@@ -63,19 +63,13 @@ pub(crate) fn run_in_child(name: &str, env: &[(&str, &Path)]) {
 /// Put a `go` in `bin` that records its pid in `bin/started`, then waits
 /// for a minute (by absolute path: `bin` is the whole PATH).
 pub(crate) fn fake_slow_go(bin: &Path) {
-    let go = bin.join("go");
-    std::fs::write(
-        &go,
-        "#!/bin/sh\necho $$ > \"${0%/*}/started.tmp\"\n\
-         /bin/mv \"${0%/*}/started.tmp\" \"${0%/*}/started\"\n\
-         exec /bin/sleep 60\n",
-    )
-    .unwrap();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&go, std::fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    clew_core::testutil::write_script(
+        &bin.join("go"),
+        "echo $$ > \"${0%/*}/started.tmp\"\n\
+         /bin/mv \"${0%/*}/started.tmp\" \"${0%/*}/started\"\n\
+         exec /bin/sleep 60",
+    );
 }
 
 /// The pid [`fake_slow_go`] recorded, once it has (within ten seconds).

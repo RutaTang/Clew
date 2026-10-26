@@ -93,6 +93,20 @@ pub enum Message {
     Tick,
     /// A no-op sink for fire-and-forget async debug commands.
     Noop,
+    /// Whether the window draws a widget's own overlay now — a picker's
+    /// menu, a tooltip (`ui::placed::watch_overlays`).
+    OverlayOpen(bool),
+    /// The pointer moved over a question, where nothing tells the window it
+    /// moved (`App::arm_on_enter`).
+    Armed(crate::app::model::Question),
+    /// The redraw `App::wake_after` asked for.
+    QuestionWake,
+    /// Where a question's answers are laid out now (`ui::placed`): `None`
+    /// when not all of them are in view.
+    Placed {
+        question: crate::app::model::Question,
+        place: Option<iced::Rectangle>,
+    },
 }
 
 /// The clew-server transport: its lifecycle and what it delivers.
@@ -232,8 +246,10 @@ pub enum ConnectMsg {
 pub enum ProjectMsg {
     OpenFolderPressed,
     FolderPicked(Option<PathBuf>),
-    ConsentAllowed,
-    ConsentDenied,
+    /// Allow creating `.clew` in the folder the consent modal names (see
+    /// `crate::app::model::Question`).
+    ConsentAllowed(PathBuf),
+    ConsentDenied(PathBuf),
     /// The client-side (fallback) scan finished. Its stamp is transport-bound
     /// (the transport and the project instance it was started under): the
     /// root alone cannot tell a local scan of `/p` from a
@@ -785,7 +801,9 @@ pub enum GraphMsg {
     ProjectCallsRefined {
         stamp: Stamp,
         generation: u64,
-        result: Result<crate::app::tasks::RefineDone, String>,
+        /// Boxed: a whole graph and its edge set, every other message the
+        /// size of it otherwise.
+        result: Result<Box<crate::app::tasks::RefineDone>, String>,
     },
 }
 
@@ -1102,6 +1120,13 @@ pub enum AskMsg {
         key: ApprovalKey,
         option: String,
     },
+    /// The approval card of the turn on `stream` turned to its answers'
+    /// `page` (`ui::panels::shown_answers`).
+    AnswersPage {
+        stream: u64,
+        key: ApprovalKey,
+        page: usize,
+    },
     /// Who answers: clew's own agent (`None`) or the ACP agent named.
     PickAgent(Option<String>),
     /// The ACP agent `name` started with its first session — or did not.
@@ -1176,6 +1201,10 @@ pub enum IntegrationsMsg {
     },
     /// Forget the sign-in to the server.
     McpSignOut(String),
+    McpSignedOut {
+        name: String,
+        result: Result<(), String>,
+    },
     /// The add-an-agent form's fields.
     AcpName(String),
     AcpCommand(String),
@@ -1202,6 +1231,7 @@ impl IntegrationsMsg {
             | IntegrationsMsg::McpSignIn(..)
             | IntegrationsMsg::McpSignedIn { .. }
             | IntegrationsMsg::McpSignOut(..)
+            | IntegrationsMsg::McpSignedOut { .. }
             | IntegrationsMsg::AcpName(..)
             | IntegrationsMsg::AcpCommand(..)
             | IntegrationsMsg::AcpAdd
@@ -1304,29 +1334,46 @@ pub enum DebugMsg {
         addr: Option<std::net::SocketAddr>,
         /// The adapter's `supportsEvaluateForHovers` capability.
         hover_safe: bool,
+        /// The adapter runs on clew-server, its stdio proxied over the
+        /// transport — a remote one, or a local stdio adapter — and so dies
+        /// with it; a local TCP adapter (js-debug, delve) does not.
+        proxied: bool,
     },
     /// A child session (js-debug) is ready; it becomes the active client.
     DapChildStarted {
         stamp: Stamp,
         run: u64,
+        /// Its id within the run (`crate::app::state::DebugChildren`).
+        child: crate::app::state::DebugSessionId,
         client: dap::DapClient,
         /// The child's own `supportsEvaluateForHovers` promise.
         hover_safe: bool,
     },
-    /// An event pushed from the debug adapter.
+    /// An event pushed from the debug adapter, on the run's own session.
     DapEvent {
         stamp: Stamp,
         run: u64,
+        event: dap::DapEvent,
+    },
+    /// An event pushed on one of the run's js-debug child sessions.
+    DapChildEvent {
+        stamp: Stamp,
+        run: u64,
+        child: crate::app::state::DebugSessionId,
         event: dap::DapEvent,
     },
     /// The stopped frame's stack + scopes/variables finished loading.
     /// `stop` is the `App::debug_stop` the fetch was issued at (checked with
     /// `owns_debug_stop`): within one run the program may already have
     /// continued or stopped again, and this describes the older pause.
+    ///
+    /// `record`: a new stop, kept in the trace and the reading trail — not a
+    /// paused session shown again when it comes back on screen.
     DapStopInspected {
         stamp: Stamp,
         run: u64,
         stop: u64,
+        record: bool,
         frames: Vec<dap::StackFrame>,
         scopes: Vec<DebugScope>,
     },
@@ -1340,6 +1387,18 @@ pub enum DebugMsg {
     DapBreakpointsAnswered {
         stamp: Stamp,
         run: u64,
+        /// The session that answered: breakpoint handles are its own.
+        session: crate::app::state::DebugSessionId,
+        answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
+    },
+    /// A session's configuration (every file's breakpoints, then
+    /// `configurationDone`) was answered. `rev` is the breakpoint revision
+    /// it was a snapshot of (`DebugState::bp_rev`).
+    DapConfigured {
+        stamp: Stamp,
+        run: u64,
+        session: crate::app::state::DebugSessionId,
+        rev: u64,
         answers: Vec<(PathBuf, Result<Vec<dap::Breakpoint>, String>)>,
     },
     /// Stepping / continue control.
@@ -1352,7 +1411,18 @@ pub enum DebugMsg {
         run: u64,
         stop: u64,
         current: Option<(PathBuf, usize)>,
+        /// The session it was sent to.
+        session: crate::app::state::DebugSessionId,
         error: String,
+    },
+    /// Session `session` of run `run` took a Continue (`continued`) or a
+    /// step: it runs on. Continued, a session still paused comes on screen
+    /// (`App::show_paused_debug_session`).
+    DapControlled {
+        stamp: Stamp,
+        run: u64,
+        session: crate::app::state::DebugSessionId,
+        continued: bool,
     },
     /// End the debug session.
     Stop,
@@ -1401,6 +1471,7 @@ pub enum DebugMsg {
     ChildFailed {
         stamp: Stamp,
         run: u64,
+        child: crate::app::state::DebugSessionId,
         error: String,
     },
     /// The debug adapter this run needs must be installed first: raises the
@@ -1448,13 +1519,16 @@ pub enum LspMsg {
         generation: u64,
         result: Result<lsp::client::LspClient, String>,
     },
-    ConsentAllowed,
+    /// Allow the install (or build) the consent question with this number
+    /// asks about (see `crate::app::model::Question`).
+    ConsentAllowed(u64),
     /// Approve running the language-server command the project's `lsp.toml`
-    /// names (recorded against its fingerprint, so an edit re-asks).
-    CommandAllowed,
-    /// Decline the project's language-server command.
-    CommandDismissed,
-    ConsentDismissed,
+    /// names (recorded against its fingerprint, so an edit re-asks) — the
+    /// one the question with this number shows.
+    CommandAllowed(u64),
+    /// Decline the project's language-server command (question number).
+    CommandDismissed(u64),
+    ConsentDismissed(u64),
     DownloadResult {
         stamp: Stamp,
         language: String,
@@ -1607,6 +1681,8 @@ pub enum WindowMsg {
     /// Show / hide the right sidebar (Outline / Explain tabs).
     ToggleRightPanel,
     Resized(Size),
+    /// The window moved on the screen, or is drawn at another scale.
+    Moved,
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
     /// The window gained or lost focus (greys out the custom controls).
@@ -1617,6 +1693,10 @@ pub enum WindowMsg {
     Close,
     Minimize,
     ToggleFullscreen,
+    /// What the window is in now, for its controls to show: asked after a
+    /// toggle, and on each resize — the window leaves fullscreen by itself
+    /// too (the green control, ⌃⌘F, Esc).
+    ModeIs(iced::window::Mode),
     /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
     /// right panel) or y (bottom panel). See [`resize::Divider`].
     ResizeSidebar(f32),
@@ -1695,7 +1775,12 @@ impl Message {
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
-            Message::Tick | Message::Noop => None,
+            Message::Tick
+            | Message::Noop
+            | Message::Placed { .. }
+            | Message::Armed(..)
+            | Message::QuestionWake
+            | Message::OverlayOpen(..) => None,
         }
     }
 }
@@ -1753,8 +1838,8 @@ impl ProjectMsg {
             | ProjectMsg::TreeUpdated { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
-            | ProjectMsg::ConsentAllowed
-            | ProjectMsg::ConsentDenied
+            | ProjectMsg::ConsentAllowed(..)
+            | ProjectMsg::ConsentDenied(..)
             | ProjectMsg::ToggleDir(..) => None,
         }
     }
@@ -2108,6 +2193,7 @@ impl AskMsg {
             | AskMsg::PinGoto(..)
             | AskMsg::AboutSelection
             | AskMsg::Approve { .. }
+            | AskMsg::AnswersPage { .. }
             | AskMsg::PickAgent(..)
             | AskMsg::AcpOption { .. } => None,
         }
@@ -2151,9 +2237,12 @@ impl DebugMsg {
             DebugMsg::DapStarted { stamp, .. }
             | DebugMsg::DapChildStarted { stamp, .. }
             | DebugMsg::DapEvent { stamp, .. }
+            | DebugMsg::DapChildEvent { stamp, .. }
             | DebugMsg::DapStopInspected { stamp, .. }
             | DebugMsg::DapControlFailed { stamp, .. }
+            | DebugMsg::DapControlled { stamp, .. }
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
+            | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }
@@ -2186,10 +2275,10 @@ impl LspMsg {
             | LspMsg::DownloadResult { stamp, .. }
             | LspMsg::Staged { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
-            LspMsg::ConsentAllowed
-            | LspMsg::CommandAllowed
-            | LspMsg::CommandDismissed
-            | LspMsg::ConsentDismissed
+            LspMsg::ConsentAllowed(..)
+            | LspMsg::CommandAllowed(..)
+            | LspMsg::CommandDismissed(..)
+            | LspMsg::ConsentDismissed(..)
             | LspMsg::Removed { .. }
             | LspMsg::ToggleInlayHints
             | LspMsg::TogglePanel
@@ -2226,8 +2315,10 @@ impl GlossaryMsg {
 pub enum ExportMsg {
     /// The ⋯ menu's Export row: ask where to save.
     Start,
-    /// The save dialog closed: the path picked, or `None` for cancelled.
-    Picked(Option<PathBuf>),
+    /// The save dialog closed: the path picked, or `None` for cancelled —
+    /// for the project it was opened over (`stamp`): another opened while
+    /// it was up would have its notes written under this one's name.
+    Picked { stamp: Stamp, path: Option<PathBuf> },
     /// Check again whether the docs index the glossary needs is in, before
     /// writing to `path` (`waited` checks so far).
     Ready {
@@ -2248,10 +2339,10 @@ impl ExportMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            ExportMsg::Written { stamp, .. } | ExportMsg::Ready { stamp, .. } => {
-                Some(Origin::Stamped(stamp))
-            }
-            ExportMsg::Start | ExportMsg::Picked(..) => None,
+            ExportMsg::Written { stamp, .. }
+            | ExportMsg::Ready { stamp, .. }
+            | ExportMsg::Picked { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ExportMsg::Start => None,
         }
     }
 }
@@ -2324,12 +2415,14 @@ impl WindowMsg {
             | WindowMsg::ToggleLeftSidebar
             | WindowMsg::ToggleRightPanel
             | WindowMsg::Resized(..)
+            | WindowMsg::Moved
             | WindowMsg::TitleBarDragged
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
             | WindowMsg::Close
             | WindowMsg::Minimize
             | WindowMsg::ToggleFullscreen
+            | WindowMsg::ModeIs(..)
             | WindowMsg::ResizeSidebar(..)
             | WindowMsg::ResizeRight(..)
             | WindowMsg::ResizeBottom(..)

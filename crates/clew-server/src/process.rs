@@ -291,6 +291,15 @@ pub(crate) enum Spawned {
     Failed(Event),
 }
 
+/// The `PATH` for a language server or debug adapter: the absolute entries
+/// of this process's own. A relative one (`.`, `./node_modules/.bin`)
+/// resolves against the project — the process's working directory — so the
+/// repository could put its own `node` (or `cargo`, `go`, `python`) under a
+/// server's `#!/usr/bin/env node`.
+pub(crate) fn clean_path() -> Option<std::ffi::OsString> {
+    Some(clew_core::linerpc::child_path())
+}
+
 /// Spawn `cmd` (in `cwd` when given) and proxy its stdio to the client under
 /// handle `proc`, whose stdin queue was set up by [`register_proc`]: stdout
 /// streams back as `ProcessOutput`, stdin drains `input_rx` (frames fed by
@@ -299,6 +308,8 @@ pub(crate) enum Spawned {
 /// Emits exactly one of `ProcessStarted` or `ProcessExited` — except on
 /// [`Spawned::Cancelled`], where whoever removed the table entry has already
 /// sent the exit.
+///
+/// `path`, when given, is the `PATH` the process gets ([`clean_path`]).
 #[allow(clippy::too_many_arguments)] // the spawn's full contract, not state
 pub(crate) async fn spawn_registered(
     out: &UnboundedSender<ServerMessage>,
@@ -310,8 +321,14 @@ pub(crate) async fn spawn_registered(
     cwd: Option<String>,
     mut input_rx: tokio::sync::mpsc::Receiver<Vec<u8>>,
     generation: u64,
+    path: Option<std::ffi::OsString>,
 ) -> Spawned {
     let mut command = tokio::process::Command::new(&cmd);
+    // The `PATH` the process gets, when the caller sets one (see
+    // `clean_path`).
+    if let Some(path) = path {
+        command.env("PATH", path);
+    }
     command
         .args(&args)
         .stdin(std::process::Stdio::piped())
@@ -565,6 +582,7 @@ mod tests {
                 None,
                 input_rx,
                 generation,
+                None,
             )
             .await;
             assert!(matches!(spawned, Spawned::Started), "{script}");
@@ -574,6 +592,52 @@ mod tests {
             let helper_gone = gone(helper).await;
             assert!(helper_gone, "the helper outlived its process: {script}");
         }
+    }
+
+    /// A language server or adapter gets only the absolute entries of
+    /// `PATH`: a relative one resolves against the project, its working
+    /// directory, where a repository could plant the `node` it runs.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_server_is_given_no_relative_path_entry() {
+        let dir = scratch("path");
+        let seen = dir.join("path.txt");
+        let procs: SharedProcs = Arc::default();
+        let (out, _events) = tokio::sync::mpsc::unbounded_channel();
+        let (input_rx, generation) = register_proc(&procs, 9).await;
+        let args = vec![
+            "-c".to_string(),
+            "printf '%s' \"$PATH\" > \"$1\"".to_string(),
+            "sh".to_string(),
+            seen.to_string_lossy().into_owned(),
+        ];
+        let spawned = spawn_registered(
+            &out,
+            &procs,
+            crate::transport::OutputBudget::new(),
+            9,
+            "/bin/sh".to_string(),
+            args,
+            Some(dir.to_string_lossy().into_owned()),
+            input_rx,
+            generation,
+            clean_path(),
+        )
+        .await;
+        assert!(matches!(spawned, Spawned::Started));
+        let mut path = String::new();
+        for _ in 0..300 {
+            path = std::fs::read_to_string(&seen).unwrap_or_default();
+            if !path.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!path.is_empty(), "the process wrote its PATH");
+        assert!(
+            path.split(':').all(|d| d.starts_with('/')),
+            "a relative entry reached it: {path}"
+        );
     }
 
     /// A proxied process that exits BY ITSELF — nobody killed it — takes
@@ -605,6 +669,7 @@ mod tests {
             None,
             input_rx,
             generation,
+            None,
         )
         .await;
         assert!(matches!(spawned, Spawned::Started));
@@ -651,6 +716,7 @@ mod tests {
             None,
             input_rx,
             generation,
+            None,
         )
         .await;
         assert!(matches!(spawned, Spawned::Failed(_)));

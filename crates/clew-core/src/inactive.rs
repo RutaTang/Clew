@@ -101,7 +101,19 @@ pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<
     let Some(tree) = parser.parse(source, None) else {
         return out;
     };
-    walk(tree.root_node(), source.as_bytes(), target, &mut out);
+    let mut gated = Vec::new();
+    walk(tree.root_node(), source.as_bytes(), target, &mut gated);
+    // Nested gated items cover the same lines again: the ranges are merged
+    // first, so each line is inserted once (inserting every range's lines cost
+    // depth × lines for nested `#[cfg]` modules).
+    gated.sort_unstable();
+    let mut next = 0;
+    for (start, end) in gated {
+        for line in start.max(next)..=end {
+            out.insert(line);
+        }
+        next = next.max(end + 1);
+    }
     out
 }
 
@@ -109,7 +121,7 @@ pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<
 /// [`crate::structure`] for why: a deeply nested expression is ~2 bytes per
 /// level, so a file inside the size cap can reach a depth that overflows the
 /// stack, and this runs on every file opened.
-fn walk(root: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
+fn walk(root: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut cursor = node.walk();
@@ -120,10 +132,20 @@ fn walk(root: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
     }
 }
 
-/// The per-node work, split out so the traversal above stays plain.
-fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
+/// The per-node work, split out so the traversal above stays plain: the line
+/// ranges `node`'s children gate off. Siblings are looked up in the child list
+/// itself — tree-sitter finds a node's sibling through its parent, which it
+/// finds by walking down from the root, so `next_named_sibling` cost the
+/// node's depth per call.
+fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
     let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
+    let children: Vec<Node> = node.named_children(&mut cursor).collect();
+    // For each child, the first later one that is not an attribute or a
+    // comment: found by one pass from the end, the first time an attribute
+    // needs it. Searched for from each attribute, a run of them cost its
+    // length per attribute.
+    let mut items_after: Option<Vec<Option<Node>>> = None;
+    for (i, &child) in children.iter().enumerate() {
         // An outer `#[cfg(...)]` is a *preceding sibling* of the item it gates.
         // When it's inactive, dim from the attribute through the item that
         // follows (skipping any further attributes, and any comments, between
@@ -131,17 +153,21 @@ fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
         // too, so stopping at one dimmed the attribute and the comment while
         // leaving the function the `cfg` actually gates displayed as active.
         if child.kind() == "attribute_item" && cfg_of(child, src, host) == Some(false) {
-            let mut item = child.next_named_sibling();
-            while let Some(n) = item {
-                if matches!(
-                    n.kind(),
-                    "attribute_item" | "line_comment" | "block_comment"
-                ) {
-                    item = n.next_named_sibling();
-                } else {
-                    break;
+            let items_after = items_after.get_or_insert_with(|| {
+                let mut after = vec![None; children.len()];
+                let mut next = None;
+                for (j, n) in children.iter().enumerate().rev() {
+                    after[j] = next;
+                    if !matches!(
+                        n.kind(),
+                        "attribute_item" | "line_comment" | "block_comment"
+                    ) {
+                        next = Some(*n);
+                    }
                 }
-            }
+                after
+            });
+            let item = items_after[i];
             // A match arm and a field initializer hold their attributes as
             // their OWN children, so the sibling found above is only the
             // pattern (or the field's name): the gated item is the parent.
@@ -153,11 +179,7 @@ fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut HashSet<usize>) {
             } else {
                 item.unwrap_or(child)
             };
-            let start = child.start_position().row;
-            let end = gated.end_position().row;
-            for line in start..=end {
-                out.insert(line);
-            }
+            out.push((child.start_position().row, gated.end_position().row));
         }
     }
 }
@@ -538,5 +560,38 @@ mod depth_tests {
             .expect("spawn")
             .join()
             .expect("the walk must not overflow the stack");
+    }
+
+    /// Nested gated items: every line dimmed once, and at once — not each
+    /// level re-dimming the lines below it, nor a sibling lookup per level
+    /// costing the depth (tree-sitter finds a sibling through the parent).
+    #[test]
+    fn nested_gated_modules_are_dimmed_in_one_pass() {
+        const DEPTH: usize = 20_000;
+        let src = format!(
+            "{}{}",
+            "#[cfg(target_os = \"nonesuch\")] mod a {\n".repeat(DEPTH),
+            "}\n".repeat(DEPTH)
+        );
+        let started = std::time::Instant::now();
+        let lines = inactive_lines(&src, "rust", &Target::host());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(lines.len(), 2 * DEPTH);
+    }
+
+    /// A run of gated attributes: each finds the item they gate without
+    /// searching the rest of the run (which cost the run's length each).
+    #[test]
+    fn a_run_of_gated_attributes_is_dimmed_in_one_pass() {
+        const RUN: usize = 32_000;
+        let src = format!(
+            "{}fn gated() {{}}\nfn shown() {{}}\n",
+            "#[cfg(target_os = \"nonesuch\")]\n".repeat(RUN)
+        );
+        let started = std::time::Instant::now();
+        let lines = inactive_lines(&src, "rust", &Target::host());
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(lines.len(), RUN + 1);
+        assert!(lines.contains(&RUN) && !lines.contains(&(RUN + 1)));
     }
 }

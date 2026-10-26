@@ -195,6 +195,25 @@ pub struct EffectiveServer {
     pub init_options: Option<serde_json::Value>,
 }
 
+impl EffectiveServer {
+    /// What of the project this server runs on load, when it is clew's own
+    /// store (or toolchain) binary and that binary builds the project — the
+    /// registry's [`runs_project_code`](registry::ServerSpec::runs_project_code).
+    /// Such a start needs the user's leave to build THIS project
+    /// ([`crate::trust::Trust::is_build_trusted`]); every start path asks
+    /// here, so none can skip it.
+    ///
+    /// `None` for a `command`: that is the repository's own program, which
+    /// runs only once the user has approved it — the bigger consent, which
+    /// already covers whatever it builds.
+    pub fn runs_project_code(&self) -> Option<&'static str> {
+        if self.command.is_some() {
+            return None;
+        }
+        registry::by_name(&self.server_name)?.runs_project_code
+    }
+}
+
 /// How deeply `init_options` may nest. The file is the repository's own
 /// `.clew/lsp.toml`, so its shape is attacker-chosen; past this depth the
 /// value is replaced with null rather than recursed into.
@@ -238,6 +257,26 @@ mod tests {
 
     fn parse(toml: &str) -> ProjectLspConfig {
         toml::from_str(toml).unwrap()
+    }
+
+    /// The servers that build the project ask for leave to; one the project's
+    /// own `command` runs does not — its approval is the bigger consent.
+    #[test]
+    fn only_store_servers_that_build_the_project_need_leave() {
+        let cfg = ProjectLspConfig::default();
+        for lang in ["rust", "zig", "dart"] {
+            let server = cfg.resolve(lang).unwrap();
+            assert!(server.runs_project_code().is_some(), "{lang}");
+        }
+        for lang in ["python", "go", "typescript", "c", "json", "toml"] {
+            let server = cfg.resolve(lang).unwrap();
+            assert_eq!(server.runs_project_code(), None, "{lang}");
+        }
+        let cfg = parse("[rust]\ncommand = \"/opt/ra\"\n");
+        assert_eq!(cfg.resolve("rust").unwrap().runs_project_code(), None);
+        // The registry row decides, whichever language picked it.
+        let cfg = parse("[c]\nserver = \"zls\"\n");
+        assert!(cfg.resolve("c").unwrap().runs_project_code().is_some());
     }
 
     #[test]

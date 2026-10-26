@@ -9,6 +9,7 @@ use iced::widget::{
 };
 use iced::{Element, Fill, Font, Length, Padding, Task};
 
+use crate::app::model::Question;
 use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
@@ -34,6 +35,8 @@ mod statusbar;
 pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
+mod fresh;
+pub(crate) mod placed;
 mod reader_scroll;
 pub(crate) use reader_scroll::*;
 mod docs_stats;
@@ -145,9 +148,10 @@ pub fn modal_scope_id() -> iced::widget::Id {
 /// choice, so Escape always closes exactly what is on top.
 pub(crate) enum ActiveOverlay<'a> {
     Consent(&'a std::path::Path),
-    LspCommand(&'a crate::PendingLspCommand),
-    /// The question on screen, and how many more wait behind it.
-    LspConsent(&'a crate::LspConsent, usize),
+    /// The question on screen, its number, and how many more wait behind it.
+    LspCommand(&'a crate::PendingLspCommand, u64, usize),
+    /// The question on screen, its number, and how many more wait behind it.
+    LspConsent(&'a crate::LspConsent, u64, usize),
     UpdateNotes,
     Settings,
     Connect,
@@ -170,10 +174,14 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
     use ActiveOverlay as O;
     let overlay = if let Some(root) = &app.pending_consent {
         O::Consent(root)
-    } else if let Some(pending) = &app.proj.pending_lsp_command {
-        O::LspCommand(pending)
-    } else if let Some(consent) = app.proj.pending_lsp_consent.front() {
-        O::LspConsent(consent, app.proj.pending_lsp_consent.len() - 1)
+    } else if let Some((number, pending)) = app.proj.pending_lsp_command.on_screen() {
+        O::LspCommand(
+            pending,
+            number,
+            app.proj.pending_lsp_command.len() - 1 + app.proj.pending_lsp_consent.len(),
+        )
+    } else if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
+        O::LspConsent(consent, number, app.proj.pending_lsp_consent.len() - 1)
     } else if app.update.show_notes {
         O::UpdateNotes
     } else if app.settings.open {
@@ -216,6 +224,35 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
 }
 
 impl<'a> ActiveOverlay<'a> {
+    /// Which overlay it is, when it holds the keys yet takes none to a
+    /// field of its own: every one but the hover peek (no keys), the
+    /// finder and the note and condition editors (each focuses its input).
+    /// Opened, it leaves the keyboard where it was — in a field under it
+    /// (Ask, Search, Find), whose Enter would act behind it — unless that
+    /// is taken away (`App::update`).
+    pub(crate) fn leaves_focus(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::Consent(_) => "consent",
+            Self::LspCommand(..) => "lsp-command",
+            Self::LspConsent(..) => "lsp-consent",
+            Self::UpdateNotes => "update-notes",
+            Self::Settings => "settings",
+            Self::Connect => "connect",
+            Self::Shortcuts => "shortcuts",
+            Self::Why(_) => "why",
+            Self::ToolsMenu => "tools-menu",
+            Self::TargetMenu => "target-menu",
+            Self::Graph(_) => "graph",
+            Self::ServerPanel => "server-panel",
+            Self::ContextMenu(_) => "context-menu",
+            Self::BpCondition(_)
+            | Self::BookmarkNote(_)
+            | Self::ReadingNote(_)
+            | Self::Finder
+            | Self::Hover(_) => return None,
+        })
+    }
+
     /// Whether this overlay holds the keys of what is under it: every one
     /// but the hover peek, which asks for none (the Esc every overlay takes
     /// aside, `escape_message`). A time-travel session under one takes none
@@ -226,9 +263,23 @@ impl<'a> ActiveOverlay<'a> {
 
     fn view(self, app: &'a App) -> Element<'a, Message> {
         match self {
-            Self::Consent(root) => consent_modal(root),
-            Self::LspCommand(pending) => lsp_command_modal(pending),
-            Self::LspConsent(consent, waiting) => lsp_consent_modal(consent, waiting),
+            // Each Allow is drawn enabled once its question has been within
+            // reach long enough to be read, where it is (`App::asked`).
+            Self::Consent(root) => {
+                consent_modal(root, app.asked(Question::Project(root.to_path_buf())))
+            }
+            Self::LspCommand(pending, number, waiting) => lsp_command_modal(
+                pending,
+                number,
+                waiting,
+                app.asked(Question::LspCommand(number)),
+            ),
+            Self::LspConsent(consent, number, waiting) => lsp_consent_modal(
+                consent,
+                number,
+                waiting,
+                app.asked(Question::LspConsent(number)),
+            ),
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
@@ -252,9 +303,9 @@ impl<'a> ActiveOverlay<'a> {
     /// is the decline ("Not now" / "Don't run"), as Escape means cancel.
     pub(crate) fn dismiss_message(&self) -> Message {
         match self {
-            Self::Consent(_) => Message::Project(ProjectMsg::ConsentDenied),
-            Self::LspCommand(_) => Message::Lsp(LspMsg::CommandDismissed),
-            Self::LspConsent(..) => Message::Lsp(LspMsg::ConsentDismissed),
+            Self::Consent(root) => Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
+            Self::LspCommand(_, number, _) => Message::Lsp(LspMsg::CommandDismissed(*number)),
+            Self::LspConsent(_, number, _) => Message::Lsp(LspMsg::ConsentDismissed(*number)),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),
@@ -339,7 +390,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
-    stack![base, overlay, tutorial].into()
+    // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
+    placed::watch_overlays(app.overlay_open, stack![base, overlay, tutorial])
 }
 
 // ---------------------------------------------------------------- hover tooltip

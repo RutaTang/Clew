@@ -400,7 +400,16 @@ impl LspPool {
             ));
         };
 
-        let (client, started) = self.client_for(language, &abs, &source, stamp).await?;
+        // Starting a server is an `initialize` and a wait for its first
+        // index — tens of seconds — and a Stop must not wait them out.
+        let (client, started) = tokio::select! {
+            got = self.client_for(language, &abs, &source, stamp) => got?,
+            () = async {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            } => return Err("stopped".into()),
+        };
         let character = lsp_character(client.encoding, line_text, byte_col);
         let line0 = line1 - 1;
 
@@ -563,6 +572,7 @@ impl LspPool {
                 .strip_prefix(self.canon())
                 .or_else(|_| t.path.strip_prefix(&self.root))
                 .ok();
+            let inside = rel.is_some();
             let label = match rel {
                 Some(rel) => {
                     let rel = rel.to_string_lossy().into_owned();
@@ -575,15 +585,25 @@ impl LspPool {
                 // it is not navigable in clew, so no chip.
                 None => t.path.to_string_lossy().into_owned(),
             };
+            // Only a target inside the project is quoted, read through the
+            // project's confinement (no link out of it). The language server
+            // names any file it likes — an `#include "/proc/self/environ"`
+            // makes the environment a definition — and the preview goes to
+            // the model, which can repeat it or hand it to a tool.
+            if !inside {
+                rows.push(format!("{label}:{line1}"));
+                continue;
+            }
             let preview = line_cache
                 .entry(t.path.clone())
                 .or_insert_with(|| {
-                    // A target can point anywhere the language server knows
-                    // about, including generated files outside the project,
-                    // so this read is bounded like every other.
-                    clew_core::statefile::read_capped(&t.path, MAX_SEMANTIC_READ_BYTES)
-                        .map(|s| s.lines().map(str::to_string).collect())
-                        .unwrap_or_default()
+                    clew_core::fs_scan::read_confined_capped(
+                        self.canon(),
+                        &t.path,
+                        MAX_SEMANTIC_READ_BYTES,
+                    )
+                    .map(|s| s.lines().map(str::to_string).collect())
+                    .unwrap_or_default()
                 })
                 .get(t.line)
                 .map(|l| l.trim().to_string())
@@ -673,7 +693,13 @@ async fn start(
         // `init_options` are gated separately just below — nothing here can
         // ask the user anything, so unapproved ones are dropped, never sent.
         None => match store::locate(&server) {
-            store::Located::Ready(exe) => exe,
+            // A server that builds the project needs the user's leave for
+            // this one; the agent cannot ask for it, so it says where to.
+            store::Located::Ready(exe) => {
+                crate::lsp_gate::build_allowed(approvals, root, &server)
+                    .map_err(|runs| crate::lsp_gate::build_refusal(&server, runs))?;
+                exe
+            }
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {
                 return Err(format!(
                     "the {language} language server is not installed — the user can \
@@ -692,6 +718,7 @@ async fn start(
     // exactly as it is not for a `command`. Withheld options only make the
     // server less configured; they never stop the agent's tools.
     let (init_options, _withheld) = crate::approved_init_options(approvals, root, &server);
+    let init_options = clew_core::lsp::langenv::with_pinned(&server, &exe, init_options)?;
     let client = LspClient::start(&exe, &server.args, root, init_options).await?;
     // Progress can lag the handshake; give it a moment to appear, then wait
     // (bounded) for the initial index so first queries aren't false negatives.
@@ -802,6 +829,34 @@ mod tests {
 
         let empty = pool.format_targets(&[], "two", Semantic::References);
         assert!(empty.content.contains("no references"));
+    }
+
+    /// What a language server names outside the project is a location, never
+    /// quoted text: the preview goes to the model, and the server may name
+    /// any file (`#include "/proc/self/environ"`, a secret next door). A link
+    /// inside the project that leads out is not quoted either.
+    #[test]
+    fn targets_outside_the_project_are_not_quoted() {
+        let dir = Scratch::new("agent-lsp-outside");
+        let elsewhere = Scratch::new("agent-lsp-secret");
+        std::fs::write(elsewhere.join("secret.txt"), "TOKEN=hunter2\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(elsewhere.join("secret.txt"), dir.join("link.rs")).unwrap();
+        let pool = LspPool::new(dir.to_path_buf(), Default::default());
+        let mut targets = vec![Target {
+            path: elsewhere.canonicalize().unwrap().join("secret.txt"),
+            line: 0,
+            character: 0,
+        }];
+        #[cfg(unix)]
+        targets.push(Target {
+            path: dir.canonicalize().unwrap().join("link.rs"),
+            line: 0,
+            character: 0,
+        });
+        let out = pool.format_targets(&targets, "x", Semantic::Definition);
+        assert!(!out.content.contains("hunter2"), "{}", out.content);
+        assert!(out.content.contains("secret.txt:1"), "{}", out.content);
     }
 
     /// Building a pool resolves nothing: it is built on the request loop, and

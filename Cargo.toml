@@ -4,10 +4,13 @@
 # child or deploys over SSH).
 [workspace]
 members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
+# Third-party crates carried with a fix of clew's (see vendor/README.md): built
+# as dependencies, not linted, formatted or tested as clew's own.
+exclude = ["vendor"]
 
 [package]
 name = "clew"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"
@@ -81,3 +84,10 @@ iced_test = "0.14"
 [[bin]]
 name = "clew"
 path = "src/main.rs"
+
+# cosmic-text 0.15.0 (iced 0.14's text shaper) panics on a line holding a
+# Unicode paragraph separator other than CR/LF whose paragraphs disagree on
+# direction — reachable from any file name, line of code or peer's text. The
+# patched copy shapes such a line in one direction (vendor/README.md).
+[patch.crates-io]
+cosmic-text = { path = "vendor/cosmic-text" }

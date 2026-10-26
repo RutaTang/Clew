@@ -423,8 +423,16 @@ pub enum Shell {
     /// Deliver an app message to a specific window's `App`.
     Window(window::Id, Message),
     /// Deliver an app message to the focused window (from the app-global menu).
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "sent by macOS's menu bar and appearance watch")
+    )]
     ToFocused(Message),
     /// Open a new, independent window.
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "sent by macOS's menu bar")
+    )]
     NewWindow,
     /// A window finished opening — set up its native chrome (main thread).
     Opened(window::Id),
@@ -443,6 +451,10 @@ pub enum Shell {
     /// macOS asked the app to terminate — the Dock's Quit item, a log-out, a
     /// restart — and waits for the answer: a [`Shell::Quit`] whose outcome
     /// AppKit is told.
+    #[cfg_attr(
+        all(not(target_os = "macos"), not(test)),
+        expect(dead_code, reason = "sent by macOS's terminate request")
+    )]
     Terminate,
     /// Question `ticket`'s sheet ended, as `answer` says: the user chose to
     /// keep the edits it was about, or to lose them, or clew ended it.
@@ -994,6 +1006,9 @@ impl Clew {
         if std::mem::take(&mut self.terminating) {
             self.platform.reply_terminate(false);
         }
+        for app in self.windows.values_mut() {
+            app.on_quit_cancelled();
+        }
         let held: Vec<(window::Id, Asker)> = self.held_closes.drain().collect();
         let closes: Vec<Task<Shell>> = held
             .into_iter()
@@ -1059,16 +1074,28 @@ impl Clew {
                 None
             }
         };
+        let appearance = crate::theme::revision();
         let teardown = app
             .on_window_closed()
             .teardown
             .map(move |m| Shell::Window(id, m));
+        // Its preview put back: the others repaint (see `update`).
+        let resync = if crate::theme::revision() == appearance {
+            Task::none()
+        } else {
+            Task::batch(self.windows.keys().map(|other| {
+                Task::done(Shell::Window(
+                    *other,
+                    Message::Settings(SettingsMsg::ThemeResynced),
+                ))
+            }))
+        };
         let close = self
             .platform
             .dismiss(id)
             .discard()
             .chain(iced::window::close(id));
-        let closed = Task::batch([close, self.track(teardown)]);
+        let closed = Task::batch([close, self.track(teardown), resync]);
         match requit {
             Some(agreed) => Task::batch([closed, self.send_then_quit(agreed)]),
             // With it gone, a quit's question may stand over nothing
@@ -1382,14 +1409,9 @@ fn route(event: iced::Event, status: iced::event::Status, window: window::Id) ->
             Some(Shell::CloseRequested(window))
         }
         iced::Event::Window(iced::window::Event::Closed) => Some(Shell::Closed(window)),
-        iced::Event::Window(iced::window::Event::Focused) => Some(Shell::Window(
-            window,
-            Message::Window(WindowMsg::FocusChanged(true)),
-        )),
-        iced::Event::Window(iced::window::Event::Unfocused) => Some(Shell::Window(
-            window,
-            Message::Window(WindowMsg::FocusChanged(false)),
-        )),
+        // The window's focus and moves are told by its own view, ahead of
+        // the press and release that come with them (`ui::placed::
+        // watch_overlays`): from here they came after.
         _ => None,
     }
 }
@@ -1651,6 +1673,9 @@ mod tests {
         /// The windows a callback was asked to run on (`window::run`): where
         /// clew's own sheets are begun. None runs here.
         callbacks: Vec<window::Id>,
+        /// The windows iced was asked to restore (un-minimize): how a window
+        /// is brought forward where no callback does it (anywhere but macOS).
+        restored: Vec<window::Id>,
     }
 
     impl Runtime {
@@ -1668,6 +1693,7 @@ mod tests {
                 running: Vec::new(),
                 exits: 0,
                 callbacks: Vec::new(),
+                restored: Vec::new(),
             }
         }
 
@@ -1773,6 +1799,7 @@ mod tests {
                 }
                 // Dropped unrun, as iced does for a window it no longer has.
                 Action::Window(WindowAction::Run(id, _)) => self.callbacks.push(id),
+                Action::Window(WindowAction::Minimize(id, false)) => self.restored.push(id),
                 Action::Window(WindowAction::Close(id)) => {
                     self.step(Step::Closed(id));
                     // iced delivers the window's `Closed` event, once.
@@ -1977,11 +2004,19 @@ mod tests {
         let (app, _) = remote_app_with_unsent_edits("shell-sheet-unshown", 1);
         let window = rt.window(app);
         rt.send(Shell::CloseRequested(window));
-        assert_eq!(
-            rt.callbacks,
-            [window, window],
-            "not brought forward, then a sheet, on the window closing"
-        );
+        // On macOS both are the window's callbacks; elsewhere iced brings the
+        // window forward itself (restored; a close from outside does not take
+        // the focus), and the sheet is the one callback.
+        if cfg!(target_os = "macos") {
+            assert_eq!(
+                rt.callbacks,
+                [window, window],
+                "not brought forward, then a sheet, on the window closing"
+            );
+        } else {
+            assert_eq!(rt.restored, [window], "not brought forward");
+            assert_eq!(rt.callbacks, [window], "no sheet on the window closing");
+        }
         assert!(rt.clew.closing.is_empty(), "never answered");
         assert!(rt.is_open(window), "closed on a question never shown");
         assert_eq!(rt.exits, 0);
@@ -3143,6 +3178,40 @@ mod tests {
         assert_eq!(rt.clew.windows[&window].proj.remote_edits_lost, None);
     }
 
+    /// The quit an installed update asks for, cancelled over unsaved edits,
+    /// leaves the window saying so — the update goes in only if clew quits
+    /// within the helper's wait — not "Restarting…" while it goes on running.
+    #[tokio::test]
+    async fn a_cancelled_update_quit_says_the_update_waits() {
+        let mut rt = Runtime::new();
+        let (mut app, _, _outbox) = remote_app_with_unanswered_edits("shell-update-quit-cancel", 1);
+        app.update.phase = crate::UpdatePhase::Installing;
+        let window = rt.window(app);
+        rt.send(Shell::Window(
+            window,
+            Message::Updater(UpdaterMsg::Installed(Ok(()))),
+        ));
+        let [removal] = on_the_wire(&rt, window)[..] else {
+            panic!("the quit waits for the removal on the wire");
+        };
+        let refused = host_refuses_one(&rt.clew.windows[&window], removal);
+        rt.send(Shell::Window(window, refused));
+        assert_eq!(rt.asked().len(), 1);
+        rt.answer(0, false);
+        assert!(rt.is_open(window));
+        let app = &rt.clew.windows[&window];
+        assert!(
+            app.status.starts_with("clew was kept open"),
+            "{}",
+            app.status
+        );
+        assert!(
+            matches!(app.update.phase, crate::UpdatePhase::Failed(_)),
+            "{:?}",
+            app.update.phase
+        );
+    }
+
     /// While a close, or a quit, waits for the host, the window says so on
     /// its status line — it is still open and working — counting what is
     /// left as the host answers. A failure the host reports meanwhile is
@@ -3782,7 +3851,12 @@ mod tests {
             forward_key(&left, Modifiers::ALT, Ignored),
             "with no field focused ⌥← is still Back"
         );
-        assert!(!forward_key(&key("p"), Modifiers::CTRL, Captured));
+        // ⌃ is not ⌘ on macOS, so ⌃P stays in the field; elsewhere Ctrl IS the
+        // command key (`Modifiers::command`), and Ctrl+P is what ⌘P is there.
+        assert_eq!(
+            forward_key(&key("p"), Modifiers::CTRL, Captured),
+            !cfg!(target_os = "macos")
+        );
     }
 
     /// The router applies that rule to real events and leaves the rest alone.
@@ -3825,6 +3899,17 @@ mod tests {
             ),
             Some(Shell::CloseRequested(w)) if w == id
         ));
+        // Focus and moves are the window's own view's to tell, ahead of
+        // the events after them (`ui::placed::watch_overlays`): not routed
+        // here too, after them.
+        for event in [
+            iced::window::Event::Moved(iced::Point::new(10.0, 20.0)),
+            iced::window::Event::Rescaled(2.0),
+            iced::window::Event::Focused,
+            iced::window::Event::Unfocused,
+        ] {
+            assert!(route(iced::Event::Window(event), iced::event::Status::Ignored, id).is_none());
+        }
         assert!(
             !crate::window_settings().exit_on_close_request,
             "iced would close the window itself, unasked"

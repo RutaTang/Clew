@@ -349,10 +349,12 @@ impl App {
                 format!("{} · {note}", self.status)
             };
         }
-        if seq == self.proj.explain.cache_seq
-            && let Some(merged) = merged
-            && !merged.is_empty()
-        {
+        // What the store lacks of the window's copy is in it already
+        // (`explain::keep_unstored`, in the save).
+        let Some(merged) = merged else {
+            return;
+        };
+        if seq == self.proj.explain.cache_seq && !merged.is_empty() {
             self.set_explain_cache(merged);
         }
     }
@@ -847,6 +849,10 @@ impl App {
             Ok(cfg) => cfg,
             Err(ask_for_key) => return ask_for_key,
         };
+        if !self.proj.explain.blocks_in_flight.insert(node.clone()) {
+            self.status = "Explaining blocks… (already asked)".into();
+            return Task::none();
+        }
         // Unique-name → summary map so the off-thread gather can attach callee
         // context (ambiguous names resolve to None and are skipped).
         let mut summaries: HashMap<String, Option<String>> = HashMap::new();
@@ -933,6 +939,7 @@ impl App {
         node: explain::Node,
         detail: Result<String, String>,
     ) -> Task<Message> {
+        self.proj.explain.blocks_in_flight.remove(&node);
         match detail {
             Ok(md) => {
                 // Persist the walkthrough alongside the summary (dropped
@@ -1030,6 +1037,9 @@ async fn run_saves(
     chain: crate::app::state::SaveChain,
 ) -> (u64, explain::Cache, Result<usize, String>) {
     let mut save = first;
+    // The most any save of the chain left out to fit the cap: the note says
+    // so, though a later save of the chain had nothing more to leave out.
+    let mut most_left_out = 0;
     loop {
         let crate::app::state::QueuedSave { changes, mine, seq } = save;
         // Shared with the save rather than moved into it: the changes come
@@ -1037,14 +1047,23 @@ async fn run_saves(
         let changes = Arc::new(changes);
         let (store_now, root_now, for_save) = (store.clone(), root.clone(), changes.clone());
         let (merged, saved) = tokio::task::spawn_blocking(move || {
-            let (merged, saved) = explain::edit(&store_now, &root_now, |disk| {
+            let (mut merged, saved) = explain::edit(&store_now, &root_now, |disk| {
                 explain::merge_unsaved(disk, &mine, &for_save);
             });
+            // What the window holds and the store does not — left out to fit
+            // its cap, by this save, an earlier one of the chain, or another
+            // window's — stays in what the window adopts.
+            if saved.is_ok() {
+                explain::keep_unstored(&mut merged, &mine);
+            }
             (merged, saved.map_err(|e| e.to_string()))
         })
         .await
         .unwrap_or_else(|e| (explain::Cache::new(), Err(e.to_string())));
         let changes = Arc::try_unwrap(changes).unwrap_or_else(|shared| (*shared).clone());
+        if let Ok(left_out) = &saved {
+            most_left_out = most_left_out.max(*left_out);
+        }
         let mut queue = chain.lock();
         if saved.is_err() {
             let mut carried = changes;
@@ -1063,7 +1082,7 @@ async fn run_saves(
             Some(next) => save = next,
             None => {
                 queue.open = false;
-                return (seq, merged, saved);
+                return (seq, merged, saved.map(|_| most_left_out));
             }
         }
     }

@@ -21,10 +21,13 @@
 //!     selection, the caret): what the rest of the app speaks;
 //!   * **bytes** — what the shaper's hit test returns (cosmic-text's
 //!     `Cursor::index`, surfaced as `Hit::CharOffset` despite the name);
-//!   * **graphemes** — what `Paragraph::grapheme_position` takes.
+//!   * **graphemes** — the units a caret moves by and a click lands on.
 //!
 //! [`ColMap`] converts between them once per shaped line (cached with the
-//! paragraph); nothing else in the widget indexes a paragraph directly.
+//! paragraph), and [`Edges`] says where each grapheme is drawn, measured from
+//! the shaper's glyphs — not counted along them, which a grapheme drawn as
+//! several glyphs, or right-to-left text, defeats. Nothing else in the widget
+//! indexes a paragraph directly.
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::{HashMap, HashSet};
@@ -62,7 +65,7 @@ const LINE_LAYOUT_WIDTH: f32 = 1.0e6;
 /// stall scrolling and every mouse move over it. Nobody reads past 4096
 /// columns; the rest of such a line is elided (a dim `…` marks the cut) and
 /// stays reachable through search, copy and the language server.
-const MAX_SHAPED_COLS: usize = 4096;
+pub(crate) const MAX_SHAPED_COLS: usize = 4096;
 /// Width of the elision marker's box past a cut line's shaped prefix, in
 /// monospace advances: a half-advance gap, then the two-advance `…`.
 const ELISION_MARKER_COLS: f32 = 2.5;
@@ -93,6 +96,27 @@ enum Rounding {
     Nearest,
 }
 
+/// LEFT-TO-RIGHT MARK: a strong left-to-right letter that draws as nothing,
+/// put ahead of a line that holds right-to-left text so the line reads left
+/// to right ([`CodeView::shape`]).
+const LTR_MARK: char = '\u{200E}';
+const LTR_MARK_STR: &str = "\u{200E}";
+
+/// Whether `c` is a letter of a right-to-left script (Hebrew, Arabic, Syriac,
+/// Thaana, N'Ko and the scripts after them, their presentation forms, and
+/// the historic ones of the supplementary planes): what makes the shaper
+/// read a paragraph right to left when it comes first.
+fn is_right_to_left(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0590}'..='\u{08FF}'
+            | '\u{FB1D}'..='\u{FDFF}'
+            | '\u{FE70}'..='\u{FEFF}'
+            | '\u{10800}'..='\u{10FFF}'
+            | '\u{1E800}'..='\u{1EFFF}'
+    )
+}
+
 /// Column geometry of one shaped line. The paragraph's text is the display
 /// text with inlay chips spliced in (capped at [`MAX_SHAPED_COLS`]); this maps
 /// its chars to the byte offsets the shaper reports and to the grapheme
@@ -119,6 +143,100 @@ struct ColTable {
     char_grapheme: Vec<u32>,
     /// First char of each grapheme, plus `chars` (`graphemes + 1` entries).
     grapheme_char: Vec<u32>,
+}
+
+/// One glyph of a shaped line, as the shaper laid it out: the byte range of
+/// the text it draws, its advance box `[x, x + w)` from the text origin, and
+/// whether it runs right to left.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Glyph {
+    start: usize,
+    end: usize,
+    x: f32,
+    w: f32,
+    rtl: bool,
+}
+
+/// A paragraph whose glyphs can be read: the one the app's renderer shapes
+/// with. Where each grapheme is drawn is measured from them
+/// ([`Edges::of`]) rather than counted: `grapheme_position` counts graphemes
+/// along the glyphs, so a grapheme drawn as several glyphs — a ZWJ emoji
+/// sequence no font joins — counted as several, and every column after it
+/// was drawn and hit-tested off its glyph; and it counts in visual order, so a
+/// column inside right-to-left text named the mirrored glyph.
+pub(crate) trait Glyphs {
+    /// The first line's glyphs, in visual order; `None` when they cannot be
+    /// read, which leaves the view to `grapheme_position`.
+    fn glyphs(&self) -> Option<Vec<Glyph>>;
+}
+
+impl Glyphs for iced::advanced::graphics::text::Paragraph {
+    fn glyphs(&self) -> Option<Vec<Glyph>> {
+        let run = self.buffer().layout_runs().next()?;
+        Some(
+            run.glyphs
+                .iter()
+                .map(|g| Glyph {
+                    start: g.start,
+                    end: g.end,
+                    x: g.x,
+                    w: g.w,
+                    rtl: g.level.is_rtl(),
+                })
+                .collect(),
+        )
+    }
+}
+
+/// Where each grapheme of a shaped line is drawn: its `[left, right)` from the
+/// text origin, and whether it runs right to left — measured from the glyphs.
+#[derive(Debug, Default)]
+struct Edges {
+    spans: Vec<(f32, f32)>,
+    rtl: Vec<bool>,
+}
+
+impl Edges {
+    /// The graphemes' edges, from `glyphs`: a grapheme drawn as several glyphs
+    /// spans them all; a glyph drawing several graphemes (a ligature) is
+    /// shared out between them evenly, in its direction; a grapheme no glyph
+    /// draws sits, empty, where the one before it ends. `None` when a face
+    /// put a glyph off the axis.
+    fn of(glyphs: &[Glyph], map: &ColMap) -> Option<Edges> {
+        let n = map.graphemes();
+        let mut spans = vec![(f32::INFINITY, f32::NEG_INFINITY); n];
+        let mut rtl = vec![false; n];
+        for glyph in glyphs {
+            if !glyph.x.is_finite() || !glyph.w.is_finite() {
+                return None;
+            }
+            let first = map.grapheme_of_byte(glyph.start);
+            let last = map.grapheme_of_byte(glyph.end.max(glyph.start + 1) - 1);
+            let count = (last.min(n.saturating_sub(1)) + 1)
+                .saturating_sub(first)
+                .max(1);
+            for k in 0..count {
+                let g = first + k;
+                if g >= n {
+                    break;
+                }
+                let part = if glyph.rtl { count - 1 - k } else { k };
+                let left = glyph.x + glyph.w * part as f32 / count as f32;
+                let right = glyph.x + glyph.w * (part + 1) as f32 / count as f32;
+                let span = &mut spans[g];
+                *span = (span.0.min(left), span.1.max(right));
+                rtl[g] = glyph.rtl;
+            }
+        }
+        let mut end = 0.0f32;
+        for span in &mut spans {
+            if !span.0.is_finite() {
+                *span = (end, end);
+            }
+            end = end.max(span.1);
+        }
+        Some(Edges { spans, rtl })
+    }
 }
 
 /// The inline blame's text size: a point under the code's, never below the
@@ -168,6 +286,11 @@ impl ColMap {
         }
     }
 
+    /// The grapheme holding byte `byte` (past the end → the grapheme count).
+    fn grapheme_of_byte(&self, byte: usize) -> usize {
+        self.grapheme_of_char(self.char_of_byte(byte))
+    }
+
     /// Number of graphemes in the text.
     fn graphemes(&self) -> usize {
         match &self.table {
@@ -215,8 +338,16 @@ impl ColMap {
 struct Shaped<P> {
     paragraph: P,
     map: ColMap,
+    /// The paragraph's text starts with [`LTR_MARK`], ahead of the line's
+    /// own (see [`CodeView::shape`]): one grapheme, and its bytes, before
+    /// what `map` describes.
+    marked: bool,
     /// The line runs past [`MAX_SHAPED_COLS`]; only its prefix was shaped.
     elided: bool,
+    /// Where each grapheme is drawn, measured from the glyphs once, when
+    /// shaped ([`Edges::of`]); `None` for a paragraph whose glyphs cannot be
+    /// read, which `grapheme_position` then answers for.
+    edges: Option<Edges>,
 }
 
 impl<P: text::Paragraph> Shaped<P> {
@@ -251,21 +382,93 @@ impl<P: text::Paragraph> Shaped<P> {
         if round_up && !self.map.is_boundary(c) {
             g += 1;
         }
+        if let Some(edges) = &self.edges {
+            return match edges.spans.get(g) {
+                Some(&(left, _)) => left,
+                None => edges.spans.last().map_or(0.0, |&(_, right)| right),
+            };
+        }
         self.paragraph
-            .grapheme_position(0, g)
+            .grapheme_position(0, g + usize::from(self.marked))
             .map(|p| p.x)
             .filter(|x| x.is_finite())
             .unwrap_or(g as f32 * char_width)
     }
 
+    /// The x-interval `[left, right)` grapheme `g` is drawn in, when the
+    /// glyphs were measured.
+    fn drawn_at(&self, g: usize) -> Option<(f32, f32)> {
+        self.edges.as_ref()?.spans.get(g).copied()
+    }
+
+    /// x of the boundary before spliced char `c`: where a caret there is
+    /// drawn — the left edge of the grapheme after it, or its right edge when
+    /// that grapheme is drawn right to left.
+    fn edge_x(&self, c: usize, char_width: f32) -> f32 {
+        if c < self.map.chars
+            && let Some(edges) = &self.edges
+        {
+            let g = self.map.grapheme_of_char(c);
+            if let Some(&(left, right)) = edges.spans.get(g) {
+                return if edges.rtl[g] { right } else { left };
+            }
+        }
+        self.boundary_x(c, false, char_width)
+    }
+
+    /// The horizontal extent `(x0, x1)` of spliced chars `[c0, c1)`, relative
+    /// to the text origin: what a highlight, a selection or the block caret
+    /// covers: that of the glyphs they are drawn as. With right-to-left text
+    /// the chars of one logical range need not be drawn side by side, nor left
+    /// to right. Unmeasured, it runs from the boundary at `c0` to the one at
+    /// `c1` ([`Shaped::boundary_x`]).
+    fn span_x(&self, c0: usize, c1: usize, char_width: f32) -> (f32, f32) {
+        let plain = (
+            self.boundary_x(c0, false, char_width),
+            self.boundary_x(c1, true, char_width),
+        );
+        if self.edges.is_none() || c0 >= self.map.chars {
+            return plain;
+        }
+        let g0 = self.map.grapheme_of_char(c0);
+        let mut g1 = self.map.grapheme_of_char(c1.min(self.map.chars));
+        if c1 < self.map.chars && !self.map.is_boundary(c1) {
+            g1 += 1;
+        }
+        if g1 <= g0 {
+            let x = self.edge_x(c0, char_width);
+            return (x, x);
+        }
+        let (mut x0, mut x1) = (f32::INFINITY, f32::NEG_INFINITY);
+        for g in g0..g1 {
+            if let Some((left, right)) = self.drawn_at(g) {
+                x0 = x0.min(left);
+                x1 = x1.max(right);
+            }
+        }
+        // Columns past the text continue at monospace advances.
+        if c1 > self.map.chars {
+            x1 = x1.max(self.boundary_x(c1, true, char_width));
+        }
+        if x0.is_finite() && x1.is_finite() {
+            (x0, x1)
+        } else {
+            plain
+        }
+    }
+
     /// Spliced char column for a pointer `x` (relative to the text origin).
     fn column_at(&self, x: f32, line_height: f32, rounding: Rounding) -> usize {
+        if let Some(edges) = &self.edges {
+            return self.measured_column_at(edges, x, rounding);
+        }
         let Some(hit) = self.paragraph.hit_test(Point::new(x, line_height * 0.5)) else {
             return 0;
         };
         // `Hit::cursor()` is cosmic-text's `Cursor::index`: a BYTE offset into
         // the paragraph text, already snapped to the nearest boundary.
-        let c = self.map.char_of_byte(hit.cursor());
+        let lead = if self.marked { LTR_MARK.len_utf8() } else { 0 };
+        let c = self.map.char_of_byte(hit.cursor().saturating_sub(lead));
         if rounding == Rounding::Nearest {
             return c;
         }
@@ -273,7 +476,10 @@ impl<P: text::Paragraph> Shaped<P> {
         // bracket it: the boundary the shaper chose is either its left edge
         // (pointer in its left half) or its right edge (right half).
         let g = self.map.grapheme_of_char(c);
-        let edge = match self.paragraph.grapheme_position(0, g) {
+        let edge = match self
+            .paragraph
+            .grapheme_position(0, g + usize::from(self.marked))
+        {
             Some(p) if p.x.is_finite() => p.x,
             _ => return c,
         };
@@ -282,6 +488,45 @@ impl<P: text::Paragraph> Shaped<P> {
             self.map.chars // past the last glyph: the end of the line
         } else {
             self.map.grapheme_start(under)
+        }
+    }
+
+    /// [`Shaped::column_at`] on measured glyphs: the grapheme drawn under `x`
+    /// — the start of it, or for [`Rounding::Nearest`] whichever of its two
+    /// boundaries is nearer, its start being its right edge when it runs
+    /// right to left. Left of the text is its first column drawn there, right
+    /// of it the end of the line.
+    fn measured_column_at(&self, edges: &Edges, x: f32, rounding: Rounding) -> usize {
+        let line_end = edges.spans.iter().fold(0.0f32, |end, &(_, r)| end.max(r));
+        if edges.spans.is_empty() || x >= line_end {
+            return self.map.chars;
+        }
+        let under = edges
+            .spans
+            .iter()
+            .position(|&(left, right)| left <= x && x < right)
+            .or_else(|| {
+                // In no glyph's box (left of the text, or in a gap between
+                // runs): the grapheme drawn nearest.
+                let distance = |&(left, right): &(f32, f32)| {
+                    if x < left { left - x } else { x - right }
+                };
+                (0..edges.spans.len()).min_by(|&a, &b| {
+                    distance(&edges.spans[a]).total_cmp(&distance(&edges.spans[b]))
+                })
+            })
+            .unwrap_or(0);
+        let start = self.map.grapheme_start(under);
+        if rounding == Rounding::Under {
+            return start;
+        }
+        let (left, right) = edges.spans[under];
+        let in_first_half = (x - left) < (right - x);
+        let before = in_first_half != edges.rtl[under];
+        if before {
+            start
+        } else {
+            self.map.grapheme_start(under + 1)
         }
     }
 }
@@ -499,6 +744,11 @@ pub struct CodeView<'a, Message> {
     git_deleted: Option<&'a HashSet<usize>>,
     /// Inline blame for the caret line: (line, formatted annotation).
     blame: Option<(usize, String)>,
+    /// The content's identity from its owner ([`CodeView::generation`]); 0
+    /// when none was handed in.
+    generation: u64,
+    /// The lines' identity alone ([`CodeView::lines_generation`]).
+    lines_generation: u64,
 }
 
 impl<'a, Message> CodeView<'a, Message> {
@@ -548,7 +798,26 @@ impl<'a, Message> CodeView<'a, Message> {
             git_status: None,
             git_deleted: None,
             blame: None,
+            generation: 0,
+            lines_generation: 0,
         }
+    }
+
+    /// The identity of the lines and fold projection being drawn, which moves
+    /// on whenever either changes (`Viewer::generation`). The paragraph caches
+    /// are keyed by it as well as by the buffers' addresses: an address alone
+    /// is reused by the allocator, and a new buffer of as many lines at the
+    /// old one's address was drawn from the old one's shaped text.
+    pub fn generation(mut self, generation: u64) -> Self {
+        self.generation = generation;
+        self
+    }
+
+    /// The identity of the lines alone, which a fold leaves be
+    /// (`Viewer::lines_generation`): what the measured extent is keyed by.
+    pub fn lines_generation(mut self, generation: u64) -> Self {
+        self.lines_generation = generation;
+        self
     }
 
     /// Git gutter inputs: per-line change status and deleted-below markers.
@@ -633,6 +902,20 @@ impl<'a, Message> CodeView<'a, Message> {
     pub fn find_matches(mut self, matches: &'a [FindMatch], current: usize) -> Self {
         self.find = Some((matches, current));
         self
+    }
+
+    /// The bottom of the sticky band pinned at the top of `viewport`, or
+    /// `None` without one: the headers, and the row scrolled part-way under
+    /// them, which is hidden too. What is drawn and what takes a press are
+    /// the same band: a press on its lower strip went to the hidden row.
+    fn sticky_band_bottom(&self, bounds: Rectangle, viewport: Rectangle) -> Option<f32> {
+        if self.sticky.is_empty() {
+            return None;
+        }
+        let lh = self.line_height;
+        let sticky_h = self.sticky.len() as f32 * lh;
+        let first_shown_row = ((viewport.y + sticky_h - bounds.y) / lh).ceil().max(0.0);
+        Some((bounds.y + first_shown_row * lh).max(viewport.y + sticky_h))
     }
 
     pub fn sticky(mut self, sticky: Vec<usize>) -> Self {
@@ -950,14 +1233,47 @@ impl<'a, Message> CodeView<'a, Message> {
 
     /// Shape display line `line` into a paragraph plus its column map. The
     /// expensive step: callers go through the paragraph cache when they can.
-    fn shape<P: text::Paragraph<Font = Font>>(&self, line: usize) -> Shaped<P> {
+    ///
+    /// A line is laid out left to right, as code reads, whatever letter it
+    /// starts with: the shaper takes a paragraph's direction from its first
+    /// strong letter, so a line opening on a Hebrew or Arabic string
+    /// (`"שלום": "hello",`) was drawn right to left — reversed, its
+    /// indentation at the far end. A line holding right-to-left text is
+    /// shaped with [`LTR_MARK`] ahead of it, which the shaper reads first and
+    /// draws as nothing; what is measured is mapped back past it.
+    fn shape<P: text::Paragraph<Font = Font> + Glyphs>(&self, line: usize) -> Shaped<P> {
         ensure_usable_fonts();
         let (spans, elided) = self.line_spans(line);
         let text: String = spans.iter().map(|s| s.text.as_ref()).collect();
+        let marked = text.chars().any(is_right_to_left);
+        let paragraph = if marked {
+            let mut with_mark = Vec::with_capacity(spans.len() + 1);
+            with_mark.push(Span::new(LTR_MARK_STR));
+            with_mark.extend(spans.iter().cloned());
+            P::with_spans(self.line_text(&with_mark))
+        } else {
+            P::with_spans(self.line_text(&spans))
+        };
+        let map = ColMap::new(&text);
+        let lead = if marked { LTR_MARK.len_utf8() } else { 0 };
+        let edges = paragraph.glyphs().and_then(|glyphs| {
+            let glyphs: Vec<Glyph> = glyphs
+                .into_iter()
+                .filter(|g| g.start >= lead)
+                .map(|g| Glyph {
+                    start: g.start - lead,
+                    end: g.end.saturating_sub(lead),
+                    ..g
+                })
+                .collect();
+            Edges::of(&glyphs, &map)
+        });
         Shaped {
-            paragraph: P::with_spans(self.line_text(&spans)),
-            map: ColMap::new(&text),
+            paragraph,
+            map,
+            marked,
             elided,
+            edges,
         }
     }
 
@@ -1020,17 +1336,20 @@ impl<'a, Message> CodeView<'a, Message> {
             self.visible.map(|v| v.as_ptr() as usize).unwrap_or(0),
             self.annotation_signature(),
             theme::active_theme() as *const _ as usize,
+            self.generation,
         )
     }
 
     /// Identity of what the measured extent describes: the document, the font
-    /// size and the annotations spliced into / drawn past its lines.
+    /// size and the annotations spliced into / drawn past its lines. Not the
+    /// folds: hiding lines does not change how wide they were measured.
     fn extent_key(&self) -> ExtentKey {
         (
             self.lines.as_ptr() as usize,
             self.lines.len(),
             self.font_size.to_bits(),
             self.annotation_signature(),
+            self.lines_generation,
         )
     }
 
@@ -1088,11 +1407,13 @@ impl<'a, Message> CodeView<'a, Message> {
 /// shaped paragraphs bake span colors, so without the theme component a switch
 /// left stale-colored lines (and scrolling mixed old and new palettes).
 // (lines ptr, line count, font-size bits, fold-projection ptr, inlay
-// signature, active-theme identity).
-type CacheKey = (usize, usize, u32, usize, u64, usize);
+// signature, active-theme identity, content generation — see
+// `CodeView::generation`).
+type CacheKey = (usize, usize, u32, usize, u64, usize, u64);
 
-/// (lines ptr, line count, font-size bits, annotation signature).
-type ExtentKey = (usize, usize, u32, u64);
+/// (lines ptr, line count, font-size bits, annotation signature, lines
+/// generation — see `CodeView::lines_generation`).
+type ExtentKey = (usize, usize, u32, u64, u64);
 
 /// Cached shaped paragraphs for the currently visible line range.
 struct LineCache<P> {
@@ -1104,7 +1425,7 @@ struct LineCache<P> {
 impl<P> Default for LineCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0, 0, 0),
             first: 0,
             paragraphs: Vec::new(),
         }
@@ -1129,9 +1450,9 @@ impl<P> LineCache<P> {
 /// the jank.
 struct StickyCache<P> {
     /// (lines ptr, line count, font-size bits, theme identity, annotation
-    /// signature). The annotations matter here too: a pinned header line can
-    /// carry inlay chips, and its paragraph bakes them.
-    key: (usize, usize, u32, usize, u64),
+    /// signature, content generation). The annotations matter here too: a
+    /// pinned header line can carry inlay chips, and its paragraph bakes them.
+    key: (usize, usize, u32, usize, u64, u64),
     lines: Vec<usize>,
     paragraphs: Vec<Shaped<P>>,
 }
@@ -1139,7 +1460,7 @@ struct StickyCache<P> {
 impl<P> Default for StickyCache<P> {
     fn default() -> Self {
         Self {
-            key: (0, 0, 0, 0, 0),
+            key: (0, 0, 0, 0, 0, 0),
             lines: Vec::new(),
             paragraphs: Vec::new(),
         }
@@ -1188,7 +1509,7 @@ impl<P> Default for State<P> {
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
             measured: Cell::new(0.0),
-            measured_key: Cell::new((0, 0, 0, 0)),
+            measured_key: Cell::new((0, 0, 0, 0, 0)),
             laid_out: Cell::new(0.0),
         }
     }
@@ -1221,6 +1542,7 @@ impl<P> State<P> {
 impl<Message, Theme, Renderer> Widget<Message, Theme, Renderer> for CodeView<'_, Message>
 where
     Renderer: text::Renderer<Font = Font>,
+    Renderer::Paragraph: Glyphs,
     Renderer::Paragraph: 'static,
 {
     fn tag(&self) -> tree::Tag {
@@ -1278,12 +1600,16 @@ where
         }
 
         // A click on the pinned sticky region is swallowed (it covers, but does
-        // not belong to, the scrolled line underneath).
-        let over_sticky = !self.sticky.is_empty()
-            && cursor.position().is_some_and(|abs| {
-                abs.y >= viewport.y
-                    && abs.y < viewport.y + self.sticky.len() as f32 * self.line_height
-                    && abs.x >= bounds.x
+        // not belong to, the scrolled line underneath) — all of it, as drawn.
+        let over_sticky = self
+            .sticky_band_bottom(bounds, *viewport)
+            .is_some_and(|bottom| {
+                cursor.position().is_some_and(|abs| {
+                    abs.y >= viewport.y
+                        && abs.y < bottom
+                        && abs.x >= viewport.x
+                        && abs.x < viewport.x + viewport.width
+                })
             });
         if let Event::Mouse(mouse::Event::ButtonPressed(_)) = event
             && over_sticky
@@ -1292,6 +1618,15 @@ where
             return;
         }
 
+        // A drag the band went away under (the minimap turned off, the file
+        // now shorter than it is drawn for) ends there: its release, unseen,
+        // left it on, and every move once the band came back scrolled the
+        // file to it, no button held.
+        if state.minimap_drag
+            && (self.on_minimap.is_none() || self.minimap_band(viewport).is_none())
+        {
+            state.minimap_drag = false;
+        }
         // Minimap drag-to-scroll: a press or drag inside the band scrolls the
         // content to the corresponding fraction of the file.
         if let Some(on_minimap) = &self.on_minimap
@@ -1560,16 +1895,7 @@ where
             let y = bounds.y + row as f32 * lh;
             let shaped = cache.paragraphs.get(row - cache.first);
             let cw = state.char_width;
-            // x (from the text origin) of source column `col` on this line:
-            // mapped through the spliced chips, then through the column map to
-            // the grapheme index the paragraph measures by.
-            let col_x = |col: usize, round_up: bool| -> f32 {
-                let spliced = self.spliced_col(i, col, !round_up);
-                match shaped {
-                    Some(s) => s.boundary_x(spliced, round_up, cw),
-                    None => spliced as f32 * cw,
-                }
-            };
+            let cols_x = |c0: usize, c1: Option<usize>| self.cols_x(i, shaped, cw, c0, c1);
 
             // Debug: highlight the current stopped line across the FULL editor
             // width. The widget lays out to content width (longest line), so we
@@ -1637,7 +1963,7 @@ where
             }
 
             // Character-level selection background for this line.
-            if let Some((x0, x1)) = self.selection_span(i, shaped, cw, &col_x) {
+            if let Some((x0, x1)) = self.selection_span(i, shaped, cw, &cols_x) {
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1678,8 +2004,7 @@ where
             for hl in self.highlights_on(i) {
                 // The columns are source display columns; `col_x` maps them
                 // through the spliced chips and the grapheme geometry.
-                let x0 = col_x(hl.col0, false);
-                let x1 = col_x(hl.col1, true);
+                let (x0, x1) = cols_x(hl.col0, Some(hl.col1));
                 let color = match hl.kind {
                     HlKind::FindCurrent => theme::with_alpha(theme::find(), 0.55),
                     HlKind::FindMatch => theme::with_alpha(theme::find(), 0.28),
@@ -1722,8 +2047,8 @@ where
             if let Some((_, cc)) = self.cursor.filter(|(cl, _)| *cl == i) {
                 // The cell spans the whole grapheme at the caret (a CJK glyph,
                 // an emoji sequence), not one monospace advance.
-                let x0 = col_x(cc, false);
-                let width = (col_x(cc + 1, true) - x0).max(cw.max(2.0));
+                let (x0, x1) = cols_x(cc, Some(cc + 1));
+                let width = (x1 - x0).max(cw.max(2.0));
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds: Rectangle {
@@ -1946,15 +2271,12 @@ where
                 let spliced = shaped.column_at(p.x - gutter_px, lh, Rounding::Under);
                 let col = self.unspliced_col(line, spliced);
                 if let Some((s, e)) = self.word_at(line, col) {
-                    let cx = |c: usize, round_up: bool| {
-                        shaped.boundary_x(
-                            self.spliced_col(line, c, !round_up),
-                            round_up,
-                            state.char_width,
-                        )
-                    };
                     let y = bounds.y + row as f32 * lh;
-                    let (x0, x1) = (cx(s, false), cx(e, true));
+                    let (x0, x1) = shaped.span_x(
+                        self.spliced_col(line, s, true),
+                        self.spliced_col(line, e, false),
+                        state.char_width,
+                    );
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -1975,13 +2297,15 @@ where
         // beneath were skipped above, so the panel fill covers clean editor
         // background; it extends to the first shown row so no sliver peeks at
         // fractional scroll offsets.
-        if !self.sticky.is_empty() {
-            let band_bottom = bounds.y + first_shown_row as f32 * lh;
-            let band_h = (band_bottom - viewport.y).max(sticky_h);
+        if let Some(band_bottom) = self.sticky_band_bottom(bounds, *viewport) {
+            let band_h = band_bottom - viewport.y;
+            // Across the viewport, wherever the lines are scrolled to: from
+            // the lines' left, scrolled right it stopped short, the rows it
+            // covers left blank.
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: bounds.x,
+                        x: viewport.x,
                         y: viewport.y,
                         width: viewport.width,
                         height: band_h,
@@ -1999,6 +2323,7 @@ where
                     self.font_size.to_bits(),
                     theme::active_theme() as *const _ as usize,
                     self.annotation_signature(),
+                    self.generation,
                 );
                 let mut sc = state.sticky_cache.borrow_mut();
                 if sc.key != sticky_key || sc.lines != self.sticky {
@@ -2043,7 +2368,7 @@ where
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: bounds.x,
+                        x: viewport.x,
                         y: band_bottom - 1.0,
                         width: viewport.width,
                         height: 1.0,
@@ -2135,28 +2460,60 @@ impl<Message> CodeView<'_, Message> {
         word_range_at(self.lines, line, col)
     }
 
+    /// The extent, from the text origin, of source columns `[c0, c1)` of line
+    /// `i` — to the end of the line's text when `c1` is `None`: mapped
+    /// through the spliced chips, then through the column map to the
+    /// graphemes the paragraph measures by, glyph by glyph where the line is
+    /// drawn in bidi order (`Shaped::span_x`).
+    fn cols_x<P: text::Paragraph>(
+        &self,
+        i: usize,
+        shaped: Option<&Shaped<P>>,
+        cw: f32,
+        c0: usize,
+        c1: Option<usize>,
+    ) -> (f32, f32) {
+        let s0 = self.spliced_col(i, c0, true);
+        match shaped {
+            Some(s) => {
+                let s1 = c1.map_or(s.map.chars.max(s0), |c| self.spliced_col(i, c, false));
+                s.span_x(s0, s1, cw)
+            }
+            None => {
+                let x0 = s0 as f32 * cw;
+                let x1 = c1.map_or(x0, |c| self.spliced_col(i, c, false) as f32 * cw);
+                (x0, x1)
+            }
+        }
+    }
+
     /// Horizontal span `(x0, x1)` (relative to the text origin) of the selection
-    /// on line `i`, or `None` when the line is outside the selection. `col_x`
-    /// maps a source column to its glyph-accurate x (see `draw`).
+    /// on line `i`, or `None` when the line is outside the selection.
+    /// `cols_x` maps source columns `[c0, c1)` — to the line's end for `None` —
+    /// to their glyph-accurate extent ([`Self::cols_x`]).
     fn selection_span<P: text::Paragraph>(
         &self,
         i: usize,
         shaped: Option<&Shaped<P>>,
         char_width: f32,
-        col_x: &impl Fn(usize, bool) -> f32,
+        cols_x: &impl Fn(usize, Option<usize>) -> (f32, f32),
     ) -> Option<(f32, f32)> {
         let ((sl, sc), (el, ec)) = self.selection?;
         if i < sl || i > el {
             return None;
         }
         let line_end = shaped.map_or(0.0, |s| s.paragraph.min_bounds().width);
-        let x0 = if i == sl { col_x(sc, false) } else { 0.0 };
-        let x1 = if i == el {
-            col_x(ec, true)
-        } else {
-            // Continuation lines extend to the text end, with a small sliver so
-            // selected empty lines are still visible.
-            line_end.max(char_width * 0.5)
+        // Continuation lines extend to the text end, with a small sliver so
+        // selected empty lines are still visible.
+        let to_end = line_end.max(char_width * 0.5);
+        let (x0, x1) = match (i == sl, i == el) {
+            (true, true) => cols_x(sc, Some(ec)),
+            (true, false) => (cols_x(sc, None).0, to_end),
+            // Ending at the line's start selects none of it: not even a
+            // chip anchored there, which the range's left edge counts in.
+            (false, true) if ec == 0 => (0.0, 0.0),
+            (false, true) => (0.0, cols_x(0, Some(ec)).1),
+            (false, false) => (0.0, to_end),
         };
         Some((x0, x1.max(x0)))
     }
@@ -2166,7 +2523,7 @@ impl<Message> CodeView<'_, Message> {
     /// row is on screen (it always is for a click), else shaped on the spot —
     /// with the shaper's byte offset converted to a column and `rounding`
     /// deciding between the grapheme under the pointer and the nearest gap.
-    fn hit<P: text::Paragraph<Font = Font>>(
+    fn hit<P: text::Paragraph<Font = Font> + Glyphs>(
         &self,
         state: &State<P>,
         point: Point,
@@ -2569,6 +2926,54 @@ mod scroll_tests {
         );
     }
 
+    /// The sticky band takes the presses on all of what it draws: down to
+    /// the first row not hidden behind it. A press on its lower strip — the
+    /// row scrolled part-way under the headers, hidden — went to that row.
+    #[test]
+    fn a_press_on_the_sticky_bands_lower_strip_is_its_own() {
+        let src = (0..200)
+            .map(|i| format!("line{i} {}", "x".repeat(60)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let presses = |y: f32| {
+            let code = CodeView::new(
+                &lines,
+                70,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| Msg::Hit,
+                |_| Msg::Hit,
+                |_, _| Msg::Hit,
+            )
+            .sticky(vec![0]);
+            let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code)
+                .on_scroll(Msg::Scrolled)
+                .width(Fill)
+                .height(Fill)
+                .into();
+            let mut sim = iced_test::simulator(elem);
+            sim.point_at(Point::new(200.0, 200.0));
+            // Ten and a half rows down: row 10 is half under the header.
+            let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels { x: 0.0, y: -210.0 },
+            })]);
+            sim.point_at(Point::new(200.0, y));
+            let _ = sim.simulate([
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ]);
+            sim.into_messages()
+                .filter(|m| matches!(m, Msg::Hit))
+                .count()
+        };
+        // The header, the hidden strip under it, and the first row shown.
+        assert_eq!(presses(10.0), 0);
+        assert_eq!(presses(25.0), 0, "the strip under the header is the band's");
+        assert!(presses(45.0) > 0, "a shown row takes its press");
+    }
+
     /// R4-19, the same defect one layer in: the blame annotation is drawn from
     /// the *inlay-spliced* paragraph's width, so a caret line carrying both a
     /// chip and the annotation needs room for both. The extent used to take the
@@ -2769,23 +3174,61 @@ mod hit_tests {
         GUTTER_CHARS as f32 * measure_char_width::<iced::Renderer>(FONT)
     }
 
+    /// A line holding a paragraph separator other than CR/LF, with text of
+    /// the other direction after it, is shaped — not a panic in the shaper
+    /// (the vendored cosmic-text's patch): a file name, a line of code or a
+    /// peer's text could carry one, and the panic closed every window.
+    #[test]
+    fn a_line_with_a_paragraph_separator_is_shaped() {
+        for sep in ['\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2029}'] {
+            let src = format!("let a = 1;{sep}// \u{5d0}\u{5d1}\n\u{5d0}{sep}x\n");
+            let lines = plain_lines(&src);
+            let cv = view(&lines);
+            for i in 0..lines.len() {
+                let _ = cv.shape::<P>(i);
+            }
+            let label = format!("x{sep}\u{5d0}.md");
+            let _ = P::with_text(iced::advanced::Text {
+                content: label.as_str(),
+                bounds: iced::Size::new(400.0, 40.0),
+                size: iced::Pixels(FONT),
+                line_height: iced::advanced::text::LineHeight::default(),
+                font: iced::Font::MONOSPACE,
+                align_x: iced::advanced::text::Alignment::Default,
+                align_y: iced::alignment::Vertical::Top,
+                shaping: iced::advanced::text::Shaping::Advanced,
+                wrapping: iced::advanced::text::Wrapping::None,
+            });
+        }
+    }
+
     /// Per grapheme of a line: its first display column and its left/right x
     /// on screen (relative to the text origin).
     type Graphemes = Vec<(usize, f32, f32)>;
 
-    /// Display text of each line and its grapheme geometry.
+    /// Display text of each line and its grapheme geometry: where the shaper
+    /// drew each grapheme, from its glyphs' advance boxes — not from
+    /// `grapheme_position`, which counts a grapheme drawn as several glyphs (a
+    /// ZWJ sequence the font does not join) as several.
     fn geometry(src: &str) -> Vec<(String, Graphemes)> {
+        use super::Glyphs as _;
         let lines = plain_lines(src);
         let cv = view(&lines);
         (0..lines.len())
             .map(|i| {
                 let text: String = lines[i].spans.iter().map(|(t, _)| t.as_str()).collect();
                 let shaped = cv.shape::<P>(i);
+                let glyphs = shaped.paragraph.glyphs().expect("the glyphs are readable");
                 let mut col = 0;
                 let mut out = Vec::new();
-                for (g, grapheme) in text.graphemes(false).enumerate() {
-                    let x0 = shaped.paragraph.grapheme_position(0, g).unwrap().x;
-                    let x1 = shaped.paragraph.grapheme_position(0, g + 1).unwrap().x;
+                for (at, grapheme) in text.grapheme_indices(false) {
+                    let inside = at..at + grapheme.len();
+                    let (x0, x1) = glyphs
+                        .iter()
+                        .filter(|g| inside.contains(&g.start))
+                        .fold((f32::INFINITY, f32::NEG_INFINITY), |(l, r), g| {
+                            (l.min(g.x), r.max(g.x + g.w))
+                        });
                     out.push((col, x0, x1));
                     col += grapheme.chars().count();
                 }
@@ -3007,6 +3450,46 @@ mod hit_tests {
         assert_eq!(col, 6);
     }
 
+    /// A character that would end the shaper's paragraph mid-line reaches the
+    /// code view as a replacement (`highlight::clean`): the whole line is laid
+    /// out, every column after it measured, in order. Split there, the rest
+    /// of the line was never drawn.
+    #[test]
+    fn a_paragraph_separator_does_not_hide_the_rest_of_the_line() {
+        let geo = geometry("ok();\u{2029}evil();\u{1C}x");
+        let (text, cols) = &geo[0];
+        assert_eq!(text.chars().count(), 15);
+        assert_eq!(cols.len(), 15);
+        assert!(
+            cols.iter().all(|(_, x0, x1)| x0.is_finite() && x1 > x0),
+            "{cols:?}"
+        );
+        assert!(cols.windows(2).all(|w| w[1].1 >= w[0].2 - 0.5), "{cols:?}");
+    }
+
+    /// A selection that ends at a line's start selects none of that line —
+    /// not a chip anchored there either, which the range's left edge counts
+    /// in.
+    #[test]
+    fn a_selection_ending_at_a_chip_lines_start_covers_none_of_it() {
+        let lines = plain_lines("let a = 1;\nf(b);\n");
+        let hints = std::collections::HashMap::from([(1usize, vec![(0usize, "x: ".to_string())])]);
+        let cv = view(&lines)
+            .inlay_hints(&hints, iced::Color::WHITE)
+            .selection(Some(((0, 4), (1, 0))));
+        let shaped = cv.shape::<P>(1);
+        let cols_x = |c0, c1| cv.cols_x(1, Some(&shaped), 7.8, c0, c1);
+        let (x0, x1) = cv
+            .selection_span(1, Some(&shaped), 7.8, &cols_x)
+            .expect("the line is in the selection");
+        assert_eq!((x0, x1), (0.0, 0.0));
+        // One column in, it covers the chip and that column.
+        let cv = cv.selection(Some(((0, 4), (1, 1))));
+        let cols_x = |c0, c1| cv.cols_x(1, Some(&shaped), 7.8, c0, c1);
+        let (_, x1) = cv.selection_span(1, Some(&shaped), 7.8, &cols_x).unwrap();
+        assert!(x1 >= shaped.boundary_x(4, false, 7.8) - 0.5, "{x1}");
+    }
+
     /// Inlay chips spliced into the paragraph shift the glyphs after them; a
     /// click on a real character past a chip on a CJK line still reports
     /// that character's SOURCE column, and a click inside the chip snaps to
@@ -3222,6 +3705,22 @@ mod extent_tests {
         assert_eq!(fed.visual_max_cols(7.8), 900);
         assert_eq!(fed.cache_key().4, 42, "the paragraph cache keys on it");
     }
+
+    /// Every cache knows the content by its owner's generation too, not by
+    /// the buffer's address alone, which the allocator reuses.
+    #[test]
+    fn the_caches_key_on_the_content_generation() {
+        let lines = plain_lines("fn a() {\n    x();\n}\n");
+        let first = view(&lines, 8).generation(7).lines_generation(3);
+        let next = view(&lines, 8).generation(8).lines_generation(3);
+        assert_eq!(first.cache_key().6, 7);
+        assert_ne!(first.cache_key(), next.cache_key());
+        // A fold moves the generation, not the lines': the measured width
+        // still holds.
+        assert_eq!(first.extent_key(), next.extent_key());
+        let reloaded = view(&lines, 8).generation(9).lines_generation(4);
+        assert_ne!(first.extent_key(), reloaded.extent_key());
+    }
 }
 
 /// The font probe (`ensure_usable_fonts`): what indicts a face, and that the
@@ -3418,5 +3917,155 @@ mod font_tests {
         );
         assert_eq!(ascii_face(&mut fs), Some(primary));
         assert!(fs.db().len() <= faces);
+    }
+}
+
+/// Where each logical column is drawn, measured from the glyphs: right-to-left
+/// text, and a grapheme drawn as several glyphs.
+#[cfg(test)]
+mod bidi_tests {
+    use super::{CodeView, Edges, Rounding};
+    use crate::highlight::plain_lines;
+
+    type P = <iced::Renderer as iced::advanced::text::Renderer>::Paragraph;
+
+    fn view(lines: &[crate::highlight::HlLine]) -> CodeView<'_, ()> {
+        CodeView::new(
+            lines,
+            40,
+            13.0,
+            20.0,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+    }
+
+    /// The shaper lays a right-to-left run out reversed, whatever the font
+    /// draws it with: the word's first letter is drawn right of its last, and
+    /// a column is found — and drawn — where its glyph is.
+    #[test]
+    fn a_right_to_left_run_is_measured_where_the_shaper_put_it() {
+        let lines = plain_lines("x = 'שלום';");
+        let shaped = view(&lines).shape::<P>(0);
+        let cw = 7.8;
+        let (first, last) = (shaped.span_x(5, 6, cw), shaped.span_x(8, 9, cw));
+        assert!(
+            first.0 > last.0,
+            "ש is drawn right of ם: {first:?} {last:?}"
+        );
+        let word = shaped.span_x(5, 9, cw);
+        assert!(word.0 <= last.0 && word.1 >= first.1, "{word:?}");
+        // A caret before right-to-left text sits at its right edge.
+        assert_eq!(shaped.edge_x(5, cw), first.1);
+        let mid = (first.0 + first.1) / 2.0;
+        assert_eq!(shaped.column_at(mid, 20.0, Rounding::Under), 5);
+        // The text around it is where it always was.
+        assert!(shaped.span_x(0, 1, cw).0 < word.0);
+        assert!(shaped.span_x(9, 10, cw).0 >= word.1);
+    }
+
+    /// A line is laid out left to right whatever letter it starts with: one
+    /// opening on a Hebrew string was drawn right to left, reversed, its
+    /// indentation at the far end. Its columns are still found where drawn.
+    #[test]
+    fn a_line_opening_on_right_to_left_text_reads_left_to_right() {
+        let lines = plain_lines("    \"שלום\": \"hello\",");
+        let shaped = view(&lines).shape::<P>(0);
+        assert!(shaped.marked);
+        let cw = 7.8;
+        let quote = shaped.span_x(4, 5, cw);
+        let word = shaped.span_x(5, 9, cw);
+        let hello = shaped.span_x(13, 18, cw);
+        assert!(quote.0 > 0.0, "the indentation is on the left: {quote:?}");
+        assert!(quote.1 <= word.0 + 0.5, "{quote:?} {word:?}");
+        assert!(hello.0 >= word.1 - 0.5, "{word:?} {hello:?}");
+        // The Hebrew word itself still runs right to left.
+        assert!(shaped.span_x(5, 6, cw).0 > shaped.span_x(8, 9, cw).0);
+        let h = shaped.span_x(13, 14, cw);
+        assert_eq!(
+            shaped.column_at((h.0 + h.1) / 2.0, 20.0, Rounding::Under),
+            13
+        );
+        // A line without right-to-left text is shaped as it is.
+        let plain = plain_lines("let x = 1;");
+        assert!(!view(&plain).shape::<P>(0).marked);
+    }
+
+    /// The same, against edges made round: what each query answers.
+    #[test]
+    fn a_right_to_left_column_is_found_where_it_is_drawn() {
+        let lines = plain_lines("x = 'שלום';");
+        let mut shaped = view(&lines).shape::<P>(0);
+        // Graphemes 5..9 (the word) drawn reversed in slots 8, 7, 6, 5; slot
+        // k is [10k, 10k + 10).
+        let slot_of = [0, 1, 2, 3, 4, 8, 7, 6, 5, 9, 10];
+        shaped.edges = Some(Edges {
+            spans: slot_of
+                .iter()
+                .map(|&k| (k as f32 * 10.0, k as f32 * 10.0 + 10.0))
+                .collect(),
+            rtl: (0..11).map(|g| (5..9).contains(&g)).collect(),
+        });
+        let cw = 7.8;
+        assert_eq!(shaped.span_x(5, 6, cw), (80.0, 90.0));
+        assert_eq!(shaped.span_x(5, 9, cw), (50.0, 90.0));
+        assert_eq!(shaped.span_x(0, 1, cw), (0.0, 10.0));
+        assert_eq!(shaped.span_x(9, 11, cw), (90.0, 110.0));
+        assert_eq!(shaped.edge_x(5, cw), 90.0);
+        assert_eq!(shaped.edge_x(1, cw), 10.0);
+        assert_eq!(shaped.column_at(85.0, 20.0, Rounding::Under), 5);
+        assert_eq!(shaped.column_at(55.0, 20.0, Rounding::Under), 8);
+        assert_eq!(shaped.column_at(5.0, 20.0, Rounding::Under), 0);
+        assert_eq!(shaped.column_at(500.0, 20.0, Rounding::Under), 11);
+        // The nearest gap in a right-to-left glyph: its right half is before
+        // it, its left half after it.
+        assert_eq!(shaped.column_at(88.0, 20.0, Rounding::Nearest), 5);
+        assert_eq!(shaped.column_at(82.0, 20.0, Rounding::Nearest), 6);
+        assert_eq!(shaped.column_at(2.0, 20.0, Rounding::Nearest), 0);
+        assert_eq!(shaped.column_at(8.0, 20.0, Rounding::Nearest), 1);
+    }
+
+    /// A ZWJ sequence no font joins is drawn as several glyphs and is one
+    /// grapheme: it spans them all, and the columns after it are where their
+    /// own glyphs are. Counted along the glyphs, it was several graphemes,
+    /// and every column after it landed on the wrong glyph.
+    #[test]
+    fn a_grapheme_drawn_as_several_glyphs_is_one() {
+        let glyph = |start: usize, end: usize, x: f32| super::Glyph {
+            start,
+            end,
+            x,
+            w: 10.0,
+            rtl: false,
+        };
+        // "a👨‍👩‍👧b": `a` at 0..1, the family at bytes 1..19 as three glyphs,
+        // `b` at 19..20.
+        let text = "a\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}b";
+        let map = super::ColMap::new(text);
+        let glyphs = [
+            glyph(0, 1, 0.0),
+            glyph(1, 5, 10.0),
+            glyph(8, 12, 20.0),
+            glyph(15, 19, 30.0),
+            glyph(19, 20, 40.0),
+        ];
+        let edges = Edges::of(&glyphs, &map).unwrap();
+        assert_eq!(edges.spans, vec![(0.0, 10.0), (10.0, 40.0), (40.0, 50.0)]);
+        // A ligature drawing two graphemes shares its advance between them.
+        let map = super::ColMap::new("->");
+        let edges = Edges::of(
+            &[super::Glyph {
+                start: 0,
+                end: 2,
+                x: 0.0,
+                w: 20.0,
+                rtl: false,
+            }],
+            &map,
+        )
+        .unwrap();
+        assert_eq!(edges.spans, vec![(0.0, 10.0), (10.0, 20.0)]);
     }
 }

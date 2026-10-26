@@ -50,6 +50,12 @@ enum LocalInstall {
     Toolchain(lsp::registry::Install),
 }
 
+/// Most inlay chips one line carries, and most chars they add up to — a call
+/// with a hundred arguments has a hundred, far shorter: a server's reply may
+/// hold any number for one line, and each is shaped with it.
+pub(crate) const MAX_LINE_CHIPS: usize = 256;
+pub(crate) const MAX_LINE_CHIP_CHARS: usize = 4096;
+
 impl App {
     /// Read every READY language server's state once per update — one lock
     /// each — for the view that follows: the status bar, the diagnostic
@@ -361,7 +367,7 @@ impl App {
             // — that is what the user is being asked about. Approving
             // re-enters `ensure_lsp`, which stages afresh, so nothing here can
             // be spawned later.
-            self.proj.pending_lsp_command = Some(PendingLspCommand {
+            self.proj.pending_lsp_command.offer(PendingLspCommand {
                 root,
                 host: None,
                 language,
@@ -499,7 +505,7 @@ impl App {
         // Approving re-enters `ensure_lsp`, which resolves and re-fingerprints
         // from scratch — so an lsp.toml edited while the dialog sat open is
         // asked about again instead of riding on this answer.
-        self.proj.pending_lsp_command = Some(PendingLspCommand {
+        self.proj.pending_lsp_command.offer(PendingLspCommand {
             root,
             host: None,
             language: language.to_string(),
@@ -538,6 +544,33 @@ impl App {
             let Some(server) = self.proj.lsp_config.resolve(language) else {
                 return Task::none();
             };
+            // A server that builds the project runs the repository's own code
+            // on load: it starts only once the user has let it build THIS
+            // project. Asked here, where every local start arrives, for the
+            // reason the options below are. (A remote host asks its own
+            // question, in its `LspResolve` answer and again at `SpawnLsp`.)
+            if let Some(runs) = server.runs_project_code()
+                && !self
+                    .trust
+                    .is_build_trusted(None, &root, &server.server_name)
+            {
+                self.proj
+                    .link
+                    .lsp
+                    .insert(language.to_string(), LspSlot::AwaitingConsent);
+                self.proj.pending_lsp_consent.offer(LspConsent {
+                    language: language.to_string(),
+                    server_name: server.server_name,
+                    version: server.version,
+                    provision: LspProvision::Build {
+                        runs: runs.to_string(),
+                        root,
+                        host: None,
+                    },
+                    dest_dir: PathBuf::new(),
+                });
+                return Task::none();
+            }
             // The repository's own options reach `initialize` only once the
             // user has approved them. This is the choke point for that: every
             // local start arrives here — `ensure_lsp`'s ready arm, a finished
@@ -550,8 +583,18 @@ impl App {
             };
             // Merge the auto-detected language environment (e.g. a project
             // venv for Python) under any explicit lsp.toml init_options
-            // (explicit wins).
-            let init = langenv::merge(language, &server.server_name, &root, explicit);
+            // (explicit wins), over the settings clew pins for its own
+            // binary — which, when they cannot be pinned, keep it stopped.
+            let init = match langenv::merge(language, &server, &exe, &root, explicit) {
+                Ok(init) => init,
+                Err(e) => {
+                    self.proj
+                        .link
+                        .lsp
+                        .insert(language.to_string(), LspSlot::Failed(e));
+                    return Task::none();
+                }
+            };
             (server.args.clone(), init)
         };
         self.proj
@@ -657,8 +700,11 @@ impl App {
     /// from zero, so a stale mark would suppress every refetch forever.
     pub(crate) fn reset_lsp(&mut self, language: &str) {
         // Stops a Ready client (see `LspSlots`), and an install in flight.
+        // One the host runs is no longer waited for: what is asked next is
+        // asked anew.
         self.proj.link.lsp.remove(language);
         self.proj.link.lsp_installs.remove(language);
+        self.proj.link.remote_installs.remove(language);
         self.proj
             .link
             .lsp_opened
@@ -718,8 +764,14 @@ impl App {
         client.did_change(path, self.lsp_doc_rev, source);
     }
 
-    pub(crate) fn on_lsp_consent_allowed(&mut self) -> Task<Message> {
-        let Some(c) = self.proj.pending_lsp_consent.pop_front() else {
+    /// The user allowed the consent question `number`, if it is the one
+    /// within reach and has been long enough to be read
+    /// ([`App::may_allow`]).
+    pub(crate) fn on_lsp_consent_allowed(&mut self, number: u64) -> Task<Message> {
+        if !self.may_allow(&crate::app::model::Question::LspConsent(number)) {
+            return Task::none();
+        }
+        let Some(c) = self.proj.pending_lsp_consent.answer(number) else {
             return Task::none();
         };
         // What the consent was for decides the path, in ONE match — the local
@@ -743,12 +795,18 @@ impl App {
                     self.status = format!("Installing {} on the remote host…", c.server_name);
                     // Back verbatim: the consent covers the install the user
                     // saw, and the server runs no other.
-                    let _ = self.send_to_server(clew_protocol::Request::LspInstall {
-                        language: c.language,
+                    let sent = self.send_to_server(clew_protocol::Request::LspInstall {
+                        language: c.language.clone(),
                         consent,
                     });
+                    if let Some(id) = sent {
+                        self.proj.link.remote_installs.insert(c.language, id);
+                    }
                 }
                 return Task::none();
+            }
+            LspProvision::Build { root, host, .. } => {
+                return self.on_build_allowed(&c.language, &c.server_name, root, host);
             }
             LspProvision::Download(download) => LocalInstall::Download(download),
             LspProvision::Install(install) => LocalInstall::Toolchain(install),
@@ -797,6 +855,43 @@ impl App {
         )
     }
 
+    /// The user let `server` build the project `root` on `host`: record it,
+    /// outside the project, and start the language afresh. Recorded against the
+    /// project the question was asked about — never the current one, which may
+    /// have changed while the modal sat open.
+    fn on_build_allowed(
+        &mut self,
+        language: &str,
+        server: &str,
+        root: PathBuf,
+        host: Option<String>,
+    ) -> Task<Message> {
+        if self.proj.project.as_ref().map(|p| &p.root) != Some(&root)
+            || self.connection.approval_host().map(str::to_string) != host
+        {
+            self.status = "The project changed — nothing was allowed".into();
+            return Task::none();
+        }
+        if let Err(e) = self
+            .trust
+            .update(|t| t.trust_build(host.as_deref(), &root, server))
+        {
+            // Nothing was recorded (see `on_lsp_command_allowed`): a slot that
+            // says so, rather than the same question again.
+            self.status = format!("Could not record the leave to build: {e}");
+            self.proj.link.lsp.insert(
+                language.to_string(),
+                LspSlot::Failed(format!("could not record the leave to build: {e}")),
+            );
+            return Task::none();
+        }
+        // The server holds the same gate (SpawnLsp, the agent's semantic
+        // tools, a remote's resolve): it hears of the leave first.
+        self.send_lsp_approvals();
+        self.proj.link.lsp.remove(language);
+        self.ensure_lsp(language)
+    }
+
     /// The user approved the language-server command this project's `lsp.toml`
     /// names. Record the approval against the fingerprint the modal SHOWED,
     /// then restart the resolve flow from scratch — never spawn what the
@@ -804,8 +899,14 @@ impl App {
     /// sat open; re-entering `ensure_lsp` re-fingerprints the file as it is
     /// NOW, so a swapped script fails the approval check and raises a fresh
     /// modal instead of running.
-    pub(crate) fn on_lsp_command_allowed(&mut self) -> Task<Message> {
-        let Some(c) = self.proj.pending_lsp_command.take() else {
+    ///
+    /// Only the question `number`, and only once it has been within reach
+    /// long enough to be read ([`App::may_allow`]).
+    pub(crate) fn on_lsp_command_allowed(&mut self, number: u64) -> Task<Message> {
+        if !self.may_allow(&crate::app::model::Question::LspCommand(number)) {
+            return Task::none();
+        }
+        let Some(c) = self.proj.pending_lsp_command.answer(number) else {
             return Task::none();
         };
         // Record against the root/host the modal was raised for — never the
@@ -851,7 +952,10 @@ impl App {
         let approvals = self
             .trust
             .lsp_approvals_for(self.connection.approval_host(), root);
-        let _ = self.send_to_server(clew_protocol::Request::LspApprovals { approvals });
+        let _ = self.send_to_server(clew_protocol::Request::LspApprovals {
+            root: root.to_string_lossy().into_owned(),
+            approvals,
+        });
     }
 
     /// Request whole-file inlay hints for `abs` from `client` (no-op unless the
@@ -966,10 +1070,29 @@ impl App {
             let source = v.source.clone();
             let src_lines: Vec<&str> = source.lines().collect();
             let mut map: HashMap<usize, Vec<(usize, String)>> = HashMap::new();
+            // The chars of each line's chips so far.
+            let mut spliced: HashMap<usize, usize> = HashMap::new();
             for h in &hints {
                 let Some(line) = src_lines.get(h.line) else {
                     continue;
                 };
+                // Past what the code view shapes of a line, a chip is never
+                // drawn: no char takes more than four units of any encoding,
+                // so a hint that far in is at a column past the cut — and
+                // finding its column walked the line up to it, per chip.
+                if h.character / 4 > crate::codeview::MAX_SHAPED_COLS {
+                    continue;
+                }
+                // Every chip is spliced into its line, shaped with it on the
+                // UI thread: what one reply may put on a line is bounded
+                // before anything is computed for it.
+                let chips = map.entry(h.line).or_default();
+                let chars = spliced.entry(h.line).or_default();
+                let len = h.label.chars().count() + 2;
+                if chips.len() >= MAX_LINE_CHIPS || *chars + len > MAX_LINE_CHIP_CHARS {
+                    continue;
+                }
+                *chars += len;
                 let col = viewer::Col::from_offset(line, h.character, enc).0;
                 let mut text = h.label.clone();
                 if h.padding_left {
@@ -978,7 +1101,7 @@ impl App {
                 if h.padding_right {
                     text.push(' ');
                 }
-                map.entry(h.line).or_default().push((col, text));
+                chips.push((col, text));
             }
             for chips in map.values_mut() {
                 chips.sort_by_key(|(c, _)| *c);
@@ -1018,6 +1141,40 @@ impl App {
         }
     }
 
+    /// What `language`'s [`LspSlot::AwaitingConsent`] slot waits on.
+    pub fn lsp_awaiting(&self, language: &str) -> Awaiting {
+        let consent = self
+            .proj
+            .pending_lsp_consent
+            .iter()
+            .find(|c| c.language == language);
+        match consent.map(|c| &c.provision) {
+            Some(LspProvision::Build { .. }) => Awaiting::Build,
+            Some(_) => Awaiting::Download,
+            None if self
+                .proj
+                .pending_lsp_command
+                .iter()
+                .any(|c| c.language == language) =>
+            {
+                Awaiting::Approval
+            }
+            None if self.proj.link.remote_installs.contains_key(language) => Awaiting::Installing,
+            None if self.connection.is_remote() => Awaiting::Host,
+            None => Awaiting::Nothing,
+        }
+    }
+
+    /// The status bar's word on `language`'s server, from the snapshot this
+    /// update took.
+    pub fn lsp_status(&self, language: &str) -> Option<String> {
+        let slot = self.proj.link.lsp.get(language)?;
+        Some(match slot {
+            LspSlot::AwaitingConsent => self.lsp_awaiting(language).to_string(),
+            slot => slot.label(self.proj.link.lsp_snapshots.get(language)),
+        })
+    }
+
     /// Status text and the action button for a language row in the server
     /// panel. Distinguishes running / installed-but-idle / not-downloaded so an
     /// installed server never shows a misleading "Download".
@@ -1050,7 +1207,22 @@ impl App {
             Some(LspSlot::Starting) => ("starting…".into(), None),
             Some(LspSlot::Failed(e)) => (format!("error: {e}"), provision("Retry")),
             Some(LspSlot::Unsupported(e)) => (e.clone(), None),
-            Some(LspSlot::AwaitingConsent) => ("download pending".into(), provision("Download")),
+            // A "no" is not for good: without a way to ask again, the
+            // language had no server until the project was reopened.
+            Some(LspSlot::Declined(e)) => (e.clone(), provision("Ask again")),
+            // The question waiting may be leave to build, or the project's
+            // command, rather than an install: nothing to download, and no
+            // button that reads so.
+            Some(LspSlot::AwaitingConsent) => match self.lsp_awaiting(language) {
+                Awaiting::Download => ("download pending".into(), provision("Download")),
+                // Nothing on screen to answer — the host's word lost with a
+                // link, a question that went with it — or not yet: asked
+                // again, the start resolves afresh.
+                waiting @ (Awaiting::Host | Awaiting::Nothing) => {
+                    (waiting.to_string(), provision("Ask again"))
+                }
+                other => (other.to_string(), None),
+            },
             // Where the server would come from is a store probe on disk. The
             // panel is redrawn on every refresh tick, so the answer comes from
             // the listing the panel last ran off the UI thread
@@ -1235,25 +1407,29 @@ impl App {
                     }
                 }
             }
-            LspMsg::ConsentDismissed => {
-                if let Some(c) = self.proj.pending_lsp_consent.pop_front() {
+            LspMsg::ConsentDismissed(number) => {
+                if let Some(c) = self.proj.pending_lsp_consent.answer(number) {
                     // A declined debug-adapter install is not a language
                     // server: there is no LSP slot to mark.
                     if let LspProvision::DebugAdapter { install, .. } = &c.provision {
                         self.status = format!("{} not installed", install.name());
                         return Task::none();
                     }
-                    self.proj.link.lsp.insert(
-                        c.language,
-                        LspSlot::Unsupported("server download declined".into()),
-                    );
+                    let declined = match c.provision {
+                        LspProvision::Build { .. } => "not allowed to build this project",
+                        _ => "server download declined",
+                    };
+                    self.proj
+                        .link
+                        .lsp
+                        .insert(c.language, LspSlot::Declined(declined.into()));
                 }
                 Task::none()
             }
-            LspMsg::ConsentAllowed => self.on_lsp_consent_allowed(),
-            LspMsg::CommandAllowed => self.on_lsp_command_allowed(),
-            LspMsg::CommandDismissed => {
-                if let Some(c) = self.proj.pending_lsp_command.take() {
+            LspMsg::ConsentAllowed(number) => self.on_lsp_consent_allowed(number),
+            LspMsg::CommandAllowed(number) => self.on_lsp_command_allowed(number),
+            LspMsg::CommandDismissed(number) => {
+                if let Some(c) = self.proj.pending_lsp_command.answer(number) {
                     // Name what was actually declined: the modal asks about a
                     // command, about `initialize` options, or about both, and
                     // a slot that always said "command" left the user of an
@@ -1264,7 +1440,7 @@ impl App {
                     };
                     self.proj.link.lsp.insert(
                         c.language,
-                        LspSlot::Unsupported(format!("project's language-server {what} declined")),
+                        LspSlot::Declined(format!("project's language-server {what} declined")),
                     );
                 }
                 Task::none()

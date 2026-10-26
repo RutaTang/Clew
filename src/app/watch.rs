@@ -64,6 +64,13 @@ impl App {
                 .map(|p| p.files.clone())
                 .unwrap_or_default(),
         };
+        // The folders the scan walked, read the first time a path needs
+        // them. A path in any other — a build's output under a gitignored
+        // `dist/` — is no change to the tree or the index unless it is open
+        // or already tracked: read, a new `dist/app.js` was taken for a
+        // created source file, re-walked the project on every batch the
+        // build wrote, and joined the index the tree leaves it out of.
+        let mut walked: Option<HashSet<String>> = None;
         for p in paths {
             if !seen.insert(p.clone()) {
                 continue;
@@ -73,8 +80,20 @@ impl App {
             // tracks it (a tracked file the scan lists, see
             // `fs_scan::index_language`).
             let rel = self.rel_of(&p);
-            if open.contains(&p)
-                || self.proj.registry.is_tracked(&p)
+            let followed = open.contains(&p) || self.proj.registry.is_tracked(&p);
+            if !followed {
+                let folders = walked.get_or_insert_with(|| {
+                    self.proj
+                        .project
+                        .as_ref()
+                        .map(|p| clew_core::fs_scan::folders_of(&p.tree))
+                        .unwrap_or_default()
+                });
+                if !clew_core::fs_scan::in_walked_folder(Path::new(&rel), folders) {
+                    continue;
+                }
+            }
+            if followed
                 || (!clew_core::fs_scan::in_noise_dir(&rel)
                     && clew_core::fs_scan::index_language(&rel, &p).is_some())
             {

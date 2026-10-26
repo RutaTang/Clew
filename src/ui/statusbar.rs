@@ -73,13 +73,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 // clew cannot read shows as a problem, not as "ready").
                 let lsp = v
                     .lang_key
-                    .and_then(|k| {
-                        Some((
-                            app.proj.link.lsp.get(k)?,
-                            app.proj.link.lsp_snapshots.get(k),
-                        ))
-                    })
-                    .map(|(slot, snapshot)| format!("  ·  LSP {}", slot.label(snapshot)))
+                    .and_then(|k| app.lsp_status(k))
+                    .map(|status| format!("  ·  LSP {status}"))
                     .unwrap_or_default();
                 // Diagnostic counts for this file, from the same snapshot.
                 let diags = v

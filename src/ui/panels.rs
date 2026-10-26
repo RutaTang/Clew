@@ -386,8 +386,13 @@ pub(crate) fn index_cap_note(app: &App) -> Option<&str> {
 pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     // The tab bar already names the panel and offers collapse, so the only header
     // control left is "Clear", and only once there's a conversation to clear.
+    // Every part of the panel keeps its place in the column, there or not
+    // (an empty `space()`, not one of no height, which a column leaves out):
+    // iced pairs widget state with widgets by position, and one coming or
+    // going handed the conversation's scroll, or the input's focus, to
+    // another widget.
     let header: Element<'_, Message> = if app.proj.ask_turns.is_empty() {
-        space().height(0).into()
+        space().into()
     } else {
         row![
             space().width(Fill),
@@ -501,9 +506,19 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
-        // Tool calls waiting for the user's say-so.
-        for approval in &turn.extras.approvals {
-            convo.push(approval_card(turn.stream, approval));
+        // Tool calls waiting for the user's say-so are asked above the
+        // conversation, one at a time.
+        let waiting = turn.extras.approvals.len();
+        if turn.streaming && waiting > 0 {
+            convo.push(
+                text(match waiting {
+                    1 => "A tool call is waiting for your answer, above".to_string(),
+                    n => format!("{n} tool calls are waiting for your answer, above"),
+                })
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .into(),
+            );
         }
         if turn.streaming && !turn.extras.thought.trim().is_empty() {
             let thought = turn.extras.thought.trim();
@@ -567,6 +582,52 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Fill);
+    // The tool call waiting for the user's say-so, pinned above the
+    // conversation: drawn in it, a card moved down as its turn grew above
+    // it — a step, a plan entry, each scrolling the panel — its Allow with
+    // it, to under the pointer. Here nothing above it changes while it is
+    // asked. Its Allow is drawn enabled once it has been within reach long
+    // enough to be read (`App::may_allow`); the cards are answered in turn.
+    let pinned: Element<'_, Message> = match app.first_approval() {
+        Some((turn, approval)) => {
+            let asked = app.asked(crate::app::model::Question::Approval {
+                stream: turn.stream,
+                key: approval.key,
+            });
+            let more = app
+                .proj
+                .ask_turns
+                .iter()
+                .filter(|t| t.streaming)
+                .map(|t| t.extras.approvals.len())
+                .sum::<usize>()
+                - 1;
+            // About half the panel at most, the input kept in view: a card
+            // whose arguments run longer scrolls them, above its answers.
+            let head = (app.bottom_height * 0.5 - 60.0).max(40.0);
+            let page = match &app.asking.answers_page {
+                Some((crate::app::model::Question::Approval { stream, key }, page))
+                    if *stream == turn.stream && *key == approval.key =>
+                {
+                    *page
+                }
+                _ => 0,
+            };
+            let card = approval_card(turn.stream, approval, asked, head, page);
+            // The count goes below it, out of what scrolls: one more coming
+            // moves nothing of the card.
+            let mut pinned = column![card].spacing(4);
+            if more > 0 {
+                pinned = pinned.push(
+                    text(format!("{more} more waiting after this one"))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
+                );
+            }
+            pinned.into()
+        }
+        None => space().into(),
+    };
 
     // Compose area: the pinned-selection chips (each a clickable jump + remove)
     // above the input row. Chips persist across turns and wrap when there are
@@ -603,7 +664,11 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .into()
             })
             .collect();
-        compose.push(Row::with_children(chips).spacing(4).wrap().into());
+        compose.push(compose_slot(Some(
+            Row::with_children(chips).spacing(4).wrap().into(),
+        )));
+    } else {
+        compose.push(compose_slot(None));
     }
     let placeholder = match app
         .ask_agent
@@ -664,24 +729,33 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                     text(format!("{}:", option.name))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
-                    pick_list(choices, selected, move |c: OptionChoice| {
-                        Message::Ask(AskMsg::AcpOption {
-                            option: id.clone(),
-                            value: c.value,
+                    ask_picker(
+                        app,
+                        pick_list(choices, selected, move |c: OptionChoice| {
+                            Message::Ask(AskMsg::AcpOption {
+                                option: id.clone(),
+                                value: c.value,
+                            })
                         })
-                    })
-                    .text_size(ts::CAPTION)
-                    .padding([2, 6]),
+                        .text_size(ts::CAPTION)
+                        .padding([2, 6]),
+                    ),
                 ]
                 .spacing(4)
                 .align_y(iced::Center)
                 .into()
             })
             .collect();
-        compose.push(Row::with_children(pickers).spacing(10).wrap().into());
+        compose.push(compose_slot(Some(
+            Row::with_children(pickers).spacing(10).wrap().into(),
+        )));
+    } else {
+        compose.push(compose_slot(None));
     }
-    let mut compose_row = row![].spacing(6).align_y(iced::Center);
-    // Who answers: clew's own agent, or an ACP agent the user configured.
+    // Who answers: clew's own agent, or an ACP agent the user configured —
+    // in a place of its own, there or not, as the rows above: the input
+    // after it keeps its state (`compose_slot`).
+    let mut agent: Element<'_, Message> = space().into();
     if !app.acp_agents.is_empty() {
         let mut choices = vec![AgentChoice {
             name: None,
@@ -696,39 +770,114 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             .find(|c| c.name == app.ask_agent)
             .cloned()
             .or_else(|| choices.first().cloned());
-        compose_row = compose_row.push(
+        agent = container(ask_picker(
+            app,
             pick_list(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
             .text_size(ts::SMALL)
             .padding([6, 8]),
-        );
+        ))
+        .padding(iced::Padding::default().right(6))
+        .into();
     }
-    let mut compose_row = compose_row.push(input);
-    if streaming {
-        // An answer can run long — always give the user a way out.
-        compose_row = compose_row.push(
-            button(text("Stop").size(ts::BASE))
-                .style(theme::toolbar_button)
-                .padding([7, 12])
-                .on_press(Message::Ask(AskMsg::Stop)),
-        );
-    }
-    compose.push(compose_row.push(ask_btn).into());
+    // An answer can run long — always give the user a way out. In a place
+    // of its own, there or not: Stop coming before Ask handed Ask its state
+    // as it went, and a press held on Stop as the answer ended asked the
+    // question typed meanwhile, let go of over Ask.
+    let stop: Element<'_, Message> = if streaming {
+        button(text("Stop").size(ts::BASE))
+            .style(theme::toolbar_button)
+            .padding([7, 12])
+            .on_press(Message::Ask(AskMsg::Stop))
+            .into()
+    } else {
+        slot()
+    };
+    let compose_row = row![input, stop].spacing(6).align_y(iced::Center);
+    compose.push(
+        row![agent, compose_row.push(ask_btn)]
+            .align_y(iced::Center)
+            .into(),
+    );
 
     container(
-        column![
-            header,
-            conversation,
-            Column::with_children(compose).spacing(4)
-        ]
-        .spacing(8)
-        .padding([8, 12]),
+        column![header]
+            .push(pinned)
+            .push(conversation)
+            .push(Column::with_children(compose))
+            .spacing(8)
+            .padding([8, 12]),
     )
     .width(Fill)
     .height(Fill)
     .style(theme::panel)
     .into()
+}
+
+/// Most answers of each kind (allowing, declining) an approval card shows
+/// at once.
+pub(crate) const MAX_SHOWN_ANSWERS: usize = 3;
+
+/// The answers of `options` an approval card shows on its `page` (counted
+/// round), and how many pages there are: the `page`th [`MAX_SHOWN_ANSWERS`]
+/// allowing ones and as many declining ones, in the agent's order — and,
+/// past the declining ones, the first of them again: a way to decline on
+/// every page.
+pub(crate) fn shown_answers(
+    options: &[crate::app::model::ApprovalOption],
+    page: usize,
+) -> (Vec<&crate::app::model::ApprovalOption>, usize) {
+    let of_kind = |allows: bool| -> Vec<usize> {
+        (0..options.len())
+            .filter(|&i| options[i].allows == allows)
+            .collect()
+    };
+    let (allowing, declining) = (of_kind(true), of_kind(false));
+    let pages = allowing
+        .len()
+        .max(declining.len())
+        .div_ceil(MAX_SHOWN_ANSWERS)
+        .max(1);
+    let page = page % pages;
+    let on_page = |of: &[usize]| -> Vec<usize> {
+        of.iter()
+            .skip(page * MAX_SHOWN_ANSWERS)
+            .take(MAX_SHOWN_ANSWERS)
+            .copied()
+            .collect()
+    };
+    let mut shown = on_page(&allowing);
+    match on_page(&declining) {
+        none if none.is_empty() => shown.extend(declining.first()),
+        some => shown.extend(some),
+    }
+    shown.sort_unstable();
+    (shown.into_iter().map(|i| &options[i]).collect(), pages)
+}
+
+/// A picker of the Ask panel, drawn afresh — its menu closed — while what
+/// is over the panel takes every press (a modal, the context menu): a menu
+/// left open under one could not be closed from it, and an open menu holds
+/// back every question (`ui::placed::watch_overlays`), that modal's too.
+fn ask_picker<'a>(app: &App, picker: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    let covered = crate::ui::active_overlay(app).is_some_and(|o| o.holds_keys());
+    crate::ui::fresh::fresh(u64::from(covered), picker)
+}
+
+/// A row of the Ask panel's compose area that may be there or not, in a
+/// place of its own either way: iced pairs widget state with widgets by
+/// position, and a row coming or going above the input handed its focus and
+/// cursor to another widget. An empty `space()`, not one of no height, which
+/// a column leaves out; the gap below a row is its own, so an absent one
+/// takes no room.
+fn compose_slot(row: Option<Element<'_, Message>>) -> Element<'_, Message> {
+    match row {
+        Some(row) => container(row)
+            .padding(iced::Padding::default().bottom(4))
+            .into(),
+        None => space().into(),
+    }
 }
 
 /// One value of an ACP session setting, as its picker lists it.
@@ -759,54 +908,102 @@ impl std::fmt::Display for AgentChoice {
 }
 
 /// A tool call waiting for the user: who asks for what, the arguments, and
-/// the answers on offer.
-fn approval_card<'a>(stream: u64, approval: &crate::app::model::Approval) -> Element<'a, Message> {
-    let buttons: Vec<Element<'a, Message>> = approval
-        .options
-        .iter()
+/// the answers on offer, those on `page` (counted round; see
+/// [`shown_answers`]) — those that let it run only when `ready`. Who asks
+/// and the arguments scroll, no taller than `head`; the answers stay below
+/// them, where they are: scrolled with them, an Allow out of view while its
+/// delay ran came up under the pointer enabled.
+pub(crate) fn approval_card<'a>(
+    stream: u64,
+    approval: &crate::app::model::Approval,
+    asked: impl Into<crate::ui::placed::Asked>,
+    head: f32,
+    page: usize,
+) -> Element<'a, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
+    // A few of each kind at a time, in the agent's order, the rest a page
+    // further: an agent's list of answers is its own to make as long as it
+    // likes, and answers running over more rows than the card can show
+    // could not be reached. A way to decline is always among them.
+    let (shown, pages) = shown_answers(&approval.options, page);
+    let page = page % pages;
+    let mut buttons: Vec<Element<'a, Message>> = shown
+        .into_iter()
         .map(|option| {
-            button(text(option.label.clone()).size(ts::SMALL))
+            let answer = Message::Ask(AskMsg::Approve {
+                stream,
+                key: approval.key,
+                option: option.id.clone(),
+            });
+            let shown = button(text(option.label.clone()).size(ts::SMALL))
                 .style(if option.allows {
                     theme::primary_button
                 } else {
                     theme::secondary_button
                 })
                 .padding([3, 10])
-                .on_press(Message::Ask(AskMsg::Approve {
-                    stream,
-                    key: approval.key,
-                    option: option.id.clone(),
-                }))
-                .into()
+                .on_press_maybe((ready || !option.allows).then_some(answer));
+            if option.allows {
+                crate::ui::fresh::allow(ready, shown)
+            } else {
+                shown.into()
+            }
         })
         .collect();
-    let mut body = column![
+    let mut asks = column![
         text(format!("⚠ {}", approval.title))
             .size(ts::BODY)
             .color(theme::warn())
     ]
     .spacing(6);
     if !approval.detail.is_empty() {
-        // All of it can be read: long arguments scroll inside the card.
-        body = body.push(
-            container(
-                scrollable(
-                    text(approval.detail.clone())
-                        .size(ts::SMALL)
-                        .font(iced::Font::MONOSPACE)
-                        .color(theme::fg_muted()),
-                )
-                .width(Fill),
-            )
-            .max_height(260.0),
+        asks = asks.push(
+            text(approval.detail.clone())
+                .size(ts::SMALL)
+                .font(iced::Font::MONOSPACE)
+                .color(theme::fg_muted()),
         );
     }
-    body = body.push(Row::with_children(buttons).spacing(6).wrap());
-    container(body)
-        .padding([8, 10])
-        .width(Fill)
-        .style(theme::panel)
-        .into()
+    // All of it can be read: long arguments scroll, across the card.
+    let asks = container(
+        scrollable(asks)
+            .width(Fill)
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar),
+    )
+    .max_height(head);
+    // The rest of its answers, a page on: the card counts its delay anew
+    // for them (`App::on_answers_page`), and its buttons are drawn anew.
+    if pages > 1 {
+        buttons.push(
+            button(text(format!("More answers ({} of {pages})", page + 1)).size(ts::SMALL))
+                .style(theme::toolbar_button)
+                .padding([3, 10])
+                .on_press(Message::Ask(AskMsg::AnswersPage {
+                    stream,
+                    key: approval.key,
+                    page: (page + 1) % pages,
+                }))
+                .into(),
+        );
+    }
+    let answers =
+        crate::ui::fresh::fresh(page as u64, Row::with_children(buttons).spacing(6).wrap());
+    // Fresh for each card: one that comes up where another was answered is
+    // not handed a press held on that one's buttons, nor where it was
+    // scrolled to (`fresh`).
+    // Where its answers are (`placed`).
+    crate::ui::placed::placed(
+        &asked,
+        crate::ui::fresh::fresh_for(
+            &(stream, approval.key),
+            container(column![asks, answers].spacing(6))
+                .padding([8, 10])
+                .width(Fill)
+                .style(theme::panel),
+        ),
+    )
 }
 
 /// One agent exploration step as a chip: a tool glyph + its one-line title.

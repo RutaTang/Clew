@@ -299,6 +299,12 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     } else {
         HashMap::new()
     };
+    // No match starts deeper than a real definition sits: the cursor keeps
+    // a state per enclosing pattern in progress, which cost depth² over a
+    // deeply nested file, and everything below climbs from the definition
+    // through its parents — each found by tree-sitter walking down from the
+    // root.
+    cursor.set_max_start_depth(Some(MAX_DEF_DEPTH));
     let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
     while let Some(m) = matches.next() {
         let mut kind: Option<&str> = None;
@@ -461,12 +467,14 @@ fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), us
 /// from access labels, including raw strings and labels on a member's line.
 fn cpp_member_access(tree: &Tree, source: &str) -> HashMap<usize, bool> {
     let mut access = HashMap::new();
-    let mut todo = vec![tree.root_node()];
-    while let Some(node) = todo.pop() {
+    // Each node with its parent, carried rather than asked of tree-sitter
+    // (which walks down from the root for it).
+    let mut todo: Vec<(Node, Option<Node>)> = vec![(tree.root_node(), None)];
+    while let Some((node, parent)) = todo.pop() {
         let mut cursor = node.walk();
         let children: Vec<Node> = node.named_children(&mut cursor).collect();
         if node.kind() == "field_declaration_list" {
-            let mut public = node.parent().is_none_or(|p| p.kind() != "class_specifier");
+            let mut public = parent.is_none_or(|p| p.kind() != "class_specifier");
             let mut members: Vec<Node> = children.iter().rev().copied().collect();
             while let Some(child) = members.pop() {
                 // Preprocessor branches can contain class-level labels. As
@@ -493,7 +501,7 @@ fn cpp_member_access(tree: &Tree, source: &str) -> HashMap<usize, bool> {
                 }
             }
         }
-        todo.extend(children);
+        todo.extend(children.into_iter().map(|c| (c, Some(node))));
     }
     access
 }
@@ -607,6 +615,12 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
         }
     }
 }
+
+/// Deepest a definition is outlined at, in tree levels. Real code defines
+/// things a few dozen levels down at most; a file nesting deeper (a minified
+/// bundle, or one a repository crafts) has its deeper definitions left out
+/// rather than cost depth² each.
+const MAX_DEF_DEPTH: u32 = 256;
 
 /// Most ancestors [`owner_of`] climbs looking for an enclosing body. A
 /// definition sits a few levels below its body; the bound only matters for a
@@ -860,129 +874,30 @@ pub fn analyze_definitions(source: &str, lang_key: &str) -> Option<Analysis> {
 }
 
 /// Whether the function/method named `name` at 1-based `line1` in `lines` (the
-/// file split into lines) is a test. Rust: a `#[…test…]` attribute above the
-/// definition (`#[test]`, `#[tokio::test]`, `#[rstest]`, `#[test_case(…)]`, …).
-/// Java: a JUnit test annotation (`@Test`, `@ParameterizedTest`, …).
-/// Go/Python: the standard test-name convention. Pure text, no tree-sitter.
-/// Lives in clew-core so the client's index and the server's project-symbol
-/// snapshot classify identically.
+/// file split into lines) is a test. Rust: a `#[…test…]` attribute on or
+/// above the definition (`#[test]`, `#[tokio::test]`, `#[rstest]`,
+/// `#[test_case(…)]`, …). Java: a JUnit test annotation (`@Test`,
+/// `@ParameterizedTest`, …). Go/Python: the standard test-name convention.
+/// Pure text, no tree-sitter. Lives in clew-core so the client's index and
+/// the server's project-symbol snapshot classify identically.
+///
+/// One symbol's, reading the file down to it; for each of a file's,
+/// [`EntryPoints::is_test`] reads the file once.
 pub fn is_test_fn(lines: &[&str], line1: usize, name: &str, lang: &str) -> bool {
-    let Some(lang) = Lang::from_key(lang) else {
-        return false;
-    };
-    match lang {
-        Lang::Rust => {
-            if line1 == 0 || line1 > lines.len() {
-                return false;
-            }
-            // Scan upward over attributes, doc-comments and blank lines; a test
-            // attribute anywhere in that run marks it. Stop at the first real line.
-            let mut i = line1 - 1; // 0-based index of the definition line
-            while i > 0 {
-                i -= 1;
-                let t = lines[i].trim();
-                if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
-                    continue;
-                }
-                // The last line of an attribute rustfmt wrapped (`)]`): skip to
-                // its `#[` line, as `rust_attributes_above` does, rather than
-                // taking it for code and ending the run there.
-                if !t.starts_with("#[")
-                    && t.ends_with(']')
-                    && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
-                        .rev()
-                        .find(|&j| lines[j].trim().starts_with("#["))
-                {
-                    i = j + 1;
-                    continue;
-                }
-                if let Some(rest) = t.strip_prefix("#[") {
-                    if attr_marks_test(rest) {
-                        return true;
-                    }
-                    continue; // another attribute (e.g. #[cfg(...)]) — keep scanning
-                }
-                break; // a code line — the attribute run has ended
-            }
-            false
-        }
-        Lang::Go => {
-            name.starts_with("Test") || name.starts_with("Benchmark") || name.starts_with("Fuzz")
-        }
-        Lang::Python => name.starts_with("test") || name.starts_with("Test"),
-        Lang::Java => java_has_test_annotation(lines, line1, name),
-        // Tests in these are calls (`it(…)`, `test(…)`, `TEST(…)`), not named
-        // functions, or the language has no functions at all.
-        Lang::JavaScript
-        | Lang::TypeScript
-        | Lang::Tsx
-        | Lang::Dart
-        | Lang::C
-        | Lang::Cpp
-        | Lang::Json
-        | Lang::Bash
-        | Lang::Yaml
-        | Lang::Toml
-        | Lang::Html
-        | Lang::Css
-        | Lang::Zig => false,
-    }
+    EntryPoints::new(lines, lang, "").is_test(line1, name)
 }
 
-/// Whether a Java method carries a JUnit test annotation. A method's symbol
-/// line is its FIRST modifier, annotations included, so the annotations sit
-/// between that line and the one naming the method; any directly above it are
-/// scanned too.
-fn java_has_test_annotation(lines: &[&str], line1: usize, name: &str) -> bool {
-    const TEST_ANNOTATIONS: &[&str] = &[
-        "Test",
-        "ParameterizedTest",
-        "RepeatedTest",
-        "TestFactory",
-        "TestTemplate",
-    ];
-    let marks = |t: &str| {
-        t.split_whitespace().any(|word| {
-            word.strip_prefix('@').is_some_and(|a| {
-                let a = a.split('(').next().unwrap_or(a);
-                let a = a.rsplit('.').next().unwrap_or(a);
-                TEST_ANNOTATIONS.contains(&a)
-            })
-        })
-    };
-    if line1 == 0 || line1 > lines.len() {
-        return false;
-    }
-    let start = line1 - 1;
-    // Down from the symbol line to the line that names the method (bounded:
-    // a modifier run is never long).
-    for t in lines.iter().skip(start).take(16) {
-        if marks(t) {
-            return true;
-        }
-        if t.contains(&format!("{name}(")) {
-            break;
-        }
-    }
-    // Up over a run of annotation and blank lines.
-    let mut i = start;
-    while i > 0 {
-        i -= 1;
-        let t = lines[i].trim();
-        if t.is_empty() {
-            continue;
-        }
-        if !t.starts_with('@') {
-            break;
-        }
-        if marks(t) {
-            return true;
-        }
-    }
-    false
-}
+/// The JUnit annotations that make a method a test.
+const TEST_ANNOTATIONS: &[&str] = &[
+    "Test",
+    "ParameterizedTest",
+    "RepeatedTest",
+    "TestFactory",
+    "TestTemplate",
+];
 
-/// Whether one Rust attribute marks a test. `rest` is its text after `#[`.
+/// Whether one Rust attribute marks a test. `rest` is its text after `#[`
+/// (see [`rust_leading_attributes`]).
 ///
 /// Only the attribute PATH decides, plus the two attributes that carry a
 /// condition. A `test` substring anywhere else belongs to somebody's feature
@@ -1168,7 +1083,7 @@ impl EntryKind {
 /// What is read, per language:
 /// - the name: `main` everywhere (`WinMain`/`wmain` in C and C++ too), and a
 ///   lone `handler`/`lambda_handler` function (the cloud-function shape);
-/// - Rust: the attributes above the definition (`#[get("/")]`,
+/// - Rust: the attributes on and above the definition (`#[get("/")]`,
 ///   `#[tokio::main]`, `#[tauri::command]`, `#[no_mangle]`, …);
 /// - Python, JavaScript, TypeScript: the decorators above it (`@app.route`,
 ///   `@router.get`, `@click.command`, `@shared_task`, `@Get()`, `@Cron()`,
@@ -1182,6 +1097,9 @@ impl EntryKind {
 ///
 /// A test is never an entry (a `#[test] fn main` stays a test), and neither
 /// is anything but a function or method.
+///
+/// One symbol's; for each of a file's, [`EntryPoints`] reads what is the
+/// file's once.
 pub fn entry_kind(
     lines: &[&str],
     line1: usize,
@@ -1190,126 +1108,591 @@ pub fn entry_kind(
     lang: &str,
     rel: &str,
 ) -> Option<EntryKind> {
-    if !matches!(kind, "function" | "method") {
-        return None;
-    }
-    let lang = Lang::from_key(lang)?;
-    if is_test_fn(lines, line1, name, lang.key()) {
-        return None;
-    }
-    let mut found: Option<EntryKind> = None;
-    let mut mark = |k: EntryKind| {
-        if found.is_none_or(|f| k < f) {
-            found = Some(k);
+    EntryPoints::new(lines, lang, rel).kind_of(line1, name, kind)
+}
+
+/// One file's functions and methods as [`entry_kind`] reads them, with what
+/// is the file's own — whether a Java file imports Micronaut's HTTP
+/// annotations — read once, the first time a method needs it: read again
+/// for every method, a long header over many methods cost their product.
+///
+/// So is what its lines say: each line's attributes or annotations and the
+/// run of them it ends ([`Line`]), and the decorators on and above each
+/// symbol line. Read again for every symbol, the lines above one cost their
+/// length for each symbol below them — tens of seconds for one file whose
+/// every line starts with an attribute and holds hundreds of functions.
+pub struct EntryPoints<'a> {
+    lines: &'a [&'a str],
+    lang: Option<Lang>,
+    rel: &'a str,
+    micronaut: std::cell::OnceCell<bool>,
+    /// What each line says to the scan for the decorators above a
+    /// definition ([`Decoration`]), read once for the file.
+    decorations: std::cell::OnceCell<Vec<Decoration>>,
+    /// What each line says, from the top: the lines read so far.
+    read: std::cell::RefCell<Vec<Line>>,
+    /// What each line read so far declares ([`Declares`]): whose its
+    /// attributes, annotations or decorators are.
+    declares: std::cell::RefCell<Vec<Declares<'a>>>,
+    /// The strongest entry kind the decorators directly above a symbol line
+    /// mark ([`decorated_above`]), by line: read once for all the symbols
+    /// that start on it.
+    above: std::cell::RefCell<std::collections::HashMap<usize, Option<EntryKind>>>,
+    /// Go: which functions declared on a line have an HTTP handler's
+    /// signature, by name, by line ([`EntryPoints::go_handlers`]).
+    go: std::cell::RefCell<
+        std::collections::HashMap<usize, std::collections::HashMap<&'a str, bool>>,
+    >,
+}
+
+/// What one line declares, for the attributes, annotations or decorators on
+/// and above it to be told whose they are when it declares several things:
+/// `#[test] fn a() {} fn b() {}` makes a test of `a`, not of `b`.
+#[derive(Debug, Default)]
+enum Declares<'a> {
+    /// Not told (a language that does not ask; a head not parsed): what is
+    /// on and above it is taken for each symbol on it.
+    #[default]
+    Unknown,
+    /// Rust: a function, by its name, is the item its attributes are for.
+    RustFn(&'a str),
+    /// Rust: an item that is no function (`mod`, `impl`, `struct`, …): the
+    /// attributes are its, not a function's in it.
+    RustOther,
+    /// Java, JavaScript, TypeScript: each member named on it (`name(`),
+    /// with what the annotations or decorators between the member before it
+    /// and its name mark, sorted by name; and the first of them.
+    Members {
+        members: Box<[(&'a str, Marks)]>,
+        first: Option<&'a str>,
+    },
+}
+
+impl Declares<'_> {
+    /// What the annotations or decorators just before `name` mark, when it
+    /// is a member named on the line.
+    fn member(&self, name: &str) -> Option<Marks> {
+        match self {
+            Declares::Members { members, .. } => members
+                .binary_search_by(|(member, _)| (*member).cmp(name))
+                .ok()
+                .map(|at| members[at].1),
+            _ => None,
         }
-    };
-    if name == "main"
-        || (matches!(lang, Lang::C | Lang::Cpp) && matches!(name, "WinMain" | "wmain"))
-    {
-        mark(EntryKind::Main);
     }
-    match lang {
-        Lang::Rust => {
-            for attr in rust_attributes_above(lines, line1) {
-                if let Some(k) = marker_kind(&attr, lang) {
-                    mark(k);
-                }
+
+    /// Whether what is on the line's start and above it is `name`'s: the
+    /// first thing the line declares, or one that is not told.
+    fn first_is(&self, name: &str) -> bool {
+        match self {
+            Declares::Unknown => true,
+            // A raw name, `r#` or not, is the same name.
+            Declares::RustFn(first) => {
+                first.strip_prefix("r#").unwrap_or(first) == name.strip_prefix("r#").unwrap_or(name)
+            }
+            Declares::RustOther => false,
+            Declares::Members { first, .. } => first.is_none_or(|first| first == name),
+        }
+    }
+}
+
+/// What a definition's attributes or annotations — or its name — say of it:
+/// whether it is a test, and the strongest entry kind they mark it as.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Marks {
+    test: bool,
+    kind: Option<EntryKind>,
+}
+
+impl Marks {
+    /// These, and `test` and `kind` too.
+    fn and(self, test: bool, kind: Option<EntryKind>) -> Marks {
+        Marks {
+            test: self.test || test,
+            kind: stronger(self.kind, kind),
+        }
+    }
+
+    fn with(self, other: Marks) -> Marks {
+        self.and(other.test, other.kind)
+    }
+}
+
+/// The stronger of two entry kinds, either of them none.
+fn stronger(a: Option<EntryKind>, b: Option<EntryKind>) -> Option<EntryKind> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// What one line of a Rust or Java file says of the definitions on and
+/// below it.
+#[derive(Debug, Clone, Copy, Default)]
+struct Line {
+    /// Its own attributes (Rust: the ones it starts with) or annotations
+    /// (Java: all of them, modifiers coming first or not).
+    own: Marks,
+    /// The run of attribute or annotation lines — blank and comment lines
+    /// among them — that it ends, for the definition below it; nothing for
+    /// a line of code. A line declaring an item after its attributes or
+    /// annotations (`#[inline] fn f() {}`, `@Override public String
+    /// toString() {…}`) is code: what it carries is its item's, not the next
+    /// one's. A run is the line's own and the run of the line above, so
+    /// every line is read once, from the top.
+    run: Marks,
+}
+
+impl<'a> EntryPoints<'a> {
+    /// The file `lines`, in language `lang` (a key), at project-relative
+    /// `rel`.
+    pub fn new(lines: &'a [&'a str], lang: &str, rel: &'a str) -> Self {
+        EntryPoints {
+            lines,
+            lang: Lang::from_key(lang),
+            rel,
+            micronaut: std::cell::OnceCell::new(),
+            decorations: std::cell::OnceCell::new(),
+            read: Default::default(),
+            declares: Default::default(),
+            above: Default::default(),
+            go: Default::default(),
+        }
+    }
+
+    fn decorations(&self, lang: Lang) -> &[Decoration] {
+        self.decorations
+            .get_or_init(|| self.lines.iter().map(|l| decoration(l, lang)).collect())
+    }
+
+    /// Whether the file imports Micronaut's HTTP annotations, read from its
+    /// header only — package, imports and comments, where Java allows an
+    /// import.
+    fn micronaut(&self) -> bool {
+        *self.micronaut.get_or_init(|| {
+            java_header(self.lines).any(|l| l.starts_with("import io.micronaut.http"))
+        })
+    }
+
+    /// Whether the function or method `name` at 1-based `line1` is a test
+    /// (see [`is_test_fn`]).
+    pub fn is_test(&self, line1: usize, name: &str) -> bool {
+        self.marks(line1, name).test
+    }
+
+    /// What marks the function or method `name` at 1-based `line1`.
+    fn marks(&self, line1: usize, name: &str) -> Marks {
+        let Some(lang) = self.lang else {
+            return Marks::default();
+        };
+        match lang {
+            Lang::Rust => self.rust_marks(line1, name),
+            Lang::Java => self.java_marks(line1, name),
+            Lang::Go => Marks {
+                test: name.starts_with("Test")
+                    || name.starts_with("Benchmark")
+                    || name.starts_with("Fuzz"),
+                kind: None,
+            },
+            Lang::Python => Marks {
+                test: name.starts_with("test") || name.starts_with("Test"),
+                kind: None,
+            },
+            // Tests in these are calls (`it(…)`, `test(…)`, `TEST(…)`), not
+            // named functions, or the language has no functions at all; their
+            // decorators are read by `decorated`.
+            Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Dart
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css
+            | Lang::Zig => Marks::default(),
+        }
+    }
+
+    /// What marks the Rust function `name` at 1-based `line1`: the
+    /// attributes its line starts with (`#[test] fn t() {}`), and the run of
+    /// them above it — when it is the item they are for, the first its line
+    /// declares.
+    fn rust_marks(&self, line1: usize, name: &str) -> Marks {
+        let Some(i) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return Marks::default();
+        };
+        let line = self.line(i);
+        let ours = self.declares.borrow()[i].first_is(name);
+        match ours {
+            true => line.own.with(self.run_above(i)),
+            false => Marks::default(),
+        }
+    }
+
+    /// What marks the Java method `name` whose symbol starts at 1-based
+    /// `line1` — its first modifier, annotations included: the annotations
+    /// from there down to the line naming the method (bounded: a modifier
+    /// run is never long), and the run of annotation lines directly above.
+    fn java_marks(&self, line1: usize, name: &str) -> Marks {
+        let Some(start) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return Marks::default();
+        };
+        // The run above is the first member's of the line it ends on.
+        self.line(start);
+        let ours = self.declares.borrow()[start].first_is(name);
+        let mut marks = match ours {
+            true => self.run_above(start),
+            false => Marks::default(),
+        };
+        // What each line holds is read once for the file: a line visited
+        // here costs nothing. On the line naming it, only the annotations
+        // just before its name are its (`@Test void a() {} void b() {}`).
+        for i in start..(start + 16).min(self.lines.len()) {
+            let line = self.line(i);
+            let own = self.declares.borrow()[i].member(name);
+            match own {
+                Some(own) => return marks.with(own),
+                None => marks = marks.with(line.own),
             }
         }
-        Lang::Python => {
-            for head in decorators_above(lines, line1) {
-                if let Some(k) = marker_kind(&head, lang) {
-                    mark(k);
-                }
-            }
-            if kind == "function" && matches!(name, "handler" | "lambda_handler") {
-                mark(EntryKind::Handler);
-            }
+        marks
+    }
+
+    /// The entry kind a Java annotation marks. A bare HTTP verb is a route
+    /// in JAX-RS (`@GET`) and in Micronaut (`@Get`, in a file importing its
+    /// HTTP annotations); elsewhere `@Delete`/`@Update` mark a Room or
+    /// MyBatis DAO method, which nothing outside calls through the network.
+    fn java_kind(&self, head: &str) -> Option<EntryKind> {
+        let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
+        if verb && head != head.to_ascii_uppercase() && !self.micronaut() {
+            return None;
         }
-        Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+        marker_kind(head, Lang::Java)
+    }
+
+    /// The run ending on the line above 0-based line `i`: none above the
+    /// first.
+    fn run_above(&self, i: usize) -> Marks {
+        i.checked_sub(1)
+            .map(|up| self.line(up).run)
+            .unwrap_or_default()
+    }
+
+    /// [`Line`] of 0-based line `i`, reading the lines down to it not read
+    /// yet.
+    fn line(&self, i: usize) -> Line {
+        let mut read = self.read.borrow_mut();
+        while read.len() <= i {
+            let at = read.len();
+            let next = self.read_line(at, &read);
+            read.push(next);
+            let declares = self.declares_of(self.lines[at].trim());
+            self.declares.borrow_mut().push(declares);
+        }
+        read[i]
+    }
+
+    /// [`Line`] of 0-based line `i`, the lines above it read (`above`).
+    ///
+    /// Read whole, once for the file, as a scan for each symbol could not
+    /// afford: a line that holds attributes only, or an item after them, is
+    /// told by all of it. (One attribute is told by its start: one nested
+    /// without end costs its length at every level.)
+    fn read_line(&self, i: usize, above: &[Line]) -> Line {
+        let line = self.lines[i];
+        let t = line.trim();
+        let up = || i.checked_sub(1).map(|j| above[j].run).unwrap_or_default();
+        match self.lang {
+            Some(Lang::Rust) => {
+                let (attrs, tail) = rust_leading_attributes(t);
+                let item = holds_code(tail, "//");
+                let own = attrs.into_iter().fold(Marks::default(), |marks, attr| {
+                    let attr = &attr[..attr.floor_char_boundary(MAX_READ_LINE)];
+                    marks.and(
+                        attr_marks_test(attr),
+                        marker_kind(&rust_attribute_head(attr), Lang::Rust),
+                    )
+                });
+                let run = if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
+                    up()
+                } else if t.starts_with("#[") {
+                    match item {
+                        true => Marks::default(),
+                        false => own.with(up()),
+                    }
+                } else if line.trim_end().ends_with(']')
+                    && let Some(j) = wrapped_attribute_start(self.lines, i)
+                {
+                    // The last line of an attribute wrapped over several
+                    // lines (`)]`, as rustfmt wraps long arguments): the run
+                    // goes on from its `#[` line.
+                    above[j].run
+                } else {
+                    Marks::default()
+                };
+                Line { own, run }
+            }
+            Some(Lang::Java) => {
+                let own = t
+                    .split_whitespace()
+                    .filter_map(|word| word.strip_prefix('@'))
+                    .fold(Marks::default(), |marks, annotation| {
+                        let head = decorator_head(annotation);
+                        marks.and(
+                            TEST_ANNOTATIONS.contains(&head.as_str()),
+                            self.java_kind(&head),
+                        )
+                    });
+                let run = if t.is_empty() {
+                    up()
+                } else if t.starts_with('@')
+                    && let (heads, tail) = leading_decorators(t)
+                    && !holds_code(tail, "//")
+                {
+                    heads.iter().fold(up(), |marks, head| {
+                        marks.and(
+                            TEST_ANNOTATIONS.contains(&head.as_str()),
+                            self.java_kind(head),
+                        )
+                    })
+                } else {
+                    Marks::default()
+                };
+                Line { own, run }
+            }
+            _ => Line::default(),
+        }
+    }
+
+    /// [`Declares`] of a line of the file, trimmed.
+    fn declares_of(&self, t: &'a str) -> Declares<'a> {
+        match self.lang {
+            Some(Lang::Rust) => rust_item(rust_leading_attributes(t).1),
+            Some(Lang::Java) => members(t, |head| {
+                Marks::default().and(TEST_ANNOTATIONS.contains(&head), self.java_kind(head))
+            }),
+            Some(lang @ (Lang::JavaScript | Lang::TypeScript | Lang::Tsx)) => members(t, |head| {
+                Marks::default().and(false, marker_kind(head, lang))
+            }),
+            _ => Declares::Unknown,
+        }
+    }
+
+    /// The strongest entry kind the decorators of the symbol `name` at
+    /// 1-based `line1` mark (Python, JavaScript, TypeScript): those directly
+    /// above it — when it is the first its line declares — and, in
+    /// JavaScript and TypeScript, those on its own line and the lines down
+    /// to its name.
+    fn decorated(&self, line1: usize, name: &str, lang: Lang) -> Option<EntryKind> {
+        let i = line1.checked_sub(1).filter(|&i| i < self.lines.len())?;
+        self.line(i);
+        let ours = self.declares.borrow()[i].first_is(name);
+        let mut kind = match ours {
+            true => self.decorated_above(line1, lang),
+            false => None,
+        };
+        if matches!(lang, Lang::JavaScript | Lang::TypeScript | Lang::Tsx) {
             // JavaScript's grammar puts a method's decorators INSIDE its
             // definition (TypeScript's makes them siblings), so there the
             // definition starts at its first decorator: read down through the
-            // decorator-only lines to the one that names the method.
-            let mut own = Vec::new();
-            let from = line1.checked_sub(1).unwrap_or(lines.len());
-            for line in lines.iter().skip(from).take(16) {
-                let (heads, tail) = leading_decorators(line);
-                own.extend(heads);
-                if !tail.is_empty() || line.trim().is_empty() {
+            // decorator-only lines to the one that names the method, where
+            // the decorators just before its name are its.
+            for (j, &line) in self.decorations(lang).iter().enumerate().skip(i).take(16) {
+                self.line(j);
+                let own = self.declares.borrow()[j].member(name);
+                if let Some(own) = own {
+                    return stronger(kind, own.kind);
+                }
+                // Through decorator-only and comment lines, to the line of
+                // code its name is on — one not told by its name
+                // (`[Symbol.iterator]() {}`) has the decorators it starts
+                // with, when it declares no other member first.
+                if line.blank || !(line.only || line.skipped) {
+                    if self.declares.borrow()[j].first_is(name) {
+                        kind = stronger(kind, line.kind);
+                    }
                     break;
                 }
+                kind = stronger(kind, line.kind);
             }
-            for head in decorators_above(lines, line1).into_iter().chain(own) {
-                if let Some(k) = marker_kind(&head, lang) {
+        }
+        kind
+    }
+
+    /// [`decorated_above`] the symbol line `line1`, read once for all the
+    /// symbols that start on it.
+    fn decorated_above(&self, line1: usize, lang: Lang) -> Option<EntryKind> {
+        if let Some(&kind) = self.above.borrow().get(&line1) {
+            return kind;
+        }
+        let kind = decorated_above(self.decorations(lang), line1);
+        self.above.borrow_mut().insert(line1, kind);
+        kind
+    }
+
+    /// Whether the Go function `name` at 1-based `line1` has an HTTP
+    /// handler's signature ([`EntryPoints::go_handlers`]).
+    fn go_handler(&self, line1: usize, name: &str) -> bool {
+        let Some(i) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return false;
+        };
+        if !self.go.borrow().contains_key(&i) {
+            let handlers = self.go_handlers(i);
+            self.go.borrow_mut().insert(i, handlers);
+        }
+        self.go.borrow()[&i].get(name).copied().unwrap_or(false)
+    }
+
+    /// Whether each Go function declared on 0-based line `i` has an HTTP
+    /// handler's signature, by name (the first one declaring it), read once
+    /// for all the symbols on the line: each from its `func` to its own `{`,
+    /// or the `;` that ends one without a body — the last running on over
+    /// the next lines when its parameter list does. A function's symbol is
+    /// its declaration, `func` and name on its first line: one past what is
+    /// read of the line is not told.
+    fn go_handlers(&self, i: usize) -> std::collections::HashMap<&'a str, bool> {
+        let text: &'a str = readable(self.lines[i]);
+        let b = text.as_bytes();
+        let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c >= 0x80;
+        let space = |mut at: usize| {
+            while b.get(at).is_some_and(u8::is_ascii_whitespace) {
+                at += 1;
+            }
+            at
+        };
+        let mut found = std::collections::HashMap::new();
+        // Every byte is looked at a bounded number of times: each step goes
+        // on past what it read.
+        let mut from = 0;
+        while let Some(at) = text[from..].find("func").map(|at| from + at) {
+            from = at + 4;
+            if at.checked_sub(1).is_some_and(|p| word(b[p]))
+                || b.get(from).is_some_and(|&c| word(c))
+            {
+                continue;
+            }
+            let mut name = space(from);
+            if b.get(name) == Some(&b'(') {
+                // A method's receiver — or a function literal's parameters.
+                let Some(close) = group_end(b, name) else {
+                    break; // the rest of the line is in it
+                };
+                name = space(close);
+            }
+            let end = (name..b.len()).find(|&k| !word(b[k])).unwrap_or(b.len());
+            from = from.max(end);
+            if end == name || !matches!(b.get(space(end)), Some(b'(' | b'[')) {
+                continue; // a literal, or no function
+            }
+            let declaration = &text[at..];
+            let handler = match go_declaration_end(declaration) {
+                Some(len) => {
+                    from = at + len;
+                    go_handler_signature(&declaration[..len])
+                }
+                None => {
+                    from = b.len();
+                    let mut signature = declaration.to_string();
+                    for (_, t) in read_down(self.lines, i + 1, 3) {
+                        if go_declaration_end(&signature).is_some() {
+                            break;
+                        }
+                        signature.push(' ');
+                        signature.push_str(t);
+                    }
+                    if let Some(len) = go_declaration_end(&signature) {
+                        signature.truncate(len);
+                    }
+                    go_handler_signature(&signature)
+                }
+            };
+            found.entry(&text[name..end]).or_insert(handler);
+        }
+        found
+    }
+
+    /// [`entry_kind`] of the symbol `name` of kind `kind` at 1-based
+    /// `line1`.
+    pub fn kind_of(&self, line1: usize, name: &str, kind: &str) -> Option<EntryKind> {
+        let rel = self.rel;
+        if !matches!(kind, "function" | "method") {
+            return None;
+        }
+        let lang = self.lang?;
+        // Rust's attributes and Java's annotations: what marks it a test
+        // marks its kind too.
+        let marks = self.marks(line1, name);
+        if marks.test {
+            return None;
+        }
+        let mut found: Option<EntryKind> = marks.kind;
+        let mut mark = |k: EntryKind| {
+            if found.is_none_or(|f| k < f) {
+                found = Some(k);
+            }
+        };
+        if name == "main"
+            || (matches!(lang, Lang::C | Lang::Cpp) && matches!(name, "WinMain" | "wmain"))
+        {
+            mark(EntryKind::Main);
+        }
+        match lang {
+            Lang::Rust | Lang::Java => {}
+            Lang::Python => {
+                if let Some(k) = self.decorated(line1, name, lang) {
                     mark(k);
                 }
+                if kind == "function" && matches!(name, "handler" | "lambda_handler") {
+                    mark(EntryKind::Handler);
+                }
             }
-            let path = rel.replace('\\', "/");
-            let in_pages_api = path.starts_with("pages/api/") || path.contains("/pages/api/");
-            let is_route_file =
-                path.rsplit('/').next().is_some_and(|f| {
+            Lang::JavaScript | Lang::TypeScript | Lang::Tsx => {
+                if let Some(k) = self.decorated(line1, name, lang) {
+                    mark(k);
+                }
+                let path = rel.replace('\\', "/");
+                let in_pages_api = path.starts_with("pages/api/") || path.contains("/pages/api/");
+                let is_route_file = path.rsplit('/').next().is_some_and(|f| {
                     matches!(f, "route.ts" | "route.js" | "route.tsx" | "route.jsx")
                 }) && (path.starts_with("app/") || path.contains("/app/"));
-            let nextjs_route = (in_pages_api && matches!(name, "handler" | "default"))
-                || (is_route_file
-                    && matches!(
-                        name,
-                        "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
-                    ));
-            if nextjs_route {
-                mark(EntryKind::Route);
-            } else if kind == "function" && name == "handler" {
-                mark(EntryKind::Handler);
-            }
-        }
-        Lang::Java => {
-            // A bare HTTP verb is a route in JAX-RS (`@GET`) and in
-            // Micronaut (`@Get`, in a file importing its HTTP annotations);
-            // elsewhere `@Delete`/`@Update` mark a Room or MyBatis DAO
-            // method, which nothing outside calls through the network.
-            let micronaut = lines
-                .iter()
-                .any(|l| l.trim_start().starts_with("import io.micronaut.http"));
-            for head in java_annotations(lines, line1, name) {
-                let verb = HTTP_VERBS.contains(&head.to_ascii_lowercase().as_str());
-                if verb && !micronaut && head != head.to_ascii_uppercase() {
-                    continue;
-                }
-                if let Some(k) = marker_kind(&head, lang) {
-                    mark(k);
+                let nextjs_route = (in_pages_api && matches!(name, "handler" | "default"))
+                    || (is_route_file
+                        && matches!(
+                            name,
+                            "GET" | "POST" | "PUT" | "DELETE" | "PATCH" | "HEAD" | "OPTIONS"
+                        ));
+                if nextjs_route {
+                    mark(EntryKind::Route);
+                } else if kind == "function" && name == "handler" {
+                    mark(EntryKind::Handler);
                 }
             }
-        }
-        Lang::Go => {
-            // A handler is one by its signature; the parameter list may
-            // continue on the next lines.
-            let signature: String = lines
-                .iter()
-                .skip(line1.saturating_sub(1))
-                .take(4)
-                .copied()
-                .collect::<Vec<_>>()
-                .join(" ");
-            if go_handler_signature(&signature) {
-                mark(EntryKind::Route);
-            } else if kind == "function" && matches!(name, "handler" | "Handler" | "HandleRequest")
-            {
-                mark(EntryKind::Handler);
+            Lang::Go => {
+                if self.go_handler(line1, name) {
+                    mark(EntryKind::Route);
+                } else if kind == "function"
+                    && matches!(name, "handler" | "Handler" | "HandleRequest")
+                {
+                    mark(EntryKind::Handler);
+                }
             }
+            Lang::Dart
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Zig
+            | Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css => {}
         }
-        Lang::Dart
-        | Lang::C
-        | Lang::Cpp
-        | Lang::Zig
-        | Lang::Json
-        | Lang::Bash
-        | Lang::Yaml
-        | Lang::Toml
-        | Lang::Html
-        | Lang::Css => {}
+        found
     }
-    found
 }
 
 /// Lines a wrapped attribute may span: past that, a `]` line is code.
@@ -1367,8 +1750,11 @@ fn go_handler_signature(signature: &str) -> bool {
     while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
         i += 1;
     }
+    // Go allows a space before either list; gofmt takes it out.
+    skip_ws(&mut i);
     if chars.get(i) == Some(&'[') {
         group(&mut i, '[', ']');
+        skip_ws(&mut i);
     }
     let Some(params) = group(&mut i, '(', ')') else {
         return false;
@@ -1397,94 +1783,504 @@ fn go_handler_signature(signature: &str) -> bool {
     }
 }
 
-/// The heads of the Rust attributes in the run directly above `line1`
-/// (`#[a::b(c)]` → `b`), blank and comment lines skipped, stopping at the
-/// first code line. String literals are blanked first so nothing inside one
-/// is read as a path.
-fn rust_attributes_above(lines: &[&str], line1: usize) -> Vec<String> {
-    let mut heads = Vec::new();
-    if line1 == 0 || line1 > lines.len() {
-        return heads;
-    }
-    let mut i = line1 - 1;
-    while i > 0 {
-        i -= 1;
-        let t = lines[i].trim();
-        if t.is_empty() || t.starts_with("//") || t.starts_with("#!") {
-            continue;
-        }
-        // The last line of an attribute wrapped over several lines (`)]`,
-        // as rustfmt wraps long arguments): its head is on the `#[` line
-        // above.
-        if !t.starts_with("#[")
-            && t.ends_with(']')
-            && let Some(j) = (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
-                .rev()
-                .find(|&j| lines[j].trim().starts_with("#["))
-        {
-            i = j + 1;
-            continue;
-        }
-        let Some(rest) = t.strip_prefix("#[") else {
-            break;
+/// The attributes a line of Rust starts with — each one's text inside its
+/// `#[…]`, or to the end of the line for one that does not close on it (it is
+/// wrapped over the lines below) — and what follows them on the line: an
+/// item (`#[inline] fn f() {}`) when it holds code ([`holds_code`]). Such a
+/// line is that item's: its attributes are not the next one's.
+fn rust_leading_attributes(t: &str) -> (Vec<&str>, &str) {
+    let mut attrs = Vec::new();
+    let mut rest = t.trim_start();
+    while let Some(after) = rest.strip_prefix("#[") {
+        let Some(close) = closing_bracket(after) else {
+            attrs.push(after);
+            return (attrs, "");
         };
-        let rest = crate::highlight::without_string_literals(rest, &['"']);
-        let path = rest
-            .split(['(', '=', ']', ' ', '\t'])
-            .next()
-            .unwrap_or_default()
-            .trim();
-        heads.push(path.rsplit("::").next().unwrap_or(path).to_string());
+        attrs.push(&after[..close]);
+        rest = after[close + 1..].trim_start();
     }
-    heads
+    (attrs, rest)
 }
 
-/// The heads of the decorators in the run directly above `line1`
-/// (`@a.b.c(d)` → `c`), blank and comment lines skipped, stopping at the
-/// first other line. A decorator whose argument list runs over several lines
-/// is read whole (the lines below its `@` line are its continuation while
-/// they close more parentheses than they open); a line that carries a
-/// declaration after its decorators (`@Post() create() {}`) is another
-/// member's, and ends the run.
-fn decorators_above(lines: &[&str], line1: usize) -> Vec<String> {
-    let mut heads = Vec::new();
-    if line1 == 0 || line1 > lines.len() {
-        return heads;
-    }
-    let balance = |t: &str| {
-        let t = crate::highlight::without_string_literals(t, &['"', '\'']);
-        t.matches(')').count() as i64 - t.matches('(').count() as i64
+/// What the Rust `item` — a line's text after its attributes — declares
+/// first ([`Declares`]): past its visibility and qualifiers (`pub(crate)`,
+/// `async`, `const`, `unsafe`, `extern "C"`), a function by its name, or
+/// another item. Nothing or anything else is not told.
+fn rust_item(item: &str) -> Declares<'_> {
+    let word = |rest: &str| -> usize {
+        rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .unwrap_or(rest.len())
     };
+    let mut rest = item.trim_start();
+    if let Some(after) = rest.strip_prefix("pub") {
+        if let Some(inner) = after.strip_prefix('(') {
+            let Some(close) = inner.find(')') else {
+                return Declares::Unknown;
+            };
+            rest = inner[close + 1..].trim_start();
+        } else if after.starts_with(char::is_whitespace) {
+            rest = after.trim_start();
+        }
+    }
+    loop {
+        let end = word(rest);
+        let (head, after) = (&rest[..end], rest[end..].trim_start());
+        match head {
+            "async" | "unsafe" | "default" | "safe" | "auto" => rest = after,
+            "extern" => {
+                // `extern "C" fn`, `extern fn` — or `extern crate`.
+                rest = match after.strip_prefix('"') {
+                    Some(abi) => match abi.find('"') {
+                        Some(close) => abi[close + 1..].trim_start(),
+                        None => return Declares::Unknown,
+                    },
+                    None => after,
+                };
+                // An `extern` block: its functions' own attributes are in it.
+                if rest.starts_with('{') {
+                    return Declares::RustOther;
+                }
+            }
+            // `const fn` — or a constant.
+            "const" if matches!(&after[..word(after)], "fn" | "unsafe" | "async" | "extern") => {
+                rest = after;
+            }
+            "fn" => {
+                // A raw name is its symbol's with its `r#` (`fn r#type`).
+                let raw = if after.starts_with("r#") { 2 } else { 0 };
+                let name = &after[..raw + word(&after[raw..])];
+                return match name.len() == raw {
+                    true => Declares::Unknown,
+                    false => Declares::RustFn(name),
+                };
+            }
+            "mod" | "struct" | "enum" | "union" | "trait" | "impl" | "type" | "static"
+            | "const" | "use" | "crate" | "macro_rules" => return Declares::RustOther,
+            _ => return Declares::Unknown,
+        }
+    }
+}
+
+/// The members `t`, a trimmed line of Java, JavaScript or TypeScript, names
+/// ([`Declares::Members`]): each identifier right before a `(` — calls too,
+/// as a line's members are told apart by name, not declared from — an
+/// annotation's or decorator's own name aside, with what `marks` says of
+/// the heads of the annotations or decorators between the member before it
+/// and its name. Strings, comments and an annotation's argument list are
+/// passed over.
+fn members<'a>(t: &'a str, marks: impl Fn(&str) -> Marks) -> Declares<'a> {
+    let b = t.as_bytes();
+    let ident = |c: u8| c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c >= 0x80;
+    let mut found: Vec<(&str, Marks)> = Vec::new();
+    let mut pending = Marks::default();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' | b'`' => i = past_literal(b, i),
+            b'/' if b.get(i + 1) == Some(&b'/') => break,
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                i = t[i + 2..].find("*/").map_or(b.len(), |end| i + 2 + end + 2);
+            }
+            b'@' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && (ident(b[j]) || b[j] == b'.') {
+                    j += 1;
+                }
+                pending = pending.with(marks(&decorator_head(&t[start..j])));
+                if b.get(j) == Some(&b'(') {
+                    j = past_parens(b, j);
+                }
+                i = j;
+            }
+            // A JavaScript private name's `#` is part of it (`#run(`).
+            c if ident(c) || c == b'#' => {
+                let start = i;
+                i += 1;
+                while i < b.len() && ident(b[i]) {
+                    i += 1;
+                }
+                if b.get(i) == Some(&b'(') && !b[start].is_ascii_digit() {
+                    found.push((&t[start..i], std::mem::take(&mut pending)));
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    let first = found.first().map(|&(name, _)| name);
+    // The first naming of each, in line order.
+    found.sort_by(|a, b| a.0.cmp(b.0));
+    found.dedup_by(|later, earlier| later.0 == earlier.0);
+    Declares::Members {
+        members: found.into_boxed_slice(),
+        first,
+    }
+}
+
+/// Past the string or char literal opening at `b[at]`, escapes and all.
+fn past_literal(b: &[u8], at: usize) -> usize {
+    let quote = b[at];
+    let mut i = at + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            c if c == quote => return i + 1,
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// Past the argument list opening at `b[at]` (`(`), nested ones and
+/// literals in it included.
+fn past_parens(b: &[u8], at: usize) -> usize {
+    let mut depth = 0usize;
+    let mut i = at;
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' | b'`' => {
+                i = past_literal(b, i);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    b.len()
+}
+
+/// Where the Go declaration `text` starts with ends on its line: past its
+/// body's `{`, or at the `;` that ends one without a body — outside the
+/// parameter and type parameter lists, which may hold either (`func(…)`,
+/// `interface{…}`).
+fn go_declaration_end(text: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, c) in text.bytes().enumerate() {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => depth = depth.saturating_sub(1),
+            b'{' if depth == 0 => return Some(at + 1),
+            b';' if depth == 0 => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Past the parameter list opening at `b[at]` (`(`), lists and type
+/// parameter lists nested in it included; `None` when it does not close.
+fn group_end(b: &[u8], at: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (i, &c) in b.iter().enumerate().skip(at) {
+        match c {
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Where the `]` closing an attribute is in `after`, its text after `#[`:
+/// brackets nest, and those in its string, char and byte literals
+/// (`#[test_case(']')]`) do not count.
+fn closing_bracket(after: &str) -> Option<usize> {
+    let bytes = after.as_bytes();
+    let mut depth = 1usize;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += if bytes[i] == b'\\' { 2 } else { 1 };
+                }
+            }
+            b'\'' => {
+                if let Some(len) = char_literal_len(&after[i..]) {
+                    i += len;
+                    continue;
+                }
+            }
+            b'[' => depth += 1,
+            b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// The length of the char literal `s` starts with (`'x'`, `'\''`,
+/// `'\u{1F600}'`), or `None` when its `'` starts a lifetime (`'a`).
+fn char_literal_len(s: &str) -> Option<usize> {
+    let body = s.strip_prefix('\'')?;
+    let mut chars = body.char_indices();
+    let (_, first) = chars.next()?;
+    let close = match first {
+        // An escape: to the quote that ends it, past the escaped char.
+        '\\' => chars.skip(1).take(10).find(|&(_, c)| c == '\'')?.0,
+        _ => match chars.next()? {
+            (at, '\'') => at,
+            _ => return None,
+        },
+    };
+    Some(close + 2)
+}
+
+/// Whether `tail`, what follows a line's attributes or decorators, holds
+/// code: anything but comments — `/* … */` ones, and one to the end of the
+/// line opened by `line_comment` (`//`; `#` in Python).
+fn holds_code(tail: &str, line_comment: &str) -> bool {
+    let mut rest = tail.trim_start();
+    loop {
+        if rest.is_empty() || rest.starts_with(line_comment) {
+            return false;
+        }
+        let Some(inner) = rest.strip_prefix("/*") else {
+            return true;
+        };
+        match inner.find("*/") {
+            Some(end) => rest = inner[end + 2..].trim_start(),
+            // A comment the line does not close.
+            None => return false,
+        }
+    }
+}
+
+/// Whether `t`, a trimmed line, holds attributes (`#[derive(Debug)]`) or
+/// annotations and decorators (`@Override`) and nothing after them: no item
+/// declared on their line.
+pub(crate) fn only_attributes(t: &str) -> bool {
+    if t.starts_with("#[") {
+        return !holds_code(rust_leading_attributes(t).1, "//");
+    }
+    t.starts_with('@') && !holds_code(leading_decorators(t).1, "//")
+}
+
+/// `a::b(c)` → `b`: the last path segment of an attribute (its text after
+/// `#[`). String literals are blanked first so nothing inside one is read as
+/// a path.
+fn rust_attribute_head(attr: &str) -> String {
+    let attr = crate::highlight::without_string_literals(attr, &['"']);
+    let path = attr
+        .split(['(', '=', ']', ' ', '\t'])
+        .next()
+        .unwrap_or_default()
+        .trim();
+    path.rsplit("::").next().unwrap_or(path).to_string()
+}
+
+/// The `#[` line of the attribute whose last line (`)]`, as rustfmt wraps
+/// long arguments) is 0-based line `i`.
+fn wrapped_attribute_start(lines: &[&str], i: usize) -> Option<usize> {
+    (i.saturating_sub(MAX_WRAPPED_ATTRIBUTE_LINES)..i)
+        .rev()
+        .find(|&j| lines[j].trim_start().starts_with("#["))
+}
+
+/// The header of a Java file, trimmed: its lines up to the first that is not
+/// blank, a comment (a block comment's every line), `package` or `import`.
+fn java_header<'a>(lines: &'a [&'a str]) -> impl Iterator<Item = &'a str> + 'a {
+    let mut in_comment = false;
+    lines.iter().map(|l| l.trim_start()).take_while(move |l| {
+        if in_comment {
+            in_comment = !l.contains("*/");
+            return true;
+        }
+        if l.starts_with("/*") {
+            in_comment = !l.contains("*/");
+            return true;
+        }
+        l.is_empty() || l.starts_with("//") || l.starts_with("import ") || l.starts_with("package ")
+    })
+}
+
+/// Longest part of a line a scan for one symbol reads (a Go signature),
+/// and of one attribute told for its marks: no person writes a longer one,
+/// and a line read for each of the symbols it holds — a whole minified file
+/// of them — cost its length per symbol. What each line holds as a whole is
+/// read once for the file ([`EntryPoints`]).
+const MAX_READ_LINE: usize = 4096;
+
+/// `line`, trimmed, as far as a scan reads it: its first [`MAX_READ_LINE`]
+/// bytes.
+fn readable(line: &str) -> &str {
+    line[..line.floor_char_boundary(MAX_READ_LINE)].trim()
+}
+
+/// Most bytes the scans below a definition's first line read, all its lines
+/// together (for its own decorators, annotations or signature): read for
+/// each symbol, the lines a scan went through cost their length for every
+/// one.
+const MAX_READ_BELOW: usize = 4 * MAX_READ_LINE;
+
+/// The lines from 0-based `from` down, at most `most` of them and
+/// [`MAX_READ_BELOW`] bytes, each as far as it is read ([`readable`]), with
+/// its index.
+fn read_down<'l>(
+    lines: &'l [&'l str],
+    from: usize,
+    most: usize,
+) -> impl Iterator<Item = (usize, &'l str)> + 'l {
+    let mut budget = MAX_READ_BELOW;
+    lines
+        .iter()
+        .enumerate()
+        .skip(from)
+        .take(most)
+        .map_while(move |(i, line)| {
+            if budget == 0 {
+                return None;
+            }
+            budget = budget.saturating_sub(line.len().min(MAX_READ_LINE));
+            Some((i, readable(line)))
+        })
+}
+
+/// Most lines a scan above a definition for its decorators looks through.
+/// Blank lines, comments and a decorator's argument list span some lines,
+/// never more than this: past it, a `)` the count misread (one in a comment)
+/// carried the scan through code to the top of the file.
+const MAX_LINES_ABOVE: usize = 1000;
+
+/// What one line of a Python, JavaScript or TypeScript file says to the
+/// scan for the decorators above a definition ([`decorated_above`]).
+#[derive(Debug, Clone, Copy)]
+struct Decoration {
+    /// Blank.
+    blank: bool,
+    /// Blank, or a comment: passed over.
+    skipped: bool,
+    /// It starts with a decorator.
+    decorator: bool,
+    /// Decorators and nothing else, comments aside: a line that declares a
+    /// member after its decorators (`@Post() create() {}`) is that member's.
+    only: bool,
+    /// The strongest entry kind the decorators it starts with mark.
+    kind: Option<EntryKind>,
+    /// The kind its first one marks: a line inside another decorator's
+    /// argument list is read for that one only.
+    first: Option<EntryKind>,
+    /// Its [`paren_balance`].
+    balance: i64,
+}
+
+/// [`Decoration`] of `line`, in language `lang` — read whole, once for the
+/// file: whether a line holds decorators only is told by all of it.
+fn decoration(line: &str, lang: Lang) -> Decoration {
+    let t = line.trim();
+    // `#` opens a comment in Python only: in JavaScript it names a private
+    // member, which is code.
+    let comment = if lang == Lang::Python { "#" } else { "//" };
+    // Blank, or comments only (`// …`, `/* … */`).
+    let skipped = !holds_code(t, comment);
+    let decorator = !skipped && t.starts_with('@');
+    let (heads, tail) = match decorator {
+        true => leading_decorators(t),
+        false => (Vec::new(), ""),
+    };
+    let only = decorator && !holds_code(tail, comment);
+    Decoration {
+        blank: t.is_empty(),
+        skipped,
+        decorator,
+        only,
+        kind: heads.iter().filter_map(|h| marker_kind(h, lang)).min(),
+        first: heads.first().and_then(|h| marker_kind(h, lang)),
+        balance: paren_balance(line),
+    }
+}
+
+/// The strongest entry kind the decorators in the run directly above
+/// `line1` mark, `lines` the file's [`Decoration`]s: blank and comment lines
+/// passed over, stopping at the first other line. A decorator whose argument
+/// list runs over several lines is read whole (the lines below its `@` line
+/// are its continuation while they close more parentheses than they open);
+/// a line that declares a member after its decorators ends the run.
+///
+/// Each line read once for the file, each visit here costs nothing: read
+/// again for every symbol, a file of decorator lines cost each line's
+/// length for every symbol under it — twenty seconds for one file.
+fn decorated_above(lines: &[Decoration], line1: usize) -> Option<EntryKind> {
+    if line1 == 0 || line1 > lines.len() {
+        return None;
+    }
+    let mut kind = None;
     // Parentheses closed on lines below the `@` line that opened them.
     let mut pending: i64 = 0;
     let mut i = line1 - 1;
-    while i > 0 {
+    let floor = i.saturating_sub(MAX_LINES_ABOVE);
+    while i > floor {
         i -= 1;
-        let t = lines[i].trim();
-        if t.is_empty() || t.starts_with('#') || t.starts_with("//") {
+        let line = lines[i];
+        if line.skipped {
             continue;
         }
-        if let Some(rest) = t.strip_prefix('@') {
+        if line.decorator {
             if pending > 0 {
-                pending = (pending + balance(t)).max(0);
-                heads.push(decorator_head(rest));
+                pending = (pending + line.balance).max(0);
+                kind = stronger(kind, line.first);
                 continue;
             }
-            let (own, tail) = leading_decorators(t);
-            if !tail.is_empty() {
+            if !line.only {
                 break;
             }
-            heads.extend(own);
+            kind = stronger(kind, line.kind);
             continue;
         }
-        let closed = balance(t);
-        if pending + closed > 0 {
-            pending += closed;
+        if pending + line.balance > 0 {
+            pending += line.balance;
             continue;
         }
         break;
     }
-    heads
+    kind
+}
+
+/// How many more parentheses `line` closes than it opens, outside its string
+/// literals (`"…"`, `'…'`, with `\` escapes).
+fn paren_balance(line: &str) -> i64 {
+    let mut balance = 0i64;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for c in line.chars() {
+        match quote {
+            Some(q) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                '"' | '\'' => quote = Some(c),
+                ')' => balance += 1,
+                '(' => balance -= 1,
+                _ => {}
+            },
+        }
+    }
+    balance
 }
 
 /// The decorators at the START of a line (`@Get() findAll() {`), for the
@@ -1532,50 +2328,6 @@ fn decorator_head(rest: &str) -> String {
         .next()
         .unwrap_or("");
     name.rsplit('.').next().unwrap_or(name).to_string()
-}
-
-/// The heads of a Java method's annotations: from the symbol's first
-/// modifier line down to the line naming the method (bounded), and the run of
-/// annotation lines directly above (see [`java_has_test_annotation`]).
-fn java_annotations(lines: &[&str], line1: usize, name: &str) -> Vec<String> {
-    let mut heads = Vec::new();
-    if line1 == 0 || line1 > lines.len() {
-        return heads;
-    }
-    let collect = |t: &str, heads: &mut Vec<String>| {
-        for word in t.split_whitespace() {
-            if let Some(a) = word.strip_prefix('@') {
-                heads.push(decorator_head(a));
-            }
-        }
-    };
-    let start = line1 - 1;
-    let needle = format!("{name}(");
-    for t in lines.iter().skip(start).take(16) {
-        collect(t, &mut heads);
-        if t.contains(&needle) {
-            break;
-        }
-    }
-    let mut i = start;
-    while i > 0 {
-        i -= 1;
-        let t = lines[i].trim();
-        if t.is_empty() {
-            continue;
-        }
-        if !t.starts_with('@') {
-            break;
-        }
-        // Annotations only; a line that declares another member after its
-        // annotations (`@Scheduled(...) public void tick()`) is that member's.
-        let (own, tail) = leading_decorators(t);
-        if !tail.is_empty() {
-            break;
-        }
-        heads.extend(own);
-    }
-    heads
 }
 
 /// The entry kind a decorator/attribute/annotation head marks, by its name
@@ -1900,6 +2652,450 @@ mod entry_tests {
         );
     }
 
+    /// A `)` the decorator scan misreads (one in a comment) keeps it going
+    /// through code — no further than a decorator could reach, not to the top
+    /// of the file for every function.
+    #[test]
+    fn the_decorator_scan_is_bounded() {
+        let src: String = (0..20_000)
+            .map(|i| format!("x = 1  # )\ndef f{i}(): pass\n"))
+            .collect();
+        let lines: Vec<&str> = src.lines().collect();
+        let entries = EntryPoints::new(&lines, "python", "a.py");
+        let started = std::time::Instant::now();
+        for i in 0..20_000 {
+            let _ = entries.kind_of(2 * i + 2, &format!("f{i}"), "function");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+    }
+
+    /// A decorator's argument list may run over hundreds of lines (FastAPI's
+    /// `responses={…}`): it is read whole.
+    #[test]
+    fn a_long_decorator_argument_list_is_read() {
+        let src = format!(
+            "@router.get(\n    \"/x\",\n    responses={{\n{}    }},\n)\ndef x(): pass\n",
+            "        1: {\"description\": \"one\"},\n".repeat(500)
+        );
+        let lines: Vec<&str> = src.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, lines.len(), "x", "function", "python", "a.py"),
+            Some(EntryKind::Route)
+        );
+    }
+
+    /// What is the file's is read once for all its symbols, and a scan above
+    /// a symbol goes no further than an attribute run could: neither a long
+    /// header over many methods nor many symbols under a long run of blank
+    /// lines costs their product.
+    #[test]
+    fn a_files_symbols_are_classified_in_linear_time() {
+        const N: usize = 20_000;
+        let blank = "\n".repeat(100_000);
+        let java = format!(
+            "{blank}import io.micronaut.http.annotation.*;\nclass C {{\n{}}}\n",
+            (0..N)
+                .map(|i| format!("  @Get(\"/{i}\")\n  User m{i}() {{}}\n"))
+                .collect::<String>()
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        let first = 100_000 + 3;
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let kind = entries.kind_of(first + 2 * i, &format!("m{i}"), "method");
+            assert_eq!(kind, Some(EntryKind::Route));
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+
+        let rust = format!(
+            "{blank}{}\n",
+            (0..N)
+                .map(|i| format!("fn f{i}() {{}} "))
+                .collect::<String>()
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        let started = std::time::Instant::now();
+        for i in 0..N {
+            let _ = entries.kind_of(100_001, &format!("f{i}"), "function");
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+
+        // One line of tens of thousands of functions of one name, a comment
+        // of unclosed brackets before them: the line is read once for all.
+        let junk = "\"a[ x) ".repeat(570);
+        for (tail, n) in [("func a(){};", 47_000), ("func a(x int, ", 40_000)] {
+            let go = format!("/*{junk}*/ {}\n", tail.repeat(n));
+            let lines: Vec<&str> = go.lines().collect();
+            let entries = EntryPoints::new(&lines, "go", "a.go");
+            let started = std::time::Instant::now();
+            for _ in 0..n {
+                let _ = entries.kind_of(1, "a", "function");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{tail}: {:?}",
+                started.elapsed()
+            );
+        }
+
+        // A whole file on one line (minified, generated): each symbol on it
+        // does not read the line again.
+        for (lang, src) in [
+            (
+                "java",
+                format!(
+                    "class C {{ {}}}",
+                    (0..N)
+                        .map(|i| format!("@Get void m{i}() {{}} "))
+                        .collect::<String>()
+                ),
+            ),
+            (
+                "go",
+                (0..N)
+                    .map(|i| format!("func m{i}() {{}}; "))
+                    .collect::<String>(),
+            ),
+        ] {
+            let lines: Vec<&str> = src.lines().collect();
+            let entries = EntryPoints::new(&lines, lang, "a");
+            let started = std::time::Instant::now();
+            for i in 0..N {
+                let name = format!("m{i}");
+                let _ = entries.is_test(1, &name);
+                let _ = entries.kind_of(1, &name, "method");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{lang}"
+            );
+        }
+    }
+
+    /// A file of attribute or annotation lines that each hold hundreds of
+    /// definitions: what a definition's scan up through them finds is read
+    /// once for the file, not once per definition — each read the lines
+    /// above it again, tens of seconds for one file — and a scan down for
+    /// the line naming a method reads a bounded part of the lines below.
+    #[test]
+    fn a_file_of_attribute_lines_is_classified_in_linear_time() {
+        // Lines just under what is read of one, to the index's file cap.
+        let file = |item: fn(usize) -> String| {
+            let (mut src, mut symbols) = (String::new(), Vec::new());
+            for line1 in 1.. {
+                let mut line = String::new();
+                while line.len() + 32 < MAX_READ_LINE {
+                    let n = symbols.len();
+                    line += &item(n);
+                    symbols.push((line1, format!("m{n}")));
+                }
+                src += &line;
+                src.push('\n');
+                if src.len() > 512 * 1024 {
+                    return (src, symbols);
+                }
+            }
+            unreachable!()
+        };
+        type Item = fn(usize) -> String;
+        let items: [(&str, Item); 6] = [
+            ("java", |n| format!("@A void m{n}() {{}} ")),
+            // The line naming a method is never found.
+            ("java", |n| format!("@A void m{n} () {{}} ")),
+            ("rust", |n| format!("#[a] fn m{n}() {{}} ")),
+            ("typescript", |n| format!("@Get() m{n}() {{}} ")),
+            ("javascript", |n| format!("@Get() m{n} () {{}} ")),
+            // Functions without a body: each reads its own part of the line.
+            ("go", |n| format!("func m{n}(w http.ResponseWriter); ")),
+        ];
+        for (lang, item) in items {
+            let (src, symbols) = file(item);
+            let lines: Vec<&str> = src.lines().collect();
+            let entries = EntryPoints::new(&lines, lang, "a");
+            let started = std::time::Instant::now();
+            for (line1, name) in &symbols {
+                let _ = entries.is_test(*line1, name);
+                let _ = entries.kind_of(*line1, name, "method");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{lang}: {} symbols took {:?}",
+                symbols.len(),
+                started.elapsed()
+            );
+        }
+    }
+
+    /// An attribute or annotation on the line of its item is that item's: a
+    /// one-line test is a test, and the function under it is not. And a
+    /// line longer than the scans read is read as far as they read it: the
+    /// attribute, annotation or decorator it starts with still counts.
+    #[test]
+    fn a_one_line_definitions_marks_are_its_own() {
+        let long = "x".repeat(2 * MAX_READ_LINE);
+        let rust = format!(
+            "#[test] fn one() {{}}\nfn helper() {{}}\n\
+             #[no_mangle] pub extern \"C\" fn exported() {{}}\n\
+             #[rstest]\n#[case(\"{long}\")]\nfn cases(s: &str) {{}}\n"
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(1, "one"));
+        assert!(!entries.is_test(2, "helper"));
+        assert_eq!(
+            entries.kind_of(3, "exported", "function"),
+            Some(EntryKind::Handler)
+        );
+        assert!(entries.is_test(6, "cases"));
+        let java = format!(
+            "class C {{\n  @Test void a() {{}}\n  void b() {{}}\n\
+             @Test void t() {{ assertEquals(X, f(\"{long}\")); }}\n\
+             @Override public String toString() {{ return \"\"; }}\n  void c() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(entries.is_test(2, "a"));
+        assert!(!entries.is_test(3, "b"));
+        assert!(entries.is_test(4, "t"));
+        assert!(!entries.is_test(6, "c"));
+        let ts = format!("class C {{\n  @Get(\"{long}\")\n  find() {{}}\n}}\n");
+        let lines: Vec<&str> = ts.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 3, "find", "method", "typescript", "c.ts"),
+            Some(EntryKind::Route)
+        );
+        // The one-off check reads the same.
+        let lines: Vec<&str> = rust.lines().collect();
+        assert!(is_test_fn(&lines, 1, "one", "rust"));
+        assert!(!is_test_fn(&lines, 2, "helper", "rust"));
+    }
+
+    /// Several definitions on one line: the attributes, annotations or
+    /// decorators it starts with — and those of the lines above — are the
+    /// first one's, and the ones just before a name are that name's.
+    #[test]
+    fn several_definitions_on_one_line_each_have_their_own_marks() {
+        let rust = "#[test] fn a() {} fn b() {}\n\
+                    #[cfg(test)] mod t { fn helper() {} }\n\
+                    #[test]\nfn c() {} fn d() {}\n\
+                    #[test]\npub(crate) async unsafe fn e() {}\n\
+                    #[test]\nconst fn f() {}\n\
+                    #[test]\nimpl X { fn g() {} }\n\
+                    #[no_mangle] pub extern \"C\" fn h() {} fn i() {}\n\
+                    #[test] extern \"C\" { fn j(); }\n\
+                    #[test]\nfn r#k() {}\n";
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(1, "a"));
+        assert!(!entries.is_test(1, "b"));
+        assert!(
+            !entries.is_test(2, "helper"),
+            "the module's, not its function's"
+        );
+        assert!(entries.is_test(4, "c"));
+        assert!(!entries.is_test(4, "d"));
+        assert!(entries.is_test(6, "e"));
+        assert!(entries.is_test(8, "f"));
+        assert!(!entries.is_test(10, "g"), "the impl's");
+        assert_eq!(
+            entries.kind_of(11, "h", "function"),
+            Some(EntryKind::Handler)
+        );
+        assert_eq!(entries.kind_of(11, "i", "function"), None);
+        assert!(!entries.is_test(12, "j"), "the block's");
+        // A raw name is its symbol's with its `r#`.
+        assert!(entries.is_test(14, "r#k"));
+        assert!(entries.is_test(14, "k"));
+
+        let java = "class C {\n  @Test void a() {} void b() {}\n\
+                    @Test\n  void c() {} void d() {}\n\
+                    void e() {} @Test void f() {}\n\
+                    @GetMapping(\"/x(\") @Deprecated X g() { return h(); } void i() {}\n\
+                    @Test(timeout = t()) void j() {}\n}\n";
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(entries.is_test(2, "a"));
+        assert!(!entries.is_test(2, "b"));
+        assert!(entries.is_test(3, "c"));
+        assert!(!entries.is_test(4, "d"));
+        assert!(!entries.is_test(5, "e"));
+        assert!(entries.is_test(5, "f"));
+        assert_eq!(entries.kind_of(6, "g", "method"), Some(EntryKind::Route));
+        assert_eq!(entries.kind_of(6, "i", "method"), None);
+        assert!(
+            entries.is_test(7, "j"),
+            "an annotation's arguments are no member"
+        );
+
+        let ts = "class C {\n  @Get() find() {} plain() {}\n\
+                  @Get()\n  one() {} two() {}\n\
+                  open() {} @Post() save() {}\n\
+                  @Get() #own() {}\n}\n";
+        let lines: Vec<&str> = ts.lines().collect();
+        for lang in ["typescript", "javascript"] {
+            let of = |line1, name| entry_kind(&lines, line1, name, "method", lang, "c.ts");
+            assert_eq!(of(2, "find"), Some(EntryKind::Route), "{lang}");
+            assert_eq!(of(2, "plain"), None, "{lang}");
+            assert_eq!(of(3, "one"), Some(EntryKind::Route), "{lang}");
+            assert_eq!(of(4, "two"), None, "{lang}");
+            assert_eq!(of(5, "open"), None, "{lang}");
+            assert_eq!(of(5, "save"), Some(EntryKind::Route), "{lang}");
+            assert_eq!(of(6, "#own"), Some(EntryKind::Route), "{lang}");
+        }
+
+        let go = "func add(a, b int) int { return a + b }; \
+                  func h(w http.ResponseWriter, r *http.Request) {}\n\
+                  func a() { h(nil, nil) }; func b(c *gin.Context) {}\n\
+                  func (s *S) ServeHTTP(w http.ResponseWriter, r *http.Request) {}; func (s *S) x() {}\n\
+                  func g[T any] (c *gin.Context) {}\n";
+        assert_eq!(kind_of(go, 1, "add", "go"), None);
+        assert_eq!(kind_of(go, 1, "h", "go"), Some(EntryKind::Route));
+        assert_eq!(kind_of(go, 2, "a", "go"), None);
+        assert_eq!(kind_of(go, 2, "b", "go"), Some(EntryKind::Route));
+        let lines: Vec<&str> = go.lines().collect();
+        let method = |name| entry_kind(&lines, 3, name, "method", "go", "s.go");
+        assert_eq!(method("ServeHTTP"), Some(EntryKind::Route));
+        assert_eq!(method("x"), None);
+        assert_eq!(kind_of(go, 4, "g", "go"), Some(EntryKind::Route));
+        // A parameter list over several lines, a `{` in it.
+        let go = "func h(w http.ResponseWriter,\n\tr *http.Request, opts map[string]interface{}) {\n}\n\
+                  func j(w http.ResponseWriter,\n\tr *http.Request) { x := func(){} }\n";
+        assert_eq!(kind_of(go, 1, "h", "go"), Some(EntryKind::Route));
+        assert_eq!(kind_of(go, 4, "j", "go"), Some(EntryKind::Route));
+        // Past what is read of a line, a function is not told.
+        let long = format!(
+            "{}func h(w http.ResponseWriter, r *http.Request) {{}}\n",
+            "func f() {}; ".repeat(MAX_READ_LINE / 10)
+        );
+        assert_eq!(kind_of(&long, 1, "h", "go"), None);
+    }
+
+    /// A file whose every line is decorators only — an argument list left
+    /// open keeps each one going — and a method: each line is read once for
+    /// the file, not once for every method under it (twenty seconds for one
+    /// file).
+    #[test]
+    fn a_file_of_decorator_lines_is_classified_in_linear_time() {
+        let mut src = String::new();
+        let mut n = 0;
+        while src.len() < 512 * 1024 {
+            src += &format!("@a @b @c @d(class {{ m{n}() {{}} }}\n");
+            n += 1;
+        }
+        let lines: Vec<&str> = src.lines().collect();
+        for lang in ["javascript", "typescript", "python"] {
+            let entries = EntryPoints::new(&lines, lang, "a");
+            let started = std::time::Instant::now();
+            for i in 0..n {
+                let _ = entries.kind_of(i + 1, &format!("m{i}"), "method");
+            }
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(20),
+                "{lang}: {n} methods took {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
+    /// What can follow an attribute or decorator without ending the run: a
+    /// comment, and a `]` or `[` in a char literal (a lexer's test cases).
+    /// And a line longer than is read holds attributes only if it ends as
+    /// one does: its marks are not passed on to the next item.
+    #[test]
+    fn comments_and_char_literals_keep_a_run_and_a_cut_item_line_ends_it() {
+        let long = "x".repeat(2 * MAX_READ_LINE);
+        let rust = format!(
+            "#[test_case('[' ; \"open\")]\n#[test_case(']' ; \"close\")]\nfn brackets(c: char) {{}}\n\
+             #[test] /* flaky */\nfn flaky() {{}}\n\
+             #[test_case(\"{long}\")] fn long_case() {{}}\nfn helper() {{}}\n\
+             #[test_case(b']', '\\'', 'a')]\nfn bytes() {{}}\n"
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(3, "brackets"));
+        assert!(entries.is_test(5, "flaky"));
+        assert!(entries.is_test(6, "long_case"));
+        assert!(!entries.is_test(7, "helper"));
+        assert!(entries.is_test(9, "bytes"));
+
+        let ts = format!(
+            "class C {{\n  @Get(':id') // one\n  findOne() {{}}\n\
+             @Get(\"{long}\") find() {{}}\n  plain() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = ts.lines().collect();
+        let of = |line1, name| entry_kind(&lines, line1, name, "method", "typescript", "c.ts");
+        assert_eq!(of(3, "findOne"), Some(EntryKind::Route));
+        assert_eq!(of(5, "plain"), None);
+        let py = "@app.route(\"/\")  # noqa\ndef index(): pass\n";
+        let lines: Vec<&str> = py.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 2, "index", "function", "python", "a.py"),
+            Some(EntryKind::Route)
+        );
+
+        let java = format!(
+            "class C {{\n  @Operation(summary = \"{long}\") public void get() {{}}\n\
+             @Test void t() {{}}\n  @Test // flaky\n  void u() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(!entries.is_test(2, "get"), "the next member's @Test");
+        assert!(entries.is_test(3, "t"));
+        assert!(entries.is_test(5, "u"));
+    }
+
+    /// A line longer than a scan for one symbol reads is told whole, once
+    /// for the file: one that holds attributes or decorators only — a
+    /// comment after them, an argument list wrapped onto the next line —
+    /// passes their marks on; and a `#` member of a JavaScript class is
+    /// code, not a comment.
+    #[test]
+    fn a_long_attribute_line_is_read_whole() {
+        let long = "x".repeat(MAX_READ_LINE + 200);
+        let rust = format!(
+            "#[test]\n#[case(\"{long}\",\n \"b\")]\nfn t() {{}}\n\
+             #[test]\n#[doc = \"{long}\"] // x\nfn u() {{}}\n"
+        );
+        let lines: Vec<&str> = rust.lines().collect();
+        let entries = EntryPoints::new(&lines, "rust", "a.rs");
+        assert!(entries.is_test(4, "t"));
+        assert!(entries.is_test(7, "u"));
+
+        let java = format!(
+            "class C {{\n  @DisplayName(\"{long}\")\n  @Test\n  void t() {{}}\n\
+             @Operation(summary = \"{long}\")\n  @GetMapping(\"/x\")\n  public X get() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = java.lines().collect();
+        let entries = EntryPoints::new(&lines, "java", "C.java");
+        assert!(entries.is_test(2, "t"));
+        assert_eq!(entries.kind_of(5, "get", "method"), Some(EntryKind::Route));
+
+        let js = format!(
+            "class C {{\n  @Doc(\"{long}\")\n  @Get()\n  find() {{}}\n\
+             @Get() // x\n  #find() {{}}\n  plain() {{}}\n}}\n"
+        );
+        let lines: Vec<&str> = js.lines().collect();
+        let of = |line1, name| entry_kind(&lines, line1, name, "method", "javascript", "c.js");
+        assert_eq!(of(2, "find"), Some(EntryKind::Route));
+        assert_eq!(of(7, "plain"), None, "a private member is code");
+        let js = "class C {\n  @Doc()\n  /* see docs */\n  @Get('/x')\n  find() {}\n}\n";
+        let lines: Vec<&str> = js.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 2, "find", "method", "javascript", "c.js"),
+            Some(EntryKind::Route),
+            "read on past a comment"
+        );
+
+        let py = format!("@app.route(\"/\")\n@doc(\"{long}\")  # noqa\ndef view(): pass\n");
+        let lines: Vec<&str> = py.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 3, "view", "function", "python", "a.py"),
+            Some(EntryKind::Route)
+        );
+    }
+
     #[test]
     fn java_annotations_on_the_modifier_lines_and_go_handler_signatures() {
         let src = "@RestController\npublic class C {\n  @GetMapping(\"/x\")\n  public List<X> all() {}\n\
@@ -1973,6 +3169,14 @@ mod entry_tests {
             entry_kind(&lines, 5, "one", "method", "java", "C.java"),
             Some(EntryKind::Route)
         );
+        // Its import read from the header, past a license block whose lines
+        // carry no `*`.
+        let licensed = format!("/*\n Copyright\n Licensed under X\n */\npackage p;\n\n{micronaut}");
+        let lines: Vec<&str> = licensed.lines().collect();
+        assert_eq!(
+            entry_kind(&lines, 11, "one", "method", "java", "C.java"),
+            Some(EntryKind::Route)
+        );
         // Still a canister's query in Rust, and a resolver's in TypeScript.
         assert_eq!(
             kind_of("#[query]\nfn balance() {}\n", 2, "balance", "rust"),
@@ -2026,6 +3230,29 @@ mod tests {
         assert!(names.contains(&"origin"), "symbols: {symbols:?}");
         let origin = symbols.iter().find(|s| s.name == "origin").unwrap();
         assert_eq!(origin.line, 3);
+    }
+
+    /// A function is a method in an `impl` or a trait, and nowhere else:
+    /// the functions of an inline module were listed as methods.
+    #[test]
+    fn a_modules_functions_are_functions() {
+        let src = "mod inner {\n    pub fn helper() {}\n    pub struct S;\n    impl S {\n        pub fn m(&self) {}\n    }\n}\n\
+                   pub trait T {\n    fn provided(&self) {}\n}\n";
+        let kinds: Vec<(String, String)> = extract(src, "rust")
+            .into_iter()
+            .map(|s| (s.name, s.kind))
+            .collect();
+        let kind = |name: &str| {
+            kinds
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, k)| k.as_str())
+                .unwrap_or_else(|| panic!("no {name} in {kinds:?}"))
+        };
+        assert_eq!(kind("helper"), "function");
+        assert_eq!(kind("m"), "method");
+        assert_eq!(kind("provided"), "method");
+        assert_eq!(kind("inner"), "module");
     }
 
     #[test]

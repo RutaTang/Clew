@@ -275,6 +275,8 @@ pub(crate) fn time_travel_code<'a>(
         |(line, col)| Message::TimeTravel(TimeTravelMsg::SelectDrag { line, col }),
         |_, _| Message::Noop,
     )
+    .generation(hv.generation())
+    .lines_generation(hv.lines_generation())
     .cursor(hv.caret)
     .selection(hv.selection_ordered())
     .sticky(sticky)
@@ -570,10 +572,13 @@ const TAB_COLS: usize = 4;
 /// A diff line as the view draws it: tabs expanded like the code view's, and a
 /// blank line kept one space wide so it does not collapse.
 pub(crate) fn diff_display_text(line: &str) -> String {
-    if line.is_empty() {
+    // In order, as the code view draws it (`highlight::line_in_order`): a
+    // direction control in a changed line reordered it here.
+    let shown = crate::highlight::line_in_order(line);
+    if shown.is_empty() {
         " ".to_string()
     } else {
-        line.replace('\t', &" ".repeat(TAB_COLS))
+        shown.replace('\t', &" ".repeat(TAB_COLS))
     }
 }
 
@@ -673,8 +678,13 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
     .padding(6)
     .style(theme::modal_panel);
 
-    // Pin to the top-right of the pane.
-    container(bar)
+    // Pin to the top-right of the pane. Its panel takes every press and
+    // hover over it: the count and the gaps between its controls took none,
+    // and a press on one reached the code drawn under it (the caret moved
+    // there, a ⌘-press went to a definition, a rest asked for a peek of the
+    // token hidden there). The row it is pinned in does not, or the code to
+    // its left could not be clicked.
+    container(iced::widget::opaque(bar))
         .width(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .padding(Padding {
@@ -690,8 +700,8 @@ pub(crate) fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
     let active = app.proj.active == pane;
     let title = app.proj.panes[pane]
         .as_ref()
-        .map(|v| v.rel.as_str())
-        .unwrap_or("—");
+        .map(|v| crate::highlight::in_order(&v.rel))
+        .unwrap_or("—".into());
     mouse_area(
         container(
             text(title)
@@ -871,6 +881,8 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             })
         },
     )
+    .generation(v.generation())
+    .lines_generation(v.lines_generation())
     .selection(v.selection_ordered())
     .cursor(cursor)
     .highlights(app.code_highlights(pane, v))
@@ -1171,21 +1183,40 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
-            // The reader's own note, in accent so it's distinct from the summary.
-            col = col.push(
-                container(
-                    text(format!("\u{270e} {}", n.text))
-                        .size(ts::CAPTION)
-                        .color(theme::accent())
-                        .wrapping(Wrapping::Word),
-                )
+            // The reader's own note, in accent so it's distinct from the
+            // summary — on one line, as the summary is, the whole of it in a
+            // bubble on hover: the outline's follow counts its rows' lines
+            // (`App::outline_offset`), and a note wrapped over many threw it
+            // off by as many.
+            let first = n.text.lines().next().unwrap_or_default();
+            let mut one_line = truncate_ellipsis(first, 52);
+            if one_line == first && n.text.trim_end() != first {
+                one_line.push('…');
+            }
+            let line = container(
+                text(format!("\u{270e} {one_line}"))
+                    .size(ts::CAPTION)
+                    .color(theme::accent())
+                    .wrapping(Wrapping::None),
+            )
+            .clip(true)
+            .width(Fill)
+            .padding(Padding {
+                top: 0.0,
+                right: 4.0,
+                bottom: 0.0,
+                left: 44.0,
+            });
+            let bubble = container(text(n.text.as_str()).size(ts::SMALL).color(theme::fg()))
                 .padding(Padding {
-                    top: 0.0,
-                    right: 4.0,
-                    bottom: 0.0,
-                    left: 44.0,
-                }),
-            );
+                    top: 6.0,
+                    right: 9.0,
+                    bottom: 6.0,
+                    left: 9.0,
+                })
+                .max_width(TIP_MAX_W)
+                .style(theme::modal_panel);
+            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
 
         let jump = button(col)
@@ -1340,6 +1371,21 @@ mod tests {
             format!("{}x", " ".repeat(TAB_COLS))
         );
         assert_eq!(diff_display_text("+ok"), "+ok");
+        // A line of nothing but a `\r` (from a `\r\r\n` end) is a blank line.
+        assert_eq!(diff_display_text("\r"), " ");
+        // A direction control is drawn as U+FFFD, a column it took none of:
+        // the row is as wide as what is drawn, so its tail can be scrolled
+        // to.
+        let line = "+a\u{2066}\u{2066}\u{2066}b".to_string();
+        let diff = crate::DiffState::new(
+            "/p/a.rs".into(),
+            "a.rs".into(),
+            vec![crate::git::DiffLine {
+                kind: crate::git::DiffKind::Add,
+                text: line,
+            }],
+        );
+        assert_eq!(diff.max_cols, 6);
     }
 
     /// The advance is measured by the text engine, not assumed at 0.6 em —

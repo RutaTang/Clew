@@ -287,7 +287,11 @@ impl App {
         // identically for a local and a remote project. A disk probe is only
         // meaningful, and only allowed, for a local one.
         let listed = project.files.iter().any(|f| f.abs == candidate);
-        let abs = if listed || (self.local_project_state() && candidate.is_file()) {
+        // On disk, a file that really is the project's: `is_file` followed a
+        // linked directory on the way out of it, as the `clew:` branch of
+        // `on_open_link` knows.
+        let on_disk = || clew_core::fs_scan::is_inside(&project.root, &candidate);
+        let abs = if listed || (self.local_project_state() && on_disk()) {
             candidate
         } else {
             let base = std::path::Path::new(path_part).file_name()?;
@@ -379,8 +383,26 @@ impl App {
             }) if *file == v.abs => (name.clone(), *ordinal),
             _ => return Task::none(),
         };
+        let Some(y) = self.outline_offset(v, &name, ordinal) else {
+            return Task::none();
+        };
+        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
+        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
+    }
+
+    /// Where function `name` (its `ordinal`th of the name) starts in `v`'s
+    /// outline, estimated from its rows' lines as `ui::outline_content` lays
+    /// them out: a label line, a summary line when inline summaries are on
+    /// and the symbol has a real one, and a line for the reader's note.
+    pub(crate) fn outline_offset(&self, v: &Viewer, name: &str, ordinal: u32) -> Option<f32> {
         let mut y = 0.0f32;
         let mut found = false;
+        // As the outline finds them: the first note on a name is its note.
+        let mut notes: std::collections::HashMap<&str, &crate::notes::Note> =
+            std::collections::HashMap::new();
+        for n in self.proj.notes.iter().filter(|n| n.rel == v.rel) {
+            notes.entry(n.symbol.as_str()).or_insert(n);
+        }
         // One pass for every symbol's same-name ordinal: `fn_ordinal` per
         // symbol inside this loop scanned the whole list per symbol —
         // quadratic, on every caret move.
@@ -411,13 +433,15 @@ impl App {
             if has_summary {
                 h += 14.0;
             }
+            if notes
+                .get(s.name.as_str())
+                .is_some_and(|n| !n.text.is_empty())
+            {
+                h += 14.0;
+            }
             y += h;
         }
-        if !found {
-            return Task::none();
-        }
-        let y = (y - 48.0).max(0.0); // keep a little context above the symbol
-        operation::scroll_to(ui::outline_scroll_id(), AbsoluteOffset { x: 0.0, y })
+        found.then_some(y)
     }
 }
 
@@ -434,10 +458,6 @@ impl App {
     }
 }
 
-/// Start `cmd` without waiting for it, and reap it when it exits (on a
-/// thread of its own), returning its pid. A child that is spawned and dropped
-/// is never waited for, and every link click left an exited `open` behind as
-/// a zombie for the rest of the session.
 /// Hand a plain http(s) URL to the system's opener — never `file://`,
 /// `javascript:`, a leading `-` (flag injection), an embedded line break.
 pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
@@ -447,15 +467,20 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     if !plain {
         return Err(format!("Refused to open link: {url}"));
     }
-    // By absolute path where the system ships one: a bare name is resolved
-    // through PATH, which may name a directory the user (or a project's
-    // tooling) can write to.
+    // By absolute path where the system ships one, and else found on the
+    // absolute directories of PATH: a bare name is resolved through PATH,
+    // whose relative entries name the directory clew was started in (a
+    // project's, perhaps).
     let opener = if cfg!(target_os = "macos") {
-        "/usr/bin/open"
-    } else if cfg!(target_os = "windows") {
-        "explorer"
+        std::path::PathBuf::from("/usr/bin/open")
     } else {
-        "xdg-open"
+        let name = if cfg!(target_os = "windows") {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
+        clew_core::linerpc::resolve_program(name)
+            .ok_or_else(|| format!("Couldn't open the link: {name} was not found"))?
     };
     // The opener not starting is a failure to report, not a no-op: the click
     // otherwise looks broken with no explanation.
@@ -466,6 +491,10 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
         .map_err(|e| format!("Couldn't open the link: {e}"))
 }
 
+/// Start `cmd` without waiting for it, and reap it when it exits (on a
+/// thread of its own), returning its pid. A child that is spawned and dropped
+/// is never waited for, and every link click left an exited `open` behind as
+/// a zombie for the rest of the session.
 pub(crate) fn spawn_reaped(mut cmd: std::process::Command) -> std::io::Result<u32> {
     let mut child = cmd.spawn()?;
     let pid = child.id();

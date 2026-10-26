@@ -108,6 +108,12 @@ impl App {
             // speaks another protocol — every path out of the wait releases
             // this root, or the window sits on "Scanning…" forever. This is
             // what removes the duplicate scan at startup.
+            //
+            // A transport that gave up, or was refused, is not coming back on
+            // its own (`handshake_failure`): the open dials again, whichever
+            // way it was asked for — the stale Connect browser's Open, a
+            // recent project — or the root waited for good.
+            self.retry_server_after_handshake_failure();
             self.pending_scan_root = Some(root);
             return Task::none();
         }
@@ -123,6 +129,16 @@ impl App {
         };
         match self.send_to_server(request) {
             Some(id) => {
+                // The host stops every install it runs as it takes the open
+                // up, before its answer — which may come first — so they are
+                // given up now: their "cancelled" is nobody's, and should the
+                // open fail, leaving this project on screen, its languages
+                // are asked about again (`on_open_project_failed`).
+                let link = &mut self.proj.link;
+                for (language, install) in link.remote_installs.drain() {
+                    link.abandoned_installs.insert(install);
+                    link.interrupted_languages.push(language);
+                }
                 self.pending_scan_root = Some(root);
                 // Correlated: a failure is this open's answer, not a stray
                 // status line (`on_open_project_failed`).
@@ -171,8 +187,42 @@ impl App {
                 "Could not open {} on the remote host: {message}",
                 root.display()
             );
+            // The host left this project for the one it could not open, and
+            // stopped the installs it ran for it (`request_open_project`):
+            // they are asked for again once it is back — left as they were,
+            // the languages read "unsupported" for good. So are those it took
+            // up while the open was pending, which the reopen stops in turn,
+            // and every language still waiting on it: what it was asked
+            // meanwhile it answered for the other root, an answer dropped.
+            let link = &mut self.proj.link;
+            let mut interrupted = std::mem::take(&mut link.interrupted_languages);
+            for (language, install) in link.remote_installs.drain() {
+                link.abandoned_installs.insert(install);
+                interrupted.push(language);
+            }
+            interrupted.extend(
+                link.lsp
+                    .iter()
+                    .filter(|(_, slot)| matches!(slot, LspSlot::AwaitingConsent))
+                    .map(|(language, _)| language.clone()),
+            );
+            interrupted.sort();
+            interrupted.dedup();
+            for language in &interrupted {
+                self.reset_lsp(language);
+            }
             self.sync_project_to_server();
-            return Task::none();
+            // The project's state is read again, and the edits its journal
+            // held while the open was pending go after the reads: nothing
+            // else would send them — no timer waits on them, and a
+            // reconnect made during the open re-read nothing for this
+            // project.
+            self.request_remote_state();
+            let again: Vec<Task<Message>> = interrupted
+                .iter()
+                .map(|language| self.ensure_lsp(language))
+                .collect();
+            return Task::batch(again);
         }
         let why = format!(
             "clew-server could not open {} ({message}) — scanning it here",
@@ -218,10 +268,16 @@ impl App {
         })
     }
 
-    pub(crate) fn on_consent_allowed(&mut self) -> Task<Message> {
-        let Some(root) = self.pending_consent.take() else {
+    /// Consent to creating `.clew` in `root`: the folder the modal within
+    /// reach asks about, once it has been long enough to be read
+    /// ([`App::may_allow`]).
+    pub(crate) fn on_consent_allowed(&mut self, root: PathBuf) -> Task<Message> {
+        if self.pending_consent.as_ref() != Some(&root)
+            || !self.may_allow(&crate::app::model::Question::Project(root.clone()))
+        {
             return Task::none();
-        };
+        }
+        self.pending_consent = None;
         // Consent is recorded outside the project (see `request_open`): a
         // repository must never be able to grant itself permission. It is
         // bound to the host it was granted for.
@@ -267,7 +323,7 @@ impl App {
         // whole session, the same reset a transport switch performs
         // (`forget_project_state`). That includes any tree resync still awaited
         // for it (this tree IS the project's file list, and answers it better).
-        self.forget_project_state();
+        let _ = self.forget_project_state();
         // Tracked files the ignore rules hid, listed anyway: marked in the tree.
         self.proj.tracked_ignored = report.tracked_ignored.into_iter().collect();
         // Persisted project state (`.clew/`) lives WITH the project. For a
@@ -364,9 +420,20 @@ impl App {
             Task::none()
         };
 
+        // The file clew was started with, opened in the project it is in —
+        // not in another opened while that one waited (its consent not yet
+        // answered, ⌘O meanwhile), where it is no file of the project.
         let open_task = match self.pending_open.take() {
-            Some(file) => self.open_file(file, None, true), // clears show_overview
-            None => Task::none(),
+            Some(file)
+                if self
+                    .proj
+                    .project
+                    .as_ref()
+                    .is_some_and(|p| file.starts_with(&p.root)) =>
+            {
+                self.open_file(file, None, true) // clears show_overview
+            }
+            _ => Task::none(),
         };
         // An open Language Servers panel lists THIS project's languages now
         // (its lsp.toml re-lists it again when it loads).
@@ -397,8 +464,11 @@ impl App {
     /// `drop_project_work`'s, which runs first.
     ///
     /// Two drafts the user typed exist nowhere else, so a discarded one is
-    /// reported (as is unsaved remote state) rather than left to vanish.
-    pub(crate) fn forget_project_state(&mut self) {
+    /// reported (as is unsaved remote state) rather than left to vanish: in
+    /// the status line, and returned, for a caller that sets its own status
+    /// after. Told by the return, not by comparing status lines: a notice the
+    /// line already held read as no notice at all.
+    pub(crate) fn forget_project_state(&mut self) -> Option<String> {
         let left = std::mem::take(&mut self.proj);
         // What the project left still waits for is forgotten with it: its
         // answers, arriving late, are nobody's (`App::session_first_req`).
@@ -415,12 +485,15 @@ impl App {
             left.reading_note_edit.map(|(_, _, draft)| draft),
             left.note_edit.map(|(_, _, draft)| draft),
         ];
+        // Both losses are said, together: the second used to replace the
+        // first in the status line.
+        let mut discarded = Vec::new();
         if dropped_drafts
             .iter()
             .flatten()
             .any(|draft| !draft.trim().is_empty())
         {
-            self.status = "Unsaved note was discarded with the previous project".into();
+            discarded.push("Unsaved note was discarded with the previous project".to_string());
         }
         // Anything still marked dirty is a change this client holds and the
         // remote never received. Leaving the project discards it, so say so
@@ -429,8 +502,16 @@ impl App {
         if !left.remote_state_dirty.is_empty() {
             let mut lost: Vec<&str> = left.remote_state_dirty.iter().map(String::as_str).collect();
             lost.sort_unstable();
-            self.status = format!("Unsaved remote state was discarded: {}", lost.join(", "));
+            discarded.push(format!(
+                "Unsaved remote state was discarded: {}",
+                lost.join(", ")
+            ));
         }
+        if discarded.is_empty() {
+            return None;
+        }
+        self.status = discarded.join("; ");
+        Some(self.status.clone())
     }
 
     /// Stop everything running FOR the project being left — the work itself,
@@ -928,13 +1009,16 @@ impl App {
                 self.retry_server_after_handshake_failure();
                 self.request_open(root)
             }
-            ProjectMsg::ConsentDenied => {
+            ProjectMsg::ConsentDenied(root) => {
+                if self.pending_consent.as_ref() != Some(&root) {
+                    return Task::none();
+                }
                 self.pending_consent = None;
                 self.pending_open = None;
                 self.status = "Project not opened: creating .clew was not allowed".to_string();
                 Task::none()
             }
-            ProjectMsg::ConsentAllowed => self.on_consent_allowed(),
+            ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
             ProjectMsg::ScanDone { result, report, .. } => {
                 // Accept only the scan we are waiting for: a slow scan of a
                 // project the user has already left must not re-open it. The

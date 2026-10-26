@@ -258,9 +258,16 @@ pub fn scoped_dir(tag: &str) -> PathBuf {
 /// so the window is met now and then; it lasts a moment, and this waits it
 /// out rather than reading a busy file as one that does not run.
 pub fn settle_new_executable(path: &Path) {
+    settle_new_executable_with(path, &[]);
+}
+
+/// [`settle_new_executable`], run with `args`: a fake that records or acts
+/// on what it is run with can be given a word it exits on at once.
+pub fn settle_new_executable_with(path: &Path, args: &[&str]) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         let status = std::process::Command::new(path)
+            .args(args)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -276,6 +283,19 @@ pub fn settle_new_executable(path: &Path) {
             Err(e) => panic!("{} does not run: {e}", path.display()),
         }
     }
+}
+
+/// Write `body` to `path` as an executable `/bin/sh` script, settled
+/// ([`settle_new_executable_with`]) before it is returned to: run once with
+/// `--clew-warm-up`, which it exits on before `body` — a fake that sleeps,
+/// forks, or records that it ran is not set off by its settling.
+#[cfg(unix)]
+pub fn write_script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let script = format!("#!/bin/sh\n[ \"$1\" = --clew-warm-up ] && exit 0\n{body}\n");
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    settle_new_executable_with(path, &["--clew-warm-up"]);
 }
 
 /// Whether this process runs as root, who reads and writes past every file

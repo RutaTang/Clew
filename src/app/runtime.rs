@@ -17,15 +17,14 @@ impl App {
         // more trustworthy than a local one — its `.clew/lsp.toml` and
         // `launch.json` are read and acted on the same way.
         let open_task = if app.connection.is_remote() {
-            match std::env::args().nth(1) {
-                Some(arg) => app.request_open(PathBuf::from(arg)),
+            match path_argument(std::env::args_os()) {
+                Some(arg) => app.request_open(arg),
                 None => Task::none(),
             }
         } else {
-            match std::env::args().nth(1) {
+            match path_argument(std::env::args_os()) {
                 Some(arg) => {
-                    let path = PathBuf::from(&arg);
-                    let path = path.canonicalize().unwrap_or(path);
+                    let path = arg.canonicalize().unwrap_or_else(|_| arg.clone());
                     if path.is_dir() {
                         app.request_open(path)
                     } else if path.is_file() {
@@ -37,7 +36,7 @@ impl App {
                         app.pending_open = Some(path);
                         app.request_open(root)
                     } else {
-                        app.status = format!("No such path: {arg}");
+                        app.status = format!("No such path: {}", arg.display());
                         Task::none()
                     }
                 }
@@ -113,6 +112,8 @@ impl App {
             show_minimap: true,
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
+            overlay_open: false,
+            arm_on_enter: window_unplaced(),
             acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
@@ -147,6 +148,7 @@ impl App {
             window_height: 800.0,
             fullscreen: false,
             window_focused: true,
+            asking: Default::default(),
             controls_hovered: false,
             sidebar_width: 280.0,
             right_width: 400.0,
@@ -176,11 +178,15 @@ impl App {
                 .to_string_lossy()
                 .into_owned()
         });
-        match (project, file) {
+        // In the order they are spelled (`highlight::in_order`): the Dock
+        // and the Window menu draw a direction override as the file would
+        // like to be read.
+        let title = match (project, file) {
             (Some(p), Some(f)) => format!("{p} — {f}"),
             (Some(p), None) => p,
-            _ => "Clew".to_string(),
-        }
+            _ => return "Clew".to_string(),
+        };
+        crate::highlight::in_order(&title).into_owned()
     }
 
     pub(crate) fn view(&self) -> Element<'_, Message> {
@@ -284,7 +290,12 @@ impl App {
         // rebuilt and re-shown the title bar.
         #[cfg(target_os = "macos")]
         macos::configure_frameless(10.0);
-        Task::none()
+        // And so does entering or leaving it by the window's own means: the
+        // controls show what the window is in.
+        match self.main_window {
+            Some(id) => iced::window::mode(id).map(|mode| Message::Window(WindowMsg::ModeIs(mode))),
+            None => Task::none(),
+        }
     }
 
     pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
@@ -426,6 +437,14 @@ impl App {
             },
             WindowMsg::FocusChanged(focused) => {
                 self.window_focused = focused;
+                // The window coming to the front: the question in it is
+                // within reach from now, though it may never have been
+                // told it had lost the focus (some platforms report no
+                // focus at start), and the click that raised it is no
+                // answer (`App::track_question`).
+                if focused {
+                    self.asking.question = None;
+                }
                 // When following the system appearance, re-check on focus — the
                 // user may have flipped the OS theme while clew was in the
                 // background. Only re-color if it actually changed.
@@ -459,19 +478,38 @@ impl App {
                 }
                 Task::none()
             }
-            WindowMsg::ToggleFullscreen => {
-                self.fullscreen = !self.fullscreen;
-                let mode = if self.fullscreen {
-                    iced::window::Mode::Fullscreen
-                } else {
-                    iced::window::Mode::Windowed
-                };
-                match self.main_window {
-                    Some(id) => iced::window::set_mode(id, mode),
-                    None => Task::none(),
-                }
+            // The window is asked what it is in, not a flag remembered: it
+            // leaves fullscreen by itself too (the green control, ⌃⌘F,
+            // Esc), and the remembered flag then made the next toggle do
+            // nothing.
+            WindowMsg::ToggleFullscreen => match self.main_window {
+                Some(id) => iced::window::mode(id).then(move |mode| {
+                    let next = if mode == iced::window::Mode::Fullscreen {
+                        iced::window::Mode::Windowed
+                    } else {
+                        iced::window::Mode::Fullscreen
+                    };
+                    Task::batch([
+                        iced::window::set_mode(id, next),
+                        Task::done(Message::Window(WindowMsg::ModeIs(next))),
+                    ])
+                }),
+                None => Task::none(),
+            },
+            WindowMsg::ModeIs(mode) => {
+                self.fullscreen = mode == iced::window::Mode::Fullscreen;
+                Task::none()
             }
             WindowMsg::Resized(size) => self.on_window_resized(size),
+            // Moved, or drawn at another scale, at the same size: what is in
+            // it is where it was in the window, not on the screen — every
+            // question's answers report anew, and wait anew (`ui::placed`).
+            // (Wayland tells a client nothing of where its window is: a move
+            // there reaches it as the pointer's own motion.)
+            WindowMsg::Moved => {
+                self.asking.places.clear();
+                Task::none()
+            }
             WindowMsg::ResizeSidebar(x) => {
                 self.sidebar_width = x;
                 self.clamp_panel_sizes();
@@ -561,4 +599,37 @@ impl App {
             }
         }
     }
+}
+
+/// Whether the window system tells a window nothing of where it is on the
+/// screen: Wayland, which winit takes where `WAYLAND_DISPLAY` or
+/// `WAYLAND_SOCKET` says it is. (macOS, Windows and X11 report a move.) As
+/// noted at start ([`note_window_system`]), or read now.
+fn window_unplaced() -> bool {
+    *UNPLACED.get_or_init(wayland_named)
+}
+
+/// What [`window_unplaced`] says, once noted.
+static UNPLACED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Note which window system the windows will be on, before iced connects to
+/// it: Wayland's client takes `WAYLAND_SOCKET` out of the environment as it
+/// connects.
+pub fn note_window_system() {
+    let _ = UNPLACED.set(wayland_named());
+}
+
+/// Whether the environment names a Wayland display, as winit reads it.
+fn wayland_named() -> bool {
+    let named = |var| std::env::var_os(var).is_some_and(|v| !v.is_empty());
+    cfg!(all(unix, not(target_os = "macos")))
+        && (named("WAYLAND_DISPLAY") || named("WAYLAND_SOCKET"))
+}
+
+/// The path clew was started with (its first argument), as the system gave
+/// it: a name that is not UTF-8 (a Latin-1 folder on Linux) is a path all
+/// the same — read as a `String`, the `std::env::args` iterator panicked on
+/// it, before any window was up.
+pub(crate) fn path_argument(args: impl IntoIterator<Item = std::ffi::OsString>) -> Option<PathBuf> {
+    args.into_iter().nth(1).map(PathBuf::from)
 }

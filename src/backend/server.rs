@@ -511,7 +511,7 @@ impl Ssh {
         // options: the point is to learn the user's own list.
         let settings = resolve_settings(program, &options, args, label).await;
         if let Err(e) = &settings {
-            eprintln!("[clew] {label}: {e}");
+            eprintln!("[clew] {label}: {}", printable(e));
         }
         Ssh::assemble(label, args, program, options, settings)
     }
@@ -1325,6 +1325,22 @@ where
     ))
 }
 
+/// `line` with its control characters written out (`\u{1b}`), tabs aside:
+/// what a server writes to its stderr is printed to the terminal clew runs
+/// in, and what it logs can name a repository's files — an escape sequence
+/// in one was obeyed by the terminal, not shown.
+fn printable(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    for c in line.chars() {
+        if c.is_control() && c != '\t' {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The tail of a running server's stderr, kept for failure messages while
 /// every line is also forwarded to clew's own stderr.
 #[derive(Clone, Default)]
@@ -1350,7 +1366,7 @@ impl StderrTail {
                 {
                     Ok(0) | Err(_) => break,
                     Ok(_) => {
-                        let line = String::from_utf8_lossy(&buf).trim_end().to_string();
+                        let line = printable(String::from_utf8_lossy(&buf).trim_end());
                         if line.is_empty() {
                             continue;
                         }
@@ -1708,7 +1724,7 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                     match start(&target, &launcher).await {
                         Ok(t) => break t,
                         Err(f) => {
-                            eprintln!("[clew] transport: {}", f.reason);
+                            eprintln!("[clew] transport: {}", printable(&f.reason));
                             record_failure(&target, &f);
                             if !f.retryable() {
                                 let _ = output.send(f.into_message(conn)).await;
@@ -1724,7 +1740,7 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                 match start(&target, &launcher).await {
                     Ok(t) => t,
                     Err(f) => {
-                        eprintln!("[clew] transport: {}", f.reason);
+                        eprintln!("[clew] transport: {}", printable(&f.reason));
                         record_failure(&target, &f);
                         let _ = output.send(f.into_message(conn)).await;
                         return;
@@ -1872,6 +1888,27 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server's stderr reaches clew's terminal, and what it logs can name
+    /// a repository's files: an escape sequence in one is written out, not
+    /// handed to the terminal to obey.
+    #[tokio::test]
+    async fn a_servers_stderr_reaches_the_terminal_without_its_escapes() {
+        assert_eq!(printable("a\tb"), "a\tb");
+        assert_eq!(
+            printable("x\u{1b}]0;owned\u{7}y"),
+            "x\\u{1b}]0;owned\\u{7}y"
+        );
+        assert_eq!(printable("\u{9b}31m"), "\\u{9b}31m");
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let (tail, task) = StderrTail::spawn(reader, "clew-server");
+        tokio::io::AsyncWriteExt::write_all(&mut writer, b"cannot read src/\x1b[2Jevil.rs\n")
+            .await
+            .unwrap();
+        drop(writer);
+        task.await.unwrap();
+        assert_eq!(tail.last(1), "cannot read src/\\u{1b}[2Jevil.rs");
+    }
     use std::os::unix::fs::PermissionsExt;
 
     /// Each host-key failure reaches the app as the prompt it can offer: a
@@ -1967,14 +2004,10 @@ exit 3
     /// executable on its first run, and under a loaded test run that check
     /// took up to eight seconds — enough to trip the production timeouts the
     /// fakes run under (a 10 s fingerprint, a 10 s `ssh -G`). Paid here, it is
-    /// paid before anything is timed.
+    /// paid before anything is timed; so is Linux's `ETXTBSY` (see
+    /// [`clew_core::testutil::settle_new_executable`]).
     fn warm_up(path: &Path) {
-        let _ = std::process::Command::new(path)
-            .arg("--clew-warm-up")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        clew_core::testutil::settle_new_executable_with(path, &["--clew-warm-up"]);
     }
 
     /// An invocation of `program` for `root@example.com:2222`, built without
@@ -2312,6 +2345,7 @@ exit 3
         let server = current.join("clew-server");
         std::fs::write(&server, format!("#!/bin/sh\necho '{}'\n", l.probe_line)).unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+        clew_core::testutil::settle_new_executable(&server);
         set_mtime_days_ago(&current, 60);
         let stale = root.join("0.0.1-p1-deadbeef");
         let recent = root.join("0.0.2-p2-cafef00d");
@@ -2385,14 +2419,32 @@ exit 3
             .count();
         assert_eq!(leftovers, 0);
 
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let out = run_remote_script(&install_script(&l, "8-feed", 5), &home, b"other");
-        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // The upload cannot be written: its temp name is taken by a folder
+        // (which no user, root included, can `cat` into). The install fails,
+        // and what was installed stays.
+        let taken = dir.join("clew-server.6-feed.tmp");
+        std::fs::create_dir_all(taken.join("occupied")).unwrap();
+        let out = run_remote_script(&install_script(&l, "6-feed", 5), &home, b"other");
         assert!(
             !out.status.success(),
-            "an unwritable directory must fail the install"
+            "an unwritable upload must fail the install"
         );
         assert_eq!(std::fs::read(&installed).unwrap(), b"binary bytes");
+        std::fs::remove_dir_all(&taken).unwrap();
+
+        // …and so does a directory this user cannot write — where it really
+        // refuses them: root writes into a read-only directory regardless.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let refused = std::fs::write(dir.join("probe"), b"").is_err();
+        let out = run_remote_script(&install_script(&l, "8-feed", 5), &home, b"other");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        if refused {
+            assert!(
+                !out.status.success(),
+                "an unwritable directory must fail the install"
+            );
+            assert_eq!(std::fs::read(&installed).unwrap(), b"binary bytes");
+        }
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -2412,6 +2464,7 @@ exit 3
         let server = dir.join("clew-server");
         std::fs::write(&server, "#!/bin/sh\necho \"frame $*\"\n").unwrap();
         std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o700)).unwrap();
+        clew_core::testutil::settle_new_executable(&server);
         let out = run_remote_script(&start_script(&l, "CLEW-READY-1"), &home, b"");
         assert!(out.status.success(), "{out:?}");
         assert_eq!(
@@ -2537,16 +2590,7 @@ exit 3
     /// An executable script at `dir/name` (a fake OpenSSH tool).
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        std::fs::write(
-            &path,
-            format!(
-                "#!/bin/sh\n[ \"$1\" = --clew-warm-up ] && exit 0\nD='{}'\n{body}",
-                dir.display()
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        warm_up(&path);
+        clew_core::testutil::write_script(&path, &format!("D='{}'\n{body}", dir.display()));
         path
     }
 

@@ -78,11 +78,16 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         SidebarTab::Docs => docs_tab(app),
     };
 
-    container(column![tabs, content])
-        .width(Length::Fixed(app.sidebar_width))
-        .height(Fill)
-        .style(theme::panel)
-        .into()
+    // Each tab's own widgets: tabs of one shape (a list in a scrollable)
+    // were handed each other's scroll offset as one replaced another.
+    container(column![
+        tabs,
+        crate::ui::fresh::fresh_for(&app.sidebar, content)
+    ])
+    .width(Length::Fixed(app.sidebar_width))
+    .height(Fill)
+    .style(theme::panel)
+    .into()
 }
 
 /// The guided-walkthrough tab. The top bar toggles between *searching* the saved
@@ -464,15 +469,20 @@ pub(crate) fn walk_narration<'a>(
             .width(Fill)
             .into()
     };
-    let narration = scrollable(container(body).padding(Padding {
-        top: 0.0,
-        right: 8.0,
-        bottom: 8.0,
-        left: 8.0,
-    }))
-    .direction(thin_scroll())
-    .style(theme::overlay_scrollbar)
-    .height(Fill);
+    // From its top for each step and tour (`fresh`), not where the last
+    // step's narration was scrolled to.
+    let narration = crate::ui::fresh::fresh_for(
+        &(&wt.title, &wt.scope, cur),
+        scrollable(container(body).padding(Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: 8.0,
+            left: 8.0,
+        }))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill),
+    );
 
     container(column![nav, note, narration])
         .height(Length::Fixed(app.walk_ui.narration_height))
@@ -544,7 +554,10 @@ pub(crate) fn append_tree_rows<'a>(
         let content = row![
             text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
             tree_icon(glyph, color),
-            text(name.as_str()).size(ts::BASE).wrapping(Wrapping::None),
+            // A name in the order it is spelled (`highlight::in_order`).
+            text(crate::highlight::in_order(name))
+                .size(ts::BASE)
+                .wrapping(Wrapping::None),
         ]
         .spacing(3)
         .align_y(iced::Center);
@@ -579,7 +592,9 @@ pub(crate) fn append_tree_rows<'a>(
         let content = row![
             space().width(10), // align names under the folders' arrow column
             tree_icon(glyph, color),
-            text(name.as_str()).size(ts::BASE).wrapping(Wrapping::None),
+            text(crate::highlight::in_order(name))
+                .size(ts::BASE)
+                .wrapping(Wrapping::None),
             mark,
         ]
         .spacing(3)
@@ -753,7 +768,13 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    text(&hit.preview).size(ts::BODY).wrapping(Wrapping::None),
+                    // As the code view draws the line, wherever the preview
+                    // came from — the server's search, a reference read from
+                    // disk or from an open pane: a direction control in it
+                    // reordered it here.
+                    text(crate::highlight::line_in_order(&hit.preview))
+                        .size(ts::BODY)
+                        .wrapping(Wrapping::None),
                 ]
                 .spacing(4),
             )
@@ -959,9 +980,12 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                 .color(theme::dim())
                 .width(36),
             container(
-                text(truncate_ellipsis(&bm.preview, 48))
-                    .size(ts::BODY)
-                    .wrapping(Wrapping::None)
+                text(truncate_ellipsis(
+                    &crate::highlight::line_in_order(&bm.preview),
+                    48
+                ))
+                .size(ts::BODY)
+                .wrapping(Wrapping::None)
             )
             .clip(true)
             .width(Fill),

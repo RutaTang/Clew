@@ -592,7 +592,7 @@ impl App {
 
     /// The entry-point kind of `(file, name)`, per the symbol index: `Some`
     /// for a main, a route, a command or a handler (see
-    /// [`index::entry_kind`]), `None` for every other function.
+    /// [`clew_core::outline::entry_kind`]), `None` for every other function.
     pub fn entry_kind_of(&self, file: &Path, name: &str) -> Option<index::EntryKind> {
         self.proj.symbol_index_by_file.get(file).and_then(|syms| {
             syms.iter()

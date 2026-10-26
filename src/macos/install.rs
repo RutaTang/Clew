@@ -210,6 +210,18 @@ fn install_dmg_inner(dmg: &Path, expected: Version, reopen: Option<PathBuf>) -> 
     launched
 }
 
+/// The `Clew.app` at the top of the mounted image `mount`: the folder
+/// itself, never a link to one — a link is verified at its target and then
+/// copied from wherever it points by then.
+fn app_on_image(mount: &Path) -> Result<PathBuf, String> {
+    let app = mount.join("Clew.app");
+    match std::fs::symlink_metadata(&app) {
+        Ok(meta) if meta.is_dir() => Ok(app),
+        Ok(_) => Err("the update image's Clew.app is not an app folder".into()),
+        Err(_) => Err("the update image has no Clew.app".into()),
+    }
+}
+
 /// Mount the image read-only, verify the `Clew.app` on it, and copy that app
 /// into `staging` so the image can be detached before the swap. Returns the
 /// staged copy.
@@ -224,10 +236,7 @@ fn stage_from_image(
     // Everything between mount and detach goes through this closure so we always
     // unmount, even on an early error.
     let staged = (|| -> Result<PathBuf, String> {
-        let src_app = image.mount_point.join("Clew.app");
-        if !src_app.exists() {
-            return Err("the update image has no Clew.app".into());
-        }
+        let src_app = app_on_image(&image.mount_point)?;
         verify(&src_app, identity)?;
         // After `verify`: the Info.plist is sealed by the signature just
         // checked, so the version read from it is the signer's.
@@ -241,6 +250,10 @@ fn stage_from_image(
             .arg(&src_app)
             .arg(&staged_app))
         .map_err(|e| format!("could not stage the update: {e}"))?;
+        // What gets installed is the copy, so the copy is what is checked:
+        // it sits in this user's private folder, where nothing changes it
+        // between this check and the swap.
+        verify(&staged_app, identity)?;
         Ok(staged_app)
     })();
 
@@ -982,6 +995,31 @@ fn quote(s: &str) -> String {
 mod tests {
     use super::*;
     use crate::app::tests::test_dir;
+
+    /// The app on an image is the folder itself: a link — verified at its
+    /// target, then copied from wherever it pointed by then — is refused.
+    #[test]
+    fn the_app_on_an_image_is_a_folder_not_a_link() {
+        let dir = test_dir("update-image-app");
+        let _ = std::fs::remove_dir_all(&dir);
+        let real = dir.join("real");
+        std::fs::create_dir_all(real.join("Clew.app/Contents")).unwrap();
+        assert_eq!(app_on_image(&real), Ok(real.join("Clew.app")));
+        let linked = dir.join("linked");
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(real.join("Clew.app"), linked.join("Clew.app")).unwrap();
+        assert!(
+            app_on_image(&linked)
+                .unwrap_err()
+                .contains("not an app folder")
+        );
+        assert!(
+            app_on_image(&dir.join("empty"))
+                .unwrap_err()
+                .contains("no Clew.app")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn identity(identifier: &str, team: &str) -> SigningIdentity {
         SigningIdentity {
@@ -1937,7 +1975,6 @@ mod tests {
 
     impl SwapFixture {
         fn new(name: &str) -> SwapFixture {
-            use std::os::unix::fs::PermissionsExt;
             let root = test_dir(&format!("swap-{name}"));
             let target = root.join("Applications/Clew.app");
             std::fs::create_dir_all(target.join("Contents")).unwrap();
@@ -1947,12 +1984,10 @@ mod tests {
             std::fs::create_dir_all(staged.join("Contents")).unwrap();
             std::fs::write(staged.join("Contents/version"), "new").unwrap();
             let opener = root.join("opener.sh");
-            std::fs::write(
+            clew_core::testutil::write_script(
                 &opener,
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/opened.txt\"\n",
-            )
-            .unwrap();
-            std::fs::set_permissions(&opener, std::fs::Permissions::from_mode(0o755)).unwrap();
+                "printf '%s\\n' \"$@\" >> \"$(dirname \"$0\")/opened.txt\"",
+            );
             SwapFixture {
                 root,
                 target,
@@ -1989,10 +2024,10 @@ mod tests {
                 let _ = tx.send(Command::new("/bin/bash").arg("-c").arg(script).status());
             });
             // A hang detector, not a speed bound: the script itself runs in
-            // well under a second, but its first run of the fixture's fresh
-            // `opener.sh` waits for macOS to assess the new executable, which
-            // takes over ten seconds while the rest of the suite is starting
-            // fresh scripts of its own.
+            // well under a second (macOS's assessment of the fixture's fresh
+            // `opener.sh`, over ten seconds while the rest of the suite is
+            // starting fresh scripts of its own, was paid when it was
+            // written).
             rx.recv_timeout(std::time::Duration::from_secs(90))
                 .expect("the swap script hung")
                 .unwrap()

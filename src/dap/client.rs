@@ -56,6 +56,12 @@ pub enum Transport {
 /// not leave the session (and whatever awaits it) hung forever.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long an adapter has to answer `disconnect`, asked as a run stops —
+/// the adapter goes with its client after it. Waited for as long as any
+/// request, a silent adapter kept its debuggee running, and its port held,
+/// for a minute after Stop.
+const DISCONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// How long a `launch` refusal is listened for. The answer comes only after
 /// `configurationDone`, and a launch can take as long as the program does to
 /// start, so this is no failure when it passes: just the end of listening.
@@ -115,6 +121,10 @@ impl DapClient {
         command
             .args(args)
             .current_dir(cwd)
+            // Only the absolute entries of `PATH`: a relative one resolves
+            // against the project (the working directory), where a
+            // repository could plant the `node` or `python` the adapter runs.
+            .env("PATH", clew_core::linerpc::child_path())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
@@ -237,8 +247,18 @@ impl DapClient {
     /// A request the adapter never answers fails after the timeout, and its
     /// pending entry is released rather than kept for the session's lifetime.
     async fn request(&self, command: &str, arguments: Value) -> Result<Value, String> {
+        self.request_within(command, arguments, self.timeout).await
+    }
+
+    /// [`Self::request`], answered within `timeout`.
+    async fn request_within(
+        &self,
+        command: &str,
+        arguments: Value,
+        timeout: Duration,
+    ) -> Result<Value, String> {
         self.rpc
-            .call(command, arguments, self.timeout)
+            .call(command, arguments, timeout)
             .await
             .map_err(|e| match e {
                 CallError::NotRunning => "debug adapter not running".to_string(),
@@ -473,7 +493,8 @@ impl DapClient {
 
     /// End the session and kill the debuggee.
     pub async fn disconnect(&self) -> Result<(), String> {
-        self.request("disconnect", json!({ "terminateDebuggee": true }))
+        let within = self.timeout.min(DISCONNECT_TIMEOUT);
+        self.request_within("disconnect", json!({ "terminateDebuggee": true }), within)
             .await
             .map(|_| ())
     }
@@ -1299,6 +1320,23 @@ mod tests {
         }
     }
 
+    /// An adapter that does not answer `disconnect` is waited for a few
+    /// seconds, not the minute any request gets: the run is over, and the
+    /// adapter goes with its client after it.
+    #[tokio::test]
+    async fn an_unanswered_disconnect_is_not_waited_out() {
+        let (client, _events, mut adapter) = manual_adapter().await;
+        let started = std::time::Instant::now();
+        let err = client.disconnect().await.unwrap_err();
+        assert!(err.contains("did not answer 'disconnect'"), "{err}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(adapter.next().await["command"], "disconnect");
+    }
+
     /// F8/F17: a request the adapter never answers fails after the timeout —
     /// and is released: the old pending map kept every such entry for the
     /// session's lifetime. A later, answered request still works.
@@ -1480,11 +1518,18 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn a_child_session_dials_the_address_the_adapter_announced() {
-        // Every macOS host has `::1` on lo0; a host without an IPv6 loopback
-        // fails here rather than passing having checked nothing.
-        let listener = tokio::net::TcpListener::bind("[::1]:0")
-            .await
-            .expect("an IPv6 loopback to listen on");
+        // Every macOS host has `::1` on lo0, and is held to it. A Linux host
+        // with no IPv6 (a container) checks the same thing on another IPv4
+        // loopback: what matters is an announced address that is not
+        // 127.0.0.1. Neither fails here rather than passing having checked
+        // nothing.
+        let listener = match tokio::net::TcpListener::bind("[::1]:0").await {
+            Ok(listener) => listener,
+            Err(e) if cfg!(target_os = "macos") => panic!("an IPv6 loopback to listen on: {e}"),
+            Err(_) => tokio::net::TcpListener::bind("127.0.0.2:0")
+                .await
+                .expect("a loopback other than 127.0.0.1 to listen on"),
+        };
         let announced = listener.local_addr().unwrap();
         let script = format!("echo 'Debug server listening at {announced}'; exec sleep 30");
         let args = vec!["-c".to_string(), script];

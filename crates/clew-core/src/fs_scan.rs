@@ -81,6 +81,38 @@ pub fn in_noise_dir(rel: &str) -> bool {
         .is_some_and(|dir| dir.components().any(|c| is_noise_dir(c.as_os_str())))
 }
 
+/// Every folder of `tree`, as a rel (`src`, `src/app`): the folders the scan
+/// that built it walked, empty ones included.
+pub fn folders_of(tree: &DirNode) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut todo: Vec<(String, &DirNode)> = vec![(String::new(), tree)];
+    while let Some((at, node)) = todo.pop() {
+        for (name, child) in &node.dirs {
+            let rel = if at.is_empty() {
+                name.clone()
+            } else {
+                format!("{at}/{name}")
+            };
+            out.insert(rel.clone());
+            todo.push((rel, child));
+        }
+    }
+    out
+}
+
+/// Whether a create, remove or rename at `rel` can change the file set of a
+/// scan that walked `folders` ([`folders_of`]): it sits in one of them, at
+/// the root, or below the depth the tree folds at — or is one of them. A
+/// folder the scan skips (a gitignored `build/`) holds nothing the set
+/// lists, whatever is made in it.
+pub fn in_walked_folder(rel: &Path, folders: &HashSet<String>) -> bool {
+    let parent = rel.parent().unwrap_or(Path::new(""));
+    parent.as_os_str().is_empty()
+        || parent.components().count() >= MAX_TREE_DEPTH
+        || parent.to_str().is_some_and(|p| folders.contains(p))
+        || rel.to_str().is_some_and(|r| folders.contains(r))
+}
+
 /// Directories a code reader should never scan: clew/git internals, and the
 /// build-output / vendored-dependency dirs of the supported languages. Skipped
 /// unconditionally (even without a `.gitignore`, which many projects lack) so
@@ -1065,8 +1097,8 @@ mod tests {
         std::fs::write(dir.join("a.rs"), "fn a() {}\n").unwrap();
         git(&dir, &["add", "-A"]);
         git(&dir, &["commit", "-qm", "init"]);
-        // A filter driver clew cannot switch off makes it refuse to run git.
-        git(&dir, &["config", "filter.x=y.clean", "cat"]);
+        // An index git cannot read: it cannot say what it tracks.
+        std::fs::write(dir.join(".git/index"), "not an index").unwrap();
         let (result, report) = scan_with_report(dir.clone());
         assert!(result.files.iter().any(|f| f.rel == "a.rs"));
         assert!(report.tracked_error.is_some(), "{report:?}");

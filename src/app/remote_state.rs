@@ -979,6 +979,17 @@ impl App {
         if !self.server.ready {
             return;
         }
+        // Another project is being opened on this transport, and the server
+        // serves that one from the moment it reads the `OpenProject`: an edit
+        // of this project sent now is refused as another project's, and was
+        // given up as unsaveable — while an open that then failed left this
+        // project on screen, the edit shown and never written. The edits wait
+        // for the open instead: a project that replaces this one takes the
+        // journal with it (and says so), and one that failed is opened on the
+        // server again (`on_open_project_failed`), which then sends them.
+        if self.server.pending_open.is_some() {
+            return;
+        }
         let Some(root) = self
             .proj
             .project

@@ -163,6 +163,9 @@ fn for_each_match<'tree>(
 ) {
     let names = query.capture_names();
     let mut cursor = QueryCursor::new();
+    // No import starts deeper: the cursor keeps a state per enclosing
+    // pattern in progress, which cost depth² over a deeply nested file.
+    cursor.set_max_start_depth(Some(MAX_IMPORT_DEPTH));
     let mut matches = cursor.matches(query, root, src.as_bytes());
     while let Some(m) = matches.next() {
         let caps: Vec<(&str, Node)> = m
@@ -174,13 +177,17 @@ fn for_each_match<'tree>(
     }
 }
 
+/// Deepest an import is found at, in tree levels: real code imports at the
+/// top or a few blocks down.
+const MAX_IMPORT_DEPTH: u32 = 256;
+
 fn capture<'t>(caps: &[(&str, Node<'t>)], name: &str) -> Option<Node<'t>> {
     caps.iter().find(|(n, _)| *n == name).map(|(_, node)| *node)
 }
 
 const RUST_QUERY: &str = r#"
 (mod_item name: (identifier) @mod_name) @mod_item
-(use_declaration argument: (_) @use_arg)
+(use_declaration argument: (_) @use_arg) @use_decl
 "#;
 
 fn rust_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
@@ -197,6 +204,8 @@ pub(crate) fn for_each_rust_import<'tree>(
     query: &Query,
     mut emit: impl FnMut(RawImport, Node<'tree>),
 ) {
+    // What is left of the file's import budget (see `MAX_RUST_IMPORTS`).
+    let mut budget = MAX_RUST_IMPORTS;
     for_each_match(root, query, src, |caps| {
         if let Some(mi) = capture(caps, "mod_item") {
             // `mod x { ... }` (has a body) is an inline module, not a file edge.
@@ -204,6 +213,12 @@ pub(crate) fn for_each_rust_import<'tree>(
                 return;
             }
             if let Some(name) = capture(caps, "mod_name") {
+                // A declaration is an import too: scoping copies the inline
+                // modules around it into each one (`rustscope`).
+                if budget == 0 {
+                    return;
+                }
+                budget -= 1;
                 emit(
                     RawImport {
                         module: node_text(name, src).to_string(),
@@ -216,8 +231,13 @@ pub(crate) fn for_each_rust_import<'tree>(
             return;
         }
         if let Some(arg) = capture(caps, "use_arg") {
-            let reexport = arg.parent().is_some_and(|decl| is_reexport(decl, src));
-            for (module, line) in expand_use_tree(arg, src) {
+            // The declaration comes from the match, not `arg.parent()`:
+            // tree-sitter finds a parent by walking down from the root, a
+            // cost of the depth per import.
+            let reexport = capture(caps, "use_decl").is_some_and(|decl| is_reexport(decl, src));
+            let paths = expand_use_tree(arg, src, budget);
+            budget -= paths.len();
+            for (module, line) in paths {
                 emit(
                     RawImport {
                         module: if reexport {
@@ -253,10 +273,22 @@ fn is_reexport(decl: Node, src: &str) -> bool {
 /// the two modules it actually names. The nesting is walked with an explicit
 /// stack: it is repository-controlled, and deep enough nesting would
 /// otherwise overflow the thread's stack.
-fn expand_use_tree(arg: Node, src: &str) -> Vec<(String, usize)> {
+///
+/// The fan-out is bounded too: each entry of a list is its prefix plus the
+/// entry, so `use <long path>::{b, b, b, …}` cost entries × prefix — tens of
+/// GiB from one file within the index's size cap. The entries share their
+/// prefix while queued, at most `budget` paths are returned, and a path
+/// longer than [`MAX_RUST_IMPORT_LEN`] (no real one is) is left out.
+fn expand_use_tree(arg: Node, src: &str, budget: usize) -> Vec<(String, usize)> {
     let mut out = Vec::new();
-    let mut stack: Vec<(Node, String)> = vec![(arg, String::new())];
+    let mut stack: Vec<(Node, std::rc::Rc<str>)> = vec![(arg, "".into())];
     while let Some((node, prefix)) = stack.pop() {
+        if out.len() >= budget {
+            break;
+        }
+        if prefix.len() > MAX_RUST_IMPORT_LEN {
+            continue;
+        }
         match node.kind() {
             "scoped_use_list" => {
                 let path = node
@@ -264,7 +296,7 @@ fn expand_use_tree(arg: Node, src: &str) -> Vec<(String, usize)> {
                     .map(|p| path_text(p, src))
                     .unwrap_or_default();
                 if let Some(list) = node.child_by_field_name("list") {
-                    push_use_list(list, join_path(&prefix, &path), &mut stack);
+                    push_use_list(list, join_path(&prefix, &path).into(), &mut stack);
                 }
             }
             "use_list" => push_use_list(node, prefix, &mut stack),
@@ -279,17 +311,17 @@ fn expand_use_tree(arg: Node, src: &str) -> Vec<(String, usize)> {
                     .map(|p| path_text(p, src))
                     .unwrap_or_default();
                 let module = join_path(&prefix, &path);
-                if !module.is_empty() {
+                if !module.is_empty() && module.len() <= MAX_RUST_IMPORT_LEN {
                     let glob = join_path(&module, crate::rustscope::GLOB);
                     out.push((glob, line_of(node)));
                 }
             }
             // `use a::{self}`: the list's own prefix.
-            "self" if !prefix.is_empty() => out.push((prefix, line_of(node))),
+            "self" if !prefix.is_empty() => out.push((prefix.to_string(), line_of(node))),
             "line_comment" | "block_comment" => {}
             _ => {
                 let module = join_path(&prefix, &path_text(node, src));
-                if !module.is_empty() {
+                if !module.is_empty() && module.len() <= MAX_RUST_IMPORT_LEN {
                     out.push((module, line_of(node)));
                 }
             }
@@ -298,8 +330,21 @@ fn expand_use_tree(arg: Node, src: &str) -> Vec<(String, usize)> {
     out
 }
 
-/// Queue a `use_list`'s entries so they pop in source order.
-fn push_use_list<'t>(list: Node<'t>, prefix: String, stack: &mut Vec<(Node<'t>, String)>) {
+/// Most import paths one Rust or Python file yields (a real file has some
+/// dozens): each entry of a list carries the list's prefix, so their count
+/// times the prefix is what one file can cost.
+const MAX_RUST_IMPORTS: usize = 10_000;
+
+/// Longest import path kept, in bytes.
+pub(crate) const MAX_RUST_IMPORT_LEN: usize = 1024;
+
+/// Queue a `use_list`'s entries so they pop in source order, sharing the
+/// prefix.
+fn push_use_list<'t>(
+    list: Node<'t>,
+    prefix: std::rc::Rc<str>,
+    stack: &mut Vec<(Node<'t>, std::rc::Rc<str>)>,
+) {
     let mut cursor = list.walk();
     let entries: Vec<Node> = list.named_children(&mut cursor).collect();
     for entry in entries.into_iter().rev() {
@@ -364,6 +409,12 @@ const PYTHON_QUERY: &str = r#"
 fn python_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
     let mut out = Vec::new();
     for_each_match(root, query, src, |caps| {
+        // Bounded as Rust's are (`MAX_RUST_IMPORTS`): `from <dots> import a,
+        // b, …` gives each name the dots, which a file within the index's
+        // size cap can make tens of GiB.
+        if out.len() >= MAX_RUST_IMPORTS {
+            return;
+        }
         if let Some(plain) = capture(caps, "plain") {
             push_module(&mut out, node_text(plain, src).trim(), line_of(plain));
             return;
@@ -390,6 +441,11 @@ fn python_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
                 };
                 if let Some(dotted) = dotted {
                     let name = node_text(dotted, src).trim();
+                    if out.len() >= MAX_RUST_IMPORTS
+                        || text.len() + name.len() >= MAX_RUST_IMPORT_LEN
+                    {
+                        continue;
+                    }
                     push_module(
                         &mut out,
                         &format!("{text}{PY_NAME_SEP}{name}"),
@@ -652,13 +708,49 @@ mod extraction_tests {
         std::thread::Builder::new()
             .stack_size(256 * 1024)
             .spawn(move || {
-                let imports = imports_of(&src, "rust");
-                assert_eq!(imports.len(), 1);
-                assert_eq!(imports[0].module.matches("::").count(), DEPTH);
+                // A path that long is no real one: it is left out.
+                assert!(imports_of(&src, "rust").is_empty());
             })
             .unwrap()
             .join()
             .expect("expanding the use tree must not overflow the stack");
+        // One nested within the length cap is kept whole.
+        let src = format!("use {}x{};\n", "a::{".repeat(100), "}".repeat(100));
+        let imports = imports_of(&src, "rust");
+        assert_eq!(imports.len(), 1);
+        assert_eq!(imports[0].module.matches("::").count(), 100);
+    }
+
+    /// A list's entries share its prefix: a long prefix over many entries
+    /// costs neither entries × prefix of memory nor more than the per-file
+    /// cap of paths.
+    #[test]
+    fn a_wide_use_list_is_bounded() {
+        let prefix = "a".repeat(1000);
+        let src = format!("use {prefix}::{{{}}};\n", vec!["b"; 100_000].join(","));
+        let imports = imports_of(&src, "rust");
+        assert_eq!(imports.len(), MAX_RUST_IMPORTS);
+        assert!(imports.iter().all(|i| i.module == format!("{prefix}::b")));
+        // A prefix over the length cap yields nothing.
+        let src = format!("use {}::{{b, c}};\n", "a".repeat(2000));
+        assert!(imports_of(&src, "rust").is_empty());
+        // Declarations count too: scoping copies their modules into each.
+        let src = "mod m;\n".repeat(MAX_RUST_IMPORTS + 10);
+        assert_eq!(imports_of(&src, "rust").len(), MAX_RUST_IMPORTS);
+    }
+
+    /// Python's relative form gives each name the dots it imports from, so
+    /// it is bounded as a Rust list is: no more than the per-file cap of
+    /// paths, and none over the length cap.
+    #[test]
+    fn a_wide_relative_python_import_is_bounded() {
+        let names = vec!["b"; 100_000].join(", ");
+        let src = format!("from {} import {names}\n", ".".repeat(1000));
+        let imports = imports_of(&src, "python");
+        assert_eq!(imports.len(), MAX_RUST_IMPORTS);
+        assert!(imports.iter().all(|i| i.module.len() < MAX_RUST_IMPORT_LEN));
+        let src = format!("from {} import b, c\n", ".".repeat(2000));
+        assert!(imports_of(&src, "python").is_empty());
     }
 
     /// `from . import views` names `views` OF the package (a submodule or an

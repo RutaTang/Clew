@@ -693,18 +693,15 @@ fn queries_outside_a_repository_say_so() {
 #[test]
 #[cfg(unix)]
 fn repository_configured_programs_never_run() {
-    use std::os::unix::fs::PermissionsExt;
     let dir = repo_dir("git-hostile-config");
     let marker = dir.join("RAN");
     let script = dir.join("payload.sh");
     // Records that it ran, then behaves like a working filter (`cat`), so
     // nothing about the run would look like a failure.
-    std::fs::write(
+    crate::testutil::write_script(
         &script,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\ncat\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("echo \"$*\" >> '{}'\ncat", marker.display()),
+    );
     std::fs::write(
         dir.join(".gitattributes"),
         "*.rs diff=evil filter=evil\n*.txt filter=dotted.name\n*.md filter=included\n",
@@ -813,21 +810,44 @@ fn repository_configured_programs_never_run() {
     );
 }
 
+/// Runs plain git's working-tree diff of `file` in `dir`, which runs the
+/// repository's clean filter for it: a fixture's precondition.
+fn plain_diff_runs_the_filter(dir: &Path, file: &str, marker: &Path) {
+    let plain = plain_git()
+        .args([
+            "-c",
+            "core.fsmonitor=false",
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "HEAD",
+            "--",
+            file,
+        ])
+        .current_dir(dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(plain.success());
+    assert!(
+        marker.exists(),
+        "precondition: plain git runs the repository's filter"
+    );
+    std::fs::remove_file(marker).unwrap();
+}
+
 /// A driver name `-c` cannot spell (it splits at the first `=`) would leave
-/// that filter running; the query is refused instead, and nothing runs.
+/// that filter running: it is switched off from a configuration file the
+/// query includes, and nothing runs. A git that would not read the file
+/// has the query refused.
 #[test]
 #[cfg(unix)]
-fn a_filter_that_cannot_be_switched_off_refuses_the_query() {
-    use std::os::unix::fs::PermissionsExt;
+fn a_filter_the_command_line_cannot_name_is_switched_off_from_a_file() {
     let dir = repo_dir("git-unsafe-filter");
     let marker = dir.join("RAN");
     let script = dir.join("payload.sh");
-    std::fs::write(
-        &script,
-        format!("#!/bin/sh\ntouch '{}'\ncat\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testutil::write_script(&script, &format!("touch '{}'\ncat", marker.display()));
     std::fs::write(dir.join(".gitattributes"), "*.rs filter=a=b\n").unwrap();
     std::fs::write(dir.join("f.rs"), "fn a() {}\n").unwrap();
     commit_all(&dir, "init");
@@ -835,12 +855,358 @@ fn a_filter_that_cannot_be_switched_off_refuses_the_query() {
         &dir,
         &["config", "filter.a=b.clean", &script.display().to_string()],
     );
+    sh_git(
+        &dir,
+        &[
+            "config",
+            "filter.q\"u\\o.te.clean",
+            &script.display().to_string(),
+        ],
+    );
     std::fs::write(dir.join("f.rs"), "fn a() { 1 }\n").unwrap();
+    plain_diff_runs_the_filter(&dir, "f.rs", &marker);
 
-    let err = try_info(&dir, &dir.join("f.rs")).unwrap_err();
-    assert!(matches!(err, GitError::UnsafeConfig(_)), "{err}");
-    assert!(file_history(&dir, "f.rs", 5).is_err());
+    let info = try_info(&dir, &dir.join("f.rs"))
+        .unwrap()
+        .expect("gutter info");
+    assert!(!info.status.is_empty(), "f.rs shows as changed");
+    assert!(!file_history(&dir, "f.rs", 5).unwrap().is_empty());
     assert!(!marker.exists(), "the filter ran");
+
+    let scratch = Scratch::new().unwrap();
+    assert!(matches!(
+        confirm_included(&dir, &[], &scratch),
+        Err(GitError::UnsafeConfig(_))
+    ));
+}
+
+/// A driver of the user's that stays on is git-lfs, which stores what it
+/// cleans under the repository's `.git/lfs` — through a symlink there, where
+/// the repository likes. It is pointed at a scratch directory of the query's
+/// own instead, gone when the query is; with none to give it, every driver is
+/// switched off.
+#[test]
+fn a_driver_left_on_stores_into_a_scratch_directory_of_its_own() {
+    let setting = |overrides: &[OsString]| {
+        overrides
+            .iter()
+            .map(|o| o.to_string_lossy().into_owned())
+            .find_map(|o| o.strip_prefix("lfs.storage=").map(str::to_string))
+    };
+    let users = b"global\0filter.lfs.process\0local\0filter.evil.clean\0\
+                  local\0lfs.repositoryformatversion\n0\0";
+    let (overrides, scratch) = settings_for(users, true, false, Scratch::new).unwrap();
+    let scratch = scratch.expect("a scratch directory");
+    let dir = scratch.path().to_path_buf();
+    assert!(dir.is_dir());
+    assert_eq!(
+        setting(&overrides),
+        Some(dir.to_string_lossy().into_owned())
+    );
+    assert!(overrides.iter().any(|o| o == "filter.evil.clean="));
+    assert!(!overrides.iter().any(|o| o == "filter.lfs.clean="));
+    std::fs::create_dir_all(dir.join("objects/ab/cd")).unwrap();
+    std::fs::write(dir.join("objects/ab/cd/abcd"), "x").unwrap();
+    drop(scratch);
+    assert!(!dir.exists(), "the scratch directory outlived its query");
+
+    // Every driver off: nothing to point anywhere.
+    let repos = b"local\0filter.evil.clean\0";
+    let (overrides, scratch) = settings_for(repos, true, false, Scratch::new).unwrap();
+    assert!(scratch.is_none() && setting(&overrides).is_none());
+
+    // No scratch directory to be had: the user's driver goes off too.
+    let (overrides, scratch) =
+        settings_for(users, true, false, || Err(std::io::Error::other("full"))).unwrap();
+    assert!(scratch.is_none() && setting(&overrides).is_none());
+    assert!(overrides.iter().any(|o| o == "filter.lfs.clean="));
+}
+
+/// git-lfs writes its format version into the repository's own config the
+/// first time it runs there without one — through a symlinked `.git/config`
+/// too. A driver that runs git-lfs is left on only where the key is recorded
+/// at the repository's own scope already, and set (git-lfs reads it empty as
+/// missing); a driver that does not run git-lfs is not concerned. git hands
+/// `git lfs` to git-lfs: that spelling runs it too.
+#[test]
+fn a_git_lfs_driver_runs_only_where_its_format_version_is_recorded() {
+    let off = |listing: &[u8]| -> Vec<String> {
+        drivers_to_switch_off(listing, true)
+            .off
+            .into_iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect()
+    };
+    let users = b"global\0filter.lfs.process\ngit-lfs filter-process\0\
+                  global\0filter.lfs.required\ntrue\0\
+                  global\0filter.nb.clean\nnbstripout\0";
+    assert_eq!(
+        off(users),
+        ["lfs"],
+        "no format version: git-lfs would write one"
+    );
+    let mut versioned = users.to_vec();
+    versioned.extend_from_slice(b"local\0lfs.repositoryformatversion\n0\0");
+    assert!(off(&versioned).is_empty(), "{:?}", off(&versioned));
+    // Recorded anywhere but the repository's own config, git-lfs does not
+    // see it (`git config --local`) and writes it.
+    let mut elsewhere = users.to_vec();
+    elsewhere.extend_from_slice(b"worktree\0lfs.repositoryformatversion\n0\0");
+    assert_eq!(off(&elsewhere), ["lfs"]);
+    // Empty, with no value, or emptied by a later line: not recorded.
+    for unset in [
+        &b"local\0lfs.repositoryformatversion\n\0"[..],
+        b"local\0lfs.repositoryformatversion\0",
+        b"local\0lfs.repositoryformatversion\n0\0local\0lfs.repositoryformatversion\n\0",
+    ] {
+        let mut listing = users.to_vec();
+        listing.extend_from_slice(unset);
+        assert_eq!(off(&listing), ["lfs"], "{}", String::from_utf8_lossy(unset));
+    }
+    let mut set_last = users.to_vec();
+    set_last.extend_from_slice(
+        b"local\0lfs.repositoryformatversion\n\0local\0lfs.repositoryformatversion\n0\0",
+    );
+    assert!(off(&set_last).is_empty());
+    // However it is spelled, or whatever the driver is called.
+    for driver in [
+        "global\0filter.big.process\ngit lfs filter-process\0",
+        "global\0filter.big.process\n\"C:/Program Files/Git/cmd/git.exe\" lfs filter-process\0",
+        "global\0filter.big.smudge\n/opt/bin/Git-LFS smudge %f\0",
+        "global\0filter.lfs.process\nmy-wrapper\0",
+    ] {
+        let found = off(driver.as_bytes());
+        assert_eq!(found.len(), 1, "{driver:?}: {found:?}");
+    }
+    for spelled in [
+        "\"git\" lfs filter-process",
+        "'git' lfs smudge %f",
+        "sh -c 'git lfs filter-process'",
+        "sh -c \"cd x && git lfs smudge %f\"",
+        "git -c k=v lfs filter-process",
+        "git --no-pager 'lfs' smudge",
+    ] {
+        assert!(runs_git_lfs(spelled.as_bytes()), "{spelled}");
+    }
+    // A value as long as the listing's cap, of `git` and nothing after it,
+    // is read once.
+    let long = "git ".repeat(250_000);
+    let started = std::time::Instant::now();
+    assert!(!runs_git_lfs(long.as_bytes()));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    // A command that only has the letters in it does not run git-lfs.
+    for driver in [
+        "global\0filter.crypt.clean\n/home/ralfs/bin/crypt\0",
+        "global\0filter.tls.smudge\nwolfssl-decrypt\0",
+    ] {
+        assert!(off(driver.as_bytes()).is_empty(), "{driver:?}");
+    }
+}
+
+/// What `rev-parse` says of the work tree, read as the bytes it printed: a
+/// common directory whose name is not UTF-8 is not taken for the one its
+/// decoding names (a repository could provide that one, with a plain
+/// configuration of its own), and anything but the three lines asked for is
+/// taken for a linked configuration.
+#[cfg(unix)]
+#[test]
+fn the_work_trees_layout_is_read_as_printed() {
+    let dir = crate::testutil::TempDir::new("git-layout");
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    // The decoding's directory: a configuration of its own, a plain file.
+    let decoded = dir.path().join("g\u{FFFD}");
+    std::fs::create_dir_all(&decoded).unwrap();
+    std::fs::write(decoded.join("config"), "").unwrap();
+    // The one printed: none there is plain.
+    let printed = b"true\n\n../g\xff\n";
+    assert!(
+        layout(&root, printed).unwrap().1,
+        "the decoded name was checked"
+    );
+    let plain = dir.path().join("plain");
+    std::fs::create_dir_all(&plain).unwrap();
+    std::fs::write(plain.join("config"), "").unwrap();
+    assert_eq!(
+        layout(&root, b"true\nsub/\n../plain\n").unwrap(),
+        ("sub/".to_string(), false)
+    );
+    assert!(
+        layout(&root, b"true\n\n../pl\nain\n").unwrap().1,
+        "split lines"
+    );
+    assert!(layout(&root, b"true\n\n").unwrap().1, "no common directory");
+    assert!(matches!(
+        layout(&root, b"false\n"),
+        Err(GitError::NotARepository)
+    ));
+}
+
+/// A listing of as many drivers as its cap holds is told apart once each;
+/// more drivers to switch off than git starts with in reasonable time with
+/// `-c` settings are switched off from one included file — a real
+/// repository's hundreds of them included, none of which runs; and more than
+/// git looks through in reasonable time refuse the query.
+#[test]
+fn many_filter_drivers_are_switched_off_in_good_time() {
+    let listing = |drivers: usize| {
+        let mut listing = Vec::new();
+        for i in 0..drivers {
+            listing.extend_from_slice(format!("local\0filter.d{i}.clean\nx\0").as_bytes());
+        }
+        listing
+    };
+    let all = listing(40_000);
+    let started = std::time::Instant::now();
+    assert_eq!(drivers_to_switch_off(&all, true).off.len(), 40_000);
+    assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    assert!(matches!(
+        settings_for(&all, true, false, Scratch::new),
+        Err(GitError::UnsafeConfig(_))
+    ));
+    let many = listing(MAX_INCLUDED_DRIVERS);
+    let started = std::time::Instant::now();
+    let (overrides, scratch) = settings_for(&many, true, false, Scratch::new).unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
+    let scratch = scratch.expect("the file's directory");
+    assert_eq!(overrides.len(), 1, "{overrides:?}");
+    let file = scratch.path().join("filters.config");
+    assert_eq!(
+        overrides[0],
+        OsString::from(format!("include.path={}", file.display()))
+    );
+    let text = std::fs::read_to_string(&file).unwrap();
+    let last = format!("[filter \"d{}\"]\n\tclean = \n", MAX_INCLUDED_DRIVERS - 1);
+    assert!(text.contains(&last), "{}", &text[..200]);
+    let at_most = listing(MAX_DRIVERS);
+    let (overrides, scratch) = settings_for(&at_most, true, false, Scratch::new).unwrap();
+    assert_eq!(overrides.len(), MAX_DRIVERS * 4);
+    assert!(scratch.is_none());
+    // No place for the file: refused, not run.
+    assert!(matches!(
+        settings_for(&many, true, false, || Err(std::io::Error::other("full"))),
+        Err(GitError::UnsafeConfig(_))
+    ));
+    let (overrides, _) =
+        settings_for(&at_most, true, false, || Err(std::io::Error::other("full"))).unwrap();
+    assert_eq!(overrides.len(), MAX_DRIVERS * 4);
+
+    #[cfg(unix)]
+    {
+        let dir = repo_dir("git-many-filters");
+        let marker = dir.join("RAN");
+        let script = dir.join("payload.sh");
+        crate::testutil::write_script(&script, &format!("touch '{}'\ncat", marker.display()));
+        std::fs::write(dir.join(".gitattributes"), "*.rs filter=d299\n").unwrap();
+        std::fs::write(dir.join("f.rs"), "fn a() {}\n").unwrap();
+        commit_all(&dir, "init");
+        let mut config = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.join(".git/config"))
+            .unwrap();
+        for i in 0..300 {
+            use std::io::Write;
+            writeln!(config, "[filter \"d{i}\"]\n\tclean = {}", script.display()).unwrap();
+        }
+        drop(config);
+        std::fs::write(dir.join("f.rs"), "fn a() { 1 }\n").unwrap();
+        plain_diff_runs_the_filter(&dir, "f.rs", &marker);
+        let started = std::time::Instant::now();
+        let info = try_info(&dir, &dir.join("f.rs"))
+            .unwrap()
+            .expect("gutter info");
+        assert!(!info.status.is_empty(), "f.rs shows as changed");
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert!(!marker.exists(), "the filter ran");
+    }
+}
+
+/// A repository whose configuration is a symlink keeps on only the drivers
+/// of the user's that run git-lfs, and those only while git-lfs has its
+/// version recorded there: git writes a configuration through a symlink,
+/// and git-lfs then writes nothing to it — while what another program does,
+/// a wrapper that may run git-lfs among them, cannot be told.
+#[test]
+fn a_symlinked_configuration_keeps_only_git_lfs_on() {
+    let strings = |overrides: &[OsString]| -> Vec<String> {
+        overrides
+            .iter()
+            .map(|o| o.to_string_lossy().into_owned())
+            .collect()
+    };
+    let users = b"global\0filter.nb.clean\nnbstripout\0\
+                  global\0filter.crypt.smudge\nmy-lfs-wrapper\0\
+                  global\0filter.lfs.clean\ngit-lfs clean -- %f\0\
+                  global\0filter.lfs.process\ngit-lfs filter-process\0\
+                  global\0filter.lfs.required\ntrue\0\
+                  global\0filter.media.clean\ngit media clean %f\0\
+                  global\0filter.media.smudge\ngit lfs smudge %f\0\
+                  local\0lfs.repositoryformatversion\n0\0";
+    let (overrides, scratch) = settings_for(users, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_some(), "git-lfs stays on, its storage pinned");
+    let overrides = strings(&overrides);
+    for driver in ["nb", "crypt", "media"] {
+        assert!(
+            overrides.contains(&format!("filter.{driver}.clean=")),
+            "{driver}: {overrides:?}"
+        );
+    }
+    assert!(
+        !overrides.iter().any(|o| o.starts_with("filter.lfs.")),
+        "{overrides:?}"
+    );
+    // Not linked, every driver of the user's stays on.
+    let (overrides, _) = settings_for(users, true, false, Scratch::new).unwrap();
+    assert!(
+        !strings(&overrides).iter().any(|o| o.starts_with("filter.")),
+        "{overrides:?}"
+    );
+    // Without the version, git-lfs would write it there: all off.
+    let unversioned = b"global\0filter.nb.clean\nnbstripout\0\
+                        global\0filter.lfs.clean\ngit-lfs clean -- %f\0";
+    let (overrides, scratch) = settings_for(unversioned, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    let overrides = strings(&overrides);
+    for driver in ["nb", "lfs"] {
+        assert!(
+            overrides.contains(&format!("filter.{driver}.clean=")),
+            "{driver}: {overrides:?}"
+        );
+    }
+    // A blank version is none, as git-lfs reads it (trimmed).
+    let blank = b"global\0filter.lfs.clean\ngit-lfs clean -- %f\0\
+                  local\0lfs.repositoryformatversion\n \n\0";
+    let (overrides, scratch) = settings_for(blank, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    assert!(strings(&overrides).contains(&"filter.lfs.clean=".to_string()));
+    // A driver named `lfs` running something else is that something.
+    let wrapped = b"global\0filter.lfs.clean\nmy-wrapper %f\0\
+                    local\0lfs.repositoryformatversion\n0\0";
+    let (overrides, scratch) = settings_for(wrapped, true, true, Scratch::new).unwrap();
+    assert!(scratch.is_none());
+    assert!(strings(&overrides).contains(&"filter.lfs.clean=".to_string()));
+
+    #[cfg(unix)]
+    {
+        let dir = crate::testutil::TempDir::new("git-linked-config");
+        let common = dir.path().join(".git");
+        std::fs::create_dir_all(&common).unwrap();
+        std::fs::write(dir.path().join("elsewhere"), "").unwrap();
+        assert!(linked_config(&common), "no config at all: not to be told");
+        std::fs::write(common.join("config"), "").unwrap();
+        assert!(!linked_config(&common));
+        std::fs::remove_file(common.join("config")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("elsewhere"), common.join("config")).unwrap();
+        assert!(linked_config(&common));
+    }
 }
 
 /// Which drivers are switched off: every one the repository defines (at any
@@ -854,6 +1220,7 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
                     local\0filter.lfs.process\0local\0filter.nodriver\0\
                     local\0filter.evil.required\0";
     let names: Vec<String> = drivers_to_switch_off(listing, true)
+        .off
         .into_iter()
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .collect();
@@ -861,13 +1228,35 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
 
     let unscoped = b"filter.lfs.clean\0filter.evil.clean\0filter.lfs.smudge\0";
     let names: Vec<String> = drivers_to_switch_off(unscoped, false)
+        .off
         .into_iter()
         .map(|n| String::from_utf8_lossy(n).into_owned())
         .collect();
     assert_eq!(names, ["lfs", "evil"]);
 
+    // The repository's git-lfs settings: inert ones leave the user's lfs
+    // driver running; one that steers what git-lfs runs or writes switches
+    // off every driver, the user's own included.
+    let inert = b"global\0filter.lfs.process\0local\0lfs.repositoryformatversion\n0\0\
+                  local\0lfs.url\0local\0lfs.https://h.example/r.git/info/lfs.access\0\
+                  global\0lfs.extension.mine.clean\0";
+    assert!(drivers_to_switch_off(inert, true).off.is_empty());
+    for steer in [
+        "lfs.extension.evil.clean",
+        "lfs.storage",
+        "lfs.customtransfer.x.path",
+    ] {
+        let listing =
+            format!("global\0filter.lfs.process\0system\0filter.sys.clean\0local\0{steer}\0");
+        let names: Vec<String> = drivers_to_switch_off(listing.as_bytes(), true)
+            .off
+            .into_iter()
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .collect();
+        assert_eq!(names, ["lfs", "sys"], "{steer}");
+    }
+
     let overrides: Vec<String> = overrides_for(&[b"a.b".as_slice()])
-        .unwrap()
         .into_iter()
         .map(|o| o.to_string_lossy().into_owned())
         .collect();
@@ -880,10 +1269,8 @@ fn only_the_repositorys_own_filter_drivers_are_switched_off() {
             "filter.a.b.required=false"
         ]
     );
-    assert!(matches!(
-        overrides_for(&[b"x=y".as_slice()]),
-        Err(GitError::UnsafeConfig(_))
-    ));
+    assert!(fits_the_command_line(&[b"a.b".as_slice()]));
+    assert!(!fits_the_command_line(&[b"x=y".as_slice()]));
 }
 
 /// The partial-clone hint follows the runner's finding, not git's wording,
@@ -1054,7 +1441,6 @@ fn a_partial_clone_never_fetches_through_its_remote() {
 #[test]
 #[cfg(unix)]
 fn a_git_that_ignores_the_lazy_fetch_switch_still_fetches_nothing() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = TempDir::new("git-lazy-fetch-old");
     let base = std::fs::canonicalize(scratch.path()).unwrap();
     let src = base.join("src");
@@ -1085,12 +1471,7 @@ fn a_git_that_ignores_the_lazy_fetch_switch_still_fetches_nothing() {
     let bin = base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let helper = bin.join("git-remote-clewtest");
-    std::fs::write(
-        &helper,
-        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    crate::testutil::write_script(&helper, &format!("touch '{}'\nexit 1", marker.display()));
     sh_git(&part, &["config", "remote.origin.url", "clewtest::x"]);
     sh_git(&part, &["config", "protocol.clewtest.allow", "always"]);
     let path = format!(
@@ -1134,17 +1515,14 @@ fn a_git_that_ignores_the_lazy_fetch_switch_still_fetches_nothing() {
 #[test]
 #[cfg(unix)]
 fn a_submodule_never_runs_its_own_configured_programs() {
-    use std::os::unix::fs::PermissionsExt;
     let scratch = TempDir::new("git-submodule-programs");
     let base = std::fs::canonicalize(scratch.path()).unwrap();
     let marker = base.join("RAN");
     let script = base.join("payload.sh");
-    std::fs::write(
+    crate::testutil::write_script(
         &script,
-        format!("#!/bin/sh\necho \"$*\" >> '{}'\ncat\n", marker.display()),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        &format!("echo \"$*\" >> '{}'\ncat", marker.display()),
+    );
     let identity = ["-c", "user.email=t@example.com", "-c", "user.name=t"];
     let git_as = |dir: &Path, args: &[&str]| {
         let all: Vec<&str> = identity.iter().chain(args).copied().collect();
@@ -1936,4 +2314,31 @@ fn the_review_base_is_the_branch_the_work_left() {
     ] {
         assert!(!is_plain_branch_name(bad), "{bad:?}");
     }
+}
+
+/// git is run by its absolute path, found on the absolute directories of
+/// `PATH`, and hands what it runs in turn (a filter's `git-lfs`) only
+/// those: a relative entry (`.`, `node_modules/.bin`) resolves against the
+/// directory clew was started in — a repository's own, whose `git` would
+/// run at the first file opened.
+#[test]
+fn git_runs_by_its_absolute_path_with_an_absolute_path() {
+    let dir = repo_dir("git-absolute-program");
+    let cmd = base_command(&dir);
+    let program = Path::new(cmd.get_program());
+    assert!(
+        program.is_absolute() && program.ends_with("git"),
+        "{program:?}"
+    );
+    let path = cmd
+        .get_envs()
+        .find(|(key, _)| *key == "PATH")
+        .and_then(|(_, value)| value)
+        .expect("its PATH is set");
+    assert!(!path.is_empty());
+    assert!(
+        std::env::split_paths(path).all(|d| d.is_absolute()),
+        "{path:?}"
+    );
+    assert!(installed_version().is_ok());
 }

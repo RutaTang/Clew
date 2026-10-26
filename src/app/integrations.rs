@@ -76,6 +76,9 @@ pub(crate) fn call_deadline() -> std::time::Instant {
         - std::time::Duration::from_secs(15)
 }
 
+/// How the turn on a stream ended: what its `session/prompt` answered.
+pub type TurnEnd = (u64, Result<acp::StopReason, String>);
+
 /// The ACP agent a project's questions go to.
 #[derive(Debug)]
 pub struct AcpLink {
@@ -102,8 +105,14 @@ pub struct AcpLink {
     pub pump: Option<iced::task::Handle>,
     /// The running turn's `session/prompt`.
     pub prompt: Option<iced::task::Handle>,
+    /// Where a turn's end goes to be told after the agent's last events
+    /// ([`TurnEnd`]): to the task that forwards them, once it runs.
+    pub ends: Option<tokio::sync::mpsc::UnboundedSender<TurnEnd>>,
     /// The session's settings the user may choose (its mode, its model…).
     pub options: Vec<acp::ConfigOption>,
+    /// The decline clew added to each permission request that offered
+    /// none, by request: its option id (`with_a_decline`).
+    pub declines: HashMap<u64, String>,
     /// The user's choices among them, `(option, value)`: a new session with
     /// the agent (after Clear, or a restart) starts with them too.
     pub chosen: Vec<(String, String)>,
@@ -123,8 +132,66 @@ impl AcpLink {
             cancelling: None,
             pump: None,
             prompt: None,
+            ends: None,
             options: Vec::new(),
             chosen: Vec::new(),
+            declines: HashMap::new(),
+        }
+    }
+}
+
+/// `servers`, each HTTP one that has no `Authorization` header of its own
+/// given the user's sign-in to it: the agent reaches the server itself, as
+/// it gets the user's headers. A token that ran out is renewed first —
+/// handed on as it was stored, it only got the agent refused. Renewing
+/// blocks, so it runs off the runtime's threads.
+pub(crate) async fn with_sign_ins(mut servers: Vec<acp::McpServerSpec>) -> Vec<acp::McpServerSpec> {
+    for server in &mut servers {
+        let acp::McpServerSpec::Http { url, headers, .. } = server else {
+            continue;
+        };
+        if headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        {
+            continue;
+        }
+        let at = url.clone();
+        if let Ok(Some(token)) = tokio::task::spawn_blocking(move || mcp::oauth::bearer(&at)).await
+        {
+            headers.push(("Authorization".into(), format!("Bearer {token}")));
+        }
+    }
+    servers
+}
+
+/// Forward an agent's `events` and its turns' ends to `out`, each end after
+/// the events that came before it, for as long as the agent runs: its answer
+/// waited for them to be events (`Agent::prompt`), and they go first.
+pub(crate) async fn forward_acp(
+    mut events: tokio::sync::mpsc::UnboundedReceiver<acp::AgentEvent>,
+    mut ended: tokio::sync::mpsc::UnboundedReceiver<TurnEnd>,
+    stamp: Stamp,
+    mut out: iced::futures::channel::mpsc::Sender<Message>,
+) {
+    loop {
+        let msg = tokio::select! {
+            biased;
+            event = events.recv() => match event {
+                Some(event) => AskMsg::AcpEvent {
+                    stamp: stamp.clone(),
+                    event,
+                },
+                None => return,
+            },
+            Some((stream, result)) = ended.recv() => AskMsg::AcpTurnEnded {
+                stamp: stamp.clone(),
+                stream,
+                result,
+            },
+        };
+        if out.send(Message::Ask(msg)).await.is_err() {
+            return;
         }
     }
 }
@@ -268,37 +335,52 @@ pub(crate) fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
 
 /// A tool call's arguments as an approval card shows them: each long string
 /// shortened on its own (saying by how much), so a padded argument cannot
-/// push the one that matters out of view.
+/// push the one that matters out of view — and the card says so whenever
+/// anything was left out.
 fn args_preview(args: &serde_json::Value) -> String {
+    const WARNING: &str = "decline if you cannot tell what this does";
+    let mut cut = false;
     let text = match args {
         serde_json::Value::Object(map) if map.is_empty() => "(no arguments)".to_string(),
-        args => serde_json::to_string_pretty(&shorten_strings(args)).unwrap_or_default(),
+        args => serde_json::to_string_pretty(&shorten_strings(args, &mut cut)).unwrap_or_default(),
     };
     let total = text.chars().count();
     if total > MAX_DETAIL_CHARS {
         let shown: String = text.chars().take(MAX_DETAIL_CHARS).collect();
         format!(
-            "{shown}\n… {} more characters not shown — decline if you cannot tell what this does",
+            "{shown}\n… {} more characters not shown — {WARNING}",
             total - MAX_DETAIL_CHARS
         )
+    } else if cut {
+        format!("{text}\n(parts of the arguments are not shown — {WARNING})")
     } else {
         text
     }
 }
 
-/// `value` with each string longer than [`MAX_ARG_CHARS`] cut there.
-fn shorten_strings(value: &serde_json::Value) -> serde_json::Value {
+/// `value` with each string longer than [`MAX_ARG_CHARS`] cut to its first
+/// and last characters, `cut` set when one was: the end of a command is
+/// where `; rm -rf ~` goes.
+fn shorten_strings(value: &serde_json::Value, cut: &mut bool) -> serde_json::Value {
     use serde_json::Value;
     match value {
         Value::String(s) if s.chars().count() > MAX_ARG_CHARS => {
-            let rest = s.chars().count() - MAX_ARG_CHARS;
-            let head: String = s.chars().take(MAX_ARG_CHARS).collect();
-            Value::String(format!("{head}… ({rest} more characters)"))
+            *cut = true;
+            let count = s.chars().count();
+            let (head, tail) = (MAX_ARG_CHARS * 2 / 3, MAX_ARG_CHARS / 3);
+            let start: String = s.chars().take(head).collect();
+            let end: String = s.chars().skip(count - tail).collect();
+            Value::String(format!(
+                "{start} … ({} characters not shown) … {end}",
+                count - head - tail
+            ))
         }
-        Value::Array(items) => Value::Array(items.iter().map(shorten_strings).collect()),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|v| shorten_strings(v, cut)).collect())
+        }
         Value::Object(map) => Value::Object(
             map.iter()
-                .map(|(k, v)| (k.clone(), shorten_strings(v)))
+                .map(|(k, v)| (k.clone(), shorten_strings(v, cut)))
                 .collect(),
         ),
         other => other.clone(),
@@ -596,13 +678,32 @@ impl App {
         }
     }
 
-    /// The user answered an approval card.
+    /// The user answered an approval card: an answer that lets the call run
+    /// only once the card has been within reach long enough to be read
+    /// ([`App::may_allow`]); one the card does not offer, not at all.
     pub(crate) fn on_approve(
         &mut self,
         stream: u64,
         key: ApprovalKey,
         option: String,
     ) -> Task<Message> {
+        let allows = self
+            .proj
+            .ask_turns
+            .iter()
+            .find(|t| t.stream == stream)
+            .and_then(|t| t.extras.approvals.iter().find(|a| a.key == key))
+            .and_then(|a| a.options.iter().find(|o| o.id == option))
+            .map(|o| o.allows);
+        match allows {
+            None => return Task::none(),
+            Some(true)
+                if !self.may_allow(&crate::app::model::Question::Approval { stream, key }) =>
+            {
+                return Task::none();
+            }
+            Some(_) => {}
+        }
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
             turn.extras.approvals.retain(|a| a.key != key);
         }
@@ -658,6 +759,11 @@ impl App {
                 self.run_mcp_call(stream, call, target, args, deadline)
             }
             ApprovalKey::Acp { id } => {
+                // The decline clew added where the agent offered none is the
+                // request cancelled (`with_a_decline`): told by the id it
+                // was given, which no answer of the agent's has.
+                let added = self.proj.acp.as_mut().and_then(|l| l.declines.remove(&id));
+                let cancelled = allows == Some(false) && added.as_deref() == Some(option.as_str());
                 // Only the running turn's agent is answered: a card of a turn
                 // that ended (or of an agent since replaced) answers nothing.
                 if let Some(agent) = self
@@ -667,7 +773,7 @@ impl App {
                     .filter(|l| l.turn == Some(stream))
                     .and_then(|l| l.agent.as_ref())
                 {
-                    agent.answer_permission(id, Some(&option));
+                    agent.answer_permission(id, (!cancelled).then_some(option.as_str()));
                 }
                 Task::none()
             }
@@ -690,6 +796,20 @@ impl App {
                     step.state = StepState::Failed;
                 }
             }
+        }
+        // The declines added to the cards gone with them.
+        let live: std::collections::HashSet<u64> = self
+            .proj
+            .ask_turns
+            .iter()
+            .flat_map(|t| &t.extras.approvals)
+            .filter_map(|a| match a.key {
+                ApprovalKey::Acp { id } => Some(id),
+                ApprovalKey::Mcp { .. } => None,
+            })
+            .collect();
+        if let Some(link) = self.proj.acp.as_mut() {
+            link.declines.retain(|id, _| live.contains(id));
         }
     }
 
@@ -876,17 +996,8 @@ impl App {
                             env: launch.env,
                         });
                     }
-                    mcp::Transport::Http { url, mut headers } => {
-                        // The agent reaches the server itself: it gets the
-                        // user's sign-in, as it gets their headers.
-                        let has_auth = headers
-                            .iter()
-                            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
-                        if !has_auth
-                            && let Some(token) = mcp::oauth::session(&url).map(|s| s.access_token)
-                        {
-                            headers.push(("Authorization".into(), format!("Bearer {token}")));
-                        }
+                    // The user's sign-in is added on the way ([`with_sign_ins`]).
+                    mcp::Transport::Http { url, headers } => {
                         servers.push(acp::McpServerSpec::Http {
                             name: server.name,
                             url,
@@ -911,6 +1022,7 @@ impl App {
             .as_ref()
             .map(|l| l.chosen.clone())
             .unwrap_or_default();
+        let (ends, ended) = tokio::sync::mpsc::unbounded_channel::<TurnEnd>();
         let stream = iced::stream::channel(
             256,
             move |mut out: iced::futures::channel::mpsc::Sender<Message>| async move {
@@ -919,12 +1031,13 @@ impl App {
                         .await
                         .map_err(|e| e.to_string())?;
                     let agent = Arc::new(agent);
+                    let mcp = with_sign_ins(mcp).await;
                     let session = agent.new_session(&mcp).await.map_err(|e| e.to_string())?;
                     apply_choices(&agent, &session, &chosen).await;
                     Ok::<_, String>((agent, session, events))
                 }
                 .await;
-                let (agent, session, mut events) = match started {
+                let (agent, session, events) = match started {
                     Ok(started) => started,
                     Err(e) => {
                         let _ = out
@@ -948,20 +1061,13 @@ impl App {
                 // The agent is the link's now: this task holds it only for
                 // as long as it forwards.
                 drop(agent);
-                while let Some(event) = events.recv().await {
-                    let msg = Message::Ask(AskMsg::AcpEvent {
-                        stamp: stamp.clone(),
-                        event,
-                    });
-                    if out.send(msg).await.is_err() {
-                        return;
-                    }
-                }
+                forward_acp(events, ended, stamp, out).await;
             },
         );
         let (task, handle) = Task::run(stream, |m| m).abortable();
         if let Some(link) = self.proj.acp.as_mut() {
             link.pump = Some(handle.abort_on_drop());
+            link.ends = Some(ends);
         }
         task
     }
@@ -986,6 +1092,7 @@ impl App {
             .unwrap_or_default();
         let (task, handle) = Task::perform(
             async move {
+                let mcp = with_sign_ins(mcp).await;
                 let session = agent.new_session(&mcp).await.map_err(|e| e.to_string())?;
                 apply_choices(&agent, &session, &chosen).await;
                 Ok(session)
@@ -1103,21 +1210,28 @@ impl App {
             return Task::none();
         };
         link.turn = Some(stream);
-        let (task, handle) = Task::perform(
-            async move {
-                agent
-                    .prompt(&session, blocks)
-                    .await
-                    .map_err(|e| e.to_string())
-            },
-            move |result| {
+        let prompt = async move {
+            agent
+                .prompt(&session, blocks)
+                .await
+                .map_err(|e| e.to_string())
+        };
+        let (task, handle) = match link.ends.clone() {
+            // Told on a path of its own, the end overtook the turn's last
+            // events: the end of the answer was dropped, or shown in the next
+            // turn, and a last tool update failed a step of it.
+            Some(ends) => Task::future(async move {
+                let _ = ends.send((stream, prompt.await));
+            })
+            .discard(),
+            None => Task::perform(prompt, move |result| {
                 Message::Ask(AskMsg::AcpTurnEnded {
                     stamp: stamp.clone(),
                     stream,
                     result,
                 })
-            },
-        )
+            }),
+        }
         .abortable();
         link.prompt = Some(handle.abort_on_drop());
         task
@@ -1212,7 +1326,29 @@ impl App {
                 );
                 return Task::none();
             }
+            // Answered already: its card goes, wherever it is.
+            acp::AgentEvent::PermissionWithdrawn { id, .. } => {
+                if let Some(link) = self.proj.acp.as_mut() {
+                    link.declines.remove(&id);
+                }
+                for turn in &mut self.proj.ask_turns {
+                    turn.extras
+                        .approvals
+                        .retain(|a| a.key != ApprovalKey::Acp { id });
+                }
+                return Task::none();
+            }
             _ => {}
+        }
+        // Another session's — one a Clear left: nothing of this one's turn.
+        if event
+            .session()
+            .is_some_and(|s| link.session.as_deref() != Some(s))
+        {
+            if let (acp::AgentEvent::Permission(request), Some(agent)) = (&event, &link.agent) {
+                agent.answer_permission(request.id, None);
+            }
+            return Task::none();
         }
         let Some(stream) = link.turn else {
             // Between turns nothing is shown; a permission asked then is
@@ -1223,6 +1359,7 @@ impl App {
             return Task::none();
         };
         let label = link.label.clone();
+        let agent = link.agent.clone();
         if let acp::AgentEvent::Text { text, .. } = &event {
             return self.on_ask_delta(stream, text.clone());
         }
@@ -1232,6 +1369,12 @@ impl App {
             .iter_mut()
             .find(|t| t.stream == stream && t.streaming)
         else {
+            // The turn is not on screen any more: a permission asked for it
+            // is refused, as between turns — dropped, the agent waited on it
+            // for good.
+            if let (acp::AgentEvent::Permission(request), Some(agent)) = (&event, &agent) {
+                agent.answer_permission(request.id, None);
+            }
             return Task::none();
         };
         let refs_of = |locations: &Option<Vec<(PathBuf, Option<u32>)>>| {
@@ -1342,11 +1485,16 @@ impl App {
                         line.map(|l| format!(":{l}")).unwrap_or_default()
                     ));
                 }
-                turn.extras.approvals.push(Approval {
-                    key: ApprovalKey::Acp { id: request.id },
-                    title: format!("{label} asks to {what}"),
-                    detail: detail.trim().to_string(),
-                    options: request
+                // What it would do: a title alone ("Run a command") is no
+                // ground to allow it on.
+                if let Some(summary) = &request.tool.summary {
+                    detail.push_str(&format!("\n{summary}"));
+                }
+                if let Some(input) = &request.tool.raw_input {
+                    detail.push_str(&format!("\n{}", args_preview(input)));
+                }
+                let (options, added) = with_a_decline(
+                    request
                         .options
                         .iter()
                         .map(|o| ApprovalOption {
@@ -1355,7 +1503,16 @@ impl App {
                             allows: o.kind.starts_with("allow"),
                         })
                         .collect(),
+                );
+                turn.extras.approvals.push(Approval {
+                    key: ApprovalKey::Acp { id: request.id },
+                    title: format!("{label} asks to {what}"),
+                    detail: detail.trim().to_string(),
+                    options,
                 });
+                if let (Some(added), Some(link)) = (added, self.proj.acp.as_mut()) {
+                    link.declines.insert(request.id, added);
+                }
                 self.status = format!("{label} waits for your answer in the Ask panel");
                 self.ask_to_bottom()
             }
@@ -1381,8 +1538,14 @@ impl App {
                 link.prompt = None;
             }
         }
+        let agent = self.proj.acp.as_ref().and_then(|l| l.agent.clone());
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream) {
-            turn.extras.approvals.clear();
+            // A request still open is answered: the agent may wait on it.
+            for approval in turn.extras.approvals.drain(..) {
+                if let (ApprovalKey::Acp { id }, Some(agent)) = (approval.key, &agent) {
+                    agent.answer_permission(id, None);
+                }
+            }
             turn.extras.thought.clear();
             for step in &mut turn.steps {
                 if matches!(step.state, StepState::Running | StepState::Waiting) {
@@ -1665,10 +1828,38 @@ impl App {
                 {
                     Some(mcp::Transport::Http { url, .. }) => {
                         mcp::hub::Hub::global().forget(&name);
-                        mcp::oauth::sign_out(url).map(|()| Some(format!("Signed out of `{name}`")))
+                        // Off the UI thread, as signing in is: the store's
+                        // locks are held across a renewal's token request,
+                        // which may take its whole timeout, and this thread
+                        // serves every window.
+                        let url = url.clone();
+                        draft.note = Some(format!("Signing out of `{name}`…"));
+                        return Task::perform(
+                            async move {
+                                let result =
+                                    tokio::task::spawn_blocking(move || mcp::oauth::sign_out(&url))
+                                        .await
+                                        .unwrap_or_else(|_| {
+                                            Err("the sign-out failed unexpectedly".into())
+                                        });
+                                (name, result)
+                            },
+                            |(name, result)| {
+                                Message::Integrations(IntegrationsMsg::McpSignedOut {
+                                    name,
+                                    result,
+                                })
+                            },
+                        );
                     }
                     _ => Ok(None),
                 }
+            }
+            IntegrationsMsg::McpSignedOut { name, result } => {
+                // A connection made while the store still held the sign-in
+                // carries it: dropped again now that it does not.
+                mcp::hub::Hub::global().forget(&name);
+                result.map(|()| Some(format!("Signed out of `{name}`")))
             }
             IntegrationsMsg::AcpAdd => self.add_acp_from_form(),
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {
@@ -1821,6 +2012,33 @@ impl App {
     }
 }
 
+/// What the id of the decline clew adds to a permission request starts as
+/// ([`with_a_decline`]).
+pub(crate) const DECLINE: &str = "clew:decline";
+
+/// An ACP agent's answers to a permission request, and a way to decline
+/// when it offers none (only allowing answers, or none at all) — the card
+/// would otherwise leave the user nothing to say but yes, or nothing — with
+/// the id it was given: one no answer of the agent's has. Chosen, the agent
+/// hears a cancelled request (`Agent::answer_permission`).
+pub(crate) fn with_a_decline(
+    mut options: Vec<ApprovalOption>,
+) -> (Vec<ApprovalOption>, Option<String>) {
+    if options.iter().any(|o| !o.allows) {
+        return (options, None);
+    }
+    let mut id = DECLINE.to_string();
+    while options.iter().any(|o| o.id == id) {
+        id.push('_');
+    }
+    options.push(ApprovalOption {
+        id: id.clone(),
+        label: "Decline".into(),
+        allows: false,
+    });
+    (options, Some(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1870,7 +2088,16 @@ mod tests {
         let padded = serde_json::json!({ "a_pad": "x".repeat(5000), "command": "rm -rf ~" });
         let shown = args_preview(&padded);
         assert!(shown.contains("rm -rf ~"), "{shown}");
-        assert!(shown.contains("4400 more characters"), "{shown}");
+        assert!(shown.contains("4400 characters not shown"), "{shown}");
+        assert!(shown.contains("decline if you cannot tell"), "{shown}");
+        // Nor the end of a long one.
+        let long = format!("echo {}; rm -rf ~", "hi ".repeat(1000));
+        let shown = args_preview(&serde_json::json!({ "command": long }));
+        assert!(shown.contains("; rm -rf ~"), "{shown}");
+        assert!(shown.contains("decline if you cannot tell"), "{shown}");
+        // Shown whole, nothing to warn about.
+        let shown = args_preview(&serde_json::json!({ "command": "ls" }));
+        assert!(!shown.contains("not shown"), "{shown}");
         // However much there is, the card says what it left out.
         let many: serde_json::Map<String, serde_json::Value> = (0..100)
             .map(|i| (format!("k{i:03}"), "y".repeat(1000).into()))

@@ -61,7 +61,22 @@ pub fn extract_full(source: &str, lang_key: &str, symbols: &[Symbol]) -> HashMap
 /// GNU-style C definition puts `static int` on the line above `foo(void)`, and
 /// its doc comment above that. Results are still keyed by `symbol.line`.
 pub fn extract_located(source: &str, lang_key: &str, items: &[Located]) -> HashMap<usize, String> {
-    let targets = items
+    extract_with(source, lang_key, located_targets(items), usize::MAX)
+}
+
+/// A file's outline and the hover peek's docs for it, from one parse: each
+/// doc looked for above the line its declaration starts on, as the Docs view
+/// does, and kept to `MAX_DOC`. Looked for above the name's line ([`extract`]),
+/// the doc of a C++ template, a GNU-style C definition, a JS `export` on a
+/// line of its own and a TS class under a decorator was never found.
+pub fn outline_and_peek(source: &str, lang_key: &str) -> (Vec<Symbol>, HashMap<usize, String>) {
+    let items = crate::outline::extract_located(source, lang_key);
+    let docs = extract_with(source, lang_key, located_targets(&items), MAX_DOC);
+    (items.into_iter().map(|l| l.symbol).collect(), docs)
+}
+
+fn located_targets(items: &[Located]) -> Vec<Target<'_>> {
+    items
         .iter()
         .map(|l| Target {
             key: l.symbol.line,
@@ -70,8 +85,7 @@ pub fn extract_located(source: &str, lang_key: &str, items: &[Located]) -> HashM
             name: &l.symbol.name,
             owner: Some(l.owner.clone()),
         })
-        .collect();
-    extract_with(source, lang_key, targets, usize::MAX)
+        .collect()
 }
 
 fn extract_with(
@@ -94,12 +108,17 @@ fn extract_with(
         DocStyle::Block => block_openers(&lines),
         _ => Vec::new(),
     };
+    // Every style that reads above a signature consults this one.
+    let ends = match style {
+        DocStyle::Block | DocStyle::RustLike | DocStyle::SlashSlash => doc_ends(&lines),
+        DocStyle::PyDocstring | DocStyle::None => Vec::new(),
+    };
     let mut out = HashMap::new();
     for t in &targets {
         if out.contains_key(&t.key) {
             continue;
         }
-        if let Some(mut doc) = style.doc_for(&lines, &openers, t) {
+        if let Some(mut doc) = style.doc_for(&lines, &openers, &ends, t) {
             doc = clean_doc_text(&doc, lang);
             if doc.chars().count() > max {
                 doc = doc.chars().take(max).collect::<String>() + "…";
@@ -240,6 +259,7 @@ impl DocStyle {
         &self,
         lines: &[&str],
         openers: &[Option<usize>],
+        ends: &[Option<usize>],
         target: &Target,
     ) -> Option<String> {
         match self {
@@ -251,47 +271,30 @@ impl DocStyle {
                 .then(|| py_docstring(lines, target.anchor))
                 .flatten(),
             DocStyle::None => None,
-            _ => self.above_doc(lines, openers, target.anchor),
+            _ => self.above_doc(lines, openers, ends, target.anchor),
         }
     }
 
     /// Docs that sit on the lines above a signature (every style but Python).
     /// `openers` is the block-comment index, empty for the styles that never
-    /// look at it.
+    /// look at it; `ends` is [`doc_ends`].
     fn above_doc(
         &self,
         lines: &[&str],
         openers: &[Option<usize>],
+        ends: &[Option<usize>],
         sig_line: usize,
     ) -> Option<String> {
         if sig_line < 2 || sig_line > lines.len() + 1 {
             return None;
         }
-        // 0-based index of the line directly above the signature.
-        let mut idx = sig_line as isize - 2;
-        // Skip lines glued between the doc and the signature: attribute /
-        // annotation lines (Rust `#[derive]`, Java `@Override`) and single-line
-        // non-doc block-comment pragmas (Rollup's `/*@__NO_SIDE_EFFECTS__*/`,
-        // `/*#__PURE__*/` — ubiquitous above exported functions in JS/TS libs).
-        // Without the pragma skip, that `/* … */` masks the real JSDoc above it.
-        while idx >= 0 {
-            let t = lines[idx as usize].trim();
-            let is_annotation = t.starts_with("#[") || t.starts_with("#!") || t.starts_with('@');
-            let is_pragma_comment =
-                t.starts_with("/*") && !t.starts_with("/**") && t.ends_with("*/");
-            if is_annotation || is_pragma_comment {
-                idx -= 1;
-            } else {
-                break;
-            }
-        }
-        if idx < 0 {
-            return None;
-        }
-        let end = idx as usize;
+        // Up from the line directly above the signature, past the lines glued
+        // between it and its doc.
+        let end = ends.get(sig_line - 2).copied().flatten()?;
         match self {
             DocStyle::Block => collect_block(lines, openers, end),
-            DocStyle::RustLike => collect_line_docs(lines, end, &["///", "//!"]),
+            // `//!` documents the module it sits in, never the item below it.
+            DocStyle::RustLike => collect_line_docs(lines, end, &["///"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
             _ => None,
         }
@@ -309,6 +312,10 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
         let Some(prefix) = prefixes.iter().find(|p| t.starts_with(**p)) else {
             break;
         };
+        // `////` is a plain comment, as rustdoc and dartdoc read it.
+        if *prefix == "///" && t.starts_with("////") {
+            break;
+        }
         let body = &t[prefix.len()..];
         let body = body.strip_prefix(' ').unwrap_or(body);
         collected.push(body.trim_end().to_string());
@@ -320,6 +327,123 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
     collected.reverse();
     let doc = collected.join("\n").trim().to_string();
     (!doc.is_empty()).then_some(doc)
+}
+
+/// For every line, the nearest line at or above it that a doc for the
+/// signature below may end on, or `None` when there is none: the lines glued
+/// between a doc and its signature are passed over — attribute and
+/// annotation lines (Rust `#[derive]`, Java `@Override`) and single-line
+/// non-doc block-comment pragmas (Rollup's `/*@__NO_SIDE_EFFECTS__*/`,
+/// `/*#__PURE__*/`, ubiquitous above exported functions in JS/TS libraries,
+/// where they masked the real JSDoc above them).
+///
+/// An attribute or decorator whose arguments run on below its first line
+/// (rustfmt's `#[derive(` … `)]`, an Angular `@Component({` … `})`) is
+/// glued on every line it spans, or the doc above it was lost.
+///
+/// One forward pass, like [`block_openers`]: walked up from each symbol, a
+/// file whose every line starts with an attribute (`#[a] fn f() {}`, legal
+/// Rust) took a scan of the file per symbol — a minute and a half for 4 MiB,
+/// in the blocking task the file's pane waits on.
+fn doc_ends(lines: &[&str]) -> Vec<Option<usize>> {
+    work::add(lines.len());
+    let mut out = Vec::with_capacity(lines.len());
+    let mut last: Option<usize> = None;
+    // The brackets an attribute above left open, and the lines it may
+    // still run on.
+    let mut open: Option<(usize, usize)> = None;
+    for (i, l) in lines.iter().enumerate() {
+        let t = l.trim();
+        let glue = match open.take() {
+            // A comment's end is not an attribute's: an `@see(` left open in
+            // a starless JSDoc block must not swallow the `*/` that closes it.
+            Some(_) if t.contains("*/") => false,
+            Some((depth, left)) => match run_on(t, depth) {
+                Ok(depth) => {
+                    open = (left > 1).then(|| (depth, left - 1));
+                    true
+                }
+                Err(rest) => {
+                    let rest = rest.trim();
+                    let glue = rest.is_empty() || rest.starts_with("//") || glued(rest);
+                    open = opens(rest, glue);
+                    glue
+                }
+            },
+            None => {
+                let glue = glued(t);
+                open = opens(t, glue);
+                glue
+            }
+        };
+        if !glue {
+            last = Some(i);
+        }
+        out.push(last);
+    }
+    out
+}
+
+/// Most lines below its first an attribute's arguments are read as running
+/// on: an attribute left unclosed by mistake glues no more than these.
+const MAX_ATTRIBUTE_LINES: usize = 64;
+
+/// For `t`, a trimmed line [`glued`] (`glue`) or not: the brackets an
+/// attribute on it leaves open, and the lines it may still run on.
+fn opens(t: &str, glue: bool) -> Option<(usize, usize)> {
+    if !glue || !(t.starts_with("#[") || t.starts_with("#![") || t.starts_with('@')) {
+        return None;
+    }
+    let mut depth = 0;
+    let mut rest = t;
+    loop {
+        match run_on(rest, depth) {
+            Ok(0) => return None,
+            Ok(left) => return Some((left, MAX_ATTRIBUTE_LINES)),
+            Err(after) => (depth, rest) = (0, after),
+        }
+    }
+}
+
+/// `t` read on with `depth` brackets open: `Ok` with how many are still
+/// open after it, or `Err` with the text after the one that closes the
+/// last. Brackets in a string or character literal are not counted.
+fn run_on(t: &str, mut depth: usize) -> Result<usize, &str> {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in t.char_indices() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '"' | '\'' | '`' => quote = Some(c),
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return Err(&t[i + 1..]);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(depth)
+}
+
+/// Whether a line (trimmed) sits between a doc and the signature it
+/// documents: attributes or annotations alone — a line declaring an item
+/// after them (`#[inline] fn f() {}`, `@Override public String toString()
+/// {…}`) is that item's, and so is the doc above it — or a pragma comment.
+fn glued(t: &str) -> bool {
+    let pragma = t.starts_with("/*") && !t.starts_with("/**") && t.ends_with("*/");
+    pragma || t.starts_with("#!") || crate::outline::only_attributes(t)
 }
 
 /// For every line, the nearest line at or above it that contains a
@@ -650,6 +774,12 @@ fn py_docstring(lines: &[&str], sig_line: usize) -> Option<String> {
         i += 1;
     }
     let first = lines.get(i)?.trim_start();
+    // A raw or unicode literal is a docstring too: `r"""…"""` is the usual
+    // form of one that holds a backslash.
+    let first = first
+        .strip_prefix(|c| matches!(c, 'r' | 'R' | 'u' | 'U'))
+        .filter(|rest| rest.starts_with(['"', '\'']))
+        .unwrap_or(first);
 
     for q in ["\"\"\"", "'''"] {
         if let Some(rest) = first.strip_prefix(q) {
@@ -744,9 +874,121 @@ mod tests {
     }
 
     #[test]
+    fn a_doc_above_an_attribute_wrapped_over_lines_is_found() {
+        let rust = "/// A config.\n#[derive(\n    Debug, Clone, // all of them\n    PartialEq,\n)]\n#[serde(rename_all = \"camelCase\")]\npub struct Config;\n";
+        let docs = docs_of(rust, "rust");
+        assert_eq!(docs.get(&7).map(String::as_str), Some("A config."));
+        let items = crate::outline::extract_located(rust, "rust");
+        assert_eq!(
+            extract_located(rust, "rust", &items)
+                .get(&7)
+                .map(String::as_str),
+            Some("A config.")
+        );
+        // Two attributes on the line that closes the first, the second left
+        // open in turn; a `)` in a string closes nothing.
+        let rust = "/// A config.\n#[derive(\n    Debug,\n)] #[error(\n    \"missing )\"\n)]\npub struct Config;\n";
+        assert_eq!(
+            docs_of(rust, "rust").get(&7).map(String::as_str),
+            Some("A config.")
+        );
+        let ts = "/** The root. */\n@Component({\n  selector: 'app-root',\n  template: '<p>(</p>',\n})\nexport class AppComponent {}\n";
+        assert_eq!(
+            docs_of(ts, "typescript").get(&6).map(String::as_str),
+            Some("The root.")
+        );
+    }
+
+    #[test]
+    fn an_attribute_left_open_glues_no_further_than_its_bound() {
+        // Closed on the same line, nothing runs on: the plain comment in
+        // between still parts `b` from `a`'s doc.
+        let src = "/// Of a.\n#[derive(Debug)]\npub struct A;\n// not a doc\npub fn b() {}\n";
+        let docs = docs_of(src, "rust");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Of a."));
+        assert!(!docs.contains_key(&5), "{docs:?}");
+        // Never closed: the lines below it glue only up to the bound, so a
+        // function far below borrows nothing. (A parser reads the rest of the
+        // file into the attribute, so the function is named by hand.)
+        let mut src = String::from("/// Of nothing.\n#[cfg(\n");
+        src.push_str(&"\n".repeat(MAX_ATTRIBUTE_LINES + 1));
+        src.push_str("pub fn far() {}\n");
+        let line = src.lines().count();
+        let far = |line| Symbol {
+            name: "far".into(),
+            kind: "function".into(),
+            line,
+            end_line: line,
+        };
+        let docs = extract(&src, "rust", &[far(line)]);
+        assert!(docs.is_empty(), "{docs:?}");
+        // Within it, it is the attribute's.
+        let src = "/// Of far.\n#[cfg(\n\npub fn far() {}\n";
+        assert_eq!(
+            extract(src, "rust", &[far(4)]).get(&4).map(String::as_str),
+            Some("Of far.")
+        );
+        // An `@see(` left open in a starless JSDoc ends with the comment.
+        let js = "/**\n  Adds.\n  @see(\n*/\nfunction add() {}\n";
+        assert_eq!(
+            docs_of(js, "javascript")
+                .get(&5)
+                .map(|d| d.contains("Adds")),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn the_peek_reads_the_doc_above_where_the_declaration_starts() {
+        let (symbols, docs) = outline_and_peek(
+            "/** Larger. */\ntemplate <typename T>\nT larger(T a, T b) { return a; }\n",
+            "cpp",
+        );
+        assert!(
+            symbols.iter().any(|s| s.name == "larger" && s.line == 3),
+            "{symbols:?}"
+        );
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Larger."));
+        let (_, docs) = outline_and_peek(
+            "/** Adds. */\nstatic int\nadd(int a, int b) { return a + b; }\n",
+            "c",
+        );
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Adds."));
+        let (_, docs) = outline_and_peek("/** Runs. */\nexport\nfunction run() {}\n", "javascript");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("Runs."));
+        // Kept to the peek's length.
+        let long = format!("/** {} */\nfunction f() {{}}\n", "word ".repeat(MAX_DOC));
+        let (_, docs) = outline_and_peek(&long, "javascript");
+        assert_eq!(docs.get(&2).map(|d| d.chars().count()), Some(MAX_DOC + 1));
+    }
+
+    /// A module's own doc (`//!`) is not the item below it's, and `////`
+    /// is no doc at all.
+    #[test]
+    fn inner_docs_and_four_slashes_are_not_an_items_doc() {
+        assert!(docs_of("//! The module.\npub fn first() {}\n", "rust").is_empty());
+        assert!(docs_of("//// A note.\npub fn f() {}\n", "rust").is_empty());
+        let docs = docs_of("//! The module.\n/// The fn.\npub fn f() {}\n", "rust");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("The fn."));
+        let docs = docs_of("//// A note.\n/// The fn.\npub fn f() {}\n", "rust");
+        assert_eq!(docs.get(&3).map(String::as_str), Some("The fn."));
+    }
+
+    #[test]
     fn rust_plain_comment_is_not_a_doc() {
         let src = "// internal note\npub fn add() {}\n";
         assert!(docs_of(src, "rust").is_empty());
+    }
+
+    /// A raw or unicode docstring is a docstring; a string named by
+    /// something else is not one.
+    #[test]
+    fn a_raw_docstring_is_a_docstring() {
+        let src = "def f():\n    r\"\"\"Match \\d+.\"\"\"\n\ndef g():\n    U'Hi.'\n\ndef h():\n    rx = 'no'\n";
+        let docs = docs_of(src, "python");
+        assert_eq!(docs.get(&1).map(String::as_str), Some("Match \\d+."));
+        assert_eq!(docs.get(&4).map(String::as_str), Some("Hi."));
+        assert!(!docs.contains_key(&7), "{docs:?}");
     }
 
     #[test]
@@ -1090,6 +1332,55 @@ def request(
             visited <= bound,
             "visited {visited} lines (bound {bound}): a whole-file join per symbol"
         );
+    }
+
+    /// A line declaring an item after its attributes or annotations is that
+    /// item's, and so is the doc above it: not the next item's. And the
+    /// lines glued between a doc and its signature are passed over in one
+    /// pass for the file — walked up from each symbol, a file of
+    /// `#[a] fn f() {}` lines took a scan of the file per symbol, 98 s for
+    /// 4 MiB. Asserted on the lines visited.
+    #[test]
+    fn an_attribute_on_its_items_line_is_not_glued_to_the_next_one() {
+        const N: usize = 20_000;
+        let mut src = String::from("/// The first one's.\n");
+        let mut symbols = Vec::new();
+        for i in 0..N {
+            src.push_str(&format!("#[a] fn f{i}() {{}}\n"));
+            symbols.push(Symbol {
+                name: format!("f{i}"),
+                kind: "function".into(),
+                line: i + 2,
+                end_line: i + 2,
+            });
+        }
+        let (docs, visited) = work::measure(|| extract(&src, "rust", &symbols));
+        assert_eq!(docs.keys().collect::<Vec<_>>(), [&2], "{docs:?}");
+        let bound = 4 * N;
+        assert!(
+            visited <= bound,
+            "visited {visited} lines for {N} symbols (bound {bound}): a per-symbol rescan"
+        );
+
+        let java = "class C {\n  /** Its own. */\n  @Override public String toString() { return \"\"; }\n\
+                    public void next() {}\n  /** Above its annotation. */\n  @Deprecated\n  public void old() {}\n}\n";
+        let docs = docs_of(java, "java");
+        let mut all: Vec<&str> = docs.values().map(String::as_str).collect();
+        all.sort();
+        assert_eq!(all, ["Above its annotation.", "Its own."], "{docs:?}");
+        assert!(!docs.contains_key(&4), "{docs:?}");
+    }
+
+    /// A comment after an attribute or decorator, and a `]` in a char
+    /// literal inside one, leave it glued to the signature below.
+    #[test]
+    fn a_comment_or_char_literal_after_an_attribute_keeps_the_doc() {
+        let ts = "class C {\n  /** Lists. */\n  @Get() // list\n  findAll() {}\n}\n";
+        let docs = docs_of(ts, "typescript");
+        assert!(docs.values().any(|d| d == "Lists."), "{docs:?}");
+        let rust = "/// Lexes.\n#[case(']')] /* close */\nfn lex() {}\n";
+        let docs = docs_of(rust, "rust");
+        assert!(docs.values().any(|d| d == "Lexes."), "{docs:?}");
     }
 
     #[test]

@@ -95,9 +95,10 @@ impl App {
         }
 
         // Entry points: every function the index classifies as one — mains
-        // first, then routes, commands and handlers (see `index::entry_kind`)
-        // — capped, so a service with hundreds of routes does not turn the
-        // prompt into its route table; the cap says how many it left out.
+        // first, then routes, commands and handlers (see
+        // `clew_core::outline::entry_kind`) — capped, so a service with
+        // hundreds of routes does not turn the prompt into its route table;
+        // the cap says how many it left out.
         let mut entries: Vec<(index::EntryKind, &str, &str)> = self
             .proj
             .symbol_index_by_file

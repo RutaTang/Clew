@@ -1765,6 +1765,20 @@ impl Limits {
         }
     }
 
+    /// One whole request within `total`, its body included — a request of
+    /// the MCP sign-in flow ([`crate::mcp::oauth`]): a peer that trickles
+    /// its answer a byte at a time never trips an idle limit.
+    pub(crate) const fn bounded(total: Duration) -> Limits {
+        Limits {
+            connect: CONNECT_TIMEOUT,
+            write: WRITE_TIMEOUT,
+            idle: Some(total),
+            total: Some(total),
+            pace: None,
+            pooled: false,
+        }
+    }
+
     /// A request whose answer may be slow to start and may stream for long —
     /// an MCP server's tool call ([`crate::mcp`]): `idle` bounds every read,
     /// the wait for the response headers included, and the caller bounds the
@@ -1934,10 +1948,10 @@ fn agent_with_proxies(
 // -- retries -----------------------------------------------------------------
 
 /// How many times a transient failure is retried before giving up.
-const SEND_RETRIES: u32 = 3;
+pub(crate) const SEND_RETRIES: u32 = 3;
 
 /// Longest single wait between attempts, whatever `retry-after` asks for.
-const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 
 /// Statuses worth retrying: the request timing out before the provider had it
 /// (408), rate limits (429), the provider's own internal error (500),
@@ -1955,7 +1969,7 @@ const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
 /// app's `explain_pass`): one resend, rather than every caller, file and
 /// folder that quotes the call paid for without it, then again once a later
 /// pass explains it.
-fn transient_status(code: u16) -> bool {
+pub(crate) fn transient_status(code: u16) -> bool {
     matches!(code, 408 | 429 | 500 | 503 | 529)
 }
 
@@ -1985,7 +1999,7 @@ fn transient_status(code: u16) -> bool {
 /// not now — or that held its answer past the connect timeout, as a slow
 /// target makes it — is resent, as a direct connect that could not reach it
 /// is.
-fn retryable_transport(e: &ureq::Error) -> bool {
+pub(crate) fn retryable_transport(e: &ureq::Error) -> bool {
     crate::net::is_unreached(e) && !crate::net::proxy_refused(e)
 }
 
@@ -2074,7 +2088,7 @@ fn send_with_retry(
 
 /// The wait a `429`/`503` asked for: `retry-after` (seconds) or OpenAI's
 /// `retry-after-ms`. HTTP-date forms are ignored (the backoff applies).
-fn retry_after(r: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
+pub(crate) fn retry_after(r: &ureq::http::Response<ureq::Body>) -> Option<Duration> {
     let header = |name: &str| {
         r.headers()
             .get(name)

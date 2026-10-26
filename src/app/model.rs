@@ -188,7 +188,7 @@ impl CitationIndex {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SidebarTab {
     Files,
     Search,
@@ -505,6 +505,12 @@ impl TrailWriter {
         let next = self.queued.pop_front();
         self.busy = next.is_some();
         next
+    }
+
+    /// The writes still waiting, taken: the window is closing, and they go
+    /// with its teardown (`App::on_window_closed`).
+    pub fn take_queued(&mut self) -> Vec<TrailWrite> {
+        self.queued.drain(..).collect()
     }
 
     /// Whether a write is running (tests).
@@ -960,9 +966,12 @@ pub struct DiffRun {
 impl DiffState {
     pub fn new(abs: PathBuf, rel: String, lines: Vec<git::DiffLine>) -> Self {
         let shown = &lines[..lines.len().min(crate::ui::MAX_DIFF_ROWS)];
+        // Of what is drawn (`ui::diff_display_text`): a direction control
+        // is drawn as U+FFFD, a column where it took none, and a `\r` not
+        // at all.
         let max_cols = shown
             .iter()
-            .map(|l| crate::ui::display_cols(&l.text))
+            .map(|l| crate::ui::display_cols(&crate::highlight::line_in_order(&l.text)))
             .max()
             .unwrap_or(0);
         let runs = shown
@@ -993,7 +1002,13 @@ pub enum LspSlot {
     Ready(lsp::client::LspClient),
     Failed(String),
     Unsupported(String),
-    /// Awaiting the user's consent to download the server (see LspConsent).
+    /// The user said no to what starting it needs — a download, leave to
+    /// build the project, the project's own command — and why. Not asked
+    /// again on its own; the server panel offers to ask again.
+    Declined(String),
+    /// Awaiting the user's answer about what starting it needs (see
+    /// `LspConsent`, `PendingLspCommand`), or, remotely, the host's word on
+    /// what that is (`LspResolve`).
     AwaitingConsent,
 }
 
@@ -1122,9 +1137,42 @@ impl LspSlot {
                 None => "ready".into(),
             },
             LspSlot::Failed(e) => format!("error: {e}"),
-            LspSlot::Unsupported(e) => e.clone(),
-            LspSlot::AwaitingConsent => "download needed".into(),
+            LspSlot::Unsupported(e) | LspSlot::Declined(e) => e.clone(),
+            // What the answer is about is the App's to say
+            // (`App::lsp_awaiting`); the slot knows only that one is due.
+            LspSlot::AwaitingConsent => "waiting for your answer".into(),
         }
+    }
+}
+
+/// What a language's [`LspSlot::AwaitingConsent`] slot waits on
+/// (`App::lsp_awaiting`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Awaiting {
+    /// The user's leave to download or install the server.
+    Download,
+    /// The user's leave to let the server build the project.
+    Build,
+    /// The user's approval of the project's own command or options.
+    Approval,
+    /// The remote host's answer about what starting the server needs.
+    Host,
+    /// Nothing: no question is waiting for it.
+    Nothing,
+    /// The remote host installing the server, as the user allowed.
+    Installing,
+}
+
+impl std::fmt::Display for Awaiting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Awaiting::Download => "download needed",
+            Awaiting::Build => "waiting for leave to build the project",
+            Awaiting::Approval => "waiting for approval of the project's settings",
+            Awaiting::Host => "checking with the host…",
+            Awaiting::Nothing => "not started",
+            Awaiting::Installing => "installing on the host…",
+        })
     }
 }
 
@@ -1149,6 +1197,89 @@ pub enum LspProvision {
         install: dap::AdapterInstall,
         stamp: Stamp,
     },
+    /// Nothing to install: the server is there, but it builds the project to
+    /// understand it — runs `runs`, the repository's own code — and may start
+    /// only once the user lets it build THIS project
+    /// (`clew_core::trust::Trust::trust_build`). `root` and `host` are the
+    /// project the question is about, captured when it was asked, so an
+    /// answer can never be recorded for another one.
+    Build {
+        runs: String,
+        root: PathBuf,
+        host: Option<String>,
+    },
+}
+
+/// Questions asked one at a time in arrival order, the front one on screen,
+/// each under a number of its own: an answer names the question it was given
+/// to ([`Question`]), and counts for that one only.
+#[derive(Debug)]
+pub struct Questions<T> {
+    waiting: std::collections::VecDeque<(u64, T)>,
+}
+
+impl<T> Default for Questions<T> {
+    fn default() -> Self {
+        Questions {
+            waiting: Default::default(),
+        }
+    }
+}
+
+/// The number the last question asked was given, by any queue of any
+/// project: numbered per project, the next project's first question had the
+/// last one's number, and with it the time that one had been on screen.
+static LAST_QUESTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl<T> Questions<T> {
+    /// Ask `question`, in place of the waiting one it is the `same` question
+    /// as, if any — under a number of its own either way: a question replaced
+    /// asks about what would run now, and is read again before it is
+    /// answered.
+    fn ask(&mut self, question: T, same: impl Fn(&T, &T) -> bool) {
+        let number = LAST_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        match self.waiting.iter().position(|(_, q)| same(q, &question)) {
+            Some(at) => self.waiting[at] = (number, question),
+            None => self.waiting.push_back((number, question)),
+        }
+    }
+
+    /// The question on screen.
+    pub fn front(&self) -> Option<&T> {
+        self.waiting.front().map(|(_, q)| q)
+    }
+
+    /// The number of the question on screen.
+    pub fn asked(&self) -> Option<u64> {
+        self.waiting.front().map(|&(number, _)| number)
+    }
+
+    /// The question on screen, with its number.
+    pub fn on_screen(&self) -> Option<(u64, &T)> {
+        self.waiting.front().map(|(number, q)| (*number, q))
+    }
+
+    /// Answer question `number`: it leaves the queue, if it is the one on
+    /// screen. An answer to one no longer there answers nothing — least of
+    /// all the question that took its place.
+    pub fn answer(&mut self, number: u64) -> Option<T> {
+        if self.asked() != Some(number) {
+            return None;
+        }
+        self.waiting.pop_front().map(|(_, q)| q)
+    }
+
+    pub fn len(&self) -> usize {
+        self.waiting.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.waiting.iter().map(|(_, q)| q)
+    }
 }
 
 /// The provisionings awaiting the user's consent, asked one at a time in
@@ -1156,8 +1287,21 @@ pub enum LspProvision {
 /// — a language server and the debug adapter, two languages at once — used to
 /// share one slot, and the later silently replaced the earlier: its language
 /// sat "awaiting consent" with no question left on screen to answer.
-#[derive(Debug, Default)]
-pub struct ConsentQueue(std::collections::VecDeque<LspConsent>);
+pub type ConsentQueue = Questions<LspConsent>;
+
+/// The project's language-server commands and options awaiting the user's
+/// approval, asked one at a time in arrival order, like [`ConsentQueue`]'s:
+/// held in one slot, a second language's question replaced the first, whose
+/// language then waited for an answer to a question no longer asked.
+pub type CommandQueue = Questions<PendingLspCommand>;
+
+impl CommandQueue {
+    /// Queue `pending`. A newer question for a language already waiting
+    /// replaces that one in place: it asks about what would run now.
+    pub fn offer(&mut self, pending: PendingLspCommand) {
+        self.ask(pending, |waiting, new| waiting.language == new.language);
+    }
+}
 
 impl ConsentQueue {
     /// Queue `consent`. A request for what is already waiting — the same
@@ -1166,32 +1310,99 @@ impl ConsentQueue {
     /// newer description (and, for a remote install, the newer digest the
     /// server will check), a new debug run the newer session.
     pub fn offer(&mut self, consent: LspConsent) {
-        match self.0.iter_mut().find(|c| c.same_request(&consent)) {
-            Some(waiting) => *waiting = consent,
-            None => self.0.push_back(consent),
+        self.ask(consent, LspConsent::same_request);
+    }
+}
+
+/// How long a question must have been within the user's reach before its
+/// Allow counts — and is drawn enabled. Asked one after another, the next
+/// question comes up where the last one was answered: a double-click on
+/// Allow answered it too, unread, and its Allow runs a program, or trusts a
+/// host. The usual guard of a permission prompt (a browser's is a second).
+pub const ANSWER_DELAY: std::time::Duration = if cfg!(test) {
+    std::time::Duration::ZERO
+} else {
+    std::time::Duration::from_millis(500)
+};
+
+/// A question whose Allow runs or trusts something on the user's word, as
+/// the screen asks it — what an answer names, so that it counts for the
+/// question it was given to, and no other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Question {
+    /// Creating `.clew` in this folder (`App::pending_consent`).
+    Project(PathBuf),
+    /// The language-server command question with this number
+    /// ([`CommandQueue`]).
+    LspCommand(u64),
+    /// The install or build question with this number ([`ConsentQueue`]).
+    LspConsent(u64),
+    /// Trusting the unknown host key with this fingerprint.
+    TrustHost(String),
+    /// Forgetting the changed host key clew recorded for this host.
+    ForgetHostKey(String),
+    /// Letting the agent turn `stream` run the tool call `key` asks for (an
+    /// approval card in the Ask panel).
+    Approval { stream: u64, key: ApprovalKey },
+}
+
+/// The question within the user's reach, and since when: on top of every
+/// other overlay, with no tour over it, in a window that has the focus. A
+/// question that came up — or came out from under another modal, the tour,
+/// another window — under the pointer counts [`Asking::delay`] from then;
+/// and its answers, all of them in view, count it from where they were last
+/// laid out ([`Asking::places`]): moved by the window or the panel resized,
+/// they were not read where they are.
+#[derive(Debug)]
+pub struct Asking {
+    pub question: Option<Question>,
+    pub since: std::time::Instant,
+    /// Where the questions drawn lately have their answers laid out, and
+    /// since when (`ui::placed`), the latest last.
+    pub places: Vec<Placement>,
+    /// The approval card last drawn for the first time, whose first report
+    /// decided whether the bottom panel opened to fit it
+    /// (`CARD_PANEL_HEIGHT`).
+    pub raised_for: Option<Question>,
+    /// When the redraw `App::wake_after` asked for is due, and whether one
+    /// is waiting.
+    pub wake_due: Option<std::time::Instant>,
+    pub wake_waiting: bool,
+    /// The page of its answers the approval card `.0` shows, when turned
+    /// from its first (`ui::panels::shown_answers`).
+    pub answers_page: Option<(Question, usize)>,
+    /// [`ANSWER_DELAY`]; tests set their own.
+    pub delay: std::time::Duration,
+}
+
+/// Where a question's answers are laid out (see [`Asking::places`]).
+#[derive(Debug, Clone)]
+pub struct Placement {
+    pub question: Question,
+    /// `None`: drawn, but not all of them in view.
+    pub place: Option<iced::Rectangle>,
+    pub since: std::time::Instant,
+}
+
+/// The bottom panel's height an approval card drawn too low for it opens the
+/// panel to: all of it in view, its answers in reach (`App::on_placed`).
+pub const CARD_PANEL_HEIGHT: f32 = 260.0;
+
+/// Most placements kept: a few questions are drawn at a time.
+pub const MAX_PLACEMENTS: usize = 16;
+
+impl Default for Asking {
+    fn default() -> Self {
+        Asking {
+            question: None,
+            places: Vec::new(),
+            raised_for: None,
+            wake_due: None,
+            wake_waiting: false,
+            answers_page: None,
+            since: std::time::Instant::now(),
+            delay: ANSWER_DELAY,
         }
-    }
-
-    /// The question on screen.
-    pub fn front(&self) -> Option<&LspConsent> {
-        self.0.front()
-    }
-
-    /// Answer the question on screen: it leaves the queue.
-    pub fn pop_front(&mut self) -> Option<LspConsent> {
-        self.0.pop_front()
-    }
-
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &LspConsent> {
-        self.0.iter()
     }
 }
 
@@ -1214,7 +1425,8 @@ impl LspConsent {
             && std::mem::discriminant(&self.provision) == std::mem::discriminant(&other.provision)
     }
 
-    /// One line describing what running the provisioning will do.
+    /// One line describing what running the provisioning will do. What a
+    /// remote host said is cut to a length a dialog can show.
     pub fn describe(&self) -> String {
         match &self.provision {
             LspProvision::Download(d) => d
@@ -1224,9 +1436,24 @@ impl LspConsent {
                 .map(|f| format!("download {f}"))
                 .unwrap_or_else(|| "download a binary".into()),
             LspProvision::Install(i) => format!("{} (requires {} on PATH)", i.describe, i.tool),
-            LspProvision::Remote { describe, .. } => format!("{describe} — on the remote host"),
+            LspProvision::Remote { describe, .. } => {
+                format!("{} — on the remote host", shown(describe))
+            }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
+            LspProvision::Build { runs, host, .. } => match host {
+                Some(_) => format!("It runs {} — on the remote host.", shown(runs)),
+                None => format!("It runs {runs}."),
+            },
         }
+    }
+}
+
+/// `text` cut to what a consent dialog shows of another host's words.
+pub(crate) fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    const MOST: usize = 400;
+    match text.char_indices().nth(MOST) {
+        None => std::borrow::Cow::Borrowed(text),
+        Some((cut, _)) => std::borrow::Cow::Owned(format!("{}…", &text[..cut])),
     }
 }
 
@@ -1400,4 +1627,31 @@ pub struct RemoteBrowser {
     pub omitted: usize,
     /// True while a `ListDir` is in flight, so the view can show it is loading.
     pub loading: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Questions;
+
+    /// Each question asked is answered by its own number only: a question
+    /// replaced in place is a new one, and an answer to one no longer on
+    /// screen answers nothing.
+    #[test]
+    fn an_answer_counts_for_the_question_it_names() {
+        let mut questions = Questions::default();
+        questions.ask("a", |_, _| false);
+        questions.ask("b", |_, _| false);
+        let a = questions.asked().unwrap();
+        // "a" asked again, about something else: under a new number.
+        questions.ask("a2", |q, _| q.starts_with('a'));
+        let a2 = questions.asked().unwrap();
+        assert_ne!(a, a2);
+        assert_eq!(questions.answer(a), None, "an answer to the replaced one");
+        assert_eq!(questions.front(), Some(&"a2"));
+        assert_eq!(questions.answer(a2), Some("a2"));
+        let b = questions.asked().unwrap();
+        assert_eq!(questions.answer(a2), None, "answered twice");
+        assert_eq!(questions.answer(b), Some("b"));
+        assert!(questions.is_empty() && questions.asked().is_none());
+    }
 }

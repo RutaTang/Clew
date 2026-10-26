@@ -227,11 +227,11 @@ fn import_graph_layout(g: &imports::ImportGraph) -> graphlayout::Layout {
         })
         .collect();
     let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
+    // A Go import as edges to its package's files, the nodes.
+    let packages = g.go_packages();
     for f in &files {
-        for e in g.imports(f) {
-            if let imports::Target::Internal(t) = &e.target
-                && let (Some(&a), Some(&b)) = (idx.get(f), idx.get(t))
-            {
+        for t in g.imported_files(f, &packages) {
+            if let (Some(&a), Some(&b)) = (idx.get(f), idx.get(&t)) {
                 edge_set.insert((a, b));
             }
         }
@@ -924,6 +924,7 @@ impl App {
             // time it is needed; one the LSP refine owns is left to it.
             calls = self.refresh_call_graph_in_use();
         }
+        let mut relayout = Task::none();
         if done.applied.changed {
             self.proj.import_graph_rev += 1;
             if let Some(cycles) = done.cycles {
@@ -933,6 +934,14 @@ impl App {
                 self.proj.import_ranks = ranks;
             }
             self.refresh_import_tree();
+            // The import map open over it, laid out from the graph before
+            // this one — empty, when opened while the project was still
+            // being read, it said "Nothing to show" until reopened — is laid
+            // out anew where files or edges came or went.
+            if done.applied.structure_changed && self.proj.overlay == Some(Overlay::ProjectImports)
+            {
+                relayout = self.refresh_graph_layout();
+            }
         }
         // The overview's module map is laid out from the resolved graph; one
         // drawn before the imports were resolved fills in now.
@@ -946,6 +955,7 @@ impl App {
             retired,
             overview,
             calls,
+            relayout,
             next,
             self.refresh_deferred_calls(landed),
         ])
@@ -2328,7 +2338,7 @@ impl App {
             }
             GraphMsg::ProjectCallsRefined {
                 generation, result, ..
-            } => self.on_project_calls_refined(generation, result),
+            } => self.on_project_calls_refined(generation, result.map(|done| *done)),
             GraphMsg::RemoteTsConfigsLoaded {
                 generation, result, ..
             } => self.on_remote_ts_configs_loaded(generation, result),

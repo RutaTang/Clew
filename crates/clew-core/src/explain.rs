@@ -680,6 +680,7 @@ pub fn save(store: &Path, cache: &Cache) -> std::io::Result<usize> {
 /// the least it can. The same cache always leaves out the same entries.
 fn save_capped(store: &Path, cache: &Cache, cap: u64) -> std::io::Result<usize> {
     let mut pairs: Vec<(&Node, &Cached)> = cache.iter().collect();
+    // The canonical order, which the cut is taken from the end of.
     pairs.sort_by(|a, b| a.0.cmp(b.0));
     let mut keep = pairs.len();
     loop {
@@ -694,6 +695,21 @@ fn save_capped(store: &Path, cache: &Cache, cap: u64) -> std::io::Result<usize> 
         let per_entry = (json.len() / keep).max(1);
         let excess = json.len() - cap as usize;
         keep = keep.saturating_sub(excess / per_entry + 1 + keep / 100);
+    }
+}
+
+/// Add to `merged` — the store as a save of a window's changes left it —
+/// every entry of `mine`, the window's copy the save was made from, that the
+/// store lacks: a summary cut to fit the store's size cap (by this save, an
+/// earlier one, or another window's) is kept for the session, as the status
+/// line says. What the window itself removed is not in `mine`, so it is not
+/// brought back. An entry another window removed stays too, for the session:
+/// the store cannot tell it from one it cut.
+pub fn keep_unstored(merged: &mut Cache, mine: &Cache) {
+    for (node, entry) in mine {
+        if !merged.contains_key(node) {
+            merged.insert(node.clone(), entry.clone());
+        }
     }
 }
 
@@ -1545,6 +1561,13 @@ impl Pass {
                 }
                 Verdict::Skip => {
                     self.unexplained += 1;
+                    // Skipped for its key's lack of a summary — but a group's
+                    // key is its first node, and a member added to a call
+                    // cycle can sort first: the members that have summaries
+                    // keep them exactly as recorded. Recording nothing for
+                    // them read, to `written`, as their summaries removed,
+                    // and the save deleted them.
+                    self.keep_recorded(gi);
                     // A re-explain judges no code without a summary, so what
                     // finds it must still find it. An automatic pass judged
                     // it: not added since (see `Pass`).
@@ -2024,6 +2047,20 @@ impl Pass {
                         .any(|s| self.cache.contains_key(&Node::Folder(s.clone())))
             }
             None => false,
+        }
+    }
+
+    /// Keep the recorded summary of each node of group `gi` that has one
+    /// (not a failure placeholder), as it is.
+    fn keep_recorded(&mut self, gi: usize) {
+        for node in &self.plan.groups[gi].nodes {
+            if let Some(had) = self
+                .prev
+                .get(node)
+                .filter(|c| !is_error_summary(&c.summary))
+            {
+                self.cache.insert(node.clone(), had.clone());
+            }
         }
     }
 
@@ -3307,6 +3344,47 @@ mod tests {
             generated,
             [unrelated, file("/p/src/b.rs"), folder("/p/src")]
         );
+    }
+
+    /// A call cycle whose new member sorts first is keyed by that member,
+    /// which has no summary yet; a re-explain of other code skips the group,
+    /// and the members that have summaries keep them as recorded. Recording
+    /// nothing for them read as their summaries removed, and the save
+    /// deleted what had been paid for.
+    #[test]
+    fn a_skipped_cycle_keeps_its_members_summaries() {
+        let cycle = |with_atom: bool| {
+            let a = "/p/src/a.rs";
+            let mut functions = vec![
+                f(a, "pexpr", &[(a, "pterm")]),
+                f(a, "pterm", &[(a, "pexpr")]),
+                f("/p/src/b.rs", "other", &[]),
+            ];
+            if with_atom {
+                functions[0] = f(a, "pexpr", &[(a, "pterm"), (a, "patom")]);
+                functions.push(f(a, "patom", &[(a, "pexpr")]));
+            }
+            let mut inputs = two_file_project("{}");
+            inputs.files[0].functions = functions
+                .iter()
+                .filter(|f| f.file == Path::new(a))
+                .map(|f| (f.file.clone(), f.name.clone(), 0))
+                .collect();
+            inputs.files[1].functions = vec![("/p/src/b.rs".into(), "other".into(), 0)];
+            inputs.functions = functions;
+            inputs
+        };
+        let (fresh, _, _) = pass_with(&cycle(false), &Cache::new(), Reuse::SamePrompt);
+        let pexpr = fnode("/p/src/a.rs", "pexpr");
+        let pterm = fnode("/p/src/a.rs", "pterm");
+        assert!(fresh.contains_key(&pexpr) && fresh.contains_key(&pterm));
+        let (after, _, _) = pass_with(
+            &cycle(true),
+            &fresh,
+            Reuse::Node(fnode("/p/src/b.rs", "other")),
+        );
+        assert_eq!(after.get(&pexpr), fresh.get(&pexpr), "kept as recorded");
+        assert_eq!(after.get(&pterm), fresh.get(&pterm), "kept as recorded");
     }
 
     /// `Pass::written` names each entry the pass changed, with the identity

@@ -118,7 +118,7 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
         );
         // Ask before writing.
         fake.send(json!({"jsonrpc": "2.0", "id": 102, "method": "session/request_permission", "params": {"sessionId": "s1",
-            "toolCall": {"toolCallId": "t2", "title": "Write b.rs", "kind": "edit"},
+            "toolCall": {"toolCallId": "t2", "title": "Write b.rs", "kind": "edit", "rawInput": {"path": "src/new/b.rs"}},
             "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"}, {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}})).await;
         let answer = fake.recv().await;
         assert_eq!(answer["id"], 102);
@@ -190,6 +190,10 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
             AgentEvent::Text { text: t, .. } => text.push_str(&t),
             AgentEvent::Permission(request) => {
                 assert_eq!(request.tool.title.as_deref(), Some("Write b.rs"));
+                assert_eq!(
+                    request.tool.raw_input,
+                    Some(json!({"path": "src/new/b.rs"}))
+                );
                 assert_eq!(request.options.len(), 2);
                 agent.answer_permission(request.id, Some("yes"));
                 agent.answer_permission(request.id, Some("again"));
@@ -221,6 +225,7 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
                 seen.push("thought".to_string());
             }
             AgentEvent::Exited(why) => panic!("exited: {why}"),
+            AgentEvent::PermissionWithdrawn { .. } => panic!("nothing was withdrawn"),
             AgentEvent::Options { .. } => {}
         }
         if text == "Because reasons." {
@@ -233,6 +238,59 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
         ["plan", "thought", "call", "permission", "written", "update"]
     );
     agent_task.await.unwrap();
+}
+
+/// A turn's end is never told before the updates the agent sent ahead of
+/// its answer: they come out of the reader on a path of their own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_turns_end_comes_after_its_last_updates() {
+    const N: usize = 200;
+    let dir = project();
+    let root = dir.path().canonicalize().unwrap();
+    let (reader, writer, mut fake) = start();
+    let read_path = root.join("src/a.rs");
+    let agent_task = tokio::spawn(async move {
+        fake.initialize(json!([])).await;
+        let new = fake.recv().await;
+        fake.send(json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "s1"}}))
+            .await;
+        let prompt = fake.recv().await;
+        let chunk = |text: &str| {
+            json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "s1",
+                "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+        };
+        // In one write: updates, a read (which the client serves off its
+        // thread), the last update, and the answer right behind it.
+        let mut burst: String = (0..N)
+            .map(|i| format!("{}\n", chunk(&i.to_string())))
+            .collect();
+        let read = json!({"jsonrpc": "2.0", "id": 100, "method": "fs/read_text_file",
+            "params": {"sessionId": "s1", "path": read_path.to_string_lossy()}});
+        let answer =
+            json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}});
+        burst.push_str(&format!("{read}\n{}\n{answer}\n", chunk("last")));
+        fake.out.write_all(burst.as_bytes()).await.unwrap();
+        assert_eq!(fake.recv().await["result"]["content"], "one\ntwo\nthree\n");
+        fake
+    });
+    let (agent, mut events) = Agent::over(reader, writer, &root).await.unwrap();
+    let session = agent.new_session(&[]).await.unwrap();
+    let stop = agent.prompt(&session, vec![text_block("go")]).await;
+    assert_eq!(stop.unwrap(), StopReason::EndTurn);
+    let mut told = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let AgentEvent::Text { session, text } = &event {
+            assert_eq!(event.session(), Some(session.as_str()));
+            told.push(text.clone());
+        }
+    }
+    assert_eq!(
+        told.len(),
+        N + 1,
+        "every update is an event by the time the turn ends"
+    );
+    assert_eq!(told.last().map(String::as_str), Some("last"));
+    drop(agent_task.await.unwrap());
 }
 
 #[tokio::test]
@@ -272,6 +330,61 @@ async fn cancelling_a_turn_answers_its_open_permissions() {
     agent.cancel(&session);
     assert_eq!(turn.await.unwrap().unwrap(), StopReason::Cancelled);
     agent_task.await.unwrap();
+}
+
+/// A permission request the agent withdraws (`$/cancel_request`) is
+/// answered "cancelled" and taken back from the user; one never asked is
+/// nothing to withdraw.
+#[tokio::test]
+async fn a_withdrawn_permission_request_is_answered_and_taken_back() {
+    let dir = project();
+    let root = dir.path().canonicalize().unwrap();
+    let (reader, writer, mut fake) = start();
+    let agent_task = tokio::spawn(async move {
+        fake.initialize(json!([])).await;
+        let new = fake.recv().await;
+        fake.send(json!({"jsonrpc": "2.0", "id": new["id"], "result": {"sessionId": "s9"}}))
+            .await;
+        let prompt = fake.recv().await;
+        fake.send(json!({"jsonrpc": "2.0", "id": "perm", "method": "session/request_permission", "params": {"sessionId": "s9",
+            "toolCall": {"toolCallId": "t"}, "options": [{"optionId": "ok", "name": "OK", "kind": "allow_once"}]}})).await;
+        fake.send(json!({"jsonrpc": "2.0", "method": "$/cancel_request", "params": {"requestId": "other"}}))
+            .await;
+        fake.send(json!({"jsonrpc": "2.0", "method": "$/cancel_request", "params": {"requestId": "perm"}}))
+            .await;
+        let answer = fake.recv().await;
+        assert_eq!(answer["id"], "perm");
+        assert_eq!(answer["result"]["outcome"]["outcome"], "cancelled");
+        fake.send(
+            json!({"jsonrpc": "2.0", "id": prompt["id"], "result": {"stopReason": "end_turn"}}),
+        )
+        .await;
+        fake
+    });
+    let (agent, mut events) = Agent::over(reader, writer, &root).await.unwrap();
+    let agent = Arc::new(agent);
+    let session = agent.new_session(&[]).await.unwrap();
+    let turn = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.prompt("s9", vec![text_block("go")]).await })
+    };
+    let AgentEvent::Permission(request) = events.recv().await.unwrap() else {
+        panic!("expected a permission request");
+    };
+    let withdrawn = events.recv().await.unwrap();
+    assert_eq!(
+        withdrawn,
+        AgentEvent::PermissionWithdrawn {
+            id: request.id,
+            session: session.clone()
+        }
+    );
+    // Answered already: the user's late answer goes nowhere.
+    agent.answer_permission(request.id, Some("ok"));
+    assert_eq!(turn.await.unwrap().unwrap(), StopReason::EndTurn);
+    let mut fake = agent_task.await.unwrap();
+    let quiet = tokio::time::timeout(Duration::from_millis(200), fake.recv()).await;
+    assert!(quiet.is_err(), "nothing more was sent: {quiet:?}");
 }
 
 #[tokio::test]

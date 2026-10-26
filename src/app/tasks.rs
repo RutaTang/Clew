@@ -438,7 +438,7 @@ pub(crate) async fn refine_stream(
         .send(Message::Graph(GraphMsg::ProjectCallsRefined {
             stamp,
             generation,
-            result,
+            result: result.map(Box::new),
         }))
         .await;
 }
@@ -3098,15 +3098,33 @@ where
     })
 }
 
+///
+/// `confine` is the project root when `abs` names a file of the project: it
+/// must then really be one. `O_NOFOLLOW` refuses only a link at the LEAF, and a
+/// path under the root by its text can leave it through a linked directory on
+/// the way — a README's `[Setup](setup/id_rsa)` with `setup -> ../../.ssh`, or
+/// a repo-shipped bookmark naming the same — which the server's `ReadFile`
+/// confines and this fallback read as asked. `None` for a file outside the
+/// project, a dependency's source a language server resolved.
 pub(crate) async fn load_file(
     pane: usize,
     abs: PathBuf,
     target: Option<usize>,
+    confine: Option<PathBuf>,
 ) -> (usize, PathBuf, Option<usize>, Result<String, String>) {
     let read_path = abs.clone();
-    let result = tokio::task::spawn_blocking(move || read_text_file(&read_path))
-        .await
-        .unwrap_or_else(|e| Err(e.to_string()));
+    let result = tokio::task::spawn_blocking(move || {
+        if let Some(root) = confine
+            && !clew_core::fs_scan::is_inside(&root, &read_path)
+        {
+            return Err(
+                "cannot read: missing, a symlink, or not a file inside the project".to_string(),
+            );
+        }
+        read_text_file(&read_path)
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()));
     (pane, abs, target, result)
 }
 
@@ -4145,19 +4163,24 @@ mod pass_tests {
             None,
             |r| {
                 let src = r.src.clone();
-                render::run_guarded(
-                    1024 * 1024,
-                    std::time::Duration::from_millis(300),
-                    move || match src.as_str() {
-                        "boom" => panic!("index out of bounds"),
-                        "bad" => None,
-                        "forever" => {
-                            std::thread::sleep(std::time::Duration::from_secs(3));
-                            None
-                        }
-                        _ => Some(r#"<svg viewBox="0 0 10 10"></svg>"#.to_string()),
-                    },
-                )
+                // Only the runaway is meant to meet the deadline. The others
+                // get room: a panic runs the panic hook, which on a loaded
+                // machine with `RUST_BACKTRACE` set spends longer than a
+                // runaway's deadline capturing the backtrace — and the crash
+                // then read as a timeout.
+                let deadline = match src.as_str() {
+                    "forever" => std::time::Duration::from_millis(300),
+                    _ => std::time::Duration::from_secs(30),
+                };
+                render::run_guarded(1024 * 1024, deadline, move || match src.as_str() {
+                    "boom" => panic!("index out of bounds"),
+                    "bad" => None,
+                    "forever" => {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        None
+                    }
+                    _ => Some(r#"<svg viewBox="0 0 10 10"></svg>"#.to_string()),
+                })
             },
         );
         let mut rendered: Vec<u64> = batch.rendered.keys().copied().collect();

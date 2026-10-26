@@ -51,6 +51,29 @@ impl App {
     ) -> Task<Message> {
         self.update.checking = false;
         match result {
+            // A download or install is under way for the release on offer, and
+            // it stays the one on offer: replaced, the banner named a version
+            // that was not the one downloading, and the finished image was
+            // checked against the NEW version — which it does not hold, so the
+            // update the user started failed. The newer one is found by the
+            // next check, from the version this installs.
+            Ok(release)
+                if matches!(
+                    self.update.phase,
+                    UpdatePhase::Downloading | UpdatePhase::Installing
+                ) && self.update.available.is_some() =>
+            {
+                if manual {
+                    let running = self.update.available.as_ref().map(|u| u.version);
+                    self.status = match running {
+                        Some(running) if release.version > running => format!(
+                            "clew {} is available — after the update to {running} in progress",
+                            release.version
+                        ),
+                        _ => "The update is already in progress".into(),
+                    };
+                }
+            }
             Ok(release) if release.version > updater::current_version() => {
                 let notes = iced::widget::markdown::parse(&release.notes).collect();
                 self.update.available = Some(AvailableUpdate {
@@ -58,24 +81,16 @@ impl App {
                     dmg_url: release.dmg_url,
                     notes,
                 });
-                // A fresh find clears any earlier failure / progress — but only
-                // when nothing is running. A check can land mid-download (the
-                // startup check racing a download started from an earlier
-                // find, or a manual "Check for Updates" pressed during one),
-                // and resetting the phase there re-armed the install button
-                // underneath a download that was still going: a second press
+                // A fresh find clears any earlier failure / progress. Never
+                // under a running download or install (the arm above): a check
+                // can land mid-download (the startup check racing a download
+                // started from an earlier find, or a manual "Check for
+                // Updates" pressed during one), and resetting the phase there
+                // re-armed the install button underneath it — a second press
                 // started a second download of the same image and orphaned the
-                // first. The generation counter makes the orphan harmless (its
-                // completion is dropped at `on_update_downloaded`), so this is
-                // wasted bandwidth rather than a bad install, but there is no
-                // reason to allow it.
-                if !matches!(
-                    self.update.phase,
-                    UpdatePhase::Downloading | UpdatePhase::Installing
-                ) {
-                    self.update.phase = UpdatePhase::Idle;
-                    self.update.progress = None;
-                }
+                // first.
+                self.update.phase = UpdatePhase::Idle;
+                self.update.progress = None;
                 if manual {
                     self.status = format!("clew {} is available", release.version);
                 }
@@ -281,6 +296,21 @@ impl App {
                 self.status = format!("Update failed: {e}");
                 Task::none()
             }
+        }
+    }
+
+    /// The quit an installed update asked for was cancelled — a window held
+    /// edits it could not send, and the user kept clew open. The helper
+    /// swaps the update in only if clew exits within its wait, so the window
+    /// says that, rather than "Restarting…" for as long as it went on
+    /// running, the update shown as still installing.
+    pub(crate) fn on_quit_cancelled(&mut self) {
+        if self.update.phase == UpdatePhase::Installing {
+            let kept = "clew was kept open — the update is installed if it quits within a \
+                        minute; after that, install it again";
+            self.update.phase = UpdatePhase::Failed(kept.into());
+            self.update.progress = None;
+            self.status = kept.into();
         }
     }
 

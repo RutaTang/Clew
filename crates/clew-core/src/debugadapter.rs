@@ -461,7 +461,7 @@ pub fn js_debug_server() -> Option<PathBuf> {
 /// Download, verify (pinned SHA-256), and unpack vscode-js-debug. Blocking.
 fn install_js_debug(cancel: &AtomicBool) -> Result<PathBuf, String> {
     let root = adapters_root().ok_or("no data directory")?;
-    std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+    store::create_store_dir(&root)?;
     let dest = js_debug_dir().ok_or("no data directory")?;
     store::install_download(&JS_DEBUG, &dest, &root, cancel)
 }
@@ -599,7 +599,7 @@ mod tests {
     #[cfg(unix)]
     fn fake_python(dir: &Path, probe_answer: &str) -> PathBuf {
         let log = dir.join("log");
-        let python = script(
+        script(
             &dir.join("bin/python3"),
             &format!(
                 "case \"$1\" in -c|-m) echo \"$(pwd) $PYTHONSAFEPATH $*\" >> '{log}' ;; esac\n\
@@ -610,11 +610,7 @@ mod tests {
                 log = log.display(),
                 mark = dir.join("installed").display(),
             ),
-        );
-        // Run bare (it does nothing then, and logs nothing), so the probe's
-        // deadline times the probe and not the OS's check of a new file.
-        crate::testutil::settle_new_executable(&python);
-        python
+        )
     }
 
     /// F3/F14: a missing debugpy is a consent request, not an install; the
@@ -771,7 +767,6 @@ mod tests {
             &dir.join("bin/python3"),
             "case \"$1\" in -m) sleep 60 ;; *) echo '0 0' ;; esac",
         );
-        crate::testutil::settle_new_executable(&python);
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let flip = {
             let cancel = cancel.clone();

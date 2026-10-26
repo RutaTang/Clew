@@ -37,6 +37,9 @@ pub struct Trust {
     /// command ([`lsp_fingerprint`]) or only options ([`lsp_options_fingerprint`]),
     /// and the two hashes are domain-separated, so a config that changes shape
     /// has to be approved again rather than inheriting the other answer.
+    ///
+    /// The same map holds the leave given to a store server to build the
+    /// project, under [`build_key`] rather than a language.
     #[serde(default)]
     lsp: BTreeMap<String, BTreeMap<String, String>>,
 }
@@ -203,6 +206,18 @@ impl Trust {
             .unwrap_or_default()
     }
 
+    /// Whether the user let the store server `server` build this project on
+    /// `host` (`None` = this machine): run the project's own code that the
+    /// registry names ([`crate::lsp::registry::ServerSpec::runs_project_code`]).
+    pub fn is_build_trusted(&self, host: Option<&str>, root: &Path, server: &str) -> bool {
+        self.is_lsp_approved(host, root, &build_key(server), &build_fingerprint(server))
+    }
+
+    /// Let the store server `server` build this project on `host`.
+    pub fn trust_build(&mut self, host: Option<&str>, root: &Path, server: &str) {
+        self.approve_lsp(host, root, &build_key(server), &build_fingerprint(server));
+    }
+
     /// Every fingerprint approved anywhere, on any host — what keeps a staged
     /// copy in `exec/` alive (see [`sweep_exec`]).
     fn all_fingerprints(&self) -> std::collections::HashSet<&str> {
@@ -211,6 +226,36 @@ impl Trust {
             .flat_map(|m| m.values().map(String::as_str))
             .collect()
     }
+}
+
+/// The approval-map key under which [`Trust::trust_build`] records that the
+/// store server `server` may build a project.
+///
+/// It rides in the same per-project map as the `lsp.toml` approvals, which is
+/// what carries it everywhere an approval goes: pushed to the clew-server with
+/// the rest (`LspApprovals`), read from this host's store by the agent's and
+/// the MCP server's language-server pools, forgotten with the root. A language
+/// key is a slug (`rust`, `cpp`) and never holds a `:`, so the two kinds of
+/// entry cannot collide.
+pub fn build_key(server: &str) -> String {
+    format!("build:{server}")
+}
+
+/// Domain tag for [`build_fingerprint`], so the value can never equal a
+/// command or options fingerprint.
+const BUILD_DOMAIN: &str = "clew.lsp.build.v1";
+
+/// The value recorded under [`build_key`]. It names the server and nothing
+/// else — not its version: leave to build a project is about the project and
+/// what the server does with it, and an upgrade does not change either.
+pub fn build_fingerprint(server: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [BUILD_DOMAIN, server] {
+        h.update((part.len() as u64).to_le_bytes());
+        h.update(part.as_bytes());
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// The absolute form of a (possibly project-relative) lsp.toml `command`.
@@ -277,6 +322,18 @@ pub fn lsp_fingerprint(
 /// user gave to a different question.
 const OPTIONS_DOMAIN: &str = "clew.lsp.init-options.v1";
 
+/// The arguments as one hashed part: their count, then each with its
+/// length. Joined by a separator they were not: `[]` and `[""]` read the same,
+/// as did an argument holding the separator and the two around it — a
+/// consent given to the one let the other run.
+fn args_part(args: &[String]) -> String {
+    let mut part = format!("{}", args.len());
+    for arg in args {
+        part.push_str(&format!(";{}:{arg}", arg.len()));
+    }
+    part
+}
+
 /// A stable fingerprint of the `init_options` a config asks clew to send in
 /// `initialize`, for the case where the config names NO `command` — the
 /// server binary is then clew's own store-installed (or toolchain) copy,
@@ -315,13 +372,7 @@ pub fn lsp_options_fingerprint(
         serde_json::to_string(init_options).map_err(|e| format!("lsp.toml init_options: {e}"))?;
     let mut h = Sha256::new();
     // Length-prefix each field so no rearrangement of the parts collides.
-    for part in [
-        OPTIONS_DOMAIN,
-        &args.join("\u{1e}"),
-        server,
-        version,
-        &options,
-    ] {
+    for part in [OPTIONS_DOMAIN, &args_part(args), server, version, &options] {
         h.update((part.len() as u64).to_le_bytes());
         h.update(part.as_bytes());
     }
@@ -407,7 +458,7 @@ fn hash_command(
     // Length-prefix each field so no rearrangement of the parts collides.
     for part in [
         real.to_string_lossy().as_ref(),
-        &args.join("\u{1e}"),
+        &args_part(args),
         server,
         version,
         &options,
@@ -495,7 +546,8 @@ impl CommandProbe {
     ///
     /// - **Outside the project, in a trusted location** — owned by the user or
     ///   root, and neither it nor any directory above it writable by anyone
-    ///   else ([`trusted_location`]): the file itself is returned, by its
+    ///   else by its mode bits ([`trusted_location`], which says what it does
+    ///   not read): the file itself is returned, by its
     ///   canonical path. The repository cannot touch it, so there is no
     ///   check-to-exec race to close, and running it in place is what lets
     ///   a real toolchain work at all: `rust-analyzer` found through
@@ -611,10 +663,18 @@ pub fn stage_lsp_command(
 }
 
 /// Whether nobody but its owner — the user, or root — can change the file at
-/// `path` or re-point any directory above it: the file and every ancestor are
-/// owned by the current user or root, the file is writable by neither group
-/// nor others, and each ancestor is too — unless it is sticky (like `/tmp`),
-/// where others may add entries but cannot rename or replace ours.
+/// `path` or re-point any directory above it, by their mode bits: the file
+/// and every ancestor are owned by the current user or root, the file is
+/// writable by neither group nor others, and each ancestor is too — unless it
+/// is sticky (like `/tmp`), where others may add entries but cannot rename or
+/// replace ours.
+///
+/// Mode bits are all it reads. A POSIX ACL (Linux) that lets another user
+/// write shows in the group bits — its mask — and is refused; a macOS ACL
+/// entry is kept apart from the mode and is not read, so there a file another
+/// local user was granted write to by an ACL counts as private. The
+/// repository, which this guards against, cannot grant itself one outside
+/// the project.
 ///
 /// `path` must be canonical (no symlink components), which is what makes a
 /// walk over its ancestors a statement about the real directories.
@@ -1110,6 +1170,43 @@ mod tests {
         });
     }
 
+    /// Leave to build is per project, per host and per server, survives an
+    /// approval of the same language's `lsp.toml`, and goes with the root.
+    #[test]
+    fn leave_to_build_is_per_project_host_and_server() {
+        with_data_dir("clew-trust-build", |dir| {
+            let project = dir.join("proj");
+            let other = dir.join("other");
+            std::fs::create_dir_all(&project).unwrap();
+            std::fs::create_dir_all(&other).unwrap();
+            let mut t = Trust::load();
+            assert!(!t.is_build_trusted(None, &project, "rust-analyzer"));
+            t.update(|t| {
+                t.trust_build(None, &project, "rust-analyzer");
+                // The same language's options approval is a different entry.
+                t.approve_lsp(None, &project, "rust", "fp-1");
+            })
+            .unwrap();
+            let back = Trust::load();
+            assert!(back.is_build_trusted(None, &project, "rust-analyzer"));
+            assert!(back.is_lsp_approved(None, &project, "rust", "fp-1"));
+            assert!(!back.is_build_trusted(None, &project, "zls"));
+            assert!(!back.is_build_trusted(None, &other, "rust-analyzer"));
+            assert!(!back.is_build_trusted(Some("host"), &project, "rust-analyzer"));
+            // Pushed to the server with the rest, under a key no language has.
+            let pushed = back.lsp_approvals_for(None, &project);
+            assert!(pushed.contains(&(
+                build_key("rust-analyzer"),
+                build_fingerprint("rust-analyzer")
+            )));
+            assert!(build_key("rust-analyzer").contains(':'));
+            assert_ne!(build_fingerprint("rust-analyzer"), build_fingerprint("zls"));
+
+            t.update(|t| t.forget_root(None, &project)).unwrap();
+            assert!(!Trust::load().is_build_trusted(None, &project, "rust-analyzer"));
+        });
+    }
+
     #[test]
     fn forgetting_a_root_drops_its_lsp_approvals() {
         with_data_dir("clew-trust-forget", |dir| {
@@ -1395,6 +1492,16 @@ mod staging_tests {
             base,
             lsp_options_fingerprint(&[], "rust-analyzer", "1", &opts).unwrap()
         );
+        // No two argument lists read the same: not none and one empty one,
+        // nor one holding a separator and the two around it.
+        let of = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+            lsp_options_fingerprint(&args, "rust-analyzer", "1", &opts).unwrap()
+        };
+        assert_ne!(of(&[]), of(&[""]));
+        assert_ne!(of(&["--a\u{1e}--b"]), of(&["--a", "--b"]));
+        assert_ne!(of(&["a;1:b"]), of(&["a", "b"]));
+        assert_ne!(of(&["", ""]), of(&[""]));
 
         // Domain separation: approving a command whose fingerprint covers
         // these very options must not satisfy the options-only check.

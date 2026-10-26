@@ -517,20 +517,26 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
             // left 4 so the button's own inner padding lands its text at ~12,
             // aligned with the title above (not indented past it).
             container(Row::with_children(actions).spacing(4)).padding(pad(4, 12)),
-            scrollable(
-                Column::with_children(rows)
-                    .spacing(8)
-                    .width(Fill)
-                    .padding(Padding {
-                        top: 2.0,
-                        right: 10.0,
-                        bottom: 8.0,
-                        left: 12.0
-                    }),
-            )
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            .height(iced::Length::Fill),
+            // From its top for each node it follows: one widget for all of
+            // them kept where the last was scrolled to, and the next one's
+            // text, when it came, opened partway down.
+            crate::ui::fresh::fresh_for(
+                node,
+                scrollable(
+                    Column::with_children(rows)
+                        .spacing(8)
+                        .width(Fill)
+                        .padding(Padding {
+                            top: 2.0,
+                            right: 10.0,
+                            bottom: 8.0,
+                            left: 12.0
+                        }),
+                )
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(iced::Length::Fill),
+            ),
         ]
         .spacing(8),
     )
@@ -591,8 +597,12 @@ pub(crate) fn human_size(bytes: u64) -> String {
 
 pub(crate) fn lsp_consent_modal(
     consent: &crate::LspConsent,
+    number: u64,
     waiting: usize,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'_, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     use crate::LspProvision;
     const SERVER_BLURB: &str = "clew manages its own “go to definition” server for this \
                                 language, separate from anything on your system:";
@@ -604,7 +614,22 @@ pub(crate) fn lsp_consent_modal(
             "Install",
         ),
         LspProvision::Install(_) => ("Install a language server?", SERVER_BLURB, "Install"),
+        LspProvision::Build { .. } => (
+            "Let the language server build this project?",
+            "To understand this code, its language server builds the project — which runs \
+             the project's own code, with your permissions. Allow it only for code you \
+             trust; without it clew still reads the project with its own parser.",
+            "Allow",
+        ),
         _ => ("Download a language server?", SERVER_BLURB, "Download"),
+    };
+    // Leave to build is given to one project, and the button says which.
+    let action = match &consent.provision {
+        LspProvision::Build { root, .. } => match root.file_name() {
+            Some(name) => format!("{action} in {}", name.to_string_lossy()),
+            None => action.to_string(),
+        },
+        _ => action.to_string(),
     };
 
     let panel = container(
@@ -612,42 +637,55 @@ pub(crate) fn lsp_consent_modal(
             text(title).size(ts::TITLE).color(theme::fg()),
             text(blurb).size(ts::BASE).color(theme::fg()),
             container(
-                text(format!("{} {}", consent.server_name, consent.version))
-                    .size(ts::BODY)
-                    .color(theme::accent())
-                    .font(Font::MONOSPACE)
-                    .wrapping(Wrapping::None),
+                // Leave to build is not about a version: any version builds.
+                text(match consent.provision {
+                    LspProvision::Build { .. } => {
+                        crate::app::model::shown(&consent.server_name).into_owned()
+                    }
+                    _ => format!(
+                        "{} {}",
+                        crate::app::model::shown(&consent.server_name),
+                        crate::app::model::shown(&consent.version)
+                    ),
+                })
+                .size(ts::BODY)
+                .color(theme::accent())
+                .font(Font::MONOSPACE)
+                .wrapping(Wrapping::None),
             )
             .padding(8)
             .width(Fill)
             .style(theme::editor),
+            // Wrapped: what it runs is the point of the question, and a
+            // line cut at the dialog's edge hid the most of it.
             text(consent.describe())
                 .size(ts::BODY)
                 .color(theme::dim())
-                .wrapping(Wrapping::None),
-            // Asked one at a time: say that more follow, so answering this
-            // one and seeing another does not read as the same question again.
-            text(match waiting {
-                0 => String::new(),
-                1 => "1 more install is waiting for your answer after this one.".to_string(),
-                n => format!("{n} more installs are waiting for your answer after this one."),
-            })
-            .size(ts::SMALL)
-            .color(theme::dim()),
+                .wrapping(Wrapping::WordOrGlyph),
+        ]
+        // Asked one at a time: say that more follow, so answering this one
+        // and seeing another does not read as the same question again.
+        .push(more_questions(waiting))
+        .push(
             row![
                 space().width(Fill),
                 button(text("Not now").size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::ConsentDismissed)),
-                button(text(action).size(ts::BASE))
-                    .style(theme::primary_button)
-                    .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::ConsentAllowed)),
+                    .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
+                crate::ui::fresh::allow(
+                    ready,
+                    button(text(action).size(ts::BASE))
+                        .style(theme::primary_button)
+                        .padding([6, 16])
+                        .on_press_maybe(
+                            ready.then_some(Message::Lsp(LspMsg::ConsentAllowed(number)))
+                        )
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),
-        ]
+        )
         .spacing(14),
     )
     .width(DIALOG_W)
@@ -655,7 +693,21 @@ pub(crate) fn lsp_consent_modal(
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
+    // Fresh for each question: one replaced in place is drawn with buttons
+    // of its own — a press held on the last one's Allow is not this one's.
+    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh(number, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
+}
+
+/// "N more questions are waiting…", under a question `waiting` more follow;
+/// nothing under the last.
+fn more_questions<'a>(waiting: usize) -> Option<Element<'a, Message>> {
+    let said = match waiting {
+        0 => return None,
+        1 => "1 more question is waiting for your answer after this one.".to_string(),
+        n => format!("{n} more questions are waiting for your answer after this one."),
+    };
+    Some(text(said).size(ts::SMALL).color(theme::dim()).into())
 }
 
 /// Confirm what the project's own `lsp.toml` asks clew to do for a language:
@@ -664,7 +716,18 @@ pub(crate) fn lsp_consent_modal(
 /// before it takes effect — options included, because a server will run a
 /// program named in them (rust-analyzer's `overrideCommand`, pyright's
 /// `pythonPath`) just as readily as clew would run a `command`.
-pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'_, Message> {
+///
+/// `waiting` more questions follow it, which it says, as the install consent
+/// does: answering this one and seeing another must not read as the same
+/// question again.
+pub(crate) fn lsp_command_modal(
+    pending: &crate::PendingLspCommand,
+    number: u64,
+    waiting: usize,
+    asked: impl Into<crate::ui::placed::Asked>,
+) -> Element<'_, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     // One block per thing being approved, each only when it exists: a modal
     // that showed an empty command box for an options-only config would be
     // asking about something the repository did not ask for.
@@ -733,20 +796,28 @@ pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'
             .size(ts::BODY)
             .color(theme::dim())
             .wrapping(Wrapping::None),
+        ]
+        .push(more_questions(waiting))
+        .push(
             row![
                 space().width(Fill),
                 button(text(decline).size(ts::BASE))
                     .style(theme::primary_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::CommandDismissed)),
-                button(text(accept).size(ts::BASE))
-                    .style(theme::toolbar_button)
-                    .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::CommandAllowed)),
+                    .on_press(Message::Lsp(LspMsg::CommandDismissed(number))),
+                crate::ui::fresh::allow(
+                    ready,
+                    button(text(accept).size(ts::BASE))
+                        .style(theme::toolbar_button)
+                        .padding([6, 16])
+                        .on_press_maybe(
+                            ready.then_some(Message::Lsp(LspMsg::CommandAllowed(number)))
+                        )
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),
-        ]
+        )
         .spacing(14),
     )
     .width(DIALOG_W)
@@ -754,12 +825,20 @@ pub(crate) fn lsp_command_modal(pending: &crate::PendingLspCommand) -> Element<'
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
+    // Fresh for each question: one replaced in place is drawn with buttons
+    // of its own — a press held on the last one's Allow is not this one's.
+    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh(number, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }
 
 // ---------------------------------------------------------------- consent modal
 
-pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
+pub(crate) fn consent_modal(
+    root: &std::path::Path,
+    asked: impl Into<crate::ui::placed::Asked>,
+) -> Element<'_, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let name = root
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -796,11 +875,18 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
                 button(text("Not now").size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Project(ProjectMsg::ConsentDenied)),
-                button(text(format!("Allow in {name}")).size(ts::BASE))
-                    .style(theme::primary_button)
-                    .padding([6, 16])
-                    .on_press(Message::Project(ProjectMsg::ConsentAllowed)),
+                    .on_press(Message::Project(ProjectMsg::ConsentDenied(
+                        root.to_path_buf()
+                    ))),
+                crate::ui::fresh::allow(
+                    ready,
+                    button(text(format!("Allow in {name}")).size(ts::BASE))
+                        .style(theme::primary_button)
+                        .padding([6, 16])
+                        .on_press_maybe(ready.then(|| {
+                            Message::Project(ProjectMsg::ConsentAllowed(root.to_path_buf()))
+                        }))
+                ),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -812,5 +898,8 @@ pub(crate) fn consent_modal(root: &std::path::Path) -> Element<'_, Message> {
     .style(theme::modal_panel);
 
     // The choice is required: the backdrop ignores clicks (Escape declines).
+    // Fresh for each folder asked about (`fresh`); where its answers are
+    // (`placed`).
+    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh_for(&root, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }

@@ -133,6 +133,20 @@ impl App {
     /// subscription brings up the new transport, which hands back a fresh channel
     /// via `ServerMsg::Connected`. The Connect modal, if open, moves to "connecting".
     pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) -> Task<Message> {
+        let headline = format!("Connecting to {}…", target.label());
+        self.connect_to_saying(target, headline)
+    }
+
+    /// [`Self::connect_to`], with `headline` in the status line instead of
+    /// "Connecting to …". What the switch dropped with the old project (an
+    /// unsaved note, unsent remote state) follows it there: a caller that set
+    /// its own status after the switch overwrote that notice, so the loss went
+    /// unsaid.
+    pub(crate) fn connect_to_saying(
+        &mut self,
+        target: connect::ConnTarget,
+        headline: String,
+    ) -> Task<Message> {
         let label = target.label();
         // Stop the old project's work FIRST: `drop_connection_state` drops the
         // project's link (its stream ids) and the server link (the channel) —
@@ -151,9 +165,7 @@ impl App {
         // screen, and fed the next question, until the new host's scan
         // replaced them. What it reports (a discarded draft, unsaved remote
         // state) is kept in the status line below.
-        let before = self.status.clone();
-        self.forget_project_state();
-        let discarded = (self.status != before).then(|| self.status.clone());
+        let discarded = self.forget_project_state();
         self.pending_scan_root = None;
         self.scanning = false;
         // A folder awaiting consent, or a file waiting to open once a scan
@@ -174,13 +186,34 @@ impl App {
         self.remote_ai_opt_in = false;
         self.connection = target;
         self.status = match discarded {
-            Some(note) => format!("Connecting to {label}… — {note}"),
-            None => format!("Connecting to {label}…"),
+            Some(note) => format!("{headline} — {note}"),
+            None => headline,
         };
         if let Some(ui) = &mut self.connect {
             ui.stage = ConnectStage::Connecting { label };
         }
         stop_old
+    }
+
+    /// Trust or Forget, answered for the host this window is on: connect to it
+    /// again. A project open on that host stays open — this is the reconnect
+    /// a dropped link makes on its own (`on_server_disconnected`), asked for by
+    /// the user: the new transport re-syncs the project and flushes its unsent
+    /// edits (`on_server_ready`). Through `connect_to` the same host's project
+    /// was forgotten, edit journal and all, for a key the user had just
+    /// checked. With no project open there is nothing to keep, and the switch
+    /// moves the Connect modal on to the folder picker as any connect does.
+    fn reconnect_saying(&mut self, target: connect::ConnTarget, headline: String) -> Task<Message> {
+        if self.proj.project.is_none() || target != self.connection {
+            return self.connect_to_saying(target, headline);
+        }
+        // A fresh transport for the same target, immediately (the user is
+        // waiting); its `Connected` drops whatever the old link still held.
+        self.conn_gen += 1;
+        self.conn_respawn = false;
+        self.connect = None;
+        self.status = headline;
+        Task::none()
     }
 
     /// Show the remote folder picker for `path` (home when `None`) and request its
@@ -293,6 +326,13 @@ impl App {
     /// reconnect meets the host's new key as unknown, and the Connect modal
     /// shows its fingerprint to be checked before it is trusted.
     pub(crate) fn on_connect_forget_host_key(&mut self, host: &str) -> Task<Message> {
+        // Only once the question has been within reach long enough to be
+        // read (`App::may_allow`).
+        if !self.may_allow(&crate::app::model::Question::ForgetHostKey(
+            host.to_string(),
+        )) {
+            return Task::none();
+        }
         let Some(ConnectUi {
             stage:
                 ConnectStage::HostKeyChanged {
@@ -313,13 +353,13 @@ impl App {
             Ok(removed) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let task = self.connect_to(target);
-                self.remote_ai_opt_in = opt_in;
-                self.status = format!(
+                let headline = format!(
                     "Forgot {removed} key{} clew had recorded for {host} — connecting; check \
                      the new key's fingerprint before trusting it",
                     if removed == 1 { "" } else { "s" }
                 );
+                let task = self.reconnect_saying(target, headline);
+                self.remote_ai_opt_in = opt_in;
                 task
             }
             Err(e) => {
@@ -337,6 +377,13 @@ impl App {
     /// known_hosts (`connect::trust_host_key`), never `~/.ssh/known_hosts`,
     /// and only for the host the refused connection looked up.
     pub(crate) fn on_connect_trust_host(&mut self, fingerprint: &str) -> Task<Message> {
+        // Only once the question has been within reach long enough to be
+        // read (`App::may_allow`).
+        if !self.may_allow(&crate::app::model::Question::TrustHost(
+            fingerprint.to_string(),
+        )) {
+            return Task::none();
+        }
         let Some(ConnectUi {
             stage: ConnectStage::TrustHost { target, key, .. },
             ..
@@ -361,14 +408,14 @@ impl App {
             Ok(path) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let task = self.connect_to(target);
-                self.remote_ai_opt_in = opt_in;
-                self.status = format!(
+                let headline = format!(
                     "Trusted {} key {} (recorded in {}) — connecting…",
                     key.kind,
                     key.fingerprint,
                     path.display()
                 );
+                let task = self.reconnect_saying(target, headline);
+                self.remote_ai_opt_in = opt_in;
                 task
             }
             Err(e) => {
@@ -464,6 +511,8 @@ impl App {
             }
             ConnectMsg::Close => {
                 self.connect = None;
+                // Back to reading (see `SettingsMsg::Close`).
+                self.code_focused = true;
                 Task::none()
             }
             ConnectMsg::Field(field, value) => self.on_connect_field(field, value),

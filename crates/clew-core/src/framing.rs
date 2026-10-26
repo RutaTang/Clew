@@ -1321,7 +1321,11 @@ pub async fn reap(child: tokio::process::Child, grace: Duration, own_group: bool
         };
         leader.exited_within(grace).await;
         leader.kill_group_async().await;
-        let _ = leader.child.start_kill();
+        // Not one reaped behind our back: its pid may name another process
+        // by now.
+        if leader.signalable {
+            let _ = leader.child.start_kill();
+        }
         let _ = leader.child.wait().await;
         return;
     }

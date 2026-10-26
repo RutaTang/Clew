@@ -2076,12 +2076,42 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
     };
     assert!(spec.command.contains("fake-lsp.sh"));
 
+    // An approval pushed for another project — the client's view from
+    // before this one was opened — is not this project's.
+    server
+        .handle(
+            40,
+            Request::LspApprovals {
+                root: "/the/last/project".into(),
+                approvals: vec![("rust".into(), spec.fingerprint.clone())],
+            },
+        )
+        .await;
+    assert!(
+        server
+            .handle(
+                41,
+                Request::SpawnLsp {
+                    proc: 9,
+                    language: "rust".into(),
+                },
+            )
+            .await
+            .is_none()
+    );
+    let refused = recv_reply(&mut rx, 41).await;
+    assert!(
+        matches!(refused, Event::Error { ref message, .. } if message.contains("not approved")),
+        "another project's approval was taken, got {refused:?}"
+    );
+
     // Push the approval; the same spawn now proceeds (the script exits at
     // once, so the proxy reports ProcessExited rather than an Error).
     server
         .handle(
             4,
             Request::LspApprovals {
+                root: root.to_string_lossy().into_owned(),
                 approvals: vec![("rust".into(), spec.fingerprint.clone())],
             },
         )
@@ -2532,6 +2562,7 @@ async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
         .handle(
             3,
             Request::LspApprovals {
+                root: root.to_string_lossy().into_owned(),
                 approvals: vec![("rust".into(), spec.fingerprint)],
             },
         )

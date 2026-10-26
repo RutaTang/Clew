@@ -38,6 +38,12 @@ impl App {
         if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
             anchor.superseded = true;
         }
+        // A Go package (an import names its directory: the Imports tab's
+        // row, the map's) opens at its first file: a directory is no file.
+        let abs = match abs.extension() {
+            None => self.proj.import_graph.package_file(&abs).unwrap_or(abs),
+            Some(_) => abs,
+        };
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
@@ -299,8 +305,16 @@ impl App {
         });
         self.status = format!("Loading {rel}…");
         let stamp = self.stamp();
+        // A file of the project is read only if it really is one (see
+        // `load_file`); one outside it by its path is a dependency's source.
+        let confine = self
+            .proj
+            .project
+            .as_ref()
+            .filter(|_| !external_local)
+            .map(|p| p.root.clone());
         Task::perform(
-            load_file(pane, abs, line),
+            load_file(pane, abs, line, confine),
             move |(pane, abs, target, result)| {
                 Message::Editor(EditorMsg::FileLoaded {
                     stamp: stamp.clone(),
@@ -361,10 +375,25 @@ impl App {
         // as uncolored text and is said instead.
         self.status = open_status(&v.rel, lang_key);
         self.proj.panes[pane] = Some(v);
-        // Seed the content hash so the watcher can tell real edits from noise.
-        self.proj
-            .registry
-            .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        // The peek open over the file it replaces is of that file's symbol
+        // (and an answer still on its way for it is too), as on every other
+        // way a pane is replaced.
+        self.invalidate_hover();
+        // Seed the content hash so the watcher can tell real edits from noise
+        // — for a file of the project: one outside it (a dependency, the
+        // standard library, gone to by a definition) is in no index, and
+        // seeding it moved the registry on, every view built from it read
+        // stale and was built again for nothing.
+        let in_project = self
+            .proj
+            .project
+            .as_ref()
+            .is_some_and(|p| abs.starts_with(&p.root));
+        if in_project {
+            self.proj
+                .registry
+                .set(abs.clone(), incremental::content_hash(source.as_bytes()));
+        }
         // Point the Imports tab at the newly focused file.
         if pane == self.proj.active {
             self.refresh_import_tree();
@@ -404,12 +433,10 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let lines = highlight::highlight_lines(&hl_source, lang_key);
-                    let symbols = lang_key
-                        .map(|key| outline::extract(&hl_source, key))
-                        .unwrap_or_default();
-                    // Author's doc comments, reusing the symbols just parsed.
-                    let docs = lang_key
-                        .map(|key| docs::extract(&hl_source, key, &symbols))
+                    // The outline, and the author's doc comments for it, from
+                    // one parse.
+                    let (symbols, docs) = lang_key
+                        .map(|key| docs::outline_and_peek(&hl_source, key))
                         .unwrap_or_default();
                     // Inactive `#[cfg]` lines for the reading target (dimmed).
                     let inactive = lang_key
@@ -434,7 +461,17 @@ impl App {
             },
         );
 
-        let git_task = match self.proj.project.as_ref().map(|p| p.root.clone()) {
+        // The project's git, for a file of it: asked about a file outside it
+        // (a dependency gone to by a definition), git refuses — "outside
+        // repository" — and that refusal took the status line at every such
+        // jump.
+        let git_task = match self
+            .proj
+            .project
+            .as_ref()
+            .map(|p| p.root.clone())
+            .filter(|root| abs.starts_with(root))
+        {
             Some(root) => {
                 // This pass is now the newest blame request for the file (see
                 // `request_git_info`): only its answer may paint the gutter.
@@ -1221,8 +1258,10 @@ impl App {
             // Center the clicked fraction in the viewport.
             let y = (fraction * total - v.viewport_h / 2.0).clamp(0.0, max_y);
             v.scroll_y = y;
+            // Across, it stays where it was: the minimap moves the file down.
+            let x = v.scroll_x;
             self.reader_moved_caret(pane);
-            return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+            return operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x, y });
         }
         Task::none()
     }
@@ -1245,17 +1284,30 @@ impl App {
         if (new_line_height - old_line_height).abs() < f32::EPSILON {
             return Task::none();
         }
+        // Both ways: a character is as much wider as a line is taller, so the
+        // column at the left edge stays there — set to 0, it threw the reader
+        // back to the start of every line.
+        let scale = new_line_height / old_line_height;
+        // The past revision on screen scrolls apart from the pane's live file:
+        // scaled too, and the one the pane's scrollable is told.
+        let shown_tt = ui::time_travel_pane(self);
+        let tt = self.proj.time_travel.as_mut().map(|tt| {
+            tt.scroll_x *= scale;
+            tt.scroll_y *= scale;
+            (tt.scroll_x, tt.scroll_y)
+        });
         let mut tasks = Vec::new();
         for (pane, slot) in self.proj.panes.iter_mut().enumerate() {
             if let Some(v) = slot {
-                let first = v.scroll_y / old_line_height;
-                v.scroll_y = first * new_line_height;
+                v.scroll_x *= scale;
+                v.scroll_y *= scale;
+                let (x, y) = match tt {
+                    Some(offset) if shown_tt == Some(pane) => offset,
+                    _ => (v.scroll_x, v.scroll_y),
+                };
                 tasks.push(operation::scroll_to(
                     ui::code_scroll_id(pane),
-                    AbsoluteOffset {
-                        x: 0.0,
-                        y: v.scroll_y,
-                    },
+                    AbsoluteOffset { x, y },
                 ));
             }
         }
@@ -1365,7 +1417,7 @@ impl App {
     /// find-match list is stamped with. `None` when no pane holds a file.
     pub(crate) fn active_find_doc(&self) -> Option<find::DocId> {
         self.active_viewer()
-            .map(|v| (v.abs.clone(), Arc::as_ptr(&v.source) as usize))
+            .map(|v| (v.abs.clone(), v.lines_generation()))
     }
 
     /// Recompute the find matches over the active pane's current document.

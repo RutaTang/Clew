@@ -85,12 +85,35 @@ pub struct SymNode {
 /// The graph. Its adjacency lists are indices into `nodes`, which every
 /// accessor trusts — so a graph that comes from outside (the wire) is checked
 /// on the way in ([`ProjectCallGraph::from_wire`]).
-#[derive(Debug, Default, Clone)]
+#[derive(Default, Clone)]
 pub struct ProjectCallGraph {
     nodes: Vec<SymNode>,
     /// Each node's ordinal among its file's same-name callables — the third
     /// part of its [`SymKey`] — computed once, when the node set is fixed.
     ordinals: Vec<u32>,
+    /// The nodes by their key's hash ([`key_hash`]), in node order: a lookup
+    /// by key ([`ProjectCallGraph::id_of_key`]) read every node, and a view
+    /// makes one per stack frame on every draw.
+    by_key: HashMap<u64, Vec<usize>>,
+}
+
+/// The graph as its nodes say it: the index is theirs, and in no order a
+/// graph built again would repeat.
+impl std::fmt::Debug for ProjectCallGraph {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProjectCallGraph")
+            .field("nodes", &self.nodes)
+            .field("ordinals", &self.ordinals)
+            .finish()
+    }
+}
+
+/// The hash a node's `(file, name, ordinal)` key is indexed under.
+fn key_hash(file: &Path, name: &str, ordinal: u32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (file, name, ordinal).hash(&mut h);
+    h.finish()
 }
 
 impl ProjectCallGraph {
@@ -101,7 +124,18 @@ impl ProjectCallGraph {
                 .iter()
                 .map(|n| (n.file.as_path(), n.name.as_str(), n.kind.as_str(), n.line)),
         );
-        ProjectCallGraph { nodes, ordinals }
+        let mut by_key: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (i, n) in nodes.iter().enumerate() {
+            by_key
+                .entry(key_hash(&n.file, &n.name, ordinals[i]))
+                .or_default()
+                .push(i);
+        }
+        ProjectCallGraph {
+            nodes,
+            ordinals,
+            by_key,
+        }
     }
 }
 
@@ -347,16 +381,27 @@ impl ProjectCallGraph {
             })
             .collect();
 
-        let mut name_to: HashMap<&str, Vec<usize>> = HashMap::new();
-        let mut by_file: HashMap<&Path, Vec<usize>> = HashMap::new();
+        // The definitions looked up by name, indexed so a lookup costs what
+        // it finds: scanning every same-named definition, or every
+        // definition of the file, per call cost calls × definitions.
+        let mut defs = Defs::default();
         for (i, n) in nodes.iter().enumerate() {
             let name = logical_name(&n.name, facts[i].lang);
-            name_to.entry(name).or_default().push(i);
-            by_file.entry(n.file.as_path()).or_default().push(i);
+            let named = defs.named.entry(name).or_default();
+            named.all.push(i);
+            if !facts[i].bodyless {
+                named.defined.push(i);
+            }
+            let file = n.file.as_path();
+            defs.in_file.entry((file, name)).or_default().push(i);
+            defs.callers
+                .entry((file, n.name.as_str()))
+                .or_default()
+                .push(i);
         }
         // Definitions within a file, ordered by line, so a call resolves to the
         // nearest preceding same-named definition.
-        for v in by_file.values_mut() {
+        for v in defs.callers.values_mut() {
             v.sort_by_key(|&i| nodes[i].line);
         }
 
@@ -369,6 +414,9 @@ impl ProjectCallGraph {
                 lang: fc.lang,
                 imported,
             };
+            // What a name called from this file resolves to depends on the
+            // name and the call's shape only: worked out once per file.
+            let mut resolved: HashMap<(&str, bool), Vec<usize>> = HashMap::new();
             for cs in &fc.calls {
                 // Bare calls to language builtins (`len(x)`, `make(...)`) are not
                 // project functions; skip them so they don't resolve to some
@@ -379,15 +427,23 @@ impl ProjectCallGraph {
                 let Some(caller_name) = cs.caller.as_deref() else {
                     continue; // a top-level call has no caller function node
                 };
-                let Some(caller) =
-                    resolve_caller(&by_file, &fc.file, caller_name, cs.line, &nodes, &fc.bodies)
-                else {
+                let Some(caller) = resolve_caller(
+                    &defs.callers,
+                    &fc.file,
+                    caller_name,
+                    cs.line,
+                    &nodes,
+                    &fc.bodies,
+                ) else {
                     continue;
                 };
-                for callee in resolve_callees(&name_to, &nodes, &facts, cs, &site) {
+                let callees = resolved
+                    .entry((cs.callee.as_str(), cs.method))
+                    .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, cs, &site));
+                for &callee in callees.iter() {
                     // Skip self-edges so a recursive function with no other
                     // callers still reads as "uncalled".
-                    if callee != caller {
+                    if callee != caller && edges.len() < MAX_EDGES {
                         edges.insert((caller, callee));
                     }
                 }
@@ -551,9 +607,15 @@ impl ProjectCallGraph {
     /// The node id for `(file, name, ordinal)`. Same-line callables share an
     /// ordinal (see `ordinals_of`); of those, the first node is the answer.
     pub fn id_of_key(&self, file: &Path, name: &str, ordinal: u32) -> Option<usize> {
-        (0..self.nodes.len()).find(|&i| {
-            self.ordinals[i] == ordinal && self.nodes[i].name == name && self.nodes[i].file == file
-        })
+        self.by_key
+            .get(&key_hash(file, name, ordinal))?
+            .iter()
+            .copied()
+            .find(|&i| {
+                self.ordinals[i] == ordinal
+                    && self.nodes[i].name == name
+                    && self.nodes[i].file == file
+            })
     }
 
     pub fn callers_of(&self, id: usize) -> &[usize] {
@@ -689,6 +751,25 @@ struct NodeFacts {
     lang: Option<Lang>,
 }
 
+/// The project's definitions, by name (see `ProjectCallGraph::build`).
+#[derive(Default)]
+struct Defs<'a> {
+    /// By logical name ([`logical_name`]).
+    named: HashMap<&'a str, Named>,
+    /// By file and logical name.
+    in_file: HashMap<(&'a Path, &'a str), Vec<usize>>,
+    /// By file and name as written, in line order: a call's enclosing
+    /// function ([`resolve_caller`]).
+    callers: HashMap<(&'a Path, &'a str), Vec<usize>>,
+}
+
+/// The definitions of one name: all of them, and those with a body.
+#[derive(Default)]
+struct Named {
+    all: Vec<usize>,
+    defined: Vec<usize>,
+}
+
 /// Where a call was made.
 struct Site<'a> {
     file: &'a Path,
@@ -821,6 +902,17 @@ fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
     src.get(node.byte_range()).unwrap_or("")
 }
 
+/// One node of [`walk`]: the node, its parent and the sibling before it
+/// (carried, as tree-sitter finds a parent by walking down from the root, a
+/// cost of the depth per call, and a sibling through its parent), and the
+/// enclosing function name in scope for it.
+type WalkItem<'t> = (
+    Node<'t>,
+    Option<Node<'t>>,
+    Option<Node<'t>>,
+    Option<Rc<str>>,
+);
+
 /// Iterative depth-first walk carrying the nearest enclosing function name. It is
 /// explicit-stack (not recursive) so a pathologically deep tree — e.g. a checked-
 /// in minified bundle with 100k-deep nested expressions — can't overflow the
@@ -833,9 +925,8 @@ fn walk(
     callable: Option<&HashSet<&str>>,
     out: &mut Vec<CallSite>,
 ) {
-    // Each item is a node plus the enclosing function name in scope for it.
-    let mut stack: Vec<(Node, Option<Rc<str>>)> = vec![(root, None)];
-    while let Some((node, enclosing)) = stack.pop() {
+    let mut stack: Vec<WalkItem> = vec![(root, None, None, None)];
+    while let Some((node, parent, before, enclosing)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
             continue;
@@ -843,7 +934,7 @@ fn walk(
         // A function definition becomes the enclosing scope for its subtree —
         // under the first of its names that the file's outline has.
         let own: Option<Rc<str>> = if spec.fn_kinds.contains(&kind) {
-            fn_names(node, src, lang)
+            fn_names(node, parent, before, src, lang)
                 .into_iter()
                 .find(|name| callable.is_none_or(|c| c.contains(name.as_str())))
                 .map(|s| Rc::from(s.as_str()))
@@ -867,8 +958,10 @@ fn walk(
         }
 
         let mut cursor = node.walk();
+        let mut before = None;
         for child in node.children(&mut cursor) {
-            stack.push((child, current.clone()));
+            stack.push((child, Some(node), before, current.clone()));
+            before = Some(child);
         }
     }
 }
@@ -914,7 +1007,16 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
 /// and the outline know it by the binding, so the binding comes first: taking
 /// the own name first attributed its calls to `named`, which a TypeScript
 /// outline does not list, so they fell to whatever function enclosed it.
-fn fn_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
+///
+/// `parent` is the node's parent and `before` the sibling before it, both
+/// carried by the walk.
+fn fn_names(
+    node: Node,
+    parent: Option<Node>,
+    before: Option<Node>,
+    src: &str,
+    lang: Lang,
+) -> Vec<String> {
     match lang {
         // `function_definition` names its function inside the declarator.
         Lang::C | Lang::Cpp => return c_function_name(node, src).into_iter().collect(),
@@ -923,8 +1025,10 @@ fn fn_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
         // signature has no name, so those calls fall through to the enclosing
         // named function).
         Lang::Dart if node.kind() == "function_body" => {
-            return node
-                .prev_sibling()
+            // The sibling the walk carried: `prev_sibling` finds it through
+            // `parent()`, a walk down from the root, and a scan of the
+            // parent's children cost their number per body.
+            return before
                 .and_then(|sig| dart_sig_name(sig, src))
                 .into_iter()
                 .collect();
@@ -934,13 +1038,13 @@ fn fn_names(node: Node, src: &str, lang: Lang) -> Vec<String> {
     let own = node
         .child_by_field_name("name")
         .map(|n| node_text(n, src).to_string());
-    binding_name(node, src).into_iter().chain(own).collect()
+    binding_name(parent, src).into_iter().chain(own).collect()
 }
 
 /// The name of the binding a function expression is assigned to, if it is
-/// assigned to one (see [`fn_names`]).
-fn binding_name(node: Node, src: &str) -> Option<String> {
-    let parent = node.parent()?;
+/// assigned to one (see [`fn_names`]); `parent` is the expression's parent.
+fn binding_name(parent: Option<Node>, src: &str) -> Option<String> {
+    let parent = parent?;
     let named = match parent.kind() {
         "variable_declarator" | "public_field_definition" => parent.child_by_field_name("name"),
         // JavaScript's class field names its property `property`.
@@ -1142,6 +1246,14 @@ fn logical_name(name: &str, lang: Option<Lang>) -> &str {
     }
 }
 
+/// Most definitions one call resolves to (see [`resolve_callees`]): more
+/// than any overload set, or than the `new` of each module a crate root
+/// declares.
+const MAX_CANDIDATES: usize = 64;
+
+/// Most edges a graph holds: past it, further calls are left out.
+const MAX_EDGES: usize = 2_000_000;
+
 /// Resolve a call to the project definitions it plausibly refers to, narrowing
 /// by scope so a name isn't sprayed across every same-named definition:
 ///   1. a definition in the **same file** (a local helper), else
@@ -1156,35 +1268,72 @@ fn logical_name(name: &str, lang: Option<Lang>) -> &str {
 /// resolves to nothing rather than guessing (its name belongs to a receiver
 /// type we can't see).
 fn resolve_callees(
-    name_to: &HashMap<&str, Vec<usize>>,
+    defs: &Defs,
     nodes: &[SymNode],
     facts: &[NodeFacts],
     call: &CallSite,
     site: &Site,
 ) -> Vec<usize> {
-    let Some(all) = name_to.get(logical_name(&call.callee, Some(site.lang))) else {
+    let name = logical_name(&call.callee, Some(site.lang));
+    let Some(named) = defs.named.get(name) else {
         return Vec::new();
     };
-    let defined: Vec<usize> = all
-        .iter()
-        .copied()
-        .filter(|&i| !facts[i].bodyless)
+    let with_body = !named.defined.is_empty();
+    let cands: &[usize] = if with_body {
+        &named.defined
+    } else {
+        &named.all
+    };
+    // The candidates in `file`, with a body when any definition has one.
+    fn in_file<'d>(
+        defs: &'d Defs<'d>,
+        facts: &'d [NodeFacts],
+        file: &'d Path,
+        name: &'d str,
+        with_body: bool,
+    ) -> impl Iterator<Item = usize> + 'd {
+        defs.in_file
+            .get(&(file, name))
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(move |&i| !with_body || !facts[i].bodyless)
+    }
+    // A name defined more often than any real overload set is ambiguous: it
+    // resolves to none of them. Linking every one made a file of N
+    // same-named definitions calling each other N² edges — tens of GB from
+    // one generated file within the index's size cap.
+    let local: Vec<usize> = in_file(defs, facts, site.file, name, with_body)
+        .take(MAX_CANDIDATES + 1)
         .collect();
-    let cands: &[usize] = if defined.is_empty() { all } else { &defined };
-    let local: Vec<usize> = cands
-        .iter()
-        .copied()
-        .filter(|&i| nodes[i].file == site.file)
-        .collect();
+    if local.len() > MAX_CANDIDATES {
+        return Vec::new();
+    }
     if !local.is_empty() {
         return local;
     }
-    let scoped: Vec<usize> = cands
-        .iter()
-        .copied()
-        .filter(|&i| site.imported.contains(&nodes[i].file))
-        .collect();
+    // From whichever side is smaller: the candidates, or the files in scope.
+    let scoped: Vec<usize> = match cands.len() <= site.imported.len() {
+        true => cands
+            .iter()
+            .copied()
+            .filter(|&i| site.imported.contains(&nodes[i].file))
+            .take(MAX_CANDIDATES + 1)
+            .collect(),
+        false => site
+            .imported
+            .iter()
+            .flat_map(|file| in_file(defs, facts, file, name, with_body))
+            .take(MAX_CANDIDATES + 1)
+            .collect(),
+    };
+    if scoped.len() > MAX_CANDIDATES {
+        return Vec::new();
+    }
     if !scoped.is_empty() {
+        let mut scoped = scoped;
+        // In the candidates' order, whichever side they came from.
+        scoped.sort_unstable();
         return scoped;
     }
     // A lone global definition of this name — accepted only when its language
@@ -1348,28 +1497,26 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
 /// a nested same-name function closed went to that nested one. Without a
 /// span that holds the call, that nearest preceding definition still
 /// decides (falling back to the first when none precedes the call).
+///
+/// `callers` holds each file's definitions by name, in line order
+/// ([`Defs::callers`]). The innermost body is searched for among the closest
+/// [`MAX_CALLER_SCAN`] definitions before the call: past them, the closest
+/// one stands in.
 fn resolve_caller(
-    by_file: &HashMap<&Path, Vec<usize>>,
+    callers: &HashMap<(&Path, &str), Vec<usize>>,
     file: &Path,
     name: &str,
     call_line: usize,
     nodes: &[SymNode],
     bodies: &HashMap<usize, (usize, usize)>,
 ) -> Option<usize> {
-    let ids = by_file.get(file)?;
+    let ids = callers.get(&(file, name))?;
+    let first = *ids.first()?;
+    // The ones defined at or before the call: only those can hold it.
+    let before = &ids[..ids.partition_point(|&id| nodes[id].line <= call_line)];
+    let best = before.last().copied();
     let mut innermost: Option<(usize, usize)> = None; // (id, span length)
-    let mut best: Option<usize> = None;
-    let mut first: Option<usize> = None;
-    for &id in ids {
-        if nodes[id].name != name {
-            continue;
-        }
-        if first.is_none() {
-            first = Some(id);
-        }
-        if nodes[id].line <= call_line {
-            best = Some(id); // ids are line-sorted, so this keeps the closest
-        }
+    for &id in before.iter().rev().take(MAX_CALLER_SCAN) {
         if let Some(&(lo, hi)) = bodies.get(&nodes[id].line)
             && (lo..=hi).contains(&call_line)
             && innermost.is_none_or(|(_, len)| hi - lo < len)
@@ -1377,8 +1524,13 @@ fn resolve_caller(
             innermost = Some((id, hi - lo));
         }
     }
-    innermost.map(|(id, _)| id).or(best).or(first)
+    innermost.map(|(id, _)| id).or(best).or(Some(first))
 }
+
+/// How many same-named definitions before a call [`resolve_caller`] looks
+/// through for the body holding it. Real nesting reuses a name a few times;
+/// a file of thousands of them made each call cost their number.
+const MAX_CALLER_SCAN: usize = 64;
 
 #[cfg(test)]
 mod tests {
@@ -1470,6 +1622,28 @@ void main() {
         let method = |callee: &str| calls.iter().find(|c| c.callee == callee).unwrap().method;
         assert!(method("hello"), "{calls:?}");
         assert!(!method("_build"), "{calls:?}");
+    }
+
+    /// A body's name comes from the signature before it, carried by the
+    /// walk: looked up among its parent's children, a file of many
+    /// top-level functions cost their number per function.
+    #[test]
+    fn a_wide_dart_file_is_named_in_one_walk() {
+        const N: usize = 20_000;
+        let src: String = (0..N)
+            .map(|i| format!("void f{i}() {{ g{i}(); }}\n"))
+            .collect();
+        let started = std::time::Instant::now();
+        let calls = calls_of(&src, "dart");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(calls.len(), N);
+        for i in [0, N / 2, N - 1] {
+            let call = calls.iter().find(|c| c.callee == format!("g{i}"));
+            assert_eq!(
+                call.and_then(|c| c.caller.as_deref()),
+                Some(format!("f{i}").as_str())
+            );
+        }
     }
 
     #[test]
@@ -1570,6 +1744,94 @@ void main() {
         assert!(uncalled.contains(&"main"));
         assert!(uncalled.contains(&"lonely"));
         assert!(!uncalled.contains(&"used"));
+    }
+
+    /// A name defined many times in one file is ambiguous: its calls link to
+    /// none of the definitions. Linking all of them made a file of N
+    /// same-named functions calling that name N² edges.
+    #[test]
+    fn a_name_defined_many_times_resolves_to_none() {
+        const N: usize = 3_000;
+        let src: String = (0..N).map(|_| "function f(){f()}\n").collect();
+        let defs: Vec<_> = (0..N).map(|i| def("f", "/p/a.js", i + 1)).collect();
+        let sources = vec![(PathBuf::from("/p/a.js"), src)];
+        let started = std::time::Instant::now();
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(g.edge_count(), 0);
+        // A small overload set still resolves.
+        let defs = vec![
+            def("caller", "/p/b.rs", 1),
+            def("g", "/p/b.rs", 4),
+            def("g", "/p/b.rs", 5),
+        ];
+        let sources = vec![(
+            PathBuf::from("/p/b.rs"),
+            "fn caller() {\n    g();\n}\nfn g() {}\nfn g() {}\n".to_string(),
+        )];
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert_eq!(g.edge_count(), 2);
+    }
+
+    /// Real overload sets, and a crate root's modules each defining `new`,
+    /// are not ambiguous: their calls link to every definition.
+    #[test]
+    fn an_overload_set_or_a_crate_roots_modules_resolve_to_every_definition() {
+        // Twelve overloads of `of` in one file, Guava style.
+        let mut defs = vec![def("caller", "/p/A.java", 1)];
+        defs.extend((0..12).map(|i| def("of", "/p/A.java", i + 3)));
+        let src = format!(
+            "class A {{\n void caller() {{ of(); }}\n{}}}\n",
+            "  void of() {}\n".repeat(12)
+        );
+        let sources = vec![(PathBuf::from("/p/A.java"), src)];
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert_eq!(g.edge_count(), 12);
+
+        // `lib.rs` declares nine modules, each with a `new`.
+        let mut defs = vec![def("start", "/p/lib.rs", 1)];
+        let mut sources = vec![(
+            PathBuf::from("/p/lib.rs"),
+            "fn start() {\n    new();\n}\n".to_string(),
+        )];
+        let mut scope: HashMap<PathBuf, HashSet<PathBuf>> = HashMap::new();
+        for m in 0..9 {
+            let file = format!("/p/m{m}.rs");
+            defs.push(def("new", &file, 1));
+            sources.push((PathBuf::from(&file), "fn new() {}\n".to_string()));
+            scope
+                .entry(PathBuf::from("/p/lib.rs"))
+                .or_default()
+                .insert(PathBuf::from(file));
+        }
+        let g = ProjectCallGraph::build(defs, &sources, &scope);
+        assert_eq!(g.edge_count(), 9);
+    }
+
+    /// What a call resolves to is looked up, not searched for: many calls
+    /// of a name defined in many files, or a file of many functions, cost
+    /// neither calls × definitions nor calls × the file's functions.
+    #[test]
+    fn many_calls_of_a_common_name_resolve_at_once() {
+        const FILES: usize = 3_000;
+        const CALLS: usize = 3_000;
+        let mut defs = Vec::new();
+        let mut sources = Vec::new();
+        for f in 0..FILES {
+            let file = format!("/p/m{f}.rs");
+            defs.push(def("new", &file, 1));
+            sources.push((PathBuf::from(&file), "fn new() {}\n".to_string()));
+        }
+        let mut src = String::new();
+        for c in 0..CALLS {
+            defs.push(def(&format!("c{c}"), "/p/main.rs", c + 1));
+            src.push_str(&format!("fn c{c}() {{ new(); }}\n"));
+        }
+        sources.push((PathBuf::from("/p/main.rs"), src));
+        let started = std::time::Instant::now();
+        let g = ProjectCallGraph::build(defs, &sources, &HashMap::new());
+        assert!(started.elapsed() < std::time::Duration::from_secs(20));
+        assert_eq!(g.edge_count(), 0, "a name defined everywhere is no one's");
     }
 
     #[test]

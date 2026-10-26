@@ -42,6 +42,14 @@ fn main() {
     // work on the runtime's other threads still unwinds and is answered with
     // an error (see the function's docs for why not `panic = "abort"`).
     clew_server::abort_on_panic_in_this_thread();
+    // The `PATH` language servers, debug adapters and MCP servers are given
+    // (asked of the login shell once, for an app opened from the Finder,
+    // whose server inherits its bare `PATH`) is found now, off the request
+    // loop: the first `SpawnProcess` reads it there, and waited for the
+    // shell — seconds of every request queued behind it.
+    std::thread::spawn(|| {
+        let _ = clew_core::linerpc::spawn_path();
+    });
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().map(String::as_str) == Some("mcp") {
         let root = match clew_server::mcp::root_from_args(&args) {

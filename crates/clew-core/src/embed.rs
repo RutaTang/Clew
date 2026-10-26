@@ -15,6 +15,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::explain::Node;
 use crate::incremental::{Version, content_hash};
@@ -353,6 +354,12 @@ pub fn embed_batch_cancellable(
 
 /// [`embed_batch_cancellable`]'s request, through `agent` (a test's own in
 /// tests), on a worker thread.
+///
+/// A batch refused for now (429, 503, …) or whose connection never reached
+/// the endpoint is sent again, a few times, as a model call is
+/// (`llm::send_with_retry`'s policy): embedding is safe to resend, and one
+/// rate limit hit partway through a large build used to fail it — after
+/// every batch before it was paid for, and to be paid for again.
 fn run_batch(
     agent: ureq::Agent,
     via: Option<crate::net::Via>,
@@ -361,22 +368,73 @@ fn run_batch(
     texts: &[String],
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Vec<f32>>, String> {
-    let (cfg, texts) = (cfg.clone(), texts.to_vec());
-    let (answer, _abandon) = crate::llm::spawn_worker(1, move |_, tx| {
-        let _ = tx.send(request_batch(&agent, via.as_ref(), &url, &cfg, &texts));
-    })
-    .map_err(String::from)?;
+    let mut delay = Duration::from_secs(1);
+    let mut attempt = 0;
     loop {
-        if cancelled() {
-            return Err(crate::llm::CANCELLED.to_string());
-        }
-        match answer.recv_timeout(CANCEL_POLL) {
-            Ok(result) => return result,
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            // The worker died without answering (it panicked).
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-                return Err("the embeddings request stopped unexpectedly".into());
+        let (agent, via, url) = (agent.clone(), via.clone(), url.clone());
+        let (cfg, texts) = (cfg.clone(), texts.to_vec());
+        let (answer, _abandon) = crate::llm::spawn_worker(1, move |_, tx| {
+            let _ = tx.send(request_batch(&agent, via.as_ref(), &url, &cfg, &texts));
+        })
+        .map_err(String::from)?;
+        let failed = loop {
+            if cancelled() {
+                return Err(crate::llm::CANCELLED.to_string());
             }
+            match answer.recv_timeout(CANCEL_POLL) {
+                Ok(Ok(vectors)) => return Ok(vectors),
+                Ok(Err(failed)) => break failed,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                // The worker died without answering (it panicked).
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("the embeddings request stopped unexpectedly".into());
+                }
+            }
+        };
+        let wait = match failed {
+            BatchError::Again { wait, .. } if attempt < crate::llm::SEND_RETRIES => {
+                wait.unwrap_or(delay).min(crate::llm::MAX_RETRY_WAIT)
+            }
+            BatchError::Again { message, .. } | BatchError::Final(message) => {
+                return Err(message);
+            }
+        };
+        attempt += 1;
+        delay = (delay * 2).min(crate::llm::MAX_RETRY_WAIT);
+        let until = std::time::Instant::now() + wait;
+        while std::time::Instant::now() < until {
+            if cancelled() {
+                return Err(crate::llm::CANCELLED.to_string());
+            }
+            std::thread::sleep(CANCEL_POLL.min(until - std::time::Instant::now()));
+        }
+    }
+}
+
+/// Why a batch has no vectors.
+#[derive(Debug)]
+enum BatchError {
+    /// Refused for now, or the endpoint was not reached: another attempt
+    /// may get through — after `wait`, when the endpoint said how long.
+    Again {
+        message: String,
+        wait: Option<Duration>,
+    },
+    /// Anything else: the same request would fail the same way.
+    Final(String),
+}
+
+impl From<String> for BatchError {
+    fn from(message: String) -> BatchError {
+        BatchError::Final(message)
+    }
+}
+
+impl BatchError {
+    #[cfg(test)]
+    fn message(&self) -> &str {
+        match self {
+            BatchError::Again { message, .. } | BatchError::Final(message) => message,
         }
     }
 }
@@ -397,7 +455,7 @@ fn request_batch(
     url: &str,
     cfg: &Config,
     texts: &[String],
-) -> Result<Vec<Vec<f32>>, String> {
+) -> Result<Vec<Vec<f32>>, BatchError> {
     let uri = crate::net::request_uri(url)?;
     let mut body = serde_json::json!({
         "model": cfg.model,
@@ -416,7 +474,17 @@ fn request_batch(
             .header("content-type", "application/json")
             .send(body.as_str())
     })
-    .map_err(|e| format!("request failed: {}", crate::net::failure(&e, via)))?;
+    .map_err(|e| {
+        let message = format!("request failed: {}", crate::net::failure(&e, via));
+        if crate::llm::retryable_transport(&e) {
+            BatchError::Again {
+                message,
+                wait: None,
+            }
+        } else {
+            BatchError::Final(message)
+        }
+    })?;
     let status = resp.status();
     // No redirect is followed (the agent follows none), so a 3xx is an
     // ordinary response whose body is a redirect page. Say so, rather than
@@ -427,7 +495,7 @@ fn request_batch(
             .get("location")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("elsewhere");
-        return Err(format!(
+        return Err(BatchError::Final(format!(
             "embeddings endpoint redirected to {}; not following — point base_url at the real endpoint",
             to.lines()
                 .next()
@@ -435,7 +503,7 @@ fn request_batch(
                 .chars()
                 .take(200)
                 .collect::<String>()
-        ));
+        )));
     }
     if status.as_u16() == 407
         && let Some(via) = via
@@ -443,12 +511,13 @@ fn request_batch(
         // What the proxy's challenges offer decides what can be done: a
         // user name and password clew can send, or logins (NTLM, Negotiate)
         // it cannot make — as for a model call (`crate::llm`).
-        return Err(format!(
+        return Err(BatchError::Final(format!(
             "request failed: {}",
             via.answered_407(resp.headers())
-        ));
+        )));
     }
     if status.is_client_error() || status.is_server_error() {
+        let wait = crate::llm::retry_after(&resp);
         let mut raw = Vec::new();
         let _ = resp
             .into_body()
@@ -466,10 +535,15 @@ fn request_batch(
             })
             .unwrap_or_else(|| raw.lines().next().unwrap_or("").to_string());
         let msg: String = msg.chars().take(200).collect();
-        return Err(format!("embeddings API error {}: {msg}", status.as_u16()));
+        let message = format!("embeddings API error {}: {msg}", status.as_u16());
+        return Err(if crate::llm::transient_status(status.as_u16()) {
+            BatchError::Again { message, wait }
+        } else {
+            BatchError::Final(message)
+        });
     }
     let text = read_body(resp.into_body().into_reader(), MAX_RESPONSE_BYTES)?;
-    parse_embeddings(&text, texts.len())
+    Ok(parse_embeddings(&text, texts.len())?)
 }
 
 /// A response body as text, refusing one longer than `cap` bytes (read through
@@ -529,11 +603,14 @@ fn parse_embeddings(text: &str, expected: usize) -> Result<Vec<Vec<f32>>, String
             .get("embedding")
             .and_then(|e| e.as_array())
             .ok_or_else(|| format!("embedding {idx} is not a list of numbers"))?;
+        // Finite as an f32 too: `1e39` is a JSON number, and an infinity
+        // the cast made of it is written as `null` on the wire, where the
+        // client could not read the frame and dropped the whole connection.
         let vec = values
             .iter()
-            .map(|x| x.as_f64().map(|f| f as f32))
+            .map(|x| x.as_f64().map(|f| f as f32).filter(|f| f.is_finite()))
             .collect::<Option<Vec<f32>>>()
-            .ok_or_else(|| format!("embedding {idx} holds a non-number"))?;
+            .ok_or_else(|| format!("embedding {idx} holds a non-number or one out of range"))?;
         if vec.is_empty() {
             return Err(format!("embedding {idx} is empty"));
         }
@@ -675,9 +752,15 @@ fn index_path(store: &Path) -> PathBuf {
 }
 
 /// Load the index for `store`, judged against this machine's current embedding
-/// config (see [`load_for`]).
+/// settings (see [`load_for`]) — the space they name, with or without a key:
+/// an app opened from the Dock has no `OPENAI_API_KEY`, and judging against
+/// "no config" read a valid index as empty, so the next build re-billed it.
 pub fn load(store: &Path, root: &Path) -> Index {
-    load_for(store, root, Config::load().as_ref())
+    let (index, problem) = load_in(store, root, Some(&stored_space()));
+    if let Some(problem) = problem {
+        eprintln!("clew: {problem}");
+    }
+    index
 }
 
 /// [`load`], also saying why a stored index that EXISTS was not used: not a
@@ -687,8 +770,7 @@ pub fn load(store: &Path, root: &Path) -> Index {
 /// say why. An index from another embedding space is NOT a problem; it is the
 /// expected result of a config change, and reads as absent.
 pub fn load_checked(store: &Path, root: &Path) -> (Index, Option<String>) {
-    let cfg = Config::load();
-    load_in(store, root, cfg.map(|c| c.space()).as_ref())
+    load_in(store, root, Some(&stored_space()))
 }
 
 /// Load the index, keeping it only when `cfg` names the exact model AND
@@ -899,6 +981,15 @@ fn merge_capped(
     }
     let dims = built.dims();
     let mut entries = in_node_order(built.entries.clone());
+    // What has a summary in the store every window merges into: a stored
+    // vector of code that has none any more (a function renamed or deleted)
+    // is dropped, not kept forever for search to rank. The summaries are
+    // read as they are on disk, so another window's nodes are kept; when
+    // there is no such store, or it cannot be read, nothing is dropped.
+    let summarized = crate::explain::cache_path(store)
+        .is_file()
+        .then(|| crate::explain::load_checked(store, root).ok())
+        .flatten();
     let only_stored = {
         let covered: std::collections::HashSet<&Node> = entries.iter().map(|e| &e.node).collect();
         in_node_order(
@@ -906,6 +997,7 @@ fn merge_capped(
                 .entries
                 .into_iter()
                 .filter(|e| !covered.contains(&e.node) && dims.is_none_or(|d| e.vec.len() == d))
+                .filter(|e| summarized.as_ref().is_none_or(|s| s.contains_key(&e.node)))
                 .collect(),
         )
     };
@@ -1308,6 +1400,7 @@ mod tests {
         let started = std::time::Instant::now();
         let err = request_batch(&agent, None, &url, &cfg, &["x".to_string()])
             .expect_err("a silent endpoint is a failure, not an answer");
+        let err = err.message().to_string();
         let waited = started.elapsed();
         assert!(
             waited < std::time::Duration::from_secs(3),
@@ -1353,6 +1446,7 @@ mod tests {
         );
         let err = request_batch(&agent, None, &endpoint(&cfg), &cfg, &["hello".to_string()])
             .expect_err("endless trailers are not a set of embeddings");
+        let err = err.message().to_string();
         assert!(
             err.contains("byte limit"),
             "not stopped by the meter: {err}"
@@ -1405,6 +1499,7 @@ mod tests {
             &["hello".to_string()],
         )
         .expect_err("a proxy that refuses every login yields no embeddings");
+        let err = err.message().to_string();
         assert!(
             err.contains("it takes only NTLM logins, which clew cannot make")
                 && err.contains("cntlm or px"),
@@ -1422,6 +1517,60 @@ mod tests {
     /// ends — every batch's abandon comes after its request is over — and
     /// the connection is kept all the same: the line held it for that
     /// request's term alone (`net::Lease`), not for the next batch's.
+    /// A batch refused for now (429) is sent again after the wait the
+    /// endpoint names, and its vectors come back; one refused for good (400)
+    /// is not resent.
+    #[test]
+    fn a_batch_refused_for_now_is_sent_again() {
+        use std::io::Write;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        let (seen_tx, seen) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let ok = r#"{"data":[{"index":0,"embedding":[1,2]}]}"#;
+            let answers = [
+                "HTTP/1.1 429 Too Many Requests\r\nretry-after: 0\r\ncontent-length: 2\r\n\r\n{}"
+                    .to_string(),
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{ok}",
+                    ok.len()
+                ),
+                "HTTP/1.1 400 Bad Request\r\ncontent-length: 2\r\n\r\n{}".to_string(),
+            ];
+            for answer in answers {
+                let Ok((mut conn, _)) = listener.accept() else {
+                    return;
+                };
+                let _ = crate::testutil::read_http(&mut conn);
+                let _ = conn.write_all(answer.as_bytes());
+                let _ = seen_tx.send(());
+            }
+        });
+        let cfg = Config {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url,
+        };
+        // No kept connections: each attempt is one connection.
+        let agent = crate::llm::test_agent(
+            crate::llm::Limits::bounded(std::time::Duration::from_secs(20)),
+            crate::testutil::trusting_the_test_cert(),
+            4096,
+        );
+        let texts = ["x".to_string()];
+        let vectors =
+            run_batch(agent.clone(), None, endpoint(&cfg), &cfg, &texts, &|| false).unwrap();
+        assert_eq!(vectors, [vec![1.0, 2.0]]);
+        assert_eq!(seen.try_iter().count(), 2, "refused, then answered");
+        let err = run_batch(agent, None, endpoint(&cfg), &cfg, &texts, &|| false).unwrap_err();
+        assert!(err.contains("400"), "{err}");
+        assert_eq!(
+            seen.recv_timeout(std::time::Duration::from_secs(5)),
+            Ok(()),
+            "the 400 was asked once"
+        );
+    }
+
     #[test]
     fn a_kept_connection_carries_batch_after_batch() {
         use std::io::Write;
@@ -1822,6 +1971,26 @@ mod integrity_tests {
         data
     }
 
+    /// An index is judged by the space the settings name, key or no key:
+    /// an app opened from the Dock has no `OPENAI_API_KEY`, and judging
+    /// against "no config" read a valid index as empty — then re-billed it.
+    #[test]
+    fn an_index_loads_without_a_key() {
+        let dir = crate::testutil::DataDir::new("embed-no-key");
+        // A self-hosted endpoint: no environment key applies to it either.
+        let base = "http://localhost:9/v1";
+        std::fs::write(
+            dir.join("config.toml"),
+            format!("[embedding]\nmodel = \"m\"\nbase_url = \"{base}\"\n"),
+        )
+        .unwrap();
+        assert!(Config::load().is_none(), "no key");
+        save(&dir, &index("m", base, vec![entry("f", vec![1.0, 0.0])])).unwrap();
+        let root = PathBuf::from("/p");
+        assert_eq!(load(&dir, &root).entries.len(), 1);
+        assert_eq!(load_checked(&dir, &root).0.entries.len(), 1);
+    }
+
     /// The file is stamped with the space its VECTORS came from, whatever the
     /// live config says at write time — so a config change that lands while
     /// a build runs cannot relabel old-space vectors as new-space ones.
@@ -2078,6 +2247,50 @@ mod integrity_tests {
         assert_eq!(names, vec!["fresh", "stored"]);
     }
 
+    /// A stored vector of code the summaries no longer hold (renamed,
+    /// deleted) leaves the index at the next merge, instead of being ranked
+    /// by search forever; one of code they hold — another window's — stays.
+    #[test]
+    fn a_merge_drops_vectors_of_code_that_has_no_summary_any_more() {
+        let dir = with_config("prune", "m");
+        let root = PathBuf::from("/p");
+        save(
+            &dir,
+            &index(
+                "m",
+                DEFAULT_BASE_URL,
+                vec![entry("gone", vec![1.0]), entry("other", vec![3.0])],
+            ),
+        )
+        .unwrap();
+        let mut summaries = crate::explain::Cache::new();
+        for name in ["other", "fresh"] {
+            summaries.insert(
+                entry(name, vec![]).node,
+                crate::explain::Cached {
+                    summary: "s".into(),
+                    prompt_hash: 1,
+                    detail: None,
+                    basis: None,
+                },
+            );
+        }
+        crate::explain::save(&dir, &summaries).unwrap();
+        let built = index("m", DEFAULT_BASE_URL, vec![entry("fresh", vec![2.0])]);
+        let (merged, saved) = merge_built(&dir, &root, &built);
+        saved.unwrap();
+        let mut names: Vec<&str> = merged
+            .entries
+            .iter()
+            .map(|e| match &e.node {
+                Node::Function { name, .. } => name.as_str(),
+                _ => "",
+            })
+            .collect();
+        names.sort();
+        assert_eq!(names, ["fresh", "other"]);
+    }
+
     /// Without the file lock nothing is written: the merge used to carry on
     /// unlocked, which is the lost update the lock exists to prevent. The
     /// merged index is still computed from a fresh read and handed back — its
@@ -2210,6 +2423,13 @@ mod integrity_tests {
             ),
             (r#"{"data":[{"index":0,"embedding":[]}]}"#, 1, "empty"),
             (r#"{"data":[]}"#, 1, "expected 1"),
+            // A number no f32 holds: an infinity, written as `null` on the
+            // wire, where the client cannot read it.
+            (
+                r#"{"data":[{"index":0,"embedding":[1,1e39]}]}"#,
+                1,
+                "out of range",
+            ),
         ] {
             let err = parse_embeddings(bad, expected).expect_err(why);
             assert!(err.contains(why), "{why}: {err}");

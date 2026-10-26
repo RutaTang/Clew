@@ -240,7 +240,13 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        self.proj.ask_input.clear();
+        // The input holds this question when it was just submitted. When an
+        // agent turn that failed to start falls back here
+        // (`on_ask_stream_ended`), it holds what the user typed while that
+        // turn ran, which is theirs to keep.
+        if self.proj.ask_input.trim() == question.trim() {
+            self.proj.ask_input.clear();
+        }
         self.show_bottom = true;
         self.bottom_tab = BottomTab::Ask;
         self.proj.asking = true;
@@ -291,6 +297,16 @@ impl App {
         }
     }
 
+    /// A question that could not be answered goes back into the Ask input,
+    /// from which it was cleared at submit — unless the user has typed
+    /// something there since, which stays. Failing used to take the question
+    /// with it.
+    fn return_question(&mut self, question: String) {
+        if self.proj.ask_input.trim().is_empty() {
+            self.proj.ask_input = question;
+        }
+    }
+
     pub(crate) fn on_ask_retrieved(
         &mut self,
         stream: u64,
@@ -321,9 +337,7 @@ impl App {
                 || *space != self.proj.embed_index.space()
             {
                 self.proj.asking = false;
-                if self.proj.ask_input.trim().is_empty() {
-                    self.proj.ask_input = question;
-                }
+                self.return_question(question);
                 self.status =
                     "Ask's embedding index or configuration changed — retry the question once the index is ready"
                         .into();
@@ -334,6 +348,7 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 self.proj.asking = false;
+                self.return_question(question);
                 self.status = format!("Ask failed: {e}");
                 return Task::none();
             }
@@ -342,6 +357,7 @@ impl App {
         // another window's): the same gate, and the same offer, as a submit.
         if let Err(ask_for_key) = self.require_llm() {
             self.proj.asking = false;
+            self.return_question(question);
             return ask_for_key;
         }
 
@@ -362,6 +378,7 @@ impl App {
             Ok(sources) => sources,
             Err(e) => {
                 self.proj.asking = false;
+                self.return_question(question);
                 self.status = format!("Ask failed: {e}");
                 return Task::none();
             }
@@ -406,20 +423,12 @@ impl App {
                 })
                 .collect();
             let mut added = 0usize;
+            let packages = self.proj.import_graph.go_packages();
             for f in seeds {
                 if added >= 4 {
                     break;
                 }
-                let mut neigh: Vec<PathBuf> = self
-                    .proj
-                    .import_graph
-                    .imports(&f)
-                    .iter()
-                    .filter_map(|e| match &e.target {
-                        imports::Target::Internal(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect();
+                let mut neigh: Vec<PathBuf> = self.proj.import_graph.imported_files(&f, &packages);
                 neigh.extend(self.proj.import_graph.importers(&f));
                 neigh.sort();
                 neigh.dedup();
@@ -539,6 +548,7 @@ impl App {
         };
         if messages.is_empty() {
             self.proj.asking = false;
+            self.return_question(pending.question);
             self.status = "Ask failed: the question's context could not be assembled".into();
             return Task::none();
         }
@@ -546,6 +556,7 @@ impl App {
             Ok(cfg) => cfg,
             Err(ask_for_key) => {
                 self.proj.asking = false;
+                self.return_question(pending.question);
                 return ask_for_key;
             }
         };
@@ -897,6 +908,10 @@ impl App {
             return Task::none();
         };
         self.proj.asking = false;
+        // Its tool calls waiting for an answer wait for nothing now (a
+        // disconnect ends a server's turn here): their cards go with it, or
+        // the first of them stood between the user and every later card.
+        self.drop_turn_tools(stream);
         // A Stop is what the user asked for, not a failure: it reads as
         // stopped, whatever layer it came from (the server's stream, its
         // agent turn, or the provider call on this machine).
@@ -1289,6 +1304,7 @@ impl App {
                 key,
                 option,
             } => self.on_approve(stream, key, option),
+            AskMsg::AnswersPage { stream, key, page } => self.on_answers_page(stream, key, page),
             AskMsg::PickAgent(agent) => self.on_pick_ask_agent(agent),
             AskMsg::AcpReady { name, result, .. } => self.on_acp_ready(name, result),
             AskMsg::AcpSession { result, .. } => self.on_acp_session(result),

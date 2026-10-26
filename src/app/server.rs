@@ -286,14 +286,30 @@ impl App {
         // A remote transport that died outside the Connect modal (e.g. a
         // reconnect that failed): fail closed. The deferred root is a remote
         // path — a local scan of it would read this machine's files instead.
+        //
+        // Latched as a local one is (below): nothing re-keys the transport
+        // on its own, so a project the user then asks for — a consent
+        // answered after the link gave up — parked its root for a transport
+        // that was not coming, "Scanning…" for good. The ask dials again
+        // (`retry_server_after_handshake_failure`); one that gives up as well
+        // lands back here and releases the root.
         if self.connection.is_remote() {
             self.pending_scan_root = None;
             self.scanning = false;
             self.status = format!("{reason} — use Connect to reconnect.");
+            self.handshake_failure = Some(self.status.clone());
             return Task::none();
         }
-        // The server binary didn't spawn. Fall back to a local scan for
-        // any project that was deferred waiting on it.
+        // The server binary didn't spawn, or the transport stopped retrying
+        // (`run_transport` says so only as it gives up). Nothing re-keys the
+        // subscription after that on its own, so the next project open would
+        // park its root waiting for a server that is not coming — "Scanning…"
+        // for good. Latched like a refusal, it is that open which tries again
+        // (`retry_server_after_handshake_failure`), and an attempt that fails
+        // the same way lands back here with its root to scan locally.
+        self.handshake_failure = Some(reason.clone());
+        // Fall back to a local scan for any project that was deferred waiting
+        // on it.
         self.status = reason;
         if let Some(root) = self.pending_scan_root.take() {
             return self.local_scan(root);
@@ -451,13 +467,28 @@ impl App {
         // renders blank. Not the turn the provider on THIS machine is writing
         // (`inflight.ask_local`): that stream does not ride the transport and
         // is still going, and closing its turn dropped every later token
-        // while the call ran on, and was billed, to the end.
+        // while the call ran on, and was billed, to the end. Nor an ACP
+        // agent's turn — running, or waiting for the agent to start: the agent
+        // is this machine's own child, talking to this window, and a closed
+        // turn dropped what it went on writing and left a permission it asked
+        // for with nobody to answer, the agent blocked on it.
         let local = self.proj.inflight.ask_local.as_ref().map(|(s, _)| *s);
+        let acp: Vec<u64> = self
+            .proj
+            .acp
+            .as_ref()
+            .map(|l| {
+                l.turn
+                    .into_iter()
+                    .chain(l.pending.as_ref().map(|(s, _)| *s))
+                    .collect()
+            })
+            .unwrap_or_default();
         let cut: Vec<u64> = self
             .proj
             .ask_turns
             .iter()
-            .filter(|t| t.streaming && Some(t.stream) != local)
+            .filter(|t| t.streaming && Some(t.stream) != local && !acp.contains(&t.stream))
             .map(|t| t.stream)
             .collect();
         let closed = Task::batch(cut.into_iter().map(|stream| {
@@ -472,12 +503,18 @@ impl App {
         // link, so the next need respawns them. (Spawn results still in flight
         // for them are transport-stamped, and dropped in `dispatch`.)
         //
-        // A proxied debug session can't outlive its transport.
-        if let Some(session) = self.debug.session.as_mut() {
-            session.status = DebugStatus::Terminated;
-            session.current = None;
+        // A proxied debug session can't outlive its transport. One whose
+        // adapter this machine runs itself (a TCP adapter: js-debug, delve;
+        // any adapter started while no server was up) does not ride it, and
+        // goes on: ended here, the program it debugs was cut off mid-session
+        // for nothing. A run still starting may yet be proxied, and goes.
+        if self.debug_rides_transport() {
+            if let Some(session) = self.debug.session.as_mut() {
+                session.status = DebugStatus::Terminated;
+                session.current = None;
+            }
+            self.bump_debug_run();
         }
-        self.bump_debug_run();
         closed
     }
 
@@ -1459,6 +1496,15 @@ impl App {
                 // starts from the current state and reports only later events.
                 // Splice it in, keeping panes, scroll and Ask history.
                 if !self.scanning {
+                    // The answer to an open sent twice (the window's own, and
+                    // the handshake's for the project it was opening): the
+                    // first built the project, and this one ends the wait —
+                    // left pending, it held this project's state edits back
+                    // for good (`send_remote_edits`).
+                    if self.server.pending_open == Some(id) {
+                        self.server.pending_open = None;
+                        self.send_remote_edits();
+                    }
                     if std::mem::take(&mut self.proj.link.pending_tree_resync) {
                         return self.splice_tree(&tree_root, seq, tree, files, tracked_ignored);
                     }
@@ -1511,6 +1557,20 @@ impl App {
                 // install): each resolution state demands its own action —
                 // start, raise the approval modal, raise the install-consent
                 // modal, or give up with the server's reason.
+                //
+                // Asked for the project since left, it is nobody's: an install
+                // that project started, cancelled by a reopen, answered
+                // "cancelled" — and landing after this project's own resolve,
+                // set its server to that for good. So is the answer to an
+                // install the host stopped on its own (`abandoned_installs`).
+                if id < self.session_first_req || self.proj.link.abandoned_installs.remove(&id) {
+                    return Task::none();
+                }
+                // The install this answers is over; a resolve's answer while
+                // the install still runs is not the install's.
+                if self.proj.link.remote_installs.get(&language) == Some(&id) {
+                    self.proj.link.remote_installs.remove(&language);
+                }
                 if !matches!(
                     self.proj.link.lsp.get(&language),
                     Some(LspSlot::AwaitingConsent)
@@ -1554,7 +1614,7 @@ impl App {
                             // client re-parses), so the options always render:
                             // the modal never asks about nothing.
                             let shown = crate::app::lsp::pretty_init_options(Some(&spec.options));
-                            self.proj.pending_lsp_command = Some(PendingLspCommand {
+                            self.proj.pending_lsp_command.offer(PendingLspCommand {
                                 root,
                                 host,
                                 language,
@@ -1594,7 +1654,7 @@ impl App {
                             // is being approved and must be visible.
                             let shown = spec.init_options.clone();
                             self.stash_remote_init(&language, spec.init_options);
-                            self.proj.pending_lsp_command = Some(PendingLspCommand {
+                            self.proj.pending_lsp_command.offer(PendingLspCommand {
                                 root,
                                 host,
                                 language,
@@ -1621,6 +1681,20 @@ impl App {
                             server_name: server,
                             version,
                             provision: LspProvision::Remote { describe, consent },
+                            dest_dir: PathBuf::new(),
+                        });
+                        Task::none()
+                    }
+                    LspResolution::NeedsBuildTrust { server, runs } => {
+                        // Asked every time, as for withheld options: the host
+                        // decides, and on Allow the client records the leave,
+                        // pushes it and resolves again — the reply lands here.
+                        let version = String::new();
+                        self.proj.pending_lsp_consent.offer(LspConsent {
+                            language,
+                            server_name: server,
+                            version,
+                            provision: LspProvision::Build { runs, root, host },
                             dest_dir: PathBuf::new(),
                         });
                         Task::none()
@@ -1791,6 +1865,10 @@ impl App {
                 if id == crate::app::server::HELLO_REQ_ID {
                     return self.on_handshake_failed(message);
                 }
+                // A refused install (the host has no project open): the
+                // language is not being installed after all — what is left
+                // to do about it is asking again.
+                self.proj.link.remote_installs.retain(|_, sent| *sent != id);
                 // The open this window waits on could not be done.
                 if self.server.pending_open == Some(id) {
                     self.server.pending_open = None;

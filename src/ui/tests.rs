@@ -333,6 +333,91 @@ fn turn_after(
     (ui.into_cache(), messages, probe.found)
 }
 
+/// A click on the minimap moves the file down to it and leaves it where it
+/// was across: a reader scrolled right was thrown back to the left edge.
+#[test]
+fn a_minimap_click_keeps_the_place_across() {
+    let mut app = reader_app();
+    let wide: String = (0..400)
+        .map(|i| format!("fn line_{i}() {{}} // {}\n", "wide ".repeat(80)))
+        .collect();
+    app.proj.panes[0] = Some(Viewer::new(
+        PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(wide.clone()),
+        crate::highlight::plain_lines(&wide),
+    ));
+    let mut renderer = renderer();
+    let (cache, _, _) = turn(
+        &app,
+        Cache::default(),
+        &mut renderer,
+        &redraw(),
+        mouse::Cursor::Unavailable,
+    );
+    let wheel = [Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels { x: -400.0, y: 0.0 },
+    })];
+    let over_code = mouse::Cursor::Available(Point::new(400.0, 400.0));
+    let (cache, messages, across) = turn(&app, cache, &mut renderer, &wheel, over_code);
+    let across = across.expect("the code view is on screen").x;
+    assert!(across > 100.0, "precondition: scrolled right ({across})");
+    apply_scrolls(&mut app, messages);
+    let task = app.update(Message::Editor(EditorMsg::MinimapScrolled {
+        pane: 0,
+        fraction: 0.5,
+    }));
+    let (_, _, at) = turn_after(&app, task, cache, &mut renderer);
+    let at = at.expect("the code view is on screen");
+    assert!(at.y > 100.0, "moved down: {at:?}");
+    assert!(
+        (at.x - across).abs() < 1.0,
+        "kept across: {at:?} vs {across}"
+    );
+}
+
+/// A minimap drag whose band goes away under it — the minimap turned off
+/// while held — ends there: its release, unseen, no longer leaves it on, so
+/// moves once the band is back do not scroll the file, no button held.
+#[test]
+fn a_minimap_drag_ends_with_its_band() {
+    let mut app = reader_app();
+    app.show_minimap = true;
+    let mut renderer = renderer();
+    let on_band = mouse::Cursor::Available(Point::new(1250.0, 400.0));
+    let scrolled = |messages: &[Message]| {
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Editor(EditorMsg::MinimapScrolled { .. })))
+    };
+    let press = [Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Left,
+    ))];
+    let (cache, messages, _) = turn(&app, Cache::default(), &mut renderer, &press, on_band);
+    assert!(scrolled(&messages), "precondition: the band is there");
+    // Turned off while held; let go of meanwhile.
+    app.show_minimap = false;
+    let release = [Event::Mouse(mouse::Event::ButtonReleased(
+        mouse::Button::Left,
+    ))];
+    let (cache, _, _) = turn(&app, cache, &mut renderer, &release, on_band);
+    // Back, and the pointer moves over it.
+    app.show_minimap = true;
+    let elsewhere = Point::new(1250.0, 500.0);
+    let moved = [Event::Mouse(mouse::Event::CursorMoved {
+        position: elsewhere,
+    })];
+    let (_, messages, _) = turn(
+        &app,
+        cache,
+        &mut renderer,
+        &moved,
+        mouse::Cursor::Available(elsewhere),
+    );
+    assert!(!scrolled(&messages), "{messages:?}");
+}
+
 /// A11: scrubbing to another revision keeps the reader's place on BOTH axes —
 /// on the historical view itself. The scroll the reader makes there is
 /// recorded from the view's own reports, and the next revision's view,
@@ -1121,7 +1206,7 @@ fn enter_in_a_form_field_submits_it() {
         sim.point_at(bounds.center());
         let _ = sim.simulate(iced_test::simulator::click());
         let _ = sim.tap_key(keyboard::Key::Named(keyboard::key::Named::Enter));
-        sim.into_messages().collect()
+        sent_by(sim).into_iter().collect()
     };
     let mut app = reader_app();
     let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
@@ -1397,7 +1482,7 @@ fn the_toolbar_geometry_matches_what_is_drawn() {
         let mut sim = sim_of(&app);
         sim.point_at(Point::new(x, TOOLBAR_H / 2.0));
         let _ = sim.simulate(iced_test::simulator::click());
-        sim.into_messages().collect::<Vec<_>>()
+        sent_by(sim).into_iter().collect::<Vec<_>>()
     };
     for (i, is_expected) in expected.iter().enumerate() {
         let sent = click_at(toolbar_icon_center_x(WINDOW.width, i));
@@ -1551,7 +1636,7 @@ fn escape_names_the_topmost_overlay() {
     app.pending_consent = Some(PathBuf::from("/nonexistent/clew-ui-test"));
     assert!(matches!(
         super::escape_message(&app),
-        Some(Message::Project(ProjectMsg::ConsentDenied))
+        Some(Message::Project(ProjectMsg::ConsentDenied(root))) if root == std::path::Path::new("/nonexistent/clew-ui-test")
     ));
 }
 
@@ -1734,7 +1819,15 @@ fn click_nth(mut sim: Sim<'_>, label: &str, nth: usize) -> Vec<Message> {
         .unwrap_or_else(|| panic!("{label:?} (#{nth}) is not on screen"));
     sim.point_at(bounds.center());
     let _ = sim.simulate(iced_test::simulator::click());
-    sim.into_messages().collect()
+    sent_by(sim).into_iter().collect()
+}
+
+/// What `sim` sent, leaving out where its questions' answers were laid out
+/// (`ui::placed`): the runtime's own bookkeeping, not a press's message.
+fn sent_by(sim: Sim<'_>) -> Vec<Message> {
+    sim.into_messages()
+        .filter(|m| !matches!(m, Message::Placed { .. }))
+        .collect()
 }
 
 fn click(sim: Sim<'_>, label: &str) -> Vec<Message> {
@@ -1828,6 +1921,176 @@ fn the_tutorial_points_at_each_icon_and_leaves_no_field_holding_its_keys() {
         }
     }
     assert_eq!(run_operation(&mut ui, &renderer, find_focused()), None);
+}
+
+/// The reading panels start from the top for each thing they show — the
+/// node explained, the docs item, the tour's step, the sidebar's tab —
+/// not where the last was scrolled to: each is drawn fresh for it
+/// (`ui::fresh`), one key per thing shown.
+#[test]
+fn reading_panels_are_drawn_fresh_for_what_they_show() {
+    use super::fresh::keys_in;
+    // The docs page, by its item.
+    let page = |line| crate::DocPage {
+        rel: "src/lib.rs".into(),
+        entries: vec![crate::DocEntryView {
+            name: "a".into(),
+            kind: "fn".into(),
+            signature: String::new(),
+            line,
+            depth: 0,
+            doc_items: Vec::new(),
+        }],
+    };
+    assert_ne!(
+        keys_in(&super::docs_page(&page(1))),
+        keys_in(&super::docs_page(&page(9)))
+    );
+    assert_eq!(
+        keys_in(&super::docs_page(&page(1))),
+        keys_in(&super::docs_page(&page(1)))
+    );
+    // The sidebar, by its tab.
+    let mut app = reader_app();
+    let tab = |app: &mut App, tab| {
+        app.sidebar = tab;
+        keys_in(&super::sidebar::sidebar(app))
+    };
+    let marks = tab(&mut app, crate::SidebarTab::Marks);
+    assert_ne!(marks, tab(&mut app, crate::SidebarTab::Notes));
+    assert_eq!(marks, tab(&mut app, crate::SidebarTab::Marks));
+    // The explain panel, by its node.
+    let explained = |app: &mut App, name: &str| {
+        app.proj.explain.view = Some(clew_core::explain::Node::Function {
+            file: "src/lib.rs".into(),
+            name: name.into(),
+            ordinal: 0,
+        });
+        keys_in(&super::explain_content(app))
+    };
+    let a = explained(&mut app, "line_1");
+    assert_ne!(a, explained(&mut app, "line_2"));
+    assert_eq!(a, explained(&mut app, "line_1"));
+    // The tour's narration, by its step.
+    let step = |n: usize| crate::walkthrough::Step {
+        title: format!("step {n}"),
+        file: "src/lib.rs".into(),
+        symbol: None,
+        line: Some(n),
+        narration: format!("narration {n}"),
+    };
+    let tour = crate::walkthrough::Walkthrough {
+        title: "tour".into(),
+        scope: String::new(),
+        steps: vec![step(1), step(2)],
+    };
+    let at = |app: &mut App, n| {
+        app.proj.walk.step = n;
+        keys_in(&super::sidebar::walk_narration(app, &tour))
+    };
+    let first = at(&mut app, 0);
+    assert_ne!(first, at(&mut app, 1));
+    assert_eq!(first, at(&mut app, 0));
+}
+
+/// The find bar takes every press over it — on its count, its padding, the
+/// gaps between its controls — none reaching the code drawn under it.
+#[test]
+fn a_press_on_the_find_bar_does_not_reach_the_code_under_it() {
+    let mut app = reader_app();
+    // Lines running under the bar, at the pane's top right.
+    let source: String = (0..400)
+        .map(|i| {
+            format!(
+                "fn line_{i}() {{ let value = {i}; }} // {}\n",
+                "x".repeat(200)
+            )
+        })
+        .collect();
+    let lines = crate::highlight::plain_lines(&source);
+    app.proj.panes[0] = Some(Viewer::new(
+        PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
+        "src/lib.rs".into(),
+        Some("rust"),
+        Arc::new(source),
+        lines,
+    ));
+    app.proj.find.open = true;
+    app.proj.find.query = "line_1".into();
+    let _ = app.update(Message::Noop);
+    assert!(!app.proj.find.matches.is_empty(), "precondition");
+    let mut sim = sim_of(&app);
+    let count = text_at(&mut sim, |t| t.contains('/'), 0).expect("its count is shown");
+    // On the count, and on the panel's edge beside the input.
+    for at in [count.center(), Point::new(count.x - 3.0, count.center_y())] {
+        let mut sim = sim_of(&app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        let sent = sent_by(sim);
+        assert!(
+            !sent
+                .iter()
+                .any(|m| matches!(m, Message::Editor(EditorMsg::SelectStart { .. }))),
+            "{at:?}: {sent:?}"
+        );
+    }
+}
+
+/// An overlay come up over a field holding the keyboard — opened by its
+/// chord from inside the field — takes the keyboard from it, unless it
+/// focuses a field of its own (the finder): left in the Ask input under a
+/// graph or a menu, the Enter that seemed to go nowhere asked the hidden
+/// question.
+#[test]
+fn an_overlay_come_up_over_a_field_takes_the_keyboard_from_it() {
+    let mut renderer = renderer();
+    // The search box holding the keys, then `message`: what has them after.
+    let mut focused_after = |message: Message| -> Option<iced::widget::Id> {
+        let mut app = reader_app();
+        app.show_left_sidebar = true;
+        app.sidebar = crate::SidebarTab::Search;
+        let mut ui =
+            UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+        let _ = run_operation(
+            &mut ui,
+            &renderer,
+            iced::advanced::widget::operation::focusable::focus::<()>(super::search_input_id()),
+        );
+        assert_eq!(
+            run_operation(&mut ui, &renderer, find_focused()),
+            Some(super::search_input_id()),
+            "precondition"
+        );
+        let cache = ui.into_cache();
+        let task = app.update(message);
+        let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+        for mut op in widget_ops(task) {
+            loop {
+                ui.operate(&renderer, &mut black_box(&mut *op));
+                match op.finish() {
+                    Outcome::Chain(next) => op = next,
+                    _ => break,
+                }
+            }
+        }
+        run_operation(&mut ui, &renderer, find_focused())
+    };
+    for message in [
+        Message::Window(WindowMsg::OpenShortcuts),
+        Message::Window(WindowMsg::ToggleToolsMenu),
+    ] {
+        let what = format!("{message:?}");
+        assert_eq!(focused_after(message), None, "{what}");
+    }
+    // Not something that brings up no overlay, nor the finder: its own
+    // input takes the keys.
+    assert_eq!(focused_after(Message::Noop), Some(super::search_input_id()));
+    assert_eq!(
+        focused_after(Message::Nav(NavMsg::FinderOpened(
+            crate::ui::FinderMode::Files
+        ))),
+        Some(super::finder_input_id())
+    );
 }
 
 /// I10: the shortcuts modal lists every rebindable action — the ten added in
@@ -1975,6 +2238,16 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
     assert!(!file.exists(), "a click for another key recorded something");
     assert_eq!(app.conn_gen, conn);
 
+    // Not before it can have been read.
+    app.asking.delay = std::time::Duration::from_secs(5);
+    let _ = app.update(Message::Noop);
+    let _ = app.update(Message::Connect(ConnectMsg::TrustHost {
+        fingerprint: "SHA256:Ed25519PrintForTests".into(),
+    }));
+    assert!(!file.exists(), "trusted unread");
+    let delay = app.asking.delay;
+    crate::app::tests::read_for(&mut app, delay);
+
     let _ = app.update(Message::Connect(ConnectMsg::TrustHost {
         fingerprint: "SHA256:Ed25519PrintForTests".into(),
     }));
@@ -1987,6 +2260,129 @@ fn an_unknown_host_is_trusted_only_by_a_click_on_the_key_shown() {
         app.connect.as_ref().map(|u| &u.stage),
         Some(crate::ConnectStage::Connecting { .. })
     ));
+}
+
+/// The tap that raises the window — its focus, a press and a release in
+/// one batch — landing on an Allow drawn enabled answers nothing: the focus
+/// is told first (`ui::placed::watch_overlays`), and the question waits
+/// from it. A window that opened without the focus is told none at start.
+/// The same press and release, the window focused already, do answer.
+#[test]
+fn the_tap_that_raises_the_window_answers_nothing() {
+    use crate::app::model::Question;
+    use iced_test::selector::{Candidate, Selector};
+    let data = crate::app::tests::test_dir("ui trust tap");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = crate::app::tests::data_dir_override(&data);
+    let known_hosts = data.join("known_hosts");
+    let delay = std::time::Duration::from_secs(5);
+    // The key asked about, its Allow drawn where it was reported and read
+    // there; then `events` on the Allow, and what the app made of them.
+    let tapped = |events: &[Event]| -> (App, Vec<Message>) {
+        let mut app = reader_app();
+        app.asking.delay = delay;
+        app.connection = port_2222_target();
+        let key = scanned_key();
+        app.connect = Some(crate::ConnectUi {
+            stage: crate::ConnectStage::TrustHost {
+                target: port_2222_target(),
+                reason: "refused".into(),
+                key: key.clone(),
+            },
+            ..Default::default()
+        });
+        let question = Question::TrustHost(key.fingerprint.clone());
+        let _ = app.update(Message::Noop);
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        let cache = ui.into_cache();
+        for message in sent.drain(..) {
+            let _ = app.update(message);
+        }
+        // Read where it is: the delay gone by, for it and its place.
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+        assert!(
+            app.may_allow(&question),
+            "precondition: its Allow is enabled"
+        );
+
+        let mut ui = UserInterface::build(super::view(&app), WINDOW, cache, &mut renderer);
+        let mut find = (|c: Candidate<'_>| match c {
+            Candidate::Text {
+                content: "Trust and connect",
+                visible_bounds,
+                ..
+            } => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        let allow = match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at,
+            other => panic!("the Allow is not on screen: {other:?}"),
+        };
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(allow.center()),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        drop(ui);
+        for message in sent.clone() {
+            let _ = app.update(message);
+        }
+        (app, sent)
+    };
+    let click = [
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+    ];
+    let tap: Vec<Event> = std::iter::once(Event::Window(window::Event::Focused))
+        .chain(click.iter().cloned())
+        .collect();
+
+    let (app, sent) = tapped(&tap);
+    let focus = sent
+        .iter()
+        .position(|m| matches!(m, Message::Window(crate::WindowMsg::FocusChanged(true))));
+    let trust = sent
+        .iter()
+        .position(|m| matches!(m, Message::Connect(ConnectMsg::TrustHost { .. })));
+    assert!(
+        matches!((focus, trust), (Some(f), Some(t)) if f < t),
+        "the focus told after the press it came with: {sent:?}"
+    );
+    assert!(
+        matches!(
+            app.connect.as_ref().map(|u| &u.stage),
+            Some(crate::ConnectStage::TrustHost { .. })
+        ),
+        "the tap that raised the window trusted the key"
+    );
+    assert!(!known_hosts.exists());
+
+    // The control: the window focused already, the same click trusts —
+    // the key recorded, the prompt gone.
+    let (app, _) = tapped(&click);
+    assert_eq!(
+        std::fs::read_to_string(&known_hosts).ok(),
+        Some(format!("{}\n", scanned_key().line)),
+        "a click on the enabled Allow trusts"
+    );
+    assert!(app.connect.is_none());
 }
 
 /// A CHANGED key clew itself recorded can be forgotten from the Connect
@@ -2072,6 +2468,47 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
     assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
 }
 
+/// The forget-key reconnect drops the project as every switch does, and what
+/// that discarded is still said: the reconnect's own line used to overwrite it.
+#[test]
+fn forgetting_a_key_keeps_the_discard_notice() {
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEd25519KeyForTestsOnly0000";
+    let mut app = blank_app();
+    app.connect = Some(crate::ConnectUi::default());
+    let _ = app.connect_to(port_2222_target());
+    let _ = app.update(Message::Server(ServerMsg::HostKeyChanged {
+        conn: app.conn_gen,
+        reason: "refused: the host key changed".into(),
+        forget_host: "[example.com]:2222".into(),
+    }));
+    // Unsent remote state, and a typed note, held when the key is forgotten.
+    app.proj.remote_state_dirty.insert("notes.json".into());
+    app.proj.note_edit = Some(("src/lib.rs".into(), 1, "half a thought".into()));
+    let data = crate::app::tests::test_dir("ui forget notice");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = crate::app::tests::data_dir_override(&data);
+    std::fs::write(
+        data.join("known_hosts"),
+        format!("[example.com]:2222 {KEY}\n"),
+    )
+    .unwrap();
+    let _ = app.update(Message::Connect(ConnectMsg::ForgetHostKey {
+        host: "[example.com]:2222".into(),
+    }));
+    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+    assert!(
+        app.status
+            .contains("Unsaved remote state was discarded: notes.json"),
+        "{}",
+        app.status
+    );
+    assert!(
+        app.status.contains("Unsaved note was discarded"),
+        "{}",
+        app.status
+    );
+}
+
 /// F#8: consent questions are asked one at a time, and the modal says when
 /// more wait behind the one on screen.
 #[test]
@@ -2086,11 +2523,1887 @@ fn the_consent_modal_says_how_many_more_wait() {
         },
         dest_dir: PathBuf::new(),
     };
-    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 2));
-    assert!(shows(&mut sim, "2 more installs are waiting"));
-    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 0));
+    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 1, 2, true));
+    assert!(shows(&mut sim, "2 more questions are waiting"));
+    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 1, 0, true));
     assert!(shows(&mut sim, "rust-analyzer 1"));
     assert!(!shows(&mut sim, "waiting for your answer"));
+
+    // Its Allow is pressed only once it can have been read, and names the
+    // question; its decline at once.
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 7, 0, false));
+    assert!(click(sim, "Download").is_empty(), "allowed unread");
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 7, 0, true));
+    assert!(matches!(
+        click(sim, "Download").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentAllowed(7))]
+    ));
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 7, 0, false));
+    assert!(matches!(
+        click(sim, "Not now").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentDismissed(7))]
+    ));
+}
+
+/// Every question's Allow is drawn disabled until it can have been read:
+/// a click on it sends nothing; its decline is pressed at once.
+#[test]
+fn an_unread_questions_allow_sends_nothing() {
+    let root = PathBuf::from("/nonexistent/clew-ui-unread");
+    let sim = sim_elem(super::consent_modal(&root, false));
+    assert!(click(sim, "Allow in clew-ui-unread").is_empty());
+    let sim = sim_elem(super::consent_modal(&root, true));
+    assert!(matches!(
+        click(sim, "Allow in clew-ui-unread").as_slice(),
+        [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
+    ));
+    let pending = crate::PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: Some(root.join("run.sh")),
+        args: Vec::new(),
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
+    };
+    let sim = sim_elem(super::lsp_command_modal(&pending, 4, 0, false));
+    assert!(click(sim, "Run it").is_empty());
+    let sim = sim_elem(super::lsp_command_modal(&pending, 4, 0, false));
+    assert!(matches!(
+        click(sim, "Don't run").as_slice(),
+        [Message::Lsp(crate::LspMsg::CommandDismissed(4))]
+    ));
+    let target = port_2222_target();
+    let key = scanned_key();
+    let sim = sim_elem(super::connect::trust_host_prompt(&target, &key, false));
+    assert!(click(sim, "Trust and connect").is_empty());
+    let sim = sim_elem(super::connect::host_key_changed_prompt(
+        &target, "changed", "host", false,
+    ));
+    assert!(click(sim, "Forget the old key").is_empty());
+    let sim = sim_elem(super::connect::host_key_changed_prompt(
+        &target, "changed", "host", true,
+    ));
+    assert!(matches!(
+        click(sim, "Forget the old key").as_slice(),
+        [Message::Connect(ConnectMsg::ForgetHostKey { host })] if host == "host"
+    ));
+    let approval = crate::app::model::Approval {
+        key: crate::app::model::ApprovalKey::Mcp { call: 3 },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![
+            crate::app::model::ApprovalOption {
+                id: "once".into(),
+                label: "Allow once".into(),
+                allows: true,
+            },
+            crate::app::model::ApprovalOption {
+                id: "deny".into(),
+                label: "Deny".into(),
+                allows: false,
+            },
+        ],
+    };
+    let sim = sim_elem(super::panels::approval_card(9, &approval, false, 200.0, 0));
+    assert!(click(sim, "Allow once").is_empty());
+    let sim = sim_elem(super::panels::approval_card(9, &approval, false, 200.0, 0));
+    assert!(matches!(
+        click(sim, "Deny").as_slice(),
+        [Message::Ask(AskMsg::Approve { stream: 9, option, .. })] if option == "deny"
+    ));
+}
+
+/// A press held on Stop as the answer ends is not one on Ask, let go of
+/// there: Ask keeps a place of its own, Stop there or not.
+#[test]
+fn a_press_on_stop_is_not_one_on_ask() {
+    use iced_test::selector::{Candidate, Selector};
+    let mut app = reader_app();
+    app.proj.ask_input = "and then?".into();
+    app.proj.asking = true;
+    let mut renderer = renderer();
+    let size = Size::new(800.0, app.bottom_height);
+    let find = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
+                renderer: &iced::Renderer,
+                label: &'static str| {
+        let mut find = (move |c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                visible_bounds,
+                ..
+            } if content == label => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(renderer, &mut black_box(&mut find));
+        match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at.center(),
+            other => panic!("{label} is not on screen: {other:?}"),
+        }
+    };
+    let mut ui = UserInterface::build(
+        super::panels::ask_panel(&app),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let stop = find(&mut ui, &renderer, "Stop");
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))],
+        mouse::Cursor::Available(stop),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let cache = ui.into_cache();
+    // The answer ends while it is held; let go of over Ask.
+    app.proj.asking = false;
+    let mut ui = UserInterface::build(super::panels::ask_panel(&app), size, cache, &mut renderer);
+    let ask = find(&mut ui, &renderer, "Ask");
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        ))],
+        mouse::Cursor::Available(ask),
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Submit))),
+        "{sent:?}"
+    );
+}
+
+/// A field of the Connect form keeps the keyboard while what comes before
+/// the form changes — an error shown by the Enter that tried to connect,
+/// a host saved from another window: typed on, it is still that field.
+#[test]
+fn a_connect_field_keeps_the_keyboard_as_the_form_s_head_changes() {
+    use iced_test::selector::{Candidate, Selector};
+    let app = reader_app();
+    let form = crate::ConnectUi::default();
+    let size = Size::new(560.0, 700.0);
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(
+        super::connect::connect_picker(&app, &form, None),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let mut find = (|c: Candidate<'_>| match c {
+        Candidate::Text {
+            content: "User",
+            visible_bounds,
+            ..
+        } => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(&renderer, &mut black_box(&mut find));
+    let user = match Operation::finish(&find) {
+        Outcome::Some(Some(at)) => at,
+        other => panic!("the User field is not on screen: {other:?}"),
+    };
+    // Its input, under its label.
+    let at = mouse::Cursor::Available(Point::new(user.x + 20.0, user.y + user.height + 14.0));
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+        ],
+        at,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    let cache = ui.into_cache();
+    // Enter showed an error above the form; typed on.
+    let mut ui = UserInterface::build(
+        super::connect::connect_picker(&app, &form, Some("Host and user are required.")),
+        size,
+        cache,
+        &mut renderer,
+    );
+    let typed = Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Character("r".into()),
+        modified_key: keyboard::Key::Character("r".into()),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::empty(),
+        text: Some("r".into()),
+        repeat: false,
+    });
+    let mut sent = Vec::new();
+    let _ = ui.update(
+        &[typed],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut sent,
+    );
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Connect(ConnectMsg::Field(crate::ConnectField::User, typed))] if typed == "r"
+        ),
+        "{sent:?}"
+    );
+}
+
+/// One runtime turn of the Ask panel alone, at its default size, over
+/// `cache`: `events` delivered with the pointer at `cursor`, then the
+/// conversation scrolled to its end, as each answer token and tool call has
+/// it (`ask.rs`), and what is found then — the visible bounds of the text
+/// `label`, and the widget with the focus.
+fn ask_panel_turn(
+    app: &App,
+    cache: Cache,
+    renderer: &mut iced::Renderer,
+    (events, cursor): (&[Event], mouse::Cursor),
+    label: &str,
+) -> (Cache, Option<Rectangle>, Option<Id>) {
+    use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
+    use iced_test::selector::{Candidate, Selector};
+    let size = Size::new(800.0, app.bottom_height);
+    let mut ui = UserInterface::build(super::panels::ask_panel(app), size, cache, renderer);
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        events,
+        cursor,
+        renderer,
+        &mut clipboard::Null,
+        &mut messages,
+    );
+    let end = AbsoluteOffset {
+        x: Some(0.0),
+        y: Some(f32::MAX),
+    };
+    let _ = run_operation::<()>(&mut ui, renderer, scroll_to(super::ask_scroll_id(), end));
+    let wanted = label.to_string();
+    let mut find = (move |c: Candidate<'_>| match c {
+        Candidate::Text {
+            content,
+            visible_bounds,
+            ..
+        } if content == wanted => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(renderer, &mut black_box(&mut find));
+    let found = match Operation::finish(&find) {
+        Outcome::Some(found) => found,
+        _ => None,
+    };
+    let focused = run_operation(&mut ui, renderer, find_focused());
+    (ui.into_cache(), found, focused)
+}
+
+/// The approval card is asked above the conversation, from its own top,
+/// its answers in view below what scrolls: its turn growing — steps, plan
+/// entries, its answer, each scrolling the conversation —, more cards
+/// coming and its arguments scrolled move none of its answers; the next
+/// card starts from its own top; and nothing coming or going in the panel
+/// takes the conversation's scroll or the input's focus.
+#[test]
+fn an_approval_card_stays_put_while_its_turn_grows() {
+    use crate::app::model::{AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState};
+    let mut app = reader_app();
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    // Arguments longer than the card shows: they scroll.
+    let card = |call| Approval {
+        key: ApprovalKey::Mcp { call },
+        title: format!("run {call}"),
+        detail: (0..30).map(|i| format!("arg {i}\n")).collect(),
+        options: vec![ApprovalOption {
+            id: "once".into(),
+            label: "Allow once".into(),
+            allows: true,
+        }],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        answer_md: "so far ".repeat(2000),
+        ..AskTurn::default()
+    });
+    let mut renderer = renderer();
+    let mut cache = {
+        let mut ui = UserInterface::build(
+            super::panels::ask_panel(&app),
+            Size::new(800.0, app.bottom_height),
+            Cache::default(),
+            &mut renderer,
+        );
+        let _ = run_operation::<()>(
+            &mut ui,
+            &renderer,
+            iced::advanced::widget::operation::focusable::focus(super::ask_input_id()),
+        );
+        ui.into_cache()
+    };
+    let input = Some(super::ask_input_id());
+    let still: (&[Event], mouse::Cursor) = (&[], mouse::Cursor::Unavailable);
+    let mut turn = |app: &App, events: (&[Event], mouse::Cursor), label: &str| {
+        let (next, found, focused) = ask_panel_turn(
+            app,
+            std::mem::take(&mut cache),
+            &mut renderer,
+            events,
+            label,
+        );
+        cache = next;
+        assert_eq!(focused, input, "the input lost the focus");
+        found
+    };
+    // Read to the end of the answer so far.
+    let _ = turn(&app, still, "Allow once");
+    let _ = turn(&app, still, "Allow once");
+
+    app.proj.ask_turns[0].extras.approvals.push(card(1));
+    let title = turn(&app, still, "⚠ run 1").expect("the card shows from its top");
+    let allow = turn(&app, still, "Allow once").expect("its answers show");
+    assert_eq!(turn(&app, still, "⚠ run 1"), Some(title));
+
+    // More cards, steps, plan entries and answer: the card stays put.
+    app.proj.ask_turns[0].extras.approvals.push(card(2));
+    assert_eq!(turn(&app, still, "Allow once"), Some(allow));
+    assert!(turn(&app, still, "1 more waiting after this one").is_some());
+    assert_eq!(turn(&app, still, "⚠ run 2"), None, "one card at a time");
+    let grown = &mut app.proj.ask_turns[0];
+    for i in 0..40 {
+        grown.steps.push(AgentStep {
+            tool: "read".into(),
+            title: format!("Read file {i}.rs"),
+            refs: Vec::new(),
+            state: StepState::Done,
+        });
+        grown.extras.plan.push(clew_core::acp::PlanEntry {
+            content: format!("step {i}"),
+            status: "pending".into(),
+        });
+    }
+    grown.answer_md.push_str(&"more ".repeat(400));
+    assert_eq!(turn(&app, still, "Allow once"), Some(allow));
+    assert_eq!(turn(&app, still, "⚠ run 1"), Some(title));
+
+    // Its arguments read to their end: the answers stay where they were.
+    let over_title = mouse::Cursor::Available(title.center());
+    let _ = turn(&app, (&wheel_by(0.0, 2000.0), over_title), "Allow once");
+    assert_eq!(turn(&app, still, "⚠ run 1"), None, "scrolled out of view");
+    assert_eq!(turn(&app, still, "Allow once"), Some(allow));
+
+    // The next card, when the first is answered, from its own top.
+    app.proj.ask_turns[0].extras.approvals.remove(0);
+    let next = turn(&app, still, "⚠ run 2").expect("the next card from its top");
+    assert_eq!(next.position(), title.position());
+    assert_eq!(turn(&app, still, "Allow once"), Some(allow));
+
+    // Rows coming and going around the input keep its focus.
+    app.proj.ask_pins.push(crate::app::model::AskPin {
+        rel: "src/a.rs".into(),
+        file: PathBuf::from("/nonexistent/src/a.rs"),
+        line: 3,
+        code: "fn a() {}".into(),
+    });
+    let _ = turn(&app, still, "Allow once");
+    app.acp_agents = vec![clew_core::acp::AgentConfig {
+        name: "fake".into(),
+        launch: clew_core::linerpc::Launch::default(),
+        share_mcp: false,
+    }];
+    let _ = turn(&app, still, "Allow once");
+    // The ACP session's settings, once it offers some.
+    let mut link = crate::app::integrations::AcpLink::new("fake".into(), "Fake".into());
+    link.options = vec![clew_core::acp::ConfigOption {
+        id: "mode".into(),
+        name: "Mode".into(),
+        category: Some("mode".into()),
+        current: "ask".into(),
+        choices: vec![("ask".into(), "Ask".into()), ("code".into(), "Code".into())],
+    }];
+    app.proj.acp = Some(link);
+    app.ask_agent = Some("fake".into());
+    assert!(turn(&app, still, "Mode:").is_some(), "its settings show");
+    app.proj.acp = None;
+    app.ask_agent = None;
+    let _ = turn(&app, still, "Allow once");
+    app.proj.ask_pins.clear();
+    app.acp_agents.clear();
+    let _ = turn(&app, still, "Allow once");
+    app.proj.ask_turns[0].extras.approvals.clear();
+    assert_eq!(turn(&app, still, "⚠ run 2"), None);
+    app.proj.ask_turns.clear();
+    let _ = turn(&app, still, "Allow once");
+}
+
+/// A question's Allow counts once its answers have been in view for the
+/// delay, where they are now (`ui::placed`): the panel resized under them
+/// moves them, and a panel too low for them hides them — each waits again.
+/// And a hover's peek over the window counts as over the card.
+#[test]
+fn a_question_moved_or_out_of_view_waits_again() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![Approval {
+                key: ApprovalKey::Mcp { call: 1 },
+                title: "run it".into(),
+                detail: "a: 1".into(),
+                options: vec![ApprovalOption {
+                    id: "once".into(),
+                    label: "Allow once".into(),
+                    allows: true,
+                }],
+            }],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    // One frame of the window: the placements it reports, fed back as the
+    // runtime does.
+    let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        cache = ui.into_cache();
+        let mut placed = Vec::new();
+        for message in messages {
+            if let Message::Placed { question, place } = &message {
+                assert_eq!(question, &card);
+                placed.push(*place);
+                let _ = app.update(message);
+            }
+        }
+        placed
+    };
+    // The delay gone by, for the question and where it is.
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let _ = app.update(Message::Noop);
+    let first = frame(&mut app);
+    assert!(matches!(first.as_slice(), [Some(_)]), "{first:?}");
+    assert!(!app.may_allow(&card), "unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
+    assert!(app.may_allow(&card));
+
+    // The panel taller: its top, and the card, move.
+    app.bottom_height += 120.0;
+    let _ = app.update(Message::Noop);
+    let moved = frame(&mut app);
+    assert!(
+        matches!(moved.as_slice(), [Some(b)] if Some(*b) != first[0]),
+        "{moved:?}"
+    );
+    assert!(!app.may_allow(&card), "moved: unread where it is");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // A panel too low for the card: not all of it in view, however long.
+    app.bottom_height = 100.0;
+    assert_eq!(frame(&mut app), [None]);
+    read(&mut app);
+    assert!(!app.may_allow(&card), "out of view");
+    app.bottom_height = 340.0;
+    assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
+    assert!(!app.may_allow(&card), "back in view: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // A hover's peek over the window: not within reach, until it goes.
+    app.proj.hover = Some(crate::app::model::HoverState {
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+        text: Some("fn origin()".into()),
+        summary: None,
+        diagnostic: None,
+    });
+    let _ = app.update(Message::Noop);
+    assert!(!app.may_allow(&card), "under the peek");
+    app.proj.hover = None;
+    let _ = app.update(Message::Noop);
+    assert!(!app.may_allow(&card), "uncovered: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // A picker's menu open over the window — opened by a press on it, as
+    // the user does — hides any question: none is within reach until it
+    // goes, read from what is drawn. Taken away with its menu open (the
+    // panel collapsed, the agent gone), it holds nothing back.
+    let mut link = crate::app::integrations::AcpLink::new("fake".into(), "Fake".into());
+    link.options = vec![clew_core::acp::ConfigOption {
+        id: "mode".into(),
+        name: "Mode".into(),
+        category: Some("mode".into()),
+        current: "ask".into(),
+        choices: vec![("ask".into(), "Ask".into()), ("code".into(), "Code".into())],
+    }];
+    app.proj.acp = Some(link);
+    app.ask_agent = Some("fake".into());
+    let mut renderer = self::renderer();
+    let mut cache = Cache::default();
+    // One frame of the window, `events` at `cursor`: what it reported, fed
+    // back as the runtime does, and where `label` is.
+    let mut step = |app: &mut App, events: &[Event], cursor: mouse::Cursor, label: &str| {
+        use iced_test::selector::{Candidate, Selector};
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            events,
+            cursor,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        let wanted = label.to_string();
+        let mut find = (move |c: Candidate<'_>| match c {
+            Candidate::Text {
+                content,
+                visible_bounds,
+                ..
+            } if content == wanted => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        let found = match Operation::finish(&find) {
+            Outcome::Some(found) => found,
+            _ => None,
+        };
+        cache = ui.into_cache();
+        let mut overlay = Vec::new();
+        for message in messages {
+            match message {
+                Message::OverlayOpen(open) => {
+                    overlay.push(open);
+                    let _ = app.update(message);
+                }
+                Message::Placed { .. } => {
+                    let _ = app.update(message);
+                }
+                _ => {}
+            }
+        }
+        (found, overlay)
+    };
+    let nowhere = mouse::Cursor::Unavailable;
+    let (label, overlay) = step(&mut app, &redraw(), nowhere, "Mode:");
+    assert!(overlay.is_empty(), "no overlay yet: {overlay:?}");
+    let label = label.expect("the settings show");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    // The picker is right of its label.
+    let picker = mouse::Cursor::Available(iced::Point::new(
+        label.x + label.width + 30.0,
+        label.center_y(),
+    ));
+    let press = [
+        Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+        Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+    ];
+    let _ = step(&mut app, &press, picker, "Mode:");
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!(overlay, [true], "the menu is open");
+    assert!(!app.may_allow(&card), "under the menu");
+    read(&mut app);
+    assert!(!app.may_allow(&card), "under the menu, however long");
+
+    // A modal question coming up over it — which takes every press, so no
+    // click could close the menu — closes it: the modal is within reach,
+    // and read in its own time.
+    let folder = PathBuf::from("/nonexistent/clew-ui-consent");
+    let consent = Question::Project(folder.clone());
+    app.pending_consent = Some(folder);
+    let _ = app.update(Message::Noop);
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    let (_, again) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!([overlay, again].concat(), [false], "the menu went");
+    assert!(!app.may_allow(&consent), "unread");
+    read(&mut app);
+    assert!(app.may_allow(&consent));
+    app.pending_consent = None;
+    let _ = app.update(Message::Noop);
+    let _ = step(&mut app, &redraw(), picker, "Mode:");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    let _ = step(&mut app, &press, picker, "Mode:");
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!(overlay, [true], "open again");
+    // The picker gone with its menu open.
+    app.proj.acp = None;
+    app.ask_agent = None;
+    let (_, overlay) = step(&mut app, &redraw(), picker, "Mode:");
+    let (_, again) = step(&mut app, &redraw(), picker, "Mode:");
+    assert_eq!([overlay, again].concat(), [false], "the menu went with it");
+    assert!(!app.may_allow(&card), "uncovered: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // The window moved on the screen, at the same size: where it is in the
+    // window says nothing of where it is now. Reported anew, read anew.
+    let _ = app.update(Message::Window(crate::WindowMsg::Moved));
+    assert!(!app.may_allow(&card), "moved with the window");
+    assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
+    assert!(!app.may_allow(&card));
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // Another card drawn where it was, alike, before the app had the last
+    // one's report: it reports for itself.
+    let mut renderer = self::renderer();
+    let mut cache = Cache::default();
+    let mut unheard = |app: &App| -> Vec<Message> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        cache = ui.into_cache();
+        messages
+    };
+    app.asking.places.clear();
+    assert!(!unheard(&app).is_empty());
+    let next = ApprovalKey::Mcp { call: 2 };
+    app.proj.ask_turns[0].extras.approvals[0].key = next;
+    let sent = unheard(&app);
+    assert!(
+        sent.iter().any(|m| matches!(m, Message::Placed { question: Question::Approval { key, .. }, place: Some(_) } if *key == next)),
+        "{sent:?}"
+    );
+}
+
+/// An agent's answers, however many, stay within the card's reach: a few
+/// of each kind at a time — a way to decline always among them — the rest
+/// a page on, where the card is read anew. And a card coming up in a
+/// bottom panel too low for it opens the panel to where it fits, once.
+#[test]
+fn many_answers_or_a_low_panel_leave_the_card_answerable() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    let option = |i: usize, allows: bool| ApprovalOption {
+        id: format!("{}{i}", if allows { "yes" } else { "no" }),
+        label: format!("{} {i}", if allows { "Allow" } else { "Deny" }),
+        allows,
+    };
+    let page = |options: &[ApprovalOption], page| -> (Vec<String>, usize) {
+        let (shown, pages) = super::panels::shown_answers(options, page);
+        (shown.into_iter().map(|o| o.id.clone()).collect(), pages)
+    };
+    let mut options: Vec<ApprovalOption> = (0..8).map(|i| option(i, true)).collect();
+    options.extend((0..8).map(|i| option(i, false)));
+    assert_eq!(
+        page(&options, 0),
+        (
+            ["yes0", "yes1", "yes2", "no0", "no1", "no2"]
+                .map(String::from)
+                .to_vec(),
+            3
+        )
+    );
+    assert_eq!(
+        page(&options, 1).0,
+        ["yes3", "yes4", "yes5", "no3", "no4", "no5"]
+    );
+    assert_eq!(page(&options, 2).0, ["yes6", "yes7", "no6", "no7"]);
+    assert_eq!(page(&options, 3), page(&options, 0), "round again");
+    // Fewer ways to decline than to allow: one on every page all the same.
+    let mut few: Vec<ApprovalOption> = vec![option(0, true), option(0, false)];
+    few.extend((1..7).map(|i| option(i, true)));
+    assert_eq!(
+        page(&few, 0),
+        (
+            ["yes0", "no0", "yes1", "yes2"].map(String::from).to_vec(),
+            3
+        )
+    );
+    assert_eq!(page(&few, 1).0, ["no0", "yes3", "yes4", "yes5"]);
+    assert_eq!(page(&few, 2).0, ["no0", "yes6"]);
+    // A few, all on one page.
+    assert_eq!(
+        page(&few[..3], 0),
+        (["yes0", "no0", "yes1"].map(String::from).to_vec(), 1)
+    );
+    let approval = Approval {
+        key: ApprovalKey::Mcp { call: 1 },
+        title: "run it".into(),
+        detail: String::new(),
+        options,
+    };
+    let mut sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 0));
+    assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_none());
+    assert!(text_at(&mut sim, |t| t == "Deny 2", 0).is_some());
+    let sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 0));
+    assert!(matches!(
+        click(sim, "More answers (1 of 3)").as_slice(),
+        [Message::Ask(AskMsg::AnswersPage {
+            stream: 9,
+            page: 1,
+            ..
+        })]
+    ));
+    let sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 2));
+    assert!(matches!(
+        click(sim, "More answers (3 of 3)").as_slice(),
+        [Message::Ask(AskMsg::AnswersPage {
+            stream: 9,
+            page: 0,
+            ..
+        })]
+    ));
+    let mut sim = sim_elem(super::panels::approval_card(9, &approval, true, 200.0, 1));
+    assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
+    assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
+
+    // In a panel too low for it: drawn, and found squeezed, it opens the
+    // panel to where it fits, and is answered there once read.
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    app.bottom_height = 120.0;
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![approval],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let card = |call| Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call },
+    };
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    let mut frame = |app: &mut App| -> Vec<Option<Rectangle>> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        cache = ui.into_cache();
+        let mut placed = Vec::new();
+        for message in sent {
+            if let Message::Placed { place, .. } = &message {
+                placed.push(*place);
+            }
+            let _ = app.update(message);
+        }
+        placed
+    };
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let _ = app.update(Message::Noop);
+    assert_eq!(frame(&mut app), [None], "squeezed at 120");
+    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert!(
+        matches!(frame(&mut app).as_slice(), [Some(_)]),
+        "in view at the height it opened to"
+    );
+    read(&mut app);
+    assert!(app.may_allow(&card(1)), "answerable there");
+    // Turned a page on: other answers under the pointer, read anew — and
+    // there, the page it shows, answerable once read.
+    let _ = app.update(Message::Ask(AskMsg::AnswersPage {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+        page: 1,
+    }));
+    assert!(!app.may_allow(&card(1)), "a page on: unread");
+    {
+        let mut sim = sim_of(&app);
+        assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
+    }
+    assert!(
+        matches!(frame(&mut app).as_slice(), [Some(_)]),
+        "placed anew"
+    );
+    read(&mut app);
+    assert!(app.may_allow(&card(1)), "read on its page");
+
+    // Made lower by the user, it stays so.
+    app.bottom_height = 120.0;
+    assert_eq!(frame(&mut app), [None]);
+    assert_eq!(app.bottom_height, 120.0);
+    // Another card, squeezed when first drawn: opened for, once — and on
+    // its own first page, not the one the last was turned to.
+    app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
+    let _ = app.update(Message::Noop);
+    assert_eq!(frame(&mut app), [None]);
+    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert!(text_at(&mut sim_of(&app), |t| t == "Allow 0", 0).is_some());
+    // One that fits when first drawn moves nothing — nor does the user's
+    // own drag squeezing it after.
+    app.bottom_height = 340.0;
+    app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
+    let _ = app.update(Message::Noop);
+    assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
+    assert_eq!(app.bottom_height, 340.0);
+    app.bottom_height = 120.0;
+    assert_eq!(frame(&mut app), [None], "squeezed by the user");
+    assert_eq!(app.bottom_height, 120.0, "and left so");
+    // Reported again from nothing (the window moved): still left so.
+    let _ = app.update(Message::Window(crate::WindowMsg::Moved));
+    assert!(app.asking.places.is_empty());
+    assert_eq!(frame(&mut app), [None]);
+    assert_eq!(app.bottom_height, 120.0);
+    let _ = card;
+}
+
+/// A page of answers taller than the first — its labels running over more
+/// rows — in a bottom panel the first page fitted: drawn, and found
+/// squeezed, it opens the panel to where it fits, as a card come up does.
+#[test]
+fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, TurnExtras};
+    let option = |id: String, label: String, allows: bool| ApprovalOption { id, label, allows };
+    let mut options: Vec<ApprovalOption> = (0..3)
+        .map(|i| option(format!("yes{i}"), format!("Allow {i}"), true))
+        .collect();
+    options.extend((3..6).map(|i| {
+        let label = format!("Allow {i}, {}", "and so on and so forth ".repeat(8));
+        option(format!("yes{i}"), label, true)
+    }));
+    options.push(option("no".into(), "Deny".into(), false));
+    // At `height`: where the card was placed on its first page, then on
+    // its second, and the panel's height after.
+    let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, f32) {
+        let mut app = reader_app();
+        app.show_bottom = true;
+        app.bottom_tab = crate::BottomTab::Ask;
+        app.bottom_height = height;
+        app.proj.ask_turns.push(AskTurn {
+            stream: 9,
+            question: "why?".into(),
+            streaming: true,
+            extras: TurnExtras {
+                approvals: vec![Approval {
+                    key: ApprovalKey::Mcp { call: 1 },
+                    title: "run it".into(),
+                    detail: String::new(),
+                    options: options.clone(),
+                }],
+                ..TurnExtras::default()
+            },
+            ..AskTurn::default()
+        });
+        let _ = app.update(Message::Noop);
+        let mut renderer = renderer();
+        let mut cache = Cache::default();
+        let mut frame = |app: &mut App| -> Option<Option<Rectangle>> {
+            let mut ui = UserInterface::build(
+                super::view(app),
+                WINDOW,
+                std::mem::take(&mut cache),
+                &mut renderer,
+            );
+            let mut sent = Vec::new();
+            let _ = ui.update(
+                &redraw(),
+                mouse::Cursor::Unavailable,
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut sent,
+            );
+            cache = ui.into_cache();
+            let mut placed = None;
+            for message in sent {
+                if let Message::Placed { place, .. } = &message {
+                    placed = Some(*place);
+                }
+                let _ = app.update(message);
+            }
+            placed
+        };
+        let first = frame(&mut app).flatten();
+        let _ = app.update(Message::Ask(AskMsg::AnswersPage {
+            stream: 9,
+            key: ApprovalKey::Mcp { call: 1 },
+            page: 1,
+        }));
+        let second = frame(&mut app).expect("placed anew");
+        (first, second, app.bottom_height)
+    };
+    let height = (100..240)
+        .step_by(5)
+        .map(|h| h as f32)
+        .find(|&h| {
+            let (first, second, _) = at(h);
+            first.is_some() && second.is_none()
+        })
+        .expect("precondition: a panel the first page fits and the second does not");
+    assert_eq!(at(height).2, crate::app::model::CARD_PANEL_HEIGHT);
+}
+
+/// The redraw that enables an Allow once its delay is over comes once for
+/// a stream of pointer moves over its question, when the last is read
+/// (`App::wake_after`): not once each.
+#[test]
+fn a_stream_of_moves_wakes_the_window_once() {
+    use crate::app::model::{ApprovalKey, Placement, Question};
+    let mut app = reader_app();
+    app.asking.delay = std::time::Duration::from_millis(80);
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    app.asking.places.push(Placement {
+        question: card.clone(),
+        place: Some(Rectangle::new(
+            iced::Point::new(0.0, 0.0),
+            Size::new(10.0, 10.0),
+        )),
+        since: std::time::Instant::now(),
+    });
+    let first = app.update(Message::Armed(card.clone()));
+    assert!(app.asking.wake_waiting);
+    let due = app.asking.wake_due.unwrap();
+    // Moved again: the latest asked, and no second redraw waiting.
+    let second = app.update(Message::Armed(card.clone()));
+    assert!(crate::app::tests::run_task(second).is_empty(), "one wake");
+    assert!(app.asking.wake_due.unwrap() >= due, "the latest asked");
+    assert!(app.asking.wake_waiting);
+    // As moves went on for a while: what is due comes after the first wake
+    // (a task's wait starts when it is run, here when the test runs it).
+    let later = std::time::Instant::now() + std::time::Duration::from_millis(250);
+    app.asking.wake_due = Some(later);
+    assert!(matches!(
+        crate::app::tests::run_task(first).as_slice(),
+        [Message::QuestionWake]
+    ));
+    let again = app.update(Message::QuestionWake);
+    assert!(
+        app.asking.wake_waiting,
+        "waited for again, for what is left"
+    );
+    assert!(matches!(
+        crate::app::tests::run_task(again).as_slice(),
+        [Message::QuestionWake]
+    ));
+    let _ = app.update(Message::QuestionWake);
+    assert!(std::time::Instant::now() >= later);
+    assert!(!app.asking.wake_waiting && app.asking.wake_due.is_none());
+}
+
+/// Where nothing tells the window it moved (Wayland), the pointer moving
+/// over a question — onto it, or within it — counts its delay anew, as a
+/// move would: a window moved under a resting pointer is seen as no more
+/// than that.
+#[test]
+fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.arm_on_enter = true;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![Approval {
+                key: ApprovalKey::Mcp { call: 1 },
+                title: "run it".into(),
+                detail: String::new(),
+                options: vec![ApprovalOption {
+                    id: "once".into(),
+                    label: "Allow once".into(),
+                    allows: true,
+                }],
+            }],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 1 },
+    };
+    let _ = app.update(Message::Noop);
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    // One frame: the mouse moved to `cursor`, what was reported fed back.
+    fn moved_to(
+        app: &mut App,
+        cache: &mut Cache,
+        renderer: &mut iced::Renderer,
+        cursor: mouse::Cursor,
+    ) -> Vec<Message> {
+        let mut ui =
+            UserInterface::build(super::view(app), WINDOW, std::mem::take(cache), renderer);
+        let mut sent = Vec::new();
+        let moved = [Event::Mouse(mouse::Event::CursorMoved {
+            position: cursor.position().unwrap_or_default(),
+        })];
+        let _ = ui.update(&moved, cursor, renderer, &mut clipboard::Null, &mut sent);
+        *cache = ui.into_cache();
+        for message in sent.clone() {
+            let _ = app.update(message);
+        }
+        sent
+    }
+    macro_rules! frame {
+        ($app:expr, $cursor:expr) => {
+            moved_to($app, &mut cache, &mut renderer, $cursor)
+        };
+    }
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let away = mouse::Cursor::Available(iced::Point::new(5.0, 5.0));
+    let _ = frame!(&mut app, away);
+    let place = app
+        .asking
+        .places
+        .iter()
+        .find(|p| p.question == card)
+        .and_then(|p| p.place)
+        .expect("the card is placed");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    // The pointer still where it was: nothing to say.
+    assert!(
+        !frame!(&mut app, away)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
+    assert!(app.may_allow(&card));
+    // Onto it — moved there, or the window moved under it.
+    let title = mouse::Cursor::Available(iced::Point::new(place.x + 20.0, place.y + 10.0));
+    let sent = frame!(&mut app, title);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Armed(q) if *q == card)),
+        "{sent:?}"
+    );
+    assert!(!app.may_allow(&card), "come onto it: unread");
+    // Resting on it: no more.
+    read(&mut app);
+    assert!(
+        !frame!(&mut app, title)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
+    assert!(app.may_allow(&card));
+    // Moved within it — onto the Allow from its title, as a window moved
+    // under the pointer resting there does: counted anew too.
+    let allow = mouse::Cursor::Available(iced::Point::new(
+        place.x + 30.0,
+        place.y + place.height - 12.0,
+    ));
+    let sent = frame!(&mut app, allow);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Armed(q) if *q == card)),
+        "{sent:?}"
+    );
+    assert!(!app.may_allow(&card), "moved within it: unread");
+    read(&mut app);
+    assert!(app.may_allow(&card));
+
+    // The user's own presses: a finger's tap on the Allow answers, a click
+    // on it answers however its pointer wobbles or is dragged (and the next
+    // waits); a hold moved onto it, a press and release around a move onto
+    // it in one frame, a click on it during a hold of another button begun
+    // elsewhere answer nothing first and the next waits — and a hold gone
+    // out of the window and back; a drag of the window by the toolbar
+    // leaves the arming as it was.
+    use iced_test::selector::{Candidate, Selector};
+    let mut ui = UserInterface::build(
+        super::view(&app),
+        WINDOW,
+        std::mem::take(&mut cache),
+        &mut renderer,
+    );
+    let mut find = (|c: Candidate<'_>| match c {
+        Candidate::Text {
+            content: "Allow once",
+            visible_bounds,
+            ..
+        } => visible_bounds,
+        _ => None,
+    })
+    .find();
+    ui.operate(&renderer, &mut black_box(&mut find));
+    let on_allow = match Operation::finish(&find) {
+        Outcome::Some(Some(at)) => at.center(),
+        other => panic!("the Allow is not on screen: {other:?}"),
+    };
+    let on_title = iced::Point::new(place.x + 20.0, place.y + 10.0);
+    let mut batch = |events: &[Event], at: iced::Point| -> Vec<Message> {
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        sent
+    };
+    let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+    let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+    let moved = |to: iced::Point| Event::Mouse(mouse::Event::CursorMoved { position: to });
+    let answered = |sent: &[Message]| {
+        sent.iter().position(
+            |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
+        )
+    };
+    let armed = |sent: &[Message]| sent.iter().position(|m| matches!(m, Message::Armed(_)));
+    // A finger's tap, the pointer resting on the title: a touch takes the
+    // pointer where it lands, and tells no move.
+    let _ = batch(&[moved(on_title)], on_title);
+    let finger = iced::touch::Finger(1);
+    let sent = batch(
+        &[
+            Event::Touch(iced::touch::Event::FingerPressed {
+                id: finger,
+                position: on_allow,
+            }),
+            Event::Touch(iced::touch::Event::FingerLifted {
+                id: finger,
+                position: on_allow,
+            }),
+        ],
+        on_allow,
+    );
+    assert!(
+        answered(&sent).is_some() && armed(&sent).is_none(),
+        "{sent:?}"
+    );
+    // A mouse click after the tap, the mouse not moved: iced's one cursor
+    // is where the finger was, so the click is taken there — where the
+    // pointer was not seen to go, counted anew first.
+    let sent = batch(&[press.clone(), release.clone()], on_allow);
+    assert!(
+        matches!(
+            (armed(&sent), answered(&sent)),
+            (Some(r), a) if a.is_none_or(|a| r < a)
+        ),
+        "{sent:?}"
+    );
+    // A click, the pointer resting on the Allow, wobbling on it between
+    // press and release.
+    let wobble = iced::Point::new(on_allow.x + 2.0, on_allow.y);
+    let _ = batch(&[moved(on_allow)], on_allow);
+    let sent = batch(std::slice::from_ref(&press), on_allow);
+    assert!(armed(&sent).is_none(), "pressed where it rests: {sent:?}");
+    let sent = batch(&[moved(wobble), release.clone()], wobble);
+    assert!(
+        matches!((answered(&sent), armed(&sent)), (Some(a), Some(r)) if a < r),
+        "the click answers, the next waits: {sent:?}"
+    );
+    // Pressed on the Allow, once it counted, and dragged along it — or
+    // the window moved under the press — before it is let go of there: the
+    // press was the user's own, on it, however far it went; the next waits.
+    let dragged = iced::Point::new(on_allow.x + 12.0, on_allow.y);
+    let _ = batch(&[moved(on_allow)], on_allow);
+    let _ = batch(std::slice::from_ref(&press), on_allow);
+    let sent = batch(&[moved(dragged), release.clone()], dragged);
+    assert!(
+        matches!((answered(&sent), armed(&sent)), (Some(a), Some(r)) if a < r),
+        "{sent:?}"
+    );
+    // A press, a move onto the Allow and a release seen in one frame (the
+    // window moved under the press while a frame was late), the pointer
+    // where it ended for all of them: where it was pressed counts first.
+    let _ = batch(&[moved(on_title)], on_title);
+    let sent = batch(&[press.clone(), moved(on_allow), release.clone()], on_allow);
+    assert!(
+        matches!((armed(&sent), answered(&sent)), (Some(r), Some(a)) if r < a),
+        "{sent:?}"
+    );
+    // Held on the title, moved onto the Allow — the window moving under
+    // it alike — and let go: no answer, and the next waits.
+    let _ = batch(&[moved(on_title)], on_title);
+    let _ = batch(std::slice::from_ref(&press), on_title);
+    let sent = batch(&[moved(on_allow)], on_allow);
+    assert!(armed(&sent).is_none(), "while held: {sent:?}");
+    let sent = batch(std::slice::from_ref(&release), on_allow);
+    assert!(
+        answered(&sent).is_none() && armed(&sent).is_some(),
+        "{sent:?}"
+    );
+    // Held from the title by another button, and clicked on the Allow
+    // there: the press, told where it is, is said first, so the click
+    // waits.
+    let right = |pressed: bool| {
+        Event::Mouse(if pressed {
+            mouse::Event::ButtonPressed(mouse::Button::Right)
+        } else {
+            mouse::Event::ButtonReleased(mouse::Button::Right)
+        })
+    };
+    let _ = batch(&[moved(on_title)], on_title);
+    let _ = batch(&[right(true)], on_title);
+    let _ = batch(&[moved(on_allow)], on_allow);
+    let sent = batch(&[press.clone(), release.clone()], on_allow);
+    assert!(
+        matches!(
+            (armed(&sent), answered(&sent)),
+            (Some(r), a) if a.is_none_or(|a| r < a)
+        ),
+        "{sent:?}"
+    );
+    let _ = batch(&[right(false)], on_allow);
+    // Held on the Allow, the pointer gone from the window, and back onto
+    // it — by a move alone, or entering first: counted anew, before the
+    // release the Allow still holds for can answer.
+    for back in [
+        vec![moved(on_allow)],
+        vec![Event::Mouse(mouse::Event::CursorEntered), moved(on_allow)],
+    ] {
+        let _ = batch(&[moved(on_allow)], on_allow);
+        let _ = batch(std::slice::from_ref(&press), on_allow);
+        let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], on_allow);
+        let sent = batch(&back, on_allow);
+        assert!(armed(&sent).is_some(), "{back:?}: {sent:?}");
+        let sent = batch(std::slice::from_ref(&release), on_allow);
+        assert!(answered(&sent).is_some(), "the Allow held it: {sent:?}");
+    }
+    // The window dragged by its toolbar: the press elsewhere, the pointer
+    // gone, its release never seen — and back over the card, arming.
+    let toolbar = iced::Point::new(400.0, 12.0);
+    let _ = batch(&[moved(toolbar)], toolbar);
+    let _ = batch(std::slice::from_ref(&press), toolbar);
+    let _ = batch(&[Event::Mouse(mouse::Event::CursorLeft)], toolbar);
+    let sent = batch(
+        &[Event::Mouse(mouse::Event::CursorEntered), moved(on_title)],
+        on_title,
+    );
+    assert!(armed(&sent).is_some(), "arming after the drag: {sent:?}");
+    let sent = batch(&[moved(on_allow)], on_allow);
+    assert!(armed(&sent).is_some(), "{sent:?}");
+    cache = ui.into_cache();
+
+    // Where a move is told (macOS), the pointer moving over it is no news.
+    app.arm_on_enter = false;
+    let elsewhere = mouse::Cursor::Available(iced::Point::new(place.x + 60.0, place.y + 15.0));
+    assert!(
+        !frame!(&mut app, elsewhere)
+            .iter()
+            .any(|m| matches!(m, Message::Armed(_)))
+    );
+    assert!(app.may_allow(&card));
+}
+
+/// Where moves go untold (Wayland), a card that comes up under a pointer
+/// resting where it is — the first of a turn, or the next one drawn where
+/// the last was answered, its first event a redraw or a scroll — answers
+/// its first click once its delay has run: the pointer resting there is
+/// not a move onto it. The pointer moving over it after still is.
+#[test]
+fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, Question, TurnExtras};
+    use iced_test::selector::{Candidate, Selector};
+    let mut app = reader_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    app.arm_on_enter = true;
+    app.show_bottom = true;
+    app.bottom_tab = crate::BottomTab::Ask;
+    let approval = |call: u64| Approval {
+        key: ApprovalKey::Mcp { call },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![ApprovalOption {
+            id: "once".into(),
+            label: "Allow once".into(),
+            allows: true,
+        }],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        extras: TurnExtras {
+            approvals: vec![approval(1)],
+            ..TurnExtras::default()
+        },
+        ..AskTurn::default()
+    });
+    let _ = app.update(Message::Noop);
+    let mut renderer = renderer();
+    let on_allow = {
+        let mut ui =
+            UserInterface::build(super::view(&app), WINDOW, Cache::default(), &mut renderer);
+        let mut find = (|c: Candidate<'_>| match c {
+            Candidate::Text {
+                content: "Allow once",
+                visible_bounds,
+                ..
+            } => visible_bounds,
+            _ => None,
+        })
+        .find();
+        ui.operate(&renderer, &mut black_box(&mut find));
+        match Operation::finish(&find) {
+            Outcome::Some(Some(at)) => at.center(),
+            other => panic!("the Allow is not on screen: {other:?}"),
+        }
+    };
+    let mut cache = Cache::default();
+    // One frame, the pointer at `at`, what was sent fed back.
+    let mut frame_at = |app: &mut App, events: &[Event], at: Point| -> Vec<Message> {
+        let mut ui = UserInterface::build(
+            super::view(app),
+            WINDOW,
+            std::mem::take(&mut cache),
+            &mut renderer,
+        );
+        let mut sent = Vec::new();
+        let _ = ui.update(
+            events,
+            mouse::Cursor::Available(at),
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut sent,
+        );
+        cache = ui.into_cache();
+        for message in sent.clone() {
+            let _ = app.update(message);
+        }
+        sent
+    };
+    let read = |app: &mut App| {
+        app.asking.since = app.asking.since.checked_sub(delay).unwrap();
+        for p in &mut app.asking.places {
+            p.since = p.since.checked_sub(delay).unwrap();
+        }
+    };
+    let press = [Event::Mouse(mouse::Event::ButtonPressed(
+        mouse::Button::Left,
+    ))];
+    let release = [Event::Mouse(mouse::Event::ButtonReleased(
+        mouse::Button::Left,
+    ))];
+    let armed = |sent: &[Message]| sent.iter().any(|m| matches!(m, Message::Armed(_)));
+    let scroll = [Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Lines { x: 0.0, y: -1.0 },
+    })];
+    // Its first event a redraw (the first of a turn, and the next drawn
+    // where it was answered), or a scroll that came first.
+    for (call, first) in [(1, redraw()), (2, redraw()), (3, scroll)] {
+        if call > 1 {
+            // Answered, the slot empty a while (the tool running), and the
+            // next drawn where it was.
+            let _ = frame_at(&mut app, &redraw(), on_allow);
+            let turn = app.proj.ask_turns.last_mut().unwrap();
+            turn.extras.approvals.push(approval(call));
+            let _ = app.update(Message::Noop);
+        }
+        let card = Question::Approval {
+            stream: 9,
+            key: ApprovalKey::Mcp { call },
+        };
+        let _ = frame_at(&mut app, &first, on_allow);
+        let _ = frame_at(&mut app, &redraw(), on_allow);
+        read(&mut app);
+        assert!(app.may_allow(&card), "card {call}: read");
+        let sent = frame_at(&mut app, &press, on_allow);
+        assert!(!armed(&sent), "card {call}: {sent:?}");
+        let sent = frame_at(&mut app, &release, on_allow);
+        assert!(
+            app.first_approval().is_none(),
+            "card {call}: its first click answers: {sent:?}"
+        );
+    }
+    // Come up so, it is still counted anew once the pointer moves over it
+    // — the window moved under it.
+    let _ = frame_at(&mut app, &redraw(), on_allow);
+    let turn = app.proj.ask_turns.last_mut().unwrap();
+    turn.extras.approvals.push(approval(4));
+    let _ = app.update(Message::Noop);
+    let card = Question::Approval {
+        stream: 9,
+        key: ApprovalKey::Mcp { call: 4 },
+    };
+    let _ = frame_at(&mut app, &redraw(), on_allow);
+    let _ = frame_at(&mut app, &redraw(), on_allow);
+    read(&mut app);
+    assert!(app.may_allow(&card));
+    let shifted = Point::new(on_allow.x + 3.0, on_allow.y);
+    let sent = frame_at(
+        &mut app,
+        &[Event::Mouse(mouse::Event::CursorMoved {
+            position: shifted,
+        })],
+        shifted,
+    );
+    assert!(armed(&sent), "{sent:?}");
+    assert!(!app.may_allow(&card), "moved over: unread");
+}
+
+/// A press made on an Allow that counts, held while it stopped counting
+/// (its question moved, say) and let go of once it counts again, answers
+/// nothing: it is drawn anew as it comes to count (`fresh::allow`). Not
+/// let go of in between, the same press answers; and a decline pressed
+/// before the Allow counts and let go of after still declines. So for
+/// every question's view.
+#[test]
+fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
+    use crate::LspMsg;
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    use iced_test::selector::{Candidate, Selector};
+    // `view`, its Allow counting or not, pressed and let go of on the
+    // answers labelled `allow` and `decline`.
+    fn check<'a>(
+        view: impl Fn(bool) -> Element<'a, Message>,
+        (allow, allows): (&str, fn(&Message) -> bool),
+        (decline, declines): (&str, fn(&Message) -> bool),
+    ) {
+        let mut renderer = renderer();
+        let mut cache = Cache::default();
+        // One frame, `events` on the answer labelled `label`.
+        let mut frame = |ready: bool, label: &str, events: &[Event]| -> Vec<Message> {
+            let mut ui = UserInterface::build(
+                view(ready),
+                WINDOW,
+                std::mem::take(&mut cache),
+                &mut renderer,
+            );
+            let mut find = (|c: Candidate<'_>| match c {
+                Candidate::Text {
+                    content,
+                    visible_bounds,
+                    ..
+                } if content == label => visible_bounds,
+                _ => None,
+            })
+            .find();
+            ui.operate(&renderer, &mut black_box(&mut find));
+            let at = match Operation::finish(&find) {
+                Outcome::Some(Some(at)) => at.center(),
+                other => panic!("{label} is not on screen: {other:?}"),
+            };
+            let mut sent = Vec::new();
+            let _ = ui.update(
+                events,
+                mouse::Cursor::Available(at),
+                &mut renderer,
+                &mut clipboard::Null,
+                &mut sent,
+            );
+            cache = ui.into_cache();
+            sent
+        };
+        let press = [Event::Mouse(mouse::Event::ButtonPressed(
+            mouse::Button::Left,
+        ))];
+        let release = [Event::Mouse(mouse::Event::ButtonReleased(
+            mouse::Button::Left,
+        ))];
+        let _ = frame(true, allow, &press);
+        let _ = frame(false, allow, &[]);
+        let sent = frame(true, allow, &release);
+        assert!(!sent.iter().any(allows), "{allow}: {sent:?}");
+        let _ = frame(true, allow, &press);
+        let sent = frame(true, allow, &release);
+        assert!(sent.iter().any(allows), "{allow}: {sent:?}");
+        let _ = frame(false, decline, &press);
+        let sent = frame(true, decline, &release);
+        assert!(sent.iter().any(declines), "{decline}: {sent:?}");
+    }
+
+    let approval = Approval {
+        key: ApprovalKey::Acp { id: 4 },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![
+            ApprovalOption {
+                id: "once".into(),
+                label: "Allow once".into(),
+                allows: true,
+            },
+            ApprovalOption {
+                id: "no".into(),
+                label: "Deny".into(),
+                allows: false,
+            },
+        ],
+    };
+    check(
+        |ready| super::panels::approval_card(9, &approval, ready, 200.0, 0),
+        (
+            "Allow once",
+            |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
+        ),
+        (
+            "Deny",
+            |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "no"),
+        ),
+    );
+    let consent = crate::LspConsent {
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Remote {
+            describe: "install it".into(),
+            consent: "digest".into(),
+        },
+        dest_dir: PathBuf::new(),
+    };
+    check(
+        |ready| super::lsp_consent_modal(&consent, 7, 0, ready),
+        ("Download", |m| {
+            matches!(m, Message::Lsp(LspMsg::ConsentAllowed(7)))
+        }),
+        ("Not now", |m| {
+            matches!(m, Message::Lsp(LspMsg::ConsentDismissed(7)))
+        }),
+    );
+    let root = PathBuf::from("/nonexistent/clew-ui-allow");
+    let pending = crate::PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: None,
+        args: Vec::new(),
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
+    };
+    check(
+        |ready| super::lsp_command_modal(&pending, 8, 0, ready),
+        ("Allow", |m| {
+            matches!(m, Message::Lsp(LspMsg::CommandAllowed(8)))
+        }),
+        ("Don't allow", |m| {
+            matches!(m, Message::Lsp(LspMsg::CommandDismissed(8)))
+        }),
+    );
+    check(
+        |ready| super::consent_modal(&root, ready),
+        ("Allow in clew-ui-allow", |m| {
+            matches!(m, Message::Project(ProjectMsg::ConsentAllowed(_)))
+        }),
+        ("Not now", |m| {
+            matches!(m, Message::Project(ProjectMsg::ConsentDenied(_)))
+        }),
+    );
+    let target = port_2222_target();
+    let key = scanned_key();
+    check(
+        |ready| super::connect::trust_host_prompt(&target, &key, ready),
+        ("Trust and connect", |m| {
+            matches!(m, Message::Connect(ConnectMsg::TrustHost { .. }))
+        }),
+        ("Cancel", |m| {
+            matches!(m, Message::Connect(ConnectMsg::TrustCancel))
+        }),
+    );
+    check(
+        |ready| super::connect::host_key_changed_prompt(&target, "changed", "host", ready),
+        ("Forget the old key", |m| {
+            matches!(m, Message::Connect(ConnectMsg::ForgetHostKey { .. }))
+        }),
+        ("Cancel", |m| {
+            matches!(m, Message::Connect(ConnectMsg::TrustCancel))
+        }),
+    );
+}
+
+/// Every question is drawn fresh for what it asks (`ui::fresh`): a press
+/// held on one's button is not the next one's, wherever it comes up. Its
+/// Allow is drawn fresh again as it comes to count or stops
+/// (`fresh::allow`).
+#[test]
+fn every_question_is_drawn_fresh_for_what_it_asks() {
+    use super::fresh::keys_in;
+    let hash = |what: &dyn Fn(&mut std::collections::hash_map::DefaultHasher)| {
+        use std::hash::Hasher;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        what(&mut hasher);
+        hasher.finish()
+    };
+    use std::hash::Hash;
+    let consent = crate::LspConsent {
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Remote {
+            describe: "install it".into(),
+            consent: "digest".into(),
+        },
+        dest_dir: PathBuf::new(),
+    };
+    assert_eq!(
+        keys_in(&super::lsp_consent_modal(&consent, 7, 0, true)),
+        [7, 1]
+    );
+    let root = PathBuf::from("/nonexistent/clew-ui-fresh");
+    let pending = crate::PendingLspCommand {
+        root: root.clone(),
+        host: None,
+        language: "rust".into(),
+        command: None,
+        args: Vec::new(),
+        server_name: "rust-analyzer".into(),
+        version: "x".into(),
+        fingerprint: "fp".into(),
+        init_options: None,
+    };
+    assert_eq!(
+        keys_in(&super::lsp_command_modal(&pending, 8, 0, true)),
+        [8, 1]
+    );
+    assert_eq!(
+        keys_in(&super::consent_modal(&root, true)),
+        [hash(&|h| root.hash(h)), 1]
+    );
+    let target = port_2222_target();
+    let key = scanned_key();
+    assert_eq!(
+        keys_in(&super::connect::trust_host_prompt(&target, &key, true)),
+        [hash(&|h| key.fingerprint.hash(h)), 1]
+    );
+    assert_eq!(
+        keys_in(&super::connect::host_key_changed_prompt(
+            &target, "changed", "host", true
+        )),
+        [hash(&|h| "host".hash(h)), 1]
+    );
+    let approval = crate::app::model::Approval {
+        key: crate::app::model::ApprovalKey::Acp { id: 4 },
+        title: "run it".into(),
+        detail: String::new(),
+        options: vec![
+            crate::app::model::ApprovalOption {
+                id: "ok".into(),
+                label: "Allow".into(),
+                allows: true,
+            },
+            crate::app::model::ApprovalOption {
+                id: "no".into(),
+                label: "Deny".into(),
+                allows: false,
+            },
+        ],
+    };
+    assert_eq!(
+        keys_in(&super::panels::approval_card(9, &approval, true, 200.0, 0)),
+        [hash(&|h| (9u64, approval.key).hash(h)), 0, 1]
+    );
+    // Its Allow anew too as it comes to count, its Deny as it is.
+    assert_eq!(
+        keys_in(&super::panels::approval_card(9, &approval, false, 200.0, 0)),
+        [hash(&|h| (9u64, approval.key).hash(h)), 0, 0]
+    );
+    // And its answers anew for each page of them.
+    let mut paged = approval.clone();
+    paged
+        .options
+        .extend((1..4).map(|i| crate::app::model::ApprovalOption {
+            id: format!("ok{i}"),
+            label: format!("Allow {i}"),
+            allows: true,
+        }));
+    assert_eq!(
+        keys_in(&super::panels::approval_card(9, &paged, true, 200.0, 1)),
+        [hash(&|h| (9u64, paged.key).hash(h)), 1, 1]
+    );
+
+    // And each reports where its answers are, all of them in view in a
+    // window of the usual size (`ui::placed`) — or its Allow never counts.
+    use crate::app::model::Question;
+    let asked = |question: Question| crate::ui::placed::Asked {
+        ready: false,
+        report: Some((question, None)),
+        arm: false,
+    };
+    let placed = |view: Element<'_, Message>| -> Vec<(Question, Option<Rectangle>)> {
+        let mut renderer = renderer();
+        let mut ui = UserInterface::build(view, WINDOW, Cache::default(), &mut renderer);
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            &redraw(),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        messages
+            .into_iter()
+            .filter_map(|m| match m {
+                Message::Placed { question, place } => Some((question, place)),
+                _ => None,
+            })
+            .collect()
+    };
+    // Its own report, of all of it in view.
+    let in_view = |places: Vec<(Question, Option<Rectangle>)>, what: Question| {
+        assert!(
+            matches!(places.as_slice(), [(question, Some(_))] if *question == what),
+            "{what:?}: {places:?}"
+        );
+    };
+    in_view(
+        placed(super::lsp_consent_modal(
+            &consent,
+            7,
+            0,
+            asked(Question::LspConsent(7)),
+        )),
+        Question::LspConsent(7),
+    );
+    in_view(
+        placed(super::lsp_command_modal(
+            &pending,
+            8,
+            0,
+            asked(Question::LspCommand(8)),
+        )),
+        Question::LspCommand(8),
+    );
+    in_view(
+        placed(super::consent_modal(
+            &root,
+            asked(Question::Project(root.clone())),
+        )),
+        Question::Project(root.clone()),
+    );
+    in_view(
+        placed(super::connect::trust_host_prompt(
+            &target,
+            &key,
+            asked(Question::TrustHost(key.fingerprint.clone())),
+        )),
+        Question::TrustHost(key.fingerprint.clone()),
+    );
+    // And in the Connect modal, as the window draws them.
+    let mut app = reader_app();
+    app.connect = Some(crate::ConnectUi {
+        stage: crate::ConnectStage::TrustHost {
+            target: target.clone(),
+            reason: "refused".into(),
+            key: key.clone(),
+        },
+        ..Default::default()
+    });
+    in_view(
+        placed(super::view(&app)),
+        Question::TrustHost(key.fingerprint.clone()),
+    );
+    app.connect = Some(crate::ConnectUi {
+        stage: crate::ConnectStage::HostKeyChanged {
+            target: target.clone(),
+            reason: "changed".into(),
+            forget_host: "host".into(),
+        },
+        ..Default::default()
+    });
+    in_view(
+        placed(super::view(&app)),
+        Question::ForgetHostKey("host".into()),
+    );
+    in_view(
+        placed(super::connect::host_key_changed_prompt(
+            &target,
+            "changed",
+            "host",
+            asked(Question::ForgetHostKey("host".into())),
+        )),
+        Question::ForgetHostKey("host".into()),
+    );
+    in_view(
+        placed(super::panels::approval_card(
+            9,
+            &approval,
+            asked(Question::Approval {
+                stream: 9,
+                key: approval.key,
+            }),
+            200.0,
+            0,
+        )),
+        Question::Approval {
+            stream: 9,
+            key: approval.key,
+        },
+    );
 }
 
 /// A14/A16: a file git tracks although `.gitignore` would hide it is listed
@@ -2929,7 +5242,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let mut sim = sim_elem(super::trace_control(&app));
     assert!(shows(&mut sim, "trace: 3 stops"));
     let _ = sim.click("Walk this run");
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Walk(WalkMsg::GenerateTrace))),
@@ -3029,7 +5342,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     assert!(shows(&mut sim, "src/lib.rs:4"));
     assert!(shows(&mut sim, "(line not read)"));
     let _ = sim.click("▸");
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Expand { token: 7, id: 1 }))),
@@ -3061,7 +5374,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     assert!(shows(&mut sim_elem(super::flow_tab(&app)), "changed"));
     let mut sim = sim_elem(super::flow_tab(&app));
     let _ = sim.click("trace again");
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Retrace))),
@@ -3172,7 +5485,7 @@ fn rows_send_the_identity_of_what_they_show() {
     let close = Point::new(app.sidebar_width - 14.0, row.center_y());
     sim.point_at(close);
     let _ = sim.simulate(iced_test::simulator::click());
-    let sent: Vec<Message> = sim.into_messages().collect();
+    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         matches!(sent.as_slice(), [Message::Reading(ReadingMsg::BookmarkRemoved { rel, line: 7 })] if rel == "b.rs"),
         "{sent:?}"

@@ -206,6 +206,131 @@ pub struct DebugState {
     /// with none. Until one has, a child that fails to start was the run's
     /// real target, and the run fails with it (`App::on_debug_child_failed`).
     pub child_started: Option<u64>,
+    /// The run's sessions beyond its own (see [`DebugChildren`]).
+    pub children: DebugChildren,
+    /// Bumped by every breakpoint change pushed to the adapter. What a
+    /// session is configured with at `Initialized` is a snapshot, sent one
+    /// file after another: a change pushed meanwhile could land first and be
+    /// overwritten by the snapshot's older list. A configuration answered at
+    /// an older revision is followed by the current breakpoints.
+    pub bp_rev: u64,
+    /// The run whose adapter rides the clew-server transport
+    /// (`DebugMsg::DapStarted::proxied`): the one a lost transport ends.
+    pub proxied_run: Option<u64>,
+}
+
+/// The session a DAP event, an answer or a client belongs to: the run's own
+/// ([`OWN_SESSION`]), or one of its js-debug children, by id.
+pub type DebugSessionId = u64;
+
+/// The run's own session: the adapter the run started.
+pub const OWN_SESSION: DebugSessionId = 0;
+
+/// js-debug opens a child session per target — the program, and each worker
+/// or child process it starts — on the adapter the run started, and each one
+/// is a DAP session of its own: its own stops, threads, stack and breakpoint
+/// handles. Which one an event came from decides what it is about; mixed, a
+/// stop of the program was inspected — and continued — on whichever child
+/// started last, which answered with nothing, and a forked child's exit ended
+/// the whole run.
+///
+/// Keyed by the run it belongs to ([`Self::run`]), like `child_started`: a
+/// later run starts with none.
+#[derive(Default)]
+pub struct DebugChildren {
+    pub run: u64,
+    /// The run's own session's client, kept when a child takes over
+    /// `DebugSession::client`, with its `initialize` promise about hovers.
+    pub own: Option<(dap::DapClient, bool)>,
+    /// What the run's own session said, as each child keeps it
+    /// ([`DebugChild::said`]).
+    pub own_said: SessionSaid,
+    /// The children alive, oldest first.
+    pub live: Vec<DebugChild>,
+    /// Children asked for (`StartDebugging`) whose session has neither
+    /// started nor failed yet. The run is not over while one is coming: a
+    /// program that forks and exits leaves its child to connect.
+    pub starting: Vec<DebugSessionId>,
+    /// Which session `DebugSession::client` is: the one the panel shows and
+    /// the controls drive — the one that stopped last, else the newest child.
+    /// A child that starts while the one on screen is paused waits its turn.
+    pub active: DebugSessionId,
+    /// The last child id handed out.
+    pub last_id: DebugSessionId,
+    /// The session a Continue or step was sent to that has not answered. It
+    /// keeps its stop while another session takes the screen: its answer may
+    /// be a refusal, which leaves it paused — forgotten, with nothing to
+    /// bring it back.
+    pub controlling: Option<DebugSessionId>,
+}
+
+/// One live js-debug child session.
+pub struct DebugChild {
+    pub id: DebugSessionId,
+    pub client: dap::DapClient,
+    /// Its own `supportsEvaluateForHovers` promise.
+    pub hover_safe: bool,
+    /// What it said that the panel shows only for the session on screen.
+    pub said: SessionSaid,
+}
+
+/// What one session of a run said that the panel shows only for the session
+/// on screen, kept so that showing it again shows its own state, not the last
+/// one's.
+#[derive(Default)]
+pub struct SessionSaid {
+    /// Where it is paused, while another session is on screen. The one on
+    /// screen keeps its stop in `DebugSession` itself. Switched back to, a
+    /// paused session is shown paused, and driven, again: left as it was, it
+    /// stayed paused for good with nothing addressing it.
+    pub paused: Option<dap::proto::Stopped>,
+    /// Its answers about the user's breakpoints, by file and requested line.
+    /// Handles are per session, so each one's are its own; the gutter shows
+    /// the active session's.
+    pub verdicts: HashMap<PathBuf, std::collections::BTreeMap<usize, Verdict>>,
+}
+
+impl SessionSaid {
+    /// Record a `setBreakpoints` answer: it is the session's whole list for
+    /// the file, so it replaces what the file had.
+    pub fn record(&mut self, path: &Path, list: &[dap::Breakpoint]) {
+        let verdicts = list
+            .iter()
+            .map(|bp| {
+                (
+                    bp.requested_line,
+                    Verdict {
+                        verified: bp.verified,
+                        bound_line: bp.relocated_to(),
+                        adapter_id: bp.id,
+                    },
+                )
+            })
+            .collect();
+        self.verdicts.insert(path.to_path_buf(), verdicts);
+    }
+
+    /// Apply a `breakpoint` event, matched by the session's handle as
+    /// `App::on_breakpoint_changed` matches it.
+    pub fn revise(&mut self, id: i64, verified: bool, line: Option<usize>) {
+        for file in self.verdicts.values_mut() {
+            for (requested, v) in file.iter_mut() {
+                if v.adapter_id == Some(id) {
+                    v.verified = verified;
+                    v.bound_line = line.filter(|l| verified && l != requested);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// A session's answer about one breakpoint: the adapter's half of [`Bp`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Verdict {
+    pub verified: bool,
+    pub bound_line: Option<usize>,
+    pub adapter_id: Option<i64>,
 }
 
 /// The whole-project symbol call graph (tree-sitter name-resolved, optionally
@@ -562,6 +687,10 @@ pub struct ExplainState {
     pub pass_automatic: bool,
     /// The node the running pass re-explains (`ExplainMsg::ReexplainNode`).
     pub pass_target: Option<explain::Node>,
+    /// The functions whose blocks are being explained (`ExplainMsg::Blocks`)
+    /// until the answer lands: asked again meanwhile, each click made one
+    /// more paid call for the same answer.
+    pub blocks_in_flight: HashSet<explain::Node>,
     /// The entries this window changed since it last saved, and what each
     /// replaced: all a save writes (`explain::merge_unsaved`). Taken by the
     /// save, handed back when it fails.
@@ -882,6 +1011,11 @@ pub struct App {
     /// A transport that merely DIED leaves this `None` and still reconnects.
     /// Cleared whenever a fresh transport comes up, so a user-initiated
     /// connect or project open gets a full verdict again.
+    ///
+    /// A local transport that gave up (`ServerMsg::Unavailable`: the binary
+    /// would not start, or reconnecting stopped) latches it too: that stream
+    /// has ended, so only a re-keyed subscription brings a server back, and
+    /// the next project open is what re-keys it.
     pub handshake_failure: Option<String>,
     /// This window is closing, or the app quitting: it wants no clew-server
     /// any more (`wants_server`), so its transport is released — the server
@@ -962,6 +1096,16 @@ pub struct App {
     /// Who answers the Ask panel: `None` for clew's own agent, else the name
     /// of a configured ACP agent (persisted as `ask_agent` in config.toml).
     pub ask_agent: Option<String>,
+    /// The window draws an overlay of a widget's own — a picker's menu, a
+    /// tooltip — over everything else, as last reported (`ui::placed::
+    /// watch_overlays`): it may hide any question (see
+    /// `App::question_on_screen`).
+    pub overlay_open: bool,
+    /// The window system tells the window nothing of where it is on the
+    /// screen (Wayland): a window moved under a resting pointer is seen
+    /// only as the pointer moving over what is in it, so a question's delay
+    /// counts from that too (`ui::placed`).
+    pub arm_on_enter: bool,
     /// The ACP agents configured, as last read (the Ask panel's picker).
     pub acp_agents: Vec<clew_core::acp::AgentConfig>,
     /// Light/Dark/System appearance preference (persisted; drives the palette).
@@ -1031,6 +1175,9 @@ pub struct App {
     /// Whether the window has keyboard focus. The custom traffic-light controls
     /// grey out when it doesn't, like native macOS.
     pub window_focused: bool,
+    /// The question whose Allow is within reach, and since when (see
+    /// [`crate::app::model::Asking`]).
+    pub asking: crate::app::model::Asking,
     /// Whether the pointer is over the traffic-light cluster, so the icons show
     /// on all three (native behaviour), not just the hovered one.
     pub controls_hovered: bool,
@@ -1641,9 +1788,9 @@ pub struct ProjectSession {
     /// debug-adapter install it consented to stops between chunks instead of
     /// downloading on for a project that is gone.
     pub adapter_install_cancel: RaiseOnDrop,
-    /// A repo-specified language server awaiting the user's approval, with the
-    /// exact command line to show them.
-    pub pending_lsp_command: Option<PendingLspCommand>,
+    /// Repo-specified language servers awaiting the user's approval, with the
+    /// exact command lines to show them, the front one on screen.
+    pub pending_lsp_command: CommandQueue,
     // -- The remote `.clew/` state -----------------------------------------------
     /// Remote `.clew/` state files whose content has not arrived yet. Until it
     /// does, what this client holds for them is the empty baseline every
@@ -1902,6 +2049,17 @@ pub struct ProjectLink {
     /// dead transport drops it with the link — left parked, it was aimed at
     /// the next SUCCESSFUL build, long after the reader moved on.
     pub pending_docs_view: Option<String>,
+    /// The languages whose server the host is installing, by the id of the
+    /// `LspInstall` sent (its `LspResolved` not back): nothing to ask about
+    /// meanwhile. Dropped with the link, whose reply can no longer come, and
+    /// on the install's refusal.
+    pub remote_installs: HashMap<String, u64>,
+    /// The `LspInstall`s the host stopped on its own — it stops them all
+    /// when asked to open a project — whose answer ("cancelled") is no
+    /// answer to what is asked since; and their languages, asked about again
+    /// should the project stay (the open failed).
+    pub abandoned_installs: HashSet<u64>,
+    pub interrupted_languages: Vec<String>,
     /// Set while the `OpenProject` a (re)connect re-sent for an ALREADY-open
     /// project is in flight, so its `Tree` reply is recognized as a resync and
     /// spliced into the open project. It is deliberately not `scanning`: that

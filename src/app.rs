@@ -72,6 +72,7 @@ mod project;
 mod reading;
 mod remote_state;
 mod runtime;
+pub use runtime::note_window_system;
 mod semantic;
 pub(crate) mod server;
 mod settings;

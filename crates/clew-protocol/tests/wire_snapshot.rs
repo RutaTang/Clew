@@ -308,6 +308,7 @@ fn lsp_resolution_index(r: &LspResolution) -> usize {
         LspResolution::Command(_) => 1,
         LspResolution::NeedsInstall { .. } => 2,
         LspResolution::Unsupported { .. } => 3,
+        LspResolution::NeedsBuildTrust { .. } => 4,
     }
 }
 
@@ -566,6 +567,10 @@ fn resolutions() -> Vec<LspResolution> {
         LspResolution::Unsupported {
             message: "no server".into(),
         },
+        LspResolution::NeedsBuildTrust {
+            server: "rust-analyzer".into(),
+            runs: "its build scripts".into(),
+        },
     ]
 }
 
@@ -782,6 +787,7 @@ fn request_samples() -> Vec<Request> {
             consent: "c0ffee".into(),
         },
         Request::LspApprovals {
+            root: "/p".into(),
             approvals: vec![("rust".into(), "fp".into())],
         },
         Request::ProcessInput {

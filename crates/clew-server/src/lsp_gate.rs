@@ -99,6 +99,50 @@ pub fn lsp_command_allowed(
     })
 }
 
+/// Whether the store server `server` may start in `root`: it runs none of the
+/// project's code, or the user let it build this project — in the set the
+/// client pushed, or in this host's own trust store, like any approval. `Err`
+/// is what it would run, for the refusal and the consent prompt.
+///
+/// The install was not that leave: one install serves every project, and a
+/// server that builds the project (rust-analyzer's build scripts and proc
+/// macros, zls's `build.zig`) runs each repository's own code on load. Every
+/// spawn path asks here — `SpawnLsp`, `LspResolve` and the agent's pool —
+/// so the agent asking instead of the GUI is no way around it.
+pub(crate) fn build_allowed(
+    approvals: &SharedApprovals,
+    root: &Path,
+    server: &clew_core::lsp::config::EffectiveServer,
+) -> Result<(), &'static str> {
+    let Some(runs) = server.runs_project_code() else {
+        return Ok(());
+    };
+    let name = &server.server_name;
+    let key = clew_core::trust::build_key(name);
+    match is_approved(
+        approvals,
+        root,
+        &key,
+        &clew_core::trust::build_fingerprint(name),
+    ) {
+        true => Ok(()),
+        false => Err(runs),
+    }
+}
+
+/// The refusal for a server [`build_allowed`] stopped, naming what it runs and
+/// where the leave is given.
+pub(crate) fn build_refusal(
+    server: &clew_core::lsp::config::EffectiveServer,
+    runs: &str,
+) -> String {
+    format!(
+        "{} has not been allowed to build this project (it runs {runs}) — open a {} file \
+         in clew to allow it",
+        server.server_name, server.language
+    )
+}
+
 /// The fingerprint for the options-only shape (`init_options`, no `command`).
 ///
 /// One derivation, two callers on purpose: the gate ([`approved_init_options`])
@@ -260,7 +304,11 @@ pub(crate) fn resolve_spawn_exe(
         // the ones `resolve_lsp` handed it, and that is where they are
         // gated ([`approved_init_options`]).
         None => match clew_core::lsp::store::locate(&server) {
-            Located::Ready(exe) => exe,
+            Located::Ready(exe) => {
+                build_allowed(approvals, root, &server)
+                    .map_err(|runs| (ErrorCode::Refused, build_refusal(&server, runs)))?;
+                exe
+            }
             // Not installed on this host. Spawning must never install:
             // consent lives in the client, and it arrives as an explicit
             // `LspInstall` — a client that skipped that step gets an
@@ -366,7 +414,16 @@ pub(crate) fn resolve_lsp(
         // "my lsp.toml is ignored" and "my lsp.toml is broken" is the
         // whole of the user's next hour. (A `Status` notice lands in the
         // client's status bar.)
-        Located::Ready(_) => {
+        Located::Ready(exe) => {
+            // Asked before the options: there is no point approving options
+            // for a server that may not start, and once it may, the resolve
+            // the client re-issues comes back here for them.
+            if let Err(runs) = build_allowed(approvals, root, &server) {
+                return LspResolution::NeedsBuildTrust {
+                    server: server.server_name.clone(),
+                    runs: runs.to_string(),
+                };
+            }
             let (allowed, refused) = approved_init_options(approvals, root, &server);
             let was_refused = refused.is_some();
             if let Some(message) = refused {
@@ -400,9 +457,15 @@ pub(crate) fn resolve_lsp(
                         options: options.clone(),
                     })
                 });
-            LspResolution::Ready {
-                init_options: allowed,
-                withheld,
+            // clew's own settings beneath the approved ones (see
+            // `langenv::pinned`): the client runs the handshake, so they
+            // reach `initialize` only by riding here.
+            match clew_core::lsp::langenv::with_pinned(&server, &exe, allowed) {
+                Ok(init_options) => LspResolution::Ready {
+                    init_options,
+                    withheld,
+                },
+                Err(message) => LspResolution::Unsupported { message },
             }
         }
         // Offered just above; kept total rather than unreachable.
@@ -515,9 +578,12 @@ pub(crate) fn install_lsp(
 
 #[cfg(test)]
 mod tests {
-    use super::{SharedApprovals, approved_init_options, install_lsp, install_offer, resolve_lsp};
+    use super::{
+        SharedApprovals, approved_init_options, install_lsp, install_offer, resolve_lsp,
+        resolve_spawn_exe,
+    };
     use crate::test_support::{Scratch, alive, fake_slow_go, in_child, run_in_child, started_pid};
-    use clew_protocol::{Event, LspResolution, ServerMessage};
+    use clew_protocol::{ErrorCode, Event, LspResolution, ServerMessage};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -637,6 +703,39 @@ mod tests {
 
         let (out, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+
+        // rust-analyzer builds the project, running its code: before anything
+        // about its options, it needs leave to build THIS project — asked for
+        // in the resolve, and refused at the spawn.
+        match resolve_lsp(&out, &approvals, &root, "rust") {
+            LspResolution::NeedsBuildTrust { server, runs } => {
+                assert_eq!(server, "rust-analyzer");
+                assert!(runs.contains("build scripts"), "{runs}");
+            }
+            other => panic!("expected NeedsBuildTrust, got {other:?}"),
+        }
+        let (code, message) = resolve_spawn_exe(&approvals, &root, "rust").unwrap_err();
+        assert_eq!(code, ErrorCode::Refused);
+        assert!(message.contains("not been allowed to build"), "{message}");
+        // The leave as the client pushes it…
+        let (key, leave) = (
+            clew_core::trust::build_key("rust-analyzer"),
+            clew_core::trust::build_fingerprint("rust-analyzer"),
+        );
+        approvals.lock().unwrap().insert(key.clone(), leave);
+        assert!(resolve_spawn_exe(&approvals, &root, "rust").is_ok());
+        approvals.lock().unwrap().remove(&key);
+        // …or as this host's own trust store records it (client and server on
+        // one machine, and the MCP server's pool). Kept for the rest.
+        clew_core::trust::Trust::load()
+            .update(|t| t.trust_build(None, &root, "rust-analyzer"))
+            .unwrap();
+        assert!(resolve_spawn_exe(&approvals, &root, "rust").is_ok());
+        // Leave for one project is not leave for another.
+        let other = data.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(resolve_spawn_exe(&approvals, &other, "rust").is_err());
+
         let resolution = resolve_lsp(&out, &approvals, &root, "rust");
         let offered = match resolution {
             LspResolution::Ready {

@@ -73,6 +73,10 @@ use crate::viewer::MAX_FILE_BYTES;
 pub fn main() -> iced::Result {
     // MCP servers are told this app's version, not its library's.
     clew_core::mcp::set_client_version(env!("CARGO_PKG_VERSION"));
+    // Which window system the windows will be on, read before iced connects
+    // to it: Wayland's client takes `WAYLAND_SOCKET` out of the environment
+    // as it does.
+    app::note_window_system();
     // The user's login-shell PATH (asked of the shell once, for an app opened
     // from the Finder) is found now, off the UI thread: the first MCP server
     // or ACP agent started, or added in the settings, would wait for it.

@@ -9,10 +9,14 @@ use crate::*;
 
 /// Write one trail on the blocking pool (`history::save_text`: under the
 /// store's lock, after its replaceability check), reporting as
-/// `ReadingMsg::TrailSaved`.
-fn write_trail((root, text): TrailWrite) -> Task<Message> {
+/// `ReadingMsg::TrailSaved`. In turn with every other (`WRITING`): the
+/// writes a closing window still had waiting start with its teardown,
+/// behind the one already running, never ahead of it.
+pub(crate) fn write_trail((root, text): TrailWrite) -> Task<Message> {
+    static WRITING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     Task::perform(
         async move {
+            let _turn = WRITING.lock().await;
             let task_root = root.clone();
             let result = tokio::task::spawn_blocking(move || {
                 history::save_text(&task_root, text.as_deref()).map_err(|e| e.to_string())
@@ -103,7 +107,32 @@ impl App {
         }
     }
 
+    /// Whether `rel` names a file of the project, which the reading state
+    /// (bookmarks, notes) is kept for; says why not when it is not. A file
+    /// opened from outside it — a definition in a dependency — is named by
+    /// its absolute path, which the stores hide when they load: a bookmark or
+    /// a note kept for one showed for the session, then was gone without a
+    /// word.
+    fn keeps_reading_state(&mut self, rel: &str, what: &str) -> bool {
+        let path = std::path::Path::new(rel);
+        if !path.is_absolute() {
+            return true;
+        }
+        let name = path
+            .file_name()
+            .map_or_else(|| rel.to_string(), |n| n.to_string_lossy().into_owned());
+        self.status = format!("{what} are kept for the project's files — {name} is outside it");
+        false
+    }
+
     pub(crate) fn on_bookmark_toggled(&mut self) -> Task<Message> {
+        // A past revision on screen: its lines are not the live file's, and
+        // the bookmark went on the hidden live file's caret line instead.
+        if ui::time_travel_pane(self).is_some() {
+            self.status =
+                "Bookmarks mark the file as it is now — leave time travel to mark a line".into();
+            return Task::none();
+        }
         let line_height = self.line_height();
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
@@ -117,21 +146,32 @@ impl App {
             preview = preview.chars().take(80).collect();
         }
         let rel = v.rel.clone();
+        if !self.keeps_reading_state(&rel, "Bookmarks") {
+            return Task::none();
+        }
+        // What the press asks for, by what this window shows: a bookmark on
+        // a line shown bare, none on one shown marked. Decided by the file
+        // instead, a bookmark another window had put on that line was
+        // removed by the press meant to add one.
+        let added = !self
+            .proj
+            .bookmarks
+            .iter()
+            .any(|b| b.rel == rel && b.line == line);
         // A remote project's bookmarks persist over the protocol, where the
         // project lives — never in a same-pathed local .clew.
-        let mut added = false;
         let saved = if self.local_project_state() {
-            // Toggle against what is on disk now, not against this window's
-            // open-time snapshot: a second window on the same project has been
-            // writing the same file, and a wholesale write of our copy erased
+            // Applied to what is on disk now, not to this window's open-time
+            // snapshot: a second window on the same project has been writing
+            // the same file, and a wholesale write of our copy erased
             // everything it added. Adopt the merged list so this window stops
             // rendering a copy that disagrees with disk.
-            // A store that cannot be read is never overwritten; the toggle is
+            // A store that cannot be read is never overwritten; the change is
             // then applied to this window's own list, so the other bookmarks
             // stay on screen instead of vanishing behind an empty one.
             let (merged, saved) =
                 bookmarks::edit_with_fallback(&root, &self.proj.bookmarks, |list| {
-                    added = bookmarks::toggle(list, &rel, line, preview)
+                    bookmarks::set_present(list, &rel, line, preview, added)
                 });
             // Adopted even when the write failed: the toggle is what the user
             // just did, and reverting to the pre-toggle list would make the
@@ -140,18 +180,22 @@ impl App {
             self.touch_project_state(bookmarks::REL);
             saved
         } else {
-            // The same toggle, replayed by the SERVER on the remote file: this
-            // window's list is its copy from project open, and shipping it
-            // wholesale deleted every bookmark another client had added since.
-            // Applied here as well so the gutter answers the click without
-            // waiting for the round trip; the merged file replaces it when it
-            // lands (`StateEdited`). A change the journal refused is not made
-            // here either (the status line says why).
-            let merge = bookmarks::merge_toggle(&rel, line, preview.clone());
+            // The same change, replayed by the SERVER on the remote file:
+            // this window's list is its copy from project open, and shipping
+            // it wholesale deleted every bookmark another client had added
+            // since. Applied here as well so the gutter answers the click
+            // without waiting for the round trip; the merged file replaces it
+            // when it lands (`StateEdited`). A change the journal refused is
+            // not made here either (the status line says why).
+            let merge = if added {
+                bookmarks::merge_add(&rel, line, preview.clone())
+            } else {
+                bookmarks::merge_remove(&rel, line)
+            };
             if !self.edit_remote_state(bookmarks::REL, merge) {
                 return Task::none();
             }
-            added = bookmarks::toggle(&mut self.proj.bookmarks, &rel, line, preview);
+            bookmarks::set_present(&mut self.proj.bookmarks, &rel, line, preview, added);
             Ok(())
         };
         self.status = match saved {
@@ -406,6 +450,14 @@ impl App {
             ReadingMsg::BookmarkNoteSave => self.on_bookmark_note_save(),
             ReadingMsg::BookmarkNoteCancel => {
                 self.proj.note_edit = None;
+                Task::none()
+            }
+            ReadingMsg::NoteToggleUnderstood { rel, .. }
+                if !self.keeps_reading_state(&rel, "Notes") =>
+            {
+                Task::none()
+            }
+            ReadingMsg::NoteEditStart { rel, .. } if !self.keeps_reading_state(&rel, "Notes") => {
                 Task::none()
             }
             ReadingMsg::NoteToggleUnderstood { rel, symbol } => {

@@ -86,7 +86,13 @@ fn compute_files_capped(root: &Path, files: &[FileEntry], max_bytes: u64) -> Sta
                     let Some(bytes) =
                         crate::fs_scan::read_confined_bytes_capped(root, &file.abs, max_bytes)
                     else {
-                        skipped.fetch_add(1, Ordering::Relaxed);
+                        // A file of a language counted, left out. One without
+                        // an extension was read only to see whether a shebang
+                        // makes it code: a data blob past the cap is no
+                        // skipped code.
+                        if lang.is_some() {
+                            skipped.fetch_add(1, Ordering::Relaxed);
+                        }
                         continue;
                     };
                     let Some(lang) = lang.or_else(|| language_from_shebang(&bytes)) else {
@@ -249,6 +255,9 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.join("main.rs"), "fn main() {}\n").unwrap();
+        // Read only for a shebang, a large file without an extension is no
+        // code left out.
+        std::fs::write(dir.join("blob"), "x".repeat(4096)).unwrap();
         let files = crate::fs_scan::scan(dir.to_path_buf()).files;
         let report = compute_files_capped(&dir, &files, 1024);
         assert_eq!(report.skipped, 1);

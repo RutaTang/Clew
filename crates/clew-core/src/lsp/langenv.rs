@@ -69,13 +69,85 @@ pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
 /// ungated value does its damage: a repository's `python.pythonPath` lands ON
 /// TOP of the interpreter [`find_python_interpreter`] vetted, so it does not
 /// merely bypass [`foreign_bytes`], it overrules it.
-pub fn merge(language: &str, server: &str, root: &Path, explicit: Option<Value>) -> Option<Value> {
-    match (detect(language, server, root), explicit) {
-        (Some(mut auto), Some(explicit)) => {
-            deep_merge(&mut auto, explicit);
-            Some(auto)
+///
+/// Beneath both lie the settings clew pins for its own store binary
+/// ([`pinned`], with `exe` the binary about to run); `Err` when they cannot be
+/// pinned, and then the server must not start.
+pub fn merge(
+    language: &str,
+    server: &crate::lsp::config::EffectiveServer,
+    exe: &Path,
+    root: &Path,
+    explicit: Option<Value>,
+) -> Result<Option<Value>, String> {
+    let auto = layer(detect(language, &server.server_name, root), explicit);
+    Ok(layer(pinned(server, exe)?, auto))
+}
+
+/// [`merge`] for a host that does not probe the project's environment (the
+/// clew-server's resolutions and the agent's pool): the pinned settings with
+/// the approved `explicit` options on top.
+pub fn with_pinned(
+    server: &crate::lsp::config::EffectiveServer,
+    exe: &Path,
+    explicit: Option<Value>,
+) -> Result<Option<Value>, String> {
+    Ok(layer(pinned(server, exe)?, explicit))
+}
+
+/// `over` merged onto `base`, `over` winning on conflict.
+fn layer(base: Option<Value>, over: Option<Value>) -> Option<Value> {
+    match (base, over) {
+        (Some(mut base), Some(over)) => {
+            deep_merge(&mut base, over);
+            Some(base)
         }
-        (auto, explicit) => auto.or(explicit),
+        (base, over) => base.or(over),
+    }
+}
+
+/// The settings clew sends its own store binary `exe` for `server` in every
+/// project, beneath everything else: the ones that keep the server from
+/// running the project's code by default.
+///
+/// typescript-language-server prefers the TypeScript in the project's
+/// `node_modules` to the one installed beside it, and runs it — so a
+/// repository that ships `node_modules/typescript/lib/tsserver.js` had it
+/// executed on opening a `.ts` file. `tsserver.path` names the copy clew
+/// installed with the server instead. It must exist: the server reads a path
+/// that does not as "unset" and goes back to the project's copy, so a missing
+/// one is an `Err` and the server does not start. An approved `lsp.toml`
+/// `tsserver.path` still wins, merged on top, as the user's own choice.
+///
+/// Nothing for a `command`: that is the repository's program, approved as
+/// such.
+pub fn pinned(
+    server: &crate::lsp::config::EffectiveServer,
+    exe: &Path,
+) -> Result<Option<Value>, String> {
+    if server.command.is_some() {
+        return Ok(None);
+    }
+    match server.server_name.as_str() {
+        "typescript-language-server" => {
+            // `<install>/node_modules/.bin/typescript-language-server`; the
+            // `typescript@5` installed with it is `<install>/node_modules/typescript`.
+            let tsserver = exe
+                .parent()
+                .and_then(Path::parent)
+                .map(|modules| modules.join("typescript").join("lib").join("tsserver.js"))
+                .filter(|p| p.is_file())
+                .ok_or_else(|| {
+                    "clew's own TypeScript is missing from the typescript-language-server \
+                     install — without it the server would run the project's copy; remove \
+                     the server and install it again"
+                        .to_string()
+                })?;
+            Ok(Some(json!({
+                "tsserver": { "path": tsserver.to_string_lossy() }
+            })))
+        }
+        _ => Ok(None),
     }
 }
 
@@ -124,11 +196,12 @@ fn find_vetted(root: &Path) -> Option<Vetted> {
     // Containment is only decidable against the real root; without it there is
     // no way to tell a repository file from a system one, so detect nothing.
     let real_root = std::fs::canonicalize(root).ok()?;
+    let repo = repository_top(&real_root);
     let vet = |cand: PathBuf, activated: bool| {
         if !cand.is_file() {
             return None;
         }
-        foreign_bytes(&real_root, &cand).map(|base| Vetted {
+        foreign_bytes(&repo, &cand).map(|base| Vetted {
             interpreter: cand,
             base,
             activated,
@@ -274,8 +347,51 @@ fn site_paths(venv: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// The bytes executing `cand` runs, when they came from outside `real_root`
-/// (which must already be canonical): the file outside the project they are.
+/// Most bytes of a `.git` file read: one `gitdir:` line.
+const MAX_GITFILE_BYTES: u64 = 4096;
+
+/// The folder everything that came with the opened folder `real_root` (already
+/// canonical) lives under: the top of the working tree it belongs to, or
+/// `real_root` itself outside any repository.
+///
+/// The opened folder alone is the wrong boundary. Opening `repo/sub` does not
+/// make the rest of the clone anyone else's: `sub/.venv/bin/python ->
+/// ../../tools/payload` resolves outside `sub` and inside the repository, and
+/// would have passed for a system interpreter. A submodule's or linked
+/// worktree's `.git` is a file naming a git directory inside the owning
+/// repository's `.git`; when the owning working tree holds this one (a
+/// submodule, a worktree checked out inside the main one), the boundary is
+/// that whole tree, since its author wrote both.
+fn repository_top(real_root: &Path) -> PathBuf {
+    let Some(top) = real_root
+        .ancestors()
+        .find(|dir| std::fs::symlink_metadata(dir.join(".git")).is_ok())
+    else {
+        return real_root.to_path_buf();
+    };
+    let gitfile = top.join(".git");
+    if gitfile.is_dir() {
+        return top.to_path_buf();
+    }
+    let owner = crate::statefile::read_capped(&gitfile, MAX_GITFILE_BYTES).and_then(|text| {
+        let gitdir = text.lines().next()?.strip_prefix("gitdir:")?.trim();
+        let gitdir = std::fs::canonicalize(top.join(gitdir)).ok()?;
+        // `<owner>/.git/modules/<name>` or `<owner>/.git/worktrees/<name>`.
+        gitdir
+            .ancestors()
+            .find(|dir| dir.file_name().is_some_and(|n| n == ".git"))?
+            .parent()
+            .map(Path::to_path_buf)
+    });
+    match owner {
+        Some(owner) if top.starts_with(&owner) => owner,
+        _ => top.to_path_buf(),
+    }
+}
+
+/// The bytes executing `cand` runs, when they came from outside `repo` (which
+/// must already be canonical; see [`repository_top`]): the file outside the
+/// project they are.
 ///
 /// Two shapes pass:
 ///   * The real file resolves outside the project. `python -m venv` links
@@ -305,18 +421,18 @@ fn site_paths(venv: &Path) -> Vec<PathBuf> {
 ///   * A real in-project interpreter with no usable `pyvenv.cfg` (`conda
 ///     create -p ./env`) is refused, not executed — the server falls back to
 ///     its own discovery. That costs accuracy, not safety.
-fn foreign_bytes(real_root: &Path, cand: &Path) -> Option<PathBuf> {
+fn foreign_bytes(repo: &Path, cand: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(cand).ok()?;
-    if !real.starts_with(real_root) {
+    if !real.starts_with(repo) {
         return Some(real);
     }
-    copies_the_base_interpreter(real_root, cand, &real)
+    copies_the_base_interpreter(repo, cand, &real)
 }
 
 /// The `--copies` arm: is the in-project `cand` a byte-for-byte copy of the
 /// base interpreter its `pyvenv.cfg` points at, with that base outside the
 /// project? Then executing it and executing the base are the same act.
-fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) -> Option<PathBuf> {
+fn copies_the_base_interpreter(repo: &Path, cand: &Path, real_cand: &Path) -> Option<PathBuf> {
     // `<venv>/bin/python` -> `<venv>`; `<venv>/Scripts/python.exe` is the same
     // shape.
     let venv = cand.parent().and_then(Path::parent)?;
@@ -339,7 +455,7 @@ fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) 
     let home = std::fs::canonicalize(home?).ok()?;
     // A `home` pointing back into the project proves nothing: the repository
     // would be vouching for itself.
-    if home.starts_with(real_root) {
+    if home.starts_with(repo) {
         return None;
     }
     // `bin/python` is usually a copy of `pythonX.Y`, so the candidate's own
@@ -362,7 +478,7 @@ fn copies_the_base_interpreter(real_root: &Path, cand: &Path, real_cand: &Path) 
         };
         // The base must be outside too, or a symlink out of `home` back into
         // the project would launder the repository's own bytes.
-        if base.starts_with(real_root) {
+        if base.starts_with(repo) {
             continue;
         }
         if same_bytes(real_cand, &base) {
@@ -596,6 +712,48 @@ mod tests {
         assert_eq!(project_local(&root), None);
     }
 
+    /// Opening a subfolder does not make the rest of the clone foreign: a link
+    /// out of the opened folder into another folder of the same repository —
+    /// or of the superproject a submodule sits in — is the repository's own
+    /// file, and is refused like one.
+    #[test]
+    #[cfg(unix)]
+    fn rejects_a_link_into_the_rest_of_the_repository() {
+        let _env = crate::testutil::EnvVars::new().remove("VIRTUAL_ENV");
+        let repo = scratch("subfolder");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join("tools")).unwrap();
+        std::fs::write(repo.join("tools/payload"), "#!/bin/sh\ntouch /tmp/pwned\n").unwrap();
+        let sub = repo.join("sub");
+        let bin = venv_bin(&sub, ".venv");
+        std::os::unix::fs::symlink("../../../tools/payload", bin.join("python")).unwrap();
+        assert!(bin.join("python").is_file(), "the link resolves");
+        assert_eq!(project_local(&sub), None);
+
+        // The same opened folder as a submodule: its `.git` is a file naming
+        // a git directory inside the superproject's.
+        std::fs::remove_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".git/modules/sub")).unwrap();
+        std::fs::write(sub.join(".git"), "gitdir: ../.git/modules/sub\n").unwrap();
+        assert_eq!(
+            repository_top(&std::fs::canonicalize(&sub).unwrap()),
+            std::fs::canonicalize(&repo).unwrap()
+        );
+        assert_eq!(project_local(&sub), None);
+
+        // A linked worktree checked out elsewhere is bounded by its own tree.
+        let main = scratch("worktree-main");
+        std::fs::create_dir_all(main.join(".git/worktrees/wt")).unwrap();
+        let wt = scratch("worktree-linked");
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}\n", main.join(".git/worktrees/wt").display()),
+        )
+        .unwrap();
+        let wt = std::fs::canonicalize(&wt).unwrap();
+        assert_eq!(repository_top(&wt.join("pkg")), wt);
+    }
+
     /// Zero bytes equal zero bytes: without the length guard an empty repo
     /// file would "match" any empty file in a plausible `home`.
     #[test]
@@ -697,6 +855,60 @@ mod tests {
         assert!(extra[1].ends_with("editable/src"), "{extra:?}");
         // The debugger still runs the venv: it is running the project.
         assert_eq!(project_local(&root), Some(bin.join("python")));
+    }
+
+    /// typescript-language-server runs the project's own TypeScript when it
+    /// finds one, so clew points it at the copy installed beside it — and
+    /// refuses to start it when that copy is missing, since a path that does
+    /// not exist sends the server back to the project's.
+    #[test]
+    fn typescript_runs_clews_own_tsserver() {
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("typescript")
+            .unwrap();
+        let install = scratch("tsinstall");
+        let exe = install.join("node_modules/.bin/typescript-language-server");
+        let err = pinned(&server, &exe).unwrap_err();
+        assert!(err.contains("TypeScript is missing"), "{err}");
+
+        let lib = install.join("node_modules/typescript/lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::write(lib.join("tsserver.js"), "// clew's own").unwrap();
+        let tsserver = lib.join("tsserver.js");
+        let opts = pinned(&server, &exe).unwrap().unwrap();
+        assert_eq!(opts["tsserver"]["path"], tsserver.to_str().unwrap());
+
+        // Merged beneath everything: other options keep it…
+        let root = scratch("tsproject");
+        let kept = merge(
+            "typescript",
+            &server,
+            &exe,
+            &root,
+            Some(json!({ "preferences": { "quotePreference": "single" } })),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(kept["tsserver"]["path"], tsserver.to_str().unwrap());
+        assert_eq!(kept["preferences"]["quotePreference"], "single");
+        // …and an approved `tsserver.path` of the user's own still wins.
+        let chosen = with_pinned(
+            &server,
+            &exe,
+            Some(json!({ "tsserver": { "path": "/mine" } })),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(chosen["tsserver"]["path"], "/mine");
+
+        // A server with nothing to pin, and a `command`, get nothing.
+        let python = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("python")
+            .unwrap();
+        assert_eq!(pinned(&python, &exe).unwrap(), None);
+        let mut custom = server.clone();
+        custom.command = Some(PathBuf::from("/opt/tls"));
+        assert_eq!(pinned(&custom, &exe).unwrap(), None);
     }
 
     #[test]

@@ -39,8 +39,15 @@ struct Server {
 
 impl Server {
     fn spawn() -> Server {
+        Self::spawn_with(|_| {})
+    }
+
+    /// [`Self::spawn`], with `configure` given the command first.
+    fn spawn_with(configure: impl FnOnce(&mut Command)) -> Server {
         let data = TempDir::new("data");
-        let mut child = Command::new(env!("CARGO_BIN_EXE_clew-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_clew-server"));
+        configure(&mut command);
+        let mut child = command
             // Launched as the app launches its local server: told it is
             // local, so it is one whatever shell runs the tests (an SSH
             // session sets SSH_CONNECTION; see SpawnPolicy).
@@ -193,6 +200,52 @@ fn project() -> TempDir {
     )
     .unwrap();
     dir
+}
+
+/// The app starts its local language servers and debug adapters through
+/// `SpawnProcess`, with the project as their working directory: they get
+/// only the absolute entries of the server's `PATH`. A relative one (`.`,
+/// `node_modules/.bin`) resolves against the project, where a repository
+/// could plant the `node` a server's `#!/usr/bin/env node` runs.
+#[test]
+#[cfg(unix)]
+fn a_spawned_process_is_given_no_relative_path_entry() {
+    let path = format!(
+        ".:node_modules/.bin:{}",
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut server = Server::spawn_with(|command| {
+        command.env("PATH", &path);
+    });
+    server.handshake();
+    server.send(
+        2,
+        Request::SpawnProcess {
+            proc: 7,
+            cmd: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf '%s' \"$PATH\"".into()],
+            cwd: None,
+        },
+    );
+    let mut seen = Vec::new();
+    server.wait_for("the process's exit", |msg| match msg {
+        ServerMessage::Notification {
+            event: Event::ProcessOutput { proc: 7, data },
+        } => {
+            seen.extend(data);
+            None
+        }
+        ServerMessage::Notification {
+            event: Event::ProcessExited { proc: 7, .. },
+        } => Some(()),
+        _ => None,
+    });
+    let seen = String::from_utf8(seen).unwrap();
+    assert!(!seen.is_empty(), "the process wrote its PATH");
+    assert!(
+        seen.split(':').all(|dir| dir.starts_with('/')),
+        "a relative entry reached it: {seen}"
+    );
 }
 
 /// The whole happy path through a real pipe: the handshake, the tree an

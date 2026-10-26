@@ -101,7 +101,11 @@ pub use payload::*;
 /// as well as its own: [`Request::AgentAsk`] lists them ([`ExternalTool`]),
 /// the turn asks the client to run one with [`Event::AgentToolCall`], and
 /// the client answers with [`Request::AgentToolResult`].
-pub const PROTOCOL_VERSION: u32 = 17;
+/// v18: [`LspResolution::NeedsBuildTrust`] — a store server that builds the
+/// project (and so runs its code) starts only once the user lets it build
+/// that project; the leave travels in `LspApprovals` like any approval, and
+/// `LspApprovals` names the project its set is for.
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -133,6 +137,15 @@ pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
 /// started by then, and bounds a running one to what is left of it — a
 /// result the turn no longer waits for is a tool run for nothing.
 pub const EXTERNAL_TOOL_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// How long a client waits for the reply to a request the server answers
+/// from minutes of work of its own: a [`Request::Git`] (each git command it
+/// runs bounded — a history walk at 90 s, a few quick ones at 30 s each),
+/// a [`Request::ProjectCalls`] or [`Request::Stats`] over a large project.
+/// Past the server's own bounds, so a slow answer is not given up as a lost
+/// one — given up at a minute, a history walk the server was still running
+/// read as a failure, and its answer came for nobody.
+pub const SLOW_REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
 
 /// Most bytes one [`Request::ProcessInput`] or [`Event::ProcessOutput`]
 /// carries. A proxied byte stream is cut into chunks no bigger than this, so a
@@ -674,11 +687,19 @@ pub enum Request {
     /// prompt sat open, say — replying with the current `NeedsInstall`
     /// instead, so the user is asked about what would actually run.
     LspInstall { language: String, consent: String },
-    /// The user's language-server command approvals for the open project
+    /// The user's language-server command approvals for project `root`
     /// (`language` → fingerprint), recorded client-side and pushed here so the
     /// server's spawn paths (SpawnLsp, the Ask agent's semantic tools) honor
     /// them. Replaces the previous set. No reply.
-    LspApprovals { approvals: Vec<(String, String)> },
+    ///
+    /// `root` is the root the project was opened with (`OpenProject`). A set
+    /// for another root than the open one is ignored: pushed before the
+    /// client saw the switch to a new project, the last project's set would
+    /// be the new one's — and a build leave is the same for every project.
+    LspApprovals {
+        root: String,
+        approvals: Vec<(String, String)>,
+    },
     /// Bytes for a spawned process's stdin, at most [`MAX_PROCESS_CHUNK`] of
     /// them. Answered only on failure: an over-cap chunk (which also stops
     /// the process — its stream would be missing those bytes for good), or a
@@ -801,12 +822,19 @@ pub struct StateMerge {
 }
 
 impl StateMerge {
-    /// Whether `entry` is the one this merge addresses.
+    /// Whether `entry` is the one this merge addresses. A key that does
+    /// not give a value for each of its fields — none at all, or fewer —
+    /// addresses no entry: compared as far as it went, an empty key matched
+    /// the first entry of a store, which an `Upsert` overwrote and a
+    /// `Remove` deleted.
     pub fn matches(&self, entry: &serde_json::Value) -> bool {
-        self.key_fields
-            .iter()
-            .zip(&self.key)
-            .all(|(field, want)| entry.get(field) == Some(want))
+        !self.key.is_empty()
+            && self.key.len() == self.key_fields.len()
+            && self
+                .key_fields
+                .iter()
+                .zip(&self.key)
+                .all(|(field, want)| entry.get(field) == Some(want))
     }
 }
 
@@ -1257,6 +1285,18 @@ pub enum LspResolution {
         /// it lands. Opaque to the client, which only hands it back.
         consent: String,
     },
+    /// Installed, but it builds the project to understand it — runs the
+    /// repository's own code, with the user's permissions — and the user has
+    /// not let it build THIS project. The client asks; the leave is recorded
+    /// under `clew_core::trust::build_key(server)` and reaches the host in
+    /// the next `LspApprovals`, after which a fresh `LspResolve` answers
+    /// `Ready`.
+    NeedsBuildTrust {
+        server: String,
+        /// What of the project it runs, completing "it runs …" in the prompt —
+        /// from the host's registry, which is the one that will run it.
+        runs: String,
+    },
     /// Nothing can run for this language on this host.
     Unsupported { message: String },
 }
@@ -1325,6 +1365,28 @@ pub enum ServerMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A merge addresses the entry its whole key names; a key short of its
+    /// fields — or none — addresses nothing, rather than the first entry.
+    #[test]
+    fn a_merge_matches_only_by_its_whole_key() {
+        let merge = |key: Vec<serde_json::Value>| StateMerge {
+            key_fields: vec!["rel".into(), "line".into()],
+            key,
+            edit: StateEdit::Remove,
+            delete_when_empty: true,
+        };
+        let entry = serde_json::json!({"rel": "a.rs", "line": 3});
+        assert!(merge(vec!["a.rs".into(), 3.into()]).matches(&entry));
+        assert!(!merge(vec!["a.rs".into(), 4.into()]).matches(&entry));
+        assert!(!merge(vec!["a.rs".into()]).matches(&entry));
+        assert!(!merge(Vec::new()).matches(&entry));
+        let no_fields = StateMerge {
+            key_fields: Vec::new(),
+            ..merge(Vec::new())
+        };
+        assert!(!no_fields.matches(&entry));
+    }
 
     /// An edit id is recorded on disk by the server, so only a plain,
     /// bounded token is one.

@@ -44,7 +44,7 @@ use serde_json::Value;
 /// How long the user has to finish signing in in the browser.
 pub const SIGN_IN_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// How long one request of the flow may take.
+/// How long one request of the flow may take, its answer included.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Largest metadata or token response read.
@@ -175,40 +175,70 @@ struct Store {
     servers: BTreeMap<String, Session>,
 }
 
-/// Serializes the store's read-modify-writes within this process.
+/// Serializes the store's read-modify-writes within this process; the file
+/// lock ([`crate::statefile::lock`]) serializes them across processes (two
+/// clew apps, or the app and an editor's `clew-server`).
 static STORE_LOCK: Mutex<()> = Mutex::new(());
 
 fn store_path() -> Option<std::path::PathBuf> {
     Some(crate::lsp::store::data_root()?.join(STORE_FILE))
 }
 
-fn read_store() -> Store {
+/// The store as it is on disk: empty when there is no file yet, and an
+/// error when there is one that cannot be read or understood — which must
+/// never be taken for empty, or the next write would drop every other
+/// server's sign-in.
+fn read_store() -> Result<Store, String> {
     let Some(path) = store_path() else {
-        return Store::default();
+        return Ok(Store::default());
     };
     match crate::statefile::read_capped_checked(&path, MAX_RESPONSE_BYTES) {
-        Ok(Some(text)) => serde_json::from_str(&text).unwrap_or_default(),
-        _ => Store::default(),
+        Ok(Some(text)) => serde_json::from_str(&text)
+            .map_err(|e| format!("{} cannot be read ({e}) — fix or remove it", path.display())),
+        Ok(None) => Ok(Store::default()),
+        Err(e) => Err(format!("{} cannot be read: {e}", path.display())),
     }
 }
 
-fn edit_store<T>(f: impl FnOnce(&mut Store) -> T) -> Result<T, String> {
+/// Hold the store (this process's lock, then the file's) while `f` runs.
+fn with_store_locked<T>(f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     let _held = STORE_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let path = store_path().ok_or("no data directory")?;
-    let mut store = read_store();
-    let out = f(&mut store);
     if let Some(dir) = path.parent() {
         crate::derived::ensure_private_dir(dir).map_err(|e| e.to_string())?;
     }
-    let text = serde_json::to_string_pretty(&store).map_err(|e| e.to_string())?;
-    crate::statefile::write_atomic_secret(&path, text.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(out)
+    let _file = crate::statefile::lock(&path).map_err(|e| e.to_string())?;
+    f()
+}
+
+/// Read, change with `f` and write the store — under its locks, and only
+/// over a store that could be read.
+fn edit_store<T>(f: impl FnOnce(&mut Store) -> T) -> Result<T, String> {
+    with_store_locked(|| {
+        let mut store = read_store()?;
+        let out = f(&mut store);
+        write_store(&store)?;
+        Ok(out)
+    })
+}
+
+/// Write `store` (its locks held), unless it is larger than it is read back
+/// at: written, it read as unreadable for good — every other server's
+/// sign-in gone, signing in and out refused — and only removing the file by
+/// hand undid it. What makes it that large is a server's answer.
+fn write_store(store: &Store) -> Result<(), String> {
+    let path = store_path().ok_or("no data directory")?;
+    let text = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
+    if text.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err("the sign-ins would not fit their store — sign out of one".into());
+    }
+    crate::statefile::write_atomic_secret(&path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// The stored sign-in of the server at `url`.
 pub fn session(url: &str) -> Option<Session> {
     let key = canonical_resource(url).ok()?;
-    read_store().servers.get(&key).cloned()
+    read_store().ok()?.servers.get(&key).cloned()
 }
 
 /// Whether the server at `url` has a stored sign-in.
@@ -249,18 +279,50 @@ pub fn bearer(url: &str) -> Option<String> {
     let session = session(url)?;
     let fresh = session
         .expires_at
-        .is_none_or(|at| now_secs() + EXPIRY_MARGIN_SECS < at);
+        .is_none_or(|at| now_secs().saturating_add(EXPIRY_MARGIN_SECS) < at);
     if fresh {
         return Some(session.access_token);
     }
-    refresh(url).ok()
+    refresh(url, Some(&session.access_token)).ok()
 }
 
 /// Exchange the stored refresh token of the server at `url` for a new
 /// access token, and store it. Blocking.
-pub fn refresh(url: &str) -> Result<String, String> {
+///
+/// The exchange runs under the store's locks, on the session as stored when
+/// they were taken: a refresh token is good for one exchange where the
+/// server rotates them, and one presented twice — by two processes renewing
+/// at once — can get the whole sign-in revoked. A session another process
+/// (or thread) renewed meanwhile is used as it is; one signed out meanwhile
+/// stays signed out.
+///
+/// `refused` is the access token the caller found unusable (expired, or
+/// answered with a 401); a stored one that is not it, and fresh, is the
+/// renewal another process made, and is taken. Without it, the store as read
+/// just before the lock stands in — which saw another process's renewal as
+/// the token to replace, and spent a refresh token on renewing it again.
+pub fn refresh(url: &str, refused: Option<&str>) -> Result<String, String> {
     let key = canonical_resource(url)?;
-    let session = session(url).ok_or("not signed in")?;
+    let seen = match refused {
+        Some(token) => token.to_string(),
+        None => session(url).ok_or("not signed in")?.access_token,
+    };
+    with_store_locked(|| refresh_locked(&key, &seen))
+}
+
+fn refresh_locked(key: &str, seen: &str) -> Result<String, String> {
+    let mut store = read_store()?;
+    let session = store
+        .servers
+        .get(key)
+        .cloned()
+        .ok_or("signed out — sign in again")?;
+    let fresh = session
+        .expires_at
+        .is_none_or(|at| now_secs().saturating_add(EXPIRY_MARGIN_SECS) < at);
+    if session.access_token != seen && fresh {
+        return Ok(session.access_token);
+    }
     let refresh_token = session
         .refresh_token
         .clone()
@@ -269,7 +331,7 @@ pub fn refresh(url: &str) -> Result<String, String> {
         ("grant_type", "refresh_token".to_string()),
         ("refresh_token", refresh_token.clone()),
         ("client_id", session.client_id.clone()),
-        ("resource", key.clone()),
+        ("resource", key.to_string()),
     ];
     if let Some(scope) = &session.scope {
         form.push(("scope", scope.clone()));
@@ -287,9 +349,8 @@ pub fn refresh(url: &str) -> Result<String, String> {
         updated.refresh_token = Some(refresh_token);
     }
     let access = updated.access_token.clone();
-    edit_store(|store| {
-        store.servers.insert(key, updated);
-    })?;
+    store.servers.insert(key.to_string(), updated);
+    write_store(&store)?;
     Ok(access)
 }
 
@@ -309,7 +370,7 @@ fn check_endpoint(url: &str) -> Result<(), String> {
 
 fn agent(url: &str) -> Result<(ureq::Agent, ureq::http::Uri), String> {
     check_endpoint(url)?;
-    let (agent, _) = crate::llm::agent_for(url, crate::llm::Limits::streaming(REQUEST_TIMEOUT))
+    let (agent, _) = crate::llm::agent_for(url, crate::llm::Limits::bounded(REQUEST_TIMEOUT))
         .map_err(|e| e.to_string())?;
     let uri = crate::net::request_uri(url)?;
     Ok((agent, uri))
@@ -384,12 +445,8 @@ fn token_request(
     if !(200..300).contains(&status) {
         return Err(oauth_error(&value, status));
     }
-    let access_token = value
-        .get("access_token")
-        .and_then(Value::as_str)
-        .filter(|t| !t.is_empty())
-        .ok_or("the token endpoint gave no access token")?
-        .to_string();
+    let access_token =
+        token_field(&value, "access_token")?.ok_or("the token endpoint gave no access token")?;
     if let Some(kind) = value.get("token_type").and_then(Value::as_str)
         && !kind.eq_ignore_ascii_case("bearer")
     {
@@ -397,10 +454,7 @@ fn token_request(
     }
     Ok(Tokens {
         access_token,
-        refresh_token: value
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        refresh_token: token_field(&value, "refresh_token")?,
         expires_in: value.get("expires_in").and_then(Value::as_u64),
         scope: value
             .get("scope")
@@ -409,10 +463,33 @@ fn token_request(
     })
 }
 
+/// Longest token kept: a JWT carrying many claims runs to a few KB, and a
+/// token is sent in a header on every request.
+const MAX_TOKEN_BYTES: usize = 16 * 1024;
+
+/// The token `field` of a token response: `None` when absent or empty, and
+/// refused when it is no token — longer than [`MAX_TOKEN_BYTES`], or holding
+/// a character OAuth's tokens never do (they are visible ASCII, RFC 6749
+/// appendix A).
+fn token_field(value: &Value, field: &str) -> Result<Option<String>, String> {
+    let Some(token) = value.get(field).and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if token.is_empty() {
+        return Ok(None);
+    }
+    if token.len() > MAX_TOKEN_BYTES || !token.bytes().all(|b| (0x20..=0x7e).contains(&b)) {
+        return Err(format!("the token endpoint gave a malformed {field}"));
+    }
+    Ok(Some(token.to_string()))
+}
+
 fn apply_tokens(session: &mut Session, tokens: &Tokens) {
     session.access_token = tokens.access_token.clone();
     session.refresh_token = tokens.refresh_token.clone();
-    session.expires_at = tokens.expires_in.map(|s| now_secs() + s);
+    // A lifetime no clock reaches (`u64::MAX` seconds) is "never expires",
+    // not an overflow.
+    session.expires_at = tokens.expires_in.map(|s| now_secs().saturating_add(s));
     if tokens.scope.is_some() {
         session.scope = tokens.scope.clone();
     }
@@ -672,6 +749,14 @@ pub fn sign_in(
     {
         return Err("the authorization server does not support PKCE (S256)".into());
     }
+    // What a sign-in response's `iss` is compared with (RFC 9207): the
+    // issuer as the server's own metadata names it, exactly — the
+    // resource's metadata may name it with a slash the server's does not.
+    let named_issuer = meta
+        .get("issuer")
+        .and_then(Value::as_str)
+        .unwrap_or(&issuer)
+        .to_string();
     let iss_supported = meta
         .get("authorization_response_iss_parameter_supported")
         .and_then(Value::as_bool)
@@ -755,7 +840,7 @@ pub fn sign_in(
     // only when the server does not promise to send it. On a mismatch
     // nothing of the response — its error included — is acted on.
     match params.get("iss") {
-        Some(iss) if iss != &issuer => {
+        Some(iss) if iss != &named_issuer => {
             return Err("the sign-in came back from another authorization server — refused".into());
         }
         None if iss_supported => {
@@ -826,6 +911,116 @@ fn probe_challenge(url: &str) -> Option<Challenge> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stored(token: &str, expires_at: Option<u64>) -> Session {
+        Session {
+            issuer: "https://auth.example".into(),
+            // Nothing listens here: a test that reached the network fails.
+            token_endpoint: "http://127.0.0.1:9/token".into(),
+            client_id: "cid".into(),
+            access_token: token.into(),
+            refresh_token: Some("rt".into()),
+            expires_at,
+            ..Session::default()
+        }
+    }
+
+    /// A store that cannot be read is an error, never an empty store the
+    /// next write would replace — that dropped every other server's sign-in.
+    #[test]
+    fn an_unreadable_store_is_never_overwritten() {
+        let _data = crate::testutil::DataDir::new("oauth-unreadable");
+        let path = store_path().unwrap();
+        crate::derived::ensure_private_dir(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(sign_out("https://a.example/mcp").is_err());
+        assert!(edit_store(|_| ()).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+        assert!(session("https://a.example/mcp").is_none());
+    }
+
+    /// A renewal finds the session as stored once it holds the store: one
+    /// another process renewed meanwhile is used as it is (no second
+    /// exchange of the same refresh token); one signed out stays out.
+    #[test]
+    fn a_refresh_takes_the_store_as_it_is_under_the_lock() {
+        let _data = crate::testutil::DataDir::new("oauth-refresh-race");
+        let url = "https://a.example/mcp";
+        let key = canonical_resource(url).unwrap();
+        let seen = "old";
+        let later = now_secs() + 3600;
+        edit_store(|store| {
+            store
+                .servers
+                .insert(key.clone(), stored("renewed", Some(later)));
+        })
+        .unwrap();
+        let token = with_store_locked(|| refresh_locked(&key, seen)).unwrap();
+        assert_eq!(token, "renewed");
+        // What the caller refused decides, not what the store held before
+        // the lock: another process's renewal is taken, not renewed again
+        // (nothing listens at the token endpoint, so an exchange fails).
+        assert_eq!(refresh(url, Some("old")).as_deref(), Ok("renewed"));
+        assert!(
+            refresh(url, Some("renewed")).is_err(),
+            "a refused token is renewed"
+        );
+        sign_out(url).unwrap();
+        let err = with_store_locked(|| refresh_locked(&key, seen)).unwrap_err();
+        assert!(err.contains("signed out"), "{err}");
+        assert!(session(url).is_none(), "not resurrected");
+    }
+
+    /// What a token endpoint answers is stored, and the store is read back
+    /// with a cap: a token that is no token is refused, and a store that
+    /// would outgrow the cap is not written — written, it read as unreadable
+    /// for good, every other sign-in with it.
+    #[test]
+    fn what_a_server_answers_cannot_make_the_store_unreadable() {
+        let answer = |token: String| serde_json::json!({ "access_token": token });
+        assert!(token_field(&answer("x".repeat(MAX_TOKEN_BYTES + 1)), "access_token").is_err());
+        assert!(token_field(&answer("a\u{1}b".into()), "access_token").is_err());
+        assert_eq!(
+            token_field(&answer("eyJ.a-b_c".into()), "access_token").unwrap(),
+            Some("eyJ.a-b_c".to_string())
+        );
+
+        let _data = crate::testutil::DataDir::new("oauth-store-cap");
+        let url = "https://a.example/mcp";
+        let key = canonical_resource(url).unwrap();
+        edit_store(|store| {
+            store.servers.insert(key.clone(), stored("kept", None));
+        })
+        .unwrap();
+        let huge = "x".repeat(MAX_RESPONSE_BYTES as usize);
+        let grown = edit_store(|store| {
+            store
+                .servers
+                .insert("https://b.example/mcp".into(), stored(&huge, None));
+        });
+        assert!(grown.is_err());
+        assert_eq!(
+            session(url).map(|s| s.access_token).as_deref(),
+            Some("kept")
+        );
+    }
+
+    /// A lifetime no clock reaches reads as "never expires", not as an
+    /// overflow (a panic in a debug build, a token always stale in release).
+    #[test]
+    fn a_huge_token_lifetime_does_not_overflow() {
+        let mut session = Session::default();
+        apply_tokens(
+            &mut session,
+            &Tokens {
+                access_token: "a".into(),
+                refresh_token: None,
+                expires_in: Some(u64::MAX),
+                scope: None,
+            },
+        );
+        assert_eq!(session.expires_at, Some(u64::MAX));
+    }
 
     #[test]
     fn challenges_are_read_from_www_authenticate() {

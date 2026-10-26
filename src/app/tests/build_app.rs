@@ -1,6 +1,7 @@
 //! Bundle the executable Cargo produced, even when a stale default path exists.
 
 use super::test_dir;
+use clew_core::testutil::write_script;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -13,12 +14,6 @@ fn checked(command: &mut Command) -> Output {
         String::from_utf8_lossy(&output.stderr),
     );
     output
-}
-
-fn executable(path: &Path, content: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, content).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 #[test]
@@ -78,19 +73,13 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
         ] {
             std::fs::write(root.join("assets").join(name), "fixture").unwrap();
         }
-        executable(
+        write_script(
             &root.join("scripts/third-party-notices.sh"),
-            "#!/bin/sh\nprintf fixture > \"$1\"\n",
+            "printf fixture > \"$1\"",
         );
-        executable(&root.join("bin/codesign"), "#!/bin/sh\nexit 0\n");
-        executable(
-            &root.join("target/debug/clew"),
-            "#!/bin/sh\necho stale GUI\n",
-        );
-        executable(
-            &root.join("target/debug/clew-server"),
-            "#!/bin/sh\necho stale server\n",
-        );
+        write_script(&root.join("bin/codesign"), "exit 0");
+        write_script(&root.join("target/debug/clew"), "echo stale GUI");
+        write_script(&root.join("target/debug/clew-server"), "echo stale server");
         let mut lock = Command::new("cargo");
         lock.current_dir(&root)
             .env("CARGO_HOME", root.join("cargo-home"))

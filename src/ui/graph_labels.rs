@@ -297,7 +297,14 @@ mod tests {
     #[test]
     fn label_width_matches_the_drawn_texture() {
         let label = "graph_labels.rs";
-        let tex = label_texture(label, iced::Color::BLACK).expect("macOS ships the label font");
+        let Some(tex) = label_texture(label, iced::Color::BLACK) else {
+            // No label font (it is a macOS system font): the label is left to
+            // canvas text, and sized as canvas text lays it out.
+            assert!(LABEL_FONT.is_none(), "the label font draws it");
+            assert_ne!(std::env::consts::OS, "macos", "macOS ships the label font");
+            assert_eq!(label_width(label), fallback_width(label));
+            return;
+        };
         let Handle::Rgba {
             width,
             height,

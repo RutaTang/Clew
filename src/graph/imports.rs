@@ -136,6 +136,10 @@ pub struct Resolver {
     /// with the window that holds them, not copied per job. Empty until
     /// then, and for projects without one.
     ts_configs: Arc<TsConfigs>,
+    /// Each Go package directory with its files, its tests aside: what an
+    /// import of the package — a directory — reaches. From the project's
+    /// files, every one of them; the graph only holds those with imports.
+    go_packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
 }
 
 impl Resolver {
@@ -610,6 +614,18 @@ impl Resolver {
             .collect();
         rust_crate_roots.sort();
         rust_crate_roots.dedup();
+        let mut go_packages: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for file in file_set.iter().filter(|f| is_go_source(f)) {
+            if let Some(dir) = file.parent() {
+                go_packages
+                    .entry(dir.to_path_buf())
+                    .or_default()
+                    .push(file.clone());
+            }
+        }
+        for files in go_packages.values_mut() {
+            files.sort();
+        }
         Resolver {
             root: root.to_path_buf(),
             files: file_set,
@@ -618,6 +634,7 @@ impl Resolver {
             go_module,
             dart_package,
             ts_configs: Arc::default(),
+            go_packages: Arc::new(go_packages),
         }
     }
 
@@ -1106,8 +1123,20 @@ impl Resolver {
             spec.starts_with("./") || spec.starts_with("../") || spec == "." || spec == "..";
         if is_relative {
             let base = from.parent().unwrap_or(&self.root);
-            return self
-                .js_file(&normalize(&base.join(spec)))
+            let joined = normalize(&base.join(spec));
+            // `.`, `..` and a path ending in `/` name a directory — its
+            // index — never a file beside it of the directory's name
+            // (`src.ts` next to `src/`), as Node and TypeScript read them.
+            let directory = matches!(spec, "." | "..")
+                || spec.ends_with('/')
+                || spec.ends_with("/.")
+                || spec.ends_with("/..");
+            let found = if directory {
+                self.js_index(&joined)
+            } else {
+                self.js_file(&joined)
+            };
+            return found
                 .map(Target::Internal)
                 .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
         }
@@ -1194,9 +1223,6 @@ impl Resolver {
     /// `.tsx`, `.mjs`/`.cjs` for `.mts`/`.cts`); an added extension; an index
     /// file.
     fn js_file(&self, joined: &Path) -> Option<PathBuf> {
-        const EXTS: &[&str] = &[
-            "ts", "tsx", "d.ts", "mts", "cts", "js", "jsx", "mjs", "cjs", "json",
-        ];
         if self.has_file(joined) {
             return Some(joined.to_path_buf());
         }
@@ -1217,19 +1243,21 @@ impl Resolver {
                 }
             }
         }
-        for ext in EXTS {
+        for ext in JS_EXTS {
             let cand = with_added_ext(joined, ext);
             if self.has_file(&cand) {
                 return Some(cand);
             }
         }
-        for ext in EXTS {
-            let cand = joined.join(format!("index.{ext}"));
-            if self.has_file(&cand) {
-                return Some(cand);
-            }
-        }
-        None
+        self.js_index(joined)
+    }
+
+    /// The index file of directory `dir` (`index.ts`, `index.js`, …).
+    fn js_index(&self, dir: &Path) -> Option<PathBuf> {
+        JS_EXTS.iter().find_map(|ext| {
+            let cand = dir.join(format!("index.{ext}"));
+            self.has_file(&cand).then_some(cand)
+        })
     }
 
     // --- Go ---
@@ -1271,6 +1299,11 @@ fn js_package(spec: &str) -> String {
 }
 
 /// Lexically normalize a path, resolving `.` and `..` without touching disk.
+/// The extensions a JS or TS import may leave off, in the order tried.
+const JS_EXTS: &[&str] = &[
+    "ts", "tsx", "d.ts", "mts", "cts", "js", "jsx", "mjs", "cjs", "json",
+];
+
 fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
@@ -2006,6 +2039,9 @@ pub struct ImportGraph {
     /// The reverse of `reads`: a file → the files whose resolution read its
     /// facts, which are exactly the ones to resolve again when they change.
     readers: HashMap<PathBuf, Arc<HashSet<PathBuf>>>,
+    /// The Go packages of the resolver last applied with
+    /// ([`Resolver::go_packages`]).
+    go_packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
 }
 
 /// One file as the import graph takes it: the specifiers its import
@@ -2295,6 +2331,13 @@ impl ImportGraph {
         let mut changed = false;
         let mut structure_changed = false;
         let mut scope_changed = false;
+        // Go imports reach their packages' files as the project has them now:
+        // a file come into a package, or gone from it, is in the scope of
+        // every file importing it, or out.
+        let held = before.map_or(&self.go_packages, |before| &before.go_packages);
+        let packages_changed =
+            !Arc::ptr_eq(held, &resolver.go_packages) && **held != *resolver.go_packages;
+        self.go_packages = resolver.go_packages.clone();
         if let Some(before) = before {
             changed = !before.out.is_empty();
             structure_changed = changed;
@@ -2382,6 +2425,8 @@ impl ImportGraph {
         if let Some(before) = before {
             scope_changed = !self.same_scope_as(before);
         }
+        changed |= packages_changed;
+        scope_changed |= packages_changed;
         Applied {
             changed,
             structure_changed,
@@ -2540,16 +2585,61 @@ impl ImportGraph {
         self.out.get(file).map(|e| e.as_slice()).unwrap_or(&[])
     }
 
-    /// Files that import this file (internal edges only), sorted for stable display.
+    /// Files that import this file (internal edges only), sorted for stable
+    /// display — a Go file's, those that import its package.
     pub fn importers(&self, file: &Path) -> Vec<PathBuf> {
         let mut v = self
             .rev
             .get(file)
             .map(|importers| importers.to_vec())
             .unwrap_or_default();
+        if is_go_source(file)
+            && let Some(package) = file.parent().and_then(|dir| self.rev.get(dir))
+        {
+            v.extend(package.iter().cloned());
+        }
         v.sort();
         v.dedup();
         v
+    }
+
+    /// Each Go package directory of the project, with its files (sorted,
+    /// its tests aside), as the resolver last applied found them: a Go
+    /// import names a package — a directory — and reaches every file of it,
+    /// where every other language's names one file.
+    pub fn go_packages(&self) -> Arc<HashMap<PathBuf, Vec<PathBuf>>> {
+        self.go_packages.clone()
+    }
+
+    /// The project files `file` imports, each once: an import's file, or the
+    /// files of a Go package it imports (`packages`, [`Self::go_packages`]).
+    pub fn imported_files(
+        &self,
+        file: &Path,
+        packages: &HashMap<PathBuf, Vec<PathBuf>>,
+    ) -> Vec<PathBuf> {
+        let mut seen: HashSet<&Path> = HashSet::new();
+        let mut files = Vec::new();
+        for e in self.imports(file) {
+            let Target::Internal(t) = &e.target else {
+                continue;
+            };
+            let reached = packages
+                .get(t)
+                .map_or(std::slice::from_ref(t), Vec::as_slice);
+            for f in reached {
+                if f != file && seen.insert(f.as_path()) {
+                    files.push(f.clone());
+                }
+            }
+        }
+        files
+    }
+
+    /// The first file of the Go package `dir`, by path — what a click on the
+    /// package opens — or `None` when `dir` is no package of the graph's.
+    pub fn package_file(&self, dir: &Path) -> Option<PathBuf> {
+        self.go_packages.get(dir)?.first().cloned()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2564,7 +2654,17 @@ impl ImportGraph {
     /// imports or a target of one), sorted for stable display.
     pub fn files(&self) -> Vec<PathBuf> {
         let mut set: HashSet<PathBuf> = self.out.keys().cloned().collect();
-        set.extend(self.rev.keys().cloned());
+        // A Go package a Go file imports as its files: a directory is no
+        // file of the graph, and its files, importing nothing, are there by
+        // being imported.
+        for target in self.rev.keys() {
+            match self.go_packages.get(target) {
+                Some(files) => set.extend(files.iter().cloned()),
+                None => {
+                    set.insert(target.clone());
+                }
+            }
+        }
         let mut v: Vec<PathBuf> = set.into_iter().collect();
         v.sort();
         v
@@ -2602,23 +2702,25 @@ impl ImportGraph {
     /// Each file mapped to the set of internal files it imports — the scope the
     /// project call graph resolves called names within.
     pub fn scope_map(&self) -> HashMap<PathBuf, HashSet<PathBuf>> {
+        // A Go import's package as its files: the call graph matches a call's
+        // file against the files in its scope, and a directory matched none.
+        let packages = self.go_packages();
         self.out
-            .iter()
-            .map(|(file, edges)| {
-                let targets: HashSet<PathBuf> = edges
-                    .iter()
-                    .filter_map(|e| match &e.target {
-                        Target::Internal(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .collect();
+            .keys()
+            .map(|file| {
+                let targets: HashSet<PathBuf> =
+                    self.imported_files(file, &packages).into_iter().collect();
                 (file.clone(), targets)
             })
             .collect()
     }
 
-    /// Number of internal files that import `file` (its fan-in).
+    /// Number of internal files that import `file` (its fan-in) — a Go
+    /// file's, those that import its package.
     pub fn fan_in(&self, file: &Path) -> usize {
+        if is_go_source(file) {
+            return self.importers(file).len();
+        }
         self.rev.get(file).map(|v| v.len()).unwrap_or(0)
     }
 
@@ -2809,6 +2911,15 @@ impl Dir {
     }
 }
 
+/// Whether `file` is a Go package's own source — what an import of its
+/// directory reaches (a `_test.go` file is the package's test).
+fn is_go_source(file: &Path) -> bool {
+    file.extension().is_some_and(|e| e == "go")
+        && !file
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with("_test.go"))
+}
+
 /// A node in the import view tree.
 #[derive(Debug, Clone)]
 pub struct INode {
@@ -2975,6 +3086,28 @@ impl ImportTree {
         depth: usize,
     ) -> Vec<INode> {
         let mut out = Vec::new();
+        // A Go package (an import names its directory): its files, each
+        // expanded from there, in either direction.
+        if graph.imports(path).is_empty()
+            && let Some(files) = graph.go_packages.get(path)
+        {
+            for f in files {
+                let cyclic = self.is_ancestor(Some(parent), f);
+                out.push(INode {
+                    target: Target::Internal(f.clone()),
+                    label: rel_name(root, f),
+                    detail: rel_path(root, f),
+                    line: 0,
+                    depth,
+                    parent: Some(parent),
+                    children: None,
+                    expanded: false,
+                    cyclic,
+                    hidden: 0,
+                });
+            }
+            return out;
+        }
         match self.direction {
             Dir::Imports => {
                 let mut seen_ext: HashSet<String> = HashSet::new();
@@ -3746,6 +3879,35 @@ mod tests {
             r.resolve(&ri("numpy"), &root.join("top.py"), "python"),
             Target::External("numpy".into())
         );
+    }
+
+    /// `.`, `..` and a path ending in `/` name a directory, whose index is
+    /// the target — not a file beside it of the directory's name.
+    #[test]
+    fn a_js_directory_import_takes_its_index_not_a_namesake_file() {
+        let root = Path::new("/proj");
+        let r = resolver(
+            root,
+            &[
+                "src.ts",
+                "src/index.ts",
+                "src/a.ts",
+                "src/a/index.ts",
+                "src/a/b.ts",
+                "src/util.ts",
+                "src/util/index.ts",
+            ],
+        );
+        let from = root.join("src/a/b.ts");
+        let res = |spec: &str| r.resolve(&ri(spec), &from, "typescript");
+        assert_eq!(res(".."), Target::Internal(root.join("src/index.ts")));
+        assert_eq!(res("."), Target::Internal(root.join("src/a/index.ts")));
+        assert_eq!(
+            res("../util/"),
+            Target::Internal(root.join("src/util/index.ts"))
+        );
+        // Without the slash, the file comes first, as it does for Node.
+        assert_eq!(res("../util"), Target::Internal(root.join("src/util.ts")));
     }
 
     #[test]

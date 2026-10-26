@@ -142,7 +142,9 @@ pub fn edit_with_fallback(
     store::edit_with_fallback(root, fallback, change)
 }
 
-/// Toggle a bookmark; returns true when one was added.
+/// Toggle a bookmark; returns true when one was added. (A press decides by
+/// what it was pressed on — [`set_present`]; the edit journal's tests flip.)
+#[cfg(test)]
 pub fn toggle(list: &mut Vec<Bookmark>, rel: &str, line: usize, preview: String) -> bool {
     if let Some(pos) = list.iter().position(|b| b.rel == rel && b.line == line) {
         list.remove(pos);
@@ -156,6 +158,36 @@ pub fn toggle(list: &mut Vec<Bookmark>, rel: &str, line: usize, preview: String)
         });
         sort(list);
         true
+    }
+}
+
+/// Make the bookmark at `rel:line` there or not — what the user asked for,
+/// pressing on a line shown with or without one — rather than flipping it
+/// against a list another window may have changed since: flipped, a press
+/// on a line shown bare removed the bookmark the other window had put there.
+/// One already there keeps its note.
+pub fn set_present(
+    list: &mut Vec<Bookmark>,
+    rel: &str,
+    line: usize,
+    preview: String,
+    present: bool,
+) {
+    let at = list.iter().position(|b| b.rel == rel && b.line == line);
+    match (at, present) {
+        (Some(at), false) => {
+            list.remove(at);
+        }
+        (None, true) => {
+            list.push(Bookmark {
+                rel: rel.to_string(),
+                line,
+                preview,
+                note: None,
+            });
+            sort(list);
+        }
+        _ => {}
     }
 }
 
@@ -193,13 +225,30 @@ fn merge(rel: &str, line: usize, edit: clew_protocol::StateEdit) -> clew_protoco
 }
 
 /// The remote twin of [`toggle`]: the SERVER decides whether this is an add or
-/// a removal, by looking at the file. Whether the bookmark is already there is
-/// exactly what a client's session-old snapshot gets wrong.
+/// a removal, by looking at the file.
+#[cfg(test)]
 pub fn merge_toggle(rel: &str, line: usize, preview: String) -> clew_protocol::StateMerge {
     let entry = serde_json::json!({
         "rel": rel, "line": line, "preview": preview, "note": serde_json::Value::Null,
     });
     merge(rel, line, clew_protocol::StateEdit::Toggle(entry))
+}
+
+/// The remote twin of [`set_present`]'s add: the entry appended when it is
+/// absent, one there left as it is (its note too).
+pub fn merge_add(rel: &str, line: usize, preview: String) -> clew_protocol::StateMerge {
+    let entry = serde_json::json!({
+        "rel": rel, "line": line, "preview": preview, "note": serde_json::Value::Null,
+    });
+    merge(
+        rel,
+        line,
+        clew_protocol::StateEdit::Patch {
+            fields: serde_json::Map::new(),
+            insert: Some(entry),
+            empty_when: Vec::new(),
+        },
+    )
 }
 
 /// Remove the bookmark at `rel:line`, by identity.

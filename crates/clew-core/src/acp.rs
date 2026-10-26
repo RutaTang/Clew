@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::framing::CallError;
 use crate::linerpc::{self, CancelStyle, PeerMsg, RpcError, Session};
@@ -176,6 +176,9 @@ pub struct ToolCallInfo {
     /// A one-line account of what it produced: its text, or the files it
     /// changed.
     pub summary: Option<String>,
+    /// Its input as the agent gave it (`rawInput`): the command it runs,
+    /// what it writes — what a permission is judged by.
+    pub raw_input: Option<Value>,
 }
 
 /// A setting of a session the agent lets the user choose — its mode, its
@@ -341,6 +344,9 @@ pub enum AgentEvent {
     },
     /// The agent asks for permission.
     Permission(PermissionRequest),
+    /// The agent no longer waits for permission request `id`
+    /// (`$/cancel_request`): it was answered "cancelled".
+    PermissionWithdrawn { id: u64, session: String },
     /// The agent wrote a file of the project through clew.
     FileWritten { path: PathBuf },
     /// The session's settings changed (the agent changed them, or a choice
@@ -351,6 +357,23 @@ pub enum AgentEvent {
     },
     /// The agent's process ended; the text says how.
     Exited(String),
+}
+
+impl AgentEvent {
+    /// The session the event is about, for the ones about a session.
+    pub fn session(&self) -> Option<&str> {
+        match self {
+            AgentEvent::Text { session, .. }
+            | AgentEvent::Thought { session, .. }
+            | AgentEvent::ToolCall { session, .. }
+            | AgentEvent::ToolCallUpdate { session, .. }
+            | AgentEvent::Plan { session, .. }
+            | AgentEvent::Options { session, .. } => Some(session),
+            AgentEvent::Permission(request) => Some(&request.session),
+            AgentEvent::PermissionWithdrawn { session, .. } => Some(session),
+            AgentEvent::FileWritten { .. } | AgentEvent::Exited(_) => None,
+        }
+    }
 }
 
 /// Why a turn ended.
@@ -442,6 +465,9 @@ pub struct Agent {
     root: PathBuf,
     permissions: OpenPermissions,
     options: SessionOptions,
+    /// Asks [`serve_peer`] to answer once it has turned into events all the
+    /// agent sent before ([`Agent::flushed`]).
+    flush: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
 impl std::fmt::Debug for Agent {
@@ -496,6 +522,7 @@ impl Agent {
         let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
         let peer = session.take_peer().expect("a fresh session");
         let (events_tx, events_rx) = mpsc::unbounded_channel();
+        let (flush, flushes) = mpsc::unbounded_channel();
         let permissions: OpenPermissions = Arc::default();
         let options: SessionOptions = Arc::default();
         let result = session
@@ -520,6 +547,7 @@ impl Agent {
         let info = read_info(&result);
         tokio::spawn(serve_peer(
             peer,
+            flushes,
             session.handle(),
             root.clone(),
             events_tx,
@@ -539,6 +567,7 @@ impl Agent {
                 root,
                 permissions,
                 options,
+                flush,
             },
             events_rx,
         ))
@@ -693,14 +722,27 @@ impl Agent {
                 json!({ "sessionId": session, "prompt": prompt }),
                 PROMPT_TIMEOUT,
             )
-            .await
-            .map_err(|e| died(&self.session, AcpError::from(e)))?;
+            .await;
+        // The turn's last updates came before its answer, but on a path of
+        // their own: told the turn was over first, a caller dropped the end
+        // of the answer, or showed it in the next turn.
+        self.flushed().await;
+        let result = result.map_err(|e| died(&self.session, AcpError::from(e)))?;
         Ok(StopReason::parse(
             result
                 .get("stopReason")
                 .and_then(Value::as_str)
                 .unwrap_or("end_turn"),
         ))
+    }
+
+    /// Once every message the agent sent so far is an event on the
+    /// receiver [`Agent::start`] returned (or the agent is gone).
+    async fn flushed(&self) {
+        let (done, flushed) = oneshot::channel();
+        if self.flush.send(done).is_ok() {
+            let _ = flushed.await;
+        }
     }
 
     /// Stop the turn running in `session`, and answer every permission
@@ -848,8 +890,10 @@ fn read_info(result: &Value) -> AgentInfo {
 /// The agent's own messages: session updates turned into events, permission
 /// requests handed to the user, file reads and writes served from the
 /// project, and everything else refused.
+#[allow(clippy::too_many_arguments)] // what the agent's own messages are served with
 async fn serve_peer(
     mut peer: mpsc::UnboundedReceiver<PeerMsg>,
+    mut flushes: mpsc::UnboundedReceiver<oneshot::Sender<()>>,
     handle: crate::framing::Handle,
     root: PathBuf,
     events: mpsc::UnboundedSender<AgentEvent>,
@@ -861,8 +905,42 @@ async fn serve_peer(
         handle.send_raw(linerpc::response(id, result));
     };
     let mut next_permission = 0u64;
-    while let Some(msg) = peer.recv().await {
+    loop {
+        // The agent's messages first: a flush asked for after one of them
+        // came in is answered once it is an event.
+        let msg = tokio::select! {
+            biased;
+            msg = peer.recv() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+            Some(done) = flushes.recv() => {
+                let _ = done.send(());
+                continue;
+            }
+        };
         match msg {
+            PeerMsg::Notification { method, params } if method == "$/cancel_request" => {
+                // The agent no longer waits for a request of its own: a
+                // permission it asked for is answered "cancelled", and taken
+                // back from the user.
+                let wanted = params.get("requestId");
+                let found = {
+                    let mut perms = permissions.lock().unwrap_or_else(PoisonError::into_inner);
+                    let ours = perms
+                        .iter()
+                        .find(|(_, (request, _))| Some(request) == wanted)
+                        .map(|(id, _)| *id);
+                    ours.and_then(|id| perms.remove(&id).map(|open| (id, open)))
+                };
+                if let Some((id, (request, session))) = found {
+                    respond(
+                        &request,
+                        Ok(json!({ "outcome": { "outcome": "cancelled" } })),
+                    );
+                    let _ = events.send(AgentEvent::PermissionWithdrawn { id, session });
+                }
+            }
             PeerMsg::Notification { method, params } => {
                 if method != "session/update" {
                     continue;
@@ -927,6 +1005,8 @@ async fn serve_peer(
             },
         }
     }
+    // Nothing more to flush: a flush asked for now is answered at once.
+    drop(flushes);
     let _ = events.send(AgentEvent::Exited(ended.await));
 }
 
@@ -1099,6 +1179,7 @@ fn read_tool_call(v: &Value) -> ToolCallInfo {
             .and_then(ToolStatus::parse),
         locations,
         summary: summary.filter(|s| !s.is_empty()),
+        raw_input: v.get("rawInput").filter(|i| !i.is_null()).cloned(),
     }
 }
 

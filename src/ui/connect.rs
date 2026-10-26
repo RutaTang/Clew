@@ -545,12 +545,20 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         .height(Length::Fixed(260.0))
         .into(),
         ConnectStage::Browsing(browser) => remote_browser_view(browser),
-        ConnectStage::TrustHost { target, key, .. } => trust_host_prompt(target, key),
+        // Each Allow is drawn enabled once its question has been within reach
+        // long enough to be read, where it is (`App::asked`).
+        ConnectStage::TrustHost { target, key, .. } => {
+            let question = crate::app::model::Question::TrustHost(key.fingerprint.clone());
+            trust_host_prompt(target, key, app.asked(question))
+        }
         ConnectStage::HostKeyChanged {
             target,
             reason,
             forget_host,
-        } => host_key_changed_prompt(target, reason, forget_host),
+        } => {
+            let question = crate::app::model::Question::ForgetHostKey(forget_host.clone());
+            host_key_changed_prompt(target, reason, forget_host, app.asked(question))
+        }
     };
 
     // Always in the same slot (a zero-size one while there is nothing to say),
@@ -576,7 +584,10 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
 pub(crate) fn trust_host_prompt<'a>(
     target: &'a crate::connect::ConnTarget,
     key: &'a crate::connect::ScannedHostKey,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'a, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let host = target.label();
     let para = |s: String| {
         text(s)
@@ -609,7 +620,9 @@ pub(crate) fn trust_host_prompt<'a>(
     .padding([8, 10])
     .width(Fill)
     .style(theme::editor);
-    column![
+    // Fresh for each key shown: a press held on another prompt's button is
+    // not this one's (`fresh`).
+    let prompt = column![
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 16.0),
             text("Unknown host key")
@@ -636,18 +649,27 @@ pub(crate) fn trust_host_prompt<'a>(
                 .style(theme::toolbar_button)
                 .padding([6, 14])
                 .on_press(Message::Connect(ConnectMsg::TrustCancel)),
-            button(text("Trust and connect").size(ts::BODY))
-                .style(theme::primary_button)
-                .padding([6, 14])
-                .on_press(Message::Connect(ConnectMsg::TrustHost {
-                    fingerprint: key.fingerprint.clone(),
-                })),
+            crate::ui::fresh::allow(
+                ready,
+                button(text("Trust and connect").size(ts::BODY))
+                    .style(theme::primary_button)
+                    .padding([6, 14])
+                    .on_press_maybe(ready.then(|| {
+                        Message::Connect(ConnectMsg::TrustHost {
+                            fingerprint: key.fingerprint.clone(),
+                        })
+                    }))
+            ),
         ]
         .spacing(8)
         .align_y(iced::Center),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+    // Where its answers are (`placed`); fresh for each key (`fresh`).
+    crate::ui::placed::placed(
+        &asked,
+        crate::ui::fresh::fresh_for(&key.fingerprint, prompt),
+    )
 }
 
 /// The changed-host-key refusal, when the key on record is one clew trusted
@@ -659,14 +681,17 @@ pub(crate) fn host_key_changed_prompt<'a>(
     target: &'a crate::connect::ConnTarget,
     reason: &'a str,
     forget_host: &'a str,
+    asked: impl Into<crate::ui::placed::Asked>,
 ) -> Element<'a, Message> {
+    let asked = asked.into();
+    let ready = asked.ready;
     let para = |s: String| {
         text(s)
             .size(ts::BODY)
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
     };
-    column![
+    let prompt = column![
         row![
             glyph::icon(Glyph::Remote, theme::danger(), 16.0),
             text("Host key changed")
@@ -689,18 +714,23 @@ pub(crate) fn host_key_changed_prompt<'a>(
                 .style(theme::toolbar_button)
                 .padding([6, 14])
                 .on_press(Message::Connect(ConnectMsg::TrustCancel)),
-            button(text("Forget the old key").size(ts::BODY))
-                .style(theme::toolbar_button)
-                .padding([6, 14])
-                .on_press(Message::Connect(ConnectMsg::ForgetHostKey {
-                    host: forget_host.to_string(),
-                })),
+            crate::ui::fresh::allow(
+                ready,
+                button(text("Forget the old key").size(ts::BODY))
+                    .style(theme::toolbar_button)
+                    .padding([6, 14])
+                    .on_press_maybe(ready.then(|| {
+                        Message::Connect(ConnectMsg::ForgetHostKey {
+                            host: forget_host.to_string(),
+                        })
+                    }))
+            ),
         ]
         .spacing(8)
         .align_y(iced::Center),
     ]
-    .spacing(10)
-    .into()
+    .spacing(10);
+    crate::ui::placed::placed(&asked, crate::ui::fresh::fresh_for(&forget_host, prompt))
 }
 
 /// Whether the host this window is connected to RIGHT NOW holds the AI keys,
@@ -754,10 +784,15 @@ pub(crate) fn connect_picker<'a>(
     use crate::ConnectField;
     let label = |s: &str| text(s.to_string()).size(ts::SMALL).color(theme::dim());
 
-    let mut col = Column::new().spacing(12);
+    // What comes before the form — the error, the saved hosts — in a place
+    // of its own, there or not: pushed in front of the form's fields, it
+    // handed their state on as it came and went (a field focused when Enter
+    // showed an error lost its focus; a host saved from another window moved
+    // the User field's cursor to Name).
+    let mut head = Column::new().spacing(12);
 
     if let Some(msg) = error {
-        col = col.push(
+        head = head.push(
             container(text(msg.to_string()).size(ts::BODY).color(theme::danger()))
                 .padding([6, 10])
                 .width(Fill)
@@ -767,7 +802,7 @@ pub(crate) fn connect_picker<'a>(
 
     // Saved hosts: click a row to connect, × to forget.
     if !app.saved_connections.is_empty() {
-        col = col.push(section_header("SAVED HOSTS"));
+        head = head.push(section_header("SAVED HOSTS"));
         let mut list = Column::new().spacing(2);
         for conn in &app.saved_connections {
             // By identity: the list is re-merged from disk whenever any
@@ -801,8 +836,12 @@ pub(crate) fn connect_picker<'a>(
                 }));
             list = list.push(row![open, remove].spacing(4).align_y(iced::Center));
         }
-        col = col.push(list);
+        head = head.push(list);
     }
+    let has_head = error.is_some() || !app.saved_connections.is_empty();
+    let head =
+        container(head).padding(Padding::default().bottom(if has_head { 12.0 } else { 0.0 }));
+    let mut col = Column::new().spacing(12);
 
     // New-connection form. Enter in any field connects, like the button.
     let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
@@ -882,7 +921,7 @@ pub(crate) fn connect_picker<'a>(
         ]);
     }
 
-    scrollable(col.width(Fill))
+    scrollable(column![head, col.width(Fill)].width(Fill))
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
         .height(Length::Shrink)

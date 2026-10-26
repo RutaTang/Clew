@@ -36,7 +36,8 @@ pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
     container(
         row![
             icon_text(glyph, color, 12.0),
-            text(rel)
+            // In the order it is spelled (`highlight::in_order`).
+            text(crate::highlight::in_order(rel))
                 .size(ts::SMALL)
                 .color(theme::fg_muted())
                 .wrapping(Wrapping::None),
@@ -456,20 +457,25 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         );
     }
 
-    let body = scrollable(
-        Column::with_children(blocks)
-            .spacing(4)
-            .width(Fill)
-            .padding(Padding {
-                top: 6.0,
-                right: 20.0,
-                bottom: 24.0,
-                left: 8.0,
-            }),
-    )
-    .direction(thin_scroll())
-    .style(theme::overlay_scrollbar)
-    .height(Fill);
+    // From its top for each item picked (`fresh`), not where the last was
+    // scrolled to.
+    let body = crate::ui::fresh::fresh_for(
+        &(&page.rel, top_line),
+        scrollable(
+            Column::with_children(blocks)
+                .spacing(4)
+                .width(Fill)
+                .padding(Padding {
+                    top: 6.0,
+                    right: 20.0,
+                    bottom: 24.0,
+                    left: 8.0,
+                }),
+        )
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill),
+    );
 
     container(column![container(header).padding([10, 16]), body])
         .width(Fill)

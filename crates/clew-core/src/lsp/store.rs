@@ -43,6 +43,20 @@ pub fn default_data_root() -> Option<PathBuf> {
     })
 }
 
+/// Create `dir` and the folders above it, the data directory among them
+/// made private first: created by `create_dir_all` alone — by the first
+/// install, before anything else of clew's was written — it stood open to
+/// every user of the machine (0755 under the usual umask) until something
+/// else tightened it.
+pub(crate) fn create_store_dir(dir: &Path) -> Result<(), String> {
+    if let Some(root) = data_root()
+        && dir.starts_with(&root)
+    {
+        crate::derived::ensure_private_dir(&root).map_err(|e| e.to_string())?;
+    }
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())
+}
+
 /// Where language servers are installed.
 fn servers_root() -> Option<PathBuf> {
     Some(data_root()?.join("servers"))
@@ -499,7 +513,7 @@ fn toolchain_install_with(
     let parent = dest_dir
         .parent()
         .ok_or_else(|| "invalid destination".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    create_store_dir(parent)?;
     let staging = create_staging_dir(parent, dest_dir)?;
     let built = (|| {
         let output = run_bounded_cancellable(
@@ -764,7 +778,7 @@ fn install_bytes(
     let parent = dest_dir
         .parent()
         .ok_or_else(|| "invalid destination".to_string())?;
-    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    create_store_dir(parent)?;
     let staging = create_staging_dir(parent, dest_dir)?;
     let unpacked = archive::unpack(download.archive, bytes, &staging, download.binary, budget)
         .and_then(|()| {
@@ -913,10 +927,8 @@ pub(crate) mod testing {
     /// Write an executable shell script.
     #[cfg(unix)]
     pub(crate) fn script(path: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::write_script(path, body);
         path.to_path_buf()
     }
 }
@@ -1393,8 +1405,8 @@ mod tests {
             let err =
                 toolchain_install_with(&install, "latest", &dest, &tool, &cancel).unwrap_err();
             let returned = Instant::now();
-            // Timed from the cancel, not from the spawn: the first run of a
-            // fresh script can wait on the OS's check of the new file.
+            // Timed from the cancel, not from the spawn: how long a script
+            // takes to get going on a busy machine is not the cancel's.
             let (cancelled, helper) = flip.join().unwrap();
             let helper = helper.expect("the installer never recorded its helper");
             assert!(err.contains("cancelled"), "{err}");
@@ -1432,11 +1444,10 @@ mod tests {
     /// is all there — the file exists, empty, before the pid is written —
     /// or `None` if it never is within a minute.
     ///
-    /// Only a wait for the script to get going, which nothing here times:
-    /// the first run of a fresh script waits on the OS's check of the new
-    /// file, and on a machine busy building it took over five seconds (the
-    /// bound this had), failing tests whose timing assertions all start
-    /// from the cancel.
+    /// Only a wait for the script to get going, which nothing here times: on
+    /// a machine busy building, a script's start took over five seconds (the
+    /// bound this had), failing tests whose timing assertions all start from
+    /// the cancel.
     #[cfg(unix)]
     fn recorded_pid(path: &Path) -> Option<libc::pid_t> {
         for _ in 0..6000 {
@@ -1843,6 +1854,21 @@ mod tests {
                 .map(|s| format!("{} {}", s.name, s.version))
                 .collect();
             assert_eq!(listed, ["zls 0.16.0"]);
+        });
+    }
+
+    /// The data directory a first install creates is private from the
+    /// start, not as open as the umask leaves a new folder.
+    #[cfg(unix)]
+    #[test]
+    fn a_first_install_creates_the_data_directory_private() {
+        use std::os::unix::fs::PermissionsExt;
+        with_store("private-root", |dir| {
+            std::fs::remove_dir_all(dir).unwrap();
+            create_store_dir(&dir.join("servers/rust-analyzer")).unwrap();
+            let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{mode:o}");
+            assert!(dir.join("servers/rust-analyzer").is_dir());
         });
     }
 

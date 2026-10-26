@@ -39,6 +39,13 @@ impl App {
     }
 
     pub(crate) fn on_open_settings(&mut self) -> Task<Message> {
+        // Open already (⌘, again, or an action that asks for a key opens
+        // it): the form as it stands. Filled anew, a key typed and not yet
+        // saved was lost, and the appearance Close goes back to became the
+        // one being previewed.
+        if self.settings.open {
+            return Task::none();
+        }
         let c = llm::Config::current_or_default();
         self.settings.provider = c.provider;
         self.settings.model = c.model;
@@ -141,6 +148,7 @@ impl App {
                 self.invalidate_llm_config();
                 self.embed_available = embed::Config::available();
                 self.settings.open = false;
+                self.code_focused = true;
                 // A changed embedding space makes every vector held in memory
                 // unusable, and keeping them is worse than losing them: FIND
                 // would embed the query at the NEW endpoint and rank it against
@@ -305,6 +313,9 @@ impl App {
                 // Closing without Save discards any previewed theme change.
                 self.restore_theme_snapshot();
                 self.settings.open = false;
+                // Back to reading, as the finder's close does: the motions
+                // the form took from the code are the code's again.
+                self.code_focused = true;
                 Task::none()
             }
             SettingsMsg::ProviderPicked(p) => {

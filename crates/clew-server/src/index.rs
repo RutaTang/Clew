@@ -165,14 +165,16 @@ pub(crate) fn file_symbols_for(
         analysis,
     } = analyze_indexable(root, abs, rel)?;
     let lines: Vec<&str> = content.lines().collect();
+    let entries = outline::EntryPoints::new(&lines, lang, rel);
     let (located, raw_imports) = analysis.map(|a| (a.symbols, a.imports)).unwrap_or_default();
     let symbols = located
         .into_iter()
         .map(|l| l.symbol)
         .map(|s| clew_protocol::IndexSymbol {
             is_test: matches!(s.kind.as_str(), "function" | "method")
-                && outline::is_test_fn(&lines, s.line, &s.name, lang),
-            entry: outline::entry_kind(&lines, s.line, &s.name, &s.kind, lang, rel)
+                && entries.is_test(s.line, &s.name),
+            entry: entries
+                .kind_of(s.line, &s.name, &s.kind)
                 .map(|k| k.key().to_string()),
             name: s.name,
             kind: s.kind,
