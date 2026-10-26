@@ -2120,9 +2120,13 @@ fn the_tap_that_raises_the_window_answers_nothing() {
     assert!(!known_hosts.exists());
 
     // The control: the window focused already, the same click trusts —
-    // the key recorded, the reconnect under way, the prompt gone.
+    // the key recorded, the prompt gone.
     let (app, _) = tapped(&click);
-    assert!(known_hosts.exists(), "a click on the enabled Allow trusts");
+    assert_eq!(
+        std::fs::read_to_string(&known_hosts).ok(),
+        Some(format!("{}\n", scanned_key().line)),
+        "a click on the enabled Allow trusts"
+    );
     assert!(app.connect.is_none());
 }
 
