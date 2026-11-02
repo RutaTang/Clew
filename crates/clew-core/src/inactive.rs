@@ -11,6 +11,9 @@
 //! - C and C++: the groups of `#if`/`#ifdef`/`#elif`/`#else` the
 //!   preprocessor drops, from the platform's macros, the flags' `-D`/`-U`,
 //!   and the file's own `#define`s.
+//! - Zig: the branches of an `if` or a `switch` on `builtin.os.tag` or
+//!   `builtin.cpu.arch` the compiler does not analyze for the target —
+//!   comptime-known, so only the one taken is compiled.
 //!
 //! Conservatively, always: a line is dimmed only when what leaves it out is
 //! *definitively* false. A feature another package may turn on, a macro a
@@ -194,6 +197,7 @@ pub fn inactive_lines_in(
         }
         "go" => go_inactive(source, target, facts, rel),
         "c" | "cpp" => c_inactive(source, lang_key, target, facts, rel),
+        "zig" => zig_inactive(source, target),
         _ => HashSet::new(),
     }
 }
@@ -508,7 +512,281 @@ fn split_top(s: &str) -> Vec<String> {
     parts
 }
 
-/// Every line of `source`.
+/// Which part of the target a Zig expression names.
+#[derive(Clone, Copy, PartialEq)]
+enum ZigFact {
+    Os,
+    Arch,
+}
+
+/// The lines of the Zig file `source` in branches the compiler leaves out
+/// for `target`: of an `if` (statement or expression) whose condition
+/// compares `builtin.os.tag` or `builtin.cpu.arch` with a tag, and of a
+/// `switch` on one of them — whole lines only, never one that holds a taken
+/// part as well.
+fn zig_inactive(source: &str, target: &Target) -> HashSet<usize> {
+    let mut out = HashSet::new();
+    let Some(lang) = crate::highlight::language_for("zig") else {
+        return out;
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return out;
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return out;
+    };
+    let zig = ZigTarget::new(source, target);
+    let src = source.as_bytes();
+    let mut stack = vec![tree.root_node()];
+    while let Some(node) = stack.pop() {
+        let mut cursor = node.walk();
+        stack.extend(node.children(&mut cursor));
+        let (dead, live) = match node.kind() {
+            "if_statement" | "if_expression" => zig.if_branches(node, src),
+            "switch_expression" => zig.switch_branches(node, src),
+            _ => continue,
+        };
+        let live: HashSet<usize> = live
+            .iter()
+            .flat_map(|n| n.start_position().row..=n.end_position().row)
+            .collect();
+        for branch in dead {
+            for row in branch.start_position().row..=branch.end_position().row {
+                if !live.contains(&row) {
+                    out.insert(row);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The target as Zig names it, and the names a file gives `@import("builtin")`
+/// and its `os.tag` / `cpu.arch`.
+struct ZigTarget {
+    os: String,
+    arch: String,
+    /// What `@import("builtin")` is bound to (`builtin`, by convention).
+    builtins: Vec<String>,
+    /// Names bound to the OS tag (`const native_os = builtin.os.tag;`) or
+    /// the architecture.
+    aliases: Vec<(String, ZigFact)>,
+}
+
+impl ZigTarget {
+    fn new(source: &str, target: &Target) -> ZigTarget {
+        let os = match target.os.as_str() {
+            "android" => "linux",
+            os => os,
+        };
+        let mut zig = ZigTarget {
+            os: os.to_string(),
+            arch: target.arch.clone(),
+            builtins: Vec::new(),
+            aliases: Vec::new(),
+        };
+        // `const NAME = VALUE;` — at any depth, as the file binds them.
+        for line in source.lines() {
+            let line: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+            let Some(rest) = line
+                .strip_prefix("pubconst")
+                .or_else(|| line.strip_prefix("const"))
+            else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once('=') else {
+                continue;
+            };
+            let name = name.split(':').next().unwrap_or(name);
+            let Some(value) = value.strip_suffix(';') else {
+                continue;
+            };
+            if value == "@import(\"builtin\")" {
+                zig.builtins.push(name.to_string());
+            } else if let Some(fact) = zig.subject(value) {
+                zig.aliases.push((name.to_string(), fact));
+            }
+        }
+        zig
+    }
+
+    /// Which part of the target `expr` (its text) names, if one.
+    fn subject(&self, expr: &str) -> Option<ZigFact> {
+        let expr: String = expr.chars().filter(|c| !c.is_whitespace()).collect();
+        if let Some((_, fact)) = self.aliases.iter().find(|(name, _)| *name == expr) {
+            return Some(*fact);
+        }
+        let rest = expr.strip_prefix("@import(\"builtin\")").or_else(|| {
+            self.builtins
+                .iter()
+                .find_map(|b| expr.strip_prefix(b.as_str()))
+        })?;
+        let rest = rest.strip_prefix(".target").unwrap_or(rest);
+        match rest {
+            ".os.tag" => Some(ZigFact::Os),
+            ".cpu.arch" => Some(ZigFact::Arch),
+            _ => None,
+        }
+    }
+
+    /// Whether `tag` (an enum literal's name) is the target's.
+    fn is(&self, fact: ZigFact, tag: &str) -> bool {
+        match fact {
+            ZigFact::Os => tag == self.os,
+            ZigFact::Arch => tag == self.arch,
+        }
+    }
+
+    /// A condition's truth, when it compares the target with tags: `==`,
+    /// `!=`, `and`, `or`, `!` and parentheses.
+    fn condition(&self, node: Node, src: &[u8], depth: usize) -> Option<bool> {
+        if depth > MAX_CFG_DEPTH {
+            return None;
+        }
+        let text = node.utf8_text(src).ok()?.trim();
+        match node.kind() {
+            "parenthesized_expression" | "grouped_expression" => {
+                let inner = node.named_child(0)?;
+                self.condition(inner, src, depth + 1)
+            }
+            "unary_expression" if text.starts_with('!') => {
+                let inner = node.named_child(0)?;
+                self.condition(inner, src, depth + 1).map(|b| !b)
+            }
+            "binary_expression" => {
+                let left = node.child_by_field_name("left")?;
+                let right = node.child_by_field_name("right")?;
+                let op = std::str::from_utf8(&src[left.end_byte()..right.start_byte()])
+                    .ok()?
+                    .trim();
+                match op {
+                    "and" => and(
+                        self.condition(left, src, depth + 1),
+                        self.condition(right, src, depth + 1),
+                    ),
+                    "or" => or(
+                        self.condition(left, src, depth + 1),
+                        self.condition(right, src, depth + 1),
+                    ),
+                    "==" | "!=" => {
+                        let l = left.utf8_text(src).ok()?;
+                        let r = right.utf8_text(src).ok()?;
+                        let (fact, tag) = match (self.subject(l), enum_literal(r)) {
+                            (Some(fact), Some(tag)) => (fact, tag),
+                            _ => (self.subject(r)?, enum_literal(l)?),
+                        };
+                        let equal = self.is(fact, tag);
+                        Some(if op == "==" { equal } else { !equal })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// An `if`'s branches the target leaves out, and those it takes.
+    fn if_branches<'t>(&self, node: Node<'t>, src: &[u8]) -> (Vec<Node<'t>>, Vec<Node<'t>>) {
+        let Some(condition) = node.child_by_field_name("condition") else {
+            return (Vec::new(), Vec::new());
+        };
+        let Some(value) = self.condition(condition, src, 0) else {
+            return (Vec::new(), Vec::new());
+        };
+        // The branches after the condition: the one taken when it holds,
+        // then the `else`'s.
+        let mut cursor = node.walk();
+        let branches: Vec<Node> = node
+            .named_children(&mut cursor)
+            .filter(|c| c.id() != condition.id())
+            .collect();
+        let (then, otherwise) = match branches.as_slice() {
+            [then, otherwise, ..] => (*then, Some(*otherwise)),
+            [then] => (*then, None),
+            [] => return (Vec::new(), Vec::new()),
+        };
+        // An `else` clause: its alternative is the branch.
+        let otherwise = otherwise.map(|o| {
+            o.child_by_field_name("alternative")
+                .filter(|_| o.kind() == "else_clause")
+                .unwrap_or(o)
+        });
+        let mut live = vec![condition];
+        let mut dead = Vec::new();
+        match (value, otherwise) {
+            (true, Some(otherwise)) => {
+                live.push(then);
+                dead.push(otherwise);
+            }
+            (true, None) => live.push(then),
+            (false, otherwise) => {
+                dead.push(then);
+                live.extend(otherwise);
+            }
+        }
+        (dead, live)
+    }
+
+    /// A `switch` on the target's OS or architecture: the cases it does not
+    /// take, and the one it does. Undecided — nothing left out — when a
+    /// case names anything but tags.
+    fn switch_branches<'t>(&self, node: Node<'t>, src: &[u8]) -> (Vec<Node<'t>>, Vec<Node<'t>>) {
+        let none = (Vec::new(), Vec::new());
+        let Some(subject) = node.named_child(0) else {
+            return none;
+        };
+        let Some(fact) = subject.utf8_text(src).ok().and_then(|t| self.subject(t)) else {
+            return none;
+        };
+        let mut cursor = node.walk();
+        let cases: Vec<Node> = node
+            .named_children(&mut cursor)
+            .filter(|c| c.kind() == "switch_case")
+            .collect();
+        let mut matched: Vec<(Node, Option<bool>)> = Vec::new();
+        for case in cases {
+            let Ok(text) = case.utf8_text(src) else {
+                return none;
+            };
+            let Some((items, _)) = text.split_once("=>") else {
+                return none;
+            };
+            let items = items.trim();
+            if items == "else" {
+                matched.push((case, None));
+                continue;
+            }
+            let mut tags = Vec::new();
+            for item in items.split(',').map(str::trim).filter(|i| !i.is_empty()) {
+                match enum_literal(item) {
+                    Some(tag) => tags.push(tag),
+                    None => return none,
+                }
+            }
+            matched.push((case, Some(tags.iter().any(|t| self.is(fact, t)))));
+        }
+        let any = matched.iter().any(|(_, m)| *m == Some(true));
+        let (mut dead, mut live) = (Vec::new(), vec![subject]);
+        for (case, taken) in matched {
+            // `else` is taken when no case names the target.
+            match taken.unwrap_or(!any) {
+                true => live.push(case),
+                false => dead.push(case),
+            }
+        }
+        (dead, live)
+    }
+}
+
+/// The name of a Zig enum literal (`.windows`), if `text` is one.
+fn enum_literal(text: &str) -> Option<&str> {
+    let name = text.trim().strip_prefix('.')?;
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then_some(name)
+}
+
+/// Every line of `source`./// Every line of `source`.
 fn all_lines(source: &str) -> HashSet<usize> {
     (0..source.lines().count().max(1)).collect()
 }
@@ -1921,5 +2199,76 @@ verbose();
             [1]
         );
         assert!(inactive_lines_in(source, "c", &linux(), &facts, Some("a.h")).is_empty());
+    }
+
+    /// Zig's comptime branches on the target's OS and architecture — an
+    /// `if`, an `else if` chain, a `switch` with an `else` — dimmed for the
+    /// ones not taken, in whole lines only, through the names the file binds
+    /// them to; and a condition on anything else decides nothing.
+    #[test]
+    fn zig_comptime_branches_dim_by_the_target() {
+        let source = "\
+const builtin = @import(\"builtin\");
+const native_os = builtin.os.tag;
+pub fn f() void {
+    if (builtin.os.tag == .windows) {
+        windows();
+    } else if (native_os == .macos) {
+        mac();
+    } else {
+        other();
+    }
+    switch (builtin.cpu.arch) {
+        .x86_64 => {
+            x64();
+        },
+        .aarch64, .arm => {
+            arm();
+        },
+        else => {
+            rest();
+        },
+    }
+    if (std.debug.runtime_safety) {
+        safe();
+    }
+    const x = if (native_os != .linux) 1 else 2;
+    if (builtin.os.tag != .windows) {
+        posix();
+    }
+}
+";
+        let linux = Target::new("Linux", "linux", "x86_64", "unix");
+        assert_eq!(
+            lines(inactive_lines_in(
+                source,
+                "zig",
+                &linux,
+                &BuildFacts::default(),
+                None
+            )),
+            // The `} else if` line holds a condition that is evaluated: lit.
+            [4, 6, 14, 15, 16, 17, 18, 19],
+        );
+        let windows = Target::new("Windows", "windows", "x86_64", "windows");
+        let on_windows = lines(inactive_lines_in(
+            source,
+            "zig",
+            &windows,
+            &BuildFacts::default(),
+            None,
+        ));
+        assert_eq!(on_windows, [6, 7, 8, 9, 14, 15, 16, 17, 18, 19, 26, 27]);
+        let mac = Target::new("macOS", "macos", "aarch64", "unix");
+        assert_eq!(
+            lines(inactive_lines_in(
+                source,
+                "zig",
+                &mac,
+                &BuildFacts::default(),
+                None
+            )),
+            [4, 8, 9, 11, 12, 13, 17, 18, 19],
+        );
     }
 }
