@@ -82,6 +82,11 @@ tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-zig = "1.1.2"
+tree-sitter-php = "0.25.1"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-erlang = "0.21.0"
+tree-sitter-haskell = "0.24.1"
 
 # The system proxy settings (net.rs `system_proxies`): what System Settings ›
 # Network › Proxies configures, read with `SCDynamicStoreCopyProxies` when no

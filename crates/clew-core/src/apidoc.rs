@@ -112,6 +112,67 @@ pub fn module_doc(source: &str, lang_key: &str) -> String {
             doc.join("\n").trim().to_string()
         }
         "lean" => lean_module_doc(lines),
+        // Zig's `//!` lines, at the top of the file.
+        "zig" => {
+            let doc: Vec<&str> = lines
+                .map(str::trim_start)
+                .skip_while(|t| t.is_empty())
+                .take_while(|t| t.starts_with("//!"))
+                .map(|t| {
+                    let rest = &t[3..];
+                    rest.strip_prefix(' ').unwrap_or(rest)
+                })
+                .collect();
+            doc.join("\n").trim().to_string()
+        }
+        // The `%%` comment run before `-module(…)` — EDoc's overview — its
+        // `@doc` tag unwrapped.
+        "erlang" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(module) = all
+                .iter()
+                .position(|l| l.trim_start().starts_with("-module("))
+            else {
+                return String::new();
+            };
+            let mut doc: Vec<&str> = all[..module]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .take_while(|l| l.starts_with('%'))
+                .map(|l| l.trim_start_matches('%').trim_start())
+                .collect();
+            doc.reverse();
+            let doc = doc.join("\n");
+            doc.trim()
+                .strip_prefix("@doc")
+                .unwrap_or(doc.trim())
+                .trim()
+                .to_string()
+        }
+        // The Haddock (`-- |`) before `module … where`.
+        "haskell" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(module) = all
+                .iter()
+                .position(|l| l.trim_start().starts_with("module "))
+            else {
+                return String::new();
+            };
+            let mut doc: Vec<&str> = all[..module]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .take_while(|l| l.starts_with("--"))
+                .map(|l| l[2..].trim_start())
+                .collect();
+            doc.reverse();
+            let doc = doc.join("\n");
+            match doc.trim().strip_prefix('|') {
+                Some(doc) => doc.trim().to_string(),
+                None => String::new(),
+            }
+        }
         _ => String::new(),
     }
 }
@@ -1202,11 +1263,26 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
             .any(|w| w == "private"),
         // A schema has no private tables.
         Lang::Sql => true,
+        // PHP members say so; a free function or class is public.
+        Lang::Php => !modifiers(d).any(|w| w == "private" || w == "protected"),
+        // C#'s members are private unless they say otherwise; a type without
+        // a modifier is internal — its assembly's API.
+        Lang::CSharp => {
+            modifiers(d).any(|w| matches!(w, "public" | "protected" | "internal"))
+                || (!is_member && !modifiers(d).any(|w| w == "private"))
+        }
+        // Zig's `pub`.
+        Lang::Zig => d.starts_with("pub ") || d.starts_with("pub\t"),
+        // A leading underscore is Ruby's own marker of a private helper; the
+        // `private` sections a class opens are decided in `build_file`'s
+        // caller as they are for C++.
+        Lang::Ruby => !name.starts_with('_'),
+        // The export list says (a module without one exports everything):
+        // not seen from one declaration, so every one counts.
+        Lang::Erlang | Lang::Haskell => true,
         // No outline, so no items to judge; the benefit of the doubt keeps a
         // Docs view from coming up empty if one ever appears.
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
-            true
-        }
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => true,
     }
 }
 
@@ -1232,6 +1308,37 @@ fn modifiers(decl: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A module's own doc in Zig (`//!`), Erlang (EDoc above `-module`) and
+    /// Haskell (Haddock above `module … where`).
+    #[test]
+    fn module_docs_of_zig_erlang_and_haskell() {
+        for (file, lang) in [("a.zig", "zig"), ("a.erl", "erlang"), ("a.hs", "haskell")] {
+            let source = match file {
+                "a.zig" => include_str!("../tests/fixtures/langs/a.zig"),
+                "a.erl" => include_str!("../tests/fixtures/langs/a.erl"),
+                _ => include_str!("../tests/fixtures/langs/a.hs"),
+            };
+            assert_eq!(module_doc(source, lang), "A shop.", "{lang}");
+        }
+        assert_eq!(
+            module_doc(
+                "module M where
+",
+                "haskell"
+            ),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "% plain
+-module(m).
+",
+                "erlang"
+            ),
+            "plain"
+        );
+    }
 
     /// A SQL table's `refs` are the tables its foreign keys reference — in a
     /// column, in a table constraint, and in the file's `ALTER TABLE`s — and

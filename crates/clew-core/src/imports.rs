@@ -76,7 +76,12 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         | Lang::Html
         | Lang::Css
         | Lang::Zig
-        | Lang::Sql => Vec::new(),
+        | Lang::Sql
+        | Lang::Php
+        | Lang::Ruby
+        | Lang::CSharp
+        | Lang::Erlang
+        | Lang::Haskell => Vec::new(),
     }
 }
 
@@ -102,7 +107,12 @@ pub fn import_query(lang: Lang) -> Result<&'static Query, QueryError> {
         | Lang::Html
         | Lang::Css
         | Lang::Zig
-        | Lang::Sql => None,
+        | Lang::Sql
+        | Lang::Php
+        | Lang::Ruby
+        | Lang::CSharp
+        | Lang::Erlang
+        | Lang::Haskell => None,
     })
 }
 
@@ -671,6 +681,11 @@ mod extraction_tests {
                             | Lang::Css
                             | Lang::Zig
                             | Lang::Sql
+                            | Lang::Php
+                            | Lang::Ruby
+                            | Lang::CSharp
+                            | Lang::Erlang
+                            | Lang::Haskell
                     ),
                     "{lang:?} lost its import model"
                 ),

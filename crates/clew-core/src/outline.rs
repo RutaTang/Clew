@@ -307,8 +307,75 @@ pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>,
 pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     match lang {
         Lang::Lean => lean_located(source),
+        Lang::Erlang | Lang::Haskell => {
+            merge_clauses(located_in_tree(tree, source, lang), source, lang)
+        }
         _ => located_in_tree(tree, source, lang),
     }
+}
+
+/// A function written as several clauses (Erlang) or equations (Haskell) —
+/// each a definition of its own to the grammar — as ONE item: the first's
+/// name and line, running to the last's end. An Erlang function is its name
+/// AND its arity: `price/1` and `price/2` side by side are two.
+fn merge_clauses(items: Vec<Located>, source: &str, lang: Lang) -> Vec<Located> {
+    let arity = |item: &Located| match lang {
+        Lang::Erlang => clause_arity(source, item),
+        _ => None,
+    };
+    let mut out: Vec<Located> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(prev) = out.last_mut()
+            && prev.symbol.kind == "function"
+            && item.symbol.kind == "function"
+            && prev.symbol.name == item.symbol.name
+            && arity(prev) == arity(&item)
+        {
+            prev.symbol.end_line = prev.symbol.end_line.max(item.symbol.end_line);
+            prev.declaration.1 = prev.declaration.1.max(item.declaration.1);
+            prev.body = match (prev.body, item.body) {
+                (Some((first, _)), Some((_, last))) => Some((first, last)),
+                (body, None) | (None, body) => body,
+            };
+            continue;
+        }
+        out.push(item);
+    }
+    out
+}
+
+/// How many arguments an Erlang clause's head takes — top-level commas of
+/// its first parenthesized list (`price(A, B)`: 2).
+fn clause_arity(source: &str, item: &Located) -> Option<usize> {
+    let text = source.get(item.declaration.0..item.declaration.1)?;
+    let head = text.split("->").next()?;
+    let open = head.find('(')?;
+    let mut depth = 0usize;
+    let mut args = 0usize;
+    let mut empty = true;
+    for c in head[open..].chars() {
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth == 1 {
+                    continue;
+                }
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            ',' if depth == 1 => args += 1,
+            c if !c.is_whitespace() => {}
+            _ => continue,
+        }
+        if depth >= 1 {
+            empty = false;
+        }
+    }
+    Some(if empty { 0 } else { args + 1 })
 }
 
 /// A Lean file's outline: each command parsed on its own
@@ -800,10 +867,16 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
             "method_declaration" if def.child_by_field_name("body").is_none() => (first(def), None),
             _ => (first(def), whole),
         },
+        // Interface and abstract methods have no body.
+        Lang::CSharp | Lang::Php => match def.kind() {
+            "method_declaration" if def.child_by_field_name("body").is_none() => (first(def), None),
+            _ => (first(def), whole),
+        },
         Lang::Rust | Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => {
             (first(def), whole)
         }
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
+        Lang::Ruby | Lang::Erlang | Lang::Haskell | Lang::Zig => (first(def), whole),
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => {
             (first(def), whole)
         }
     }
@@ -953,7 +1026,12 @@ fn container_of(def: Node, lang: Lang) -> Option<Container> {
         | Lang::Css
         | Lang::Zig
         | Lang::Sql
-        | Lang::Lean => None,
+        | Lang::Lean
+        | Lang::Php
+        | Lang::Ruby
+        | Lang::CSharp
+        | Lang::Erlang
+        | Lang::Haskell => None,
     }
 }
 
@@ -1399,6 +1477,10 @@ struct Marks {
     kind: Option<EntryKind>,
 }
 
+/// Most lines of attributes (or of a docblock) read above a declaration for
+/// what marks it.
+const MAX_ATTRIBUTE_RUN: usize = 32;
+
 impl Marks {
     /// These, and `test` and `kind` too.
     fn and(self, test: bool, kind: Option<EntryKind>) -> Marks {
@@ -1508,10 +1590,85 @@ impl<'a> EntryPoints<'a> {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
-            | Lang::Zig
             | Lang::Sql
-            | Lang::Lean => Marks::default(),
+            | Lang::Lean
+            | Lang::Haskell => Marks::default(),
+            // PHPUnit: `testX` methods (and `@test`-annotated ones, read off
+            // the docblock above).
+            Lang::Php => Marks {
+                test: name.starts_with("test") || self.docblock_says(line1, "@test"),
+                kind: None,
+            },
+            // Minitest's `test_x`; RSpec's examples are blocks, not methods.
+            Lang::Ruby => Marks {
+                test: name.starts_with("test_"),
+                kind: None,
+            },
+            // EUnit: `x_test()` and `x_test_()` generators.
+            Lang::Erlang => Marks {
+                test: name.ends_with("_test") || name.ends_with("_test_"),
+                kind: None,
+            },
+            // A `test "name" { … }` block is a test by its keyword.
+            Lang::Zig => Marks {
+                test: false,
+                kind: None,
+            },
+            Lang::CSharp => self.csharp_marks(line1, name),
         }
+    }
+
+    /// Whether the `/** … */` docblock right above the declaration at
+    /// 1-based `line1` holds `tag` (PHPUnit's `@test`).
+    fn docblock_says(&self, line1: usize, tag: &str) -> bool {
+        let Some(start) = line1.checked_sub(1) else {
+            return false;
+        };
+        (start.saturating_sub(MAX_ATTRIBUTE_RUN)..start)
+            .rev()
+            .map(|i| self.lines.get(i).map(|l| l.trim()).unwrap_or_default())
+            .take_while(|l| l.starts_with('*') || l.starts_with("/**") || l.starts_with("#["))
+            .any(|l| l.split_whitespace().any(|w| w == tag))
+    }
+
+    /// What marks the C# method `name` at 1-based `line1`: its test
+    /// framework's attribute (`[Test]`, `[Fact]`, `[Theory]`,
+    /// `[TestMethod]`, `[TestCase(…)]`) on the lines of attributes right
+    /// above it, or before its name on its own line; an ASP.NET route
+    /// (`[HttpGet]`, `[Route(…)]`) marks a route.
+    fn csharp_marks(&self, line1: usize, name: &str) -> Marks {
+        let Some(start) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return Marks::default();
+        };
+        let own = self.lines[start]
+            .find(name)
+            .map(|at| &self.lines[start][..at])
+            .unwrap_or_default();
+        let mut attributes: Vec<&str> = vec![own];
+        for i in (start.saturating_sub(MAX_ATTRIBUTE_RUN)..start).rev() {
+            let t = self.lines[i].trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                attributes.push(t);
+            } else {
+                break;
+            }
+        }
+        let mut marks = Marks::default();
+        for text in attributes {
+            for attr in text.split(['[', ']', ',']).map(str::trim) {
+                let head = attr.split(['(', ' ']).next().unwrap_or_default();
+                let head = head.strip_suffix("Attribute").unwrap_or(head);
+                match head {
+                    "Test" | "TestCase" | "TestCaseSource" | "Fact" | "Theory" | "TestMethod"
+                    | "DataTestMethod" => marks.test = true,
+                    "HttpGet" | "HttpPost" | "HttpPut" | "HttpDelete" | "HttpPatch" | "Route" => {
+                        marks.kind = Some(EntryKind::Route)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        marks
     }
 
     /// What marks the Rust function `name` at 1-based `line1`: the
@@ -1877,10 +2034,19 @@ impl<'a> EntryPoints<'a> {
                     mark(EntryKind::Handler);
                 }
             }
+            Lang::CSharp => {
+                if name == "Main" {
+                    mark(EntryKind::Main);
+                }
+            }
             Lang::Dart
             | Lang::C
             | Lang::Cpp
             | Lang::Zig
+            | Lang::Php
+            | Lang::Ruby
+            | Lang::Erlang
+            | Lang::Haskell
             | Lang::Json
             | Lang::Bash
             | Lang::Yaml
@@ -4179,5 +4345,162 @@ fn build_inner() -> B { B }
         assert!(is_test_fn(&lines, line("checks"), "checks", "java"));
         assert!(is_test_fn(&lines, line("many"), "many", "java"));
         assert!(!is_test_fn(&lines, line("helper"), "helper", "java"));
+    }
+}
+
+/// The outlines of the languages clew reads with grammars of their own —
+/// PHP, Ruby, C#, Erlang, Haskell and Zig — over one sample file each.
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+
+    fn outline(source: &str, lang: &str) -> Vec<(String, String, usize, usize)> {
+        extract(source, lang)
+            .into_iter()
+            .map(|s| (s.kind, s.name, s.line, s.end_line))
+            .collect()
+    }
+
+    fn has(items: &[(String, String, usize, usize)], kind: &str, name: &str, line: usize) -> bool {
+        items
+            .iter()
+            .any(|(k, n, l, _)| k == kind && n == name && *l == line)
+    }
+
+    /// Each kind of declaration under its own kind: PHP's methods are
+    /// methods, its traits traits, its enums and cases there; C#'s
+    /// namespaces, properties, structs, enums and records too.
+    #[test]
+    fn php_and_csharp_declarations_are_outlined_by_kind() {
+        let php = outline(include_str!("../tests/fixtures/langs/a.php"), "php");
+        for (kind, name, line) in [
+            ("module", "App\\Models", 2),
+            ("class", "Item", 9),
+            ("field", "cost", 11),
+            ("method", "price", 14),
+            ("method", "name", 19),
+            ("interface", "Priced", 22),
+            ("trait", "HasName", 23),
+            ("enum", "Kind", 24),
+            ("constant", "A", 24),
+            ("function", "helper", 26),
+        ] {
+            assert!(has(&php, kind, name, line), "php {kind} {name}: {php:?}");
+        }
+        let cs = outline(include_str!("../tests/fixtures/langs/a.cs"), "csharp");
+        for (kind, name, line) in [
+            ("module", "Shop.Models", 3),
+            ("class", "Item", 6),
+            ("property", "Cost", 8),
+            ("method", "Price", 13),
+            ("method", "Helper", 19),
+            ("interface", "IPriced", 22),
+            ("enum", "Kind", 23),
+            ("class", "Money", 24),
+            ("struct", "Point", 25),
+        ] {
+            assert!(has(&cs, kind, name, line), "csharp {kind} {name}: {cs:?}");
+        }
+    }
+
+    /// Ruby's modules, classes and methods (`def self.x` among them), and
+    /// Zig's containers, their fields and methods, free functions and tests.
+    #[test]
+    fn ruby_and_zig_declarations_are_outlined() {
+        let rb = outline(include_str!("../tests/fixtures/langs/a.rb"), "ruby");
+        for (kind, name, line) in [
+            ("module", "Shop", 5),
+            ("class", "Item", 7),
+            ("method", "price", 11),
+            ("method", "build", 15),
+        ] {
+            assert!(has(&rb, kind, name, line), "ruby {kind} {name}: {rb:?}");
+        }
+        let zig = outline(include_str!("../tests/fixtures/langs/a.zig"), "zig");
+        for (kind, name, line) in [
+            ("struct", "Item", 6),
+            ("field", "cost", 9),
+            ("method", "price", 12),
+            ("enum", "Kind", 17),
+            ("union", "U", 18),
+            ("function", "total", 21),
+            ("test", "total", 27),
+        ] {
+            assert!(has(&zig, kind, name, line), "zig {kind} {name}: {zig:?}");
+        }
+        assert!(
+            !has(&zig, "function", "price", 12),
+            "a method is not also a function"
+        );
+    }
+
+    /// A function written as several clauses (Erlang) or equations (Haskell)
+    /// is ONE item, running to its last — but Erlang's same name at another
+    /// arity is another function.
+    #[test]
+    fn a_functions_clauses_are_one_item() {
+        let erl = outline(include_str!("../tests/fixtures/langs/a.erl"), "erlang");
+        let prices: Vec<_> = erl.iter().filter(|(_, n, _, _)| n == "price").collect();
+        assert_eq!(prices.len(), 1, "{erl:?}");
+        assert_eq!((prices[0].2, prices[0].3), (14, 15));
+        for (kind, name, line) in [
+            ("module", "shop", 2),
+            ("struct", "item", 6),
+            ("type", "money", 7),
+            ("macro", "TAX", 8),
+            ("function", "total", 17),
+        ] {
+            assert!(has(&erl, kind, name, line), "erlang {kind} {name}: {erl:?}");
+        }
+        let arities = outline("f(A) -> A.\nf(A, B) -> A + B.\nf(A, _) -> A.\n", "erlang");
+        let fs: Vec<(usize, usize)> = arities
+            .iter()
+            .filter(|(_, n, _, _)| n == "f")
+            .map(|(_, _, l, e)| (*l, *e))
+            .collect();
+        assert_eq!(fs, [(1, 1), (2, 3)], "f/1 and f/2: {arities:?}");
+
+        let hs = outline(
+            &format!(
+                "{}fact :: Int -> Int\nfact 0 = 1\nfact n = n * fact (n - 1)\n",
+                include_str!("../tests/fixtures/langs/a.hs")
+            ),
+            "haskell",
+        );
+        for (kind, name, line) in [
+            ("type", "Item", 9),
+            ("constructor", "Item", 9),
+            ("field", "cost", 9),
+            ("type", "Money", 11),
+            ("type", "Name", 13),
+            ("class", "Priced", 16),
+            ("method", "priceOf", 17),
+            ("function", "price", 24),
+        ] {
+            assert!(has(&hs, kind, name, line), "haskell {kind} {name}: {hs:?}");
+        }
+        let facts: Vec<_> = hs.iter().filter(|(_, n, _, _)| n == "fact").collect();
+        assert_eq!(facts.len(), 1, "{hs:?}");
+        assert_eq!((facts[0].2, facts[0].3), (26, 27));
+    }
+
+    /// Tests by each language's convention: PHPUnit's `test*` and `@test`,
+    /// Minitest's `test_*`, EUnit's `*_test`, C#'s test attributes.
+    #[test]
+    fn tests_are_told_apart_by_each_languages_convention() {
+        let php = "<?php\nclass T {\n  public function testA() {}\n  /** @test */\n  public function b() {}\n  public function c() {}\n}\n";
+        let lines: Vec<&str> = php.lines().collect();
+        assert!(is_test_fn(&lines, 3, "testA", "php"));
+        assert!(is_test_fn(&lines, 5, "b", "php"));
+        assert!(!is_test_fn(&lines, 6, "c", "php"));
+        let cs = "class T {\n  [Fact]\n  public void A() {}\n  [Theory, InlineData(1)]\n  public void B(int x) {}\n  public void C() {}\n}\n";
+        let lines: Vec<&str> = cs.lines().collect();
+        assert!(is_test_fn(&lines, 3, "A", "csharp"));
+        assert!(is_test_fn(&lines, 5, "B", "csharp"));
+        assert!(!is_test_fn(&lines, 6, "C", "csharp"));
+        let none: Vec<&str> = Vec::new();
+        assert!(is_test_fn(&none, 1, "test_price", "ruby"));
+        assert!(is_test_fn(&none, 1, "price_test", "erlang"));
+        assert!(!is_test_fn(&none, 1, "price", "erlang"));
     }
 }

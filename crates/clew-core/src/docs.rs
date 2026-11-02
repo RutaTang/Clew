@@ -112,9 +112,13 @@ fn extract_with(
     };
     // Every style that reads above a signature consults this one.
     let ends = match style {
-        DocStyle::Block(_) | DocStyle::RustLike | DocStyle::SlashSlash | DocStyle::DashDash => {
-            doc_ends(&lines)
-        }
+        DocStyle::Block(_)
+        | DocStyle::RustLike
+        | DocStyle::SlashSlash
+        | DocStyle::DashDash
+        | DocStyle::Hash
+        | DocStyle::Percent
+        | DocStyle::Haddock => doc_ends(&lines, lang),
         DocStyle::PyDocstring | DocStyle::None => Vec::new(),
     };
     let mut out = HashMap::new();
@@ -209,7 +213,8 @@ fn share_overload_docs(
 /// `@overload` stubs and property getter/setter pairs.
 fn has_overloading(lang: Lang) -> bool {
     match lang {
-        Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::Cpp | Lang::Python => true,
+        Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::Cpp | Lang::Python | Lang::CSharp => true,
+        Lang::Php | Lang::Ruby | Lang::Erlang | Lang::Haskell => false,
         Lang::Rust
         | Lang::JavaScript
         | Lang::Go
@@ -263,6 +268,12 @@ enum DocStyle {
     SlashSlash,
     /// SQL: the run of `--` lines immediately above the statement.
     DashDash,
+    /// Ruby: the run of `#` lines immediately above the definition.
+    Hash,
+    /// Erlang's EDoc: the run of `%` lines above (`%% @doc …`).
+    Percent,
+    /// Haskell's Haddock: a run of `--` lines above whose first is `-- |`.
+    Haddock,
     /// JSDoc / Doxygen (`/** … */`), Lean (`/-- … -/`): a block above.
     Block(&'static BlockSyntax),
     /// Python: the first string literal inside a def/class body.
@@ -276,7 +287,11 @@ impl DocStyle {
             // Dart dartdoc uses `///` line comments (same shape as Rust `///`);
             // the `@`-annotation skip in `above_doc` already handles `@override`
             // etc. sitting between the doc and the declaration.
-            Lang::Rust | Lang::Dart => DocStyle::RustLike,
+            Lang::Rust | Lang::Dart | Lang::CSharp | Lang::Zig => DocStyle::RustLike,
+            Lang::Php => DocStyle::Block(&C_BLOCK),
+            Lang::Ruby => DocStyle::Hash,
+            Lang::Erlang => DocStyle::Percent,
+            Lang::Haskell => DocStyle::Haddock,
             Lang::Go => DocStyle::SlashSlash,
             Lang::JavaScript | Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::C | Lang::Cpp => {
                 DocStyle::Block(&C_BLOCK)
@@ -284,13 +299,9 @@ impl DocStyle {
             Lang::Lean => DocStyle::Block(&LEAN_BLOCK),
             Lang::Python => DocStyle::PyDocstring,
             Lang::Sql => DocStyle::DashDash,
-            Lang::Json
-            | Lang::Bash
-            | Lang::Yaml
-            | Lang::Toml
-            | Lang::Html
-            | Lang::Css
-            | Lang::Zig => DocStyle::None,
+            Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => {
+                DocStyle::None
+            }
         }
     }
 
@@ -336,6 +347,16 @@ impl DocStyle {
             DocStyle::RustLike => collect_line_docs(lines, end, &["///"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
             DocStyle::DashDash => collect_line_docs(lines, end, &["--"]),
+            // A magic comment (`# frozen_string_literal: true`) or a
+            // shebang is no doc.
+            DocStyle::Hash => collect_line_docs(lines, end, &["#"])
+                .filter(|d| !d.starts_with('!') && !d.contains("frozen_string_literal:")),
+            DocStyle::Percent => collect_line_docs(lines, end, &["%%%", "%%", "%"]),
+            DocStyle::Haddock => {
+                let doc = collect_line_docs(lines, end, &["--"])?;
+                let doc = doc.strip_prefix('|')?;
+                non_empty(doc.trim_start())
+            }
             _ => None,
         }
     }
@@ -385,15 +406,29 @@ fn collect_line_docs(lines: &[&str], end: usize, prefixes: &[&str]) -> Option<St
 /// file whose every line starts with an attribute (`#[a] fn f() {}`, legal
 /// Rust) took a scan of the file per symbol — a minute and a half for 4 MiB,
 /// in the blocking task the file's pane waits on.
-fn doc_ends(lines: &[&str]) -> Vec<Option<usize>> {
+///
+/// Some languages put more between a doc and its declaration: C#'s
+/// attribute lines (`[Fact]`), Erlang's `-spec` (the EDoc goes above it),
+/// Haskell's type signature (the Haddock goes above it) — each, with the
+/// lines it continues on, glued too.
+fn doc_ends(lines: &[&str], lang: Lang) -> Vec<Option<usize>> {
     work::add(lines.len());
     let mut out = Vec::with_capacity(lines.len());
     let mut last: Option<usize> = None;
     // The brackets an attribute above left open, and the lines it may
     // still run on.
     let mut open: Option<(usize, usize)> = None;
+    // An Erlang `-spec` or a Haskell signature still running on.
+    let mut continued = false;
     for (i, l) in lines.iter().enumerate() {
         let t = l.trim();
+        if let Some(glue) = language_glue(lang, l, &mut continued) {
+            if !glue {
+                last = Some(i);
+            }
+            out.push(last);
+            continue;
+        }
         let glue = match open.take() {
             // A comment's end is not an attribute's: an `@see(` left open in
             // a starless JSDoc block must not swallow the `*/` that closes it.
@@ -411,7 +446,7 @@ fn doc_ends(lines: &[&str]) -> Vec<Option<usize>> {
                 }
             },
             None => {
-                let glue = glued(t);
+                let glue = glued(t) || (lang == Lang::CSharp && csharp_attribute_line(t));
                 open = opens(t, glue);
                 glue
             }
@@ -481,6 +516,58 @@ fn run_on(t: &str, mut depth: usize) -> Result<usize, &str> {
 /// documents: attributes or annotations alone — a line declaring an item
 /// after them (`#[inline] fn f() {}`, `@Override public String toString()
 /// {…}`) is that item's, and so is the doc above it — or a pragma comment.
+/// Whether `line` is glue between a doc and its declaration by `lang`'s own
+/// rules — `Some(true)` it is, `Some(false)` it ends a run, `None` the
+/// general rules decide. `continued` carries a declaration head that runs on
+/// over lines: an Erlang `-spec` until its `.`, a Haskell signature over its
+/// indented lines.
+fn language_glue(lang: Lang, line: &str, continued: &mut bool) -> Option<bool> {
+    let t = line.trim();
+    match lang {
+        Lang::Erlang => {
+            if *continued || t.starts_with("-spec") {
+                *continued = !t.ends_with('.');
+                return Some(true);
+            }
+            None
+        }
+        Lang::Haskell => {
+            let indented = line.starts_with([' ', '\t']);
+            if *continued && indented && !t.is_empty() {
+                return Some(true);
+            }
+            *continued = false;
+            // `name :: Type` at the margin: a top-level signature.
+            let signature = !indented
+                && t.split_once("::").is_some_and(|(name, _)| {
+                    let name = name.trim();
+                    !name.is_empty()
+                        && name.split(',').all(|n| {
+                            n.trim()
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || "_'()".contains(c))
+                        })
+                });
+            if signature {
+                *continued = true;
+                return Some(true);
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// A line of C# attributes alone: `[Fact]`, `[HttpGet("x"), Authorize]`.
+fn csharp_attribute_line(t: &str) -> bool {
+    t.starts_with('[')
+        && t.ends_with(']')
+        && t[1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+}
+
 fn glued(t: &str) -> bool {
     let pragma = t.starts_with("/*") && !t.starts_with("/**") && t.ends_with("*/");
     pragma || t.starts_with("#!") || crate::outline::only_attributes(t)
@@ -592,6 +679,10 @@ fn clean_doc_text(s: &str, lang: Lang) -> String {
             render_inline_tags(s)
         }
         Lang::Python => simplify_rest_roles(s),
+        Lang::Php => render_inline_tags(s),
+        Lang::CSharp => render_xml_doc(s),
+        Lang::Erlang => render_edoc(s),
+        Lang::Ruby | Lang::Haskell => s.to_string(),
         Lang::Rust
         | Lang::Go
         | Lang::Json
@@ -604,6 +695,113 @@ fn clean_doc_text(s: &str, lang: Lang) -> String {
         | Lang::Sql
         | Lang::Lean => s.to_string(),
     }
+}
+
+/// C#'s XML doc comments as prose: `<summary>` unwrapped, `<param>` and
+/// `<returns>` as lines of their own, `<see cref="X"/>` and `<paramref>` as
+/// the names they point at, `<c>` and `<code>` as code — any other tag
+/// dropped, its text kept.
+fn render_xml_doc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let Some(close) = rest[open..].find('>') else {
+            out.push_str(&rest[open..]);
+            return out;
+        };
+        let tag = &rest[open + 1..open + close];
+        rest = &rest[open + close + 1..];
+        let attr = |name: &str| {
+            let at = tag.find(&format!("{name}=\""))? + name.len() + 2;
+            let len = tag[at..].find('"')?;
+            Some(tag[at..at + len].to_string())
+        };
+        let word = tag
+            .trim_start_matches('/')
+            .split([' ', '/'])
+            .next()
+            .unwrap_or("");
+        let closing = tag.starts_with('/');
+        match (word, closing) {
+            ("see" | "seealso" | "paramref" | "typeparamref", false) => {
+                let target = attr("cref")
+                    .or_else(|| attr("name"))
+                    .or_else(|| attr("langword"));
+                if let Some(target) = target {
+                    // `T:Namespace.Type` → `Type`.
+                    let target = target
+                        .rsplit([':', '.'])
+                        .next()
+                        .unwrap_or(&target)
+                        .to_string();
+                    out.push('`');
+                    out.push_str(&target);
+                    out.push('`');
+                }
+            }
+            ("param" | "typeparam", false) => {
+                out.push_str("\n- `");
+                out.push_str(&attr("name").unwrap_or_default());
+                out.push_str("`: ");
+            }
+            ("returns", false) => out.push_str("\nReturns "),
+            ("exception", false) => {
+                out.push_str("\nThrows `");
+                out.push_str(&attr("cref").unwrap_or_default());
+                out.push_str("`: ");
+            }
+            ("para" | "br", _) => out.push_str("\n\n"),
+            ("c" | "code", _) => out.push('`'),
+            _ => {}
+        }
+    }
+    out.push_str(rest);
+    out.lines()
+        .map(str::trim)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Erlang's EDoc tags as prose: `@doc` unwrapped, `@param`/`@returns`/
+/// `@see` as lines of their own, `` `x' `` quoting as code.
+fn render_edoc(s: &str) -> String {
+    let mut lines = Vec::new();
+    for line in s.lines() {
+        let t = line.trim();
+        let t = t.strip_prefix("@doc").map(str::trim_start).unwrap_or(t);
+        let t = match t.split_once(' ') {
+            Some(("@param", rest)) => format!("- {rest}"),
+            Some(("@returns" | "@return", rest)) => format!("Returns {rest}"),
+            Some(("@see", rest)) => format!("See {rest}"),
+            _ => t.to_string(),
+        };
+        lines.push(edoc_quotes(&t));
+    }
+    lines.join("\n").trim().to_string()
+}
+
+/// EDoc's `` `code' `` quoting as Markdown's `` `code` ``: the `'` closing
+/// a backquote, and no other apostrophe.
+fn edoc_quotes(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut open = false;
+    for c in line.chars() {
+        match c {
+            '`' => {
+                open = true;
+                out.push('`');
+            }
+            '\'' if open => {
+                open = false;
+                out.push('`');
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Drop dartdoc `{@ … }` directive markers, keeping the text around them.
@@ -1772,5 +1970,74 @@ mod markup_tests {
         assert!(scanned <= bound, "scanned {scanned} chars (bound {bound})");
         assert_eq!(rest_role_at(":x:`y`"), Some(("y".to_string(), 6)));
         assert_eq!(rest_role_at("::`y`"), None);
+    }
+}
+
+/// The docs of the languages clew reads with grammars of their own.
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+
+    fn docs_of(source: &str, lang: &str) -> Vec<(usize, String)> {
+        let symbols = crate::outline::extract(source, lang);
+        let mut docs: Vec<(usize, String)> = extract(source, lang, &symbols).into_iter().collect();
+        docs.sort();
+        docs
+    }
+
+    /// Each language's doc comments, as prose: PHPDoc's inline tags, C#'s
+    /// XML (past an attribute line), Ruby's `#` runs (not its magic
+    /// comment), EDoc above a `-spec`, Haddock above a signature, Zig's `///`.
+    #[test]
+    fn each_languages_docs_are_read_as_it_writes_them() {
+        assert_eq!(
+            docs_of(include_str!("../tests/fixtures/langs/a.php"), "php"),
+            [
+                (9, "A shop item.".into()),
+                (14, "The price, with Tax.".into())
+            ]
+        );
+        assert_eq!(
+            docs_of(include_str!("../tests/fixtures/langs/a.cs"), "csharp"),
+            [
+                (6, "An item, see `Kind`.".into()),
+                (
+                    13,
+                    "The price.\n\n- `tax`: The tax.\n\nReturns The `total`.".into()
+                )
+            ]
+        );
+        assert_eq!(
+            docs_of(include_str!("../tests/fixtures/langs/a.rb"), "ruby"),
+            [(7, "An item.".into()), (11, "The price.".into())]
+        );
+        assert_eq!(
+            docs_of(include_str!("../tests/fixtures/langs/a.erl"), "erlang"),
+            [(2, "A shop.".into()), (14, "The price.".into())]
+        );
+        assert_eq!(
+            docs_of(include_str!("../tests/fixtures/langs/a.hs"), "haskell"),
+            [
+                (9, "An item.".into()),
+                (16, "Things with a price.".into()),
+                (24, "The price.".into())
+            ]
+        );
+        assert_eq!(
+            docs_of(include_str!("../tests/fixtures/langs/a.zig"), "zig"),
+            [
+                (6, "An item.".into()),
+                (9, "Its cost.".into()),
+                (12, "The price.".into()),
+                (21, "Total.".into())
+            ]
+        );
+        // EDoc's quoting, its tags; an apostrophe stays one.
+        assert_eq!(
+            render_edoc("@doc Sums `xs' — it's fast.\n@param Xs the list\n@returns the sum"),
+            "Sums `xs` — it's fast.\n- Xs the list\nReturns the sum"
+        );
+        // A plain Haskell comment above a function is no Haddock.
+        assert!(docs_of("-- just a note\nf :: Int\nf = 1\n", "haskell").is_empty());
     }
 }

@@ -134,13 +134,27 @@ pub(crate) fn module_label(rel: &str) -> String {
         Some("js") | Some("jsx") => "js",
         Some("dart") => "dart",
         Some("lean") => "lean",
+        Some("java") => "java",
+        Some("cs") => "csharp",
+        Some("hs") => "haskell",
+        Some("erl") | Some("hrl") => "erlang",
         _ => "",
     };
     let no_ext = rel.rsplit_once('.').map(|(a, _)| a).unwrap_or(rel);
     let mut segs: Vec<&str> = no_ext.split('/').filter(|s| !s.is_empty()).collect();
-    // Drop a conventional source root.
-    if segs.len() > 1 && matches!(segs.first().copied(), Some("src") | Some("lib")) {
+    // Drop a conventional source root — Maven's and Gradle's
+    // `src/main/java` whole.
+    if lang == "java" && segs.len() > 3 && segs[..3] == ["src", "main", "java"] {
+        segs.drain(..3);
+    } else if segs.len() > 1 && matches!(segs.first().copied(), Some("src") | Some("lib")) {
         segs.remove(0);
+    }
+    // An Erlang module is its file, whatever the folder.
+    if lang == "erlang" {
+        return segs
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(root)".into());
     }
     // A file that names its parent module collapses to the directory.
     let is_dir_file = (lang == "rust"
@@ -162,7 +176,7 @@ pub(crate) fn module_label(rel: &str) -> String {
     }
     let sep = match lang {
         "rust" => "::",
-        "python" | "lean" => ".",
+        "python" | "lean" | "java" | "csharp" | "haskell" => ".",
         _ => "/",
     };
     segs.join(sep)

@@ -855,7 +855,12 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         | Lang::Css
         | Lang::Zig
         | Lang::Sql
-        | Lang::Lean => {
+        | Lang::Lean
+        | Lang::Php
+        | Lang::Ruby
+        | Lang::CSharp
+        | Lang::Erlang
+        | Lang::Haskell => {
             return None;
         }
     })
@@ -1496,7 +1501,12 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
         | Lang::Css
         | Lang::Zig
         | Lang::Sql
-        | Lang::Lean => false,
+        | Lang::Lean
+        | Lang::Php
+        | Lang::Ruby
+        | Lang::CSharp
+        | Lang::Erlang
+        | Lang::Haskell => false,
     }
 }
 

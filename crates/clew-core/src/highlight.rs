@@ -120,6 +120,11 @@ languages! {
     Zig => "zig",
     Sql => "sql",
     Lean => "lean",
+    Php => "php",
+    Ruby => "ruby",
+    CSharp => "csharp",
+    Erlang => "erlang",
+    Haskell => "haskell",
 }
 
 /// How many languages there are; sizes the per-language caches below.
@@ -185,6 +190,11 @@ impl Lang {
             Lang::Zig => "Zig",
             Lang::Sql => "SQL",
             Lang::Lean => "Lean",
+            Lang::Php => "PHP",
+            Lang::Ruby => "Ruby",
+            Lang::CSharp => "C#",
+            Lang::Erlang => "Erlang",
+            Lang::Haskell => "Haskell",
         }
     }
 
@@ -211,6 +221,30 @@ impl Lang {
             Lang::Zig => &["zig"],
             Lang::Sql => &["sql", "pgsql"],
             Lang::Lean => &["lean"],
+            Lang::Php => &["php", "phtml", "php8", "php7"],
+            Lang::Ruby => &["rb", "rake", "gemspec", "ru", "rbi"],
+            Lang::CSharp => &["cs", "csx"],
+            Lang::Erlang => &["erl", "hrl", "escript", "app.src"],
+            Lang::Haskell => &["hs", "hs-boot"],
+        }
+    }
+
+    /// Whole file names (no extension to go by) that select this language.
+    pub const fn file_names(self) -> &'static [&'static str] {
+        match self {
+            Lang::Ruby => &[
+                "Gemfile",
+                "Rakefile",
+                "Guardfile",
+                "Podfile",
+                "Vagrantfile",
+                "Fastfile",
+                "Brewfile",
+                "Capfile",
+                "Dangerfile",
+            ],
+            Lang::Erlang => &["rebar.config", "sys.config"],
+            _ => &[],
         }
     }
 
@@ -246,6 +280,11 @@ impl Lang {
                 "plsql",
             ],
             Lang::Lean => &["lean4"],
+            Lang::Php => &[],
+            Lang::Ruby => &["rb"],
+            Lang::CSharp => &["cs", "c#", "c-sharp"],
+            Lang::Erlang => &["erl"],
+            Lang::Haskell => &["hs"],
         }
     }
 
@@ -272,6 +311,11 @@ impl Lang {
             Lang::Zig => tree_sitter_zig::LANGUAGE.into(),
             Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
             Lang::Lean => tree_sitter_lean4::LANGUAGE.into(),
+            Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Erlang => tree_sitter_erlang::LANGUAGE.into(),
+            Lang::Haskell => tree_sitter_haskell::LANGUAGE.into(),
         }
     }
 
@@ -321,6 +365,11 @@ impl Lang {
                 SQL_HIGHLIGHT_OVERRIDES,
             ],
             Lang::Lean => &[tree_sitter_lean4::HIGHLIGHTS_QUERY],
+            Lang::Php => &[tree_sitter_php::HIGHLIGHTS_QUERY],
+            Lang::Ruby => &[tree_sitter_ruby::HIGHLIGHTS_QUERY],
+            Lang::CSharp => &[tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
+            Lang::Erlang => &[tree_sitter_erlang::HIGHLIGHTS_QUERY],
+            Lang::Haskell => &[tree_sitter_haskell::HIGHLIGHTS_QUERY],
         }
     }
 
@@ -329,6 +378,8 @@ impl Lang {
     fn capture_names(self) -> &'static [(&'static str, &'static str)] {
         match self {
             Lang::Sql => SQL_CAPTURE_NAMES,
+            Lang::Haskell => HASKELL_CAPTURE_NAMES,
+            Lang::Php | Lang::Ruby | Lang::CSharp | Lang::Erlang => &[],
             Lang::Rust
             | Lang::Python
             | Lang::JavaScript
@@ -369,13 +420,13 @@ impl Lang {
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
             Lang::Sql => &[SQL_TAGS],
             Lang::Lean => &[LEAN_TAGS],
-            Lang::Json
-            | Lang::Bash
-            | Lang::Yaml
-            | Lang::Toml
-            | Lang::Html
-            | Lang::Css
-            | Lang::Zig => &[],
+            Lang::Php => &[PHP_TAGS],
+            Lang::Ruby => &[tree_sitter_ruby::TAGS_QUERY],
+            Lang::CSharp => &[CSHARP_TAGS],
+            Lang::Erlang => &[ERLANG_TAGS],
+            Lang::Haskell => &[HASKELL_TAGS],
+            Lang::Zig => &[ZIG_TAGS],
+            Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => &[],
         }
     }
 
@@ -396,7 +447,12 @@ impl Lang {
             | Lang::Css
             | Lang::Zig
             | Lang::Sql
-            | Lang::Lean => Family::Alone(self),
+            | Lang::Lean
+            | Lang::Php
+            | Lang::Ruby
+            | Lang::CSharp
+            | Lang::Erlang
+            | Lang::Haskell => Family::Alone(self),
         }
     }
 
@@ -448,6 +504,15 @@ const SQL_CAPTURE_NAMES: &[(&str, &str)] = &[
     ("spell", ""),
     ("storageclass", "keyword"),
     ("type.qualifier", "keyword"),
+];
+
+/// The capture names of tree-sitter-haskell's highlight query that are not
+/// clew's (see [`SQL_CAPTURE_NAMES`]): its `@spell` follows `@comment` on
+/// comments, which would leave them unstyled.
+const HASKELL_CAPTURE_NAMES: &[(&str, &str)] = &[
+    ("boolean", "constant.builtin"),
+    ("character", "string"),
+    ("spell", ""),
 ];
 
 /// `query` with each capture renamed as `names` says (`(from, to)`; an empty
@@ -521,6 +586,86 @@ const LEAN_TAGS: &str = r#"
 (class_inductive name: (identifier) @name) @definition.class
 (constructor name: (identifier) @name) @definition.constructor
 (namespace name: (identifier) @name) @definition.module
+"#;
+
+/// The PHP outline. The crate's own query calls a method a function, a trait
+/// an interface, and has no enums.
+const PHP_TAGS: &str = r#"
+(namespace_definition name: (namespace_name) @name) @definition.module
+(class_declaration name: (name) @name) @definition.class
+(interface_declaration name: (name) @name) @definition.interface
+(trait_declaration name: (name) @name) @definition.trait
+(enum_declaration name: (name) @name) @definition.enum
+(enum_case name: (name) @name) @definition.constant
+(method_declaration name: (name) @name) @definition.method
+(function_definition name: (name) @name) @definition.function
+(property_declaration (property_element name: (variable_name (name) @name))) @definition.field
+"#;
+
+/// The C# outline. The crate's own query has classes, interfaces and methods
+/// only: no namespaces, structs, enums, records, properties or fields.
+const CSHARP_TAGS: &str = r#"
+(namespace_declaration name: (_) @name) @definition.module
+(file_scoped_namespace_declaration name: (_) @name) @definition.module
+(class_declaration name: (identifier) @name) @definition.class
+(record_declaration name: (identifier) @name) @definition.class
+(interface_declaration name: (identifier) @name) @definition.interface
+(struct_declaration name: (identifier) @name) @definition.struct
+(enum_declaration name: (identifier) @name) @definition.enum
+(enum_member_declaration name: (identifier) @name) @definition.constant
+(delegate_declaration name: (identifier) @name) @definition.type
+(method_declaration name: (identifier) @name) @definition.method
+(constructor_declaration name: (identifier) @name) @definition.method
+(local_function_statement name: (identifier) @name) @definition.function
+(property_declaration name: (identifier) @name) @definition.property
+(field_declaration (variable_declaration (variable_declarator name: (identifier) @name))) @definition.field
+"#;
+
+/// The Erlang outline: the module, its functions (one per clause — the
+/// outline merges a function's clauses, see `outline::merge_clauses`),
+/// records and their fields, types and macros.
+const ERLANG_TAGS: &str = r#"
+(module_attribute name: (atom) @name) @definition.module
+(fun_decl clause: (function_clause name: (atom) @name)) @definition.function
+(record_decl name: (atom) @name) @definition.struct
+(record_field name: (atom) @name) @definition.field
+(type_alias name: (type_name name: (atom) @name)) @definition.type
+(opaque name: (type_name name: (atom) @name)) @definition.type
+(pp_define lhs: (macro_lhs name: (_) @name)) @definition.macro
+"#;
+
+/// The Haskell outline: functions and bindings (one per equation — merged,
+/// see `outline::merge_clauses`), data types and their constructors and
+/// fields, newtypes, type synonyms, classes and their methods.
+const HASKELL_TAGS: &str = r#"
+(declarations (function name: (variable) @name) @definition.function)
+(declarations (bind name: (variable) @name) @definition.function)
+(data_type name: (name) @name) @definition.type
+(newtype name: (name) @name) @definition.type
+(type_synonym name: (name) @name) @definition.type
+(type_family name: (name) @name) @definition.type
+(data_constructor constructor: (record name: (constructor) @name)) @definition.constructor
+(data_constructor constructor: (prefix name: (constructor) @name)) @definition.constructor
+(field name: (field_name (variable) @name)) @definition.field
+(class name: (name) @name) @definition.class
+(class_declarations (signature name: (variable) @name) @definition.method)
+"#;
+
+/// The Zig outline: containers bound to a name (structs, enums, unions,
+/// opaques), their fields and the functions in them (methods), free
+/// functions, and tests. Methods come first, so a function is one or the
+/// other (as in [`RUST_TAGS`]).
+const ZIG_TAGS: &str = r#"
+(variable_declaration (identifier) @name (struct_declaration)) @definition.struct
+(variable_declaration (identifier) @name (enum_declaration)) @definition.enum
+(variable_declaration (identifier) @name (union_declaration)) @definition.union
+(variable_declaration (identifier) @name (opaque_declaration)) @definition.type
+(container_field name: (identifier) @name) @definition.field
+(struct_declaration (function_declaration name: (identifier) @name) @definition.method)
+(enum_declaration (function_declaration name: (identifier) @name) @definition.method)
+(union_declaration (function_declaration name: (identifier) @name) @definition.method)
+(function_declaration name: (identifier) @name) @definition.function
+(test_declaration (string (string_content) @name)) @definition.test
 "#;
 
 /// Source-oriented tags query for TypeScript/TSX — captures the symbols in real
@@ -853,6 +998,19 @@ pub(crate) fn without_string_literals(line: &str, quotes: &[char]) -> String {
 
 /// Detect the language key from a file path (by extension).
 pub fn detect(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    if let Some(lang) = Lang::ALL.iter().find(|l| l.file_names().contains(&name)) {
+        return Some(lang.key());
+    }
+    // A two-part extension (`.app.src`) before the plain one.
+    let lower = name.to_ascii_lowercase();
+    if let Some(lang) = Lang::ALL.iter().find(|l| {
+        l.extensions()
+            .iter()
+            .any(|e| e.contains('.') && lower.ends_with(&format!(".{e}")))
+    }) {
+        return Some(lang.key());
+    }
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Lang::ALL
         .iter()
@@ -1302,6 +1460,41 @@ mod tests {
             .map(|(_, s)| *s)
     }
 
+    /// The languages with grammars of their own are highlighted through and
+    /// through: their keywords, functions, types, comments and strings each
+    /// take a style of clew's.
+    #[test]
+    fn the_newer_languages_are_highlighted_through_and_through() {
+        for (lang, source) in [
+            ("php", include_str!("../tests/fixtures/langs/a.php")),
+            ("ruby", include_str!("../tests/fixtures/langs/a.rb")),
+            ("csharp", include_str!("../tests/fixtures/langs/a.cs")),
+            ("erlang", include_str!("../tests/fixtures/langs/a.erl")),
+            ("haskell", include_str!("../tests/fixtures/langs/a.hs")),
+            ("zig", include_str!("../tests/fixtures/langs/a.zig")),
+        ] {
+            let lines = highlight_lines(source, static_key(lang));
+            let styles: std::collections::BTreeSet<&str> = lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .filter_map(|(_, s)| *s)
+                .map(|s| {
+                    HIGHLIGHT_NAMES[s as usize]
+                        .split('.')
+                        .next()
+                        .unwrap_or_default()
+                })
+                .collect();
+            for wanted in ["keyword", "comment", "string", "function"] {
+                assert!(styles.contains(wanted), "{lang}: no {wanted} in {styles:?}");
+            }
+            assert!(
+                styles.contains("type") || styles.contains("constructor"),
+                "{lang}: no type in {styles:?}"
+            );
+        }
+    }
+
     /// Every language that has strings and comments must style BOTH as
     /// literal text — and the bracket inside each must read as literal, which
     /// is what the bracket matcher and occurrence highlighter ask. TypeScript,
@@ -1388,6 +1581,21 @@ mod tests {
             // interpolation, `s!` or not, so `"s{"` does not parse; a `(` in
             // one is the bracket this checks.
             ("lean", "def s := \"s(\" -- c(\n", Some("s("), Some("-- c(")),
+            (
+                "php",
+                "<?php $s = \"s{\"; // c{\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
+            ("ruby", "s = \"s{\" # c{\n", Some("s{"), Some("# c{")),
+            (
+                "csharp",
+                "class A { string s = \"s{\"; // c{\n}\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
+            ("erlang", "s() -> \"s{\". % c{\n", Some("s{"), Some("% c{")),
+            ("haskell", "s = \"s{\" -- c{\n", Some("s{"), Some("-- c{")),
         ];
         assert_eq!(cases.len(), Lang::ALL.len(), "a language is missing here");
         for (key, src, string, comment) in cases {
