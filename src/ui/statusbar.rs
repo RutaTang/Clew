@@ -201,11 +201,16 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         bar = bar.push(chip);
     }
     bar = bar.push(text(right).size(ts::SMALL));
-    // For Rust files, a small target control that drives the `#[cfg]` dimming
-    // (read another platform's branches as the live ones). A plain button + our
-    // own dropdown, so the label and chevron sit tight together — placed last so
+    // For a file whose dimming depends on the platform (Rust's `#[cfg]`, Go's
+    // build constraints, C's `#if`, …), a small target control: read another
+    // platform's branches as the live ones. A plain button + our own
+    // dropdown, so the label and chevron sit tight together — placed last so
     // the popup anchored to the bottom-right lines up under it.
-    if app.active_viewer().and_then(|v| v.lang_key) == Some("rust") {
+    if app
+        .active_viewer()
+        .and_then(|v| v.lang_key)
+        .is_some_and(crate::inactive::reads_target)
+    {
         let picker = button(
             row![
                 text(app.proj.reading_target.to_string())

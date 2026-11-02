@@ -6528,3 +6528,25 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         "the chosen ELP replaces the PATH's"
     );
 }
+
+/// The status bar's target picker is there for a file whose dimming the
+/// platform decides — Rust's, Go's, Haskell's — and not for one whose does
+/// not (C#'s, Erlang's: their files' own symbols decide).
+#[test]
+fn the_target_picker_shows_for_languages_the_platform_dims() {
+    let mut app = reader_app();
+    let label = app.proj.reading_target.to_string();
+    for (lang, shown) in [
+        ("rust", true),
+        ("go", true),
+        ("zig", true),
+        ("haskell", true),
+        ("csharp", false),
+        ("erlang", false),
+        ("python", false),
+    ] {
+        app.proj.panes[0].as_mut().unwrap().lang_key = Some(lang);
+        let mut sim = sim_elem(super::statusbar::statusbar(&app));
+        assert_eq!(sim.find(label.as_str()).is_ok(), shown, "{lang}");
+    }
+}

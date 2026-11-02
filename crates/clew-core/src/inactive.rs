@@ -177,6 +177,14 @@ impl From<clew_protocol::TargetSpec> for Target {
     }
 }
 
+/// Whether what `lang_key`'s build leaves out depends on the platform it is
+/// built for: Rust's `cfg`s, Go's build constraints, C's and C++'s
+/// predefined macros, Zig's `builtin.os.tag`, Haskell's `<os>_HOST_OS`.
+/// C# and Erlang decide by their files' own symbols alone.
+pub fn reads_target(lang_key: &str) -> bool {
+    matches!(lang_key, "rust" | "go" | "c" | "cpp" | "zig" | "haskell")
+}
+
 /// 0-based line numbers the build leaves out for `target`, with nothing
 /// known of the project's build beyond it ([`inactive_lines_in`]).
 pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<usize> {
@@ -3031,5 +3039,41 @@ y() -> ok.
 -endif.
 ";
         assert_eq!(dimmed(header), [6]);
+    }
+
+    /// The languages said to read the target are the ones whose dimming
+    /// changes with it; C#'s and Erlang's do not.
+    #[test]
+    fn the_languages_that_read_the_target_are_named() {
+        let linux = Target::from_triple("x86_64-unknown-linux-gnu");
+        let windows = Target::from_triple("x86_64-pc-windows-msvc");
+        let differs = |source: &str, lang: &str| {
+            inactive_lines(source, lang, &linux) != inactive_lines(source, lang, &windows)
+        };
+        for (lang, source) in [
+            ("rust", "#[cfg(windows)]\nfn a() {}\n"),
+            ("go", "//go:build windows\n\npackage a\n"),
+            ("c", "#ifdef _WIN32\nint a;\n#endif\n"),
+            ("cpp", "#ifdef _WIN32\nint a;\n#endif\n"),
+            (
+                "zig",
+                "const builtin = @import(\"builtin\");\nfn a() void {\n    if (builtin.os.tag == .windows) {\n        b();\n    }\n}\n",
+            ),
+            (
+                "haskell",
+                "{-# LANGUAGE CPP #-}\nmodule A where\n#ifdef mingw32_HOST_OS\na = 1\n#endif\n",
+            ),
+        ] {
+            assert!(reads_target(lang), "{lang}");
+            assert!(differs(source, lang), "{lang}'s dimming reads the target");
+        }
+        for (lang, source) in [
+            ("csharp", "#if WINDOWS\nclass A {}\n#endif\n"),
+            ("erlang", "-ifdef(WINDOWS).\na() -> 1.\n-endif.\n"),
+            ("python", "import sys\n"),
+        ] {
+            assert!(!reads_target(lang), "{lang}");
+            assert!(!differs(source, lang), "{lang}");
+        }
     }
 }
