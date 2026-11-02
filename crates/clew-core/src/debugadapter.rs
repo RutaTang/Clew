@@ -70,6 +70,11 @@ pub enum AdapterTransport {
     /// so the client connects to the port OUR child bound, never to a port
     /// chosen in advance that another process could have taken meanwhile.
     Tcp,
+    /// As [`Self::Tcp`], for an adapter that IS the debuggee (Ruby's `rdbg`
+    /// runs the program in its own process): it announces its port on
+    /// stderr, and its stdout — and the rest of its stderr — is the program's
+    /// output.
+    TcpOnStderr,
 }
 
 /// A resolved adapter: what to spawn, and the `launch` request body.
@@ -217,6 +222,25 @@ pub fn resolve(
                 store::find_on_path_unresolved("node").ok_or("node not found — install Node.js")?;
             Ok(node_with(node, program, args, cwd))
         }
+        "ruby" => {
+            // The Ruby whose Ruby LSP the user chose has its own `rdbg`, its
+            // gems' Ruby: debugged under it, as the editor reads the code.
+            let beside_chosen = chosen_sdk(choices, "ruby")
+                .and_then(|chosen| Path::new(chosen.trim()).parent().map(|d| d.join("rdbg")))
+                .filter(|rdbg| rdbg.is_absolute() && rdbg.is_file());
+            let command = match beside_chosen {
+                Some(rdbg) => rdbg,
+                None => store::find_on_path_unresolved("rdbg")
+                    .ok_or("rdbg not found — install Ruby's debugger: gem install debug")?,
+            };
+            Ok(Resolution::Ready(ruby_spec(command, program, args, cwd)))
+        }
+        "csharp" => {
+            let command = store::find_on_path_unresolved("netcoredbg").ok_or(
+                "netcoredbg not found — install it (github.com/Samsung/netcoredbg) and put it on the PATH",
+            )?;
+            Ok(Resolution::Ready(csharp_spec(command, program, args, cwd)))
+        }
         other => Err(format!("no debug adapter for {other}")),
     }
 }
@@ -270,6 +294,59 @@ fn native_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> 
             "args": args,
             "cwd": cwd.to_string_lossy(),
             "stopOnEntry": false,
+        }),
+        transport: AdapterTransport::Stdio,
+    }
+}
+
+/// Ruby's debugger, `rdbg` (the `debug` gem): it runs the program itself
+/// and serves DAP on a loopback TCP port — port 0, announced on stderr as
+/// `Debugger can attach via TCP/IP (<addr>)`. Its `launch` runs the program
+/// on once configured.
+///
+/// `--stop-at-load` holds the program as the debugger loads, before its first
+/// line. Held AT that line instead (rdbg's default), it wrote the line's
+/// listing to a client that had just connected — as text, before reading
+/// whether the client speaks DAP — and the session broke on it.
+fn ruby_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
+    let mut adapter_args: Vec<String> = [
+        "--open",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "0",
+        "--stop-at-load",
+        "--",
+    ]
+    .map(String::from)
+    .to_vec();
+    adapter_args.push(program.to_string());
+    adapter_args.extend(args.iter().cloned());
+    AdapterSpec {
+        command,
+        args: adapter_args,
+        launch: json!({
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "cwd": cwd.to_string_lossy(),
+        }),
+        transport: AdapterTransport::TcpOnStderr,
+    }
+}
+
+/// netcoredbg for .NET: DAP over stdio (`--interpreter=vscode`); the
+/// program is the built assembly (`bin/Debug/<tfm>/App.dll`).
+fn csharp_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
+    AdapterSpec {
+        command,
+        args: vec!["--interpreter=vscode".into()],
+        launch: json!({
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "cwd": cwd.to_string_lossy(),
+            "stopAtEntry": false,
         }),
         transport: AdapterTransport::Stdio,
     }
@@ -567,10 +644,10 @@ pub fn resolve_stdio(
         format!(
             "the {lang} debug adapter speaks DAP over a TCP port on this host, \
              which a remote client cannot reach — remote debugging currently \
-             supports native (lldb), Python, and Dart"
+             supports native (lldb), Python, Dart and C#"
         )
     };
-    if matches!(lang, "go" | "node") {
+    if matches!(lang, "go" | "node" | "ruby") {
         return Err(tcp_refusal());
     }
     match resolve(lang, program, args, root, root, choices)
@@ -598,7 +675,7 @@ mod tests {
 
     #[test]
     fn tcp_adapters_are_refused_with_a_reason() {
-        for lang in ["go", "node"] {
+        for lang in ["go", "node", "ruby"] {
             let err = resolve_stdio(
                 lang,
                 "/proj/main",
@@ -952,6 +1029,85 @@ mod tests {
             chosen_sdk(&sdk(&dart, Some(vec!["--lsp".into()])), "dart"),
             None
         );
+    }
+
+    /// A Ruby program runs under `rdbg`, which serves DAP on a port it picks
+    /// and names on stderr: the `rdbg` beside the Ruby LSP the user chose,
+    /// else the PATH's. A C# assembly is debugged by netcoredbg over stdio.
+    #[test]
+    #[cfg(unix)]
+    fn ruby_runs_under_rdbg_and_csharp_under_netcoredbg() {
+        let dir = TempDir::new("debug-ruby-cs");
+        let path_bin = dir.join("path-bin");
+        let on_path = script(&path_bin.join("rdbg"), "#!/bin/sh\n");
+        script(&path_bin.join("netcoredbg"), "#!/bin/sh\n");
+        let chosen_bin = dir.join("rubies/3.3.0/bin");
+        script(&chosen_bin.join("ruby-lsp"), "#!/bin/sh\n");
+        let beside = script(&chosen_bin.join("rdbg"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", path_bin.as_os_str());
+        let ruby_lsp = |command: &Path| clew_protocol::LanguageChoices {
+            servers: Some(
+                [(
+                    "ruby".to_string(),
+                    clew_protocol::ServerChoice {
+                        command: command.to_string_lossy().into_owned(),
+                        args: None,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let ready =
+            |lang: &str, program: &str, choices: &clew_protocol::LanguageChoices| match resolve(
+                lang,
+                program,
+                &["a".into()],
+                &dir,
+                &dir,
+                choices,
+            ) {
+                Ok(Resolution::Ready(spec)) => spec,
+                other => panic!("{lang}: {other:?}"),
+            };
+
+        let spec = ready("ruby", "app.rb", &Default::default());
+        assert_eq!(spec.command, on_path);
+        assert_eq!(
+            spec.args,
+            [
+                "--open",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "0",
+                "--stop-at-load",
+                "--",
+                "app.rb",
+                "a"
+            ]
+        );
+        assert_eq!(spec.transport, AdapterTransport::TcpOnStderr);
+        assert_eq!(spec.launch["request"], "launch");
+        let spec = ready("ruby", "app.rb", &ruby_lsp(&chosen_bin.join("ruby-lsp")));
+        assert_eq!(spec.command, beside, "the chosen Ruby's own rdbg");
+        // A chosen Ruby LSP with no rdbg beside it: the PATH's.
+        let spec = ready("ruby", "app.rb", &ruby_lsp(&dir.join("other/ruby-lsp")));
+        assert_eq!(spec.command, on_path);
+
+        let spec = ready("csharp", "bin/Debug/net8.0/App.dll", &Default::default());
+        assert_eq!(spec.args, ["--interpreter=vscode"]);
+        assert_eq!(spec.transport, AdapterTransport::Stdio);
+        assert_eq!(spec.launch["program"], "bin/Debug/net8.0/App.dll");
+        assert_eq!(spec.launch["stopAtEntry"], false);
+        let remote = resolve_stdio("csharp", "App.dll", &[], &dir, &Default::default()).unwrap();
+        assert_eq!(remote.args, ["--interpreter=vscode"]);
+
+        let _none = EnvVars::new().set("PATH", dir.join("empty").as_os_str());
+        let err = resolve("ruby", "app.rb", &[], &dir, &dir, &Default::default()).unwrap_err();
+        assert!(err.contains("gem install debug"), "{err}");
+        let err = resolve("csharp", "App.dll", &[], &dir, &dir, &Default::default()).unwrap_err();
+        assert!(err.contains("netcoredbg"), "{err}");
     }
 
     /// The js-debug download goes through the store's verified, staged

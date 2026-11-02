@@ -52,6 +52,10 @@ pub enum Lang {
     Dart,
     /// JavaScript / TypeScript via vscode-js-debug.
     Node,
+    /// Ruby via rdbg (the `debug` gem).
+    Ruby,
+    /// C# and the rest of .NET via netcoredbg.
+    CSharp,
 }
 
 impl Lang {
@@ -60,9 +64,11 @@ impl Lang {
     pub fn detect(type_hint: Option<&str>, program: &Path) -> Option<Lang> {
         if let Some(t) = type_hint {
             return match t.to_ascii_lowercase().as_str() {
-                "rust" | "lldb" | "lldb-dap" | "cpp" | "c" | "codelldb" | "native" => {
+                "rust" | "lldb" | "lldb-dap" | "cpp" | "c" | "codelldb" | "native" | "zig" => {
                     Some(Lang::Native)
                 }
+                "ruby" | "rdbg" => Some(Lang::Ruby),
+                "coreclr" | "netcoredbg" | "csharp" | "cs" | "dotnet" => Some(Lang::CSharp),
                 "python" | "debugpy" => Some(Lang::Python),
                 "go" | "delve" | "dlv" => Some(Lang::Go),
                 "dart" | "flutter" => Some(Lang::Dart),
@@ -80,6 +86,9 @@ impl Lang {
             Some("dart") => Some(Lang::Dart),
             Some("go") => Some(Lang::Go),
             Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") => Some(Lang::Node),
+            Some("rb") => Some(Lang::Ruby),
+            // A .NET assembly: what netcoredbg runs.
+            Some("dll") => Some(Lang::CSharp),
             None => Some(Lang::Native),
             _ => Some(Lang::Native),
         }
@@ -92,6 +101,8 @@ impl Lang {
             Lang::Go => "Go (delve)",
             Lang::Dart => "Dart",
             Lang::Node => "Node (js-debug)",
+            Lang::Ruby => "Ruby (rdbg)",
+            Lang::CSharp => "C# (netcoredbg)",
         }
     }
 
@@ -104,6 +115,8 @@ impl Lang {
             Lang::Go => "go",
             Lang::Dart => "dart",
             Lang::Node => "node",
+            Lang::Ruby => "ruby",
+            Lang::CSharp => "csharp",
         }
     }
 }
@@ -134,6 +147,7 @@ pub fn resolve(
                 transport: match spec.transport {
                     AdapterTransport::Stdio => Transport::Stdio,
                     AdapterTransport::Tcp => Transport::Tcp,
+                    AdapterTransport::TcpOnStderr => Transport::TcpOnStderr,
                 },
             }),
             Resolution::NeedsInstall(install) => Resolved::NeedsInstall(install),
@@ -166,6 +180,30 @@ mod tests {
             Lang::detect(None, Path::new("target/debug/app")),
             Some(Lang::Native)
         );
+        assert_eq!(
+            Lang::detect(None, Path::new("bin/app.rb")),
+            Some(Lang::Ruby)
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("bin/Debug/net8.0/App.dll")),
+            Some(Lang::CSharp)
+        );
+        for (hint, lang) in [
+            ("rdbg", Lang::Ruby),
+            ("ruby", Lang::Ruby),
+            ("coreclr", Lang::CSharp),
+            ("netcoredbg", Lang::CSharp),
+            ("zig", Lang::Native),
+        ] {
+            assert_eq!(
+                Lang::detect(Some(hint), Path::new("x")),
+                Some(lang),
+                "{hint}"
+            );
+        }
+        // Each goes to its own adapter, by the slug the resolver matches.
+        assert_eq!((Lang::Ruby.slug(), Lang::CSharp.slug()), ("ruby", "csharp"));
+        assert_eq!(Lang::Ruby.label(), "Ruby (rdbg)");
     }
 
     /// The venv is the PROJECT's, whatever directory the launch configuration
