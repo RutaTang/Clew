@@ -539,6 +539,9 @@ fn go_spec(
         "program": program,
         "args": args,
         "cwd": cwd.to_string_lossy(),
+        // The program's output as DAP output, not on delve's own stdout —
+        // which no one reads (and, remotely, which is on another host).
+        "outputMode": "remote",
     });
     if let Some(tags) = tags {
         launch["buildFlags"] = json!(tags);
@@ -1202,6 +1205,10 @@ mod tests {
             flag.as_deref(),
         );
         assert_eq!(spec.launch["buildFlags"], "-tags=integration,e2e");
+        assert_eq!(
+            spec.launch["outputMode"], "remote",
+            "its output comes as DAP output"
+        );
     }
 
     /// A Dart program is debugged with the SDK chosen for its server — when

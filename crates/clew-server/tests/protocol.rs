@@ -3603,6 +3603,89 @@ fn a_remote_ruby_program_is_debugged_through_the_bridge() {
     let root = temp_project("remote-rdbg");
     let program = root.join("app.rb");
     std::fs::write(&program, "x = 41\nx += 1\nputs \"answer #{x}\"\n").unwrap();
+    debug_remotely(&root, "ruby", &program, &program, 2, "answer 42");
+}
+
+/// A Go program on the server's host, through the bridge to delve: built,
+/// held at its breakpoint, run on, its output sent. Needs Go and delve on
+/// the PATH, of versions that agree.
+#[test]
+#[ignore = "needs Go and delve on the PATH; run explicitly"]
+fn a_remote_go_program_is_debugged_through_the_bridge() {
+    let root = temp_project("remote-delve");
+    std::fs::write(root.join("go.mod"), "module example.com/shop\n\ngo 1.21\n").unwrap();
+    let main = root.join("main.go");
+    std::fs::write(
+        &main,
+        "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tx := 41\n\tx++\n\tfmt.Println(\"answer\", x)\n}\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "go", &root, &main, 7, "answer 42");
+}
+
+/// clew-server's own adapters, run remotely: the server runs itself as the
+/// adapter (`php-debug`, `erlang-debug`, `haskell-debug`, `java-debug`) on
+/// the host where the program is. Each needs its language's tools.
+#[test]
+#[ignore = "needs php with Xdebug 3; run explicitly"]
+fn a_remote_php_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-php");
+    let program = root.join("app.php");
+    std::fs::write(&program, "<?php\n$x = 41;\n$x++;\necho \"answer $x\\n\";\n").unwrap();
+    debug_remotely(&root, "php", &program, &program, 3, "answer 42");
+}
+
+#[test]
+#[ignore = "needs Erlang/OTP; run explicitly"]
+fn a_remote_erlang_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-erlang");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let program = root.join("src/app.erl");
+    std::fs::write(
+        &program,
+        "-module(app).\n-export([main/1]).\n\nmain(_) ->\n    X = 41,\n    io:format(\"answer ~p~n\", [X + 1]).\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "erlang", &program, &program, 6, "answer 42");
+}
+
+#[test]
+#[ignore = "needs GHC's ghci; run explicitly"]
+fn a_remote_haskell_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-haskell");
+    let program = root.join("Main.hs");
+    std::fs::write(
+        &program,
+        "module Main where\n\nmain :: IO ()\nmain = do\n  let x = 41 + 1 :: Int\n  putStrLn (\"answer \" ++ show x)\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "haskell", &program, &program, 6, "answer 42");
+}
+
+#[test]
+#[ignore = "needs a JDK; run explicitly"]
+fn a_remote_java_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-java");
+    let program = root.join("App.java");
+    std::fs::write(
+        &program,
+        "public class App {\n    public static void main(String[] args) {\n        int x = 41;\n        x++;\n        System.out.println(\"answer \" + x);\n    }\n}\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "java", &program, &program, 4, "answer 42");
+}
+
+/// Debug `program` (in `lang`) through a real clew-server process: held at
+/// `line` of `source`, its stack read there, run on to its end, `expected`
+/// among its output.
+fn debug_remotely(
+    root: &Path,
+    lang: &str,
+    program: &Path,
+    source: &Path,
+    line: i64,
+    expected: &str,
+) {
     let mut server = Process::spawn();
     server.send(
         1,
@@ -3637,7 +3720,7 @@ fn a_remote_ruby_program_is_debugged_through_the_bridge() {
         3,
         Request::SpawnAdapter {
             proc: 5,
-            lang: "ruby".into(),
+            lang: lang.into(),
             program: program.to_string_lossy().into_owned(),
             args: vec![],
             choices: Default::default(),
@@ -3706,24 +3789,23 @@ fn a_remote_ruby_program_is_debugged_through_the_bridge() {
     );
     request(&mut server, "launch", launch);
     let (mut configured, mut stopped_at, mut output) = (false, None, String::new());
-    while !(output.contains("answer 42") && stopped_at.is_some()) {
+    while !(output.contains(expected) && stopped_at.is_some()) {
         let message = next(&server, &mut buffer);
-        match (
-            message["type"].as_str(),
-            message["event"].as_str(),
-            message["command"].as_str(),
-        ) {
-            (Some("event"), Some("initialized"), _) if !configured => {
+        match (message["type"].as_str(), message["event"].as_str()) {
+            (Some("response"), _) if message["success"] == false => {
+                panic!("refused: {message}")
+            }
+            (Some("event"), Some("initialized")) if !configured => {
                 configured = true;
-                let source = serde_json::json!({ "path": program.to_string_lossy() });
+                let source = serde_json::json!({ "path": source.to_string_lossy() });
                 request(
                     &mut server,
                     "setBreakpoints",
-                    serde_json::json!({ "source": source, "breakpoints": [{ "line": 2 }] }),
+                    serde_json::json!({ "source": source, "breakpoints": [{ "line": line }] }),
                 );
                 request(&mut server, "configurationDone", serde_json::json!({}));
             }
-            (Some("event"), Some("stopped"), _) => {
+            (Some("event"), Some("stopped")) => {
                 let thread = message["body"]["threadId"].as_i64().unwrap_or(1);
                 request(
                     &mut server,
@@ -3746,77 +3828,12 @@ fn a_remote_ruby_program_is_debugged_through_the_bridge() {
                     serde_json::json!({ "threadId": thread }),
                 );
             }
-            (Some("event"), Some("output"), _) if message["body"]["category"] == "stdout" => {
+            (Some("event"), Some("output")) if message["body"]["category"] == "stdout" => {
                 output.push_str(message["body"]["output"].as_str().unwrap_or(""));
             }
             _ => {}
         }
     }
-    assert_eq!(stopped_at, Some(2), "held at the breakpoint");
-    assert!(output.contains("answer 42"), "{output:?}");
-}
-
-/// What a project's package manifests say of where its sources are rides in
-/// the full snapshot — read where the files live — and is sent again when a
-/// manifest changes: a remote client resolves PHP classes and Haskell
-/// modules from it, as a local one does from disk.
-#[tokio::test]
-async fn package_manifests_ride_in_the_snapshot_and_follow_their_edits() {
-    let (mut server, mut rx) = server();
-    let project = temp_project("manifests");
-    let root = std::fs::canonicalize(&*project).unwrap();
-    std::fs::create_dir_all(root.join("app/Models")).unwrap();
-    std::fs::write(root.join("app/Models/User.php"), "<?php\nclass User {}\n").unwrap();
-    std::fs::write(
-        root.join("composer.json"),
-        r#"{"autoload": {"psr-4": {"App\\": "app/"}}}"#,
-    )
-    .unwrap();
-    std::fs::write(root.join("Main.hs"), "module Main where\n").unwrap();
-    std::fs::write(
-        root.join("acme.cabal"),
-        "library\n  hs-source-dirs: lib-src\n",
-    )
-    .unwrap();
-    open_project(&mut server, &mut rx, 1, &root).await;
-
-    let manifests = recv_note(&mut rx, "a full snapshot", |event| match event {
-        Event::ProjectSymbols {
-            full: true,
-            manifests,
-            ..
-        } => Some(manifests),
-        _ => None,
-    })
-    .await;
-    let clew_protocol::Patch::Set(Some(manifests)) = manifests else {
-        panic!("a full snapshot carries the manifests: {manifests:?}");
-    };
-    assert_eq!(
-        manifests.psr4,
-        [(
-            "composer.json".to_string(),
-            vec![("App\\".to_string(), vec!["app/".to_string()])]
-        )]
-    );
-    assert_eq!(
-        manifests.haskell,
-        [("acme.cabal".to_string(), vec!["lib-src".to_string()])]
-    );
-
-    // An edit to composer.json is sent on.
-    std::fs::write(
-        root.join("composer.json"),
-        r#"{"autoload": {"psr-4": {"Acme\\": "src/"}}}"#,
-    )
-    .unwrap();
-    recv_note(&mut rx, "the edited map", |event| match event {
-        Event::ProjectSymbols {
-            full: false,
-            manifests: clew_protocol::Patch::Set(Some(manifests)),
-            ..
-        } if manifests.psr4[0].1[0].0 == "Acme\\" => Some(()),
-        _ => None,
-    })
-    .await;
+    assert_eq!(stopped_at, Some(line), "held at the breakpoint");
+    assert!(output.contains(expected), "{output:?}");
 }

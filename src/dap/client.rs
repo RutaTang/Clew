@@ -1532,6 +1532,83 @@ mod tests {
         }
     }
 
+    /// Go's real delve, end to end: the program built and held at a
+    /// breakpoint, its stack read, run on to its end with its output shown.
+    /// Needs `go` and `dlv` on the PATH.
+    #[tokio::test]
+    #[ignore = "needs Go and delve on the PATH; run explicitly"]
+    async fn a_go_program_is_debugged_with_delve() {
+        let dir = clew_core::testutil::TempDir::new("dap-delve");
+        std::fs::write(dir.join("go.mod"), "module example.com/shop\n\ngo 1.21\n").unwrap();
+        let program = dir.join("main.go");
+        std::fs::write(
+            &program,
+            "package main\n\nimport \"fmt\"\n\nfunc total(items []int) int {\n\tsum := 0\n\tfor _, i := range items {\n\t\tsum += i\n\t}\n\treturn sum * 2\n}\n\nfunc main() {\n\tt := total([]int{2, 3})\n\tfmt.Println(\"answer\", t)\n}\n",
+        )
+        .unwrap();
+        let spec = match clew_core::debugadapter::resolve(
+            "go",
+            &dir.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Tcp)
+                .await
+                .expect("delve started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stopped_at = None;
+        let mut configured = false;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client
+                        .set_breakpoints(&program, &[(6, None)])
+                        .await
+                        .unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stopped_at = frames.first().map(|f| f.line);
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        // Output may trail the end a moment.
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stopped_at, Some(6), "stopped at the breakpoint");
+        assert!(output.contains("answer 10"), "{output:?}");
+    }
+
     /// Ruby's real rdbg, end to end: the program waits at its start until
     /// the session is configured, stops at the breakpoint, and runs on to
     /// its end with its output shown. Needs `rdbg` (the `debug` gem) on the
