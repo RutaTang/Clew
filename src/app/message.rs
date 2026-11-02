@@ -390,6 +390,9 @@ pub enum EditorMsg {
         /// cannot vouch for it: the user may have picked another target while
         /// this pass ran, and the same source then has a different answer.
         target: inactive::Target,
+        /// The build facts `inactive` was evaluated against, for the same
+        /// reason (`ProjectSession::build_facts`).
+        facts: Arc<clew_protocol::BuildFacts>,
     },
     /// Per-line git blame + change status finished loading for `abs`.
     GitInfoLoaded {
@@ -1287,6 +1290,11 @@ pub enum LanguagesMsg {
         stamp: Stamp,
         result: Result<(), String>,
     },
+    /// What the project's build leaves out was read.
+    FactsLoaded {
+        stamp: Stamp,
+        result: Result<clew_protocol::BuildFacts, String>,
+    },
 }
 
 /// A typed field of the settings' languages.
@@ -1316,7 +1324,8 @@ impl LanguagesMsg {
             LanguagesMsg::ChoicesLoaded { stamp, .. }
             | LanguagesMsg::Listed { stamp, .. }
             | LanguagesMsg::Browsed { stamp, .. }
-            | LanguagesMsg::Saved { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | LanguagesMsg::Saved { stamp, .. }
+            | LanguagesMsg::FactsLoaded { stamp, .. } => Some(Origin::Stamped(stamp)),
             LanguagesMsg::Refresh
             | LanguagesMsg::ChoosePython(..)
             | LanguagesMsg::Choose(..)

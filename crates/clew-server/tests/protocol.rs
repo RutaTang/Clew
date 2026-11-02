@@ -3475,6 +3475,53 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
     }
 }
 
+/// What the project's build leaves out is read where the project is: its
+/// Cargo packages' features, with the user's choices over them, and the Go
+/// tags they set.
+#[tokio::test]
+async fn build_facts_are_read_where_the_project_is() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("build-facts");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\n[features]\ndefault = []\nfast = []\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let choices = clew_protocol::LanguageChoices {
+        rust: Some(clew_protocol::RustChoices {
+            features: vec!["fast".into()],
+            ..Default::default()
+        }),
+        go: Some(clew_protocol::GoChoices {
+            tags: vec!["e2e".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(
+        server
+            .handle(2, Request::BuildFacts { choices })
+            .await
+            .is_none()
+    );
+    let facts = match recv_reply(&mut rx, 2).await {
+        Event::BuildFacts { root: at, facts } => {
+            assert_eq!(at, root.to_string_lossy());
+            facts
+        }
+        other => panic!("expected BuildFacts, got {other:?}"),
+    };
+    let app = facts
+        .crates
+        .iter()
+        .find(|c| c.dir.is_empty())
+        .expect("the root crate");
+    assert!(app.known);
+    assert_eq!(app.on, ["default", "fast"]);
+    assert_eq!(facts.go_tags, Some(vec!["e2e".to_string()]));
+}
+
 /// The project's Python interpreters are listed where the project is, with
 /// the one its server is given — and a choice the user made that is gone is
 /// reported, not used.

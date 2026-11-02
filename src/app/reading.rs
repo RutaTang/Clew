@@ -400,14 +400,8 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        // Re-evaluate the cfg dimming for every open file.
-        let t = self.proj.reading_target.clone();
-        for v in self.proj.panes.iter_mut().flatten() {
-            if let Some(lang) = v.lang_key {
-                let src = v.source.clone();
-                v.set_inactive_lines(inactive::inactive_lines(&src, lang, &t));
-            }
-        }
+        // Re-evaluate the dimming for every open file.
+        self.redim_open_panes();
         if !self.local_project_state() {
             return Task::none();
         }

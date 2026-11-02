@@ -78,6 +78,7 @@ impl Drop for EnvLock {
 
 pub mod acp;
 pub mod apidoc;
+pub mod buildfacts;
 pub mod confine;
 pub mod debugadapter;
 pub mod derived;

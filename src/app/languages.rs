@@ -60,11 +60,24 @@ impl App {
                 self.proj.inflight.choices_loading = false;
                 // The servers asked for meanwhile — each waits on, if the
                 // project's other state is still loading, that instead.
-                let mut tasks = Vec::new();
+                let mut tasks = vec![self.refresh_build_facts()];
                 for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
                     tasks.push(self.ensure_lsp(&language));
                 }
                 Task::batch(tasks)
+            }
+            LanguagesMsg::FactsLoaded { result, .. } => {
+                match result {
+                    Ok(facts) => {
+                        self.proj.build_facts = Arc::new(facts);
+                        self.redim_open_panes();
+                    }
+                    // The dimming stays as the target alone decides it.
+                    Err(e) => {
+                        self.status = format!("What the build leaves out could not be read: {e}");
+                    }
+                }
+                Task::none()
             }
             LanguagesMsg::Refresh => self.refresh_language_options(),
             LanguagesMsg::Listed { result, .. } => {
@@ -282,6 +295,9 @@ impl App {
         }
         let changed = changed_languages(&self.proj.lang_choices, &next);
         let python_changed = self.proj.lang_choices.python != next.python;
+        let build_changed = self.proj.lang_choices.rust != next.rust
+            || self.proj.lang_choices.go != next.go
+            || self.proj.lang_choices.c != next.c;
         self.proj.lang_choices = next.clone();
         let host = self.connection.approval_host().map(str::to_string);
         let stamp = self.stamp();
@@ -310,8 +326,122 @@ impl App {
         if python_changed && self.settings.open {
             tasks.push(self.refresh_language_options());
         }
+        // What the build leaves out, and so what is dimmed, follows.
+        if build_changed {
+            tasks.push(self.refresh_build_facts());
+        }
         Task::batch(tasks)
     }
+
+    /// Read what the open project's build leaves out with the user's
+    /// choices, where the project is: here, off the UI thread (its
+    /// `lsp.toml` read afresh with it), or on its remote host. Lands as
+    /// `LanguagesMsg::FactsLoaded`, which re-dims the open files.
+    pub(crate) fn refresh_build_facts(&mut self) -> Task<Message> {
+        let Some(project) = self.proj.project.as_ref() else {
+            return Task::none();
+        };
+        let root = project.root.clone();
+        let choices = self.proj.lang_choices.clone();
+        let stamp = self.stamp();
+        let loaded = move |result| {
+            Message::Languages(LanguagesMsg::FactsLoaded {
+                stamp: stamp.clone(),
+                result,
+            })
+        };
+        if self.connection.is_remote() {
+            let ai = self.ai_client();
+            return Task::perform(
+                async move {
+                    match ai
+                        .request(clew_protocol::Request::BuildFacts { choices })
+                        .await?
+                    {
+                        clew_protocol::Event::BuildFacts { facts, .. } => Ok(facts),
+                        other => Err(format!(
+                            "unexpected reply to BuildFacts: {}",
+                            crate::app::rpc::event_name(&other)
+                        )),
+                    }
+                },
+                loaded,
+            );
+        }
+        let crates =
+            clew_core::buildfacts::crate_dirs(project.files.iter().map(|f| f.rel.as_str()));
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let config = lsp::config::ProjectLspConfig::load(&root).ok();
+                    clew_core::buildfacts::read(&root, &crates, &choices, config.as_ref())
+                })
+                .await
+                .map_err(|_| "reading the build facts failed".to_string())
+            },
+            loaded,
+        )
+    }
+
+    /// The lines of `source` (the file `abs`, in `lang`) the build leaves
+    /// out, for the reading target and what is known of the project's build.
+    pub(crate) fn inactive_for(&self, source: &str, lang: &str, abs: &Path) -> HashSet<usize> {
+        inactive_of(
+            source,
+            lang,
+            abs,
+            self.proj.project.as_ref().map(|p| p.root.as_path()),
+            &self.proj.reading_target,
+            &self.proj.build_facts,
+        )
+    }
+
+    /// Evaluate the dimming of every open pane again: the reading target or
+    /// what the build leaves out changed.
+    pub(crate) fn redim_open_panes(&mut self) {
+        let target = self.proj.reading_target.clone();
+        let facts = self.proj.build_facts.clone();
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
+        for v in self.proj.panes.iter_mut().flatten() {
+            if let Some(lang) = v.lang_key {
+                let src = v.source.clone();
+                v.set_inactive_lines(inactive_of(
+                    &src,
+                    lang,
+                    &v.abs.clone(),
+                    root.as_deref(),
+                    &target,
+                    &facts,
+                ));
+            }
+        }
+    }
+}
+
+/// The lines of `source` (the file `abs` of the project at `root`, in
+/// `lang`) the build leaves out for `target`, with what `facts` say.
+pub(crate) fn inactive_of(
+    source: &str,
+    lang: &str,
+    abs: &Path,
+    root: Option<&Path>,
+    target: &inactive::Target,
+    facts: &clew_protocol::BuildFacts,
+) -> HashSet<usize> {
+    let rel = root
+        .and_then(|root| abs.strip_prefix(root).ok())
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"));
+    inactive::inactive_lines_in(source, lang, target, facts, rel.as_deref())
+}
+
+/// Whether the project file `rel` decides what its build leaves out: a Cargo
+/// manifest, a compilation database or flags file, the project's `lsp.toml`.
+pub(crate) fn is_build_manifest(rel: &str) -> bool {
+    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+    matches!(
+        name,
+        "Cargo.toml" | "compile_commands.json" | "compile_flags.txt"
+    ) || rel.replace('\\', "/") == ".clew/lsp.toml"
 }
 
 /// `choices` with a language's choices that choose nothing taken for none,

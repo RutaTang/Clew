@@ -103,33 +103,33 @@ const GO_KEYS: &[&str] = &["buildFlags", "env.GOOS", "env.GOARCH"];
 /// The clangd settings a C/C++ choice sets.
 const C_KEYS: &[&str] = &["compilationDatabasePath", "fallbackFlags"];
 
-/// Which of `keys` the project's `lsp.toml` options set — nested
-/// (`[rust.init_options.cargo] features = …`), or as one dotted key, with or
-/// without the server's prefix (`"rust-analyzer.cargo.features"`).
+/// Which of `keys` the project's `lsp.toml` options set ([`setting`]).
 fn project_sets(options: Option<&Value>, keys: &[&str]) -> Vec<String> {
     let Some(options) = options else {
         return Vec::new();
     };
     keys.iter()
-        .filter(|key| {
-            let nested = key
-                .split('.')
-                .try_fold(options, |value, part| value.get(part))
-                .is_some();
-            nested
-                || options.as_object().is_some_and(|map| {
-                    map.keys().any(|k| {
-                        k == **key || k.split_once('.').is_some_and(|(_, rest)| rest == **key)
-                    })
-                })
-        })
+        .filter(|key| setting(options, key).is_some())
         .map(|key| key.to_string())
         .collect()
 }
 
+/// The value server `options` give the dotted `key` — nested
+/// (`[rust.init_options.cargo] features = …`), or as one dotted key, with or
+/// without the server's prefix (`"rust-analyzer.cargo.features"`).
+pub fn setting<'a>(options: &'a Value, key: &str) -> Option<&'a Value> {
+    key.split('.')
+        .try_fold(options, |value, part| value.get(part))
+        .or_else(|| {
+            options.as_object()?.iter().find_map(|(k, v)| {
+                (k == key || k.split_once('.').is_some_and(|(_, rest)| rest == key)).then_some(v)
+            })
+        })
+}
+
 /// A TOML file of the project's, parsed — `None` when it is missing,
 /// oversized, not a plain file, or not TOML.
-fn read_toml(path: &Path) -> Option<toml::Table> {
+pub(crate) fn read_toml(path: &Path) -> Option<toml::Table> {
     let text = crate::statefile::read_capped(path, MAX_MANIFEST_BYTES)?;
     text.parse::<toml::Table>().ok()
 }
@@ -144,37 +144,11 @@ pub fn cargo_packages(root: &Path) -> Vec<CargoPackage> {
     if let Some(package) = package_of(&manifest, true) {
         packages.push(package);
     }
-    let workspace = manifest.get("workspace").and_then(toml::Value::as_table);
-    let patterns = |key: &str| -> Vec<String> {
-        workspace
-            .and_then(|w| w.get(key))
-            .and_then(toml::Value::as_array)
-            .map(|a| {
-                a.iter()
-                    .filter_map(toml::Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let excluded: BTreeSet<PathBuf> = patterns("exclude")
-        .iter()
-        .flat_map(|p| expand_member(root, p))
-        .collect();
-    let mut seen = BTreeSet::new();
-    for pattern in patterns("members") {
-        for dir in expand_member(root, &pattern) {
-            if packages.len() > MAX_MEMBERS {
-                break;
-            }
-            if excluded.contains(&dir) || dir == root || !seen.insert(dir.clone()) {
-                continue;
-            }
-            if let Some(package) =
-                read_toml(&dir.join("Cargo.toml")).and_then(|member| package_of(&member, false))
-            {
-                packages.push(package);
-            }
+    for dir in workspace_members(root, &manifest) {
+        if let Some(package) =
+            read_toml(&dir.join("Cargo.toml")).and_then(|member| package_of(&member, false))
+        {
+            packages.push(package);
         }
     }
     let (rooted, mut members): (Vec<_>, Vec<_>) = packages.into_iter().partition(|p| p.root);
@@ -251,7 +225,7 @@ fn package_of(manifest: &toml::Table, root: bool) -> Option<CargoPackage> {
 /// The directories a workspace `members` (or `exclude`) entry names: a path,
 /// or one with `*` / `?` wildcards in its components, as cargo globs them.
 /// Only directories under `root`, found without following a link out of it.
-fn expand_member(root: &Path, pattern: &str) -> Vec<PathBuf> {
+pub(crate) fn expand_member(root: &Path, pattern: &str) -> Vec<PathBuf> {
     let mut dirs = vec![root.to_path_buf()];
     for part in Path::new(pattern).components() {
         let part = match part {
@@ -480,6 +454,41 @@ fn is_settable_tag(word: &str) -> bool {
         && !GOOS.contains(&word)
         && !GOARCH.contains(&word)
         && !matches!(word, "cgo" | "gc" | "gccgo" | "unix" | "ignore")
+}
+
+/// The members a workspace manifest names — `members` globbed, `exclude`
+/// left out, the root itself not among them — each once.
+pub(crate) fn workspace_members(root: &Path, manifest: &toml::Table) -> Vec<PathBuf> {
+    let workspace = manifest.get("workspace").and_then(toml::Value::as_table);
+    let patterns = |key: &str| -> Vec<String> {
+        workspace
+            .and_then(|w| w.get(key))
+            .and_then(toml::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let excluded: BTreeSet<PathBuf> = patterns("exclude")
+        .iter()
+        .flat_map(|p| expand_member(root, p))
+        .collect();
+    let mut seen = BTreeSet::new();
+    let mut members = Vec::new();
+    for pattern in patterns("members") {
+        for dir in expand_member(root, &pattern) {
+            if members.len() >= MAX_MEMBERS {
+                return members;
+            }
+            if !excluded.contains(&dir) && dir != root && seen.insert(dir.clone()) {
+                members.push(dir);
+            }
+        }
+    }
+    members
 }
 
 /// The project's directories holding a `compile_commands.json`: its root,

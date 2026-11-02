@@ -689,14 +689,8 @@ impl App {
                     let target = target.unwrap_or_else(inactive::Target::host);
                     if target != self.proj.reading_target {
                         self.proj.reading_target = target;
-                        // Re-evaluate the cfg dimming of anything already open.
-                        let t = self.proj.reading_target.clone();
-                        for v in self.proj.panes.iter_mut().flatten() {
-                            if let Some(lang) = v.lang_key {
-                                let src = v.source.clone();
-                                v.set_inactive_lines(inactive::inactive_lines(&src, lang, &t));
-                            }
-                        }
+                        // Re-evaluate the dimming of anything already open.
+                        self.redim_open_panes();
                     }
                 }
                 Err(e) => problems.push(format!("reading.toml {e}")),

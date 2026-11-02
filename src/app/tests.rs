@@ -19529,6 +19529,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             docs: HashMap::new(),
             inactive: HashSet::new(),
             target: inactive::Target::host(),
+            facts: Default::default(),
         }),
         Message::Watch(WatchMsg::StructureBuilt {
             stamp: s(),
@@ -19610,6 +19611,13 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Languages(LanguagesMsg::Saved {
             stamp: s(),
             result: Err("stale".into()),
+        }),
+        Message::Languages(LanguagesMsg::FactsLoaded {
+            stamp: s(),
+            result: Ok(clew_protocol::BuildFacts {
+                go_tags: Some(vec!["stale".into()]),
+                ..Default::default()
+            }),
         }),
         Message::Lsp(LspMsg::PanelListed {
             stamp: s(),
@@ -30885,6 +30893,74 @@ async fn choosing_an_interpreter_saves_it_and_restarts_the_python_server() {
         clew_core::lsp::choices::load(Some("user@host"), &root),
         Default::default()
     );
+}
+
+/// What the project's build leaves out is read with the project's choices
+/// and dims the open files as it lands: code behind a Cargo feature the
+/// package builds without is dimmed, and choosing the feature brings it
+/// back — the facts read afresh, every open file dimmed again.
+#[test]
+fn the_build_facts_dim_what_the_build_leaves_out() {
+    let data = test_dir("build-facts-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = test_dir("build-facts");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\n[features]\ndefault = [\"tls\"]\ntls = []\nfast = []\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "#[cfg(feature = \"fast\")]\nfn fast() {}\n#[cfg(feature = \"tls\")]\nfn tls() {}\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let dimmed = |app: &App| {
+        let mut lines: Vec<usize> = app
+            .active_viewer()
+            .unwrap()
+            .inactive_lines()
+            .iter()
+            .copied()
+            .collect();
+        lines.sort();
+        lines
+    };
+    assert!(dimmed(&app).is_empty(), "nothing known of the build yet");
+
+    let land = |app: &mut App, task: Task<Message>| {
+        for message in run_task(task) {
+            if matches!(
+                message,
+                Message::Languages(LanguagesMsg::FactsLoaded { .. })
+            ) {
+                let _ = app.update(message);
+            }
+        }
+    };
+    let task = app.refresh_build_facts();
+    land(&mut app, task);
+    assert_eq!(dimmed(&app), [0, 1], "`fast` is not among the defaults");
+
+    let task = app.update(Message::Languages(LanguagesMsg::Choose(Box::new(
+        clew_protocol::LanguageChoices {
+            rust: Some(clew_protocol::RustChoices {
+                features: vec!["fast".into()],
+                no_default_features: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ))));
+    land(&mut app, task);
+    assert_eq!(dimmed(&app), [2, 3], "`fast` chosen, the defaults left off");
 }
 
 /// A program of the user's own, standing in for a language's server.

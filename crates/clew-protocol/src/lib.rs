@@ -110,7 +110,9 @@ pub use payload::*;
 /// tags and platform, C/C++ compilation database and flags, and a server
 /// program per language — rides with `LspResolve`, `LspInstall`, `SpawnLsp`,
 /// `SpawnAdapter` and `AgentAsk`, and [`Request::LanguageOptions`] lists
-/// what there is to choose from on the project's host.
+/// what there is to choose from on the project's host;
+/// [`Request::BuildFacts`] says what those choices leave out of the build,
+/// for the reading aid that dims it.
 pub const PROTOCOL_VERSION: u32 = 19;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -830,6 +832,13 @@ pub enum Request {
         languages: Vec<String>,
         choices: LanguageChoices,
     },
+    /// What the open project's build leaves out with the user's `choices`
+    /// (the project's `lsp.toml` where they chose nothing): its Cargo
+    /// packages' features, the Go build tags and platform, the C/C++ macros
+    /// the flags define — read on this host, where the manifests are, by
+    /// reading files only. The client dims the code these leave out as it
+    /// is read. Reply: `BuildFacts`.
+    BuildFacts { choices: LanguageChoices },
 }
 
 /// One JSON-array entry change, addressed by the fields that IDENTIFY an entry
@@ -1277,6 +1286,8 @@ pub enum Event {
         root: String,
         options: LanguageOptions,
     },
+    /// Reply to `BuildFacts`, for project `root`.
+    BuildFacts { root: String, facts: BuildFacts },
     /// A request failed; `code` says how (see [`ErrorCode`]). Always a
     /// [`ServerMessage::Reply`] — unsolicited trouble is [`Event::Status`].
     Error { code: ErrorCode, message: String },
@@ -1368,6 +1379,59 @@ pub struct ServerChoice {
     /// of that language with (`serve` for `lake`, `language-server` for
     /// `dart`), which is what choosing where a toolchain is means.
     pub args: Option<Vec<String>>,
+}
+
+/// What a project's build leaves out beyond the target platform, as its
+/// language choices and manifests decide ([`Request::BuildFacts`]) — what the
+/// reading aid needs to dim code the build does not compile, kept to what is
+/// known for certain: what it cannot know it leaves undecided, and
+/// undecided code is never dimmed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildFacts {
+    /// The target triple rust-analyzer checks the project for, when one was
+    /// chosen: Rust's `cfg`s are read for it rather than the reading target.
+    pub rust_target: Option<String>,
+    /// Every crate of the project (each directory holding a `Cargo.toml`),
+    /// and, for the packages the build loads, which features are on.
+    pub crates: Vec<CrateFeatures>,
+    /// The `GOOS` gopls loads the project for, when one was chosen.
+    pub goos: Option<String>,
+    /// The `GOARCH` gopls loads the project for, when one was chosen.
+    pub goarch: Option<String>,
+    /// The build tags set — `None` when they cannot be known (a `GOFLAGS`
+    /// that sets some).
+    pub go_tags: Option<Vec<String>>,
+    /// The macros C/C++ files are compiled with, from the flags for files no
+    /// compilation database covers — `None` when a database decides the
+    /// flags (and so these are not known).
+    pub c_defines: Option<Vec<CMacro>>,
+    /// The macros those flags undefine (`-U`).
+    pub c_undefines: Vec<String>,
+}
+
+/// One crate of a project, and its features where the build is known.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CrateFeatures {
+    /// Its directory, relative to the project (`""` for the root).
+    pub dir: String,
+    /// Whether the rest is known: a package the build loads, whose
+    /// manifest was read. A crate outside the workspace is not.
+    pub known: bool,
+    /// The features it declares (`default` among them, and its optional
+    /// dependencies').
+    pub declared: Vec<String>,
+    /// Those certainly on in the build.
+    pub on: Vec<String>,
+    /// Those another package of the workspace may turn on.
+    pub maybe: Vec<String>,
+}
+
+/// A macro a compile flag defines (`-DNAME`, `-DNAME=1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CMacro {
+    pub name: String,
+    /// Its value, when it is a number (`-DNAME` is 1).
+    pub value: Option<i64>,
 }
 
 /// What there is to choose from for a project's languages, on its host

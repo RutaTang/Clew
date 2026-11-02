@@ -386,7 +386,8 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             .color(theme::accent()),
         lang_caption(format!(
             "Set up for this project {} — kept in clew's own data, never written into the \
-             project. A choice here wins over its .clew/lsp.toml.",
+             project. A choice here wins over its .clew/lsp.toml, and the code its build then \
+             leaves out — features off, tags unset, macros undefined — is dimmed as you read.",
             if remote {
                 "and its host"
             } else {

@@ -1250,6 +1250,14 @@ impl App {
                     // explanation refresh) are driven from there.
                     task = self.on_files_changed(rels.iter().map(|rel| root.join(rel)).collect());
                 }
+                // A manifest the build reads changed: what it leaves out may
+                // have too.
+                if rels
+                    .iter()
+                    .any(|rel| crate::app::languages::is_build_manifest(rel))
+                {
+                    task = Task::batch([task, self.refresh_build_facts()]);
+                }
             }
             Event::Tree {
                 root: tree_root,

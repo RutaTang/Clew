@@ -212,6 +212,7 @@ fn request_index(r: &Request) -> usize {
         Request::ListDir { .. } => 27,
         Request::BuildDocs => 28,
         Request::LanguageOptions { .. } => 29,
+        Request::BuildFacts { .. } => 30,
     }
 }
 
@@ -250,6 +251,7 @@ fn event_index(e: &Event) -> usize {
         Event::LspResolved { .. } => 30,
         Event::Error { .. } => 31,
         Event::LanguageOptions { .. } => 32,
+        Event::BuildFacts { .. } => 33,
     }
 }
 
@@ -1034,6 +1036,10 @@ fn request_samples() -> Vec<Request> {
             languages: vec!["python".into(), "rust".into(), "lean".into()],
             choices: choices(),
         },
+        Request::BuildFacts {
+            choices: LanguageChoices::default(),
+        },
+        Request::BuildFacts { choices: choices() },
     ]);
     samples
 }
@@ -1238,6 +1244,45 @@ fn reply_samples() -> Vec<Event> {
                 options,
             }),
     );
+    samples.extend([
+        Event::BuildFacts {
+            root: "/p".into(),
+            facts: BuildFacts::default(),
+        },
+        Event::BuildFacts {
+            root: "/p".into(),
+            facts: BuildFacts {
+                rust_target: Some("wasm32-unknown-unknown".into()),
+                crates: vec![
+                    CrateFeatures {
+                        dir: String::new(),
+                        known: true,
+                        declared: vec!["default".into(), "fast".into(), "tls".into()],
+                        on: vec!["default".into(), "tls".into()],
+                        maybe: vec!["fast".into()],
+                    },
+                    CrateFeatures {
+                        dir: "fuzz".into(),
+                        ..Default::default()
+                    },
+                ],
+                goos: Some("windows".into()),
+                goarch: Some("arm64".into()),
+                go_tags: Some(vec!["e2e".into()]),
+                c_defines: Some(vec![
+                    CMacro {
+                        name: "DEBUG".into(),
+                        value: Some(1),
+                    },
+                    CMacro {
+                        name: "NAME".into(),
+                        value: None,
+                    },
+                ]),
+                c_undefines: vec!["NDEBUG".into()],
+            },
+        },
+    ]);
     samples.extend(
         error_codes()
             .into_iter()
@@ -1708,6 +1753,12 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Notification.event.AgentStep.refs[].line",
         "Notification.event.ProcessExited.code",
         "Notification.event.ProjectSymbols.files[].symbols[].entry",
+        "Reply.event.BuildFacts.facts.c_defines",
+        "Reply.event.BuildFacts.facts.c_defines[].value",
+        "Reply.event.BuildFacts.facts.go_tags",
+        "Reply.event.BuildFacts.facts.goarch",
+        "Reply.event.BuildFacts.facts.goos",
+        "Reply.event.BuildFacts.facts.rust_target",
         "Reply.event.DirListing.parent",
         "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
@@ -1739,6 +1790,17 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.AgentAsk.choices.servers",
         "request.AgentAsk.choices.servers.lean.args",
         "request.AgentAsk.choices.servers.python.args",
+        "request.BuildFacts.choices.c",
+        "request.BuildFacts.choices.c.compile_commands",
+        "request.BuildFacts.choices.go",
+        "request.BuildFacts.choices.go.goarch",
+        "request.BuildFacts.choices.go.goos",
+        "request.BuildFacts.choices.python",
+        "request.BuildFacts.choices.rust",
+        "request.BuildFacts.choices.rust.target",
+        "request.BuildFacts.choices.servers",
+        "request.BuildFacts.choices.servers.lean.args",
+        "request.BuildFacts.choices.servers.python.args",
         "request.EditState.merge.edit.Patch.insert",
         "request.Hello.fingerprint",
         "request.LanguageOptions.choices.c",

@@ -1,15 +1,25 @@
-//! Inactive `#[cfg(...)]` detection for the reading aid that dims code which
-//! isn't compiled for the reading target.
+//! Inactive-code detection for the reading aid that dims code the build does
+//! not compile for the reading target.
 //!
-//! We evaluate each Rust `cfg` predicate against a [`Target`] (the host by
-//! default, or one the reader picks to study another platform's code),
-//! conservatively: a line is dimmed only when its `cfg` is *definitively* false
-//! (a target predicate that doesn't match). Feature flags and anything we can't
-//! decide are left active, so we never hide live code.
+//! - Rust: each `#[cfg(...)]` is evaluated against a [`Target`] (the host by
+//!   default, one the reader picks to study another platform's code, or the
+//!   target rust-analyzer is told to check for) and, for `feature = "…"`,
+//!   against the features its package builds with ([`BuildFacts`]).
+//! - Go: a file whose `//go:build` line (or `// +build` lines) or whose name
+//!   (`_windows.go`, `_arm64.go`) leaves it out of the build is dimmed whole —
+//!   for the platform gopls loads, and the build tags it is given.
+//! - C and C++: the groups of `#if`/`#ifdef`/`#elif`/`#else` the
+//!   preprocessor drops, from the platform's macros, the flags' `-D`/`-U`,
+//!   and the file's own `#define`s.
 //!
-//! Rust only for now; Go `//go:build` and C/C++ `#ifdef` can follow.
+//! Conservatively, always: a line is dimmed only when what leaves it out is
+//! *definitively* false. A feature another package may turn on, a macro a
+//! header may define, a Go version — anything undecidable is left active, so
+//! live code is never hidden.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+
+use clew_protocol::{BuildFacts, CrateFeatures};
 
 use tree_sitter::{Node, Parser};
 
@@ -70,6 +80,76 @@ impl Target {
             .find(|t| t.label == label)
             .unwrap_or_else(Target::host)
     }
+
+    /// The target a rustc target triple names (`x86_64-unknown-linux-gnu`,
+    /// `aarch64-apple-darwin`, `wasm32-unknown-unknown`), in `cfg`'s terms:
+    /// its `target_os`, `target_arch` and `target_family` ("" for none).
+    pub fn from_triple(triple: &str) -> Target {
+        let parts: Vec<&str> = triple.split('-').collect();
+        let arch = match parts.first().copied().unwrap_or_default() {
+            "arm64" => "aarch64",
+            "i386" | "i586" | "i686" => "x86",
+            a if a.starts_with("thumb") || a.starts_with("armv") || a == "arm" => "arm",
+            a if a.starts_with("riscv64") => "riscv64",
+            a if a.starts_with("riscv32") => "riscv32",
+            a => a,
+        };
+        let has = |p: &str| parts.iter().skip(1).any(|x| *x == p || x.starts_with(p));
+        let os = if has("android") {
+            "android"
+        } else if has("linux") {
+            "linux"
+        } else if has("windows") {
+            "windows"
+        } else if has("darwin") || has("macos") {
+            "macos"
+        } else if has("ios") {
+            "ios"
+        } else if has("freebsd") {
+            "freebsd"
+        } else if has("netbsd") {
+            "netbsd"
+        } else if has("openbsd") {
+            "openbsd"
+        } else if has("wasi") {
+            "wasi"
+        } else if has("none") {
+            "none"
+        } else {
+            "unknown"
+        };
+        let family = match (os, arch) {
+            ("windows", _) => "windows",
+            (_, "wasm32" | "wasm64") => "wasm",
+            ("none" | "unknown", _) => "",
+            _ => "unix",
+        };
+        Target {
+            label: triple.to_string(),
+            os: os.into(),
+            arch: arch.into(),
+            family: family.into(),
+        }
+    }
+
+    /// This target's `GOOS`.
+    fn goos(&self) -> &str {
+        match self.os.as_str() {
+            "macos" => "darwin",
+            os => os,
+        }
+    }
+
+    /// This target's `GOARCH`.
+    fn goarch(&self) -> &str {
+        match self.arch.as_str() {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            "x86" => "386",
+            "wasm32" => "wasm",
+            arch => arch,
+        }
+    }
 }
 
 /// Reconstruct a `Target` from its protocol wire form (sent with `ReadFile`).
@@ -84,13 +164,62 @@ impl From<clew_protocol::TargetSpec> for Target {
     }
 }
 
-/// 0-based line numbers whose enclosing item is gated off by a `cfg` that is
-/// inactive for `target`.
+/// 0-based line numbers the build leaves out for `target`, with nothing
+/// known of the project's build beyond it ([`inactive_lines_in`]).
 pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<usize> {
-    let mut out = HashSet::new();
-    if lang_key != "rust" {
-        return out;
+    inactive_lines_in(source, lang_key, target, &BuildFacts::default(), None)
+}
+
+/// 0-based line numbers of `source` (the project's file `rel`, when known —
+/// its name and its crate decide things too) that the build leaves out for
+/// `target`, with what `facts` say of the project's build.
+pub fn inactive_lines_in(
+    source: &str,
+    lang_key: &str,
+    target: &Target,
+    facts: &BuildFacts,
+    rel: Option<&str>,
+) -> HashSet<usize> {
+    match lang_key {
+        "rust" => {
+            let target = match &facts.rust_target {
+                Some(triple) => Target::from_triple(triple),
+                None => target.clone(),
+            };
+            let cfg = Cfg {
+                target: &target,
+                features: rel.and_then(|rel| crate_of(facts, rel)),
+            };
+            rust_inactive(source, &cfg)
+        }
+        "go" => go_inactive(source, target, facts, rel),
+        "c" | "cpp" => c_inactive(source, lang_key, target, facts, rel),
+        _ => HashSet::new(),
     }
+}
+
+/// What a Rust `cfg` is evaluated against.
+struct Cfg<'a> {
+    target: &'a Target,
+    /// The features of the crate the file is in, when they are known.
+    features: Option<&'a CrateFeatures>,
+}
+
+/// The crate `rel` is in: the deepest crate directory holding it, when its
+/// features are known.
+fn crate_of<'a>(facts: &'a BuildFacts, rel: &str) -> Option<&'a CrateFeatures> {
+    let rel = rel.replace('\\', "/");
+    facts
+        .crates
+        .iter()
+        .filter(|c| c.dir.is_empty() || rel.starts_with(&format!("{}/", c.dir)))
+        .max_by_key(|c| c.dir.len())
+        .filter(|c| c.known)
+}
+
+/// The lines of Rust `source` its inactive `#[cfg]`s gate off.
+fn rust_inactive(source: &str, cfg: &Cfg) -> HashSet<usize> {
+    let mut out = HashSet::new();
     let Some(lang) = crate::highlight::language_for("rust") else {
         return out;
     };
@@ -102,7 +231,7 @@ pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<
         return out;
     };
     let mut gated = Vec::new();
-    walk(tree.root_node(), source.as_bytes(), target, &mut gated);
+    walk(tree.root_node(), source.as_bytes(), cfg, &mut gated);
     // Nested gated items cover the same lines again: the ranges are merged
     // first, so each line is inserted once (inserting every range's lines cost
     // depth × lines for nested `#[cfg]` modules).
@@ -121,7 +250,7 @@ pub fn inactive_lines(source: &str, lang_key: &str, target: &Target) -> HashSet<
 /// [`crate::structure`] for why: a deeply nested expression is ~2 bytes per
 /// level, so a file inside the size cap can reach a depth that overflows the
 /// stack, and this runs on every file opened.
-fn walk(root: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
+fn walk(root: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) {
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let mut cursor = node.walk();
@@ -137,7 +266,7 @@ fn walk(root: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
 /// itself — tree-sitter finds a node's sibling through its parent, which it
 /// finds by walking down from the root, so `next_named_sibling` cost the
 /// node's depth per call.
-fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)>) {
+fn walk_node(node: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) {
     let mut cursor = node.walk();
     let children: Vec<Node> = node.named_children(&mut cursor).collect();
     // For each child, the first later one that is not an attribute or a
@@ -185,8 +314,8 @@ fn walk_node(node: Node, src: &[u8], host: &Target, out: &mut Vec<(usize, usize)
 }
 
 /// Evaluate the `cfg` on an `attribute_item`, or `None` if it isn't a
-/// `#[cfg(...)]` we can decide (inner `#![…]`, `cfg_attr`, features, …).
-fn cfg_of(attr_item: Node, src: &[u8], host: &Target) -> Option<bool> {
+/// `#[cfg(...)]` we can decide (inner `#![…]`, `cfg_attr`, …).
+fn cfg_of(attr_item: Node, src: &[u8], host: &Cfg) -> Option<bool> {
     let text = attr_item.utf8_text(src).ok()?.trim();
     let inner = text.strip_prefix("#[")?.strip_suffix(']')?.trim();
     // `cfg( … )` only — not `cfg_attr(…)` (which starts "cfg_attr" → no "(").
@@ -195,7 +324,7 @@ fn cfg_of(attr_item: Node, src: &[u8], host: &Target) -> Option<bool> {
         .trim_start()
         .strip_prefix('(')?
         .strip_suffix(')')?;
-    eval_cfg(pred.trim(), host)
+    eval_cfg_at(pred.trim(), host, 0)
 }
 
 /// How deeply a `cfg` predicate may nest before clew stops evaluating it.
@@ -207,13 +336,23 @@ fn cfg_of(attr_item: Node, src: &[u8], host: &Target) -> Option<bool> {
 /// treat as active, i.e. nothing is dimmed) is the safe answer.
 const MAX_CFG_DEPTH: usize = 64;
 
-/// Evaluate a `cfg` predicate. `Some(false)` = definitively inactive; `Some(true)`
-/// = active; `None` = undecidable (treated as active by callers).
+/// Evaluate a `cfg` predicate against `host` alone. `Some(false)` =
+/// definitively inactive; `Some(true)` = active; `None` = undecidable
+/// (treated as active by callers).
+#[cfg(test)]
 fn eval_cfg(pred: &str, host: &Target) -> Option<bool> {
-    eval_cfg_at(pred, host, 0)
+    eval_cfg_at(
+        pred,
+        &Cfg {
+            target: host,
+            features: None,
+        },
+        0,
+    )
 }
 
-fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
+fn eval_cfg_at(pred: &str, cfg: &Cfg, depth: usize) -> Option<bool> {
+    let host = cfg.target;
     if depth > MAX_CFG_DEPTH {
         return None;
     }
@@ -221,7 +360,7 @@ fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
     if let Some(inner) = pred.strip_prefix("all(").and_then(|s| s.strip_suffix(')')) {
         let mut result = Some(true);
         for part in split_top(inner) {
-            match eval_cfg_at(&part, host, depth + 1) {
+            match eval_cfg_at(&part, cfg, depth + 1) {
                 Some(false) => return Some(false),
                 None => result = None,
                 Some(true) => {}
@@ -232,7 +371,7 @@ fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
     if let Some(inner) = pred.strip_prefix("any(").and_then(|s| s.strip_suffix(')')) {
         let mut result = Some(false);
         for part in split_top(inner) {
-            match eval_cfg_at(&part, host, depth + 1) {
+            match eval_cfg_at(&part, cfg, depth + 1) {
                 Some(true) => return Some(true),
                 None => result = None,
                 Some(false) => {}
@@ -241,7 +380,7 @@ fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
         return result;
     }
     if let Some(inner) = pred.strip_prefix("not(").and_then(|s| s.strip_suffix(')')) {
-        return eval_cfg_at(inner, host, depth + 1).map(|b| !b);
+        return eval_cfg_at(inner, cfg, depth + 1).map(|b| !b);
     }
     if let Some((key, val)) = pred.split_once('=') {
         let val = rust_string_value(val.trim())?;
@@ -249,7 +388,19 @@ fn eval_cfg_at(pred: &str, host: &Target, depth: usize) -> Option<bool> {
             "target_os" => Some(host.os == val),
             "target_arch" => Some(host.arch == val),
             "target_family" => Some(host.family == val),
-            _ => None, // target_env, feature, … — leave active
+            // On, off, or — another package may turn it on, or it is no
+            // feature the package declares — undecided.
+            "feature" => {
+                let features = cfg.features?;
+                if features.on.contains(&val) {
+                    Some(true)
+                } else if features.maybe.contains(&val) || !features.declared.contains(&val) {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            _ => None, // target_env, … — leave active
         };
     }
     match pred {
@@ -355,6 +506,894 @@ fn split_top(s: &str) -> Vec<String> {
         parts.push(tail.to_string());
     }
     parts
+}
+
+/// Every line of `source`.
+fn all_lines(source: &str) -> HashSet<usize> {
+    (0..source.lines().count().max(1)).collect()
+}
+
+/// The lines of the Go file `source` (named `rel`) the build leaves out:
+/// all of them, when its name or its build constraint excludes it from the
+/// build for the platform (the one gopls loads, else `target`) and the tags
+/// set; none otherwise.
+fn go_inactive(
+    source: &str,
+    target: &Target,
+    facts: &BuildFacts,
+    rel: Option<&str>,
+) -> HashSet<usize> {
+    let go = GoBuild {
+        goos: facts.goos.as_deref().unwrap_or(target.goos()),
+        goarch: facts.goarch.as_deref().unwrap_or(target.goarch()),
+        tags: facts.go_tags.as_deref(),
+    };
+    let by_name = rel.and_then(|rel| {
+        let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+        go.file_name_matches(name)
+    });
+    if by_name == Some(false) || go.constraint_matches(source) == Some(false) {
+        return all_lines(source);
+    }
+    HashSet::new()
+}
+
+/// What a Go build is: the platform, and the tags set (`None` when they
+/// cannot be known).
+struct GoBuild<'a> {
+    goos: &'a str,
+    goarch: &'a str,
+    tags: Option<&'a [String]>,
+}
+
+/// The operating systems Go counts as Unix (the `unix` constraint).
+const GO_UNIX: &[&str] = &[
+    "aix",
+    "android",
+    "darwin",
+    "dragonfly",
+    "freebsd",
+    "hurd",
+    "illumos",
+    "ios",
+    "linux",
+    "netbsd",
+    "openbsd",
+    "solaris",
+];
+
+impl GoBuild<'_> {
+    /// Whether build constraint name `tag` holds; `None` when it cannot be
+    /// known (a Go version, `cgo`, a tag when the tags are unknown).
+    fn holds(&self, tag: &str) -> Option<bool> {
+        let os = self.goos;
+        let implied = matches!(
+            (tag, os),
+            ("linux", "android") | ("solaris", "illumos") | ("darwin", "ios")
+        );
+        if tag == os || implied || tag == self.goarch {
+            return Some(true);
+        }
+        if crate::lsp::langopts::GOOS.contains(&tag) || crate::lsp::langopts::GOARCH.contains(&tag)
+        {
+            return Some(false);
+        }
+        match tag {
+            "unix" => Some(GO_UNIX.contains(&os)),
+            "gc" => Some(true),
+            "gccgo" => Some(false),
+            "cgo" => None,
+            t if t.starts_with("go1.") => None,
+            t => self.tags.map(|tags| tags.iter().any(|x| x == t)),
+        }
+    }
+
+    /// Whether a file named `name` is built, by the `_GOOS`/`_GOARCH`
+    /// suffixes of its name — as the go command reads them: never the part
+    /// before the first `_`, and `_test` aside.
+    fn file_name_matches(&self, name: &str) -> Option<bool> {
+        let stem = name.strip_suffix(".go")?;
+        let stem = stem.strip_suffix("_test").unwrap_or(stem);
+        let (_, constrained) = stem.split_once('_')?;
+        let parts: Vec<&str> = constrained.split('_').collect();
+        let known_os = |p: &str| crate::lsp::langopts::GOOS.contains(&p);
+        let known_arch = |p: &str| crate::lsp::langopts::GOARCH.contains(&p);
+        let n = parts.len();
+        if n >= 2 && known_os(parts[n - 2]) && known_arch(parts[n - 1]) {
+            return Some(self.holds(parts[n - 2])? && self.holds(parts[n - 1])?);
+        }
+        let last = parts[n - 1];
+        if known_os(last) || known_arch(last) {
+            return self.holds(last);
+        }
+        None
+    }
+
+    /// Whether the build constraint at the head of `source` holds: its
+    /// `//go:build` line, else its `// +build` lines (each an OR of
+    /// space-separated ANDs of comma-separated terms, all of them ANDed).
+    /// `None` when there is none, or it cannot be decided.
+    fn constraint_matches(&self, source: &str) -> Option<bool> {
+        let mut plus: Vec<&str> = Vec::new();
+        let mut in_block = false;
+        for line in source.lines().map(str::trim) {
+            if in_block {
+                in_block = !line.contains("*/");
+                continue;
+            }
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(expr) = line.strip_prefix("//go:build") {
+                if !expr.starts_with([' ', '\t']) {
+                    continue;
+                }
+                return self.expr(expr);
+            }
+            if let Some(expr) = line.strip_prefix("// +build ") {
+                plus.push(expr);
+                continue;
+            }
+            if line.starts_with("//") {
+                continue;
+            }
+            if line.starts_with("/*") {
+                in_block = !line.contains("*/");
+                continue;
+            }
+            break; // the package clause, or anything else: the header ends
+        }
+        if plus.is_empty() {
+            return None;
+        }
+        let mut all = Some(true);
+        for line in plus {
+            let mut any = Some(false);
+            for option in line.split_whitespace() {
+                let mut both = Some(true);
+                for term in option.split(',') {
+                    let value = match term.strip_prefix('!') {
+                        Some(t) => self.holds(t).map(|b| !b),
+                        None => self.holds(term),
+                    };
+                    both = and(both, value);
+                }
+                any = or(any, both);
+            }
+            all = and(all, any);
+        }
+        all
+    }
+
+    /// A `//go:build` expression: `||`, `&&`, `!`, parentheses and names.
+    fn expr(&self, expr: &str) -> Option<bool> {
+        let tokens = go_tokens(expr)?;
+        let mut parser = GoExpr {
+            tokens: &tokens,
+            at: 0,
+            build: self,
+            depth: 0,
+        };
+        let value = parser.or()?;
+        (parser.at == tokens.len()).then_some(value)?
+    }
+}
+
+/// The tokens of a `//go:build` expression, or `None` for a character it
+/// may not hold.
+fn go_tokens(expr: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let mut chars = expr.chars().peekable();
+    while let Some(&c) = chars.peek() {
+        match c {
+            ' ' | '\t' => {
+                chars.next();
+            }
+            '!' | '(' | ')' => {
+                tokens.push(c.to_string());
+                chars.next();
+            }
+            '&' | '|' => {
+                chars.next();
+                if chars.next() != Some(c) {
+                    return None;
+                }
+                tokens.push(format!("{c}{c}"));
+            }
+            c if c.is_ascii_alphanumeric() || c == '_' || c == '.' => {
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+                        name.push(c);
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+                tokens.push(name);
+            }
+            _ => return None,
+        }
+    }
+    Some(tokens)
+}
+
+/// A recursive-descent reader of a `//go:build` expression, three-valued:
+/// `Some(Some(b))` decided, `Some(None)` undecidable, `None` malformed.
+struct GoExpr<'a> {
+    tokens: &'a [String],
+    at: usize,
+    build: &'a GoBuild<'a>,
+    depth: usize,
+}
+
+impl GoExpr<'_> {
+    fn peek(&self) -> Option<&str> {
+        self.tokens.get(self.at).map(String::as_str)
+    }
+
+    fn or(&mut self) -> Option<Option<bool>> {
+        let mut value = self.and()?;
+        while self.peek() == Some("||") {
+            self.at += 1;
+            value = or(value, self.and()?);
+        }
+        Some(value)
+    }
+
+    fn and(&mut self) -> Option<Option<bool>> {
+        let mut value = self.not()?;
+        while self.peek() == Some("&&") {
+            self.at += 1;
+            value = and(value, self.not()?);
+        }
+        Some(value)
+    }
+
+    fn not(&mut self) -> Option<Option<bool>> {
+        self.depth += 1;
+        if self.depth > MAX_CFG_DEPTH {
+            return None;
+        }
+        let value = match self.peek()? {
+            "!" => {
+                self.at += 1;
+                self.not()?.map(|b| !b)
+            }
+            "(" => {
+                self.at += 1;
+                let value = self.or()?;
+                if self.peek()? != ")" {
+                    return None;
+                }
+                self.at += 1;
+                value
+            }
+            "&&" | "||" | ")" => return None,
+            name => {
+                let value = self.build.holds(name);
+                self.at += 1;
+                value
+            }
+        };
+        self.depth -= 1;
+        Some(value)
+    }
+}
+
+/// Three-valued AND: false wins, else unknown wins.
+fn and(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(false), _) | (_, Some(false)) => Some(false),
+        (Some(true), Some(true)) => Some(true),
+        _ => None,
+    }
+}
+
+/// Three-valued OR: true wins, else unknown wins.
+fn or(a: Option<bool>, b: Option<bool>) -> Option<bool> {
+    match (a, b) {
+        (Some(true), _) | (_, Some(true)) => Some(true),
+        (Some(false), Some(false)) => Some(false),
+        _ => None,
+    }
+}
+
+/// What the preprocessor knows of a macro.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Macro {
+    /// Defined, with its value when it is a number.
+    Defined(Option<i64>),
+    /// Not defined.
+    Undefined,
+}
+
+/// The platform macros C compilers define, by the platform they mean: each
+/// is defined for its own and undefined for every other.
+const PLATFORM_MACROS: &[(&str, &[&str])] = &[
+    ("_WIN32", &["windows"]),
+    ("__linux__", &["linux", "android"]),
+    ("__linux", &["linux", "android"]),
+    ("__ANDROID__", &["android"]),
+    ("__APPLE__", &["macos", "ios"]),
+    ("__MACH__", &["macos", "ios"]),
+    ("__FreeBSD__", &["freebsd"]),
+    (
+        "__unix__",
+        &["linux", "android", "freebsd", "netbsd", "openbsd"],
+    ),
+    (
+        "__unix",
+        &["linux", "android", "freebsd", "netbsd", "openbsd"],
+    ),
+];
+
+/// The architecture macros (GCC's and Clang's spelling), by architecture.
+const ARCH_MACROS: &[(&str, &[&str])] = &[
+    ("__x86_64__", &["x86_64"]),
+    ("__amd64__", &["x86_64"]),
+    ("__aarch64__", &["aarch64"]),
+    ("__i386__", &["x86"]),
+    ("__arm__", &["arm"]),
+];
+
+/// The lines of the C or C++ file `source` (named `rel`) its preprocessor
+/// conditionals drop: the groups whose condition is definitively false for
+/// the platform's macros, the flags' `-D`/`-U` (when known), and the file's
+/// own `#define`/`#undef`s before them.
+fn c_inactive(
+    source: &str,
+    lang_key: &str,
+    target: &Target,
+    facts: &BuildFacts,
+    rel: Option<&str>,
+) -> HashSet<usize> {
+    let mut macros: HashMap<String, Macro> = HashMap::new();
+    for (table, value) in [
+        (PLATFORM_MACROS, target.os.as_str()),
+        (ARCH_MACROS, target.arch.as_str()),
+    ] {
+        for (name, on) in table {
+            let state = match on.contains(&value) {
+                true => Macro::Defined(Some(1)),
+                false => Macro::Undefined,
+            };
+            macros.insert(name.to_string(), state);
+        }
+    }
+    if target.os == "windows" && matches!(target.arch.as_str(), "x86_64" | "aarch64") {
+        macros.insert("_WIN64".into(), Macro::Defined(Some(1)));
+    } else {
+        macros.insert("_WIN64".into(), Macro::Undefined);
+    }
+    // C++ or C, where the file says which it is compiled as.
+    let ext = rel
+        .and_then(|r| r.rsplit_once('.'))
+        .map(|(_, e)| e.to_ascii_lowercase());
+    match (lang_key, ext.as_deref()) {
+        (_, Some("h")) | (_, None) => {}
+        ("cpp", _) => {
+            macros.insert("__cplusplus".into(), Macro::Defined(None));
+        }
+        (_, Some("c")) => {
+            macros.insert("__cplusplus".into(), Macro::Undefined);
+        }
+        _ => {}
+    }
+    if let Some(defines) = &facts.c_defines {
+        for m in defines {
+            macros.insert(m.name.clone(), Macro::Defined(m.value));
+        }
+        for name in &facts.c_undefines {
+            macros.insert(name.clone(), Macro::Undefined);
+        }
+    }
+    Preprocessor::new(macros).run(source)
+}
+
+/// Whether a region of a C file is compiled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Live {
+    Yes,
+    No,
+    Maybe,
+}
+
+impl Live {
+    fn of(value: Option<bool>) -> Live {
+        match value {
+            Some(true) => Live::Yes,
+            Some(false) => Live::No,
+            None => Live::Maybe,
+        }
+    }
+
+    fn known(self) -> Option<bool> {
+        match self {
+            Live::Yes => Some(true),
+            Live::No => Some(false),
+            Live::Maybe => None,
+        }
+    }
+
+    fn and(self, other: Live) -> Live {
+        Live::of(and(self.known(), other.known()))
+    }
+}
+
+/// One open `#if` chain.
+struct Group {
+    /// Whether the region around the chain is compiled.
+    outer: Live,
+    /// Whether a branch of the chain was already taken.
+    taken: Option<bool>,
+    /// Whether the current branch is compiled (by its condition alone).
+    branch: Live,
+}
+
+/// The preprocessor's view of a file, as far as it can be known.
+struct Preprocessor {
+    macros: HashMap<String, Macro>,
+    groups: Vec<Group>,
+}
+
+/// Most nested `#if`s followed; past it, nothing more is dimmed.
+const MAX_GROUPS: usize = 256;
+
+impl Preprocessor {
+    fn new(macros: HashMap<String, Macro>) -> Preprocessor {
+        Preprocessor {
+            macros,
+            groups: Vec::new(),
+        }
+    }
+
+    /// Whether the code here is compiled.
+    fn live(&self) -> Live {
+        self.groups
+            .last()
+            .map(|g| g.outer.and(g.branch))
+            .unwrap_or(Live::Yes)
+    }
+
+    /// The lines of `source` in groups the preprocessor drops.
+    fn run(mut self, source: &str) -> HashSet<usize> {
+        let mut out = HashSet::new();
+        let lines: Vec<&str> = source.lines().collect();
+        let mut in_comment = false;
+        let mut i = 0;
+        while i < lines.len() {
+            let first = i;
+            // A directive continues over lines ending in a backslash.
+            let mut text = lines[i].to_string();
+            while text.ends_with('\\') && i + 1 < lines.len() {
+                text.pop();
+                i += 1;
+                text.push(' ');
+                text.push_str(lines[i]);
+            }
+            let directive = (!in_comment)
+                .then(|| text.trim_start().strip_prefix('#'))
+                .flatten()
+                .map(|d| strip_comments(d.trim()));
+            match directive {
+                Some(directive) => {
+                    // A directive's own lines are dimmed only inside a
+                    // region dropped around its whole chain: an `#else`
+                    // between two dropped branches stays in sight.
+                    let continues =
+                        ["elif", "elifdef", "elifndef", "else", "endif"]
+                            .iter()
+                            .any(|w| {
+                                directive.strip_prefix(w).is_some_and(|rest| {
+                                    rest.is_empty() || rest.starts_with([' ', '\t', '('])
+                                })
+                            });
+                    let around = match continues {
+                        true => self.groups.last().map_or(Live::Yes, |g| g.outer),
+                        false => self.live(),
+                    };
+                    if around == Live::No {
+                        out.extend(first..=i);
+                    }
+                    let next = lines[i + 1..]
+                        .iter()
+                        .map(|l| l.trim())
+                        .find(|l| l.starts_with('#'))
+                        .map(|l| strip_comments(l[1..].trim()));
+                    self.directive(&directive, next.as_deref());
+                }
+                None => {
+                    in_comment = ends_in_comment(&text, in_comment);
+                    if self.live() == Live::No {
+                        out.extend(first..=i);
+                    }
+                }
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Apply one directive (without its `#`); `next` is the directive after
+    /// it, for an include guard.
+    fn directive(&mut self, directive: &str, next: Option<&str>) {
+        let (word, rest) = directive
+            .split_once(|c: char| c.is_whitespace() || c == '(')
+            .map(|(w, _)| (w, directive[w.len()..].trim()))
+            .unwrap_or((directive, ""));
+        let name = || {
+            rest.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .next()
+                .unwrap_or_default()
+        };
+        match word {
+            "if" => self.open(self.condition(rest)),
+            "ifdef" => self.open(self.defined(name())),
+            "ifndef" => {
+                // An include guard (`#ifndef X` then `#define X`) is open
+                // the first time the file is read — as it is read here.
+                let guard = next.is_some_and(|n| {
+                    n.strip_prefix("define")
+                        .is_some_and(|d| d.split_whitespace().next() == Some(name()))
+                });
+                let value = match guard && self.defined(name()).is_none() {
+                    true => Some(true),
+                    false => self.defined(name()).map(|b| !b),
+                };
+                self.open(value)
+            }
+            "elif" => self.other(self.condition(rest)),
+            "elifdef" => self.other(self.defined(name())),
+            "elifndef" => self.other(self.defined(name()).map(|b| !b)),
+            "else" => self.other(Some(true)),
+            "endif" => {
+                self.groups.pop();
+            }
+            "define" | "undef" => {
+                let name = name();
+                if name.is_empty() {
+                    return;
+                }
+                match self.live() {
+                    Live::No => {}
+                    // Defined or not, depending on code that may not be
+                    // compiled: no longer known.
+                    Live::Maybe => {
+                        self.macros.remove(name);
+                    }
+                    Live::Yes => {
+                        let value = match word {
+                            "undef" => Macro::Undefined,
+                            _ => {
+                                let body = &rest[name.len()..];
+                                match body.starts_with('(') {
+                                    true => Macro::Defined(None),
+                                    false => Macro::Defined(crate::buildfacts::number(body)),
+                                }
+                            }
+                        };
+                        self.macros.insert(name.to_string(), value);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Open an `#if` chain whose first condition is `value`.
+    fn open(&mut self, value: Option<bool>) {
+        if self.groups.len() >= MAX_GROUPS {
+            // Followed no deeper: everything below is undecided.
+            self.groups.push(Group {
+                outer: Live::Maybe,
+                taken: None,
+                branch: Live::Maybe,
+            });
+            return;
+        }
+        let outer = self.live();
+        self.groups.push(Group {
+            outer,
+            taken: value,
+            branch: Live::of(value),
+        });
+    }
+
+    /// The next branch of the open chain, whose condition is `value`.
+    fn other(&mut self, value: Option<bool>) {
+        let Some(group) = self.groups.last_mut() else {
+            return;
+        };
+        let untaken = group.taken.map(|t| !t);
+        group.branch = Live::of(and(untaken, value));
+        group.taken = or(group.taken, value);
+    }
+
+    /// Whether macro `name` is defined, when known.
+    fn defined(&self, name: &str) -> Option<bool> {
+        match self.macros.get(name)? {
+            Macro::Defined(_) => Some(true),
+            Macro::Undefined => Some(false),
+        }
+    }
+
+    /// An `#if` condition's truth, when it can be known.
+    fn condition(&self, expr: &str) -> Option<bool> {
+        let tokens = c_tokens(expr)?;
+        let mut parser = CExpr {
+            tokens: &tokens,
+            at: 0,
+            pre: self,
+            depth: 0,
+        };
+        let value = parser.or()?;
+        if parser.at != tokens.len() {
+            return None;
+        }
+        value.map(|v| v != 0)
+    }
+}
+
+/// `line` (a directive) without its comments.
+fn strip_comments(line: &str) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    loop {
+        let line_comment = rest.find("//");
+        let block = rest.find("/*");
+        match (line_comment, block) {
+            (Some(l), b) if b.is_none_or(|b| l < b) => {
+                out.push_str(&rest[..l]);
+                break;
+            }
+            (_, Some(b)) => {
+                out.push_str(&rest[..b]);
+                out.push(' ');
+                match rest[b + 2..].find("*/") {
+                    Some(end) => rest = &rest[b + 2 + end + 2..],
+                    None => break,
+                }
+            }
+            _ => {
+                out.push_str(rest);
+                break;
+            }
+        }
+    }
+    out.trim().to_string()
+}
+
+/// Whether a block comment is open at the end of `line`, given whether one
+/// was at its start. Strings are not looked into: a `/*` in one is rare in a
+/// line a directive could follow.
+fn ends_in_comment(line: &str, mut open: bool) -> bool {
+    let mut rest = line;
+    loop {
+        if open {
+            match rest.find("*/") {
+                Some(end) => {
+                    open = false;
+                    rest = &rest[end + 2..];
+                }
+                None => return true,
+            }
+        } else {
+            let line_comment = rest.find("//");
+            match rest.find("/*") {
+                Some(start) if line_comment.is_none_or(|l| start < l) => {
+                    open = true;
+                    rest = &rest[start + 2..];
+                }
+                _ => return false,
+            }
+        }
+    }
+}
+
+/// The tokens of an `#if` expression, or `None` for one it may not be read
+/// in (a string, a character constant, an operator not handled).
+fn c_tokens(expr: &str) -> Option<Vec<String>> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = expr.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        if c.is_ascii_alphanumeric() || c == '_' {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '_' || chars[i] == '\'')
+            {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+            continue;
+        }
+        let two: String = chars[i..(i + 2).min(chars.len())].iter().collect();
+        if ["&&", "||", "==", "!=", "<=", ">="].contains(&two.as_str()) {
+            tokens.push(two);
+            i += 2;
+            continue;
+        }
+        if "!()<>+-*".contains(c) {
+            tokens.push(c.to_string());
+            i += 1;
+            continue;
+        }
+        return None;
+    }
+    Some(tokens)
+}
+
+/// A recursive-descent reader of an `#if` expression over what is known of
+/// the macros: `Some(Some(v))` its value, `Some(None)` undecidable, `None`
+/// malformed (or holding something not handled).
+struct CExpr<'a> {
+    tokens: &'a [String],
+    at: usize,
+    pre: &'a Preprocessor,
+    depth: usize,
+}
+
+impl CExpr<'_> {
+    fn peek(&self) -> Option<&str> {
+        self.tokens.get(self.at).map(String::as_str)
+    }
+
+    fn eat(&mut self, token: &str) -> bool {
+        let found = self.peek() == Some(token);
+        if found {
+            self.at += 1;
+        }
+        found
+    }
+
+    fn or(&mut self) -> Option<Option<i64>> {
+        let mut value = self.and()?;
+        while self.eat("||") {
+            let right = self.and()?;
+            value = match (value, right) {
+                (Some(a), _) if a != 0 => Some(1),
+                (_, Some(b)) if b != 0 => Some(1),
+                (Some(_), Some(_)) => Some(0),
+                _ => None,
+            };
+        }
+        Some(value)
+    }
+
+    fn and(&mut self) -> Option<Option<i64>> {
+        let mut value = self.compare()?;
+        while self.eat("&&") {
+            let right = self.compare()?;
+            value = match (value, right) {
+                (Some(0), _) | (_, Some(0)) => Some(0),
+                (Some(_), Some(_)) => Some(1),
+                _ => None,
+            };
+        }
+        Some(value)
+    }
+
+    fn compare(&mut self) -> Option<Option<i64>> {
+        let mut value = self.sum()?;
+        while let Some(op) = self
+            .peek()
+            .filter(|t| ["==", "!=", "<", ">", "<=", ">="].contains(t))
+            .map(str::to_string)
+        {
+            self.at += 1;
+            let right = self.sum()?;
+            value = match (value, right) {
+                (Some(a), Some(b)) => Some(i64::from(match op.as_str() {
+                    "==" => a == b,
+                    "!=" => a != b,
+                    "<" => a < b,
+                    ">" => a > b,
+                    "<=" => a <= b,
+                    _ => a >= b,
+                })),
+                _ => None,
+            };
+        }
+        Some(value)
+    }
+
+    fn sum(&mut self) -> Option<Option<i64>> {
+        let mut value = self.product()?;
+        while let Some(op) = self
+            .peek()
+            .filter(|t| *t == "+" || *t == "-")
+            .map(str::to_string)
+        {
+            self.at += 1;
+            let right = self.product()?;
+            value = match (value, right) {
+                (Some(a), Some(b)) if op == "+" => a.checked_add(b),
+                (Some(a), Some(b)) => a.checked_sub(b),
+                _ => None,
+            };
+        }
+        Some(value)
+    }
+
+    fn product(&mut self) -> Option<Option<i64>> {
+        let mut value = self.unary()?;
+        while self.eat("*") {
+            let right = self.unary()?;
+            value = match (value, right) {
+                (Some(a), Some(b)) => a.checked_mul(b),
+                _ => None,
+            };
+        }
+        Some(value)
+    }
+
+    fn unary(&mut self) -> Option<Option<i64>> {
+        self.depth += 1;
+        if self.depth > MAX_CFG_DEPTH {
+            return None;
+        }
+        let value = match self.peek()? {
+            "!" => {
+                self.at += 1;
+                self.unary()?.map(|v| i64::from(v == 0))
+            }
+            "-" => {
+                self.at += 1;
+                self.unary()?.and_then(i64::checked_neg)
+            }
+            "+" => {
+                self.at += 1;
+                self.unary()?
+            }
+            "(" => {
+                self.at += 1;
+                let value = self.or()?;
+                if !self.eat(")") {
+                    return None;
+                }
+                value
+            }
+            "defined" => {
+                self.at += 1;
+                let parens = self.eat("(");
+                let name = self.peek()?.to_string();
+                self.at += 1;
+                if parens && !self.eat(")") {
+                    return None;
+                }
+                self.pre.defined(&name).map(i64::from)
+            }
+            token if token.starts_with(|c: char| c.is_ascii_digit()) => {
+                let value = crate::buildfacts::number(token);
+                self.at += 1;
+                Some(value?)
+            }
+            token => {
+                let name = token.to_string();
+                self.at += 1;
+                // A function-like macro's call is not followed.
+                if self.peek() == Some("(") {
+                    return None;
+                }
+                match (name.as_str(), self.pre.macros.get(&name)) {
+                    ("true", None) => Some(1),
+                    ("false", None) => Some(0),
+                    (_, Some(Macro::Defined(value))) => *value,
+                    // An undefined name is 0 in an `#if`.
+                    (_, Some(Macro::Undefined)) => Some(0),
+                    (_, None) => None,
+                }
+            }
+        };
+        self.depth -= 1;
+        Some(value)
+    }
 }
 
 #[cfg(test)]
@@ -593,5 +1632,294 @@ mod depth_tests {
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
         assert_eq!(lines.len(), RUN + 1);
         assert!(lines.contains(&RUN) && !lines.contains(&(RUN + 1)));
+    }
+
+    fn linux() -> Target {
+        Target::new("Linux", "linux", "x86_64", "unix")
+    }
+
+    fn lines(set: HashSet<usize>) -> Vec<usize> {
+        let mut v: Vec<usize> = set.into_iter().collect();
+        v.sort();
+        v
+    }
+
+    fn crate_features(dir: &str, declared: &[&str], on: &[&str], maybe: &[&str]) -> CrateFeatures {
+        let v = |l: &[&str]| l.iter().map(|s| s.to_string()).collect();
+        CrateFeatures {
+            dir: dir.into(),
+            known: true,
+            declared: v(declared),
+            on: v(on),
+            maybe: v(maybe),
+        }
+    }
+
+    /// A Rust `cfg(feature)` is off when its package builds without the
+    /// feature — and left alone when another package may turn it on, when
+    /// the package does not declare it, or when the file's crate is not one
+    /// whose build is known.
+    #[test]
+    fn rust_features_dim_by_the_packages_build() {
+        let source = "\
+#[cfg(feature = \"fast\")]
+fn fast() {}
+#[cfg(feature = \"tls\")]
+fn tls() {}
+#[cfg(feature = \"maybe\")]
+fn maybe() {}
+#[cfg(feature = \"nope\")]
+fn nope() {}
+#[cfg(not(feature = \"fast\"))]
+fn slow() {}
+";
+        let facts = BuildFacts {
+            crates: vec![
+                crate_features(
+                    "",
+                    &["fast", "tls", "maybe", "default"],
+                    &["default", "tls"],
+                    &["maybe"],
+                ),
+                // Not known, whatever it lists: nothing is decided by it.
+                CrateFeatures {
+                    known: false,
+                    ..crate_features("fuzz", &["fast"], &[], &[])
+                },
+            ],
+            ..Default::default()
+        };
+        let dimmed = |rel| lines(inactive_lines_in(source, "rust", &linux(), &facts, rel));
+        assert_eq!(dimmed(Some("src/lib.rs")), [0, 1]);
+        // Another crate, whose build is not known: nothing.
+        assert!(dimmed(Some("fuzz/src/lib.rs")).is_empty());
+        // No file, or no facts: features undecided, as before.
+        assert!(dimmed(None).is_empty());
+        assert!(inactive_lines(source, "rust", &linux()).is_empty());
+    }
+
+    /// The target rust-analyzer is told to check for decides Rust's
+    /// platform `cfg`s, over the reading target.
+    #[test]
+    fn a_chosen_rust_target_decides_its_cfgs() {
+        let source = "#[cfg(target_os = \"linux\")]\nfn l() {}\n#[cfg(target_family = \"wasm\")]\nfn w() {}\n";
+        let facts = BuildFacts {
+            rust_target: Some("wasm32-unknown-unknown".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            lines(inactive_lines_in(source, "rust", &linux(), &facts, None)),
+            [0, 1]
+        );
+        let t = Target::from_triple("aarch64-apple-darwin");
+        assert_eq!(
+            (t.os.as_str(), t.arch.as_str(), t.family.as_str()),
+            ("macos", "aarch64", "unix")
+        );
+        let t = Target::from_triple("x86_64-pc-windows-msvc");
+        assert_eq!((t.os.as_str(), t.family.as_str()), ("windows", "windows"));
+        let t = Target::from_triple("aarch64-linux-android");
+        assert_eq!(t.os, "android");
+        let t = Target::from_triple("thumbv7em-none-eabihf");
+        assert_eq!(
+            (t.os.as_str(), t.arch.as_str(), t.family.as_str()),
+            ("none", "arm", "")
+        );
+    }
+
+    /// A Go file is left out whole when its name or its build constraint
+    /// excludes it — for the platform gopls loads, and the tags set — and
+    /// kept when what excludes it cannot be known.
+    #[test]
+    fn go_files_dim_whole_by_their_name_and_constraint() {
+        let body = "package p\n\nfunc F() {}\n";
+        let tagged = |c: &str| format!("// Copyright\n\n{c}\n\n{body}");
+        let tags = BuildFacts {
+            go_tags: Some(vec!["e2e".into()]),
+            ..Default::default()
+        };
+        let none = BuildFacts::default();
+        let dimmed = |source: &str, facts: &BuildFacts, rel: &str| {
+            !inactive_lines_in(source, "go", &linux(), facts, Some(rel)).is_empty()
+        };
+        // By name.
+        assert!(dimmed(body, &none, "x/conn_windows.go"));
+        assert!(dimmed(body, &none, "x/conn_darwin_arm64_test.go"));
+        assert!(!dimmed(body, &none, "x/conn_linux_amd64.go"));
+        assert!(
+            !dimmed(body, &none, "x/windows.go"),
+            "no `_`: no constraint"
+        );
+        // Android is Linux too, as the go command has it — not the reverse.
+        assert!(dimmed(body, &none, "x/conn_android.go"));
+        let android = BuildFacts {
+            goos: Some("android".into()),
+            ..Default::default()
+        };
+        assert!(!dimmed(body, &android, "x/conn_linux.go"));
+        // By constraint, its tags known…
+        assert!(dimmed(&tagged("//go:build integration"), &tags, "a.go"));
+        assert!(!dimmed(
+            &tagged("//go:build e2e && !windows"),
+            &tags,
+            "a.go"
+        ));
+        assert!(dimmed(
+            &tagged("//go:build darwin || windows"),
+            &tags,
+            "a.go"
+        ));
+        assert!(!dimmed(&tagged("//go:build unix"), &tags, "a.go"));
+        assert!(dimmed(
+            &tagged("// +build windows,amd64 darwin\n// +build e2e"),
+            &tags,
+            "a.go"
+        ));
+        assert!(!dimmed(&tagged("// +build linux,e2e"), &tags, "a.go"));
+        // …or not: undecided, kept.
+        assert!(!dimmed(&tagged("//go:build integration"), &none, "a.go"));
+        assert!(!dimmed(&tagged("//go:build linux && cgo"), &tags, "a.go"));
+        assert!(!dimmed(&tagged("//go:build go1.21"), &tags, "a.go"));
+        // A false term decides it even beside one that is not known.
+        assert!(dimmed(&tagged("//go:build windows && cgo"), &tags, "a.go"));
+        // After the package clause it is no constraint.
+        assert!(!dimmed(
+            &format!("{body}//go:build windows\n"),
+            &tags,
+            "a.go"
+        ));
+        // gopls's platform, chosen, over the reading target.
+        let windows = BuildFacts {
+            goos: Some("windows".into()),
+            ..Default::default()
+        };
+        assert!(!dimmed(body, &windows, "x/conn_windows.go"));
+        assert!(dimmed(body, &windows, "x/conn_linux.go"));
+        // A malformed constraint decides nothing.
+        assert!(!dimmed(&tagged("//go:build windows &&"), &tags, "a.go"));
+    }
+
+    /// C's preprocessor groups are dropped for the platform's macros, the
+    /// flags' `-D`/`-U` and the file's own `#define`s — a whole `#if`
+    /// chain, an include guard, comments and continued lines read as the
+    /// preprocessor reads them — and never for a macro a header may define.
+    #[test]
+    fn c_preprocessor_groups_dim_by_what_is_known() {
+        let source = "\
+#ifndef APP_H
+#define APP_H
+#define USE_X 1
+#if defined(_WIN32)
+win();
+#elif defined(__linux__) && \\
+      USE_X
+linux_x();
+#else
+other();
+#endif
+#ifdef SOMETHING_A_HEADER_DEFINES
+maybe();
+#else
+maybe_too();
+#endif
+#if 0 /* off */
+off();
+#if 1
+nested_off();
+#endif
+#endif
+/*
+#if 0
+*/
+kept();
+#ifndef DEBUG
+release();
+#endif
+#if DEBUG >= 2
+verbose();
+#endif
+#endif
+";
+        let facts = BuildFacts {
+            c_defines: Some(vec![clew_protocol::CMacro {
+                name: "DEBUG".into(),
+                value: Some(2),
+            }]),
+            ..Default::default()
+        };
+        let dimmed = lines(inactive_lines_in(
+            source,
+            "c",
+            &linux(),
+            &facts,
+            Some("app.h"),
+        ));
+        assert_eq!(
+            dimmed,
+            [
+                4,  // win();
+                9,  // other();
+                17, // off();
+                18, 19, 20, // the nested #if 1 … #endif, inside the dropped group
+                27, // release(): DEBUG is defined
+            ]
+        );
+        // Flags not known (a compilation database decides them): DEBUG is
+        // undecided, and so is all that hangs on it.
+        let unknown = lines(inactive_lines_in(
+            source,
+            "c",
+            &linux(),
+            &BuildFacts::default(),
+            Some("app.h"),
+        ));
+        assert_eq!(unknown, [4, 9, 17, 18, 19, 20]);
+        // On Windows the other branch.
+        let windows = Target::new("Windows", "windows", "x86_64", "windows");
+        let on_windows = lines(inactive_lines_in(
+            source,
+            "c",
+            &windows,
+            &facts,
+            Some("app.h"),
+        ));
+        assert_eq!(&on_windows[..3], [7, 9, 17]);
+    }
+
+    /// An `#if` the reader cannot follow — a function-like macro, a cast,
+    /// a character constant — decides nothing.
+    #[test]
+    fn a_c_condition_not_followed_decides_nothing() {
+        for condition in ["FOO(1)", "(int)1 == 0", "'a' == 97", "1 ? 0 : 1"] {
+            let source = format!("#if {condition}\nx();\n#endif\n");
+            assert!(
+                inactive_lines_in(&source, "c", &linux(), &BuildFacts::default(), None).is_empty(),
+                "{condition}"
+            );
+        }
+        // C++ alone defines `__cplusplus`.
+        let source = "#ifdef __cplusplus\ncpp();\n#else\nc();\n#endif\n";
+        let facts = BuildFacts::default();
+        assert_eq!(
+            lines(inactive_lines_in(
+                source,
+                "cpp",
+                &linux(),
+                &facts,
+                Some("a.cpp")
+            )),
+            [3]
+        );
+        assert_eq!(
+            lines(inactive_lines_in(
+                source,
+                "c",
+                &linux(),
+                &facts,
+                Some("a.c")
+            )),
+            [1]
+        );
+        assert!(inactive_lines_in(source, "c", &linux(), &facts, Some("a.h")).is_empty());
     }
 }

@@ -460,6 +460,7 @@ pub(crate) fn event_name(event: &clew_protocol::Event) -> &'static str {
         Event::Status { .. } => "Status",
         Event::LspResolved { .. } => "LspResolved",
         Event::LanguageOptions { .. } => "LanguageOptions",
+        Event::BuildFacts { .. } => "BuildFacts",
         Event::Error { .. } => "Error",
     }
 }

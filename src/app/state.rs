@@ -1786,6 +1786,12 @@ pub struct ProjectSession {
     pub lang_options: Option<Result<clew_protocol::LanguageOptions, String>>,
     /// What is typed into the Settings view's language fields.
     pub lang_drafts: LanguageDrafts,
+    /// What the project's build leaves out with those choices — its Cargo
+    /// features, Go tags, C macros — read where the project is
+    /// (`App::refresh_build_facts`), for the dimming of code the build does
+    /// not compile. Replaced whole, so a highlight pass can tell whether it
+    /// ran against the current one (`Arc::ptr_eq`).
+    pub build_facts: Arc<clew_protocol::BuildFacts>,
     /// Per-language `init_options` a remote clew-server sent with
     /// `LspResolved` — the LSP handshake runs client-side even for a remote
     /// server, but the options belong to the host that owns the lsp.toml.
@@ -1992,6 +1998,7 @@ impl Default for ProjectSession {
             lang_choices: Default::default(),
             lang_options: Default::default(),
             lang_drafts: Default::default(),
+            build_facts: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
             tracked_ignored: Default::default(),

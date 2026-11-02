@@ -961,6 +961,35 @@ impl Server {
                 });
                 None
             }
+            // What the project's build leaves out with the user's choices —
+            // its Cargo features, Go tags, C macros — read on this host,
+            // where its manifests are, for the client's reading aid. Reads
+            // files only. Off the loop, replies itself.
+            Request::BuildFacts { choices } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
+                spawn_reply(&self.out, id, "reading the build facts", move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return not_ready();
+                    };
+                    let crates =
+                        clew_core::buildfacts::crate_dirs(files.iter().map(|f| f.rel.as_str()));
+                    let config = clew_core::lsp::config::ProjectLspConfig::load(&root).ok();
+                    Event::BuildFacts {
+                        root: root.to_string_lossy().into_owned(),
+                        facts: clew_core::buildfacts::read(
+                            &root,
+                            &crates,
+                            &choices,
+                            config.as_ref(),
+                        ),
+                    }
+                });
+                None
+            }
             // The name-based project call graph, built where the files live.
             // The client supplies its resolved import scope (rel-based); the
             // reply's node paths are project-relative too. CPU-bound: off
