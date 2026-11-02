@@ -158,7 +158,7 @@ impl Adapter {
                 };
                 self.resume(args, how).await
             }
-            "pause" => Err("an interpreted Erlang process cannot be paused from outside".into()),
+            "pause" => self.pause().await,
             "stackTrace" => self.stack_trace(args).await,
             "scopes" => self.scopes(args).await,
             "variables" => self.variables(args).await,
@@ -492,6 +492,15 @@ impl Adapter {
         Ok(json!({ "allThreadsContinued": false }))
     }
 
+    /// Stop the program wherever it is next in interpreted code (see the
+    /// bridge's `pause`).
+    async fn pause(&self) -> Result<Value, String> {
+        let bridge = self.bridge()?;
+        self.stepping.store(false, Ordering::SeqCst);
+        bridge.ask(|seq| format!("{{pause, {seq}}}.")).await?;
+        Ok(json!({}))
+    }
+
     async fn stack_trace(&self, args: &Value) -> Result<Value, String> {
         let bridge = self.bridge()?;
         let thread = args["threadId"].as_u64().ok_or("which process?")?;
@@ -803,9 +812,13 @@ impl Bridge {
                 match message["event"].as_str() {
                     Some("stopped") => {
                         refs.lock().await.clear();
-                        let reason = match stepping.swap(false, Ordering::SeqCst) {
-                            true => "step",
-                            false => "breakpoint",
+                        let reason = match (
+                            stepping.swap(false, Ordering::SeqCst),
+                            message["reason"].as_str(),
+                        ) {
+                            (_, Some("pause")) => "pause",
+                            (true, _) => "step",
+                            (false, _) => "breakpoint",
                         };
                         out.event(
                             "stopped",
@@ -924,6 +937,59 @@ mod tests {
         assert_ne!(one, two);
         assert!(one.is_dir() && two.is_dir());
         let _ = (std::fs::remove_dir_all(one), std::fs::remove_dir_all(two));
+    }
+
+    /// A running Erlang program is paused — by breakpoints on every line,
+    /// taken off at the first stop — and runs on again when continued. Needs
+    /// Erlang/OTP.
+    #[tokio::test]
+    #[ignore = "needs Erlang/OTP with its debugger application; run explicitly"]
+    async fn a_running_erlang_program_is_paused() {
+        let dir = clew_core::testutil::TempDir::new("erlang-pause");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let program = dir.join("src/spin.erl");
+        std::fs::write(
+            &program,
+            "-module(spin).\n-export([main/1]).\n\nloop(N) ->\n    timer:sleep(10),\n    loop(N + 1).\n\nmain(_) ->\n    loop(0).\n",
+        )
+        .unwrap();
+        let tool = |name| clew_core::lsp::store::find_on_path_unresolved(name).expect(name);
+        let (mut client, input, output) = Client::pipes();
+        let running = tokio::spawn(serve(tool("erl"), tool("erlc"), input, output));
+        client
+            .request("initialize", json!({ "adapterID": "clew" }))
+            .await;
+        let launch = client
+            .send(
+                "launch",
+                json!({ "program": program.to_string_lossy(), "cwd": dir.to_string_lossy() }),
+            )
+            .await;
+        assert_eq!(client.answer(launch).await["success"], true);
+        client.event("initialized").await;
+        client.request("configurationDone", json!({})).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        client.request("pause", json!({ "threadId": 1 })).await;
+        let stopped = client.event("stopped").await;
+        assert_eq!(stopped["body"]["reason"], "pause");
+        let thread = stopped["body"]["threadId"].clone();
+        let stack = client
+            .request("stackTrace", json!({ "threadId": thread }))
+            .await;
+        assert_eq!(stack["stackFrames"][0]["name"], "spin:loop/1", "{stack}");
+        // On again — the pause's breakpoints gone, it does not stop.
+        client
+            .request("continue", json!({ "threadId": thread }))
+            .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        client.gather(Duration::from_millis(200)).await;
+        assert!(
+            !client.seen.iter().any(|m| m["event"] == "stopped"),
+            "{:?}",
+            client.seen
+        );
+        client.request("disconnect", json!({})).await;
+        assert_eq!(running.await.unwrap(), Ok(()));
     }
 
     /// An Erlang program debugged for real, under OTP's interpreter: held at

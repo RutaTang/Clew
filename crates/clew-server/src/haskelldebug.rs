@@ -40,6 +40,9 @@ const LOAD_TIMEOUT: Duration = Duration::from_secs(300);
 /// How long a command that runs no program code may take.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Most `:step`s a step out takes before it stops where it got to.
+const MAX_STEPS_OUT: usize = 10_000;
+
 /// How long GHCi has to exit once its session is over.
 const EXIT_GRACE: Duration = Duration::from_secs(3);
 
@@ -159,7 +162,24 @@ impl Adapter {
                 self.run_on(ghci, reason).await;
                 return true;
             }
-            "stepOut" => Err("GHCi cannot step out of a binding — continue instead".into()),
+            "stepOut" => {
+                let origin = self
+                    .stop
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|at| enclosing(&at.name));
+                match origin {
+                    Some(origin) => {
+                        self.out
+                            .respond(request, Ok(json!({ "allThreadsContinued": true })))
+                            .await;
+                        self.step_out(origin).await;
+                        return true;
+                    }
+                    None => Err("the program is not stopped".into()),
+                }
+            }
             "pause" => Err("GHCi cannot pause a running program".into()),
             "stackTrace" => self.stack_trace().await,
             "scopes" => self.scopes(args).await,
@@ -376,6 +396,48 @@ impl Adapter {
         });
     }
 
+    /// Step out of the binding the program is stopped in: GHCi has no such
+    /// command, so it `:step`s on until it is somewhere outside it — or the
+    /// program ends.
+    async fn step_out(&self, origin: String) {
+        let Ok(session) = self.session() else {
+            return;
+        };
+        let out = self.out.clone();
+        let stop = self.stop.clone();
+        tokio::spawn(async move {
+            let mut ghci = session.lock().await;
+            let mut last = None;
+            for _ in 0..MAX_STEPS_OUT {
+                let Ok(reply) = ghci.command(":step", Duration::MAX).await else {
+                    break;
+                };
+                let (printed, stopped) = parse_stop(&reply);
+                if !printed.is_empty() {
+                    out.output("stdout", printed).await;
+                }
+                match stopped {
+                    Some(at) if within(&at.name, &origin) => last = Some(at),
+                    Some(at) => {
+                        last = Some(at);
+                        break;
+                    }
+                    None => {
+                        *stop.lock().await = None;
+                        out.terminated(Some(0)).await;
+                        return;
+                    }
+                }
+            }
+            *stop.lock().await = last;
+            out.event(
+                "stopped",
+                json!({ "reason": "step", "threadId": 1, "allThreadsStopped": true }),
+            )
+            .await;
+        });
+    }
+
     /// Where the program stopped, then its evaluation history.
     async fn stack_trace(&self) -> Result<Value, String> {
         let Some(at) = self.stop.lock().await.clone() else {
@@ -568,6 +630,27 @@ fn frame(id: u64, name: &str, path: &str, line: u64, column: u64) -> Value {
     })
 }
 
+/// The top-level binding a stop is in: its name up to the first component
+/// that is not a module's (`Main.total.s` is in `Main.total`).
+fn enclosing(name: &str) -> String {
+    let mut kept = Vec::new();
+    for part in name.split('.') {
+        kept.push(part);
+        if !part.starts_with(|c: char| c.is_uppercase()) {
+            break;
+        }
+    }
+    kept.join(".")
+}
+
+/// Whether the stop named `name` is within the binding `origin`.
+fn within(name: &str, origin: &str) -> bool {
+    name == origin
+        || name
+            .strip_prefix(origin)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
+
 /// A value as GHCi shows it, an unevaluated one (`_`) said so.
 fn shown_value(value: &str) -> String {
     match value.trim() {
@@ -582,10 +665,7 @@ fn shown_value(value: &str) -> String {
 /// own output comes before, a line it had not finished included.
 fn parse_stop(reply: &str) -> (String, Option<Stop>) {
     let Some(at) = reply.find("Stopped in ") else {
-        return (
-            strip_location(reply) + if reply.ends_with('\n') { "\n" } else { "" },
-            None,
-        );
+        return (without_location(reply), None);
     };
     let printed = reply[..at].to_string();
     let rest = &reply[at + "Stopped in ".len()..];
@@ -679,6 +759,15 @@ fn parse_activated(said: &str) -> Option<(String, u64)> {
     let (_, span) = rest.split_once(" at ")?;
     let (_, line, _) = parse_span(span);
     Some((number.to_string(), line))
+}
+
+/// A run's output as it printed it — spaces and line ends kept — less the
+/// `[span]` line GHCi ends a reply with while stopped.
+fn without_location(reply: &str) -> String {
+    reply
+        .split_inclusive('\n')
+        .filter(|l| !is_location(l))
+        .collect()
 }
 
 /// A reply without the `[span]` line GHCi ends it with while stopped.
@@ -794,6 +883,11 @@ mod tests {
         );
         let (printed, stop) = parse_stop("10 [\"a\"]\n");
         assert_eq!((printed.as_str(), stop), ("10 [\"a\"]\n", None));
+        // Output split across replies keeps its spaces.
+        let (printed, _) = parse_stop("total 10 ");
+        assert_eq!(printed, "total 10 ");
+        let (printed, _) = parse_stop("done\n[app/Main.hs:7:11-16] ");
+        assert_eq!(printed, "done\n");
         assert_eq!(
             parse_span("src/A.hs:(7,3)-(8,9)"),
             ("src/A.hs".into(), 7, 3)
@@ -823,6 +917,10 @@ mod tests {
         assert!(is_identifier("xs'") && is_identifier("Data.Map.empty"));
         assert!(!is_identifier("length xs") && !is_identifier("1 + 2"));
         assert_eq!(shown_value("_"), "_ (not evaluated yet)");
+        assert_eq!(enclosing("Main.total.s"), "Main.total");
+        assert_eq!(enclosing("Data.Shop.total.go.x"), "Data.Shop.total");
+        assert!(within("Main.total.s", "Main.total") && within("Main.total", "Main.total"));
+        assert!(!within("Main.totals", "Main.total") && !within("Main.main", "Main.total"));
     }
 
     /// A Haskell program debugged for real, under GHCi: held at its
@@ -874,6 +972,7 @@ mod tests {
         // Lazily, `t` is wanted first (line 13), then `s` in `total` (7).
         let mut visited = Vec::new();
         let mut saw_xs = false;
+        let mut stepped_out = false;
         loop {
             let message = client.event_any(&["stopped", "terminated"]).await;
             if message["event"] == "terminated" {
@@ -913,12 +1012,28 @@ mod tests {
                     .await;
                 assert_eq!(sum["result"], "102");
                 saw_xs = true;
+                // Out of `total`: somewhere not within it.
+                client.request("stepOut", json!({ "threadId": 1 })).await;
+                let next = client.event_any(&["stopped", "terminated"]).await;
+                if next["event"] == "stopped" {
+                    let stack = client.request("stackTrace", json!({ "threadId": 1 })).await;
+                    let name = stack["stackFrames"][0]["name"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    assert!(!name.starts_with("Main.total"), "out of total: {name}");
+                    stepped_out = true;
+                } else {
+                    stepped_out = true;
+                    break;
+                }
             }
             client.request("continue", json!({ "threadId": 1 })).await;
             assert!(visited.len() < 10, "{visited:?}");
         }
         assert!(visited.contains(&13) && visited.contains(&7), "{visited:?}");
         assert!(saw_xs);
+        assert!(stepped_out, "stepped out of total");
         assert!(
             client.output().contains("total 10 [\"a b\",\"c\"]"),
             "{}",

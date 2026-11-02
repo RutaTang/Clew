@@ -1532,6 +1532,103 @@ mod tests {
         }
     }
 
+    /// A native program under the real lldb-dap — the path Rust's, C's, C++'s
+    /// and Zig's binaries take: held at a breakpoint, its stack and a local
+    /// read, stepped, run on to its end with its output shown. Needs
+    /// `lldb-dap` (or a versioned one) and a C compiler.
+    #[tokio::test]
+    #[ignore = "needs lldb-dap and cc on the PATH; run explicitly"]
+    async fn a_native_program_is_debugged_with_lldb_dap() {
+        let dir = clew_core::testutil::TempDir::new("dap-lldb");
+        let source = dir.join("app.c");
+        std::fs::write(
+            &source,
+            "#include <stdio.h>\n\nint total(int a, int b) {\n    int sum = a + b;\n    return sum * 2;\n}\n\nint main(void) {\n    int t = total(2, 3);\n    printf(\"answer %d\\n\", t);\n    return 0;\n}\n",
+        )
+        .unwrap();
+        let binary = dir.join("app");
+        let built = std::process::Command::new("cc")
+            .args(["-g", "-O0", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        let spec = match clew_core::debugadapter::resolve(
+            "native",
+            &binary.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("lldb-dap started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stops: Vec<usize> = Vec::new();
+        let mut configured = false;
+        let mut stepped = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client.set_breakpoints(&source, &[(4, None)]).await.unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stops.push(frames[0].line);
+                    if !stepped {
+                        assert_eq!(frames[0].name, "total");
+                        assert_eq!(frames[1].line, 9, "main, where it called");
+                        let scopes = client.scopes(frames[0].id).await.unwrap();
+                        let locals = client
+                            .variables(scopes[0].variables_reference)
+                            .await
+                            .unwrap();
+                        assert!(
+                            locals.iter().any(|v| v.name == "a" && v.value == "2"),
+                            "{locals:?}"
+                        );
+                        stepped = true;
+                        client.next(thread).await.unwrap();
+                    } else {
+                        client.continue_(thread).await.unwrap();
+                    }
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stops, [4, 5], "held at the breakpoint, then a line on");
+        assert!(output.contains("answer 10"), "{output:?}");
+    }
+
     /// Go's real delve, end to end: the program built and held at a
     /// breakpoint, its stack read, run on to its end with its output shown.
     /// Needs `go` and `dlv` on the PATH.

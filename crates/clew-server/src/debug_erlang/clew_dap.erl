@@ -14,7 +14,8 @@ start([PortAtom]) ->
     register(clew_dap, Self),
     int:auto_attach([break], {clew_dap, attach}),
     spawn_link(fun() -> reader(Sock, Self) end),
-    loop(#{sock => Sock, threads => #{}, next_id => 1, refs => #{}, next_ref => 1, waiting => #{}}).
+    loop(#{sock => Sock, threads => #{}, next_id => 1, refs => #{}, next_ref => 1, waiting => #{},
+           pausing => [], paused => false}).
 
 reader(Sock, Main) ->
     case gen_tcp:recv(Sock, 0) of
@@ -78,10 +79,15 @@ meta(Meta, {break_at, Mod, Line, _Cm}, S) ->
         %% An evaluation re-reports where the process is stopped: not news.
         {_, true} -> S;
         {Id, false} ->
-            send(S, #{event => <<"stopped">>, thread => Id, module => Mod, line => Line}),
+            %% Stopped by a pause: its breakpoints everywhere go again.
+            Paused = maps:get(paused, S),
+            [int:delete_break(M, L) || {M, L} <- maps:get(pausing, S)],
+            Reason = case Paused of true -> <<"pause">>; false -> <<"breakpoint">> end,
+            send(S, #{event => <<"stopped">>, thread => Id, module => Mod, line => Line, reason => Reason}),
             Threads = maps:get(threads, S),
             Thread = maps:get(Id, Threads),
-            S#{refs => #{}, threads => maps:put(Id, Thread#{line => Line}, Threads)}
+            S#{refs => #{}, threads => maps:put(Id, Thread#{line => Line}, Threads),
+               pausing => [], paused => false}
     end;
 meta(Meta, {eval_rsp, Value}, S) ->
     Waiting = maps:get(waiting, S),
@@ -132,6 +138,16 @@ command({resume, Thread, How}, S) ->
         _ -> ok
     end,
     S;
+%% Pause: nothing stops a running interpreted process from outside, so it is
+%% stopped by a breakpoint on every line of the interpreted modules that has
+%% one, taken off again at the first stop.
+command({pause, Seq}, S) ->
+    Existing = [{M, L} || {{M, L}, _} <- int:all_breaks()],
+    Temporary = [{M, L} || M <- int:interpreted(), L <- source_lines(M),
+                           not lists:member({M, L}, Existing),
+                           int:break(M, L) =:= ok],
+    reply(S, Seq, length(Temporary)),
+    S#{pausing => Temporary, paused => true};
 command({threads, Seq}, S) ->
     Threads = [#{id => Id, name => fmt(Pid)} || {Id, #{pid := Pid}} <- maps:to_list(maps:get(threads, S)),
                                                 is_process_alive(Pid)],
@@ -195,6 +211,17 @@ command({eval, Seq, Thread, Level, Expr}, S) ->
     end;
 command(_, S) ->
     S.
+
+%% The lines of an interpreted module's source.
+source_lines(Mod) ->
+    case int:file(Mod) of
+        File when is_list(File) ->
+            case file:read_file(File) of
+                {ok, Text} -> lists:seq(1, length(binary:split(Text, <<"\n">>, [global])));
+                _ -> []
+            end;
+        _ -> []
+    end.
 
 interpreted({module, _}) -> true;
 interpreted(_) -> false.

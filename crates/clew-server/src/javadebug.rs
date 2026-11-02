@@ -298,6 +298,13 @@ struct Jdwp {
     sizes: std::sync::Mutex<IdSizes>,
     /// The VM is gone: a command fails at once rather than waiting.
     closed: Arc<AtomicBool>,
+    /// Objects an evaluation made (a string, a method's result), kept from
+    /// the collector while the program is stopped: nothing else refers to
+    /// them.
+    held: std::sync::Mutex<Vec<u64>>,
+    /// The thread running a method for an evaluation (0: none): a
+    /// breakpoint it meets is passed, as it is not the program's own run.
+    invoking: AtomicU64,
 }
 
 impl Jdwp {
@@ -331,6 +338,8 @@ impl Jdwp {
             next: AtomicU32::new(1),
             sizes: std::sync::Mutex::new(IdSizes::default()),
             closed: closed.clone(),
+            held: std::sync::Mutex::default(),
+            invoking: AtomicU64::new(0),
         });
         tokio::spawn(async move {
             loop {
@@ -430,6 +439,29 @@ impl Jdwp {
         self.call(1, 9, self.data()).await.map(|_| ())
     }
 
+    /// Keep `value` (an object an evaluation made) from the collector until
+    /// [`Jdwp::release`].
+    async fn hold(&self, value: JValue) -> JValue {
+        if !is_primitive(value.tag) && value.tag != b'V' && value.bits != 0 {
+            let held = self.call(9, 7, self.data().object(value.bits)).await;
+            if held.is_ok() {
+                self.held
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(value.bits);
+            }
+        }
+        value
+    }
+
+    /// Let the collector have what evaluations made: the program runs on.
+    async fn release(&self) {
+        let held = std::mem::take(&mut *self.held.lock().unwrap_or_else(|e| e.into_inner()));
+        for object in held {
+            let _ = self.call(9, 8, self.data().object(object)).await;
+        }
+    }
+
     async fn suspend(&self) -> Result<(), String> {
         self.call(1, 8, self.data()).await.map(|_| ())
     }
@@ -480,6 +512,14 @@ impl Jdwp {
             fields.push((r.field()?, r.string()?, r.string()?, r.i32()?));
         }
         Ok(fields)
+    }
+
+    /// The interfaces a type declares it implements (or extends).
+    async fn interfaces(&self, class: u64) -> Result<Vec<u64>, String> {
+        let reply = self.call(2, 10, self.data().reference(class)).await?;
+        let mut r = self.reader(&reply);
+        let n = r.count()?;
+        (0..n).map(|_| r.reference()).collect()
     }
 
     async fn superclass(&self, class: u64) -> Result<u64, String> {
@@ -637,6 +677,85 @@ impl Jdwp {
             .collect()
     }
 
+    /// Static fields' values (`ReferenceType.GetValues`).
+    async fn static_values(&self, class: u64, fields: &[u64]) -> Result<Vec<JValue>, String> {
+        let mut data = self.data().reference(class).i32(fields.len() as i32);
+        for field in fields {
+            data = data.field(*field);
+        }
+        let reply = self.call(2, 6, data).await?;
+        let mut r = self.reader(&reply);
+        let n = r.count()?;
+        (0..n).map(|_| r.tagged()).collect()
+    }
+
+    /// A new string in the VM.
+    async fn create_string(&self, text: &str) -> Result<JValue, String> {
+        let reply = self.call(1, 11, self.data().string(text)).await?;
+        let string = JValue {
+            tag: b's',
+            bits: self.reader(&reply).object()?,
+        };
+        Ok(self.hold(string).await)
+    }
+
+    /// Invoke a method in `thread` — on `object`, or a static one of
+    /// `class` when `object` is none — the other threads left suspended.
+    async fn invoke(
+        &self,
+        object: Option<u64>,
+        class: u64,
+        thread: u64,
+        method: u64,
+        args: &[JValue],
+    ) -> Result<JValue, String> {
+        let mut data = match object {
+            Some(object) => self.data().object(object).object(thread).reference(class),
+            None => self.data().reference(class).object(thread),
+        }
+        .method(method)
+        .i32(args.len() as i32);
+        for arg in args {
+            data = data.u8(arg.tag);
+            data = match arg.tag {
+                b'B' | b'Z' => data.u8(arg.bits as u8),
+                b'C' | b'S' => {
+                    data.bytes
+                        .extend_from_slice(&(arg.bits as u16).to_be_bytes());
+                    data
+                }
+                b'I' | b'F' => data.i32(arg.bits as u32 as i32),
+                b'J' | b'D' => data.u64(arg.bits),
+                _ => data.object(arg.bits),
+            };
+        }
+        // INVOKE_SINGLE_THREADED: only this thread runs for it.
+        let data = data.i32(1);
+        self.invoking.store(thread, Ordering::SeqCst);
+        let reply = match object {
+            Some(_) => self.call(9, 6, data).await,
+            None => self.call(3, 3, data).await,
+        };
+        self.invoking.store(0, Ordering::SeqCst);
+        // A thread runs a method only from where an event stopped it — not
+        // from a pause.
+        let reply = reply.map_err(|e| match e.as_str() {
+            "no such thread" => {
+                "methods are called only in a thread stopped at a breakpoint or a step".to_string()
+            }
+            _ => e,
+        })?;
+        let mut r = self.reader(&reply);
+        let value = r.tagged()?;
+        let exception = r.tagged()?;
+        if exception.bits != 0 {
+            let class = self.object_class(exception.bits).await.unwrap_or(0);
+            let name = class_name(&self.signature(class).await.unwrap_or_default());
+            return Err(format!("it threw {name}"));
+        }
+        Ok(self.hold(value).await)
+    }
+
     /// Ask for events of `kind`, the VM suspended when one comes.
     async fn request(&self, kind: u8, modifiers: Vec<Writer>) -> Result<i32, String> {
         let mut data = self.data().u8(kind).u8(2).i32(modifiers.len() as i32);
@@ -728,10 +847,11 @@ struct Wanted {
 /// What a `variablesReference` stands for.
 #[derive(Debug, Clone, Copy)]
 enum VarRef {
-    /// A frame's locals (and `this`).
+    /// A frame's locals (and `this`), the frame by its depth: a frame's id
+    /// does not outlive the thread running (a method invoked in it).
     Locals {
         thread: u64,
-        frame: u64,
+        depth: usize,
         location: Location,
     },
     /// An object's fields or an array's elements.
@@ -742,8 +862,9 @@ enum VarRef {
 struct State {
     /// Each source file's breakpoints, and the classes they are for.
     breakpoints: HashMap<String, (String, Vec<Wanted>)>,
-    /// The DAP frame ids handed out since the program last stopped.
-    frames: Vec<(u64, u64, Location)>,
+    /// The DAP frame ids handed out since the program last stopped: each
+    /// frame's thread, depth and location.
+    frames: Vec<(u64, usize, Location)>,
     refs: Vec<VarRef>,
     /// The step request in effect, cleared when it ends.
     step: Option<i32>,
@@ -794,10 +915,12 @@ impl Adapter {
             },
             "threads" => self.threads().await,
             "continue" => match self.vm() {
-                Ok(vm) => vm
-                    .resume()
-                    .await
-                    .map(|()| json!({ "allThreadsContinued": true })),
+                Ok(vm) => {
+                    vm.release().await;
+                    vm.resume()
+                        .await
+                        .map(|()| json!({ "allThreadsContinued": true }))
+                }
                 Err(e) => Err(e),
             },
             "next" | "stepIn" | "stepOut" => {
@@ -1115,6 +1238,7 @@ impl Adapter {
         let request = vm.request(1, modifiers).await?;
         self.state.lock().await.step = Some(request);
         self.forget_frames().await;
+        vm.release().await;
         vm.resume().await?;
         Ok(json!({}))
     }
@@ -1124,10 +1248,10 @@ impl Adapter {
         let thread = args["threadId"].as_u64().ok_or("which thread?")?;
         let frames = vm.frames(thread).await?;
         let mut shown = Vec::new();
-        for (frame, location) in frames {
+        for (depth, (_, location)) in frames.into_iter().enumerate() {
             let id = {
                 let mut state = self.state.lock().await;
-                state.frames.push((thread, frame, location));
+                state.frames.push((thread, depth, location));
                 state.frames.len()
             };
             let signature = vm.signature(location.class).await.unwrap_or_default();
@@ -1183,13 +1307,13 @@ impl Adapter {
     async fn scopes(&self, args: &Value) -> Result<Value, String> {
         let id = args["frameId"].as_u64().unwrap_or(0) as usize;
         let mut state = self.state.lock().await;
-        let (thread, frame, location) = *id
+        let (thread, depth, location) = *id
             .checked_sub(1)
             .and_then(|i| state.frames.get(i))
             .ok_or("no such frame")?;
         state.refs.push(VarRef::Locals {
             thread,
-            frame,
+            depth,
             location,
         });
         Ok(
@@ -1213,9 +1337,9 @@ impl Adapter {
         let named = match var {
             VarRef::Locals {
                 thread,
-                frame,
+                depth,
                 location,
-            } => locals(&vm, thread, frame, location).await?,
+            } => locals(&vm, thread, frame_id(&vm, thread, depth).await?, location).await?,
             VarRef::Object { object, array } => children(&vm, object, array).await?,
         };
         let mut variables = Vec::new();
@@ -1243,41 +1367,35 @@ impl Adapter {
         json!({ "name": name, "value": text, "variablesReference": reference })
     }
 
-    /// A variable, and the fields and elements along a path from it.
+    /// An expression, evaluated in a frame: JDWP evaluates none itself, so
+    /// it is parsed here ([`parse_expression`]) and worked out over JDWP —
+    /// variables and fields read, methods invoked in the stopped thread.
     async fn evaluate(&self, args: &Value) -> Result<Value, String> {
         let expression = args["expression"].as_str().unwrap_or("").trim().to_string();
-        let path = parse_path(&expression).ok_or(
-            "JDWP evaluates no expressions — name a variable, or a field or element of one",
-        )?;
+        let parsed = parse_expression(&expression)?;
         let id = args["frameId"].as_u64().unwrap_or(0) as usize;
-        let (thread, frame, location) = {
+        let (thread, depth, location) = {
             let state = self.state.lock().await;
             *id.checked_sub(1)
                 .and_then(|i| state.frames.get(i))
                 .ok_or("evaluate in a stopped thread's frame")?
         };
         let vm = self.vm()?;
-        let scope = locals(&vm, thread, frame, location).await?;
-        let mut steps = path.into_iter();
-        let first = steps.next().ok_or("nothing to evaluate")?;
-        let PathStep::Name(first) = first else {
-            return Err("start with a variable's name".into());
+        let frame = Frame {
+            vm: &vm,
+            thread,
+            depth,
+            location,
+            // Resting the pointer on code runs none of it.
+            calls: args["context"] != "hover",
         };
-        let mut value = match scope.iter().find(|(n, _)| *n == first) {
-            Some((_, v)) => *v,
-            None => {
-                // A field of `this`.
-                let this = scope.iter().find(|(n, _)| n == "this").map(|(_, v)| *v);
-                let this = this.ok_or_else(|| format!("no variable {first} here"))?;
-                field_of(&vm, this, &first).await?
+        let value = frame.eval(&parsed).await?;
+        let value = match value {
+            Val::Text(text) => {
+                return Ok(json!({ "result": format!("{text:?}"), "variablesReference": 0 }));
             }
+            Val::J(value) => value,
         };
-        for step in steps {
-            value = match step {
-                PathStep::Name(name) => field_of(&vm, value, &name).await?,
-                PathStep::Index(i) => element_of(&vm, value, i).await?,
-            };
-        }
         let shown = self.shown(&vm, &expression, value).await;
         Ok(json!({ "result": shown["value"], "variablesReference": shown["variablesReference"] }))
     }
@@ -1376,6 +1494,13 @@ async fn event_loop(
                             }
                         }
                     }
+                    resume = true;
+                }
+                // A breakpoint in a method an evaluation called: passed.
+                Event::Stopped {
+                    thread,
+                    step: false,
+                } if vm.invoking.load(Ordering::SeqCst) == thread => {
                     resume = true;
                 }
                 Event::Stopped { thread, step } => {
@@ -1519,8 +1644,8 @@ async fn display(vm: &Jdwp, value: JValue) -> String {
             .unwrap_or_default(),
         b'I' => (value.bits as u32 as i32).to_string(),
         b'J' => (value.bits as i64).to_string(),
-        b'F' => f32::from_bits(value.bits as u32).to_string(),
-        b'D' => f64::from_bits(value.bits).to_string(),
+        b'F' => java_float(f64::from(f32::from_bits(value.bits as u32))),
+        b'D' => java_float(f64::from_bits(value.bits)),
         b'V' => "void".into(),
         _ if value.bits == 0 => "null".into(),
         b's' => match vm.string_value(value.bits).await {
@@ -1544,6 +1669,16 @@ async fn display(vm: &Jdwp, value: JValue) -> String {
                 value.bits
             )
         }
+    }
+}
+
+/// A floating value as Java writes one: `3.0`, `NaN`, `Infinity`.
+fn java_float(v: f64) -> String {
+    match v {
+        _ if v.is_nan() => "NaN".into(),
+        f64::INFINITY => "Infinity".into(),
+        f64::NEG_INFINITY => "-Infinity".into(),
+        _ => format!("{v:?}"),
     }
 }
 
@@ -1586,38 +1721,979 @@ fn line_at(table: &[(u64, i32)], index: u64) -> Option<i32> {
         .map(|(_, line)| *line)
 }
 
-#[derive(Debug, PartialEq)]
-enum PathStep {
+// -- expressions --------------------------------------------------------------
+
+/// A Java expression, as much of the language as reads values: literals,
+/// names, fields, elements, calls, `this`, and the unary and binary
+/// operators on them.
+#[derive(Debug, Clone, PartialEq)]
+enum Expr {
+    Int(i64),
+    Long(i64),
+    Double(f64),
+    Bool(bool),
+    Char(char),
+    Text(String),
+    Null,
+    This,
     Name(String),
-    Index(usize),
+    Field(Box<Expr>, String),
+    Index(Box<Expr>, Box<Expr>),
+    /// A call: on its receiver, or — none — on `this` or the frame's class.
+    Call(Option<Box<Expr>>, String, Vec<Expr>),
+    Unary(char, Box<Expr>),
+    Binary(&'static str, Box<Expr>, Box<Expr>),
 }
 
-/// `order.items[0].price` as its steps; `None` for anything else — a call,
-/// an operator.
-fn parse_path(expression: &str) -> Option<Vec<PathStep>> {
-    let mut steps = Vec::new();
-    let mut rest = expression;
-    loop {
-        let end = rest
-            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
-            .unwrap_or(rest.len());
-        let name = &rest[..end];
-        if name.is_empty() || name.starts_with(|c: char| c.is_ascii_digit()) {
-            return None;
-        }
-        steps.push(PathStep::Name(name.to_string()));
-        rest = &rest[end..];
-        while let Some(after) = rest.strip_prefix('[') {
-            let close = after.find(']')?;
-            steps.push(PathStep::Index(after[..close].trim().parse().ok()?));
-            rest = &after[close + 1..];
-        }
-        match rest.strip_prefix('.') {
-            Some(after) => rest = after,
-            None if rest.is_empty() => return Some(steps),
-            None => return None,
+#[derive(Debug, Clone, PartialEq)]
+enum Token {
+    Name(String),
+    Int(i64),
+    Long(i64),
+    Double(f64),
+    Text(String),
+    Char(char),
+    Op(&'static str),
+}
+
+const OPERATORS: &[&str] = &[
+    "&&", "||", "==", "!=", "<=", ">=", "+", "-", "*", "/", "%", "<", ">", "!", "(", ")", "[", "]",
+    ".", ",",
+];
+
+fn tokenize(text: &str) -> Result<Vec<Token>, String> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+        } else if c.is_alphabetic() || c == '_' || c == '$' {
+            let start = i;
+            while i < chars.len() && (chars[i].is_alphanumeric() || matches!(chars[i], '_' | '$')) {
+                i += 1;
+            }
+            tokens.push(Token::Name(chars[start..i].iter().collect()));
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while i < chars.len()
+                && (chars[i].is_ascii_alphanumeric() || chars[i] == '.' || chars[i] == '_')
+            {
+                i += 1;
+            }
+            let number: String = chars[start..i].iter().filter(|c| **c != '_').collect();
+            let token = if let Some(n) = number.strip_suffix(['L', 'l']) {
+                Token::Long(n.parse().map_err(|_| format!("not a number: {number}"))?)
+            } else if number.contains(['.', 'e', 'E']) || number.ends_with(['d', 'D', 'f', 'F']) {
+                let n = number.trim_end_matches(['d', 'D', 'f', 'F']);
+                Token::Double(n.parse().map_err(|_| format!("not a number: {number}"))?)
+            } else {
+                Token::Int(
+                    number
+                        .parse()
+                        .map_err(|_| format!("not a number: {number}"))?,
+                )
+            };
+            tokens.push(token);
+        } else if c == '"' || c == '\'' {
+            let mut text = String::new();
+            i += 1;
+            loop {
+                let Some(&ch) = chars.get(i) else {
+                    return Err("a quote is not closed".into());
+                };
+                i += 1;
+                match ch {
+                    _ if ch == c => break,
+                    '\\' => {
+                        let escaped = *chars.get(i).ok_or("a quote is not closed")?;
+                        i += 1;
+                        text.push(match escaped {
+                            'n' => '\n',
+                            't' => '\t',
+                            'r' => '\r',
+                            '0' => '\0',
+                            other => other,
+                        });
+                    }
+                    other => text.push(other),
+                }
+            }
+            tokens.push(match c {
+                '"' => Token::Text(text),
+                _ => Token::Char(text.chars().next().ok_or("an empty character")?),
+            });
+        } else {
+            let rest: String = chars[i..chars.len().min(i + 2)].iter().collect();
+            let op = OPERATORS
+                .iter()
+                .find(|op| rest.starts_with(**op))
+                .ok_or_else(|| format!("{c} is not understood here"))?;
+            tokens.push(Token::Op(op));
+            i += op.chars().count();
         }
     }
+    Ok(tokens)
+}
+
+/// Parse an expression ([`Expr`]); an error says what is not understood.
+fn parse_expression(text: &str) -> Result<Expr, String> {
+    let tokens = tokenize(text)?;
+    if tokens.is_empty() {
+        return Err("nothing to evaluate".into());
+    }
+    let mut parser = Parser { tokens, at: 0 };
+    let expr = parser.binary(0)?;
+    match parser.tokens.get(parser.at) {
+        None => Ok(expr),
+        Some(token) => Err(format!("{token:?} is not understood here")),
+    }
+}
+
+struct Parser {
+    tokens: Vec<Token>,
+    at: usize,
+}
+
+/// Binary operators by precedence, loosest first.
+const LEVELS: &[&[&str]] = &[
+    &["||"],
+    &["&&"],
+    &["==", "!="],
+    &["<", "<=", ">", ">="],
+    &["+", "-"],
+    &["*", "/", "%"],
+];
+
+impl Parser {
+    fn peek_op(&self) -> Option<&'static str> {
+        match self.tokens.get(self.at) {
+            Some(Token::Op(op)) => Some(op),
+            _ => None,
+        }
+    }
+
+    fn expect(&mut self, op: &str) -> Result<(), String> {
+        match self.peek_op() {
+            Some(found) if found == op => {
+                self.at += 1;
+                Ok(())
+            }
+            _ => Err(format!("{op} expected")),
+        }
+    }
+
+    fn binary(&mut self, level: usize) -> Result<Expr, String> {
+        let Some(ops) = LEVELS.get(level) else {
+            return self.unary();
+        };
+        let mut left = self.binary(level + 1)?;
+        while let Some(op) = self.peek_op().filter(|op| ops.contains(op)) {
+            self.at += 1;
+            let right = self.binary(level + 1)?;
+            left = Expr::Binary(op, Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
+    fn unary(&mut self) -> Result<Expr, String> {
+        match self.peek_op() {
+            Some("-") => {
+                self.at += 1;
+                Ok(Expr::Unary('-', Box::new(self.unary()?)))
+            }
+            Some("!") => {
+                self.at += 1;
+                Ok(Expr::Unary('!', Box::new(self.unary()?)))
+            }
+            _ => self.postfix(),
+        }
+    }
+
+    fn arguments(&mut self) -> Result<Vec<Expr>, String> {
+        self.expect("(")?;
+        let mut args = Vec::new();
+        if self.peek_op() == Some(")") {
+            self.at += 1;
+            return Ok(args);
+        }
+        loop {
+            args.push(self.binary(0)?);
+            match self.peek_op() {
+                Some(",") => self.at += 1,
+                Some(")") => {
+                    self.at += 1;
+                    return Ok(args);
+                }
+                _ => return Err(") expected".into()),
+            }
+        }
+    }
+
+    fn postfix(&mut self) -> Result<Expr, String> {
+        let mut expr = self.primary()?;
+        loop {
+            match self.peek_op() {
+                Some(".") => {
+                    self.at += 1;
+                    let Some(Token::Name(name)) = self.tokens.get(self.at).cloned() else {
+                        return Err("a name expected after .".into());
+                    };
+                    self.at += 1;
+                    expr = match self.peek_op() {
+                        Some("(") => Expr::Call(Some(Box::new(expr)), name, self.arguments()?),
+                        _ => Expr::Field(Box::new(expr), name),
+                    };
+                }
+                Some("[") => {
+                    self.at += 1;
+                    let index = self.binary(0)?;
+                    self.expect("]")?;
+                    expr = Expr::Index(Box::new(expr), Box::new(index));
+                }
+                _ => return Ok(expr),
+            }
+        }
+    }
+
+    fn primary(&mut self) -> Result<Expr, String> {
+        let token = self
+            .tokens
+            .get(self.at)
+            .cloned()
+            .ok_or("an expression ended early")?;
+        self.at += 1;
+        Ok(match token {
+            Token::Int(n) => Expr::Int(n),
+            Token::Long(n) => Expr::Long(n),
+            Token::Double(n) => Expr::Double(n),
+            Token::Text(t) => Expr::Text(t),
+            Token::Char(c) => Expr::Char(c),
+            Token::Name(name) => match name.as_str() {
+                "true" => Expr::Bool(true),
+                "false" => Expr::Bool(false),
+                "null" => Expr::Null,
+                "this" => Expr::This,
+                _ if self.peek_op() == Some("(") => Expr::Call(None, name, self.arguments()?),
+                _ => Expr::Name(name),
+            },
+            Token::Op("(") => {
+                let inner = self.binary(0)?;
+                self.expect(")")?;
+                inner
+            }
+            Token::Op(op) => return Err(format!("{op} is not understood here")),
+        })
+    }
+}
+
+/// A value while an expression is worked out: one in the VM, or text not
+/// put there (a literal, a concatenation) unless a call needs it.
+#[derive(Debug, Clone)]
+enum Val {
+    J(JValue),
+    Text(String),
+}
+
+/// A number while an expression is worked out.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Num {
+    Int(i64),
+    Long(i64),
+    Double(f64),
+}
+
+/// The frame an expression is evaluated in.
+struct Frame<'a> {
+    vm: &'a Jdwp,
+    thread: u64,
+    depth: usize,
+    location: Location,
+    /// Whether methods may be called (not for a hover).
+    calls: bool,
+}
+
+/// A frame's current id: frames are looked up again after anything that
+/// ran the thread (an invoked method).
+async fn frame_id(vm: &Jdwp, thread: u64, depth: usize) -> Result<u64, String> {
+    vm.frames(thread)
+        .await?
+        .get(depth)
+        .map(|(id, _)| *id)
+        .ok_or_else(|| "no such frame".to_string())
+}
+
+type Eval<'b> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Val, String>> + Send + 'b>>;
+
+impl Frame<'_> {
+    fn eval<'b>(&'b self, expr: &'b Expr) -> Eval<'b> {
+        Box::pin(async move {
+            let vm = self.vm;
+            Ok(match expr {
+                Expr::Int(n) => Val::J(JValue {
+                    tag: b'I',
+                    bits: *n as i32 as u32 as u64,
+                }),
+                Expr::Long(n) => Val::J(JValue {
+                    tag: b'J',
+                    bits: *n as u64,
+                }),
+                Expr::Double(n) => Val::J(JValue {
+                    tag: b'D',
+                    bits: n.to_bits(),
+                }),
+                Expr::Bool(b) => Val::J(JValue {
+                    tag: b'Z',
+                    bits: u64::from(*b),
+                }),
+                Expr::Char(c) => Val::J(JValue {
+                    tag: b'C',
+                    bits: u64::from(*c as u32 as u16),
+                }),
+                Expr::Text(t) => Val::Text(t.clone()),
+                Expr::Null => Val::J(JValue { tag: b'L', bits: 0 }),
+                Expr::This => Val::J(self.this().await?.ok_or("no this in a static method")?),
+                Expr::Name(name) => Val::J(self.name(name).await?),
+                Expr::Field(target, name) => {
+                    if let Expr::Name(class) = target.as_ref()
+                        && !self.is_variable(class).await
+                        && let Some(class) = self.class_named(class).await
+                    {
+                        return Ok(Val::J(static_field(vm, class, name).await?));
+                    }
+                    let target = self.in_vm(self.eval(target).await?).await?;
+                    Val::J(field_of(vm, target, name).await?)
+                }
+                Expr::Index(target, index) => {
+                    let target = self.in_vm(self.eval(target).await?).await?;
+                    let index = self.unboxed(self.eval(index).await?).await;
+                    let index = match number(&index) {
+                        Some(Num::Int(i) | Num::Long(i)) if i >= 0 => i as usize,
+                        _ => return Err("an index must be a whole number".into()),
+                    };
+                    Val::J(element_of(vm, target, index).await?)
+                }
+                Expr::Call(receiver, name, args) => {
+                    Val::J(self.call(receiver.as_deref(), name, args).await?)
+                }
+                Expr::Unary('-', inner) => {
+                    match number(&self.unboxed(self.eval(inner).await?).await) {
+                        Some(Num::Int(i)) => num(Num::Int(-i)),
+                        Some(Num::Long(i)) => num(Num::Long(-i)),
+                        Some(Num::Double(d)) => num(Num::Double(-d)),
+                        None => return Err("- needs a number".into()),
+                    }
+                }
+                Expr::Unary(_, inner) => match self.unboxed(self.eval(inner).await?).await {
+                    Val::J(JValue { tag: b'Z', bits }) => Val::J(JValue {
+                        tag: b'Z',
+                        bits: u64::from(bits == 0),
+                    }),
+                    _ => return Err("! needs a boolean".into()),
+                },
+                Expr::Binary(op, left, right) => self.binary(op, left, right).await?,
+            })
+        })
+    }
+
+    async fn binary(&self, op: &str, left: &Expr, right: &Expr) -> Result<Val, String> {
+        let l = self.eval(left).await?;
+        // `&&` and `||` look no further than they need to.
+        if matches!(op, "&&" | "||") {
+            let needs = || format!("{op} needs booleans");
+            let l = boolean(&self.unboxed(l).await).ok_or_else(needs)?;
+            if (op == "&&" && !l) || (op == "||" && l) {
+                return Ok(bool_val(l));
+            }
+            let r = self.unboxed(self.eval(right).await?).await;
+            return Ok(bool_val(boolean(&r).ok_or_else(needs)?));
+        }
+        let r = self.eval(right).await?;
+        if op == "+" && (self.is_text(&l) || self.is_text(&r)) {
+            return Ok(Val::Text(self.text(&l).await? + &self.text(&r).await?));
+        }
+        // Two objects are compared as references, as Java compares them;
+        // otherwise a boxed number or boolean takes part as its value.
+        let objects = |v: &Val| matches!(v, Val::J(j) if !is_primitive(j.tag));
+        let (l, r) = match matches!(op, "==" | "!=") && objects(&l) && objects(&r) {
+            true => (l, r),
+            false => (self.unboxed(l).await, self.unboxed(r).await),
+        };
+        if let (Some(a), Some(b)) = (number(&l), number(&r)) {
+            return arithmetic(op, a, b);
+        }
+        match (op, &l, &r) {
+            ("==" | "!=", Val::J(a), Val::J(b)) => {
+                let same = a.bits == b.bits
+                    && (a.tag == b.tag || !is_primitive(a.tag) && !is_primitive(b.tag));
+                Ok(bool_val(same == (op == "==")))
+            }
+            _ => Err(format!("{op} is not defined on these values")),
+        }
+    }
+
+    /// A boxed value (`Integer`, `Boolean`, …) as its primitive; anything
+    /// else as it is.
+    async fn unboxed(&self, value: Val) -> Val {
+        let Val::J(j) = &value else {
+            return value;
+        };
+        if j.tag != b'L' || j.bits == 0 {
+            return value;
+        }
+        let Ok(class) = self.vm.object_class(j.bits).await else {
+            return value;
+        };
+        let boxes = [
+            "Ljava/lang/Integer;",
+            "Ljava/lang/Long;",
+            "Ljava/lang/Double;",
+            "Ljava/lang/Float;",
+            "Ljava/lang/Short;",
+            "Ljava/lang/Byte;",
+            "Ljava/lang/Character;",
+            "Ljava/lang/Boolean;",
+        ];
+        match self.vm.signature(class).await {
+            Ok(signature) if boxes.contains(&signature.as_str()) => {
+                match field_of(self.vm, *j, "value").await {
+                    Ok(inner) => Val::J(inner),
+                    Err(_) => value,
+                }
+            }
+            _ => value,
+        }
+    }
+
+    /// Run a method in the frame's thread — not for a hover.
+    async fn invoke(
+        &self,
+        object: Option<u64>,
+        class: u64,
+        method: u64,
+        args: &[JValue],
+    ) -> Result<JValue, String> {
+        if !self.calls {
+            return Err("methods are not called for a hover".into());
+        }
+        self.vm
+            .invoke(object, class, self.thread, method, args)
+            .await
+    }
+
+    async fn this(&self) -> Result<Option<JValue>, String> {
+        let frame = frame_id(self.vm, self.thread, self.depth).await?;
+        let this = self.vm.this_object(self.thread, frame).await?;
+        Ok((this.bits != 0).then_some(this))
+    }
+
+    async fn is_variable(&self, name: &str) -> bool {
+        self.name(name).await.is_ok()
+    }
+
+    /// A local, a field of `this`, or a static field of the frame's class.
+    async fn name(&self, name: &str) -> Result<JValue, String> {
+        let frame = frame_id(self.vm, self.thread, self.depth).await?;
+        let scope = locals(self.vm, self.thread, frame, self.location).await?;
+        if let Some((_, value)) = scope.iter().find(|(n, _)| n == name) {
+            return Ok(*value);
+        }
+        if let Some((_, this)) = scope.iter().find(|(n, _)| n == "this")
+            && let Ok(value) = field_of(self.vm, *this, name).await
+        {
+            return Ok(value);
+        }
+        static_field(self.vm, self.location.class, name)
+            .await
+            .map_err(|_| format!("no variable {name} here"))
+    }
+
+    /// A class by the name the code would use: in the frame's package, or
+    /// `java.lang`, or fully named.
+    async fn class_named(&self, name: &str) -> Option<u64> {
+        let own = class_name(&self.vm.signature(self.location.class).await.ok()?);
+        let package = own.rsplit_once('.').map(|(p, _)| p.to_string());
+        let mut candidates = vec![name.to_string(), format!("java.lang.{name}")];
+        if let Some(package) = package {
+            candidates.insert(0, format!("{package}.{name}"));
+        }
+        for candidate in candidates {
+            let signature = format!("L{};", candidate.replace('.', "/"));
+            if let Some(class) = self.vm.classes_by_signature(&signature).await.ok()?.first() {
+                return Some(*class);
+            }
+        }
+        None
+    }
+
+    /// Call `name` on `receiver` — an object, a class by name, or (none)
+    /// `this` or the frame's class.
+    async fn call(
+        &self,
+        receiver: Option<&Expr>,
+        name: &str,
+        args: &[Expr],
+    ) -> Result<JValue, String> {
+        let (object, class) = match receiver {
+            Some(Expr::Name(class_name)) if !self.is_variable(class_name).await => {
+                let class = self
+                    .class_named(class_name)
+                    .await
+                    .ok_or_else(|| format!("no variable or class {class_name} here"))?;
+                (None, class)
+            }
+            Some(receiver) => {
+                let object = self.in_vm(self.eval(receiver).await?).await?;
+                if object.bits == 0 {
+                    return Err("it is null".into());
+                }
+                (Some(object.bits), self.vm.object_class(object.bits).await?)
+            }
+            None => match self.this().await? {
+                Some(this) => (Some(this.bits), self.vm.object_class(this.bits).await?),
+                None => (None, self.location.class),
+            },
+        };
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(self.eval(arg).await?);
+        }
+        let candidates = overloads(self.vm, class, name, values.len()).await?;
+        if candidates.is_empty() {
+            return Err(format!(
+                "no method {name} taking {} arguments",
+                values.len()
+            ));
+        }
+        let mut kinds = Vec::new();
+        for value in &values {
+            kinds.push(self.kind(value).await?);
+        }
+        let method = candidates
+            .into_iter()
+            .filter_map(|m| {
+                let params = parameter_types(&m.signature);
+                let scores = kinds.iter().zip(&params).map(|(k, p)| k.fits(p));
+                scores.sum::<Option<u32>>().map(|score| (score, m))
+            })
+            .min_by_key(|(score, _)| *score)
+            .map(|(_, m)| m)
+            .ok_or_else(|| format!("no method {name} takes these arguments"))?;
+        let mut converted = Vec::new();
+        for (value, param) in values.into_iter().zip(parameter_types(&method.signature)) {
+            converted.push(self.argument(value, &param).await?);
+        }
+        let object = match method.is_static {
+            true => None,
+            false => Some(object.ok_or_else(|| format!("{name} needs an object to call it on"))?),
+        };
+        self.invoke(object, method.declaring, method.id, &converted)
+            .await
+    }
+
+    /// What a value is, for choosing among a method's overloads.
+    async fn kind(&self, value: &Val) -> Result<Kind, String> {
+        let class = match value {
+            Val::J(j) if is_primitive(j.tag) => return Ok(Kind::Primitive(j.tag)),
+            Val::J(j) if j.bits == 0 => return Ok(Kind::Null),
+            Val::J(j) => self.vm.object_class(j.bits).await?,
+            Val::Text(_) => *self
+                .vm
+                .classes_by_signature("Ljava/lang/String;")
+                .await?
+                .first()
+                .ok_or("no String class")?,
+        };
+        let types = supertypes(self.vm, class).await?;
+        Ok(Kind::Reference(types.into_iter().map(|(_, s)| s).collect()))
+    }
+
+    /// A value as a parameter of type `param` takes it: widened, boxed or
+    /// unboxed, text put in the VM as a string.
+    async fn argument(&self, value: Val, param: &str) -> Result<JValue, String> {
+        let tag = param.as_bytes().first().copied().unwrap_or(b'L');
+        if is_primitive(tag) {
+            let value = self.unboxed(value).await;
+            if tag == b'Z' {
+                return boolean(&value)
+                    .map(|b| JValue {
+                        tag,
+                        bits: u64::from(b),
+                    })
+                    .ok_or_else(|| "a boolean expected".into());
+            }
+            let n = number(&value).ok_or("a number expected")?;
+            let whole = match n {
+                Num::Int(i) | Num::Long(i) => i,
+                Num::Double(d) => d as i64,
+            };
+            let bits = match tag {
+                b'B' => u64::from(whole as i8 as u8),
+                b'S' => u64::from(whole as i16 as u16),
+                b'C' => u64::from(whole as u16),
+                b'I' => u64::from(whole as i32 as u32),
+                b'J' => whole as u64,
+                b'F' => u64::from((to_f64(n) as f32).to_bits()),
+                _ => to_f64(n).to_bits(),
+            };
+            return Ok(JValue { tag, bits });
+        }
+        match value {
+            // Boxed, as Java boxes it: `Integer.valueOf(int)` and the like.
+            Val::J(j) if is_primitive(j.tag) => {
+                let boxed = box_of(j.tag);
+                let class = *self
+                    .vm
+                    .classes_by_signature(boxed)
+                    .await?
+                    .first()
+                    .ok_or_else(|| format!("{} is not loaded", class_name(boxed)))?;
+                let signature = format!("({}){boxed}", j.tag as char);
+                let method = self
+                    .vm
+                    .methods(class)
+                    .await?
+                    .into_iter()
+                    .find(|(_, n, s, _)| n == "valueOf" && *s == signature)
+                    .ok_or("no valueOf to box with")?;
+                self.invoke(None, class, method.0, &[j]).await
+            }
+            other => self.in_vm(other).await,
+        }
+    }
+
+    /// A value as the VM holds it — text put there as a string.
+    async fn in_vm(&self, value: Val) -> Result<JValue, String> {
+        match value {
+            Val::J(j) => Ok(j),
+            Val::Text(text) => self.vm.create_string(&text).await,
+        }
+    }
+
+    fn is_text(&self, value: &Val) -> bool {
+        matches!(value, Val::Text(_) | Val::J(JValue { tag: b's', .. }))
+    }
+
+    /// A value as `+` joins it to text: a string's text, a primitive as
+    /// Java writes it, an object by its `toString()`.
+    async fn text(&self, value: &Val) -> Result<String, String> {
+        Ok(match value {
+            Val::Text(text) => text.clone(),
+            Val::J(j) if j.tag == b's' && j.bits != 0 => self.vm.string_value(j.bits).await?,
+            Val::J(j) if j.bits == 0 && !is_primitive(j.tag) => "null".into(),
+            Val::J(j) if is_primitive(j.tag) => {
+                let shown = display(self.vm, *j).await;
+                shown.trim_matches('\'').to_string()
+            }
+            Val::J(j) => {
+                let class = self.vm.object_class(j.bits).await?;
+                match overloads(self.vm, class, "toString", 0).await?.first() {
+                    Some(method) => {
+                        let text = self
+                            .invoke(Some(j.bits), method.declaring, method.id, &[])
+                            .await?;
+                        match text.bits {
+                            0 => "null".into(),
+                            bits => self.vm.string_value(bits).await?,
+                        }
+                    }
+                    None => display(self.vm, *j).await,
+                }
+            }
+        })
+    }
+}
+
+fn is_primitive(tag: u8) -> bool {
+    matches!(tag, b'B' | b'C' | b'F' | b'D' | b'I' | b'J' | b'S' | b'Z')
+}
+
+fn bool_val(b: bool) -> Val {
+    Val::J(JValue {
+        tag: b'Z',
+        bits: u64::from(b),
+    })
+}
+
+fn boolean(value: &Val) -> Option<bool> {
+    match value {
+        Val::J(JValue { tag: b'Z', bits }) => Some(*bits != 0),
+        _ => None,
+    }
+}
+
+fn number(value: &Val) -> Option<Num> {
+    let Val::J(j) = value else {
+        return None;
+    };
+    Some(match j.tag {
+        b'I' => Num::Int(j.bits as u32 as i32 as i64),
+        b'S' => Num::Int(j.bits as u16 as i16 as i64),
+        b'B' => Num::Int(j.bits as u8 as i8 as i64),
+        b'C' => Num::Int(j.bits as u16 as i64),
+        b'J' => Num::Long(j.bits as i64),
+        b'F' => Num::Double(f32::from_bits(j.bits as u32) as f64),
+        b'D' => Num::Double(f64::from_bits(j.bits)),
+        _ => return None,
+    })
+}
+
+fn to_f64(n: Num) -> f64 {
+    match n {
+        Num::Int(i) | Num::Long(i) => i as f64,
+        Num::Double(d) => d,
+    }
+}
+
+fn num(n: Num) -> Val {
+    Val::J(match n {
+        Num::Int(i) => JValue {
+            tag: b'I',
+            bits: i as i32 as u32 as u64,
+        },
+        Num::Long(i) => JValue {
+            tag: b'J',
+            bits: i as u64,
+        },
+        Num::Double(d) => JValue {
+            tag: b'D',
+            bits: d.to_bits(),
+        },
+    })
+}
+
+/// Java's arithmetic and comparisons: `int` unless a `long` or a floating
+/// value takes part, integer division by zero refused as Java refuses it.
+fn arithmetic(op: &str, a: Num, b: Num) -> Result<Val, String> {
+    let floating = matches!(a, Num::Double(_)) || matches!(b, Num::Double(_));
+    let long = matches!(a, Num::Long(_)) || matches!(b, Num::Long(_));
+    if floating {
+        let (x, y) = (to_f64(a), to_f64(b));
+        return Ok(match op {
+            "+" => num(Num::Double(x + y)),
+            "-" => num(Num::Double(x - y)),
+            "*" => num(Num::Double(x * y)),
+            "/" => num(Num::Double(x / y)),
+            "%" => num(Num::Double(x % y)),
+            "<" => bool_val(x < y),
+            "<=" => bool_val(x <= y),
+            ">" => bool_val(x > y),
+            ">=" => bool_val(x >= y),
+            "==" => bool_val(x == y),
+            "!=" => bool_val(x != y),
+            _ => return Err(format!("{op} is not defined on numbers")),
+        });
+    }
+    let (Num::Int(x) | Num::Long(x), Num::Int(y) | Num::Long(y)) = (a, b) else {
+        unreachable!("integral");
+    };
+    let wrap = |v: i64| match long {
+        true => num(Num::Long(v)),
+        false => num(Num::Int(v as i32 as i64)),
+    };
+    Ok(match op {
+        "+" => wrap(x.wrapping_add(y)),
+        "-" => wrap(x.wrapping_sub(y)),
+        "*" => wrap(x.wrapping_mul(y)),
+        "/" | "%" if y == 0 => {
+            return Err("it threw java.lang.ArithmeticException: / by zero".into());
+        }
+        "/" => wrap(x.wrapping_div(y)),
+        "%" => wrap(x.wrapping_rem(y)),
+        "<" => bool_val(x < y),
+        "<=" => bool_val(x <= y),
+        ">" => bool_val(x > y),
+        ">=" => bool_val(x >= y),
+        "==" => bool_val(x == y),
+        "!=" => bool_val(x != y),
+        _ => return Err(format!("{op} is not defined on numbers")),
+    })
+}
+
+/// A static field of `class` (or its superclasses).
+async fn static_field(vm: &Jdwp, class: u64, name: &str) -> Result<JValue, String> {
+    let mut current = class;
+    for _ in 0..16 {
+        if current == 0 {
+            break;
+        }
+        if let Some(field) = vm
+            .fields(current)
+            .await?
+            .into_iter()
+            .find(|f| f.1 == name && f.3 & 0x0008 != 0)
+        {
+            return vm
+                .static_values(current, &[field.0])
+                .await?
+                .into_iter()
+                .next()
+                .ok_or_else(|| format!("no field {name}"));
+        }
+        current = vm.superclass(current).await.unwrap_or(0);
+    }
+    Err(format!("no field {name}"))
+}
+
+/// A method that can be called.
+struct Method {
+    /// The type that declares it.
+    declaring: u64,
+    id: u64,
+    signature: String,
+    is_static: bool,
+}
+
+/// A type and the types it is also: its superclasses, then the interfaces
+/// of each — by id and signature, the type itself first.
+async fn supertypes(vm: &Jdwp, class: u64) -> Result<Vec<(u64, String)>, String> {
+    let mut chain = Vec::new();
+    let mut current = class;
+    while current != 0 && chain.len() < 32 {
+        chain.push(current);
+        current = vm.superclass(current).await.unwrap_or(0);
+    }
+    let mut queue: std::collections::VecDeque<u64> = chain.iter().copied().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut types = Vec::new();
+    while let Some(next) = queue.pop_front() {
+        if !seen.insert(next) || types.len() >= 128 {
+            continue;
+        }
+        types.push((next, vm.signature(next).await?));
+        queue.extend(vm.interfaces(next).await.unwrap_or_default());
+    }
+    Ok(types)
+}
+
+/// The methods `name` taking `arity` arguments that `class` has: its own,
+/// then those it inherits and does not override.
+async fn overloads(vm: &Jdwp, class: u64, name: &str, arity: usize) -> Result<Vec<Method>, String> {
+    let mut found: Vec<Method> = Vec::new();
+    for (declaring, _) in supertypes(vm, class).await? {
+        for (id, n, signature, modifiers) in vm.methods(declaring).await? {
+            if n != name
+                || parameter_types(&signature).len() != arity
+                || found.iter().any(|m| m.signature == signature)
+            {
+                continue;
+            }
+            found.push(Method {
+                declaring,
+                id,
+                signature,
+                is_static: modifiers & 0x0008 != 0,
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// What an argument is, for choosing among overloads: a primitive by its
+/// tag, `null`, or an object by every type it is (its own first).
+#[derive(Debug, Clone, PartialEq)]
+enum Kind {
+    Primitive(u8),
+    Null,
+    Reference(Vec<String>),
+}
+
+/// The class a primitive is boxed in.
+fn box_of(tag: u8) -> &'static str {
+    match tag {
+        b'Z' => "Ljava/lang/Boolean;",
+        b'B' => "Ljava/lang/Byte;",
+        b'C' => "Ljava/lang/Character;",
+        b'S' => "Ljava/lang/Short;",
+        b'I' => "Ljava/lang/Integer;",
+        b'J' => "Ljava/lang/Long;",
+        b'F' => "Ljava/lang/Float;",
+        _ => "Ljava/lang/Double;",
+    }
+}
+
+/// Whether Java widens primitive `from` to `to` without a cast.
+fn widens(from: u8, to: u8) -> bool {
+    let targets: &[u8] = match from {
+        b'B' => b"SIJFD",
+        b'S' | b'C' => b"IJFD",
+        b'I' => b"JFD",
+        b'J' => b"FD",
+        b'F' => b"D",
+        _ => b"",
+    };
+    targets.contains(&to)
+}
+
+impl Kind {
+    /// How well this fits a parameter of type `param` — 0 exactly, more the
+    /// further Java must go (widen, box, generalise) — or not at all.
+    fn fits(&self, param: &str) -> Option<u32> {
+        let tag = param.as_bytes().first().copied()?;
+        match self {
+            Kind::Primitive(from) if is_primitive(tag) => match *from == tag {
+                true => Some(0),
+                false => widens(*from, tag).then_some(1),
+            },
+            Kind::Primitive(from) => {
+                let general = [
+                    "Ljava/lang/Object;",
+                    "Ljava/io/Serializable;",
+                    "Ljava/lang/Comparable;",
+                ];
+                match param {
+                    _ if param == box_of(*from) => Some(2),
+                    "Ljava/lang/Number;" if *from != b'Z' && *from != b'C' => Some(3),
+                    _ if general.contains(&param) => Some(4),
+                    _ => None,
+                }
+            }
+            Kind::Null => (!is_primitive(tag)).then_some(1),
+            Kind::Reference(types) if is_primitive(tag) => {
+                let own = types.first()?;
+                let from = *b"ZBCSIJFD".iter().find(|t| box_of(**t) == own)?;
+                match from == tag {
+                    true => Some(2),
+                    false => widens(from, tag).then_some(3),
+                }
+            }
+            Kind::Reference(types) => match types.iter().position(|t| t == param) {
+                Some(0) => Some(0),
+                Some(_) if param == "Ljava/lang/Object;" => Some(4),
+                Some(_) => Some(1),
+                None => None,
+            },
+        }
+    }
+}
+
+/// A method signature's parameter types (`(I[JLjava/lang/String;)V` →
+/// `I`, `[J`, `Ljava/lang/String;`).
+fn parameter_types(signature: &str) -> Vec<String> {
+    let inner = signature
+        .strip_prefix('(')
+        .and_then(|s| s.split_once(')'))
+        .map(|(params, _)| params)
+        .unwrap_or("");
+    let mut types = Vec::new();
+    let bytes = inner.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = i;
+        while bytes[i] == b'[' {
+            i += 1;
+        }
+        if bytes[i] == b'L' {
+            while i < bytes.len() && bytes[i] != b';' {
+                i += 1;
+            }
+        }
+        i += 1;
+        types.push(inner[start..i.min(inner.len())].to_string());
+    }
+    types
 }
 
 /// The package a Java source declares.
@@ -1745,22 +2821,6 @@ mod tests {
         assert_eq!(type_name("Ljava/lang/String;"), "String");
         assert_eq!(line_at(&[(0, 10), (4, 11), (9, 12)], 6), Some(11));
         assert_eq!(line_at(&[(3, 10)], 1), None);
-        assert_eq!(
-            parse_path("order.items[0].price"),
-            Some(vec![
-                PathStep::Name("order".into()),
-                PathStep::Name("items".into()),
-                PathStep::Index(0),
-                PathStep::Name("price".into())
-            ])
-        );
-        for not_a_path in ["a + b", "f(x)", "items[i]", "", "1x", "a."] {
-            assert_eq!(parse_path(not_a_path), None, "{not_a_path}");
-        }
-        assert_eq!(
-            package_of("// x\npackage demo.shop;\n\nclass A {}"),
-            Some("demo.shop".into())
-        );
         assert_eq!(package_of("import java.util.List;\nclass A {}"), None);
         assert_eq!(
             source_root(Path::new("/p/src/demo/shop/Main.java"), Some("demo.shop")),
@@ -1793,6 +2853,265 @@ mod tests {
         assert!(r.u8().is_err(), "past the end is an error, not a panic");
     }
 
+    #[test]
+    fn expressions_are_parsed_with_java_precedence() {
+        let e = |t: &str| parse_expression(t).unwrap();
+        let name = |n: &str| Box::new(Expr::Name(n.into()));
+        assert_eq!(
+            e("a + b * 2"),
+            Expr::Binary(
+                "+",
+                name("a"),
+                Box::new(Expr::Binary("*", name("b"), Box::new(Expr::Int(2))))
+            )
+        );
+        assert_eq!(
+            e("a.b[1].c(2, \"x\")"),
+            Expr::Call(
+                Some(Box::new(Expr::Index(
+                    Box::new(Expr::Field(name("a"), "b".into())),
+                    Box::new(Expr::Int(1))
+                ))),
+                "c".into(),
+                vec![Expr::Int(2), Expr::Text("x".into())]
+            )
+        );
+        assert_eq!(
+            e("!a && b || c"),
+            Expr::Binary(
+                "||",
+                Box::new(Expr::Binary(
+                    "&&",
+                    Box::new(Expr::Unary('!', name("a"))),
+                    name("b")
+                )),
+                name("c")
+            )
+        );
+        assert_eq!(
+            e("-(1 - 2) <= 3L"),
+            Expr::Binary(
+                "<=",
+                Box::new(Expr::Unary(
+                    '-',
+                    Box::new(Expr::Binary(
+                        "-",
+                        Box::new(Expr::Int(1)),
+                        Box::new(Expr::Int(2))
+                    ))
+                )),
+                Box::new(Expr::Long(3))
+            )
+        );
+        assert_eq!(e("f()"), Expr::Call(None, "f".into(), vec![]));
+        assert_eq!(e("this.x"), Expr::Field(Box::new(Expr::This), "x".into()));
+        assert_eq!(e("1_000"), Expr::Int(1000));
+        assert_eq!(e("2.5e1"), Expr::Double(25.0));
+        assert_eq!(e("1f"), Expr::Double(1.0));
+        assert_eq!(e("'\\n'"), Expr::Char('\n'));
+        assert_eq!(e("\"a\\\"b\""), Expr::Text("a\"b".into()));
+        assert_eq!(
+            e("true != null"),
+            Expr::Binary("!=", Box::new(Expr::Bool(true)), Box::new(Expr::Null))
+        );
+        for bad in [
+            "", "a +", "a.", "f(1,", "(a", "\"open", "a # b", "a b", "a[1",
+        ] {
+            assert!(parse_expression(bad).is_err(), "{bad:?} is refused");
+        }
+    }
+
+    #[test]
+    fn arithmetic_is_javas() {
+        let shown = |v: Result<Val, String>| match v {
+            Ok(Val::J(j)) => (j.tag, j.bits),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            shown(arithmetic("+", Num::Int(i32::MAX as i64), Num::Int(1))),
+            (b'I', i32::MIN as u32 as u64),
+            "int wraps"
+        );
+        assert_eq!(
+            shown(arithmetic("+", Num::Long(i32::MAX as i64), Num::Int(1))),
+            (b'J', 1u64 << 31),
+            "a long takes part: long"
+        );
+        assert_eq!(
+            shown(arithmetic("/", Num::Int(-7), Num::Int(2))),
+            (b'I', (-3i32) as u32 as u64)
+        );
+        assert_eq!(
+            shown(arithmetic("%", Num::Int(-7), Num::Int(2))),
+            (b'I', (-1i32) as u32 as u64)
+        );
+        assert_eq!(
+            shown(arithmetic("/", Num::Int(1), Num::Double(2.0))),
+            (b'D', 0.5f64.to_bits())
+        );
+        assert_eq!(
+            shown(arithmetic("<", Num::Int(1), Num::Double(1.5))),
+            (b'Z', 1)
+        );
+        assert_eq!(
+            shown(arithmetic("==", Num::Long(3), Num::Int(3))),
+            (b'Z', 1)
+        );
+        assert!(
+            arithmetic("/", Num::Int(1), Num::Int(0))
+                .unwrap_err()
+                .contains("by zero")
+        );
+        assert!(arithmetic("%", Num::Long(1), Num::Long(0)).is_err());
+        assert_eq!(
+            shown(arithmetic("/", Num::Double(1.0), Num::Int(0))),
+            (b'D', f64::INFINITY.to_bits())
+        );
+        assert!(arithmetic("&&", Num::Int(1), Num::Int(1)).is_err());
+        assert_eq!(java_float(3.0), "3.0");
+        assert_eq!(java_float(f64::NAN), "NaN");
+        assert_eq!(java_float(f64::NEG_INFINITY), "-Infinity");
+    }
+
+    #[test]
+    fn overloads_are_chosen_as_java_chooses_them() {
+        let int = Kind::Primitive(b'I');
+        assert_eq!(int.fits("I"), Some(0));
+        assert_eq!(int.fits("J"), Some(1));
+        assert_eq!(int.fits("D"), Some(1));
+        assert_eq!(int.fits("C"), None, "int does not narrow to char");
+        assert_eq!(int.fits("Z"), None);
+        assert_eq!(int.fits("Ljava/lang/Integer;"), Some(2));
+        assert_eq!(int.fits("Ljava/lang/Number;"), Some(3));
+        assert_eq!(int.fits("Ljava/lang/Object;"), Some(4));
+        assert_eq!(
+            int.fits("Ljava/lang/Long;"),
+            None,
+            "int does not box to Long"
+        );
+        assert_eq!(int.fits("[C"), None);
+        assert_eq!(Kind::Primitive(b'Z').fits("Ljava/lang/Number;"), None);
+        assert_eq!(Kind::Null.fits("Ljava/lang/String;"), Some(1));
+        assert_eq!(Kind::Null.fits("I"), None);
+        let string = Kind::Reference(vec![
+            "Ljava/lang/String;".into(),
+            "Ljava/lang/Object;".into(),
+            "Ljava/lang/CharSequence;".into(),
+        ]);
+        assert_eq!(string.fits("Ljava/lang/String;"), Some(0));
+        assert_eq!(string.fits("Ljava/lang/CharSequence;"), Some(1));
+        assert_eq!(string.fits("Ljava/lang/Object;"), Some(4));
+        assert_eq!(string.fits("Ljava/lang/Integer;"), None);
+        assert_eq!(string.fits("I"), None);
+        let boxed = Kind::Reference(vec![
+            "Ljava/lang/Integer;".into(),
+            "Ljava/lang/Object;".into(),
+        ]);
+        assert_eq!(boxed.fits("I"), Some(2), "unboxed");
+        assert_eq!(boxed.fits("J"), Some(3), "unboxed and widened");
+        assert_eq!(boxed.fits("S"), None);
+        assert_eq!(
+            parameter_types("(I[JLjava/lang/String;[[Ljava/lang/Object;Z)V"),
+            ["I", "[J", "Ljava/lang/String;", "[[Ljava/lang/Object;", "Z"]
+        );
+        assert!(parameter_types("()V").is_empty());
+        for (from, to, ok) in [
+            (b'B', b'S', true),
+            (b'C', b'S', false),
+            (b'I', b'F', true),
+            (b'D', b'F', false),
+            (b'Z', b'I', false),
+        ] {
+            assert_eq!(widens(from, to), ok, "{} to {}", from as char, to as char);
+        }
+    }
+
+    /// A running Java program paused: its threads listed and stopped, its
+    /// variables read, but no method called — the VM runs one only in a
+    /// thread an event stopped — and the program run on to its end.
+    #[tokio::test]
+    #[ignore = "needs a JDK; run explicitly"]
+    async fn a_running_java_program_is_paused() {
+        let dir = clew_core::testutil::TempDir::new("java-pause-project");
+        let program = dir.join("Spin.java");
+        std::fs::write(
+            &program,
+            "public class Spin {\n    static volatile boolean go = true;\n\n    public static void main(String[] args) throws Exception {\n        String word = \"spin\";\n        long n = 0;\n        while (go && n < 400) {\n            n++;\n            Thread.sleep(10);\n        }\n        System.out.println(word + \" done\");\n    }\n}\n",
+        )
+        .unwrap();
+        let tool = |name| clew_core::lsp::store::find_on_path_unresolved(name).expect(name);
+        let (mut client, input, output) = Client::pipes();
+        let running = tokio::spawn(serve(tool("java"), tool("javac"), input, output));
+        client
+            .request("initialize", json!({ "adapterID": "clew" }))
+            .await;
+        let launch = client
+            .send(
+                "launch",
+                json!({ "program": program.to_string_lossy(), "cwd": dir.to_string_lossy() }),
+            )
+            .await;
+        assert_eq!(client.answer(launch).await["success"], true);
+        client.event("initialized").await;
+        client.request("configurationDone", json!({})).await;
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        let threads = client.request("threads", json!({})).await;
+        let main = threads["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "main")
+            .cloned()
+            .unwrap_or_else(|| panic!("main in {threads}"));
+        client
+            .request("pause", json!({ "threadId": main["id"] }))
+            .await;
+        assert_eq!(client.event("stopped").await["body"]["reason"], "pause");
+        let stack = client
+            .request("stackTrace", json!({ "threadId": main["id"] }))
+            .await;
+        let frame = stack["stackFrames"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "Spin.main")
+            .cloned()
+            .unwrap_or_else(|| panic!("Spin.main in {stack}"));
+        let read = client
+            .request(
+                "evaluate",
+                json!({ "expression": "word + \"!\"", "frameId": frame["id"] }),
+            )
+            .await;
+        assert_eq!(read["result"], "\"spin!\"");
+        let seq = client
+            .send(
+                "evaluate",
+                json!({ "expression": "word.length()", "frameId": frame["id"] }),
+            )
+            .await;
+        let refused = client.answer(seq).await;
+        assert_eq!(refused["success"], false, "{refused}");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("stopped at a breakpoint or a step"),
+            "{refused}"
+        );
+        client
+            .request("continue", json!({ "threadId": main["id"] }))
+            .await;
+        assert_eq!(client.event("exited").await["body"]["exitCode"], 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !client.output().contains("spin done") && std::time::Instant::now() < deadline {
+            client.gather(Duration::from_millis(500)).await;
+        }
+        assert!(client.output().contains("spin done"), "{}", client.output());
+        client.request("disconnect", json!({})).await;
+        assert_eq!(running.await.unwrap(), Ok(()));
+    }
+
     /// A Java program debugged for real, over JDWP: compiled for the
     /// session, a breakpoint set when its class loads, the stack read with
     /// each frame at its line, locals, an object's fields, an array and a
@@ -1806,7 +3125,7 @@ mod tests {
         let program = dir.join("src/demo/Main.java");
         std::fs::write(
             &program,
-            "package demo;\n\npublic class Main {\n    static class Cart {\n        String owner = \"ann\";\n        int[] items = {2, 3};\n    }\n\n    static int total(Cart cart) {\n        int sum = 0;\n        for (int i : cart.items) {\n            sum += i;\n        }\n        return sum * 2;\n    }\n\n    public static void main(String[] args) {\n        Cart cart = new Cart();\n        int t = total(cart);\n        System.out.println(\"total \" + t + \" \" + args.length);\n    }\n}\n",
+            "package demo;\n\npublic class Main {\n    static class Cart {\n        String owner = \"ann\";\n        int[] items = {2, 3};\n    }\n\n    static int total(Cart cart) {\n        int sum = 0;\n        for (int i : cart.items) {\n            sum += i;\n        }\n        return sum * 2;\n    }\n\n    public static void main(String[] args) {\n        Cart cart = new Cart();\n        int t = total(cart);\n        System.out.println(\"total \" + t + \" \" + args.length);\n    }\n\n    static java.util.List<Integer> seen = new java.util.ArrayList<>(java.util.List.of(4, 5));\n\n    static String greet(String who, int times) {\n        return \"hi \" + who.repeat(times);\n    }\n}\n",
         )
         .unwrap();
         let tool = |name| clew_core::lsp::store::find_on_path_unresolved(name).expect(name);
@@ -1907,20 +3226,74 @@ mod tests {
             .await;
         assert_eq!(items["variables"][1]["name"], "[1]");
         assert_eq!(items["variables"][1]["value"], "3");
-        let read = client
+        // Expressions, worked out over JDWP: fields, elements, arithmetic,
+        // calls (instance, static, overloaded, boxing and unboxing), and a
+        // breakpoint in a called method passed rather than stopped at.
+        let frame = frames[0]["id"].clone();
+        let cases = [
+            ("cart.items[1]", "3"),
+            ("cart.items[0] + cart.items[1]", "5"),
+            ("cart.owner.length()", "3"),
+            ("cart.owner.toUpperCase()", "\"ANN\""),
+            ("greet(cart.owner + \"!\", 2)", "\"hi ann!ann!\""),
+            ("total(cart)", "10"),
+            ("seen.get(1) * 2", "10"),
+            ("seen.size() == 2 && !cart.owner.isEmpty()", "true"),
+            ("seen.contains(5)", "true"),
+            ("Math.max(3, 7)", "7"),
+            ("String.valueOf(42)", "\"42\""),
+            ("Integer.MAX_VALUE + 1", "-2147483648"),
+            ("1.5 * 2", "3.0"),
+            ("\"n=\" + cart.items.length", "\"n=2\""),
+            ("cart.owner == null", "false"),
+            ("-(cart.items[0] - 7) % 4", "1"),
+        ];
+        for (expression, expected) in cases {
+            let answer = client
+                .request(
+                    "evaluate",
+                    json!({ "expression": expression, "frameId": frame, "context": "repl" }),
+                )
+                .await;
+            assert_eq!(answer["result"], expected, "{expression}: {answer}");
+        }
+        let object = client
             .request(
                 "evaluate",
-                json!({ "expression": "cart.items[1]", "frameId": frames[0]["id"] }),
+                json!({ "expression": "cart", "frameId": frame }),
             )
             .await;
-        assert_eq!(read["result"], "3");
-        let refused = client
-            .send(
+        assert!(
+            object["variablesReference"].as_u64().unwrap() > 0,
+            "{object}"
+        );
+        let hovered = client
+            .request(
                 "evaluate",
-                json!({ "expression": "cart.items[0] + 1", "frameId": frames[0]["id"] }),
+                json!({ "expression": "cart.owner", "frameId": frame, "context": "hover" }),
             )
             .await;
-        assert_eq!(client.answer(refused).await["success"], false);
+        assert_eq!(hovered["result"], "\"ann\"");
+        for (expression, context, why) in [
+            ("cart.owner.length()", "hover", "not called for a hover"),
+            ("cart.items[0] / 0", "repl", "ArithmeticException"),
+            ("cart.missing", "repl", "no field missing"),
+            ("nothing(1)", "repl", "no method nothing"),
+            ("cart.items[", "repl", "ended early"),
+        ] {
+            let seq = client
+                .send(
+                    "evaluate",
+                    json!({ "expression": expression, "frameId": frame, "context": context }),
+                )
+                .await;
+            let answer = client.answer(seq).await;
+            assert_eq!(answer["success"], false, "{expression}: {answer}");
+            assert!(
+                answer["message"].as_str().unwrap().contains(why),
+                "{expression}: {answer}"
+            );
+        }
 
         client.request("next", json!({ "threadId": thread })).await;
         assert_eq!(client.event("stopped").await["body"]["reason"], "step");

@@ -180,7 +180,9 @@ pub fn resolve(
 ) -> Result<Resolution, String> {
     match lang {
         "native" => {
-            let command = store::find_on_path_unresolved("lldb-dap")
+            let command = lldb_dap_names()
+                .iter()
+                .find_map(|name| store::find_on_path_unresolved(name))
                 .or_else(|| xcrun_find("lldb-dap"))
                 .ok_or(
                     "lldb-dap not found — install LLVM (lldb-dap) or the Xcode command-line tools",
@@ -364,6 +366,17 @@ fn python_for(
 }
 
 /// lldb-dap for native (Rust/C/C++) binaries. Ships with Xcode / LLVM.
+/// The names LLVM's DAP adapter goes by: `lldb-dap`; the versioned
+/// `lldb-dap-18` a Linux distribution installs beside other LLVMs, newest
+/// first; and `lldb-vscode`, its name before LLVM 18.
+fn lldb_dap_names() -> Vec<String> {
+    let mut names = vec!["lldb-dap".to_string()];
+    names.extend((14..=25).rev().map(|v| format!("lldb-dap-{v}")));
+    names.push("lldb-vscode".into());
+    names.extend((11..=17).rev().map(|v| format!("lldb-vscode-{v}")));
+    names
+}
+
 fn native_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
     AdapterSpec {
         command,
@@ -1544,6 +1557,40 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("Erlang/OTP"), "{err}");
+    }
+
+    /// LLVM's adapter is found by its plain name, a distribution's versioned
+    /// one (the newest), or its name before LLVM 18.
+    #[test]
+    #[cfg(unix)]
+    fn lldb_dap_is_found_by_any_of_its_names() {
+        let dir = TempDir::new("debug-lldb-names");
+        let native = |path: &Path| {
+            let _env = EnvVars::new().set("PATH", path.as_os_str());
+            match resolve(
+                "native",
+                "/p/app",
+                &[],
+                &dir,
+                &dir,
+                &Default::default(),
+                None,
+            ) {
+                Ok(Resolution::Ready(spec)) => Some(spec.command),
+                _ => None,
+            }
+        };
+        let versioned = dir.join("versioned");
+        script(&versioned.join("lldb-dap-17"), "#!/bin/sh\n");
+        let newest = script(&versioned.join("lldb-dap-18"), "#!/bin/sh\n");
+        assert_eq!(native(&versioned), Some(newest));
+        let old = dir.join("old");
+        let vscode = script(&old.join("lldb-vscode"), "#!/bin/sh\n");
+        assert_eq!(native(&old), Some(vscode));
+        let plain = dir.join("plain");
+        let dap = script(&plain.join("lldb-dap"), "#!/bin/sh\n");
+        script(&plain.join("lldb-dap-18"), "#!/bin/sh\n");
+        assert_eq!(native(&plain), Some(dap), "the plain name first");
     }
 
     /// The js-debug download goes through the store's verified, staged
