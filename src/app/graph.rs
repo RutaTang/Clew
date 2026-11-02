@@ -15,9 +15,10 @@ pub(crate) const CHURN_COMMITS: usize = 300;
 /// asks git again.
 const CHURN_TTL: std::time::Duration = std::time::Duration::from_secs(120);
 
-/// Whether a file's language is one clew fully supports in the graphs (the six
-/// with import/call extraction). Files in any other language are kept out of the
-/// Import and Call graphs entirely, so every node has a real language colour.
+/// Whether a file's language is one clew fully supports in the graphs (those
+/// with import and call extraction). Files in any other language are kept out
+/// of the Import and Call graphs entirely, so every node has a real language
+/// colour.
 pub(crate) fn graph_language(path: &std::path::Path) -> bool {
     crate::highlight::detect(path).is_some_and(graph_language_name)
 }
@@ -26,23 +27,29 @@ pub(crate) fn graph_language(path: &std::path::Path) -> bool {
 fn graph_language_name(lang: &str) -> bool {
     matches!(
         lang,
-        "rust" | "javascript" | "typescript" | "tsx" | "python" | "go" | "dart"
+        "rust"
+            | "javascript"
+            | "typescript"
+            | "tsx"
+            | "python"
+            | "go"
+            | "dart"
+            | "java"
+            | "php"
+            | "ruby"
+            | "csharp"
+            | "erlang"
+            | "haskell"
+            | "zig"
     )
 }
 
 /// Whether a file is a node of the Import graph: [`graph_language`]'s, and
-/// those of the languages whose imports clew resolves but which the call
-/// graph leaves out — Lean's calls it does not read at all
-/// (`clew_core::projectcalls`), and there its every definition would be a
-/// node without an edge.
+/// Lean's, whose imports clew resolves but whose calls it does not read
+/// (`clew_core::projectcalls`) — in the call graph its every definition would
+/// be a node without an edge.
 pub(crate) fn import_graph_language(path: &std::path::Path) -> bool {
-    crate::highlight::detect(path).is_some_and(|lang| {
-        graph_language_name(lang)
-            || matches!(
-                lang,
-                "lean" | "java" | "php" | "ruby" | "csharp" | "erlang" | "haskell" | "zig"
-            )
-    })
+    crate::highlight::detect(path).is_some_and(|lang| graph_language_name(lang) || lang == "lean")
 }
 
 /// The same stamp for `project_calls.rev`, written when a build FAILED: the
@@ -2392,14 +2399,17 @@ mod tests {
         assert!(!import_graph_language(Path::new("/p/db/schema.sql")));
     }
 
-    /// The other languages whose imports clew resolves are import-map nodes
-    /// too, and stay out of the call graph as Lean does.
+    /// Java, PHP, Ruby, C#, Erlang, Haskell and Zig — their imports resolved
+    /// and their calls read — are nodes of both maps; Lean of the import map
+    /// alone.
     #[test]
-    fn import_only_languages_are_import_map_nodes() {
+    fn the_later_languages_are_nodes_of_both_maps() {
         for file in ["A.java", "a.php", "a.rb", "A.cs", "a.erl", "A.hs", "a.zig"] {
             let path = Path::new("/p").join(file);
             assert!(import_graph_language(&path), "{file}");
-            assert!(!graph_language(&path), "{file}");
+            assert!(graph_language(&path), "{file}");
         }
+        let lean = Path::new("/p/A.lean");
+        assert!(import_graph_language(lean) && !graph_language(lean));
     }
 }

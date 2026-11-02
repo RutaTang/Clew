@@ -76,7 +76,7 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 ## 语言支持
 
-为了更好地做代码分析，Clew 会针对不同语言的特性，提供贴合它的支持。目前 Clew 提供的功能对 Rust、Python、TypeScript/JavaScript、Go 和 Dart 这 6 种语言支持良好，对其余语言目前也提供了一些基础支持，如语法高亮。未来会支持更多语言。
+为了更好地做代码分析，Clew 会针对不同语言的特性，提供贴合它的支持。目前 Clew 提供的功能完整支持 Rust、Python、TypeScript/JavaScript、Go、Dart、Java、C#、PHP、Ruby、Erlang、Haskell 和 Zig；C 和 C++、Lean 4 以及 SQL 支持其中的大部分功能；对其余语言目前也提供了一些基础支持，如语法高亮。未来会支持更多语言。
 
 **设置 → 本项目的语言**会针对当前打开的项目，显示每种语言的语言服务器及其状态，并让你为每种语言做设置——每项设置都先显示当前生效的内容，再列出可选项：
 
@@ -95,9 +95,10 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 以上内容都只通过读取文件得到——不会运行任何程序；远程项目则在其所在主机上查找。这些选择保存在 Clew 自己的数据目录中，只对本机上的这个项目生效，绝不会写入项目，优先于项目的 `lsp.toml`，并同样作用于编辑器的语言服务器、调试器以及 Ask 的代码工具。
 
-构建因此不会编译的代码会在阅读时变暗：Rust 中依赖未启用 feature（或其他平台）的 `cfg` 项、`//go:build` 行或 `_windows.go` 这类文件名所排除的 Go 文件，按平台和 `-D`/`-U` 参数会被预处理器丢弃的 C/C++ `#if`/`#ifdef` 分支，以及 Zig 中基于 `builtin.os.tag` 或 `builtin.cpu.arch` 的 comptime `if`/`switch` 分支里编译器不会为该平台分析的部分。只有确定不会编译的代码才会变暗——可能由其他 package 启用的 feature、可能由头文件定义的宏，都不会被处理。
+构建因此不会编译的代码会在阅读时变暗：Rust 中依赖未启用 feature（或其他平台）的 `cfg` 项、`//go:build` 行或 `_windows.go` 这类文件名所排除的 Go 文件，按平台和 `-D`/`-U` 参数会被预处理器丢弃的 C/C++ `#if`/`#ifdef` 分支，Zig 中基于 `builtin.os.tag` 或 `builtin.cpu.arch` 的 comptime `if`/`switch` 分支里编译器不会为该平台分析的部分，C# 中依据文件自身 `#define` 的符号判定不成立的 `#if` 分支，Haskell 中（启用了 CPP 的文件）基于 `<os>_HOST_OS` 和 `<arch>_HOST_ARCH` 的 CPP `#if` 分支，以及 Erlang 中依据文件自身 `-define` 的宏判定不成立的 `-ifdef`/`-if` 分支。与平台有关的判断，以状态栏中选定的平台为准。只有确定不会编译的代码才会变暗——可能由其他 package 启用的 feature、可能由头文件定义的宏，都不会被处理。
 
 - **SQL**：大纲列出 schema 中的表（及其列）、视图、函数、触发器和类型，并以其上方的 `--` 注释作为文档；类型图会按外键把表连接起来（无论外键写在表定义中，还是像 `pg_dump` 那样写在同一文件的 `ALTER TABLE` 里），并把每个视图连向它所查询的表。
+- **Java、C#、PHP、Ruby、Erlang、Haskell 和 Zig**：语法高亮；大纲，每个定义附带其文档（Javadoc、C# 的 `///` XML 文档、PHPDoc、Ruby 的 `#` 注释、EDoc、Haddock、Zig 的 `///`），并标出测试（JUnit、NUnit/xUnit/MSTest、PHPUnit、Minitest、EUnit、Zig 的 `test` 块）；导入图；调用图；以及语言服务器（Eclipse JDT LS、csharp-ls、intelephense、Ruby LSP、ELP、Haskell 语言服务器、zls）。导入按各语言的构建方式解析：Java 的包在项目的源码根目录（`src/main/java`）下查找，C# 的 `using` 指向项目文件所声明的命名空间，PHP 的类按 `composer.json` 的 PSR-4 映射及其 `require` 路径解析，Ruby 的 `require_relative` 以及从 `lib/` 解析的 `require`，Erlang 的 `-include`/`-include_lib` 与 `-behaviour`，Haskell 的模块在 `.cabal` 或 `package.yaml` 的源码目录下查找，Zig 的 `@import` 按路径解析；不属于项目的（JDK、NuGet、Composer 包、gem、OTP、Hackage、`std`）按包列出。
 - **Lean 4**：大纲（定义、定理、实例、结构体、类、归纳类型）及其 `/-- … -/` 文档与文件的 `/-! … -/` 模块文档、导入图、类型图中 `extends` 其他结构体的继承关系，以及 Lean 语言服务器（`lake serve`，来自 elan 安装的 Lean 工具链）。Lean 的语法可扩展，因此 clew 的语法解析器读不懂的命令会按其首行列入大纲，且不会影响其他命令的大纲。
 
 ## 贡献
