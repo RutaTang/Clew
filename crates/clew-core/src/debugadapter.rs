@@ -765,8 +765,10 @@ pub struct StdioAdapter {
 ///   - an adapter that listens on TCP (delve, rdbg) listens on the REMOTE's
 ///     loopback, which the client cannot reach: it runs behind `bridge` —
 ///     clew-server's own `dap-bridge`, which serves it over stdio — and is
-///     refused without one. vscode-js-debug is refused either way: it opens a
-///     session per debugged process, each a connection of its own;
+///     refused without one;
+///   - Node runs under clew-server's own adapter (`node-debug`, over Node's
+///     inspector), not vscode-js-debug, which opens a connection of its own
+///     per debugged process — more than one stdio channel carries;
 ///   - no provisioning: installing on a remote host without the user's
 ///     explicit consent would break the rule `LspInstall` exists for. The
 ///     error names what to install instead.
@@ -789,11 +791,29 @@ pub fn resolve_stdio(
         )
     };
     if lang == "node" {
-        return Err(format!(
-            "{} — and vscode-js-debug opens a connection per debugged process, \
-             which no bridge carries",
-            tcp_refusal()
-        ));
+        let server = bridge.ok_or_else(|| {
+            "Node is debugged on a remote host by clew-server's own adapter, \
+             and there is none to run"
+                .to_string()
+        })?;
+        let node = store::find_on_path_unresolved("node")
+            .ok_or("on the remote host: node not found — install Node.js")?;
+        let spec = own_spec(
+            server,
+            vec![
+                "node-debug".into(),
+                "--node".into(),
+                node.to_string_lossy().into_owned(),
+            ],
+            program,
+            args,
+            root,
+        );
+        return Ok(StdioAdapter {
+            command: spec.command,
+            args: spec.args,
+            launch: spec.launch.to_string(),
+        });
     }
     match resolve(lang, program, args, root, root, choices, bridge)
         .map_err(|e| format!("on the remote host: {e}"))?
@@ -844,18 +864,59 @@ mod tests {
     use crate::lsp::store::testing::{script, with_store};
     use crate::testutil::{EnvVars, TempDir};
 
+    /// On a remote host Node runs under clew-server's own adapter, over its
+    /// inspector — not js-debug, whose connection per process no stdio
+    /// channel carries; with no clew-server to run it, that is said.
     #[test]
-    fn tcp_adapters_are_refused_with_a_reason() {
+    #[cfg(unix)]
+    fn a_remote_node_program_runs_under_clew_servers_own_adapter() {
+        let dir = TempDir::new("debug-node-remote");
+        let node = script(&dir.join("bin/node"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", dir.join("bin").as_os_str());
+        let server = Path::new("/opt/clew/clew-server");
+        let remote = resolve_stdio(
+            "node",
+            "/proj/main.js",
+            &["x".into()],
+            Path::new("/proj"),
+            &Default::default(),
+            Some(server),
+        )
+        .unwrap();
+        assert_eq!(remote.command, server);
+        assert_eq!(
+            remote.args,
+            ["node-debug", "--node", &*node.to_string_lossy()]
+        );
+        let launch: serde_json::Value = serde_json::from_str(&remote.launch).unwrap();
+        assert_eq!(launch["program"], "/proj/main.js");
+        assert_eq!(launch["args"][0], "x");
+        assert_eq!(launch["cwd"], "/proj");
         let err = resolve_stdio(
             "node",
             "/proj/main.js",
             &[],
             Path::new("/proj"),
             &Default::default(),
-            Some(Path::new("/opt/clew-server")),
+            None,
         )
         .unwrap_err();
-        assert!(err.contains("TCP") && err.contains("js-debug"), "{err}");
+        assert!(err.contains("clew-server"), "{err}");
+        let _empty = EnvVars::new().set("PATH", dir.join("nothing").as_os_str());
+        let err = resolve_stdio(
+            "node",
+            "/proj/main.js",
+            &[],
+            Path::new("/proj"),
+            &Default::default(),
+            Some(server),
+        )
+        .unwrap_err();
+        assert!(err.contains("install Node.js"), "{err}");
+    }
+
+    #[test]
+    fn unknown_adapters_are_refused_with_a_reason() {
         assert!(
             resolve_stdio(
                 "cobol",

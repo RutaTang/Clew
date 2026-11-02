@@ -54,6 +54,7 @@ mod index;
 pub mod javadebug;
 mod lsp_gate;
 pub mod mcp;
+pub mod nodedebug;
 pub mod phpdebug;
 mod process;
 mod state;

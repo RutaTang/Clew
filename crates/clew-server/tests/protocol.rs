@@ -946,12 +946,11 @@ async fn project_calls_build_where_the_project_lives() {
     }
 }
 
-/// `SpawnAdapter` for an adapter no remote host can serve (vscode-js-debug,
-/// a connection per debugged process) must refuse with a reason AND end the
-/// proxied stream (ProcessExited), so the client's DAP driver sees EOF
-/// instead of waiting on an adapter that will never exist.
+/// `SpawnAdapter` for a language no host has an adapter for must refuse with
+/// a reason AND end the proxied stream (ProcessExited), so the client's DAP
+/// driver sees EOF instead of waiting on an adapter that will never exist.
 #[tokio::test]
-async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
+async fn spawn_adapter_refuses_what_it_cannot_serve_and_ends_the_stream() {
     let (mut server, mut rx) = server();
     let root = temp_project("adapter-tcp");
     open_project(&mut server, &mut rx, 1, &root).await;
@@ -961,8 +960,8 @@ async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
                 2,
                 Request::SpawnAdapter {
                     proc: 9,
-                    lang: "node".into(),
-                    program: root.join("main.js").to_string_lossy().into_owned(),
+                    lang: "cobol".into(),
+                    program: root.join("main.cbl").to_string_lossy().into_owned(),
                     args: vec![],
                     choices: Default::default(),
                 },
@@ -985,7 +984,7 @@ async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
                 event: Event::Error { message, .. },
                 ..
             } => {
-                assert!(message.contains("TCP"), "{message}");
+                assert!(message.contains("no debug adapter"), "{message}");
                 refused = true;
                 Some(())
             }
@@ -3673,6 +3672,19 @@ fn a_remote_java_program_is_debugged_by_clews_own_adapter() {
     )
     .unwrap();
     debug_remotely(&root, "java", &program, &program, 4, "answer 42");
+}
+
+#[test]
+#[ignore = "needs node; run explicitly"]
+fn a_remote_node_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-node");
+    let program = root.join("app.js");
+    std::fs::write(
+        &program,
+        "let x = 41;\nx++;\nconsole.log(\"answer \" + x);\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "node", &program, &program, 2, "answer 42");
 }
 
 /// Debug `program` (in `lang`) through a real clew-server process: held at

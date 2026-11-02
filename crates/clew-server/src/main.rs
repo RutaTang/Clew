@@ -8,11 +8,12 @@
 //! `clew-server acp` serves clew's Ask agent to an ACP client — an editor
 //! (see `clew_server::acp`), `clew-server dap-bridge` serves a debug
 //! adapter that listens on TCP over stdio, for remote debugging (see
-//! `clew_server::dapbridge`), and `clew-server java-debug`, `php-debug`,
-//! `erlang-debug` and `haskell-debug` are the debug adapters for Java (over
-//! JDWP), PHP (over Xdebug), Erlang (over OTP's interpreter) and Haskell
-//! (over GHCi's debugger) — see `clew_server::javadebug`, `phpdebug`,
-//! `erlangdebug`, `haskelldebug`.
+//! `clew_server::dapbridge`), and `clew-server java-debug`, `node-debug`,
+//! `php-debug`, `erlang-debug` and `haskell-debug` are the debug adapters for
+//! Java (over JDWP), Node.js (over its inspector), PHP (over Xdebug), Erlang
+//! (over OTP's interpreter) and Haskell (over GHCi's debugger) — see
+//! `clew_server::javadebug`, `nodedebug`, `phpdebug`, `erlangdebug`,
+//! `haskelldebug`.
 
 /// How long the runtime may take to wind down after the client's stream
 /// ended. `serve_stdio` has already stopped everything the connection started
@@ -81,6 +82,24 @@ fn main() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("[clew-server] dap-bridge: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
+    }
+    if args.first().map(String::as_str) == Some("node-debug") {
+        let node = match args.get(1..) {
+            Some([flag, node]) if flag == "--node" => std::path::PathBuf::from(node),
+            _ => {
+                eprintln!("[clew-server] usage: clew-server node-debug --node <node>");
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::nodedebug::run(node)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] node-debug: {e}");
                 1
             }
         };
