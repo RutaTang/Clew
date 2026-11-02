@@ -423,7 +423,7 @@ impl App {
                 })
                 .collect();
             let mut added = 0usize;
-            let packages = self.proj.import_graph.go_packages();
+            let packages = self.proj.import_graph.packages();
             for f in seeds {
                 if added >= 4 {
                     break;

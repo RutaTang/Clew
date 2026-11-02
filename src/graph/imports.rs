@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use clew_core::imports::PY_NAME_SEP;
+use clew_core::imports::{ERLANG_LIB, PY_NAME_SEP};
 use clew_core::rustscope::RustUse;
 
 // Extraction lives in clew-core (shared with the server's project-symbol
@@ -136,15 +136,38 @@ pub struct Resolver {
     /// with the window that holds them, not copied per job. Empty until
     /// then, and for projects without one.
     ts_configs: Arc<TsConfigs>,
-    /// Each Go package directory with its files, its tests aside: what an
-    /// import of the package — a directory — reaches. From the project's
-    /// files, every one of them; the graph only holds those with imports.
-    go_packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
+    /// Each package directory with its files: a Go package's, its tests
+    /// aside — what an import of the package, a directory, reaches — and a
+    /// Java package's, which a `*` import reaches. From the project's files,
+    /// every one of them; the graph only holds those with imports.
+    packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
     /// Each Lean module name a project file can be imported as, with the
     /// files that can be it: `A/B/C.lean` is `C`, `B.C` and `A.B.C`, as the
     /// directory it is imported from (its package's source root) is not
     /// written down anywhere clew reads. See [`Resolver::resolve_lean`].
     lean_modules: Arc<HashMap<String, Vec<PathBuf>>>,
+    /// The project's conventional Java source roots, sorted: every
+    /// `src/main/java` and `src/test/java`, one pair per module of a
+    /// multi-module build. See [`Resolver::resolve_java`].
+    java_roots: Vec<PathBuf>,
+    /// The PSR-4 maps of the project's `composer.json` files: each namespace
+    /// prefix (ending in `\`; empty for a fallback) with the directories it
+    /// maps to, the longest prefix first. Read off disk for a local project
+    /// only — a remote one resolves without them. See
+    /// [`Resolver::resolve_php`].
+    php_psr4: Vec<(String, Vec<PathBuf>)>,
+    /// The Haskell source roots that exist: what the project's `.cabal` and
+    /// `package.yaml` files name (a local project's only, as above), then the
+    /// conventional ones. See [`Resolver::resolve_haskell`].
+    haskell_roots: Vec<PathBuf>,
+    /// Each Erlang module a project file defines (`m.erl` is `m`), with the
+    /// files that do, sorted.
+    erlang_modules: HashMap<String, Vec<PathBuf>>,
+    /// Each Erlang header's file name (`x.hrl`) with the files so named.
+    erlang_headers: HashMap<String, Vec<PathBuf>>,
+    /// Each Erlang application the project holds by its `src/<app>.app.src`,
+    /// with the application's directory — whatever that directory is called.
+    erlang_apps: HashMap<String, PathBuf>,
 }
 
 impl Resolver {
@@ -566,11 +589,132 @@ fn is_importable_rust_item(kind: &str) -> bool {
 /// re-exports `b` …) before giving up; also the cycle guard.
 const MAX_REEXPORT_HOPS: usize = 4;
 
+/// What files declare themselves part of, for the imports that resolve
+/// against it rather than the file set alone (declarations among the raw
+/// imports, [`RawImport::is_mod_decl`]): the importer's own Java package,
+/// which says where its source root is, and the C# namespaces the project's
+/// files declare, which `using`s name.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Declared<'a> {
+    package: Option<&'a str>,
+    namespaces: Option<&'a Namespaces>,
+}
+
+/// Whether `raw`, an import of a `lang` file, is a declaration of what the
+/// file is part of (a Java package, a C# namespace) rather than an import:
+/// no edge of its own. A Rust `mod x;` is an edge — the module tree's.
+fn is_declaration(lang: &str, raw: &RawImport) -> bool {
+    raw.is_mod_decl && matches!(lang, "java" | "csharp")
+}
+
+/// The C# namespaces the graph's files declare (`namespace A.B { … }`,
+/// `namespace A.B;`, recorded among their raw imports as declarations): what
+/// a `using A.B;` reaches. A namespace is neither a file nor a directory —
+/// any file anywhere may declare it, and several usually do — so a `using`
+/// points at a node of its own ([`Resolver::namespace_node`]) that reaches
+/// the namespace's files, as a Go import's directory reaches its package's.
+/// An edge to each of the files instead would cost one per file per `using`,
+/// and close a "cycle" between any two files whose namespaces use each
+/// other. Shared per entry: copying it costs a key per namespace and per
+/// declaring file.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Namespaces {
+    /// Each namespace's node with the files declaring it, sorted.
+    files: HashMap<PathBuf, Arc<Vec<PathBuf>>>,
+    /// Each declaring file with the namespace nodes it declares, sorted.
+    declared: HashMap<PathBuf, Arc<Vec<PathBuf>>>,
+}
+
+impl Namespaces {
+    /// The files declaring the namespace `node`, if any do.
+    fn files(&self, node: &Path) -> Option<&[PathBuf]> {
+        self.files.get(node).map(|files| files.as_slice())
+    }
+
+    /// The namespace nodes `file` declares.
+    fn of(&self, file: &Path) -> &[PathBuf] {
+        self.declared
+            .get(file)
+            .map_or(&[], |nodes| nodes.as_slice())
+    }
+
+    /// Record that `file` declares the namespaces `nodes` (none: it declares
+    /// none, or it is gone), and return the namespaces whose files that
+    /// changed.
+    fn set(&mut self, file: &Path, mut nodes: Vec<PathBuf>) -> Vec<PathBuf> {
+        nodes.sort();
+        nodes.dedup();
+        let held = self.of(file).to_vec();
+        if held == nodes {
+            return Vec::new();
+        }
+        let left: Vec<PathBuf> = held
+            .iter()
+            .filter(|n| !nodes.contains(n))
+            .cloned()
+            .collect();
+        let joined: Vec<PathBuf> = nodes
+            .iter()
+            .filter(|n| !held.contains(n))
+            .cloned()
+            .collect();
+        for node in &left {
+            let emptied = match self.files.get_mut(node) {
+                Some(files) => {
+                    Arc::make_mut(files).retain(|f| f != file);
+                    files.is_empty()
+                }
+                None => false,
+            };
+            if emptied {
+                self.files.remove(node);
+            }
+        }
+        for node in &joined {
+            let files = Arc::make_mut(self.files.entry(node.clone()).or_default());
+            if let Err(at) = files.binary_search_by(|f| f.as_path().cmp(file)) {
+                files.insert(at, file.to_path_buf());
+            }
+        }
+        if nodes.is_empty() {
+            self.declared.remove(file);
+        } else {
+            self.declared.insert(file.to_path_buf(), Arc::new(nodes));
+        }
+        left.into_iter().chain(joined).collect()
+    }
+}
+
 impl Resolver {
     pub fn new(root: &Path, files: &[PathBuf]) -> Self {
         // A local project reads its module metadata straight off disk.
         let mut r = Self::with_meta(root, files, read_go_module(root), read_dart_package(root));
         r.ts_configs = Arc::new(read_ts_configs(root, files));
+        // PHP's and Haskell's only for a project in the language: the
+        // manifests are generic enough names (pnpm reads a package.yaml too)
+        // to be there for something else.
+        let has = |ext: &str| {
+            files
+                .iter()
+                .any(|f| f.extension().is_some_and(|e| e == ext))
+        };
+        if has("php") {
+            r.php_psr4 = read_psr4_maps(files);
+        }
+        if has("hs") {
+            let declared: Vec<(PathBuf, Vec<String>)> = manifests(files, is_haskell_manifest)
+                .into_iter()
+                .filter_map(|path| {
+                    let dirs = if path.file_name().is_some_and(|n| n == "package.yaml") {
+                        clew_core::imports::read_hpack_source_dirs(path)
+                    } else {
+                        clew_core::imports::read_cabal_source_dirs(path)
+                    };
+                    Some((path.parent()?.to_path_buf(), dirs))
+                })
+                .collect();
+            r.haskell_roots = haskell_roots(root, &declared, &r.dirs);
+        }
         r
     }
 
@@ -619,18 +763,60 @@ impl Resolver {
             .collect();
         rust_crate_roots.sort();
         rust_crate_roots.dedup();
-        let mut go_packages: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
-        for file in file_set.iter().filter(|f| is_go_source(f)) {
+        let mut packages: HashMap<PathBuf, Vec<PathBuf>> = HashMap::new();
+        for file in file_set.iter().filter(|f| is_package_source(f)) {
             if let Some(dir) = file.parent() {
-                go_packages
+                packages
                     .entry(dir.to_path_buf())
                     .or_default()
                     .push(file.clone());
             }
         }
-        for files in go_packages.values_mut() {
+        for files in packages.values_mut() {
             files.sort();
         }
+        let mut java_roots: Vec<PathBuf> = dirs
+            .iter()
+            .filter(|d| d.ends_with("src/main/java") || d.ends_with("src/test/java"))
+            .cloned()
+            .collect();
+        java_roots.sort();
+        let mut erlang_modules: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut erlang_headers: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        let mut erlang_apps: HashMap<String, PathBuf> = HashMap::new();
+        for file in &file_set {
+            let Some(name) = file.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if let Some(module) = name.strip_suffix(".erl") {
+                erlang_modules
+                    .entry(module.to_string())
+                    .or_default()
+                    .push(file.clone());
+            } else if name.ends_with(".hrl") {
+                erlang_headers
+                    .entry(name.to_string())
+                    .or_default()
+                    .push(file.clone());
+            } else if let Some(app) = name.strip_suffix(".app.src")
+                && let Some(src) = file.parent().filter(|d| d.ends_with("src"))
+                && let Some(dir) = src.parent()
+            {
+                // Two of one name: the shallower is the application's own.
+                let shallower =
+                    |held: &PathBuf| held.components().count() <= dir.components().count();
+                if !erlang_apps.get(app).is_some_and(shallower) {
+                    erlang_apps.insert(app.to_string(), dir.to_path_buf());
+                }
+            }
+        }
+        for files in erlang_modules
+            .values_mut()
+            .chain(erlang_headers.values_mut())
+        {
+            files.sort();
+        }
+        let haskell_roots = haskell_roots(root, &[], &dirs);
         let mut lean_modules: HashMap<String, Vec<PathBuf>> = HashMap::new();
         for file in file_set
             .iter()
@@ -662,8 +848,14 @@ impl Resolver {
             go_module,
             dart_package,
             ts_configs: Arc::default(),
-            go_packages: Arc::new(go_packages),
+            packages: Arc::new(packages),
             lean_modules: Arc::new(lean_modules),
+            java_roots,
+            php_psr4: Vec::new(),
+            haskell_roots,
+            erlang_modules,
+            erlang_headers,
+            erlang_apps,
         }
     }
 
@@ -688,16 +880,26 @@ impl Resolver {
 
     /// Resolve one raw import from `from` (the importing file), with no
     /// knowledge of other files' imports (Rust re-exports are not followed;
-    /// see [`Resolver::resolve_with`]). Test-only: the graph always resolves
-    /// with its Rust context.
+    /// see [`Resolver::resolve_with`]) or of what files declare (no Java
+    /// `package` line, no C# namespace). Test-only: the graph always resolves
+    /// with both.
     #[cfg(test)]
     pub fn resolve(&self, raw: &RawImport, from: &Path, lang: &str) -> Target {
-        self.resolve_with(raw, from, lang, &RustCtx::default())
+        self.resolve_with(raw, from, lang, &RustCtx::default(), &Declared::default())
     }
 
     /// Resolve one raw import from `from`, using `ctx` (built over the whole
-    /// file set) to follow Rust re-exports and local-module paths.
-    pub fn resolve_with(&self, raw: &RawImport, from: &Path, lang: &str, ctx: &RustCtx) -> Target {
+    /// file set) to follow Rust re-exports and local-module paths, and
+    /// `declared` for what the importer and the other files declare
+    /// themselves part of (a Java package, C# namespaces).
+    pub fn resolve_with(
+        &self,
+        raw: &RawImport,
+        from: &Path,
+        lang: &str,
+        ctx: &RustCtx,
+        declared: &Declared<'_>,
+    ) -> Target {
         match lang {
             "rust" => self.resolve_rust(raw, from, &Consulted::new(ctx)),
             "python" => self.resolve_python(raw, from),
@@ -705,8 +907,383 @@ impl Resolver {
             "go" => self.resolve_go(raw),
             "dart" => self.resolve_dart(raw, from),
             "lean" => self.resolve_lean(raw, from),
+            "java" => self.resolve_java(raw, from, declared.package),
+            "csharp" => self.resolve_csharp(raw, from, declared.namespaces),
+            "php" => self.resolve_php(raw, from),
+            "ruby" => self.resolve_ruby(raw, from),
+            "erlang" => self.resolve_erlang(raw, from),
+            "haskell" => self.resolve_haskell(raw, from),
+            "zig" => self.resolve_zig(raw, from),
             _ => Target::External(raw.module.clone()),
         }
+    }
+
+    // --- Java ---
+
+    /// A Java import names a class by its package's path under a source
+    /// root: the importer's own first — its directory less one level per part
+    /// of the package its `package` line declares — then every
+    /// `src/main/java` and `src/test/java` of the project, its own module's
+    /// first (a test sees its module's main classes). `a.b.C` is
+    /// `<root>/a/b/C.java`; a static member `a.b.C.m` and a nested class
+    /// `a.b.C.D` are found through `C`'s file, the longest prefix that names
+    /// one. `a.b.*` names the package: its directory, which reaches the
+    /// package's classes as a Go package's directory does
+    /// ([`ImportGraph::packages`]). A name in a package of the project's own
+    /// that no file is stays unresolved; any other is a library's, named by
+    /// its package (`java.util`).
+    fn resolve_java(&self, raw: &RawImport, from: &Path, package: Option<&str>) -> Target {
+        let spec = raw.module.as_str();
+        let (name, star) = match spec.strip_suffix(".*") {
+            Some(name) => (name, true),
+            None => (spec, false),
+        };
+        let segs: Vec<&str> = name.split('.').filter(|s| !s.is_empty()).collect();
+        if segs.is_empty() {
+            return Target::Unresolved(spec.to_string());
+        }
+        let own = self.java_own_root(from, package);
+        let roots = self.java_roots_for(from, own.as_ref());
+        for root in &roots {
+            // A root without the name's first package is passed over in one
+            // lookup: most imports are a library's, tried under every root.
+            if segs.len() > 1 && !self.dirs.contains(&root.join(segs[0])) {
+                continue;
+            }
+            if star {
+                let dir = join_all(root, &segs);
+                if self.packages.contains_key(&dir) {
+                    return Target::Internal(dir);
+                }
+            }
+            // The importer's own class (a static import of its own members)
+            // is found too: the graph drops it as no dependency.
+            for end in (1..=segs.len()).rev() {
+                let (class, dirs) = segs[..end].split_last().expect("one segment at least");
+                let file = join_all(root, dirs).join(format!("{class}.java"));
+                if self.has_file(&file) {
+                    return Target::Internal(file);
+                }
+            }
+        }
+        // The package is the name up to its first capitalised part, a class.
+        let package_len = segs
+            .iter()
+            .position(|s| s.starts_with(char::is_uppercase))
+            .unwrap_or(segs.len())
+            .max(1);
+        let package = &segs[..package_len];
+        if roots
+            .iter()
+            .any(|root| self.dirs.contains(&join_all(root, package)))
+        {
+            return Target::Unresolved(spec.to_string());
+        }
+        Target::External(package.join("."))
+    }
+
+    /// Where a Java file's `package` line says its source root is: its
+    /// directory less one level per part of the package — when the directory
+    /// does end in them; a file filed elsewhere says nothing of where its
+    /// root is. No line: the default package, rooted where the file is.
+    fn java_own_root(&self, from: &Path, package: Option<&str>) -> Option<PathBuf> {
+        let mut root = from.parent().unwrap_or(&self.root).to_path_buf();
+        let Some(package) = package else {
+            return Some(root);
+        };
+        package
+            .split('.')
+            .rev()
+            .all(|part| root.file_name().is_some_and(|n| n == part) && root.pop())
+            .then_some(root)
+    }
+
+    /// The source roots a Java file's imports are looked up under, in order
+    /// (see [`Resolver::resolve_java`]): its `own`, then the roots of the
+    /// module it is in — the innermost when modules nest — then every other
+    /// module's in path order. Borrowed, and only the importer's own few
+    /// sorted: this runs once per import, over every module's roots.
+    fn java_roots_for<'a>(&'a self, from: &Path, own: Option<&'a PathBuf>) -> Vec<&'a PathBuf> {
+        let in_module = |r: &PathBuf| r.ancestors().nth(3).is_some_and(|m| from.starts_with(m));
+        let mut own_module: Vec<&PathBuf> =
+            self.java_roots.iter().filter(|r| in_module(r)).collect();
+        own_module.sort_by_key(|r| std::cmp::Reverse(r.components().count()));
+        let others = self.java_roots.iter().filter(|r| !in_module(r));
+        let conventional = own_module.into_iter().chain(others);
+        own.into_iter()
+            .chain(conventional.filter(|r| Some(*r) != own))
+            .collect()
+    }
+
+    // --- C# ---
+
+    /// A C# `using A.B;` names a namespace, which is no file: whatever files
+    /// declare it, wherever they are ([`Namespaces`]). It resolves to the
+    /// namespace's own node ([`Resolver::namespace_node`]), which reaches
+    /// those files as a Go package's directory reaches its own. A `using
+    /// static A.B.C;` — or an alias of a type — names a type: the file of the
+    /// namespace `A.B` named after it, by C#'s one-type-a-file convention,
+    /// else the namespace. A name no project file declares is a library's.
+    fn resolve_csharp(
+        &self,
+        raw: &RawImport,
+        from: &Path,
+        namespaces: Option<&Namespaces>,
+    ) -> Target {
+        let name = raw.module.as_str();
+        let files_of = |namespace: &str| {
+            let node = self.namespace_node(namespace);
+            namespaces
+                .and_then(|n| n.files(&node))
+                .map(|files| (node, files))
+        };
+        if let Some((node, _)) = files_of(name) {
+            return Target::Internal(node);
+        }
+        if let Some((namespace, ty)) = name.rsplit_once('.')
+            && let Some((node, files)) = files_of(namespace)
+        {
+            let file = files
+                .iter()
+                .find(|f| f.as_path() != from && f.file_stem().is_some_and(|s| s == ty));
+            return Target::Internal(file.cloned().unwrap_or(node));
+        }
+        Target::External(name.to_string())
+    }
+
+    /// The node C# namespace `namespace` is in the graph: `<root>/namespace
+    /// A.B`, which the Imports tree shows as `namespace A.B` — and which no
+    /// project file or folder is called, where a folder named after a
+    /// namespace (`Acme.Core/`, a project's) is common.
+    pub fn namespace_node(&self, namespace: &str) -> PathBuf {
+        self.root.join(format!("namespace {namespace}"))
+    }
+
+    // --- PHP ---
+
+    /// A PHP name (`use A\B\C`) is a class file by PSR-4: the project's
+    /// `composer.json` files map namespace prefixes to directories, the
+    /// longest prefix first (`App\` → `app/`: `App\Models\User` is
+    /// `app/Models/User.php`); with none that maps it, the name's own path
+    /// from the project root. A name under a mapped prefix that no file is
+    /// stays unresolved; any other is a package's, named by its vendor's
+    /// namespace (`Symfony`). A `require`/`include` path is a file relative
+    /// to the importer (`__DIR__` is its directory), else to the project root.
+    fn resolve_php(&self, raw: &RawImport, from: &Path) -> Target {
+        let spec = raw.module.as_str();
+        let dir = from.parent().unwrap_or(&self.root);
+        let found = |file: PathBuf| self.has_file(&file).then_some(file);
+        if let Some(rest) = spec.strip_prefix("__DIR__") {
+            return found(normalize(&dir.join(rest.trim_start_matches('/'))))
+                .map(Target::Internal)
+                .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
+        }
+        // A class name has neither; a path has one or both.
+        if spec.contains('/') || spec.contains('.') {
+            if spec.starts_with('/') {
+                return Target::Unresolved(spec.to_string());
+            }
+            return [dir, self.root.as_path()]
+                .into_iter()
+                .find_map(|base| found(normalize(&base.join(spec))))
+                .map(Target::Internal)
+                .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
+        }
+        let mut mapped = false;
+        for (prefix, dirs) in &self.php_psr4 {
+            let Some(rest) = spec.strip_prefix(prefix.as_str()).filter(|r| !r.is_empty()) else {
+                continue;
+            };
+            mapped |= !prefix.is_empty();
+            let rel = format!("{}.php", rest.replace('\\', "/"));
+            if let Some(file) = dirs.iter().find_map(|d| found(normalize(&d.join(&rel)))) {
+                return Target::Internal(file);
+            }
+        }
+        if mapped {
+            return Target::Unresolved(spec.to_string());
+        }
+        let rel = format!("{}.php", spec.replace('\\', "/"));
+        if let Some(file) = found(self.root.join(rel)) {
+            return Target::Internal(file);
+        }
+        Target::External(spec.split('\\').next().unwrap_or(spec).to_string())
+    }
+
+    // --- Ruby ---
+
+    /// A `require_relative` (recorded `./x`) is a file relative to the
+    /// importer. A `require` or `load` names a feature on the load path: the
+    /// importer's own `lib` root (a gem's, in a repository of several), the
+    /// project's `lib/`, then `spec/` and `test/`, which RSpec and Minitest
+    /// put on it for their helpers. A feature none of them has is a gem's,
+    /// named by its first part (`active_support/all` is `active_support`).
+    fn resolve_ruby(&self, raw: &RawImport, from: &Path) -> Target {
+        let spec = raw.module.as_str();
+        if spec.starts_with('/') {
+            return Target::Unresolved(spec.to_string());
+        }
+        if spec.starts_with("./") || spec.starts_with("../") {
+            let dir = from.parent().unwrap_or(&self.root);
+            return self
+                .ruby_file(&normalize(&dir.join(spec)))
+                .map(Target::Internal)
+                .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
+        }
+        let mut roots: Vec<PathBuf> = Vec::new();
+        for name in ["lib", "spec", "test"] {
+            if let Some(own) = self.enclosing_dir_named(from, &[name]) {
+                roots.push(own.to_path_buf());
+            }
+            roots.push(self.root.join(name));
+        }
+        roots
+            .iter()
+            .find_map(|root| self.ruby_file(&normalize(&root.join(spec))))
+            .map(Target::Internal)
+            .unwrap_or_else(|| Target::External(spec.split('/').next().unwrap_or(spec).to_string()))
+    }
+
+    /// The file a Ruby feature path names: `x` is `x.rb`; one that already
+    /// names its file (`load "x.rb"`) is itself.
+    fn ruby_file(&self, path: &Path) -> Option<PathBuf> {
+        [with_added_ext(path, "rb"), path.to_path_buf()]
+            .into_iter()
+            .find(|f| self.has_file(f))
+    }
+
+    /// The nearest directory above `from`, within the project, named one of
+    /// `names`.
+    fn enclosing_dir_named<'p>(&self, from: &'p Path, names: &[&str]) -> Option<&'p Path> {
+        from.ancestors()
+            .skip(1)
+            .take_while(|d| d.starts_with(&self.root))
+            .find(|d| {
+                d.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| names.contains(&n))
+            })
+    }
+
+    // --- Erlang ---
+
+    /// `-behaviour(m)` and `-import(m, …)` name a module: the project's
+    /// `m.erl` wherever it is (the one nearest the importer, when several
+    /// are), else a library's (`gen_server`, OTP's). An `-include` path is a
+    /// header relative to the importer, then in its application's `include/`
+    /// (beside the `src/` or `test/` it is in) or from the application's own
+    /// directory, then in the project's `include/` or from its root. An
+    /// `-include_lib("app/include/x.hrl")` is the header in application
+    /// `app` wherever the project keeps it — the directory of its
+    /// `src/app.app.src`, or any directory named `app` (`apps/app`,
+    /// `deps/app`, `_build/default/lib/app`) — else, as Erlang does, where an
+    /// `-include` would find it, else in that application outside the project.
+    fn resolve_erlang(&self, raw: &RawImport, from: &Path) -> Target {
+        let spec = raw.module.as_str();
+        if let Some(path) = spec.strip_prefix(ERLANG_LIB) {
+            let app_header = path.split_once('/').and_then(|(app, rest)| {
+                let in_app = self.erlang_apps.get(app).map(|dir| dir.join(rest));
+                let header = Path::new(path).file_name()?.to_str()?;
+                let named = self.erlang_headers.get(header).and_then(|files| {
+                    nearest(
+                        files
+                            .iter()
+                            .filter(|f| f.ends_with(path) && f.as_path() != from),
+                        from,
+                    )
+                });
+                in_app
+                    .filter(|f| self.has_file(f))
+                    .or_else(|| named.cloned())
+            });
+            return match app_header.or_else(|| self.erlang_include(path, from)) {
+                Some(file) => Target::Internal(file),
+                None => match path.split_once('/') {
+                    Some((app, _)) => Target::External(app.to_string()),
+                    None => Target::Unresolved(path.to_string()),
+                },
+            };
+        }
+        // A header's path; a module's name has no `/` and is no `.hrl`.
+        if spec.contains('/') || spec.ends_with(".hrl") {
+            return self
+                .erlang_include(spec, from)
+                .map(Target::Internal)
+                .unwrap_or_else(|| Target::Unresolved(spec.to_string()));
+        }
+        self.erlang_modules
+            .get(spec)
+            .and_then(|files| nearest(files.iter().filter(|f| f.as_path() != from), from))
+            .map(|file| Target::Internal(file.clone()))
+            .unwrap_or_else(|| Target::External(spec.to_string()))
+    }
+
+    /// Where an Erlang `-include` of `path` finds its header from `from`
+    /// (see [`Resolver::resolve_erlang`]).
+    fn erlang_include(&self, path: &str, from: &Path) -> Option<PathBuf> {
+        if path.starts_with('/') {
+            return None;
+        }
+        let mut bases: Vec<PathBuf> = vec![from.parent().unwrap_or(&self.root).to_path_buf()];
+        if let Some(app) = self
+            .enclosing_dir_named(from, &["src", "test"])
+            .and_then(Path::parent)
+        {
+            bases.push(app.join("include"));
+            bases.push(app.to_path_buf());
+        }
+        bases.push(self.root.join("include"));
+        bases.push(self.root.clone());
+        bases
+            .into_iter()
+            .map(|base| normalize(&base.join(path)))
+            .find(|f| f != from && self.has_file(f))
+    }
+
+    // --- Haskell ---
+
+    /// `import A.B.C` names the file `A/B/C.hs` (or `.lhs`) under a source
+    /// root: the directories the project's `.cabal` files (`hs-source-dirs`)
+    /// and `package.yaml` files (`source-dirs`) name, then the conventional
+    /// `src`, `app`, `lib` and `test` of each package and of the project, and
+    /// the package's own directory — the roots holding the importer first,
+    /// the deepest first. A module no project file is is a package's
+    /// (`Data.Map` is `containers`'), named by itself.
+    fn resolve_haskell(&self, raw: &RawImport, from: &Path) -> Target {
+        let module = raw.module.as_str();
+        let rel = module.replace('.', "/");
+        let mut roots: Vec<&PathBuf> = self.haskell_roots.iter().collect();
+        roots.sort_by_key(|r| {
+            std::cmp::Reverse(if from.starts_with(r) {
+                r.components().count()
+            } else {
+                0
+            })
+        });
+        roots
+            .into_iter()
+            .flat_map(|root| ["hs", "lhs"].map(|ext| root.join(format!("{rel}.{ext}"))))
+            .find(|f| f != from && self.has_file(f))
+            .map(Target::Internal)
+            .unwrap_or_else(|| Target::External(module.to_string()))
+    }
+
+    // --- Zig ---
+
+    /// A Zig `@import` of a path (`x.zig`, `../y.zig`, a `.zon`) is the file
+    /// relative to the importer; a bare name — `std`, `builtin`, `root`, a
+    /// `build.zig.zon` dependency — is a package.
+    fn resolve_zig(&self, raw: &RawImport, from: &Path) -> Target {
+        let spec = raw.module.as_str();
+        let is_path = spec.contains('/') || spec.ends_with(".zig") || spec.ends_with(".zon");
+        if !is_path {
+            return Target::External(spec.to_string());
+        }
+        let file = normalize(&from.parent().unwrap_or(&self.root).join(spec));
+        if !spec.starts_with('/') && self.has_file(&file) {
+            return Target::Internal(file);
+        }
+        Target::Unresolved(spec.to_string())
     }
 
     // --- Lean ---
@@ -1391,6 +1968,114 @@ fn with_added_ext(p: &Path, ext: &str) -> PathBuf {
     p.with_file_name(name)
 }
 
+/// `base` joined with each of `parts` in turn (`a.b.C`'s parts: `a/b/C`).
+fn join_all(base: &Path, parts: &[&str]) -> PathBuf {
+    parts
+        .iter()
+        .fold(base.to_path_buf(), |path, part| path.join(part))
+}
+
+/// Of `files`, the one sharing the most of its path with `from` — the same
+/// application's, the same package's — the first one on a tie.
+fn nearest<'a>(files: impl Iterator<Item = &'a PathBuf>, from: &Path) -> Option<&'a PathBuf> {
+    let shared = |f: &Path| {
+        f.components()
+            .zip(from.components())
+            .take_while(|(a, b)| a == b)
+            .count()
+    };
+    files
+        .fold(None, |best: Option<(&PathBuf, usize)>, f| {
+            let depth = shared(f);
+            match best {
+                Some((_, held)) if held >= depth => best,
+                _ => Some((f, depth)),
+            }
+        })
+        .map(|(f, _)| f)
+}
+
+/// Most manifests of one kind (`composer.json`, Haskell package
+/// descriptions) a local resolver reads: a monorepo has one per package, a
+/// pathological tree thousands. The shallowest are kept, as tsconfig files
+/// are ([`MAX_TS_CONFIGS`]).
+const MAX_MANIFESTS: usize = 64;
+
+/// The project's files `is_manifest` picks, shallowest first (then in path
+/// order), at most [`MAX_MANIFESTS`] of them.
+fn manifests(files: &[PathBuf], is_manifest: impl Fn(&str) -> bool) -> Vec<&PathBuf> {
+    let mut found: Vec<&PathBuf> = files
+        .iter()
+        .filter(|f| {
+            f.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(&is_manifest)
+        })
+        .collect();
+    found.sort_by_key(|f| (f.components().count(), *f));
+    found.truncate(MAX_MANIFESTS);
+    found
+}
+
+/// A Haskell package description's file name: a `.cabal` file or hpack's
+/// `package.yaml`.
+fn is_haskell_manifest(name: &str) -> bool {
+    name == "package.yaml" || (name.ends_with(".cabal") && name.len() > ".cabal".len())
+}
+
+/// The PSR-4 maps of the project's `composer.json` files
+/// ([`clew_core::imports::read_composer_psr4`], bounded and plain-file-only),
+/// each directory made absolute against its file's, the longest prefix
+/// first; a prefix written without its closing `\` gets it, so `App` does not
+/// map `Application\…`.
+fn read_psr4_maps(files: &[PathBuf]) -> Vec<(String, Vec<PathBuf>)> {
+    let mut maps: Vec<(String, Vec<PathBuf>)> = Vec::new();
+    for composer in manifests(files, |name| name == "composer.json") {
+        let Some(base) = composer.parent() else {
+            continue;
+        };
+        for (mut prefix, dirs) in clew_core::imports::read_composer_psr4(composer) {
+            if !prefix.is_empty() && !prefix.ends_with('\\') {
+                prefix.push('\\');
+            }
+            let dirs = dirs.iter().map(|d| normalize(&base.join(d))).collect();
+            maps.push((prefix, dirs));
+        }
+    }
+    maps.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+    maps
+}
+
+/// The Haskell source roots that exist (are among `dirs`): for each package
+/// directory `declared` names — with the source directories its description
+/// gives — those directories, then its conventional `src`, `app`, `lib` and
+/// `test` and itself; then the same conventional ones of the project root.
+fn haskell_roots(
+    root: &Path,
+    declared: &[(PathBuf, Vec<String>)],
+    dirs: &HashSet<PathBuf>,
+) -> Vec<PathBuf> {
+    const CONVENTIONAL: &[&str] = &["src", "app", "lib", "test"];
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let packages = declared
+        .iter()
+        .map(|(dir, named)| (dir.as_path(), named.as_slice()))
+        .chain([(root, &[][..])]);
+    for (package, named) in packages {
+        let candidates = named
+            .iter()
+            .map(|d| normalize(&package.join(d)))
+            .chain(CONVENTIONAL.iter().map(|d| package.join(d)))
+            .chain([package.to_path_buf()]);
+        for candidate in candidates {
+            if dirs.contains(&candidate) && !roots.contains(&candidate) {
+                roots.push(candidate);
+            }
+        }
+    }
+    roots
+}
+
 // ---------------------------------------------------------------------------
 // tsconfig.json / jsconfig.json
 // ---------------------------------------------------------------------------
@@ -1521,14 +2206,16 @@ fn ts_config_candidates(files: &[PathBuf]) -> Vec<&PathBuf> {
 }
 
 /// Whether `path` is a file a local resolver reads for the WHOLE project —
-/// go.mod, pubspec.yaml, a tsconfig/jsconfig or a base one extends by the
-/// usual naming (`tsconfig.base.json`) — so a change to it re-resolves every
-/// file against a resolver that reads it again.
+/// go.mod, pubspec.yaml, a composer.json (PHP's PSR-4 map), a Haskell
+/// package description (`.cabal`, `package.yaml`), a tsconfig/jsconfig or a
+/// base one extends by the usual naming (`tsconfig.base.json`) — so a change
+/// to it re-resolves every file against a resolver that reads it again.
 pub fn is_resolution_metadata(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
         return false;
     };
-    matches!(name, "go.mod" | "pubspec.yaml")
+    matches!(name, "go.mod" | "pubspec.yaml" | "composer.json")
+        || is_haskell_manifest(name)
         || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
             && name.ends_with(".json"))
 }
@@ -2104,9 +2791,11 @@ pub struct ImportGraph {
     /// The reverse of `reads`: a file → the files whose resolution read its
     /// facts, which are exactly the ones to resolve again when they change.
     readers: HashMap<PathBuf, Arc<HashSet<PathBuf>>>,
-    /// The Go packages of the resolver last applied with
-    /// ([`Resolver::go_packages`]).
-    go_packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
+    /// The Go and Java package directories of the resolver last applied
+    /// with ([`Resolver::packages`]).
+    packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
+    /// The C# namespaces the files declare, kept in step with `raw`.
+    namespaces: Namespaces,
 }
 
 /// One file as the import graph takes it: the specifiers its import
@@ -2338,14 +3027,17 @@ impl ImportGraph {
     ///     inputs changed);
     ///   * the batch's files whose imports changed — an edit below a file's
     ///     imports resolves nothing at all;
-    ///   * and the files whose resolution READ a Rust fact the batch changed:
+    ///   * the files whose resolution READ a Rust fact the batch changed:
     ///     a file's `mod`/`use` declarations or items, which another file's
     ///     `use` may follow (a crate root's `pub use` re-exports, a glob's
     ///     names, a declared module). Each file's reads are recorded as it
     ///     resolves ([`Consulted`]), so a new function in one module
     ///     re-resolves the few files that look names up through it, not every
-    ///     Rust file of the project. No other language resolves through
-    ///     another file's contents.
+    ///     Rust file of the project;
+    ///   * and the C# files that use a namespace whose files the batch
+    ///     changed ([`Namespaces`]): a namespace that came or went decides
+    ///     whether a `using` is the project's. No other language resolves
+    ///     through another file's contents.
     ///
     /// A file whose resolution panics is left with its imports unresolved
     /// ([`Applied::unresolvable`]); the panic goes no further than that file.
@@ -2396,20 +3088,21 @@ impl ImportGraph {
         let mut changed = false;
         let mut structure_changed = false;
         let mut scope_changed = false;
-        // Go imports reach their packages' files as the project has them now:
-        // a file come into a package, or gone from it, is in the scope of
-        // every file importing it, or out.
-        let held = before.map_or(&self.go_packages, |before| &before.go_packages);
+        // Go and Java package imports reach their packages' files as the
+        // project has them now: a file come into a package, or gone from it,
+        // is in the scope of every file importing it, or out.
+        let held = before.map_or(&self.packages, |before| &before.packages);
         let packages_changed =
-            !Arc::ptr_eq(held, &resolver.go_packages) && **held != *resolver.go_packages;
-        self.go_packages = resolver.go_packages.clone();
+            !Arc::ptr_eq(held, &resolver.packages) && **held != *resolver.packages;
+        self.packages = resolver.packages.clone();
         if let Some(before) = before {
             changed = !before.out.is_empty();
             structure_changed = changed;
         }
         // The files whose Rust facts — what other files resolve through —
-        // changed, appeared or went.
+        // changed, appeared or went; the C# namespaces whose files did.
         let mut facts_changed: Vec<PathBuf> = Vec::new();
+        let mut namespaces_changed: HashSet<PathBuf> = HashSet::new();
         let mut dirty: Vec<PathBuf> = Vec::new();
         for (file, change) in &batch.files {
             let queued = match change {
@@ -2428,6 +3121,7 @@ impl ImportGraph {
                 if self.ctx.remove(file) {
                     facts_changed.push(file.clone());
                 }
+                namespaces_changed.extend(self.namespaces.set(file, Vec::new()));
                 continue;
             };
             if lang_of(file) == Some("rust")
@@ -2437,6 +3131,16 @@ impl ImportGraph {
             {
                 facts_changed.push(file.clone());
             }
+            let declares: Vec<PathBuf> = match lang_of(file) {
+                Some("csharp") => queued
+                    .raw
+                    .iter()
+                    .filter(|r| r.is_mod_decl)
+                    .map(|r| resolver.namespace_node(&r.module))
+                    .collect(),
+                _ => Vec::new(),
+            };
+            namespaces_changed.extend(self.namespaces.set(file, declares));
             let same = self.out.contains_key(file)
                 && self
                     .raw
@@ -2454,9 +3158,11 @@ impl ImportGraph {
                 .iter()
                 .filter_map(|f| self.readers.get(f))
                 .flat_map(|readers| readers.iter().cloned());
+            let users = self.namespace_users(&namespaces_changed, resolver, &lang_of);
             dirty
                 .into_iter()
                 .chain(readers)
+                .chain(users)
                 .filter(|f| self.raw.contains_key(f))
                 .collect()
         };
@@ -2474,7 +3180,7 @@ impl ImportGraph {
             }));
             let (edges, reads) = resolved.unwrap_or_else(|panic| {
                 unresolvable.push((file.clone(), panic_note(&*panic)));
-                (self.unresolved_edges(file), Vec::new())
+                (self.unresolved_edges(file, lang_of(file)), Vec::new())
             });
             self.set_reads(file, reads);
             let held = self.out.get(file).map(|held| held.as_slice());
@@ -2485,13 +3191,20 @@ impl ImportGraph {
                 changed = true;
             }
         }
+        // A namespace's files are what its `using`s reach — the files that
+        // count on them, and their importers' scopes, moved with them.
+        let namespaces_moved = match before {
+            Some(before) => before.namespaces != self.namespaces,
+            None => !namespaces_changed.is_empty(),
+        };
         // A reset resolved every file against an empty graph: its scope is
         // judged against the graph the reset replaced.
         if let Some(before) = before {
             scope_changed = !self.same_scope_as(before);
         }
-        changed |= packages_changed;
-        scope_changed |= packages_changed;
+        changed |= packages_changed || namespaces_moved;
+        structure_changed |= namespaces_moved;
+        scope_changed |= packages_changed || namespaces_moved;
         Applied {
             changed,
             structure_changed,
@@ -2499,6 +3212,37 @@ impl ImportGraph {
             resolved: scope.len(),
             unresolvable,
         }
+    }
+
+    /// The C# files with a `using` of one of the namespaces `changed`
+    /// (nodes), or of a type in one: what resolves differently once the
+    /// namespace's files changed — a namespace that came or went, a type's
+    /// file that joined or left it.
+    fn namespace_users(
+        &self,
+        changed: &HashSet<PathBuf>,
+        resolver: &Resolver,
+        lang_of: &impl Fn(&Path) -> Option<&'static str>,
+    ) -> Vec<PathBuf> {
+        if changed.is_empty() {
+            return Vec::new();
+        }
+        // A `using`'s name, and the namespace it is a type of, if it is one.
+        fn names(r: &RawImport) -> impl Iterator<Item = &str> {
+            let parent = r.module.rsplit_once('.').map(|(namespace, _)| namespace);
+            [Some(r.module.as_str()), parent].into_iter().flatten()
+        }
+        self.raw
+            .iter()
+            .filter(|(file, _)| lang_of(file) == Some("csharp"))
+            .filter(|(_, raws)| {
+                raws.iter()
+                    .filter(|r| !r.is_mod_decl)
+                    .flat_map(names)
+                    .any(|name| changed.contains(&resolver.namespace_node(name)))
+            })
+            .map(|(file, _)| file.clone())
+            .collect()
     }
 
     /// Whether `self` and `other` give every file the same imported project
@@ -2512,10 +3256,11 @@ impl ImportGraph {
 
     /// `file`'s imports as edges that resolve nowhere: what a file whose
     /// resolution panicked is left with — its imports on show, none of them
-    /// followed.
-    fn unresolved_edges(&self, file: &Path) -> Vec<Edge> {
+    /// followed. Its declarations (`lang`'s, a Java package) are no edges.
+    fn unresolved_edges(&self, file: &Path, lang: Option<&str>) -> Vec<Edge> {
         let raws = self.raw.get(file).map(|r| r.as_slice()).unwrap_or(&[]);
         raws.iter()
+            .filter(|r| !lang.is_some_and(|lang| is_declaration(lang, r)))
             .map(|r| Edge {
                 target: Target::Unresolved(r.module.clone()),
                 specifier: r.module.clone(),
@@ -2545,13 +3290,24 @@ impl ImportGraph {
         };
         let consulted = Consulted::new(&self.ctx);
         let raws = self.raw.get(file).map(|r| r.as_slice()).unwrap_or(&[]);
+        // A Java file's own `package` line says where its source root is.
+        let package = (lang == "java")
+            .then(|| raws.iter().find(|r| r.is_mod_decl))
+            .flatten()
+            .map(|r| r.module.as_str());
+        let declared = Declared {
+            package,
+            namespaces: Some(&self.namespaces),
+        };
         let edges = raws
             .iter()
+            .filter(|r| !is_declaration(lang, r))
             .map(|r| {
                 let (target, inferred) = if lang == "rust" {
                     resolver.resolve_rust_inferred(r, file, &consulted)
                 } else {
-                    (resolver.resolve_with(r, file, lang, &self.ctx), false)
+                    let target = resolver.resolve_with(r, file, lang, &self.ctx, &declared);
+                    (target, false)
                 };
                 let kind = if r.is_mod_decl {
                     EdgeKind::ModDecl
@@ -2571,9 +3327,13 @@ impl ImportGraph {
                 }
             })
             // A Rust path naming the file itself (`use self::Item`, a test
-            // module's `use super::*`, a local enum's `use Kind::*`) is not a
+            // module's `use super::*`, a local enum's `use Kind::*`), or a
+            // Java static import of the file's own class, is not a
             // dependency.
-            .filter(|e| !(lang == "rust" && e.target == Target::Internal(file.to_path_buf())))
+            .filter(|e| {
+                !(matches!(lang, "rust" | "java")
+                    && e.target == Target::Internal(file.to_path_buf()))
+            })
             .collect();
         (edges, consulted.into_read())
     }
@@ -2651,33 +3411,55 @@ impl ImportGraph {
     }
 
     /// Files that import this file (internal edges only), sorted for stable
-    /// display — a Go file's, those that import its package.
+    /// display — a Go or Java file's, those that import its package; a C#
+    /// file's, those that use a namespace it declares.
     pub fn importers(&self, file: &Path) -> Vec<PathBuf> {
         let mut v = self
             .rev
             .get(file)
             .map(|importers| importers.to_vec())
             .unwrap_or_default();
-        if is_go_source(file)
+        if is_package_source(file)
             && let Some(package) = file.parent().and_then(|dir| self.rev.get(dir))
         {
             v.extend(package.iter().cloned());
+        }
+        for namespace in self.namespaces.of(file) {
+            if let Some(users) = self.rev.get(namespace) {
+                v.extend(users.iter().filter(|u| u.as_path() != file).cloned());
+            }
         }
         v.sort();
         v.dedup();
         v
     }
 
-    /// Each Go package directory of the project, with its files (sorted,
-    /// its tests aside), as the resolver last applied found them: a Go
-    /// import names a package — a directory — and reaches every file of it,
-    /// where every other language's names one file.
-    pub fn go_packages(&self) -> Arc<HashMap<PathBuf, Vec<PathBuf>>> {
-        self.go_packages.clone()
+    /// Each Go and Java package directory of the project, with its files
+    /// (sorted, a Go package's tests aside), as the resolver last applied
+    /// found them: a Go import, or a Java `*` import, names a package — a
+    /// directory — and reaches every file of it, where most languages' names
+    /// one file. (A C# `using` reaches its namespace's files likewise, which
+    /// the graph keeps itself: [`Self::imported_files`] reaches them too.)
+    pub fn packages(&self) -> Arc<HashMap<PathBuf, Vec<PathBuf>>> {
+        self.packages.clone()
+    }
+
+    /// The files a package node reaches: a Go or Java package directory's
+    /// (from `packages`, [`Self::packages`]), or a C# namespace's.
+    fn package_files<'a>(
+        &'a self,
+        node: &Path,
+        packages: &'a HashMap<PathBuf, Vec<PathBuf>>,
+    ) -> Option<&'a [PathBuf]> {
+        packages
+            .get(node)
+            .map(Vec::as_slice)
+            .or_else(|| self.namespaces.files(node))
     }
 
     /// The project files `file` imports, each once: an import's file, or the
-    /// files of a Go package it imports (`packages`, [`Self::go_packages`]).
+    /// files of a package it imports (a Go or Java package from `packages`,
+    /// [`Self::packages`]; a C# namespace).
     pub fn imported_files(
         &self,
         file: &Path,
@@ -2689,9 +3471,9 @@ impl ImportGraph {
             let Target::Internal(t) = &e.target else {
                 continue;
             };
-            let reached = packages
-                .get(t)
-                .map_or(std::slice::from_ref(t), Vec::as_slice);
+            let reached = self
+                .package_files(t, packages)
+                .unwrap_or(std::slice::from_ref(t));
             for f in reached {
                 if f != file && seen.insert(f.as_path()) {
                     files.push(f.clone());
@@ -2701,10 +3483,11 @@ impl ImportGraph {
         files
     }
 
-    /// The first file of the Go package `dir`, by path — what a click on the
-    /// package opens — or `None` when `dir` is no package of the graph's.
-    pub fn package_file(&self, dir: &Path) -> Option<PathBuf> {
-        self.go_packages.get(dir)?.first().cloned()
+    /// The first file of the package `node` — a Go or Java package's
+    /// directory, a C# namespace's node — by path: what a click on the
+    /// package opens. `None` when `node` is no package of the graph's.
+    pub fn package_file(&self, node: &Path) -> Option<PathBuf> {
+        self.package_files(node, &self.packages)?.first().cloned()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -2719,11 +3502,11 @@ impl ImportGraph {
     /// imports or a target of one), sorted for stable display.
     pub fn files(&self) -> Vec<PathBuf> {
         let mut set: HashSet<PathBuf> = self.out.keys().cloned().collect();
-        // A Go package a Go file imports as its files: a directory is no
-        // file of the graph, and its files, importing nothing, are there by
-        // being imported.
+        // A package a file imports (a Go or Java package, a C# namespace) as
+        // its files: a directory or a namespace is no file of the graph, and
+        // its files, importing nothing, are there by being imported.
         for target in self.rev.keys() {
-            match self.go_packages.get(target) {
+            match self.package_files(target, &self.packages) {
                 Some(files) => set.extend(files.iter().cloned()),
                 None => {
                     set.insert(target.clone());
@@ -2767,9 +3550,10 @@ impl ImportGraph {
     /// Each file mapped to the set of internal files it imports — the scope the
     /// project call graph resolves called names within.
     pub fn scope_map(&self) -> HashMap<PathBuf, HashSet<PathBuf>> {
-        // A Go import's package as its files: the call graph matches a call's
-        // file against the files in its scope, and a directory matched none.
-        let packages = self.go_packages();
+        // A package import's package as its files: the call graph matches a
+        // call's file against the files in its scope, and a directory (or a
+        // namespace) matched none.
+        let packages = self.packages();
         self.out
             .keys()
             .map(|file| {
@@ -2780,10 +3564,11 @@ impl ImportGraph {
             .collect()
     }
 
-    /// Number of internal files that import `file` (its fan-in) — a Go
-    /// file's, those that import its package.
+    /// Number of internal files that import `file` (its fan-in) — a Go or
+    /// Java file's, those that import its package; a C# file's, those that
+    /// use its namespaces.
     pub fn fan_in(&self, file: &Path) -> usize {
-        if is_go_source(file) {
+        if is_package_source(file) || !self.namespaces.of(file).is_empty() {
             return self.importers(file).len();
         }
         self.rev.get(file).map(|v| v.len()).unwrap_or(0)
@@ -2976,13 +3761,17 @@ impl Dir {
     }
 }
 
-/// Whether `file` is a Go package's own source — what an import of its
-/// directory reaches (a `_test.go` file is the package's test).
-fn is_go_source(file: &Path) -> bool {
-    file.extension().is_some_and(|e| e == "go")
-        && !file
+/// Whether `file` is a package's own source — what an import of its
+/// directory reaches: a Go file (a `_test.go` file is the package's test),
+/// or a Java class, which a `*` import of its package reaches.
+fn is_package_source(file: &Path) -> bool {
+    match file.extension().and_then(|e| e.to_str()) {
+        Some("go") => !file
             .file_name()
-            .is_some_and(|n| n.to_string_lossy().ends_with("_test.go"))
+            .is_some_and(|n| n.to_string_lossy().ends_with("_test.go")),
+        Some("java") => true,
+        _ => false,
+    }
 }
 
 /// A node in the import view tree.
@@ -3151,10 +3940,11 @@ impl ImportTree {
         depth: usize,
     ) -> Vec<INode> {
         let mut out = Vec::new();
-        // A Go package (an import names its directory): its files, each
-        // expanded from there, in either direction.
+        // A package (a Go or Java import names its directory, a C# `using`
+        // its namespace): its files, each expanded from there, in either
+        // direction.
         if graph.imports(path).is_empty()
-            && let Some(files) = graph.go_packages.get(path)
+            && let Some(files) = graph.package_files(path, &graph.packages)
         {
             for f in files {
                 let cyclic = self.is_ancestor(Some(parent), f);
@@ -3435,7 +4225,7 @@ mod tests {
             let child = r.root.join(format!("src/commands/{stem}/inner.rs"));
             let targets: Vec<Target> = raw[&from]
                 .iter()
-                .map(|import| r.resolve_with(import, &from, "rust", &ctx))
+                .map(|import| r.resolve_with(import, &from, "rust", &ctx, &Declared::default()))
                 .collect();
             assert_eq!(
                 targets,
@@ -3482,7 +4272,7 @@ mod tests {
             let from = r.root.join(root_file);
             for import in &raw[&from] {
                 assert_eq!(
-                    r.resolve_with(import, &from, "rust", &ctx),
+                    r.resolve_with(import, &from, "rust", &ctx, &Declared::default()),
                     Target::Internal(r.root.join(&child_file)),
                     "{root_file}: {import:?}"
                 );
@@ -3516,14 +4306,14 @@ mod tests {
             let from = r.root.join(&root_file);
             for import in &raw[&from] {
                 assert_eq!(
-                    r.resolve_with(import, &from, "rust", &ctx),
+                    r.resolve_with(import, &from, "rust", &ctx, &Declared::default()),
                     Target::Internal(r.root.join("custom/child.rs")),
                     "{root_file}: {import:?}"
                 );
             }
             let child = r.root.join("custom/child.rs");
             assert_eq!(
-                r.resolve_with(&raw[&child][0], &child, "rust", &ctx),
+                r.resolve_with(&raw[&child][0], &child, "rust", &ctx, &Declared::default()),
                 Target::Internal(from),
                 "custom child still resolves its parent's items"
             );
@@ -3547,7 +4337,7 @@ mod tests {
             let from = r.root.join(file);
             for import in raw[&from].iter().filter(|import| import.module != "user") {
                 assert_eq!(
-                    r.resolve_with(import, &from, "rust", &ctx),
+                    r.resolve_with(import, &from, "rust", &ctx, &Declared::default()),
                     Target::Internal(r.root.join("src/type.rs")),
                     "{file}: {import:?}"
                 );
@@ -3571,7 +4361,7 @@ mod tests {
         let from = r.root.join("src/lib.rs");
         let targets: Vec<Target> = raw[&from]
             .iter()
-            .map(|import| r.resolve_with(import, &from, "rust", &ctx))
+            .map(|import| r.resolve_with(import, &from, "rust", &ctx, &Declared::default()))
             .collect();
         assert_eq!(
             targets,
@@ -3888,6 +4678,243 @@ mod tests {
             Target::External("Mathlib".into())
         );
         assert_eq!(at("Init", "main.lean"), Target::External("Init".into()));
+    }
+
+    /// PHP names resolve by the PSR-4 map composer.json gives (`autoload` and
+    /// `autoload-dev`), a name under a mapped prefix that no file is stays
+    /// unresolved, and any other is its vendor's; a `require` is a path from
+    /// the importer's directory (`__DIR__`), else from the project root.
+    #[test]
+    fn php_names_resolve_by_psr4_and_requires_by_path() {
+        let dir = clew_core::testutil::TempDir::new("php-psr4");
+        std::fs::write(
+            dir.join("composer.json"),
+            r#"{"autoload": {"psr-4": {"App\\": "app/"}},
+                "autoload-dev": {"psr-4": {"Tests\\": ["tests/"]}}}"#,
+        )
+        .unwrap();
+        let files: Vec<PathBuf> = [
+            "composer.json",
+            "app/Models/User.php",
+            "app/Http/Controller.php",
+            "lib/helpers.php",
+            "tests/UserTest.php",
+            "bootstrap.php",
+        ]
+        .iter()
+        .map(|f| dir.join(f))
+        .collect();
+        let r = Resolver::new(&dir, &files);
+        let from = dir.join("app/Http/Controller.php");
+        let at = |spec: &str| r.resolve(&ri(spec), &from, "php");
+        assert_eq!(
+            at("App\\Models\\User"),
+            Target::Internal(dir.join("app/Models/User.php"))
+        );
+        assert_eq!(
+            at("Tests\\UserTest"),
+            Target::Internal(dir.join("tests/UserTest.php"))
+        );
+        assert_eq!(
+            at("App\\Models\\Missing"),
+            Target::Unresolved("App\\Models\\Missing".into())
+        );
+        assert_eq!(
+            at("Symfony\\Component\\Console\\Command"),
+            Target::External("Symfony".into())
+        );
+        assert_eq!(
+            at("__DIR__/../../lib/helpers.php"),
+            Target::Internal(dir.join("lib/helpers.php"))
+        );
+        assert_eq!(
+            at("bootstrap.php"),
+            Target::Internal(dir.join("bootstrap.php"))
+        );
+        assert_eq!(at("nowhere.php"), Target::Unresolved("nowhere.php".into()));
+    }
+
+    /// A Ruby `require_relative` is a file beside the importer; a `require`
+    /// is found on the load path — the importer's own gem's `lib`, the
+    /// project's `lib/`, `spec/` for RSpec's helper — else it is a gem.
+    #[test]
+    fn ruby_requires_resolve_on_the_load_path() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "lib/acme.rb",
+                "lib/acme/widget.rb",
+                "spec/spec_helper.rb",
+                "spec/acme_spec.rb",
+                "gems/tool/lib/tool/cli.rb",
+                "gems/tool/lib/tool/version.rb",
+                "Rakefile",
+                "tasks/setup.rb",
+            ],
+        );
+        let at = |spec: &str, from: &str| r.resolve(&ri(spec), &root.join(from), "ruby");
+        assert_eq!(
+            at("./acme/widget", "lib/acme.rb"),
+            Target::Internal(root.join("lib/acme/widget.rb"))
+        );
+        assert_eq!(
+            at("acme/widget", "lib/acme.rb"),
+            Target::Internal(root.join("lib/acme/widget.rb"))
+        );
+        assert_eq!(
+            at("spec_helper", "spec/acme_spec.rb"),
+            Target::Internal(root.join("spec/spec_helper.rb"))
+        );
+        assert_eq!(
+            at("acme", "spec/acme_spec.rb"),
+            Target::Internal(root.join("lib/acme.rb"))
+        );
+        assert_eq!(
+            at("tool/version", "gems/tool/lib/tool/cli.rb"),
+            Target::Internal(root.join("gems/tool/lib/tool/version.rb"))
+        );
+        assert_eq!(
+            at("./tasks/setup.rb", "Rakefile"),
+            Target::Internal(root.join("tasks/setup.rb"))
+        );
+        assert_eq!(
+            at("active_support/all", "lib/acme.rb"),
+            Target::External("active_support".into())
+        );
+        assert_eq!(
+            at("./missing", "lib/acme.rb"),
+            Target::Unresolved("./missing".into())
+        );
+    }
+
+    /// An Erlang header is found beside the importer or in its
+    /// application's `include/` (else the project's); an `-include_lib` in
+    /// the application it names, wherever the project keeps it — by its
+    /// `.app.src`, or by its directory's name — else it is that
+    /// application's, outside. A behaviour or an import is the module's
+    /// file wherever it is, else a library's.
+    #[test]
+    fn erlang_headers_and_modules_resolve_across_applications() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "apps/shop/src/shop.app.src",
+                "apps/shop/src/cart.erl",
+                "apps/shop/include/records.hrl",
+                "apps/core/src/my_behaviour.erl",
+                "apps/core/include/core.hrl",
+                "apps/payments-service/src/payments.app.src",
+                "apps/payments-service/include/money.hrl",
+                "deps/cowboy/include/cowboy.hrl",
+                "include/global.hrl",
+            ],
+        );
+        let from = root.join("apps/shop/src/cart.erl");
+        let at = |spec: &str| r.resolve(&ri(spec), &from, "erlang");
+        let internal = |f: &str| Target::Internal(root.join(f));
+        assert_eq!(at("records.hrl"), internal("apps/shop/include/records.hrl"));
+        assert_eq!(at("global.hrl"), internal("include/global.hrl"));
+        assert_eq!(
+            at("lib:core/include/core.hrl"),
+            internal("apps/core/include/core.hrl")
+        );
+        assert_eq!(
+            at("lib:payments/include/money.hrl"),
+            internal("apps/payments-service/include/money.hrl")
+        );
+        assert_eq!(
+            at("lib:cowboy/include/cowboy.hrl"),
+            internal("deps/cowboy/include/cowboy.hrl")
+        );
+        assert_eq!(
+            at("lib:kernel/include/file.hrl"),
+            Target::External("kernel".into())
+        );
+        assert_eq!(
+            at("my_behaviour"),
+            internal("apps/core/src/my_behaviour.erl")
+        );
+        assert_eq!(at("gen_server"), Target::External("gen_server".into()));
+        assert_eq!(at("missing.hrl"), Target::Unresolved("missing.hrl".into()));
+    }
+
+    /// A Haskell module is the file under a source root: the ones the
+    /// package descriptions name (a `.cabal` file's `hs-source-dirs`, a
+    /// `package.yaml`'s `source-dirs`), or a conventional one; a module no
+    /// file is is a package's.
+    #[test]
+    fn haskell_modules_resolve_under_the_declared_source_dirs() {
+        let dir = clew_core::testutil::TempDir::new("haskell-roots");
+        std::fs::write(
+            dir.join("acme.cabal"),
+            "library\n  hs-source-dirs: lib-src\nexecutable acme\n  hs-source-dirs: app\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.join("pkgs/util")).unwrap();
+        std::fs::write(dir.join("pkgs/util/package.yaml"), "source-dirs: source\n").unwrap();
+        let names = [
+            "acme.cabal",
+            "lib-src/Acme/Types.hs",
+            "app/Main.hs",
+            "test/Acme/TypesSpec.hs",
+            "pkgs/util/package.yaml",
+            "pkgs/util/source/Util/Text.hs",
+        ];
+        let files: Vec<PathBuf> = names.iter().map(|f| dir.join(f)).collect();
+        let r = Resolver::new(&dir, &files);
+        let at = |module: &str, from: &str| r.resolve(&ri(module), &dir.join(from), "haskell");
+        assert_eq!(
+            at("Acme.Types", "app/Main.hs"),
+            Target::Internal(dir.join("lib-src/Acme/Types.hs"))
+        );
+        assert_eq!(
+            at("Acme.Types", "test/Acme/TypesSpec.hs"),
+            Target::Internal(dir.join("lib-src/Acme/Types.hs"))
+        );
+        assert_eq!(
+            at("Util.Text", "app/Main.hs"),
+            Target::Internal(dir.join("pkgs/util/source/Util/Text.hs"))
+        );
+        assert_eq!(
+            at("Data.Map", "app/Main.hs"),
+            Target::External("Data.Map".into())
+        );
+        // Without the descriptions (a remote project's resolver), only the
+        // conventional roots are known.
+        let remote = Resolver::with_meta(&dir, &files, None, None);
+        assert_eq!(
+            remote.resolve(&ri("Acme.Types"), &dir.join("app/Main.hs"), "haskell"),
+            Target::External("Acme.Types".into())
+        );
+    }
+
+    /// A Zig `@import` of a path is the file beside the importer; a bare
+    /// name is a package.
+    #[test]
+    fn zig_imports_resolve_files_and_leave_packages_external() {
+        let root = Path::new("/p");
+        let r = resolver(root, &["build.zig", "src/main.zig", "src/util/strings.zig"]);
+        let at = |spec: &str| r.resolve(&ri(spec), &root.join("src/main.zig"), "zig");
+        assert_eq!(
+            at("util/strings.zig"),
+            Target::Internal(root.join("src/util/strings.zig"))
+        );
+        assert_eq!(at("../build.zig"), Target::Internal(root.join("build.zig")));
+        assert_eq!(at("std"), Target::External("std".into()));
+        assert_eq!(at("missing.zig"), Target::Unresolved("missing.zig".into()));
+    }
+
+    /// The manifests a local resolver reads for the whole project re-resolve
+    /// it when they change.
+    #[test]
+    fn php_and_haskell_manifests_are_resolution_metadata() {
+        for name in ["composer.json", "acme.cabal", "package.yaml", "go.mod"] {
+            assert!(is_resolution_metadata(Path::new(name)), "{name}");
+        }
+        assert!(!is_resolution_metadata(Path::new(".cabal")));
+        assert!(!is_resolution_metadata(Path::new("package.json")));
     }
 
     #[test]
@@ -5262,8 +6289,15 @@ mod resolution_tests {
             ],
         );
         let ctx = RustCtx::new(&raw, &lang_of);
-        let res =
-            |spec: &str, from: &str| r.resolve_with(&ri(spec), &root.join(from), "rust", &ctx);
+        let res = |spec: &str, from: &str| {
+            r.resolve_with(
+                &ri(spec),
+                &root.join(from),
+                "rust",
+                &ctx,
+                &Declared::default(),
+            )
+        };
         let internal = |f: &str| Target::Internal(root.join(f));
         // A module re-exported by the crate root, reached through `crate::`.
         assert_eq!(
@@ -5311,7 +6345,13 @@ mod resolution_tests {
             is_mod_decl: true,
         };
         assert_eq!(
-            r.resolve_with(&nested, &root.join("src/a.rs"), "rust", &ctx),
+            r.resolve_with(
+                &nested,
+                &root.join("src/a.rs"),
+                "rust",
+                &ctx,
+                &Declared::default()
+            ),
             internal("src/a/nested/b.rs")
         );
     }
@@ -6280,5 +7320,160 @@ mod resolution_tests {
             res("gone.dart", "lib/app.dart"),
             Target::Unresolved("gone.dart".into())
         );
+    }
+
+    /// Every target `file`'s edges point at, in source order.
+    fn targets(g: &ImportGraph, file: &Path) -> Vec<Target> {
+        g.imports(file).iter().map(|e| e.target.clone()).collect()
+    }
+
+    /// A Java import is the class file under the source root the importer's
+    /// own `package` line implies — a file filed outside the Maven layout
+    /// too — or under its module's other root (a test sees the main
+    /// classes); a static member is found through its class; a star names
+    /// the package's directory, which reaches every class of it. The
+    /// `package` line is no edge, nor is a static import of the file's own
+    /// class. A name in a package of the project's own that no file is stays
+    /// unresolved; any other is its library's package.
+    #[test]
+    fn java_imports_resolve_under_the_packages_source_root() {
+        let root = Path::new("/j");
+        let main = "app/src/main/java/com/acme/app/Main.java";
+        let strings = "app/src/main/java/com/acme/util/Strings.java";
+        let user = "app/src/main/java/com/acme/model/User.java";
+        let order = "app/src/main/java/com/acme/model/Order.java";
+        let test = "app/src/test/java/com/acme/app/MainTest.java";
+        let thing = "legacy/com/acme/old/Thing.java";
+        let other = "legacy/com/acme/old2/Other.java";
+        let g = graph_with(
+            root,
+            &[
+                (
+                    main,
+                    "package com.acme.app;\n\nimport com.acme.util.Strings;\nimport com.acme.model.*;\n\
+                     import static com.acme.util.Strings.join;\nimport java.util.List;\n\
+                     import com.acme.util.Missing;\nimport static com.acme.app.Main.helper;\n\
+                     class Main {}\n",
+                ),
+                (strings, "package com.acme.util;\npublic class Strings {}\n"),
+                (user, "package com.acme.model;\npublic class User {}\n"),
+                (order, "package com.acme.model;\npublic class Order {}\n"),
+                (
+                    test,
+                    "package com.acme.app;\nimport com.acme.util.Strings;\nclass MainTest {}\n",
+                ),
+                (
+                    thing,
+                    "package com.acme.old;\nimport com.acme.old2.Other;\nclass Thing {}\n",
+                ),
+                (other, "package com.acme.old2;\npublic class Other {}\n"),
+            ],
+            false,
+        );
+        let at = |f: &str| root.join(f);
+        let model = at("app/src/main/java/com/acme/model");
+        assert_eq!(
+            targets(&g, &at(main)),
+            [
+                Target::Internal(at(strings)),
+                Target::Internal(model.clone()),
+                Target::Internal(at(strings)),
+                Target::External("java.util".into()),
+                Target::Unresolved("com.acme.util.Missing".into()),
+            ]
+        );
+        let mut reached = g.imported_files(&at(main), &g.packages());
+        reached.sort();
+        assert_eq!(reached, [at(order), at(user), at(strings)]);
+        assert_eq!(g.importers(&at(user)), [at(main)]);
+        assert_eq!(g.package_file(&model), Some(at(order)));
+        assert_eq!(targets(&g, &at(test)), [Target::Internal(at(strings))]);
+        assert_eq!(targets(&g, &at(thing)), [Target::Internal(at(other))]);
+    }
+
+    /// A C# `using` of a namespace points at the namespace's node, which
+    /// reaches every file declaring it — wherever it is, block-bodied or
+    /// file-scoped; a `using static` reaches its type's file. A namespace no
+    /// project file declares is a library's. A file whose namespaces change
+    /// moves the `using`s of them with it, as a build from scratch would
+    /// have them.
+    #[test]
+    fn csharp_usings_reach_the_files_declaring_their_namespace() {
+        let root = Path::new("/cs");
+        let user = "src/Core/User.cs";
+        let order = "src/Model/Order.cs";
+        let strings = "src/Util/Strings.cs";
+        let program = "src/App/Program.cs";
+        let sources = [
+            (user, "namespace Acme.Core {\n  public class User {}\n}\n"),
+            (order, "namespace Acme.Core;\npublic class Order {}\n"),
+            (
+                strings,
+                "namespace Acme.Util { static class Strings {} static class Paths {} }\n",
+            ),
+            (
+                program,
+                "using Acme.Core;\nusing static Acme.Util.Strings;\nusing System.Text;\n\
+                 using Json = Newtonsoft.Json;\nnamespace Acme.App { class P {} }\n",
+            ),
+        ];
+        let mut g = graph_with(root, &sources, false);
+        let at = |f: &str| root.join(f);
+        let names: Vec<&str> = sources.iter().map(|(f, _)| *f).collect();
+        let r = resolver(root, &names);
+        let core = r.namespace_node("Acme.Core");
+        assert_eq!(
+            targets(&g, &at(program)),
+            [
+                Target::Internal(core.clone()),
+                Target::Internal(at(strings)),
+                Target::External("System.Text".into()),
+                Target::External("Newtonsoft.Json".into()),
+            ]
+        );
+        let mut reached = g.imported_files(&at(program), &g.packages());
+        reached.sort();
+        assert_eq!(reached, [at(user), at(order), at(strings)]);
+        assert_eq!(g.importers(&at(order)), [at(program)]);
+        assert_eq!(g.fan_in(&at(user)), 1);
+        assert_eq!(g.package_file(&core), Some(at(user)));
+        assert!(g.files().contains(&at(order)) && !g.files().contains(&core));
+
+        // Both files leave the namespace: the `using` is no longer the
+        // project's — re-resolved though Program.cs itself did not change.
+        let mut batch = ImportBatch::default();
+        for (file, src) in [
+            (user, "namespace Acme.Domain { class User {} }\n"),
+            (order, "namespace Acme.Domain;\nclass Order {}\n"),
+        ] {
+            let raw = crate::index::analyze_file(&at(file), file, src, "csharp").imports;
+            batch.set(
+                at(file),
+                FileImports {
+                    raw,
+                    items: RustItems::new(),
+                },
+            );
+        }
+        let applied = g.apply(&batch, &r, lang_of);
+        assert!(applied.scope_changed && applied.structure_changed);
+        assert_eq!(
+            targets(&g, &at(program))[0],
+            Target::External("Acme.Core".into())
+        );
+        assert!(g.importers(&at(user)).is_empty());
+        let scratch = graph_with(
+            root,
+            &[
+                (user, "namespace Acme.Domain { class User {} }\n"),
+                (order, "namespace Acme.Domain;\nclass Order {}\n"),
+                sources[2],
+                sources[3],
+            ],
+            false,
+        );
+        for file in [user, order, strings, program] {
+            assert_eq!(g.imports(&at(file)), scratch.imports(&at(file)), "{file}");
+        }
     }
 }

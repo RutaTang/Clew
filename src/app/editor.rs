@@ -38,12 +38,11 @@ impl App {
         if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
             anchor.superseded = true;
         }
-        // A Go package (an import names its directory: the Imports tab's
-        // row, the map's) opens at its first file: a directory is no file.
-        let abs = match abs.extension() {
-            None => self.proj.import_graph.package_file(&abs).unwrap_or(abs),
-            Some(_) => abs,
-        };
+        // A package (a Go or Java import names its directory, a C# `using`
+        // its namespace: the Imports tab's row, the map's) opens at its first
+        // file: neither is a file. Looked up whatever the name: a namespace's
+        // node (`namespace Acme.Core`) reads as though it had an extension.
+        let abs = self.proj.import_graph.package_file(&abs).unwrap_or(abs);
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).

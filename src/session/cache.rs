@@ -66,7 +66,10 @@ use crate::incremental::Version;
 /// signature, a Java HTTP verb only as JAX-RS or Micronaut writes it, no
 /// database annotation, a wrapped Rust attribute read whole; an older entry
 /// keeps the looser kinds.
-pub(crate) const CACHE_VERSION: u32 = 13;
+/// 14: Java, PHP, Ruby, C#, Erlang, Haskell and Zig imports are extracted —
+/// and a Java package or C# namespace a file declares, recorded beside them
+/// (`clew_core::imports::RawImport::is_mod_decl`); an older entry lists none.
+pub(crate) const CACHE_VERSION: u32 = 14;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

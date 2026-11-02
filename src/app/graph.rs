@@ -31,11 +31,18 @@ fn graph_language_name(lang: &str) -> bool {
 }
 
 /// Whether a file is a node of the Import graph: [`graph_language`]'s, and
-/// Lean's, whose imports clew resolves but whose calls it does not read
-/// (`clew_core::projectcalls`) — in the call graph its every definition would
-/// be a node without an edge.
+/// those of the languages whose imports clew resolves but which the call
+/// graph leaves out — Lean's calls it does not read at all
+/// (`clew_core::projectcalls`), and there its every definition would be a
+/// node without an edge.
 pub(crate) fn import_graph_language(path: &std::path::Path) -> bool {
-    crate::highlight::detect(path).is_some_and(|lang| graph_language_name(lang) || lang == "lean")
+    crate::highlight::detect(path).is_some_and(|lang| {
+        graph_language_name(lang)
+            || matches!(
+                lang,
+                "lean" | "java" | "php" | "ruby" | "csharp" | "erlang" | "haskell" | "zig"
+            )
+    })
 }
 
 /// The same stamp for `project_calls.rev`, written when a build FAILED: the
@@ -236,7 +243,7 @@ fn import_graph_layout(g: &imports::ImportGraph) -> graphlayout::Layout {
         .collect();
     let mut edge_set: HashSet<(usize, usize)> = HashSet::new();
     // A Go import as edges to its package's files, the nodes.
-    let packages = g.go_packages();
+    let packages = g.packages();
     for f in &files {
         for t in g.imported_files(f, &packages) {
             if let (Some(&a), Some(&b)) = (idx.get(f), idx.get(&t)) {
@@ -2383,5 +2390,16 @@ mod tests {
         assert_eq!(layout.edges.len(), 1);
         assert!(!graph_language(&point));
         assert!(!import_graph_language(Path::new("/p/db/schema.sql")));
+    }
+
+    /// The other languages whose imports clew resolves are import-map nodes
+    /// too, and stay out of the call graph as Lean does.
+    #[test]
+    fn import_only_languages_are_import_map_nodes() {
+        for file in ["A.java", "a.php", "a.rb", "A.cs", "a.erl", "A.hs", "a.zig"] {
+            let path = Path::new("/p").join(file);
+            assert!(import_graph_language(&path), "{file}");
+            assert!(!graph_language(&path), "{file}");
+        }
     }
 }
