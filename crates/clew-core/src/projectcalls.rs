@@ -843,6 +843,42 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
             &["method_declaration", "constructor_declaration"],
             &["method_invocation", "object_creation_expression"],
         ),
+        // A closure (`function () use ($x) {…}`, `fn($x) => …`) is no scope:
+        // the outline does not list it, so its calls are the method's.
+        Lang::Php => spec(
+            &["function_definition", "method_declaration"],
+            &[
+                "function_call_expression",
+                "member_call_expression",
+                "nullsafe_member_call_expression",
+                "scoped_call_expression",
+                "object_creation_expression",
+            ],
+        ),
+        // Only `call` nodes: a bare identifier statement (`setup`) is a call
+        // to a method or a read of a local variable, and only the method's
+        // locals tell which.
+        Lang::Ruby => spec(&["method", "singleton_method"], &["call"]),
+        Lang::CSharp => spec(
+            &[
+                "method_declaration",
+                "constructor_declaration",
+                "local_function_statement",
+            ],
+            &["invocation_expression", "object_creation_expression"],
+        ),
+        // Each clause of a function is a `function_clause` naming it (the
+        // outline merges a function's clauses into one item); the clauses of
+        // an anonymous `fun` are `fun_clause`s, so its calls are the
+        // enclosing function's.
+        Lang::Erlang => spec(&["function_clause"], &["call"]),
+        // A `bind` is a scope as well as a `function`: `main = do …` and
+        // `f = \x -> …` are binds, and the outline lists every top-level one
+        // as a function — without it `main`'s calls had no caller. A bind
+        // in a `do` block (`x <- act`) has a pattern, not a name, so it is
+        // none.
+        Lang::Haskell => spec(&["function", "bind"], &["apply"]),
+        Lang::Zig => spec(&["function_declaration"], &["call_expression"]),
         // A schema has no calls; a Lean proof names the lemmas it uses inside
         // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
         // so a call graph of applications alone would say a proof uses
@@ -853,14 +889,8 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig
         | Lang::Sql
-        | Lang::Lean
-        | Lang::Php
-        | Lang::Ruby
-        | Lang::CSharp
-        | Lang::Erlang
-        | Lang::Haskell => {
+        | Lang::Lean => {
             return None;
         }
     })
@@ -961,7 +991,7 @@ fn walk(
         let current = own.or(enclosing);
 
         if spec.call_kinds.contains(&kind)
-            && let Some((callee, method)) = callee_name(node, src, lang)
+            && let Some((callee, method)) = callee_name(node, parent, src, lang)
         {
             out.push(CallSite {
                 caller: current.as_deref().map(str::to_string),
@@ -1146,9 +1176,131 @@ fn innermost_name(mut node: Node) -> Node {
 /// The called name (trailing identifier of the callee expression —
 /// `self.foo.bar` → `bar`, `Vec::<u8>::with_capacity` → `with_capacity`) plus
 /// whether the call is a `receiver.name(…)` method access. `None` for a call
-/// that cannot name a project function.
-fn callee_name(call: Node, src: &str, lang: Lang) -> Option<(String, bool)> {
+/// that cannot name a project function. `parent` is the call's parent,
+/// carried by the walk: in Erlang and Ruby it says what the call is.
+fn callee_name(call: Node, parent: Option<Node>, src: &str, lang: Lang) -> Option<(String, bool)> {
     match (lang, call.kind()) {
+        // PHP calls a function by name, or by a qualified one
+        // (`\App\helper()`). A name held in a variable (`$f()`, `$o->$m()`,
+        // `new $class`) is none the reader can follow.
+        (Lang::Php, "function_call_expression") => {
+            let function = call.child_by_field_name("function")?;
+            return Some((php_name(function, src)?, false));
+        }
+        // `$o->m()`, `$o?->m()`, and `Foo::m()` / `self::m()` /
+        // `parent::m()`, whose receiver is a class: a method each, like
+        // Java's `Foo.m()`.
+        (
+            Lang::Php,
+            "member_call_expression" | "nullsafe_member_call_expression" | "scoped_call_expression",
+        ) => {
+            let name = call.child_by_field_name("name")?;
+            return Some((php_name(name, src)?, true));
+        }
+        // `new Foo(…)` names the class. `new self`, `new static` and
+        // `new parent` name the class around the call, which is no name of
+        // their own.
+        (Lang::Php, "object_creation_expression") => {
+            let class = php_name(call.named_child(0)?, src)?;
+            if matches!(class.as_str(), "self" | "static" | "parent") {
+                return None;
+            }
+            return Some((class, false));
+        }
+        // A Ruby call carries its method name in a field, and a receiver
+        // when it is not on `self` implicitly. The name is read whole:
+        // `valid?` and `save!` are names of their own, not `valid` and
+        // `save`. Assigning through a call (`self.total = 0`) calls the
+        // setter, which is defined as `total=`.
+        (Lang::Ruby, "call") => {
+            let mut name = node_text(call.child_by_field_name("method")?, src).to_string();
+            let method = call.child_by_field_name("receiver").is_some();
+            let assigned = parent.is_some_and(|p| {
+                p.kind() == "assignment"
+                    && p.child_by_field_name("left")
+                        .is_some_and(|left| left.id() == call.id())
+            });
+            if assigned {
+                name.push('=');
+            }
+            return Some((name, method));
+        }
+        // C#: `F()`, `F<T>()`, `x.F()`, `x?.F()`. `nameof(x)` is an
+        // operator, though it is written as a call.
+        (Lang::CSharp, "invocation_expression") => {
+            let function = call.child_by_field_name("function")?;
+            let (name, method) = match function.kind() {
+                "identifier" | "generic_name" => (function, false),
+                "member_access_expression" | "member_binding_expression" => {
+                    (function.child_by_field_name("name")?, true)
+                }
+                // `x?.F()`: the member is bound after the condition.
+                "conditional_access_expression" => {
+                    let mut cursor = function.walk();
+                    let bound = function
+                        .named_children(&mut cursor)
+                        .filter(|n| n.kind() == "member_binding_expression")
+                        .last()?;
+                    (bound.child_by_field_name("name")?, true)
+                }
+                _ => return None,
+            };
+            let name = csharp_name(name, src)?;
+            if !method && name == "nameof" {
+                return None;
+            }
+            return Some((name, method));
+        }
+        // `new Foo(…)`, `new Ns.Foo<T>(…)`: the constructor is the type's
+        // base name, as the outline names it. A target-typed `new()` is an
+        // `implicit_object_creation_expression`, naming no type.
+        (Lang::CSharp, "object_creation_expression") => {
+            let ty = call.child_by_field_name("type")?;
+            return Some((csharp_name(ty, src)?, false));
+        }
+        // Erlang's `f(…)` is a local call. In `m:f(…)` the call is the `fun`
+        // of a `remote`: another module's function, so method-like. A fun
+        // held in a variable (`F(x)`) or written in place names nothing.
+        // The atom is taken as written, as the outline takes it: a quoted
+        // `'f'` or a `node@host` is no identifier run.
+        (Lang::Erlang, "call") => {
+            let function = call.child_by_field_name("expr")?;
+            if function.kind() != "atom" {
+                return None;
+            }
+            let remote = parent.is_some_and(|p| p.kind() == "remote");
+            return Some((node_text(function, src).to_string(), remote));
+        }
+        // Haskell's `f x y` is `apply (apply f x) y`: only the innermost
+        // application names the function, the outer ones are the same call
+        // taking its further arguments. A data constructor (`Just x`) is no
+        // call, and a type's `IO ()` is an `apply` of a `constructor`. A
+        // qualified `M.f` is another module's, like Python's `mod.f`.
+        (Lang::Haskell, "apply") => {
+            let function = call.child_by_field_name("function")?;
+            return match function.kind() {
+                "variable" => Some((node_text(function, src).to_string(), false)),
+                "qualified" => {
+                    let id = function.child_by_field_name("id")?;
+                    (id.kind() == "variable").then(|| (node_text(id, src).to_string(), true))
+                }
+                _ => None,
+            };
+        }
+        // Zig: `f(…)`, or `x.f(…)` through a field — a method, or a
+        // namespace's function (`std.debug.print`). A builtin (`@import(…)`)
+        // is a `builtin_function`, never a call expression.
+        (Lang::Zig, "call_expression") => {
+            let function = call.child_by_field_name("function")?;
+            return match function.kind() {
+                "identifier" => Some((node_text(function, src).to_string(), false)),
+                "field_expression" => {
+                    let member = function.child_by_field_name("member")?;
+                    Some((node_text(member, src).to_string(), true))
+                }
+                _ => None,
+            };
+        }
         // Java names the method in a field of its own; `obj.f()` carries the
         // receiver as `object`.
         (Lang::Java, "method_invocation") => {
@@ -1233,6 +1385,29 @@ fn callee_name(call: Node, src: &str, lang: Lang) -> Option<(String, bool)> {
             last_identifier(node_text(name_node, src))?
         };
     Some((name, method))
+}
+
+/// A PHP name as written (`helper`), or the last part of a qualified one
+/// (`App\Util\helper`); `None` for a variable or an expression.
+fn php_name(node: Node, src: &str) -> Option<String> {
+    match node.kind() {
+        "name" => Some(node_text(node, src).to_string()),
+        "qualified_name" => last_identifier(node_text(node, src)),
+        _ => None,
+    }
+}
+
+/// The identifier a C# name ends in: `F` of `F`, `F<T>`, `Ns.F` and
+/// `global::F`; `None` for anything else (a predefined type, an array).
+fn csharp_name(mut node: Node, src: &str) -> Option<String> {
+    loop {
+        node = match node.kind() {
+            "identifier" => return Some(node_text(node, src).to_string()),
+            "generic_name" => node.named_child(0)?,
+            "qualified_name" | "alias_qualified_name" => node.child_by_field_name("name")?,
+            _ => return None,
+        };
+    }
 }
 
 /// The last `[A-Za-z_][A-Za-z0-9_]*` run in `text`.
@@ -1485,9 +1660,105 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
                 | "setTimeout"
                 | "structuredClone"
         ),
+        // A method is called through `$this->`, never bare, so a bare
+        // `count($x)` is PHP's own even in a class that defines `count()` —
+        // and a `Countable`'s `count`, an iterator's `current`/`key`/`next`,
+        // a money type's `round`, are what it would resolve to otherwise.
+        // `isset`, `empty` and `die` are language constructs the grammar
+        // reads as calls.
+        Lang::Php => matches!(
+            name,
+            "abs"
+                | "ceil"
+                | "count"
+                | "current"
+                | "date"
+                | "die"
+                | "empty"
+                | "end"
+                | "floor"
+                | "implode"
+                | "isset"
+                | "key"
+                | "max"
+                | "min"
+                | "next"
+                | "reset"
+                | "round"
+                | "sort"
+                | "trim"
+        ),
+        // `Kernel`'s methods, called bare everywhere: an IO wrapper's own
+        // `puts` or a formatter's `format` would otherwise take every one of
+        // them. (A class that defines one of these and calls its own bare
+        // loses that edge; the name alone cannot tell.)
+        Lang::Ruby => matches!(
+            name,
+            "format"
+                | "loop"
+                | "p"
+                | "pp"
+                | "print"
+                | "printf"
+                | "puts"
+                | "raise"
+                | "require"
+                | "require_relative"
+                | "sleep"
+                | "sprintf"
+        ),
+        // Erlang's auto-imported BIFs. A module that defines one under the
+        // same name and arity cannot call its own bare (unless it declares
+        // `no_auto_import`), so a bare `get(K)` or `size(T)` is the BIF;
+        // other modules call the project's as `kv:get(K)`, a remote call.
+        // A local function of another arity called bare (`get/2`) loses its
+        // edge: the name alone cannot tell.
+        Lang::Erlang => matches!(
+            name,
+            "apply"
+                | "element"
+                | "error"
+                | "exit"
+                | "get"
+                | "length"
+                | "max"
+                | "min"
+                | "node"
+                | "put"
+                | "round"
+                | "self"
+                | "size"
+                | "spawn"
+                | "throw"
+        ),
+        // The Prelude's functions, in scope unqualified in every module: a
+        // project's container module defines its own `lookup` or `filter`
+        // and is imported qualified for them, so a bare call elsewhere is
+        // the Prelude's. (The module itself, hiding the Prelude's to call
+        // its own bare, loses those edges; the name alone cannot tell.)
+        Lang::Haskell => matches!(
+            name,
+            "concat"
+                | "elem"
+                | "filter"
+                | "head"
+                | "length"
+                | "lookup"
+                | "map"
+                | "null"
+                | "print"
+                | "reverse"
+                | "show"
+                | "sum"
+                | "tail"
+                | "zip"
+        ),
         // No bare-name builtins that a project would also define: a project
         // `malloc` wrapper IS what a C call to `malloc` links against, and
-        // C++'s `std::` calls are excluded where they are read.
+        // C++'s `std::` calls are excluded where they are read. C# has no
+        // free functions — a bare `F()` is a method of the class or a local
+        // function — and its `nameof` is dropped where it is read; Zig spells
+        // its builtins `@name`, and those are no call expressions.
         Lang::Rust
         | Lang::Dart
         | Lang::C
@@ -1502,11 +1773,7 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
         | Lang::Zig
         | Lang::Sql
         | Lang::Lean
-        | Lang::Php
-        | Lang::Ruby
-        | Lang::CSharp
-        | Lang::Erlang
-        | Lang::Haskell => false,
+        | Lang::CSharp => false,
     }
 }
 
@@ -2460,6 +2727,380 @@ class Account {
             has(&g, "/p/Account.java:transfer", "/p/Account.java:Account"),
             "`new Account()` reaches the constructor: {:?}",
             edges(&g)
+        );
+    }
+
+    /// PHP: functions, methods through `->`, `?->` and `::`, `new`, and a
+    /// closure's calls as its method's. A call through a variable and a
+    /// `new static` name nothing, and a bare `count()` is PHP's own even
+    /// beside a class's `count` method, which only `$this->` reaches.
+    #[test]
+    fn php_functions_methods_and_constructors_are_linked() {
+        let file = "/p/Cart.php";
+        let src = "\
+<?php
+function helper($x) { return $x; }
+class Cart {
+  public function __construct() { $this->reset(); }
+  public function reset() {}
+  public function count() { return 0; }
+  public function total($o) {
+    helper(1);
+    $o?->reset();
+    self::audit();
+    $copy = new Cart();
+    $same = new static();
+    $f = 'helper';
+    $f(2);
+    $g = function () { audit_log(); };
+    return count([]);
+  }
+  public static function audit() {}
+}
+function audit_log() {}
+";
+        let g = graph(&[(file, src)]);
+        for (from, to) in [
+            ("__construct", "reset"),
+            ("total", "helper"),
+            ("total", "reset"),
+            ("total", "audit"),
+            ("total", "audit_log"),
+        ] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{from} -> {to}: {:?}",
+                edges(&g)
+            );
+        }
+        assert!(
+            !has(&g, &format!("{file}:total"), &format!("{file}:count")),
+            "a bare count() is PHP's: {:?}",
+            edges(&g)
+        );
+        let calls = calls_of(src, "php");
+        let call = |callee: &str| calls.iter().find(|c| c.callee == callee);
+        assert!(call("reset").is_some_and(|c| c.method), "{calls:?}");
+        assert!(call("audit").is_some_and(|c| c.method), "{calls:?}");
+        assert!(call("helper").is_some_and(|c| !c.method), "{calls:?}");
+        assert!(
+            call("Cart").is_some_and(|c| !c.method),
+            "new Cart: {calls:?}"
+        );
+        assert!(call("f").is_none(), "a variable call: {calls:?}");
+        assert!(call("static").is_none(), "new static: {calls:?}");
+    }
+
+    /// Ruby: a call with a receiver is a method call, one without is on
+    /// `self`; `valid?` keeps its `?`, and `self.total = 0` calls the
+    /// setter. A bare identifier (`setup`) may be a local variable, so it
+    /// is no call; and a bare `puts` is `Kernel`'s, not a project `puts`
+    /// in another class.
+    #[test]
+    fn ruby_calls_with_and_without_receivers_are_linked() {
+        let file = "/p/account.rb";
+        let account = "\
+class Account
+  def initialize
+    setup
+    self.total = 0
+  end
+  def setup; end
+  def total; 0; end
+  def total=(v); end
+  def valid?; true; end
+  def deposit(x)
+    audit(x)
+    return unless valid?
+    [x].each { |i| audit(i) }
+    puts 'deposited'
+  end
+  def self.open
+    audit(1)
+  end
+  def audit(x); end
+end
+";
+        let shell = "class Shell\n  def puts(msg); end\nend\n";
+        let g = graph(&[(file, account), ("/p/shell.rb", shell)]);
+        for (from, to) in [
+            ("initialize", "total="),
+            ("deposit", "audit"),
+            ("deposit", "valid?"),
+            ("open", "audit"),
+        ] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{from} -> {to}: {:?}",
+                edges(&g)
+            );
+        }
+        for (from, to) in [
+            ("/p/account.rb:initialize", "/p/account.rb:total"),
+            ("/p/account.rb:initialize", "/p/account.rb:setup"),
+            ("/p/account.rb:deposit", "/p/shell.rb:puts"),
+        ] {
+            assert!(!has(&g, from, to), "{from} -> {to}: {:?}", edges(&g));
+        }
+        let calls = calls_of(account, "ruby");
+        assert!(
+            calls.iter().any(|c| c.callee == "total=" && c.method),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.callee == "audit" && !c.method),
+            "{calls:?}"
+        );
+    }
+
+    /// C#: methods, constructors through `new`, generic and `?.` calls, and
+    /// local functions as scopes of their own; a lambda's calls are its
+    /// method's. `nameof(x)` is no call.
+    #[test]
+    fn csharp_methods_constructors_and_local_functions_are_linked() {
+        let file = "/p/Account.cs";
+        let src = "\
+class Account {
+  Account() { Init(); }
+  void Init() {}
+  void Transfer(Account other) {
+    Audit();
+    other?.Init();
+    var copy = new Account();
+    Make<int>();
+    var name = nameof(Audit);
+    int Local(int v) { return Helper(v); }
+    Local(1);
+    System.Func<int> f = () => Helper(2);
+  }
+  static void Audit() {}
+  static T Make<T>() => default;
+  static int Helper(int v) => v;
+}
+";
+        let g = graph(&[(file, src)]);
+        for (from, to) in [
+            ("Account", "Init"),
+            ("Transfer", "Audit"),
+            ("Transfer", "Init"),
+            ("Transfer", "Account"),
+            ("Transfer", "Make"),
+            ("Transfer", "Local"),
+            ("Transfer", "Helper"),
+            ("Local", "Helper"),
+        ] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{from} -> {to}: {:?}",
+                edges(&g)
+            );
+        }
+        let calls = calls_of(src, "csharp");
+        assert!(
+            !calls.iter().any(|c| c.callee == "nameof"),
+            "nameof is an operator: {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.callee == "Init" && c.method),
+            "other?.Init(): {calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.callee == "Make" && !c.method),
+            "{calls:?}"
+        );
+    }
+
+    /// Erlang: local and remote calls, a `fun`'s calls as its function's,
+    /// each clause attributed to its own arity's function; a fun in a
+    /// variable names nothing, and a bare `size(X)` is the BIF, not
+    /// another module's `size`.
+    #[test]
+    fn erlang_local_and_remote_calls_are_linked_per_function() {
+        let file = "/p/shop.erl";
+        let src = "\
+-module(shop).
+-export([run/1]).
+run([]) -> helper(0);
+run(X) ->
+    lists:map(fun(Y) -> inner(Y) end, X),
+    shop:helper(X),
+    F = fun helper/1,
+    F(2),
+    size(X).
+helper(X) -> X.
+inner(X) -> X.
+price(X) -> price(X, 1).
+price(X, Y) -> tax(X * Y).
+tax(X) -> X.
+";
+        let util = "-module(util).\nsize(_) -> 0.\n";
+        let g = graph(&[(file, src), ("/p/util.erl", util)]);
+        for (from, to) in [("run", "helper"), ("run", "inner")] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{from} -> {to}: {:?}",
+                edges(&g)
+            );
+        }
+        assert!(
+            !has(&g, &format!("{file}:run"), "/p/util.erl:size"),
+            "size(X) is the BIF: {:?}",
+            edges(&g)
+        );
+        // `price/1` calls `price/2`, which calls `tax`: each clause is its
+        // own arity's.
+        let key = |name: &str, ordinal: u32| (PathBuf::from(file), name.to_string(), ordinal);
+        let keys = g.callee_keys();
+        assert_eq!(keys[&key("price", 0)], vec![key("price", 1)], "{keys:?}");
+        assert_eq!(keys[&key("price", 1)], vec![key("tax", 0)], "{keys:?}");
+
+        let mut calls = calls_of(src, "erlang");
+        calls.sort_by_key(|c| c.line);
+        // `helper(0)`, then `shop:helper(X)`.
+        let method = |callee: &str| -> Vec<bool> {
+            calls
+                .iter()
+                .filter(|c| c.callee == callee)
+                .map(|c| c.method)
+                .collect()
+        };
+        assert_eq!(method("helper"), [false, true]);
+        assert_eq!(method("map"), [true]);
+        assert!(!calls.iter().any(|c| c.callee == "F"), "{calls:?}");
+    }
+
+    /// Haskell: an application is a call of its head, once however many
+    /// arguments it takes; a function passed as an argument (`map price`)
+    /// is not called, a constructor (`Just`) or a type (`IO ()`) is no call,
+    /// and a `where`-bound helper's calls are its function's. `main = do …`
+    /// is a scope. A bare `lookup` is the Prelude's, not another module's.
+    #[test]
+    fn haskell_applications_link_by_their_head() {
+        let file = "/p/Shop.hs";
+        let src = "\
+module Shop where
+import qualified Data.Map as Map
+
+total :: [Int] -> Int
+total xs = sum (map price xs) + helper 1 2
+  where
+    go y = inner y
+
+price :: Int -> Int
+price x = Map.findWithDefault 0 x table + lookup x
+
+wrap :: Int -> Maybe Int
+wrap x = Just (inner x)
+
+helper :: Int -> Int -> Int
+helper a b = a + b
+
+inner :: Int -> Int
+inner = id
+
+main :: IO ()
+main = do
+  print (total [1])
+  let r = helper 1 2
+  pure ()
+
+table = Map.fromList []
+";
+        let store = "module Store where\n\nlookup :: Int -> Int\nlookup k = k\n";
+        let g = graph(&[(file, src), ("/p/Store.hs", store)]);
+        for (from, to) in [
+            ("total", "helper"),
+            ("total", "inner"),
+            ("wrap", "inner"),
+            ("main", "total"),
+            ("main", "helper"),
+        ] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{from} -> {to}: {:?}",
+                edges(&g)
+            );
+        }
+        for (from, to) in [
+            ("/p/Shop.hs:total", "/p/Shop.hs:price"),
+            ("/p/Shop.hs:price", "/p/Store.hs:lookup"),
+        ] {
+            assert!(!has(&g, from, to), "{from} -> {to}: {:?}", edges(&g));
+        }
+        let calls = calls_of(src, "haskell");
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|c| c.callee == "helper" && c.caller.as_deref() == Some("total"))
+                .count(),
+            1,
+            "{calls:?}"
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c.callee.as_str(), "Just" | "IO" | "Maybe")),
+            "{calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.callee == "findWithDefault" && c.method),
+            "{calls:?}"
+        );
+    }
+
+    /// Zig: functions, and methods through a field; `@import` and `@as` are
+    /// builtins, not calls.
+    #[test]
+    fn zig_functions_and_methods_are_linked_and_builtins_are_not_calls() {
+        let file = "/p/main.zig";
+        let src = "\
+const std = @import(\"std\");
+const Account = struct {
+    fn deposit(self: *Account) void {
+        self.audit();
+    }
+    fn audit(self: *Account) void {
+        _ = self;
+    }
+};
+fn helper() void {}
+pub fn main() void {
+    helper();
+    var a = Account{};
+    a.deposit();
+    std.debug.print(\"x\", .{});
+    const n = @as(u8, 2);
+    _ = n;
+}
+";
+        let g = graph(&[(file, src)]);
+        for (from, to) in [
+            ("main", "helper"),
+            ("main", "deposit"),
+            ("deposit", "audit"),
+        ] {
+            assert!(
+                has(&g, &format!("{file}:{from}"), &format!("{file}:{to}")),
+                "{from} -> {to}: {:?}",
+                edges(&g)
+            );
+        }
+        let calls = calls_of(src, "zig");
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c.callee.as_str(), "import" | "as")),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.callee == "print" && c.method),
+            "{calls:?}"
+        );
+        assert!(
+            calls.iter().any(|c| c.callee == "helper" && !c.method),
+            "{calls:?}"
         );
     }
 

@@ -11,6 +11,16 @@
 //! - C and C++: the groups of `#if`/`#ifdef`/`#elif`/`#else` the
 //!   preprocessor drops, from the platform's macros, the flags' `-D`/`-U`,
 //!   and the file's own `#define`s.
+//! - C#: the groups of `#if`/`#elif`/`#else` over the symbols the file
+//!   `#define`s and `#undef`s at its top. `DEBUG`, `TRACE`, the project's
+//!   `DefineConstants` and the framework's `NET8_0` come from the build, so
+//!   they are never known.
+//! - Haskell: in a file with `{-# LANGUAGE CPP #-}`, the C preprocessor's
+//!   groups, from GHC's platform macros for the target (`linux_HOST_OS`,
+//!   `x86_64_HOST_ARCH`, …) and the file's own `#define`s.
+//! - Erlang: the groups of `-ifdef`/`-ifndef`/`-if`/`-elif`/`-else` over the
+//!   macros the file `-define`s and `-undef`s; `TEST`, `OTP_RELEASE` and the
+//!   rest come from the build.
 //! - Zig: the branches of an `if` or a `switch` on `builtin.os.tag` or
 //!   `builtin.cpu.arch` the compiler does not analyze for the target —
 //!   comptime-known, so only the one taken is compiled.
@@ -197,6 +207,9 @@ pub fn inactive_lines_in(
         }
         "go" => go_inactive(source, target, facts, rel),
         "c" | "cpp" => c_inactive(source, lang_key, target, facts, rel),
+        "csharp" => csharp_inactive(source),
+        "haskell" => haskell_inactive(source, target),
+        "erlang" => erlang_inactive(source),
         "zig" => zig_inactive(source, target),
         _ => HashSet::new(),
     }
@@ -1166,7 +1179,94 @@ fn c_inactive(
             macros.insert(name.clone(), Macro::Undefined);
         }
     }
-    Preprocessor::new(macros).run(source)
+    Preprocessor::new(macros, Dialect::C).run(source)
+}
+
+/// The lines of the C# file `source` its `#if` groups drop. Nothing of the
+/// build is known: `DEBUG`, `TRACE`, the project's `DefineConstants` and the
+/// framework's symbols (`NET8_0`, …) come from the project file and the
+/// configuration built. A symbol is known only where the file `#define`s or
+/// `#undef`s it — which C# allows only at its top, before any code, so it
+/// holds for the whole file.
+fn csharp_inactive(source: &str) -> HashSet<usize> {
+    Preprocessor::new(HashMap::new(), Dialect::CSharp).run(source)
+}
+
+/// GHC's operating-system macros, by the target OS each means. Only these
+/// targets decide them: GHC names a platform's macro after the OS part of
+/// its own target triple, and for any other target here (Android, iOS, a
+/// BSD) that name is not one clew can be sure of — so on those all of them
+/// stay unknown.
+const GHC_OS_MACROS: &[(&str, &str)] = &[
+    ("linux_HOST_OS", "linux"),
+    ("darwin_HOST_OS", "macos"),
+    ("mingw32_HOST_OS", "windows"),
+];
+
+/// GHC's architecture macros, by the target architecture each means; as
+/// with [`GHC_OS_MACROS`], only these architectures decide them.
+const GHC_ARCH_MACROS: &[(&str, &str)] = &[
+    ("x86_64_HOST_ARCH", "x86_64"),
+    ("aarch64_HOST_ARCH", "aarch64"),
+];
+
+/// The lines of the Haskell file `source` its C preprocessor drops for
+/// `target` — none unless the file turns the preprocessor on. GHC's own
+/// `<os>_HOST_OS` and `<arch>_HOST_ARCH` are known, one of each defined,
+/// and so are the file's own `#define`s. Everything else stays unknown: C's
+/// platform macros (`__linux__`) are not GHC's to say, and what a
+/// package's `cpp-options` define, `__GLASGOW_HASKELL__` and
+/// `MIN_VERSION_base(…)` are the build's.
+fn haskell_inactive(source: &str, target: &Target) -> HashSet<usize> {
+    if !haskell_uses_cpp(source) {
+        return HashSet::new();
+    }
+    let mut macros: HashMap<String, Macro> = HashMap::new();
+    for (table, value) in [
+        (GHC_OS_MACROS, target.os.as_str()),
+        (GHC_ARCH_MACROS, target.arch.as_str()),
+    ] {
+        if !table.iter().any(|&(_, on)| on == value) {
+            continue;
+        }
+        for &(name, on) in table {
+            let state = match on == value {
+                true => Macro::Defined(Some(1)),
+                false => Macro::Undefined,
+            };
+            macros.insert(name.to_string(), state);
+        }
+    }
+    Preprocessor::new(macros, Dialect::C).run(source)
+}
+
+/// Whether the Haskell file `source` turns the C preprocessor on itself: a
+/// `{-# LANGUAGE … CPP … #-}` pragma, or `-XCPP` (or the older `-cpp`) in an
+/// `OPTIONS_GHC` one. A package can turn it on for all its files in its
+/// `.cabal` instead; such a file is not known to run it, so nothing in it is
+/// dimmed.
+fn haskell_uses_cpp(source: &str) -> bool {
+    let mut rest = source;
+    while let Some(start) = rest.find("{-#") {
+        let after = &rest[start + 3..];
+        let Some(end) = after.find("#-}") else {
+            break;
+        };
+        let mut words = after[..end]
+            .split(|c: char| c.is_whitespace() || c == ',')
+            .filter(|w| !w.is_empty());
+        let pragma = words.next().map(str::to_ascii_uppercase);
+        let on = match pragma.as_deref() {
+            Some("LANGUAGE") => words.any(|w| w == "CPP"),
+            Some("OPTIONS_GHC" | "OPTIONS") => words.any(|w| w == "-XCPP" || w == "-cpp"),
+            _ => false,
+        };
+        if on {
+            return true;
+        }
+        rest = &after[end + 3..];
+    }
+    false
 }
 
 /// Whether a region of a C file is compiled.
@@ -1209,20 +1309,63 @@ struct Group {
     branch: Live,
 }
 
+/// Whose `#` directives a file's are.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Dialect {
+    /// C's — C++'s too, and GHC's for a Haskell file: a line ending in a
+    /// backslash goes on to the next, macros have values, and `#if` does
+    /// arithmetic.
+    C,
+    /// C#'s: no line continues another, and `#if` reads symbols that are
+    /// only defined or not, joined by `!`, `&&`, `||`, `==`, `!=` and
+    /// parentheses, with `true` and `false`. It has no `#ifdef`.
+    CSharp,
+}
+
 /// The preprocessor's view of a file, as far as it can be known.
 struct Preprocessor {
     macros: HashMap<String, Macro>,
     groups: Vec<Group>,
+    dialect: Dialect,
 }
 
 /// Most nested `#if`s followed; past it, nothing more is dimmed.
 const MAX_GROUPS: usize = 256;
 
 impl Preprocessor {
-    fn new(macros: HashMap<String, Macro>) -> Preprocessor {
+    fn new(macros: HashMap<String, Macro>, dialect: Dialect) -> Preprocessor {
         Preprocessor {
             macros,
             groups: Vec::new(),
+            dialect,
+        }
+    }
+
+    /// Whether a directive's own lines are dropped here. They are only
+    /// inside a region dropped around its whole chain: one that `continues`
+    /// a chain (an `#elif`, `#else` or `#endif`) is judged by the region
+    /// around the chain, not by the branch before it — so an `#else` between
+    /// two dropped branches stays in sight, and the reader still sees where
+    /// each branch begins and what it hangs on.
+    fn drops_directive(&self, continues: bool) -> bool {
+        let around = match continues {
+            true => self.groups.last().map_or(Live::Yes, |g| g.outer),
+            false => self.live(),
+        };
+        around == Live::No
+    }
+
+    /// What a `#define` or `#undef` of `name` here makes of it: nothing in a
+    /// dropped region; in one that may not be compiled, no longer known.
+    fn set(&mut self, name: &str, value: Macro) {
+        match self.live() {
+            Live::No => {}
+            Live::Maybe => {
+                self.macros.remove(name);
+            }
+            Live::Yes => {
+                self.macros.insert(name.to_string(), value);
+            }
         }
     }
 
@@ -1242,9 +1385,11 @@ impl Preprocessor {
         let mut i = 0;
         while i < lines.len() {
             let first = i;
-            // A directive continues over lines ending in a backslash.
+            // In C a directive continues over lines ending in a backslash.
+            // C# has no such thing: a comment ending in `C:\temp\` would
+            // have swallowed the `#endif` below it.
             let mut text = lines[i].to_string();
-            while text.ends_with('\\') && i + 1 < lines.len() {
+            while self.dialect == Dialect::C && text.ends_with('\\') && i + 1 < lines.len() {
                 text.pop();
                 i += 1;
                 text.push(' ');
@@ -1256,9 +1401,6 @@ impl Preprocessor {
                 .map(|d| strip_comments(d.trim()));
             match directive {
                 Some(directive) => {
-                    // A directive's own lines are dimmed only inside a
-                    // region dropped around its whole chain: an `#else`
-                    // between two dropped branches stays in sight.
                     let continues =
                         ["elif", "elifdef", "elifndef", "else", "endif"]
                             .iter()
@@ -1267,11 +1409,7 @@ impl Preprocessor {
                                     rest.is_empty() || rest.starts_with([' ', '\t', '('])
                                 })
                             });
-                    let around = match continues {
-                        true => self.groups.last().map_or(Live::Yes, |g| g.outer),
-                        false => self.live(),
-                    };
-                    if around == Live::No {
+                    if self.drops_directive(continues) {
                         out.extend(first..=i);
                     }
                     let next = lines[i + 1..]
@@ -1305,6 +1443,17 @@ impl Preprocessor {
                 .next()
                 .unwrap_or_default()
         };
+        // C#'s `#region`, `#pragma`, `#nullable` and the rest open nothing.
+        // It has no `#ifdef`: one is read as a group that decides nothing,
+        // so that its `#endif` still closes it rather than the group around.
+        if self.dialect == Dialect::CSharp {
+            match word {
+                "if" | "elif" | "else" | "endif" | "define" | "undef" => {}
+                "ifdef" | "ifndef" => return self.open(None),
+                "elifdef" | "elifndef" => return self.other(None),
+                _ => return,
+            }
+        }
         match word {
             "if" => self.open(self.condition(rest)),
             "ifdef" => self.open(self.defined(name())),
@@ -1333,27 +1482,19 @@ impl Preprocessor {
                 if name.is_empty() {
                     return;
                 }
-                match self.live() {
-                    Live::No => {}
-                    // Defined or not, depending on code that may not be
-                    // compiled: no longer known.
-                    Live::Maybe => {
-                        self.macros.remove(name);
+                let value = match (word, self.dialect) {
+                    ("undef", _) => Macro::Undefined,
+                    // A C# symbol has no value: defined, it reads as true.
+                    (_, Dialect::CSharp) => Macro::Defined(Some(1)),
+                    _ => {
+                        let body = &rest[name.len()..];
+                        match body.starts_with('(') {
+                            true => Macro::Defined(None),
+                            false => Macro::Defined(crate::buildfacts::number(body)),
+                        }
                     }
-                    Live::Yes => {
-                        let value = match word {
-                            "undef" => Macro::Undefined,
-                            _ => {
-                                let body = &rest[name.len()..];
-                                match body.starts_with('(') {
-                                    true => Macro::Defined(None),
-                                    false => Macro::Defined(crate::buildfacts::number(body)),
-                                }
-                            }
-                        };
-                        self.macros.insert(name.to_string(), value);
-                    }
-                }
+                };
+                self.set(name, value);
             }
             _ => {}
         }
@@ -1399,6 +1540,12 @@ impl Preprocessor {
     /// An `#if` condition's truth, when it can be known.
     fn condition(&self, expr: &str) -> Option<bool> {
         let tokens = c_tokens(expr)?;
+        // C#'s `#if` has no numbers, arithmetic, comparisons of order or
+        // `defined`: a condition that uses them is no C#, and decides
+        // nothing.
+        if self.dialect == Dialect::CSharp && !tokens.iter().all(|t| is_csharp_token(t)) {
+            return None;
+        }
         let mut parser = CExpr {
             tokens: &tokens,
             at: 0,
@@ -1411,6 +1558,15 @@ impl Preprocessor {
         }
         value.map(|v| v != 0)
     }
+}
+
+/// Whether `token` (of [`c_tokens`]) may be in a C# `#if`: an operator it
+/// has, or a symbol — `true` and `false` among them.
+fn is_csharp_token(token: &str) -> bool {
+    matches!(token, "!" | "&&" | "||" | "==" | "!=" | "(" | ")")
+        || (token != "defined"
+            && token.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+            && token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
 }
 
 /// `line` (a directive) without its comments.
@@ -1668,6 +1824,324 @@ impl CExpr<'_> {
                     (_, None) => None,
                 }
             }
+        };
+        self.depth -= 1;
+        Some(value)
+    }
+}
+
+/// Most lines one Erlang attribute is read over to its full stop (a
+/// `-define` with a long body, an `-if` with a long condition); past it,
+/// the attribute is taken as it stands.
+const MAX_ATTRIBUTE_LINES: usize = 64;
+
+/// The lines of the Erlang file `source` its preprocessor drops: the groups
+/// of `-ifdef`, `-ifndef`, `-if`/`-elif` and `-else`, over what the file's
+/// own `-define`s and `-undef`s say. Every other macro is unknown — `TEST`
+/// and `EUNIT` come from the build (`{d, 'TEST'}`, `rebar3 eunit`),
+/// `OTP_RELEASE` from the compiler — and nothing that hangs on one is
+/// dimmed. As in C, a chain's own attributes stay lit unless the whole
+/// chain is in a dropped group (see [`Preprocessor::drops_directive`]).
+fn erlang_inactive(source: &str) -> HashSet<usize> {
+    let mut pre = Preprocessor::new(HashMap::new(), Dialect::C);
+    let mut out = HashSet::new();
+    let lines: Vec<&str> = source.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let first = i;
+        let Some((word, mut text)) = erlang_directive(lines[i]) else {
+            if pre.live() == Live::No {
+                out.insert(i);
+            }
+            i += 1;
+            continue;
+        };
+        // An attribute runs to its full stop, which may be lines on. A line
+        // that begins another attribute ends it all the same: a full stop
+        // missed must not swallow the `-endif` after it.
+        while !text.ends_with('.')
+            && i + 1 < lines.len()
+            && i + 1 - first < MAX_ATTRIBUTE_LINES
+            && erlang_directive(lines[i + 1]).is_none()
+        {
+            i += 1;
+            text.push(' ');
+            text.push_str(erlang_code(lines[i]).trim());
+        }
+        if pre.drops_directive(matches!(word, "elif" | "else" | "endif")) {
+            out.extend(first..=i);
+        }
+        let next = match word {
+            "ifndef" => lines[i + 1..].iter().find_map(|l| erlang_directive(l)),
+            _ => None,
+        };
+        pre.erlang(word, &text, next);
+        i += 1;
+    }
+    out
+}
+
+/// The preprocessor attribute `line` begins, if it begins one: its name,
+/// and the line's code.
+fn erlang_directive(line: &str) -> Option<(&'static str, String)> {
+    let code = erlang_code(line).trim();
+    let rest = code.strip_prefix('-')?.trim_start();
+    let end = rest
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(rest.len());
+    let word = match &rest[..end] {
+        "ifdef" => "ifdef",
+        "ifndef" => "ifndef",
+        "if" => "if",
+        "elif" => "elif",
+        "else" => "else",
+        "endif" => "endif",
+        "define" => "define",
+        "undef" => "undef",
+        "include" => "include",
+        "include_lib" => "include_lib",
+        _ => return None,
+    };
+    // An attribute's parentheses or full stop follow its name.
+    let after = rest[end..].trim_start();
+    (after.is_empty() || after.starts_with(['(', '.'])).then(|| (word, code.to_string()))
+}
+
+/// `line` up to its comment. The first `%` ends it, even one in a string or
+/// a `$%`: that cuts a `-define`'s body short, which costs nothing — only
+/// the macro's name is read, and the lines the attribute then runs on to
+/// are judged as they would be on their own. A conditional has neither.
+fn erlang_code(line: &str) -> &str {
+    line.split('%').next().unwrap_or(line)
+}
+
+/// What an attribute's parentheses hold: `TEST` of `-ifdef(TEST).`.
+fn erlang_args(text: &str) -> Option<&str> {
+    let open = text.find('(')?;
+    let close = text.rfind(')')?;
+    (close > open).then(|| text[open + 1..close].trim())
+}
+
+/// The macro an attribute names, from what its parentheses hold: `M` of
+/// `M`, `M, Body` and `M(Args), Body`. A quoted atom is its name unquoted
+/// (`'M'` is the macro `M`); one with an escape in it is not read.
+fn erlang_macro_name(args: &str) -> Option<String> {
+    let args = args.trim_start();
+    let (name, rest) = match args.strip_prefix('\'') {
+        Some(quoted) => {
+            let end = quoted.find('\'')?;
+            let name = &quoted[..end];
+            if name.is_empty() || name.contains('\\') {
+                return None;
+            }
+            (name, &quoted[end + 1..])
+        }
+        None => {
+            let end = args
+                .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '@'))
+                .unwrap_or(args.len());
+            let name = &args[..end];
+            if !name.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+                return None;
+            }
+            (name, &args[end..])
+        }
+    };
+    let rest = rest.trim_start();
+    (rest.is_empty() || rest.starts_with([',', '('])).then(|| name.to_string())
+}
+
+impl Preprocessor {
+    /// Apply one Erlang preprocessor attribute: `word` is its name, `text`
+    /// the whole attribute without its comments, and `next` the attribute
+    /// after it (for an `-ifndef`'s include guard).
+    fn erlang(&mut self, word: &str, text: &str, next: Option<(&str, String)>) {
+        let args = erlang_args(text);
+        let name = args.and_then(erlang_macro_name);
+        let defined = name.as_deref().and_then(|n| self.defined(n));
+        match word {
+            "ifdef" => self.open(defined),
+            "ifndef" => {
+                // An include guard (`-ifndef(X).` then `-define(X, …).`) is
+                // open the first time the header is read — as it is read
+                // here.
+                let guard = name.is_some()
+                    && next.is_some_and(|(next, text)| {
+                        next == "define" && erlang_args(&text).and_then(erlang_macro_name) == name
+                    });
+                let value = match guard && defined.is_none() {
+                    true => Some(true),
+                    false => defined.map(|b| !b),
+                };
+                self.open(value);
+            }
+            "if" => self.open(args.and_then(|a| self.erlang_condition(a))),
+            "elif" => self.other(args.and_then(|a| self.erlang_condition(a))),
+            "else" => self.other(Some(true)),
+            "endif" => {
+                self.groups.pop();
+            }
+            "define" | "undef" => match name {
+                Some(name) => {
+                    let value = match word {
+                        "define" => Macro::Defined(None),
+                        _ => Macro::Undefined,
+                    };
+                    self.set(&name, value);
+                }
+                // A macro whose name is not read could be any of them.
+                None => self.forget(),
+            },
+            // A header may define or undefine any macro: what the file said
+            // of them before it is no longer known.
+            "include" | "include_lib" => self.forget(),
+            _ => {}
+        }
+    }
+
+    /// Know nothing more of any macro, unless here is dropped (and so not
+    /// read at all).
+    fn forget(&mut self) {
+        if self.live() != Live::No {
+            self.macros.clear();
+        }
+    }
+
+    /// An Erlang `-if`/`-elif` condition's truth, when it can be known.
+    fn erlang_condition(&self, expr: &str) -> Option<bool> {
+        let tokens = erlang_tokens(expr)?;
+        let mut parser = ErlExpr {
+            tokens: &tokens,
+            at: 0,
+            pre: self,
+            depth: 0,
+        };
+        let value = parser.orelse()?;
+        (parser.at == tokens.len()).then_some(value)?
+    }
+}
+
+/// The tokens of an Erlang `-if` condition this reader follows: names and
+/// parentheses. Anything else is `None`: a macro's value (`?OTP_RELEASE >=
+/// 21`) is whatever Erlang terms its body holds, compared in the term order,
+/// and only whether a macro is defined is followed.
+fn erlang_tokens(expr: &str) -> Option<Vec<&str>> {
+    let mut tokens = Vec::new();
+    let mut rest = expr.trim_start();
+    while let Some(c) = rest.chars().next() {
+        let len = match c {
+            '(' | ')' => 1,
+            c if c.is_ascii_alphabetic() || c == '_' => rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '@'))
+                .unwrap_or(rest.len()),
+            _ => return None,
+        };
+        tokens.push(&rest[..len]);
+        rest = rest[len..].trim_start();
+    }
+    Some(tokens)
+}
+
+/// A recursive-descent reader of an Erlang `-if` condition over what is
+/// known of the macros — `defined(M)`, `true` and `false`, joined by `not`,
+/// `and`, `or`, `andalso`, `orelse` and parentheses — three-valued like
+/// [`GoExpr`]: `Some(Some(b))` decided, `Some(None)` undecidable, `None`
+/// not followed.
+struct ErlExpr<'a> {
+    tokens: &'a [&'a str],
+    at: usize,
+    pre: &'a Preprocessor,
+    depth: usize,
+}
+
+/// One of [`ErlExpr`]'s levels of precedence.
+type ErlLevel<'a> = fn(&mut ErlExpr<'a>) -> Option<Option<bool>>;
+
+impl<'a> ErlExpr<'a> {
+    fn peek(&self) -> Option<&'a str> {
+        self.tokens.get(self.at).copied()
+    }
+
+    fn eat(&mut self, token: &str) -> bool {
+        let found = self.peek() == Some(token);
+        if found {
+            self.at += 1;
+        }
+        found
+    }
+
+    /// Operands read by `operand`, joined by the operator `op` as `join`
+    /// joins two values.
+    fn chain(
+        &mut self,
+        op: &str,
+        operand: ErlLevel<'a>,
+        join: fn(Option<bool>, Option<bool>) -> Option<bool>,
+    ) -> Option<Option<bool>> {
+        let mut value = operand(self)?;
+        while self.eat(op) {
+            value = join(value, operand(self)?);
+        }
+        Some(value)
+    }
+
+    // Erlang's precedence, loosest first: `orelse`, `andalso`, then `or`
+    // (with `+`), `and` (with `*`) and `not`.
+    fn orelse(&mut self) -> Option<Option<bool>> {
+        self.chain("orelse", Self::andalso, or)
+    }
+
+    fn andalso(&mut self) -> Option<Option<bool>> {
+        self.chain("andalso", Self::or, and)
+    }
+
+    fn or(&mut self) -> Option<Option<bool>> {
+        self.chain("or", Self::and, or)
+    }
+
+    fn and(&mut self) -> Option<Option<bool>> {
+        self.chain("and", Self::not, and)
+    }
+
+    fn not(&mut self) -> Option<Option<bool>> {
+        self.depth += 1;
+        if self.depth > MAX_CFG_DEPTH {
+            return None;
+        }
+        let value = match self.peek()? {
+            "not" => {
+                self.at += 1;
+                self.not()?.map(|b| !b)
+            }
+            "(" => {
+                self.at += 1;
+                let value = self.orelse()?;
+                if !self.eat(")") {
+                    return None;
+                }
+                value
+            }
+            "true" => {
+                self.at += 1;
+                Some(true)
+            }
+            "false" => {
+                self.at += 1;
+                Some(false)
+            }
+            "defined" => {
+                self.at += 1;
+                if !self.eat("(") {
+                    return None;
+                }
+                let name = self.peek().filter(|t| !matches!(*t, "(" | ")"))?;
+                self.at += 1;
+                if !self.eat(")") {
+                    return None;
+                }
+                self.pre.defined(name)
+            }
+            _ => return None,
         };
         self.depth -= 1;
         Some(value)
@@ -2270,5 +2744,292 @@ pub fn f() void {
             )),
             [4, 8, 9, 11, 12, 13, 17, 18, 19],
         );
+    }
+
+    /// C#'s `#if` groups are dropped over the symbols the file `#define`s
+    /// and `#undef`s — `true`, `false`, `!`, `&&`, `||`, `==` and
+    /// parentheses read as C# reads them — and never for a symbol the build
+    /// may define (`DEBUG` unless the file undefines it, `TRACE`, `NET8_0`).
+    /// A `#region` is no group, a condition C# does not have decides
+    /// nothing, and a line ending in a backslash does not go on to the next.
+    #[test]
+    fn csharp_if_groups_dim_by_the_files_own_symbols() {
+        let source = "\
+#define TRACE_ON
+#undef DEBUG
+using System;
+class A {
+#if DEBUG
+    void Dbg() {}
+#elif TRACE_ON && !(DEBUG == true)
+    void Traced() {}
+#else
+    void Other() {}
+#endif
+#if false
+#region Off
+    void Off() {}
+#endregion
+    void OffToo() {}
+#endif
+#if NET8_0 || TRACE
+    void Maybe() {}
+#else
+    void MaybeToo() {}
+#endif
+#if TRACE_ON || NET8_0
+    void Sure() {}
+#else
+    void Never() {}
+#endif
+#if !DEBUG_LOGGING
+    void Unknown() {}
+#endif
+#if 0
+    void NotCSharp() {}
+#endif
+#if false
+    // C:\\temp\\
+#endif
+    void After() {}
+}
+";
+        let dimmed = |source: &str| {
+            lines(inactive_lines_in(
+                source,
+                "csharp",
+                &linux(),
+                &BuildFacts::default(),
+                None,
+            ))
+        };
+        assert_eq!(
+            dimmed(source),
+            [
+                5,  // Dbg: DEBUG is undefined here
+                9,  // Other: the #elif was taken
+                12, // #region, inside a dropped group
+                13, 14, // Off, #endregion
+                15, // OffToo: #endregion closed no group
+                25, // Never: true || unknown is true
+                34, // the comment, and no more: #endif is read
+            ]
+        );
+        // Without the file's own `#undef`, DEBUG is the build's.
+        let built = source.replacen("#undef DEBUG", "", 1);
+        assert_eq!(dimmed(&built), [12, 13, 14, 15, 25, 34]);
+        // C#'s preprocessor has no `#ifndef`: it decides nothing, and its
+        // `#endif` is its own, not that of the group around it.
+        let c_only = "\
+#define TRACE_ON
+#ifndef TRACE_ON
+    void NotCSharp() {}
+#endif
+#if false
+#ifndef TRACE_ON
+    void Off() {}
+#endif
+    void StillOff() {}
+#endif
+";
+        assert_eq!(dimmed(c_only), [5, 6, 7, 8]);
+    }
+
+    /// A Haskell file with the CPP pragma has its `#if`s read as C's, over
+    /// GHC's platform macros for the target and the file's own `#define`s;
+    /// `MIN_VERSION_…` and `__GLASGOW_HASKELL__` decide nothing, a target
+    /// whose GHC macros are not known decides no OS, nor do C's own platform
+    /// macros, and a file without the pragma has no preprocessor.
+    #[test]
+    fn haskell_cpp_groups_dim_by_ghcs_platform_macros() {
+        let body = "\
+module Platform where
+
+#if defined(mingw32_HOST_OS)
+sep = \"win\"
+#elif defined(darwin_HOST_OS) || defined(linux_HOST_OS)
+sep = \"posix\"
+#else
+sep = \"other\"
+#endif
+
+#ifdef aarch64_HOST_ARCH
+arch = \"arm\"
+#else
+arch = \"x86\"
+#endif
+
+#if MIN_VERSION_base(4,9,0)
+modern = 1
+#else
+legacy = 1
+#endif
+
+#if __GLASGOW_HASKELL__ >= 900
+ghc9 = 1
+#endif
+
+#define USE_FAST 1
+#if USE_FAST
+fast = 1
+#else
+slow = 1
+#endif
+";
+        let source = format!("{{-# LANGUAGE CPP, OverloadedStrings #-}}\n{body}");
+        let dimmed = |source: &str, target: &Target| {
+            lines(inactive_lines_in(
+                source,
+                "haskell",
+                target,
+                &BuildFacts::default(),
+                None,
+            ))
+        };
+        assert_eq!(dimmed(&source, &linux()), [4, 8, 12, 31]);
+        let windows = Target::new("Windows", "windows", "x86_64", "windows");
+        assert_eq!(dimmed(&source, &windows), [6, 8, 12, 31]);
+        let mac = Target::new("macOS", "macos", "aarch64", "unix");
+        assert_eq!(dimmed(&source, &mac), [4, 8, 14, 31]);
+        let bsd = Target::new("FreeBSD", "freebsd", "x86_64", "unix");
+        assert_eq!(dimmed(&source, &bsd), [12, 31]);
+        // The pragma spelled otherwise, or as a flag.
+        for pragma in ["{-# language CPP #-}", "{-# OPTIONS_GHC -Wall -XCPP #-}"] {
+            let source = format!("{pragma}\n{body}");
+            assert_eq!(dimmed(&source, &linux()), [4, 8, 12, 31], "{pragma}");
+        }
+        // No pragma, no preprocessor.
+        let plain = format!("{{-# LANGUAGE OverloadedStrings #-}}\n{body}");
+        assert!(dimmed(&plain, &linux()).is_empty());
+        // C's platform macros are not among what is known.
+        let c_macro = "{-# LANGUAGE CPP #-}\n#ifdef __linux__\nx = 1\n#else\ny = 1\n#endif\n";
+        assert!(dimmed(c_macro, &linux()).is_empty());
+    }
+
+    /// Erlang's `-ifdef`/`-ifndef`/`-if`/`-elif`/`-else` groups are dropped
+    /// over the macros the file `-define`s (with arguments or without) and
+    /// `-undef`s; `TEST` and `OTP_RELEASE` decide nothing, nor does a macro
+    /// defined only in a dropped group. A chain's own attributes stay lit.
+    #[test]
+    fn erlang_groups_dim_by_the_files_own_macros() {
+        let source = "\
+-module(m).
+-define(USE_ETS, true).
+-define(LOG(X), io:format(\"~p~n\", [X])).
+-undef(LEGACY).
+
+-ifdef(USE_ETS).
+store() -> ets.
+-else.
+store() -> dict.
+-endif.
+
+-ifndef(LOG).
+log(_) -> ok.
+-endif.
+
+-ifdef(TEST).
+test_only() -> ok.
+-else.
+prod_only() -> ok.
+-endif.
+
+-if(defined(USE_ETS) andalso not defined(LEGACY)).
+fast() -> ok.
+-elif(?OTP_RELEASE >= 21).
+mid() -> ok.
+-else.
+slow() -> ok.
+-endif.
+
+-ifdef(LEGACY).
+-define(OLD, 1).
+-endif.
+-ifdef(OLD).
+old() -> ok.
+-endif.
+
+-if(?OTP_RELEASE >= 21).
+otp21() -> ok.
+-endif.
+
+-if(defined(TEST) orelse defined(USE_ETS)). % either way
+either() -> ok.
+-else. % never
+neither() -> ok.
+-endif.
+";
+        assert_eq!(
+            lines(inactive_lines_in(
+                source,
+                "erlang",
+                &linux(),
+                &BuildFacts::default(),
+                None,
+            )),
+            [
+                8,  // store() -> dict: USE_ETS is defined
+                12, // log/1: LOG is defined, with arguments
+                24, // mid(): the -if before it was taken
+                26, // slow()
+                30, // -define(OLD, 1), in a dropped group
+                43, // neither(): unknown orelse true is true
+            ]
+        );
+    }
+
+    /// What may have changed a macro leaves it unknown: a `-define` or
+    /// `-undef` in a group that may not be read, and a header the file
+    /// includes. A condition goes on over lines to its full stop, and a
+    /// header's include guard is open the first time it is read.
+    #[test]
+    fn erlang_macros_the_build_or_a_header_may_change_decide_nothing() {
+        let source = "\
+-define(A, 1).
+-ifdef(TEST).
+-define(B, 1).
+-undef(A).
+-endif.
+-ifndef(A).
+a() -> ok.
+-endif.
+-ifndef(B).
+b() -> ok.
+-endif.
+-define(C, 1).
+-include(\"c.hrl\").
+-ifndef(C).
+c() -> ok.
+-endif.
+-undef(D).
+-if(not defined(D)
+    andalso true).
+d() -> ok.
+-else.
+nd() -> ok.
+-endif.
+";
+        let dimmed = |source: &str| {
+            lines(inactive_lines_in(
+                source,
+                "erlang",
+                &linux(),
+                &BuildFacts::default(),
+                None,
+            ))
+        };
+        assert_eq!(dimmed(source), [21]);
+        let header = "\
+-ifndef(SHOP_HRL).
+-define(SHOP_HRL, true).
+-define(USE_X, 1).
+-ifdef(USE_X).
+x() -> ok.
+-else.
+y() -> ok.
+-endif.
+-endif.
+";
+        assert_eq!(dimmed(header), [6]);
     }
 }
