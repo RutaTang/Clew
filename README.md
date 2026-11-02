@@ -87,6 +87,10 @@ To analyze code well, Clew tailors its support to each language's characteristic
 - **Lean and Dart** — the toolchain their server runs from: elan's toolchains (the one the project's `lean-toolchain` names first), Flutter SDKs and fvm's versions (the project's first).
 - **TypeScript and JavaScript** — the TypeScript the server runs: Clew's own by default, never the project's unless you choose it (it is listed, with its version, as running the project's code), or a global install.
 - **Zig** — the `zig` compiler zls works with: zvm's and zigup's versions (the one the project's `build.zig.zon` asks for first), or one you name.
+- **Java** — the JDK the Eclipse JDT language server builds the project with: the JDKs on your machine (`JAVA_HOME`, `/usr/lib/jvm`, macOS's, SDKMAN!'s, IntelliJ's, asdf's, mise's and Homebrew's), the one of the Java version the build asks for (`.java-version`, `.sdkmanrc`, a Gradle toolchain, the `pom.xml`) first.
+- **PHP** — the PHP version intelephense reads the code as (the lowest one `composer.json` allows first).
+- **C#** — the solution csharp-ls opens: the `.sln` and `.slnx` files at the project's root and a folder down.
+- **Ruby, Erlang and Haskell** — the Ruby LSP of one of your Rubies (rbenv's, chruby's, asdf's, mise's, RVM's; the project's `.ruby-version` first), and the ELP and Haskell language server (ghcup's, Stack's, Cabal's) to run, or the ones on your `PATH`.
 - **Any language** — a server program of your own: another build of Clew's server, another server, or one for a language Clew has none for. A server that builds the project still asks before it does.
 
 Everything is found by reading files — nothing is run — and, for a remote project, on its host. The choices are kept in Clew's own data for this project on this machine, never written into the project, win over its `lsp.toml`, and reach the editor's language servers, the debugger and Ask's code tools alike.

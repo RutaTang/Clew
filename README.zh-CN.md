@@ -87,6 +87,10 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 - **Lean 和 Dart** —— 语言服务器所用的工具链：elan 安装的各个工具链（项目 `lean-toolchain` 指定的排在最前）、Flutter SDK 以及 fvm 管理的各个版本（项目指定的排在最前）。
 - **TypeScript 和 JavaScript** —— 语言服务器所运行的 TypeScript：默认使用 Clew 自带的版本，除非你主动选择，否则绝不会使用项目自带的版本（列表中会标出它的版本，并注明它会运行项目自身的代码），也可以选择全局安装的版本。
 - **Zig** —— zls 所使用的 `zig` 编译器：zvm 和 zigup 管理的各个版本（项目 `build.zig.zon` 要求的版本排在最前），或你指定的编译器。
+- **Java** —— Eclipse JDT 语言服务器构建项目所用的 JDK：本机上的各个 JDK（`JAVA_HOME`、`/usr/lib/jvm`、macOS、SDKMAN!、IntelliJ、asdf、mise 和 Homebrew 安装的），构建要求的 Java 版本（`.java-version`、`.sdkmanrc`、Gradle 工具链、`pom.xml`）对应的排在最前。
+- **PHP** —— intelephense 按哪个 PHP 版本解读代码（`composer.json` 允许的最低版本排在最前）。
+- **C#** —— csharp-ls 打开的解决方案：项目根目录及下一级目录中的 `.sln` 和 `.slnx` 文件。
+- **Ruby、Erlang 和 Haskell** —— 选用哪个 Ruby 的 Ruby LSP（rbenv、chruby、asdf、mise、RVM 安装的；项目 `.ruby-version` 指定的排在最前），以及要运行的 ELP 和 Haskell 语言服务器（ghcup、Stack、Cabal 安装的），或 `PATH` 上的。
 - **任意语言** —— 使用你自己的语言服务器程序：另一个版本的 Clew 自带服务器、另一种服务器，或为 Clew 尚无服务器的语言指定一个。会构建项目的服务器在构建前仍会先征得你的同意。
 
 以上内容都只通过读取文件得到——不会运行任何程序；远程项目则在其所在主机上查找。这些选择保存在 Clew 自己的数据目录中，只对本机上的这个项目生效，绝不会写入项目，优先于项目的 `lsp.toml`，并同样作用于编辑器的语言服务器、调试器以及 Ask 的代码工具。
