@@ -4958,6 +4958,7 @@ fn reconnect_applies_the_new_servers_snapshot_and_file_list() {
             }],
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         });
     };
@@ -5762,6 +5763,7 @@ fn remote_project_never_touches_local_state_or_files() {
         }],
         go_module: clew_protocol::Patch::Set(None),
         dart_package: clew_protocol::Patch::Set(None),
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Set(None),
     });
     settle_imports(&mut app, snapshot);
@@ -6025,6 +6027,7 @@ fn remote_symbol_update_advances_the_registry_and_ages_the_caches() {
             }],
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         });
     };
@@ -10753,6 +10756,7 @@ fn a_remote_edit_off_the_docs_tab_rebuilds_the_index_when_the_tab_returns() {
             }],
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         });
     };
@@ -16227,6 +16231,7 @@ fn a_remote_edit_that_moves_the_import_scope_asks_for_the_open_map_once() {
             files,
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         })
     };
@@ -16618,6 +16623,7 @@ fn a_remote_refinement_the_first_snapshot_hands_back_says_so() {
         }],
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Unchanged,
     });
     let _ = serve_empty_project_calls(&app, published, &mut rx);
@@ -28759,6 +28765,7 @@ fn a_deleted_remote_tsconfig_is_dropped_before_the_one_job_that_resolves() {
         }],
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Unchanged,
     });
     settle_imports(&mut app, published);
@@ -29026,6 +29033,7 @@ fn a_remote_publication_without_files_leaves_the_call_graph_current() {
         files: Vec::new(),
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Set(None),
     });
     let _ = serve_empty_project_calls(&app, published, &mut rx);
@@ -29067,6 +29075,7 @@ fn a_remote_refined_call_graph_gives_way_to_the_next_change() {
         }],
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Unchanged,
     });
     assert!(
@@ -31196,4 +31205,91 @@ async fn typed_language_fields_make_their_choices() {
         LangField::ServerCommand,
     )));
     assert_eq!(app.proj.lang_choices.servers, None);
+}
+
+/// A remote project's PHP classes resolve by the PSR-4 map its host read of
+/// `composer.json` (sent with the snapshot); a later publication restating
+/// the same map re-resolves nothing, one that changes it re-resolves.
+#[test]
+fn a_remote_projects_php_classes_resolve_by_the_hosts_composer_map() {
+    let (mut app, root, mut rx) = remote_app("remote-psr4");
+    let root_s = root.to_string_lossy().into_owned();
+    let files = [
+        "app/Http/Controller.php",
+        "app/Models/User.php",
+        "composer.json",
+    ];
+    let spliced = app.handle_server_event(clew_protocol::Event::Tree {
+        root: root_s.clone(),
+        seq: 2,
+        tree: clew_protocol::DirNode {
+            dirs: Vec::new(),
+            files: Vec::new(),
+        },
+        files: files.iter().map(|f| f.to_string()).collect(),
+        truncated: false,
+        tracked_ignored: Vec::new(),
+    });
+    drive(&mut app, spliced, |m| {
+        matches!(m, Message::Graph(GraphMsg::ImportGraphUpdated { .. }))
+    });
+    let _ = &mut rx;
+    let map = |prefix: &str, dir: &str| clew_protocol::SourceManifests {
+        psr4: vec![(
+            "composer.json".into(),
+            vec![(prefix.into(), vec![dir.into()])],
+        )],
+        haskell: Vec::new(),
+    };
+    let publish = |app: &mut App, seq: u64, manifests: clew_protocol::Patch<_>| {
+        let published = app.handle_server_event(clew_protocol::Event::ProjectSymbols {
+            root: root_s.clone(),
+            seq,
+            full: false,
+            files: vec![clew_protocol::FileSymbols {
+                rel: "app/Http/Controller.php".into(),
+                symbols: Vec::new(),
+                imports: vec![clew_protocol::WireImport {
+                    module: "App\\Models\\User".into(),
+                    line: 3,
+                    is_mod: false,
+                }],
+            }],
+            go_module: clew_protocol::Patch::Unchanged,
+            dart_package: clew_protocol::Patch::Unchanged,
+            manifests,
+            structure: clew_protocol::Patch::Unchanged,
+        });
+        settle_imports(app, published);
+    };
+    publish(
+        &mut app,
+        1,
+        clew_protocol::Patch::Set(Some(map("App\\", "app/"))),
+    );
+    let target = |app: &App| {
+        app.proj
+            .import_graph
+            .imports(&root.join("app/Http/Controller.php"))[0]
+            .target
+            .clone()
+    };
+    assert_eq!(
+        target(&app),
+        imports::Target::Internal(root.join("app/Models/User.php"))
+    );
+    assert_eq!(app.proj.remote_manifests, map("App\\", "app/"));
+    // The map moved: the class now names no file of the project's.
+    publish(
+        &mut app,
+        2,
+        clew_protocol::Patch::Set(Some(map("App\\", "src/"))),
+    );
+    assert_eq!(
+        target(&app),
+        imports::Target::Unresolved("App\\Models\\User".into())
+    );
+    // Gone altogether: a path from the root again.
+    publish(&mut app, 3, clew_protocol::Patch::Set(None));
+    assert_eq!(app.proj.remote_manifests, Default::default());
 }

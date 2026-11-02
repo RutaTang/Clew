@@ -1575,6 +1575,10 @@ pub struct ProjectSession {
     /// read those files off the local disk. `None` until a full snapshot
     /// arrives.
     pub remote_import_meta: Option<(Option<String>, Option<String>)>,
+    /// What a remote project's package manifests say of where its sources
+    /// are (`composer.json`'s PSR-4 maps, Haskell's source directories), from
+    /// the server's project snapshot, for the same reason.
+    pub remote_manifests: clew_protocol::SourceManifests,
     /// A remote project's tsconfig/jsconfig path mappings, fetched from the
     /// host (`imports::load_remote_ts_configs`) — a remote resolver cannot
     /// read them off the local disk. Shared with every import job's
@@ -1928,6 +1932,7 @@ impl Default for ProjectSession {
             type_graph_key: None,
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
+            remote_manifests: Default::default(),
             remote_ts_configs: Default::default(),
             remote_ts_configs_gen: Default::default(),
             remote_ts_configs_retry: None,

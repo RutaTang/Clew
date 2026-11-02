@@ -690,31 +690,12 @@ impl Resolver {
         // A local project reads its module metadata straight off disk.
         let mut r = Self::with_meta(root, files, read_go_module(root), read_dart_package(root));
         r.ts_configs = Arc::new(read_ts_configs(root, files));
-        // PHP's and Haskell's only for a project in the language: the
-        // manifests are generic enough names (pnpm reads a package.yaml too)
-        // to be there for something else.
-        let has = |ext: &str| {
-            files
-                .iter()
-                .any(|f| f.extension().is_some_and(|e| e == ext))
-        };
-        if has("php") {
-            r.php_psr4 = read_psr4_maps(files);
-        }
-        if has("hs") {
-            let declared: Vec<(PathBuf, Vec<String>)> = manifests(files, is_haskell_manifest)
-                .into_iter()
-                .filter_map(|path| {
-                    let dirs = if path.file_name().is_some_and(|n| n == "package.yaml") {
-                        clew_core::imports::read_hpack_source_dirs(path)
-                    } else {
-                        clew_core::imports::read_cabal_source_dirs(path)
-                    };
-                    Some((path.parent()?.to_path_buf(), dirs))
-                })
-                .collect();
-            r.haskell_roots = haskell_roots(root, &declared, &r.dirs);
-        }
+        let rels: Vec<String> = files
+            .iter()
+            .filter_map(|f| f.strip_prefix(root).ok())
+            .map(|rel| rel.to_string_lossy().into_owned())
+            .collect();
+        r = r.with_manifests(&clew_core::imports::source_manifests(root, &rels));
         r
     }
 
@@ -722,6 +703,42 @@ impl Resolver {
     /// obtained them another way, and for tests): shared, not copied.
     pub fn with_ts_configs(mut self, configs: impl Into<Arc<TsConfigs>>) -> Self {
         self.ts_configs = configs.into();
+        self
+    }
+
+    /// Take what the project's package manifests say of where its sources
+    /// are ([`clew_core::imports::source_manifests`]): `composer.json`'s
+    /// PSR-4 maps, each directory made absolute against its file's, the
+    /// longest prefix first (a prefix written without its closing `\` gets
+    /// it, so `App` does not map `Application\…`); and the Haskell source
+    /// roots its package descriptions name. A local project's are read off
+    /// disk ([`Resolver::new`]); a remote one's arrive with the server's
+    /// snapshot.
+    pub fn with_manifests(mut self, manifests: &clew_protocol::SourceManifests) -> Self {
+        let mut maps: Vec<(String, Vec<PathBuf>)> = Vec::new();
+        for (rel, map) in &manifests.psr4 {
+            let Some(base) = self.root.join(rel).parent().map(Path::to_path_buf) else {
+                continue;
+            };
+            for (prefix, dirs) in map {
+                let mut prefix = prefix.clone();
+                if !prefix.is_empty() && !prefix.ends_with('\\') {
+                    prefix.push('\\');
+                }
+                let dirs = dirs.iter().map(|d| normalize(&base.join(d))).collect();
+                maps.push((prefix, dirs));
+            }
+        }
+        maps.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
+        self.php_psr4 = maps;
+        let declared: Vec<(PathBuf, Vec<String>)> = manifests
+            .haskell
+            .iter()
+            .filter_map(|(rel, dirs)| {
+                Some((self.root.join(rel).parent()?.to_path_buf(), dirs.clone()))
+            })
+            .collect();
+        self.haskell_roots = haskell_roots(&self.root, &declared, &self.dirs);
         self
     }
 
@@ -1995,57 +2012,6 @@ fn nearest<'a>(files: impl Iterator<Item = &'a PathBuf>, from: &Path) -> Option<
         .map(|(f, _)| f)
 }
 
-/// Most manifests of one kind (`composer.json`, Haskell package
-/// descriptions) a local resolver reads: a monorepo has one per package, a
-/// pathological tree thousands. The shallowest are kept, as tsconfig files
-/// are ([`MAX_TS_CONFIGS`]).
-const MAX_MANIFESTS: usize = 64;
-
-/// The project's files `is_manifest` picks, shallowest first (then in path
-/// order), at most [`MAX_MANIFESTS`] of them.
-fn manifests(files: &[PathBuf], is_manifest: impl Fn(&str) -> bool) -> Vec<&PathBuf> {
-    let mut found: Vec<&PathBuf> = files
-        .iter()
-        .filter(|f| {
-            f.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(&is_manifest)
-        })
-        .collect();
-    found.sort_by_key(|f| (f.components().count(), *f));
-    found.truncate(MAX_MANIFESTS);
-    found
-}
-
-/// A Haskell package description's file name: a `.cabal` file or hpack's
-/// `package.yaml`.
-fn is_haskell_manifest(name: &str) -> bool {
-    name == "package.yaml" || (name.ends_with(".cabal") && name.len() > ".cabal".len())
-}
-
-/// The PSR-4 maps of the project's `composer.json` files
-/// ([`clew_core::imports::read_composer_psr4`], bounded and plain-file-only),
-/// each directory made absolute against its file's, the longest prefix
-/// first; a prefix written without its closing `\` gets it, so `App` does not
-/// map `Application\…`.
-fn read_psr4_maps(files: &[PathBuf]) -> Vec<(String, Vec<PathBuf>)> {
-    let mut maps: Vec<(String, Vec<PathBuf>)> = Vec::new();
-    for composer in manifests(files, |name| name == "composer.json") {
-        let Some(base) = composer.parent() else {
-            continue;
-        };
-        for (mut prefix, dirs) in clew_core::imports::read_composer_psr4(composer) {
-            if !prefix.is_empty() && !prefix.ends_with('\\') {
-                prefix.push('\\');
-            }
-            let dirs = dirs.iter().map(|d| normalize(&base.join(d))).collect();
-            maps.push((prefix, dirs));
-        }
-    }
-    maps.sort_by_key(|(prefix, _)| std::cmp::Reverse(prefix.len()));
-    maps
-}
-
 /// The Haskell source roots that exist (are among `dirs`): for each package
 /// directory `declared` names — with the source directories its description
 /// gives — those directories, then its conventional `src`, `app`, `lib` and
@@ -2215,7 +2181,7 @@ pub fn is_resolution_metadata(path: &Path) -> bool {
         return false;
     };
     matches!(name, "go.mod" | "pubspec.yaml" | "composer.json")
-        || is_haskell_manifest(name)
+        || clew_core::imports::is_haskell_manifest(name)
         || ((name.starts_with("tsconfig") || name.starts_with("jsconfig"))
             && name.ends_with(".json"))
 }
@@ -4732,6 +4698,32 @@ mod tests {
             Target::Internal(dir.join("bootstrap.php"))
         );
         assert_eq!(at("nowhere.php"), Target::Unresolved("nowhere.php".into()));
+        // A remote project's resolver resolves the same with the maps the
+        // server read; without them, a class is only a path from the root.
+        let rels: Vec<String> = files
+            .iter()
+            .map(|f| {
+                f.strip_prefix(&*dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let remote = Resolver::with_meta(&dir, &files, None, None);
+        let class = |r: &Resolver| r.resolve(&ri("App\\Models\\User"), &from, "php");
+        assert_ne!(
+            class(&remote),
+            Target::Internal(dir.join("app/Models/User.php"))
+        );
+        let remote = remote.with_manifests(&clew_core::imports::source_manifests(&dir, &rels));
+        assert_eq!(
+            class(&remote),
+            Target::Internal(dir.join("app/Models/User.php"))
+        );
+        assert_eq!(
+            remote.resolve(&ri("Tests\\UserTest"), &from, "php"),
+            Target::Internal(dir.join("tests/UserTest.php"))
+        );
     }
 
     /// A Ruby `require_relative` is a file beside the importer; a `require`
@@ -4881,13 +4873,27 @@ mod tests {
             at("Data.Map", "app/Main.hs"),
             Target::External("Data.Map".into())
         );
-        // Without the descriptions (a remote project's resolver), only the
-        // conventional roots are known.
+        // Without the descriptions (a remote project's resolver before the
+        // server's snapshot), only the conventional roots are known…
         let remote = Resolver::with_meta(&dir, &files, None, None);
         assert_eq!(
             remote.resolve(&ri("Acme.Types"), &dir.join("app/Main.hs"), "haskell"),
             Target::External("Acme.Types".into())
         );
+        // …and with what the server read of them, it resolves as a local one.
+        let sent = clew_core::imports::source_manifests(&dir, &names);
+        assert_eq!(sent.haskell.len(), 2, "{sent:?}");
+        let remote = remote.with_manifests(&sent);
+        for (module, file) in [
+            ("Acme.Types", "lib-src/Acme/Types.hs"),
+            ("Util.Text", "pkgs/util/source/Util/Text.hs"),
+        ] {
+            assert_eq!(
+                remote.resolve(&ri(module), &dir.join("app/Main.hs"), "haskell"),
+                Target::Internal(dir.join(file)),
+                "{module}"
+            );
+        }
     }
 
     /// A Zig `@import` of a path is the file beside the importer; a bare

@@ -212,6 +212,70 @@ pub fn read_composer_psr4(path: &Path) -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// Most manifests of one kind (`composer.json`, Haskell package
+/// descriptions) [`source_manifests`] reads: a monorepo has one per package,
+/// a pathological tree thousands. The shallowest are kept.
+pub const MAX_MANIFESTS: usize = 64;
+
+/// A Haskell package description's file name: a `.cabal` file or hpack's
+/// `package.yaml`.
+pub fn is_haskell_manifest(name: &str) -> bool {
+    name == "package.yaml" || (name.ends_with(".cabal") && name.len() > ".cabal".len())
+}
+
+/// Whether a project file (by rel) bears on [`source_manifests`]: a manifest
+/// it reads, or a source file of a language whose manifests it reads only
+/// when the project has one.
+pub fn bears_on_manifests(rel: &str) -> bool {
+    let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
+    name == "composer.json"
+        || is_haskell_manifest(name)
+        || [".php", ".hs", ".lhs"]
+            .iter()
+            .any(|ext| name.ends_with(ext))
+}
+
+/// What the project's package manifests, among its files `rels`, say of
+/// where its sources are: each `composer.json`'s PSR-4 map when the project
+/// has PHP, each Haskell package description's source directories when it
+/// has Haskell — only then, as `package.yaml` is pnpm's file too. The
+/// shallowest [`MAX_MANIFESTS`] of each kind, read bounded and
+/// plain-file-only, where the files live.
+pub fn source_manifests<S: AsRef<str>>(root: &Path, rels: &[S]) -> clew_protocol::SourceManifests {
+    let rels: Vec<&str> = rels.iter().map(AsRef::as_ref).collect();
+    let has = |exts: &[&str]| rels.iter().any(|r| exts.iter().any(|ext| r.ends_with(ext)));
+    let picked = |is_manifest: &dyn Fn(&str) -> bool| {
+        let mut found: Vec<&str> = rels
+            .iter()
+            .copied()
+            .filter(|r| is_manifest(r.rsplit(['/', '\\']).next().unwrap_or(r)))
+            .collect();
+        found.sort_by_key(|r| (r.split(['/', '\\']).count(), *r));
+        found.truncate(MAX_MANIFESTS);
+        found
+    };
+    let mut out = clew_protocol::SourceManifests::default();
+    if has(&[".php"]) {
+        for rel in picked(&|name| name == "composer.json") {
+            let map = read_composer_psr4(&root.join(rel));
+            if !map.is_empty() {
+                out.psr4.push((rel.to_string(), map));
+            }
+        }
+    }
+    if has(&[".hs", ".lhs"]) {
+        for rel in picked(&is_haskell_manifest) {
+            let path = root.join(rel);
+            let dirs = match rel.ends_with("package.yaml") {
+                true => read_hpack_source_dirs(&path),
+                false => read_cabal_source_dirs(&path),
+            };
+            out.haskell.push((rel.to_string(), dirs));
+        }
+    }
+    out
+}
+
 /// The source directories the Cabal package description at `path` names:
 /// every stanza's `hs-source-dirs:`, relative to the file's own directory.
 /// Bounded and plain-file-only for the same reason as [`read_go_module`].
@@ -1693,6 +1757,62 @@ mod extraction_tests {
 #[cfg(test)]
 mod metadata_tests {
     use super::*;
+
+    /// The manifests are read only for a project in their language —
+    /// `package.yaml` is pnpm's too — the shallowest first, and
+    /// [`bears_on_manifests`] says which changes ask for them again.
+    #[test]
+    fn manifests_are_read_for_their_language_shallowest_first() {
+        let dir = dir("source-manifests");
+        std::fs::create_dir_all(dir.join("pkgs/a")).unwrap();
+        std::fs::write(dir.join("package.yaml"), "source-dirs: src\n").unwrap();
+        std::fs::write(
+            dir.join("pkgs/a/a.cabal"),
+            "library\n  hs-source-dirs: lib\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("composer.json"),
+            r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+        )
+        .unwrap();
+        let without = [
+            "package.yaml",
+            "pkgs/a/a.cabal",
+            "composer.json",
+            "web/app.ts",
+        ];
+        assert!(source_manifests(&dir, &without).is_empty());
+        let with = [
+            "pkgs/a/a.cabal",
+            "package.yaml",
+            "composer.json",
+            "app/A.php",
+            "Main.hs",
+        ];
+        let read = source_manifests(&dir, &with);
+        assert_eq!(read.psr4[0].0, "composer.json");
+        assert_eq!(
+            read.haskell,
+            [
+                ("package.yaml".to_string(), vec!["src".to_string()]),
+                ("pkgs/a/a.cabal".to_string(), vec!["lib".to_string()])
+            ]
+        );
+        for rel in [
+            "composer.json",
+            "x/pkg.cabal",
+            "package.yaml",
+            "a/B.php",
+            "M.hs",
+            "L.lhs",
+        ] {
+            assert!(bears_on_manifests(rel), "{rel}");
+        }
+        for rel in ["src/lib.rs", ".cabal", "package.json"] {
+            assert!(!bears_on_manifests(rel), "{rel}");
+        }
+    }
 
     fn dir(name: &str) -> crate::testutil::TempDir {
         crate::testutil::TempDir::new(name)

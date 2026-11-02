@@ -108,8 +108,8 @@
 {"Reply":{"id":1,"event":{"Error":{"code":{"Provider":"Settings"},"message":"boom"}}}}
 {"Notification":{"event":{"Tree":{"root":"/p","seq":2,"tree":{"dirs":[],"files":[]},"files":[],"truncated":true,"tracked_ignored":[]}}}}
 {"Notification":{"event":{"FilesChanged":{"root":"/p","rels":["a.rs"]}}}}
-{"Notification":{"event":{"ProjectSymbols":{"root":"/p","seq":1,"full":true,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false,"entry":"main"}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":{"Set":"example.com/m"},"dart_package":"Unchanged","structure":{"Set":{"by_type":{"Point":{"traits":["Clone"],"methods":["norm"]}},"implementors":{"Clone":["Point"]}}}}}}}
-{"Notification":{"event":{"ProjectSymbols":{"root":"/p","seq":2,"full":false,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false,"entry":"main"}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":"Unchanged","dart_package":{"Set":null},"structure":{"Set":null}}}}}
+{"Notification":{"event":{"ProjectSymbols":{"root":"/p","seq":1,"full":true,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false,"entry":"main"}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":{"Set":"example.com/m"},"dart_package":"Unchanged","manifests":{"Set":{"psr4":[["composer.json",[["App\\",["src/"]]]]],"haskell":[["acme.cabal",["lib"]]]}},"structure":{"Set":{"by_type":{"Point":{"traits":["Clone"],"methods":["norm"]}},"implementors":{"Clone":["Point"]}}}}}}}
+{"Notification":{"event":{"ProjectSymbols":{"root":"/p","seq":2,"full":false,"files":[{"rel":"a.rs","symbols":[{"name":"main","kind":"function","line":1,"is_test":false,"entry":"main"}],"imports":[{"module":"std::io","line":1,"is_mod":false}]}],"go_module":"Unchanged","dart_package":{"Set":null},"manifests":"Unchanged","structure":{"Set":null}}}}}
 {"Notification":{"event":{"ProcessOutput":{"proc":1,"data":"AJ+Slg=="}}}}
 {"Notification":{"event":{"ProcessStarted":{"proc":1}}}}
 {"Notification":{"event":{"ProcessExited":{"proc":1,"code":0}}}}

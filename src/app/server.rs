@@ -951,6 +951,7 @@ impl App {
                 files,
                 go_module,
                 dart_package,
+                manifests,
                 structure,
             } => {
                 // The server-extracted index data. Applied only for REMOTE
@@ -999,6 +1000,15 @@ impl App {
                 }
                 if meta_changed {
                     self.proj.remote_import_meta = Some((go, dart));
+                }
+                // Recomputed whenever a PHP or Haskell file moved, so only a
+                // change re-resolves the project.
+                if let clew_protocol::Patch::Set(manifests) = manifests {
+                    let manifests = manifests.unwrap_or_default();
+                    if manifests != self.proj.remote_manifests {
+                        self.proj.remote_manifests = manifests;
+                        meta_changed = true;
+                    }
                 }
                 if let clew_protocol::Patch::Set(index) = structure {
                     // `None`: recomputed, and the project has none.

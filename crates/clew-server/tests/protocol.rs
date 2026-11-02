@@ -3755,3 +3755,68 @@ fn a_remote_ruby_program_is_debugged_through_the_bridge() {
     assert_eq!(stopped_at, Some(2), "held at the breakpoint");
     assert!(output.contains("answer 42"), "{output:?}");
 }
+
+/// What a project's package manifests say of where its sources are rides in
+/// the full snapshot — read where the files live — and is sent again when a
+/// manifest changes: a remote client resolves PHP classes and Haskell
+/// modules from it, as a local one does from disk.
+#[tokio::test]
+async fn package_manifests_ride_in_the_snapshot_and_follow_their_edits() {
+    let (mut server, mut rx) = server();
+    let project = temp_project("manifests");
+    let root = std::fs::canonicalize(&*project).unwrap();
+    std::fs::create_dir_all(root.join("app/Models")).unwrap();
+    std::fs::write(root.join("app/Models/User.php"), "<?php\nclass User {}\n").unwrap();
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"autoload": {"psr-4": {"App\\": "app/"}}}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("Main.hs"), "module Main where\n").unwrap();
+    std::fs::write(
+        root.join("acme.cabal"),
+        "library\n  hs-source-dirs: lib-src\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+
+    let manifests = recv_note(&mut rx, "a full snapshot", |event| match event {
+        Event::ProjectSymbols {
+            full: true,
+            manifests,
+            ..
+        } => Some(manifests),
+        _ => None,
+    })
+    .await;
+    let clew_protocol::Patch::Set(Some(manifests)) = manifests else {
+        panic!("a full snapshot carries the manifests: {manifests:?}");
+    };
+    assert_eq!(
+        manifests.psr4,
+        [(
+            "composer.json".to_string(),
+            vec![("App\\".to_string(), vec!["app/".to_string()])]
+        )]
+    );
+    assert_eq!(
+        manifests.haskell,
+        [("acme.cabal".to_string(), vec!["lib-src".to_string()])]
+    );
+
+    // An edit to composer.json is sent on.
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"autoload": {"psr-4": {"Acme\\": "src/"}}}"#,
+    )
+    .unwrap();
+    recv_note(&mut rx, "the edited map", |event| match event {
+        Event::ProjectSymbols {
+            full: false,
+            manifests: clew_protocol::Patch::Set(Some(manifests)),
+            ..
+        } if manifests.psr4[0].1[0].0 == "Acme\\" => Some(()),
+        _ => None,
+    })
+    .await;
+}

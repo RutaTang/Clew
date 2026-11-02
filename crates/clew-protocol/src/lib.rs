@@ -184,6 +184,29 @@ pub enum Patch<T> {
     Set(Option<T>),
 }
 
+/// A `composer.json`'s PSR-4 map as written: each namespace prefix with the
+/// directories, relative to the file's own, it maps to.
+pub type Psr4Map = Vec<(String, Vec<String>)>;
+
+/// What a project's package manifests say of where its sources are, read
+/// where the files live — resolution metadata a remote client must not read
+/// off its own disk. At most a few dozen manifests of each kind, the
+/// shallowest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceManifests {
+    /// Each `composer.json` (by rel) with its PSR-4 map as written.
+    pub psr4: Vec<(Rel, Psr4Map)>,
+    /// Each Haskell package description (`*.cabal`, `package.yaml`; by rel)
+    /// with the source directories it names, relative to its own.
+    pub haskell: Vec<(Rel, Vec<String>)>,
+}
+
+impl SourceManifests {
+    pub fn is_empty(&self) -> bool {
+        self.psr4.is_empty() && self.haskell.is_empty()
+    }
+}
+
 /// Correlates a request with its reply. Minted by the client from ONE counter
 /// per connection, which also mints the `stream` ids of streamed requests, so
 /// a number names exactly one piece of work (see [`Request::Cancel`]).
@@ -1191,6 +1214,9 @@ pub enum Event {
         go_module: Patch<String>,
         /// The package `name:` of the project's `pubspec.yaml`.
         dart_package: Patch<String>,
+        /// What the project's package manifests say of where its sources
+        /// are: `composer.json`'s PSR-4 maps, Haskell's source directories.
+        manifests: Patch<SourceManifests>,
         /// The Rust type/trait structure index — the hover peek's
         /// "implements / implementors" data, extracted where the files live.
         structure: Patch<StructureIndex>,

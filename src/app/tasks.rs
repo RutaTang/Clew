@@ -32,6 +32,8 @@ pub(crate) struct ResolverInputs {
 pub(crate) struct RemoteResolution {
     /// go.mod's module and pubspec.yaml's package name.
     pub meta: (Option<String>, Option<String>),
+    /// What its package manifests say of where its sources are.
+    pub manifests: clew_protocol::SourceManifests,
     /// tsconfig/jsconfig path maps, once fetched: the window's, shared.
     pub ts_configs: Option<Arc<imports::TsConfigs>>,
 }
@@ -45,7 +47,8 @@ impl ResolverInputs {
             return imports::Resolver::new(&self.root, &files);
         };
         let (go_module, dart_package) = remote.meta.clone();
-        let resolver = imports::Resolver::with_meta(&self.root, &files, go_module, dart_package);
+        let resolver = imports::Resolver::with_meta(&self.root, &files, go_module, dart_package)
+            .with_manifests(&remote.manifests);
         match &remote.ts_configs {
             Some(configs) => resolver.with_ts_configs(configs.clone()),
             None => resolver,

@@ -549,6 +549,7 @@ impl App {
         // (`fetch_remote_ts_configs`) and apply once they have arrived.
         let remote = self.connection.is_remote().then(|| RemoteResolution {
             meta: self.proj.remote_import_meta.clone().unwrap_or_default(),
+            manifests: self.proj.remote_manifests.clone(),
             ts_configs: self.proj.remote_ts_configs.clone(),
         });
         Some(ResolverInputs {

@@ -843,6 +843,16 @@ fn project_symbols(
         }],
         go_module,
         dart_package,
+        manifests: match seq {
+            1 => Patch::Set(Some(SourceManifests {
+                psr4: vec![(
+                    "composer.json".into(),
+                    vec![("App\\".into(), vec!["src/".into()])],
+                )],
+                haskell: vec![("acme.cabal".into(), vec!["lib".into()])],
+            })),
+            _ => Patch::Unchanged,
+        },
         structure,
     }
 }
