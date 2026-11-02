@@ -4904,6 +4904,11 @@ mod tests {
         assert_eq!(at("../build.zig"), Target::Internal(root.join("build.zig")));
         assert_eq!(at("std"), Target::External("std".into()));
         assert_eq!(at("missing.zig"), Target::Unresolved("missing.zig".into()));
+        // Zig imports no file by an absolute path, even one in the project.
+        assert_eq!(
+            at("/p/build.zig"),
+            Target::Unresolved("/p/build.zig".into())
+        );
     }
 
     /// The manifests a local resolver reads for the whole project re-resolve
@@ -7345,6 +7350,10 @@ mod resolution_tests {
         let test = "app/src/test/java/com/acme/app/MainTest.java";
         let thing = "legacy/com/acme/old/Thing.java";
         let other = "legacy/com/acme/old2/Other.java";
+        // A module's tests may use another's test fixtures (a test jar).
+        let fixtures = "lib/src/test/java/com/acme/testing/Fixtures.java";
+        let lib_test = "lib/src/test/java/com/acme/lib/LibTest.java";
+        let app_it = "app/src/test/java/com/acme/app/AppIT.java";
         let g = graph_with(
             root,
             &[
@@ -7367,6 +7376,15 @@ mod resolution_tests {
                     "package com.acme.old;\nimport com.acme.old2.Other;\nclass Thing {}\n",
                 ),
                 (other, "package com.acme.old2;\npublic class Other {}\n"),
+                (
+                    fixtures,
+                    "package com.acme.testing;\npublic class Fixtures {}\n",
+                ),
+                (lib_test, "package com.acme.lib;\nclass LibTest {}\n"),
+                (
+                    app_it,
+                    "package com.acme.app;\nimport com.acme.testing.Fixtures;\nclass AppIT {}\n",
+                ),
             ],
             false,
         );
@@ -7389,6 +7407,7 @@ mod resolution_tests {
         assert_eq!(g.package_file(&model), Some(at(order)));
         assert_eq!(targets(&g, &at(test)), [Target::Internal(at(strings))]);
         assert_eq!(targets(&g, &at(thing)), [Target::Internal(at(other))]);
+        assert_eq!(targets(&g, &at(app_it)), [Target::Internal(at(fixtures))]);
     }
 
     /// A C# `using` of a namespace points at the namespace's node, which
