@@ -2256,6 +2256,9 @@ pub struct LanguageDrafts {
     pub c_flags: String,
     pub typescript_path: String,
     pub zig_path: String,
+    pub java_home: String,
+    pub php_version: String,
+    pub csharp_solution: String,
     /// The language a server program is being chosen for; `None` until
     /// one is picked.
     pub server_language: Option<String>,
@@ -2274,6 +2277,9 @@ impl LanguageDrafts {
             crate::LangField::CFlags => &self.c_flags,
             crate::LangField::TypeScriptPath => &self.typescript_path,
             crate::LangField::ZigPath => &self.zig_path,
+            crate::LangField::JavaHome => &self.java_home,
+            crate::LangField::PhpVersion => &self.php_version,
+            crate::LangField::CSharpSolution => &self.csharp_solution,
             crate::LangField::ServerCommand => &self.server_command,
             crate::LangField::ServerArgs => &self.server_args,
         }
@@ -2289,6 +2295,9 @@ impl LanguageDrafts {
             crate::LangField::CFlags => &mut self.c_flags,
             crate::LangField::TypeScriptPath => &mut self.typescript_path,
             crate::LangField::ZigPath => &mut self.zig_path,
+            crate::LangField::JavaHome => &mut self.java_home,
+            crate::LangField::PhpVersion => &mut self.php_version,
+            crate::LangField::CSharpSolution => &mut self.csharp_solution,
             crate::LangField::ServerCommand => &mut self.server_command,
             crate::LangField::ServerArgs => &mut self.server_args,
         }

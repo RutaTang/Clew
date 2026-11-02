@@ -1911,7 +1911,7 @@ impl App {
                             Message::Server(ServerMsg::ResendNotReady {
                                 stamp: stamp.clone(),
                                 id,
-                                request: request.clone(),
+                                request: Box::new(request.clone()),
                                 attempt,
                             })
                         },
@@ -2075,7 +2075,7 @@ impl App {
                 request,
                 attempt,
                 ..
-            } => self.on_resend_not_ready(id, request, attempt),
+            } => self.on_resend_not_ready(id, *request, attempt),
             // (An event queued by a transport this window has already left was
             // dropped in `dispatch`, like the lifecycle messages.)
             ServerMsg::Event { msg, .. } => match msg {

@@ -19462,7 +19462,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Server(ServerMsg::ResendNotReady {
             stamp: s(),
             id: 1,
-            request: clew_protocol::Request::BuildDocs,
+            request: Box::new(clew_protocol::Request::BuildDocs),
             attempt: 1,
         }),
         Message::Project(ProjectMsg::ScanDone {
@@ -31132,6 +31132,20 @@ async fn typed_language_fields_make_their_choices() {
         Some("/srv/ts/lib/tsserver.js")
     );
     assert_eq!(app.proj.lang_choices.zig.as_deref(), Some("zig"));
+
+    typed(&mut app, LangField::JavaHome, "/usr/lib/jvm/java-21");
+    typed(&mut app, LangField::PhpVersion, "8.1");
+    typed(&mut app, LangField::CSharpSolution, "src/App.sln");
+    let choices = &app.proj.lang_choices;
+    assert_eq!(choices.java.as_deref(), Some("/usr/lib/jvm/java-21"));
+    assert_eq!(choices.php.as_deref(), Some("8.1"));
+    assert_eq!(choices.csharp.as_deref(), Some("src/App.sln"));
+    typed(&mut app, LangField::PhpVersion, "");
+    assert_eq!(
+        app.proj.lang_choices.php.as_deref(),
+        Some("8.1"),
+        "an empty field chooses nothing"
+    );
 
     typed(&mut app, LangField::RustTarget, "wasm32-unknown-unknown");
     assert_eq!(

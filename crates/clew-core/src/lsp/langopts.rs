@@ -60,7 +60,7 @@ pub fn language_options(
     };
     let host = ToolHost::current();
     let mut toolchains = BTreeMap::new();
-    for language in ["lean", "dart", "zig"] {
+    for language in ["lean", "dart", "zig", "java", "ruby", "erlang", "haskell"] {
         if has(language) {
             toolchains.insert(
                 language.to_string(),
@@ -70,6 +70,12 @@ pub fn language_options(
     }
     if has("typescript") || has("tsx") || has("javascript") {
         toolchains.insert("typescript".into(), typescript_installs(root, &host));
+    }
+    if has("php") {
+        toolchains.insert("php".into(), php_versions(root));
+    }
+    if has("csharp") {
+        toolchains.insert("csharp".into(), solutions(root));
     }
     LanguageOptions {
         python: (has("python") || choices.python.is_some())
@@ -541,8 +547,30 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The directories in `dir` whose names `keep` keeps, links to directories
+/// among them — where a host keeps its JDKs, links name them (SDKMAN!'s
+/// `current`, Debian's `default-java`, Homebrew's `opt/openjdk`) — sorted,
+/// at most a few dozen. Only for a host's own folders: a project's are read
+/// with [`subdirs`], which follows no link out of it.
+fn linked_subdirs(dir: &Path, keep: fn(&str) -> bool) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|e| keep(&e.file_name().to_string_lossy()))
+        .take(MAX_TOOLCHAINS * 4)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    out.sort();
+    out.truncate(MAX_TOOLCHAINS);
+    out
+}
+
 /// Where a host keeps its toolchains, as its environment says. Passed in,
 /// so a test can point it at a scratch home.
+#[derive(Default)]
 pub struct ToolHost {
     /// The user's home.
     pub home: Option<PathBuf>,
@@ -552,6 +580,8 @@ pub struct ToolHost {
     pub elan_home: Option<PathBuf>,
     /// `FLUTTER_ROOT`, when set: the Flutter SDK, whose `bin/dart` is Dart's.
     pub flutter_root: Option<PathBuf>,
+    /// `JAVA_HOME`, when set.
+    pub java_home: Option<PathBuf>,
 }
 
 impl ToolHost {
@@ -567,6 +597,7 @@ impl ToolHost {
             path: crate::linerpc::spawn_path(),
             elan_home: dir("ELAN_HOME"),
             flutter_root: dir("FLUTTER_ROOT"),
+            java_home: dir("JAVA_HOME"),
         }
     }
 }
@@ -583,6 +614,20 @@ pub fn toolchain_candidates(
         "lean" => lean_toolchains(root, host),
         "dart" => dart_sdks(root, host),
         "zig" => zig_compilers(root, host),
+        "java" => jdks(root, host),
+        "ruby" => ruby_lsps(root, host),
+        "erlang" => programs(
+            host,
+            "elp",
+            &["/opt/homebrew/bin", "/usr/local/bin"],
+            &[".local/bin"],
+        ),
+        "haskell" => programs(
+            host,
+            "haskell-language-server-wrapper",
+            &["/opt/homebrew/bin", "/usr/local/bin"],
+            &[".ghcup/bin", ".local/bin", ".cabal/bin"],
+        ),
         _ => Vec::new(),
     };
     let repo = std::fs::canonicalize(root).ok();
@@ -760,6 +805,327 @@ fn zig_compilers(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
         ("/snap/bin/zig", "snap"),
     ] {
         out.extend(candidate(PathBuf::from(path), name.into(), false));
+    }
+    out
+}
+
+/// A program on `PATH`, in `dirs`, or in `home_dirs` under the home — a
+/// language server installed where its installers put it.
+fn programs(
+    host: &ToolHost,
+    binary: &str,
+    dirs: &[&str],
+    home_dirs: &[&str],
+) -> Vec<ToolchainCandidate> {
+    let mut out = Vec::new();
+    if let Some(path) = host.path.as_deref()
+        && let Some(found) = crate::lsp::store::find_in_unresolved(path, binary)
+    {
+        out.extend(candidate(found, format!("{binary} on PATH"), false));
+    }
+    if let Some(home) = &host.home {
+        for dir in home_dirs {
+            out.extend(candidate(
+                home.join(dir).join(binary),
+                format!("~/{dir}"),
+                false,
+            ));
+        }
+    }
+    for dir in dirs {
+        out.extend(candidate(
+            Path::new(dir).join(binary),
+            dir.to_string(),
+            false,
+        ));
+    }
+    out
+}
+
+/// The JDKs on `host`: `JAVA_HOME`'s, macOS's `JavaVirtualMachines`, Linux's
+/// `/usr/lib/jvm`, and those SDKMAN!, IntelliJ, asdf, mise and Homebrew
+/// keep — each once, named by its vendor and version (its `release` file),
+/// the ones of the Java version the project's build asks for marked.
+fn jdks(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
+    let wanted = project_java(root);
+    let mut homes: Vec<PathBuf> = Vec::new();
+    homes.extend(host.java_home.clone());
+    let mut each_named = |dir: PathBuf, keep: fn(&str) -> bool, inner: &str| {
+        for jdk in linked_subdirs(&dir, keep) {
+            homes.push(if inner.is_empty() {
+                jdk
+            } else {
+                jdk.join(inner)
+            });
+        }
+    };
+    let all: fn(&str) -> bool = |_| true;
+    each_named(
+        PathBuf::from("/Library/Java/JavaVirtualMachines"),
+        all,
+        "Contents/Home",
+    );
+    each_named(PathBuf::from("/usr/lib/jvm"), all, "");
+    if let Some(home) = &host.home {
+        each_named(
+            home.join("Library/Java/JavaVirtualMachines"),
+            all,
+            "Contents/Home",
+        );
+        each_named(home.join(".sdkman/candidates/java"), all, "");
+        each_named(home.join(".jdks"), all, "");
+        each_named(home.join(".asdf/installs/java"), all, "");
+        each_named(home.join(".local/share/mise/installs/java"), all, "");
+    }
+    // Homebrew's `opt` holds a link per formula, its JDKs `openjdk` and
+    // `openjdk@<n>`.
+    for brew in ["/opt/homebrew/opt", "/usr/local/opt"] {
+        each_named(
+            PathBuf::from(brew),
+            |name| name.starts_with("openjdk"),
+            "libexec/openjdk.jdk/Contents/Home",
+        );
+    }
+    let mut seen = BTreeSet::new();
+    let mut out = Vec::new();
+    for home in homes {
+        if !home.join("bin/java").is_file() && !home.join("bin/java.exe").is_file() {
+            continue;
+        }
+        let Ok(real) = std::fs::canonicalize(&home) else {
+            continue;
+        };
+        if !seen.insert(real) {
+            continue;
+        }
+        let version = jdk_version(&home);
+        let vendor = jdk_release(&home, "IMPLEMENTOR");
+        let name = match (&vendor, &version) {
+            (Some(vendor), Some(version)) => format!("{vendor} {version}"),
+            (None, Some(version)) => format!("JDK {version}"),
+            _ => home
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "JDK".into()),
+        };
+        let project = matches!(
+            (wanted, version.as_deref().and_then(java_major)),
+            (Some(w), Some(m)) if w == m
+        );
+        out.push(ToolchainCandidate {
+            command: home.to_string_lossy().into_owned(),
+            name,
+            project,
+        });
+    }
+    out
+}
+
+/// A value of a JDK's `release` file (`JAVA_VERSION="21.0.1"`).
+fn jdk_release(home: &Path, key: &str) -> Option<String> {
+    let text = crate::statefile::read_capped(&home.join("release"), 64 * 1024)?;
+    text.lines().find_map(|line| {
+        let value = line.strip_prefix(key)?.strip_prefix('=')?;
+        Some(value.trim().trim_matches('"').to_string())
+    })
+}
+
+/// A JDK's version, from its `release` file.
+pub fn jdk_version(home: &Path) -> Option<String> {
+    jdk_release(home, "JAVA_VERSION")
+}
+
+/// A Java version's major number: `21.0.1` → 21, `1.8.0_392` → 8, `17` → 17.
+pub fn java_major(version: &str) -> Option<u32> {
+    let mut parts = version.trim().split(['.', '_', '-', '+']);
+    match parts.next()?.parse().ok()? {
+        1 => parts.next()?.parse().ok(),
+        major => Some(major),
+    }
+}
+
+/// The Java version the project's build asks for: `.java-version`,
+/// `.sdkmanrc`, `.tool-versions`, a Gradle toolchain
+/// (`JavaLanguageVersion.of(17)`), or Maven's `maven.compiler.release` /
+/// `java.version`.
+fn project_java(root: &Path) -> Option<u32> {
+    let read = |file: &str| crate::statefile::read_capped(&root.join(file), 256 * 1024);
+    if let Some(text) = read(".java-version") {
+        return java_major(text.lines().next()?);
+    }
+    for (file, key) in [(".sdkmanrc", "java="), (".tool-versions", "java ")] {
+        if let Some(text) = read(file)
+            && let Some(version) = text.lines().find_map(|l| l.trim().strip_prefix(key))
+        {
+            let version = version
+                .trim()
+                .trim_start_matches(|c: char| !c.is_ascii_digit());
+            return java_major(version);
+        }
+    }
+    for file in ["build.gradle.kts", "build.gradle"] {
+        if let Some(text) = read(file)
+            && let Some(at) = text.find("JavaLanguageVersion.of(")
+        {
+            let rest = &text[at + "JavaLanguageVersion.of(".len()..];
+            let number: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            return number.parse().ok();
+        }
+    }
+    let pom = read("pom.xml")?;
+    for tag in [
+        "maven.compiler.release",
+        "maven.compiler.source",
+        "java.version",
+        "release",
+    ] {
+        let open = format!("<{tag}>");
+        if let Some(at) = pom.find(&open) {
+            let rest = &pom[at + open.len()..];
+            let value: String = rest.chars().take_while(|c| *c != '<').collect();
+            if let Some(major) = java_major(&value) {
+                return Some(major);
+            }
+        }
+    }
+    None
+}
+
+/// The PHP versions intelephense can read code as — the one the project's
+/// `composer.json` asks for (`"require": {"php": "^8.1"}`: its lowest) marked
+/// and first.
+fn php_versions(root: &Path) -> Vec<ToolchainCandidate> {
+    let wanted = crate::statefile::read_capped(&root.join("composer.json"), 1024 * 1024)
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|json| {
+            json.get("require")?
+                .get("php")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .and_then(|constraint| {
+            // The lowest `major.minor` the constraint names.
+            let at = constraint.find(|c: char| c.is_ascii_digit())?;
+            let mut parts = constraint[at..].split(|c: char| !c.is_ascii_digit());
+            Some(format!("{}.{}", parts.next()?, parts.next().unwrap_or("0")))
+        });
+    let mut versions: Vec<String> = ["8.4", "8.3", "8.2", "8.1", "8.0", "7.4", "7.3"]
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    if let Some(w) = &wanted
+        && !versions.contains(w)
+    {
+        versions.push(w.clone());
+    }
+    let mut out: Vec<ToolchainCandidate> = versions
+        .into_iter()
+        .map(|v| ToolchainCandidate {
+            project: wanted.as_deref() == Some(v.as_str()),
+            name: format!("PHP {v}"),
+            command: v,
+        })
+        .collect();
+    out.sort_by_key(|c| !c.project);
+    out
+}
+
+/// The project's C# solutions: `.sln` and `.slnx` files at its root and a
+/// folder down.
+fn solutions(root: &Path) -> Vec<ToolchainCandidate> {
+    let mut dirs = vec![root.to_path_buf()];
+    dirs.extend(subdirs(root));
+    let mut out = Vec::new();
+    for dir in dirs {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        // Solutions only, then capped: a folder of many files may list its
+        // solution last.
+        let mut found: Vec<PathBuf> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == "sln" || e == "slnx"))
+            .filter(|p| p.is_file())
+            .take(MAX_TOOLCHAINS)
+            .collect();
+        found.sort();
+        for path in found {
+            let name = path
+                .strip_prefix(root)
+                .map(|r| r.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            out.push(ToolchainCandidate {
+                command: path.to_string_lossy().into_owned(),
+                name,
+                project: true,
+            });
+        }
+    }
+    out.truncate(MAX_TOOLCHAINS);
+    out
+}
+
+/// Ruby LSP as each installed Ruby has it — rbenv's, chruby's, asdf's,
+/// mise's, RVM's, Homebrew's and the user's gem directory — the Ruby the
+/// project's `.ruby-version` (or `.tool-versions`) names marked; and one on
+/// `PATH`.
+fn ruby_lsps(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
+    let read = |file: &str| crate::statefile::read_capped(&root.join(file), 4096);
+    let wanted = read(".ruby-version")
+        .and_then(|t| {
+            t.lines()
+                .next()
+                .map(|l| l.trim().trim_start_matches("ruby-").to_string())
+        })
+        .or_else(|| {
+            read(".tool-versions")?
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("ruby ").map(|v| v.trim().to_string()))
+        })
+        .filter(|w| !w.is_empty());
+    let mut out = Vec::new();
+    if let Some(path) = host.path.as_deref()
+        && let Some(found) = crate::lsp::store::find_in_unresolved(path, "ruby-lsp")
+    {
+        out.extend(candidate(found, "ruby-lsp on PATH".into(), false));
+    }
+    if let Some(home) = &host.home {
+        for (manager, dir, bin) in [
+            ("rbenv", ".rbenv/versions", "bin"),
+            ("chruby", ".rubies", "bin"),
+            ("asdf", ".asdf/installs/ruby", "bin"),
+            ("mise", ".local/share/mise/installs/ruby", "bin"),
+            ("RVM", ".rvm/gems", "bin"),
+            ("gem --user-install", ".gem/ruby", "bin"),
+        ] {
+            for install in subdirs(&home.join(dir)) {
+                let version = install
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
+                let plain = version.trim_start_matches("ruby-");
+                let project = wanted.as_deref() == Some(plain);
+                out.extend(candidate(
+                    install.join(bin).join("ruby-lsp"),
+                    format!("{manager} · Ruby {plain}"),
+                    project,
+                ));
+            }
+        }
+    }
+    for dir in subdirs(Path::new("/opt/homebrew/lib/ruby/gems")) {
+        let version = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        out.extend(candidate(
+            dir.join("bin/ruby-lsp"),
+            format!("Homebrew · Ruby {version}"),
+            false,
+        ));
     }
     out
 }
@@ -995,6 +1361,7 @@ exclude = ["crates/skip"]
             path: Some(root.join("bin").into_os_string()),
             elan_home: None,
             flutter_root: None,
+            java_home: None,
         };
         let found = toolchain_candidates("lean", &root, &host);
         let names: Vec<(&str, bool)> = found.iter().map(|c| (c.name.as_str(), c.project)).collect();
@@ -1028,6 +1395,7 @@ exclude = ["crates/skip"]
             path: None,
             elan_home: None,
             flutter_root: None,
+            java_home: None,
         };
         let names: Vec<String> = toolchain_candidates("dart", &root, &host)
             .into_iter()
@@ -1076,6 +1444,7 @@ exclude = ["crates/skip"]
             path: None,
             elan_home: None,
             flutter_root: None,
+            java_home: None,
         };
         let found = typescript_installs(&root, &host);
         assert_eq!(
@@ -1110,6 +1479,7 @@ exclude = ["crates/skip"]
             path: None,
             elan_home: None,
             flutter_root: None,
+            java_home: None,
         };
         let names: Vec<(String, bool)> = toolchain_candidates("zig", &root, &host)
             .into_iter()
@@ -1129,5 +1499,123 @@ exclude = ["crates/skip"]
                 ("zigup · Zig 0.11.0".to_string(), false),
             ]
         );
+    }
+
+    /// JDKs where SDKMAN! and IntelliJ keep them, each once, named by vendor
+    /// and version — those of the Java version the project's build asks for
+    /// first.
+    #[cfg(unix)]
+    #[test]
+    fn jdks_are_found_the_projects_version_first() {
+        let dir = TempDir::new("langopts-jdks");
+        let home = dir.path().join("home");
+        let root = dir.path().join("proj");
+        write(
+            &root.join("build.gradle.kts"),
+            "java { toolchain { languageVersion = JavaLanguageVersion.of(17) } }",
+        );
+        for (at, version) in [
+            (".sdkman/candidates/java/21.0.1-tem", "21.0.1"),
+            (".jdks/corretto-17.0.9", "17.0.9"),
+        ] {
+            let jdk = home.join(at);
+            executable(&jdk.join("bin/java"));
+            write(
+                &jdk.join("release"),
+                &format!("IMPLEMENTOR=\"Vendor\"\nJAVA_VERSION=\"{version}\"\n"),
+            );
+        }
+        // The same JDK by another name is listed once.
+        std::os::unix::fs::symlink(
+            home.join(".jdks/corretto-17.0.9"),
+            home.join(".sdkman/candidates/java/current"),
+        )
+        .unwrap();
+        // One only a link names (as Homebrew's are) is listed.
+        let elsewhere = dir.path().join("elsewhere/jdk-11");
+        executable(&elsewhere.join("bin/java"));
+        write(
+            &elsewhere.join("release"),
+            "IMPLEMENTOR=\"Vendor\"\nJAVA_VERSION=\"11.0.2\"\n",
+        );
+        std::os::unix::fs::symlink(&elsewhere, home.join(".jdks/linked-11")).unwrap();
+        let host = ToolHost {
+            java_home: Some(home.join(".sdkman/candidates/java/current")),
+            home: Some(home),
+            ..Default::default()
+        };
+        let found: Vec<(String, bool)> = toolchain_candidates("java", &root, &host)
+            .into_iter()
+            .filter(|c| c.command.contains("home"))
+            .map(|c| (c.name, c.project))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("Vendor 17.0.9".to_string(), true),
+                ("Vendor 21.0.1".to_string(), false),
+                ("Vendor 11.0.2".to_string(), false)
+            ]
+        );
+        assert_eq!(java_major("1.8.0_392"), Some(8));
+        assert_eq!(java_major("21"), Some(21));
+    }
+
+    /// PHP versions, the project's `composer.json` floor first; the
+    /// project's C# solutions; Ruby LSP in the Ruby `.ruby-version` names;
+    /// ghcup's Haskell language server.
+    #[cfg(unix)]
+    #[test]
+    fn php_versions_solutions_rubies_and_hls_are_listed() {
+        let dir = TempDir::new("langopts-more");
+        let home = dir.path().join("home");
+        let root = dir.path().join("proj");
+        write(
+            &root.join("composer.json"),
+            r#"{"require": {"php": "^8.1 || ^9"}}"#,
+        );
+        let php = php_versions(&root);
+        assert_eq!((php[0].command.as_str(), php[0].project), ("8.1", true));
+        assert!(php.iter().filter(|c| c.project).count() == 1);
+
+        write(&root.join("Shop.sln"), "");
+        write(&root.join("tools/Tools.slnx"), "");
+        // A solution among many files is found all the same.
+        for i in 0..MAX_TOOLCHAINS * 5 {
+            write(&root.join(format!("src/f{i}.cs")), "");
+        }
+        write(&root.join("src/App.sln"), "");
+        std::fs::create_dir_all(root.join("src/Not.sln")).unwrap();
+        let names: Vec<String> = solutions(&root).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, ["Shop.sln", "src/App.sln", "tools/Tools.slnx"]);
+
+        write(&root.join(".ruby-version"), "ruby-3.3.0\n");
+        executable(&home.join(".rbenv/versions/3.2.2/bin/ruby-lsp"));
+        executable(&home.join(".rbenv/versions/3.3.0/bin/ruby-lsp"));
+        executable(&home.join(".rubies/ruby-3.3.0/bin/ruby-lsp"));
+        executable(&home.join(".ghcup/bin/haskell-language-server-wrapper"));
+        let host = ToolHost {
+            home: Some(home),
+            ..Default::default()
+        };
+        let rubies: Vec<(String, bool)> = toolchain_candidates("ruby", &root, &host)
+            .into_iter()
+            .filter(|c| c.command.contains("rbenv") || c.command.contains("rubies"))
+            .map(|c| (c.name, c.project))
+            .collect();
+        assert_eq!(
+            rubies,
+            [
+                ("rbenv · Ruby 3.3.0".to_string(), true),
+                ("chruby · Ruby 3.3.0".to_string(), true),
+                ("rbenv · Ruby 3.2.2".to_string(), false)
+            ]
+        );
+        let hls: Vec<String> = toolchain_candidates("haskell", &root, &host)
+            .into_iter()
+            .filter(|c| c.command.contains(".ghcup"))
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(hls, ["~/.ghcup/bin"]);
     }
 }

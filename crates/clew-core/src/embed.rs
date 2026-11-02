@@ -1561,7 +1561,16 @@ mod tests {
         let vectors =
             run_batch(agent.clone(), None, endpoint(&cfg), &cfg, &texts, &|| false).unwrap();
         assert_eq!(vectors, [vec![1.0, 2.0]]);
-        assert_eq!(seen.try_iter().count(), 2, "refused, then answered");
+        // Each answer is noted after it is written, so the client can be back
+        // before the note: waited for, not counted on the spot.
+        for _ in 0..2 {
+            assert_eq!(
+                seen.recv_timeout(std::time::Duration::from_secs(5)),
+                Ok(()),
+                "refused, then answered"
+            );
+        }
+        assert!(seen.try_recv().is_err(), "asked twice, no more");
         let err = run_batch(agent, None, endpoint(&cfg), &cfg, &texts, &|| false).unwrap_err();
         assert!(err.contains("400"), "{err}");
         assert_eq!(

@@ -141,6 +141,9 @@ mod tests {
             }),
             typescript: Some("/p/node_modules/typescript/lib/tsserver.js".into()),
             zig: None,
+            java: Some("/usr/lib/jvm/temurin-21".into()),
+            php: Some("8.2".into()),
+            csharp: None,
             servers: Some(
                 [
                     (

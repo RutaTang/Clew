@@ -865,8 +865,11 @@ pub fn ansi(idx: u8) -> Color {
 /// around the wheel (orange · yellow · green · teal · cyan · blue) and kept
 /// saturated so they survive being shaded by depth on either background.
 /// Lean (the import map) and SQL (the type map, whose nodes are its tables)
-/// close the wheel: violet, magenta. Anything else is filtered out of the
-/// graph upstream, so the neutral fallback should not normally appear.
+/// close the wheel: violet, magenta. The later languages take the gaps
+/// between: Java red-orange and Zig amber among the warm ones, C# lime, PHP
+/// periwinkle, Haskell lilac and Erlang orchid among the cool, Ruby red.
+/// Anything else is filtered out of the graph upstream, so the neutral
+/// fallback should not normally appear.
 pub fn language_hue(lang: Option<&str>) -> Color {
     match lang {
         Some("rust") => rgb(0xf2843c),
@@ -877,6 +880,13 @@ pub fn language_hue(lang: Option<&str>) -> Color {
         Some("typescript" | "tsx") => rgb(0x5090f0),
         Some("lean") => rgb(0x9b7cf2),
         Some("sql") => rgb(0xe05ab0),
+        Some("java") => rgb(0xe8644a),
+        Some("zig") => rgb(0xf0a030),
+        Some("csharp") => rgb(0x8fc94a),
+        Some("php") => rgb(0x7b84e8),
+        Some("haskell") => rgb(0xc07cf0),
+        Some("erlang") => rgb(0xc65bd6),
+        Some("ruby") => rgb(0xe04654),
         _ => rgb(0x8a93a6),
     }
 }

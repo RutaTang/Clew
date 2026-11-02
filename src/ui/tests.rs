@@ -6390,3 +6390,141 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     let mut sim = sim_elem(super::connect::languages_section(&app));
     assert!(sim.find(warning).is_ok(), "said once it is the one chosen");
 }
+
+/// Java's JDK, PHP's version and C#'s solution are picked from the ones
+/// found, the server's own pick by default; the Ruby whose Ruby LSP runs,
+/// Erlang's ELP and Haskell's language server from the programs found.
+#[test]
+fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
+    use clew_protocol::{LanguageChoices, LanguageOptions, ToolchainCandidate};
+    let mut app = reader_app();
+    app.proj.project_languages = ["java", "php", "csharp", "ruby", "erlang", "haskell"]
+        .map(String::from)
+        .to_vec();
+    let one = |command: &str, name: &str| {
+        vec![ToolchainCandidate {
+            command: command.into(),
+            name: name.into(),
+            project: false,
+        }]
+    };
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        toolchains: [
+            ("java".to_string(), one("/usr/lib/jvm/java-21", "JDK 21")),
+            (
+                "php".to_string(),
+                one("8.2", "PHP 8.2 — composer.json's floor"),
+            ),
+            ("csharp".to_string(), one("/p/src/App.sln", "src/App.sln")),
+            (
+                "ruby".to_string(),
+                one(
+                    "/h/.rbenv/versions/3.3.0/bin/ruby-lsp",
+                    "rbenv · Ruby 3.3.0",
+                ),
+            ),
+            (
+                "erlang".to_string(),
+                one("/opt/elp/bin/elp", "elp in /opt/elp/bin"),
+            ),
+            (
+                "haskell".to_string(),
+                one("/h/.ghcup/bin/haskell-language-server-wrapper", "ghcup"),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    }));
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    for shown in [
+        "Java: JDK",
+        "JDK 21",
+        "PHP: version",
+        "PHP 8.2 — composer.json's floor",
+        "C#: solution",
+        "src/App.sln",
+        "Ruby: the Ruby whose Ruby LSP runs",
+        "rbenv · Ruby 3.3.0",
+        "The ruby-lsp found on the PATH",
+        "Erlang: language platform",
+        "The elp found on the PATH",
+        "Haskell: language server",
+        "The haskell-language-server-wrapper found on the PATH",
+    ] {
+        assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    let _ = sim.click("Use");
+    let chosen: Vec<LanguageChoices> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chosen.len(), 1);
+    // The first "Use" is the Ruby's: its programs come before the paths.
+    let ruby = chosen[0].servers.as_ref().and_then(|s| s.get("ruby"));
+    assert_eq!(
+        ruby.map(|r| (r.command.as_str(), r.args.is_none())),
+        Some(("/h/.rbenv/versions/3.3.0/bin/ruby-lsp", true)),
+        "a program found keeps its server's arguments"
+    );
+    // Each one's "Use" chooses its own.
+    type Pick = (
+        &'static str,
+        fn(&LanguageChoices) -> Option<String>,
+        &'static str,
+    );
+    let picks: [Pick; 5] = [
+        ("java", |c| c.java.clone(), "/usr/lib/jvm/java-21"),
+        ("php", |c| c.php.clone(), "8.2"),
+        ("csharp", |c| c.csharp.clone(), "/p/src/App.sln"),
+        (
+            "erlang",
+            |c| Some(c.servers.as_ref()?.get("erlang")?.command.clone()),
+            "/opt/elp/bin/elp",
+        ),
+        (
+            "haskell",
+            |c| Some(c.servers.as_ref()?.get("haskell")?.command.clone()),
+            "/h/.ghcup/bin/haskell-language-server-wrapper",
+        ),
+    ];
+    for (language, get, want) in picks {
+        app.proj.project_languages = vec![language.to_string()];
+        let mut sim = sim_elem(super::connect::languages_section(&app));
+        let _ = sim.click("Use");
+        let chosen: Vec<LanguageChoices> = sim
+            .into_messages()
+            .filter_map(|m| match m {
+                Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chosen.len(), 1, "{language}");
+        assert_eq!(get(&chosen[0]).as_deref(), Some(want), "{language}");
+    }
+    app.proj.project_languages = ["java", "php", "csharp", "ruby", "erlang", "haskell"]
+        .map(String::from)
+        .to_vec();
+
+    app.proj.lang_choices = LanguageChoices {
+        php: Some("8.2".into()),
+        servers: Some(
+            [(
+                "erlang".to_string(),
+                clew_protocol::ServerChoice {
+                    command: "/opt/elp/bin/elp".into(),
+                    args: None,
+                },
+            )]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(
+        sim.find("The elp found on the PATH").is_err(),
+        "the chosen ELP replaces the PATH's"
+    );
+}

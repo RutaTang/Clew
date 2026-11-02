@@ -458,6 +458,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             "typescript",
             "tsx",
             "javascript",
+            "java",
+            "php",
+            "csharp",
+            "ruby",
+            "erlang",
+            "haskell",
         ]
         .iter()
         .any(|l| has(l));
@@ -492,7 +498,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     if has("c") || has("cpp") {
         col = col.push(c_block(app, options.and_then(|o| o.c.as_ref())));
     }
-    for language in ["lean", "dart"] {
+    for language in ["lean", "dart", "ruby", "erlang", "haskell"] {
         if has(language) {
             let found = options
                 .and_then(|o| o.toolchains.get(language))
@@ -523,6 +529,51 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
                 ),
             },
             |c, path| c.typescript = path,
+        ));
+    }
+    if has("java") {
+        col = col.push(path_choice_block(
+            app,
+            PathChoice {
+                heading: "Java: JDK",
+                automatic: "The JDK the server finds (JAVA_HOME, or the one on the PATH)",
+                chosen: app.proj.lang_choices.java.as_deref(),
+                found: found("java"),
+                field: crate::LangField::JavaHome,
+                placeholder: "A JDK's home folder",
+                project_note: None,
+            },
+            |c, path| c.java = path,
+        ));
+    }
+    if has("php") {
+        col = col.push(path_choice_block(
+            app,
+            PathChoice {
+                heading: "PHP: version",
+                automatic: "The server's own default",
+                chosen: app.proj.lang_choices.php.as_deref(),
+                found: found("php"),
+                field: crate::LangField::PhpVersion,
+                placeholder: "Another version, e.g. 8.2",
+                project_note: None,
+            },
+            |c, version| c.php = version,
+        ));
+    }
+    if has("csharp") {
+        col = col.push(path_choice_block(
+            app,
+            PathChoice {
+                heading: "C#: solution",
+                automatic: "The solution the server finds in the project",
+                chosen: app.proj.lang_choices.csharp.as_deref(),
+                found: found("csharp"),
+                field: crate::LangField::CSharpSolution,
+                placeholder: "A .sln or .slnx file",
+                project_note: None,
+            },
+            |c, path| c.csharp = path,
         ));
     }
     if has("zig") {
@@ -1112,6 +1163,12 @@ fn toolchain_block<'a>(
     let choices = &app.proj.lang_choices;
     let (heading, program) = match language {
         "lean" => ("Lean: toolchain", "lake"),
+        "ruby" => ("Ruby: the Ruby whose Ruby LSP runs", "ruby-lsp"),
+        "erlang" => ("Erlang: language platform", "elp"),
+        "haskell" => (
+            "Haskell: language server",
+            "haskell-language-server-wrapper",
+        ),
         _ => ("Dart: SDK", "dart"),
     };
     let chosen = choices.servers.as_ref().and_then(|s| s.get(language));

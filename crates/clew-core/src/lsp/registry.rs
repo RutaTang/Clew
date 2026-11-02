@@ -544,6 +544,77 @@ pub static SERVERS: &[ServerSpec] = &[
         source: Source::Toolchain { binary: "lake" },
     },
     ServerSpec {
+        name: "jdtls",
+        version: "toolchain",
+        languages: &["java"],
+        args: &[],
+        runs_project_code: Some(
+            "its Gradle or Maven build — the build scripts it runs to import the project",
+        ),
+        // Eclipse JDT LS, through the `jdtls` launcher its distribution
+        // ships (Homebrew, the Linux packages, the release archive's
+        // `bin/`): it needs a JDK of the user's to run on.
+        source: Source::Toolchain { binary: "jdtls" },
+    },
+    ServerSpec {
+        name: "intelephense",
+        version: "latest",
+        languages: &["php"],
+        args: &["--stdio"],
+        runs_project_code: None,
+        source: Source::Install {
+            tool: "npm",
+            kind: Installer::Npm {
+                packages: &["intelephense"],
+            },
+            binary: "node_modules/.bin/intelephense",
+        },
+    },
+    ServerSpec {
+        name: "ruby-lsp",
+        version: "toolchain",
+        languages: &["ruby"],
+        args: &[],
+        runs_project_code: Some("its Gemfile, which Bundler runs, and the gems it loads"),
+        // Shopify's Ruby LSP, a gem: run from the Ruby it was installed in.
+        source: Source::Toolchain { binary: "ruby-lsp" },
+    },
+    ServerSpec {
+        name: "csharp-ls",
+        version: "toolchain",
+        languages: &["csharp"],
+        args: &[],
+        runs_project_code: Some(
+            "its MSBuild project files, which it evaluates and builds — their tasks and targets",
+        ),
+        // A `dotnet tool` (`dotnet tool install --global csharp-ls`).
+        source: Source::Toolchain {
+            binary: "csharp-ls",
+        },
+    },
+    ServerSpec {
+        name: "elp",
+        version: "toolchain",
+        languages: &["erlang"],
+        args: &["server"],
+        runs_project_code: Some("its rebar3 build — rebar.config and the plugins it names"),
+        // The Erlang Language Platform, from its release binary.
+        source: Source::Toolchain { binary: "elp" },
+    },
+    ServerSpec {
+        name: "haskell-language-server",
+        version: "toolchain",
+        languages: &["haskell"],
+        args: &["--lsp"],
+        runs_project_code: Some(
+            "its Cabal or Stack build — Setup.hs, Template Haskell and the preprocessors it names",
+        ),
+        // ghcup's wrapper, which picks the server built for the project's GHC.
+        source: Source::Toolchain {
+            binary: "haskell-language-server-wrapper",
+        },
+    },
+    ServerSpec {
         name: "pyright",
         version: "latest",
         languages: &["python"],

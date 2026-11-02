@@ -1331,6 +1331,15 @@ pub struct LanguageChoices {
     /// The `zig` compiler zls works with: a path, or a name on `PATH`.
     /// `None` lets zls look for one.
     pub zig: Option<String>,
+    /// The JDK the Java server builds the project with: its home directory.
+    /// `None` lets the server find one.
+    pub java: Option<String>,
+    /// The PHP version the PHP server reads the code as (`8.2`); `None` is
+    /// the server's default.
+    pub php: Option<String>,
+    /// The solution (`.sln`, `.slnx`) the C# server loads; `None` lets it
+    /// look for one.
+    pub csharp: Option<String>,
     /// The program to run as a language's server instead of clew's, by
     /// language (the client's names). For a server that comes with a
     /// toolchain (Lean's `lake`, Dart's `dart`) this is where the toolchain
@@ -1452,9 +1461,11 @@ pub struct LanguageOptions {
     pub go: Option<GoOptions>,
     pub c: Option<COptions>,
     /// The toolchains found for each language whose server is a toolchain's
-    /// own (Lean's `lake`, Dart's `dart`), or that its server is told to use
-    /// (TypeScript's `tsserver.js`, Zig's `zig`), by language, the project's
-    /// own first.
+    /// own (Lean's `lake`, Dart's `dart`, Ruby's `ruby-lsp`, Erlang's `elp`,
+    /// Haskell's language server), or that its server is told to use
+    /// (TypeScript's `tsserver.js`, Zig's `zig`, Java's JDKs, C#'s
+    /// solutions, PHP's versions — `command` is the value chosen), by
+    /// language, the project's own first.
     pub toolchains: std::collections::BTreeMap<String, Vec<ToolchainCandidate>>,
 }
 

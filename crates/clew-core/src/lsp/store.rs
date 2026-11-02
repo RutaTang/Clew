@@ -379,7 +379,9 @@ pub fn locate(server: &EffectiveServer) -> Located {
             return match find_on_path_unresolved(binary) {
                 Some(p) => Located::Ready(p),
                 None => Located::Unsupported(format!(
-                    "'{binary}' not found on PATH — install the toolchain (e.g. the Dart/Flutter SDK)"
+                    "'{binary}' not found on PATH — {}, or choose where it is in Settings → \
+                     Languages",
+                    install_hint(binary)
                 )),
             };
         }
@@ -397,6 +399,21 @@ pub fn locate(server: &EffectiveServer) -> Located {
         Provision::Download(download) => Located::NeedsDownload { download, dest_dir },
         Provision::Install(install) => Located::NeedsInstall { install, dest_dir },
         Provision::Toolchain { .. } => unreachable!("returned above"),
+    }
+}
+
+/// How to get the toolchain program `binary`, for the message saying it is
+/// missing.
+fn install_hint(binary: &str) -> &'static str {
+    match binary {
+        "dart" => "install the Dart or Flutter SDK",
+        "lake" => "install Lean with elan",
+        "jdtls" => "install Eclipse JDT LS (e.g. `brew install jdtls`)",
+        "ruby-lsp" => "install it with `gem install ruby-lsp`",
+        "csharp-ls" => "install it with `dotnet tool install --global csharp-ls`",
+        "elp" => "install the Erlang Language Platform (elp) from its releases",
+        "haskell-language-server-wrapper" => "install it with ghcup (`ghcup install hls`)",
+        _ => "install its toolchain",
     }
 }
 

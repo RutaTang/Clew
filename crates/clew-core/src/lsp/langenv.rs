@@ -78,8 +78,82 @@ pub fn chosen(language: &str, root: &Path, choices: &LanguageChoices) -> Option<
             let zig = crate::lsp::store::find_program(choices.zig.as_deref()?).ok()?;
             Some(json!({ "zig_exe_path": zig.to_string_lossy() }))
         }
+        "java" => java_settings(choices.java.as_deref()?),
+        "php" => {
+            let version = php_version(choices.php.as_deref()?)?;
+            Some(json!({ "intelephense": { "environment": { "phpVersion": version } } }))
+        }
+        "csharp" => {
+            let solution = chosen_solution(root, choices.csharp.as_deref()?)?;
+            Some(json!({ "csharp": { "solution": solution.to_string_lossy() } }))
+        }
         _ => None,
     }
+}
+
+/// jdtls's settings for the JDK the user chose: the runtime the project is
+/// built with (`java.configuration.runtimes`, named by its Java SE version
+/// as jdtls names them), and `java.home`. `None` for a folder that holds no
+/// JDK (no `bin/java`).
+fn java_settings(chosen: &str) -> Option<Value> {
+    let home = expand_home(chosen)?;
+    let java = ["bin/java", "bin/java.exe"]
+        .iter()
+        .any(|b| home.join(b).is_file());
+    if !java {
+        return None;
+    }
+    let path = home.to_string_lossy().into_owned();
+    let mut java = json!({ "home": path });
+    if let Some(major) = crate::lsp::langopts::jdk_version(&home)
+        .as_deref()
+        .and_then(crate::lsp::langopts::java_major)
+    {
+        let name = match major {
+            ..=8 => format!("JavaSE-1.{major}"),
+            _ => format!("JavaSE-{major}"),
+        };
+        java["configuration"] = json!({
+            "runtimes": [{ "name": name, "path": path, "default": true }],
+        });
+    }
+    Some(json!({ "settings": { "java": java } }))
+}
+
+/// A PHP version as intelephense takes it (`8.2` → `8.2.0`), or `None` for
+/// what is not one.
+fn php_version(chosen: &str) -> Option<String> {
+    let parts: Vec<&str> = chosen.trim().split('.').collect();
+    let numbers = parts
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 3 && p.chars().all(|c| c.is_ascii_digit()));
+    match (numbers, parts.len()) {
+        (true, 2) => Some(format!("{}.0", chosen.trim())),
+        (true, 3) => Some(chosen.trim().to_string()),
+        _ => None,
+    }
+}
+
+/// The solution file the user chose for the C# server, made absolute
+/// against the project; `None` for one that is not there.
+fn chosen_solution(root: &Path, chosen: &str) -> Option<PathBuf> {
+    let path = match expand_home(chosen) {
+        Some(path) => path,
+        None => root.join(chosen.trim()),
+    };
+    let solution = path.extension().is_some_and(|e| e == "sln" || e == "slnx");
+    (solution && path.is_file()).then_some(path)
+}
+
+/// `chosen` as an absolute path — `~/` expanded — or `None` for a relative
+/// one.
+fn expand_home(chosen: &str) -> Option<PathBuf> {
+    let chosen = chosen.trim();
+    let path = match chosen.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(chosen),
+    };
+    path.is_absolute().then_some(path)
 }
 
 /// The `tsserver.js` the user chose: the file, the TypeScript `lib` folder
@@ -2163,5 +2237,84 @@ mod tests {
             chosen("zig", &dir, &zig_choice),
             Some(json!({ "zig_exe_path": zig.to_string_lossy() }))
         );
+    }
+
+    /// Java's JDK, PHP's version and C#'s solution reach their servers'
+    /// settings — a JDK by its Java SE version as jdtls names runtimes, a
+    /// PHP version in full — and a choice that names nothing usable reaches
+    /// nothing.
+    #[test]
+    fn a_chosen_jdk_php_version_and_solution_reach_their_servers() {
+        let dir = scratch("chosen-java-php-cs");
+        let jdk = dir.join("jdks/temurin-21");
+        std::fs::create_dir_all(jdk.join("bin")).unwrap();
+        std::fs::write(jdk.join("bin/java"), "").unwrap();
+        std::fs::write(jdk.join("release"), "JAVA_VERSION=\"21.0.1\"\n").unwrap();
+        let jdk8 = dir.join("jdks/jdk8");
+        std::fs::create_dir_all(jdk8.join("bin")).unwrap();
+        std::fs::write(jdk8.join("bin/java"), "").unwrap();
+        std::fs::write(jdk8.join("release"), "JAVA_VERSION=\"1.8.0_392\"\n").unwrap();
+        let choose = |c: LanguageChoices| c;
+        let java = |home: &Path| {
+            chosen(
+                "java",
+                &dir,
+                &choose(LanguageChoices {
+                    java: Some(home.to_string_lossy().into_owned()),
+                    ..Default::default()
+                }),
+            )
+        };
+        let settings = java(&jdk).unwrap();
+        assert_eq!(settings["settings"]["java"]["home"], jdk.to_str().unwrap());
+        assert_eq!(
+            settings["settings"]["java"]["configuration"]["runtimes"][0]["name"],
+            "JavaSE-21"
+        );
+        assert_eq!(
+            java(&jdk8).unwrap()["settings"]["java"]["configuration"]["runtimes"][0]["name"],
+            "JavaSE-1.8"
+        );
+        assert_eq!(java(&dir.join("jdks")), None, "no bin/java: no JDK");
+
+        let php = |v: &str| {
+            chosen(
+                "php",
+                &dir,
+                &LanguageChoices {
+                    php: Some(v.into()),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            php("8.2"),
+            Some(json!({ "intelephense": { "environment": { "phpVersion": "8.2.0" } } }))
+        );
+        assert_eq!(php("8.x"), None);
+        assert_eq!(php("8.2000"), None, "no part is that long");
+        assert_eq!(
+            php("8.2.1"),
+            Some(json!({ "intelephense": { "environment": { "phpVersion": "8.2.1" } } }))
+        );
+
+        std::fs::write(dir.join("Shop.sln"), "").unwrap();
+        let cs = |s: &str| {
+            chosen(
+                "csharp",
+                &dir,
+                &LanguageChoices {
+                    csharp: Some(s.into()),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            cs("Shop.sln"),
+            Some(json!({ "csharp": { "solution": dir.join("Shop.sln").to_string_lossy() } }))
+        );
+        assert_eq!(cs("Gone.sln"), None);
+        std::fs::write(dir.join("Shop.csproj"), "").unwrap();
+        assert_eq!(cs("Shop.csproj"), None, "a project is not a solution");
     }
 }

@@ -167,7 +167,7 @@ pub enum ServerMsg {
     ResendNotReady {
         stamp: Stamp,
         id: u64,
-        request: clew_protocol::Request,
+        request: Box<clew_protocol::Request>,
         attempt: u32,
     },
     /// The server transport died mid-session (process exit, SSH drop). All
@@ -1314,6 +1314,12 @@ pub enum LangField {
     TypeScriptPath,
     /// A `zig` compiler.
     ZigPath,
+    /// A JDK's home folder.
+    JavaHome,
+    /// A PHP version.
+    PhpVersion,
+    /// A C# solution file.
+    CSharpSolution,
     /// A language server program.
     ServerCommand,
     /// Its arguments.

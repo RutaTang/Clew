@@ -209,6 +209,16 @@ impl App {
                 }
                 next.zig = Some(text);
             }
+            LangField::JavaHome | LangField::PhpVersion | LangField::CSharpSolution => {
+                if text.is_empty() {
+                    return Task::none();
+                }
+                *match field {
+                    LangField::JavaHome => &mut next.java,
+                    LangField::PhpVersion => &mut next.php,
+                    _ => &mut next.csharp,
+                } = Some(text);
+            }
             LangField::ServerCommand | LangField::ServerArgs => {
                 let Some(language) = self.proj.lang_drafts.server_language.clone() else {
                     self.status = "Pick the language the server program is for".into();
@@ -471,7 +481,13 @@ fn normalized(mut choices: LanguageChoices) -> LanguageChoices {
     if choices.servers.as_ref().is_some_and(|s| s.is_empty()) {
         choices.servers = None;
     }
-    for path in [&mut choices.typescript, &mut choices.zig] {
+    for path in [
+        &mut choices.typescript,
+        &mut choices.zig,
+        &mut choices.java,
+        &mut choices.php,
+        &mut choices.csharp,
+    ] {
         if path.as_deref().is_some_and(|p| p.trim().is_empty()) {
             *path = None;
         }
@@ -500,6 +516,15 @@ fn changed_languages(before: &LanguageChoices, next: &LanguageChoices) -> Vec<St
     }
     if before.zig != next.zig {
         changed.push("zig".to_string());
+    }
+    for (language, a, b) in [
+        ("java", &before.java, &next.java),
+        ("php", &before.php, &next.php),
+        ("csharp", &before.csharp, &next.csharp),
+    ] {
+        if a != b {
+            changed.push(language.to_string());
+        }
     }
     let none = Default::default();
     let (a, b) = (
@@ -625,6 +650,18 @@ mod tests {
             ["typescript", "tsx", "javascript", "zig"]
         );
         assert!(changed_languages(&next, &next).is_empty());
+        for (language, set) in [
+            (
+                "java",
+                (|c: &mut LanguageChoices| c.java = Some("/jdk".into())) as fn(&mut _),
+            ),
+            ("php", |c| c.php = Some("8.2".into())),
+            ("csharp", |c| c.csharp = Some("/p/a.sln".into())),
+        ] {
+            let mut one = before.clone();
+            set(&mut one);
+            assert_eq!(changed_languages(&before, &one), [language]);
+        }
     }
 
     /// A language's choices that choose nothing are no choices at all.
@@ -637,8 +674,21 @@ mod tests {
             servers: Some(Default::default()),
             typescript: Some(" ".into()),
             zig: Some(String::new()),
+            java: Some(" ".into()),
+            php: Some(String::new()),
+            csharp: Some("\t".into()),
             ..Default::default()
         };
         assert_eq!(normalized(empty), LanguageChoices::default());
+        let kept = LanguageChoices {
+            java: Some("/jdk".into()),
+            php: Some("8.2".into()),
+            csharp: Some("a.sln".into()),
+            ..Default::default()
+        };
+        let kept = normalized(kept);
+        assert_eq!(kept.java.as_deref(), Some("/jdk"));
+        assert_eq!(kept.php.as_deref(), Some("8.2"));
+        assert_eq!(kept.csharp.as_deref(), Some("a.sln"));
     }
 }
