@@ -19595,6 +19595,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             choices: clew_protocol::LanguageChoices {
                 python: Some("/stale/bin/python".into()),
+                ..Default::default()
             },
         }),
         Message::Languages(LanguagesMsg::Listed {
@@ -19603,6 +19604,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         }),
         Message::Languages(LanguagesMsg::Browsed {
             stamp: s(),
+            field: LangField::PythonPath,
             path: Some(root.join("stale-python")),
         }),
         Message::Languages(LanguagesMsg::Saved {
@@ -30816,6 +30818,7 @@ async fn a_remote_language_server_waits_for_the_projects_choices_and_carries_the
 
     let chosen = clew_protocol::LanguageChoices {
         python: Some("/home/me/.venvs/app/bin/python".into()),
+        ..Default::default()
     };
     let _ = app.update(Message::Languages(LanguagesMsg::ChoicesLoaded {
         stamp: app.stamp(),
@@ -30846,6 +30849,7 @@ async fn choosing_an_interpreter_saves_it_and_restarts_the_python_server() {
     ))));
     let chosen = clew_protocol::LanguageChoices {
         python: Some(path.clone()),
+        ..Default::default()
     };
     assert_eq!(app.proj.lang_choices, chosen);
     let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
@@ -30881,4 +30885,213 @@ async fn choosing_an_interpreter_saves_it_and_restarts_the_python_server() {
         clew_core::lsp::choices::load(Some("user@host"), &root),
         Default::default()
     );
+}
+
+/// A program of the user's own, standing in for a language's server.
+fn server_program(
+    language: &str,
+    command: &Path,
+    args: Option<Vec<String>>,
+) -> clew_protocol::LanguageChoices {
+    clew_protocol::LanguageChoices {
+        servers: Some(
+            [(
+                language.to_string(),
+                clew_protocol::ServerChoice {
+                    command: command.to_string_lossy().into_owned(),
+                    args,
+                },
+            )]
+            .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// A server program the user chose is what a local start spawns, with the
+/// arguments they gave — and one standing in for a server that builds the
+/// project still asks for the leave to build it before anything runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chosen_server_program_is_what_a_local_start_spawns() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = scanned_app("chosen-program-local");
+    let tools = test_dir("chosen-program-tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let program = tools.join("my-server");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.proj.lang_choices = server_program("go", &program, Some(vec!["-rpc.trace".into()]));
+    let mut rx = attach_server(&mut app);
+    let start = drive_start(app.ensure_lsp("go"));
+    let proc = app.server.lsp_procs["go"];
+    let asked = asked_until_spawned(&mut rx, proc).await;
+    match asked.last() {
+        Some(clew_protocol::Request::SpawnProcess { cmd, args, .. }) => {
+            assert_eq!(cmd, &program.to_string_lossy());
+            assert_eq!(args, &["-rpc.trace".to_string()]);
+        }
+        other => panic!("expected the spawn, got {other:?}"),
+    }
+    start.abort();
+
+    // In place of rust-analyzer, which builds the project: asked first.
+    app.proj.lang_choices = server_program("rust", &program, None);
+    let _ = app.ensure_lsp("rust");
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::AwaitingConsent)
+    ));
+    assert!(matches!(
+        app.proj.pending_lsp_consent.front().map(|c| &c.provision),
+        Some(crate::LspProvision::Build { .. })
+    ));
+    assert!(
+        !app.server.lsp_procs.contains_key("rust"),
+        "nothing spawned"
+    );
+}
+
+/// A Rust choice restarts Rust's server alone — asked of the host again
+/// with the choices — and the host's spawn carries them, where they decide
+/// what runs.
+#[tokio::test]
+async fn a_build_choice_restarts_only_its_server_and_rides_the_spawn() {
+    let data = test_dir("choose-rust-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, _root, mut rx) = remote_app("choose-rust");
+    for language in ["rust", "python"] {
+        app.proj
+            .link
+            .lsp
+            .insert(language.into(), LspSlot::AwaitingConsent);
+    }
+    while rx.try_recv().is_ok() {}
+    let chosen = clew_protocol::LanguageChoices {
+        rust: Some(clew_protocol::RustChoices {
+            features: vec!["fast".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let _ = app.update(Message::Languages(LanguagesMsg::Choose(Box::new(
+        chosen.clone(),
+    ))));
+    assert_eq!(app.proj.lang_choices, chosen);
+    let resolved: Vec<(String, clew_protocol::LanguageChoices)> =
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|m| match m.request {
+                clew_protocol::Request::LspResolve { language, choices } => {
+                    Some((language, choices))
+                }
+                _ => None,
+            })
+            .collect();
+    assert_eq!(resolved, [("rust".to_string(), chosen.clone())]);
+
+    let start = drive_start(app.start_lsp_with("rust", PathBuf::new()));
+    let proc = app.server.lsp_procs["rust"];
+    let spawned = loop {
+        let request = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv())
+            .await
+            .expect("the spawn within a minute")
+            .expect("the channel is open")
+            .request;
+        if let clew_protocol::Request::SpawnLsp {
+            proc: p, choices, ..
+        } = request
+            && p == proc
+        {
+            break choices;
+        }
+    };
+    assert_eq!(spawned, chosen);
+    start.abort();
+}
+
+/// What is typed in the section's fields becomes the choice it names — a
+/// build tag that is none, or a program for no language, refused with a
+/// reason — and a program already chosen comes back to be edited.
+#[tokio::test]
+async fn typed_language_fields_make_their_choices() {
+    let data = test_dir("typed-choices-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, _root, _rx) = remote_app("typed-choices");
+    let typed = |app: &mut App, field: LangField, text: &str| {
+        let _ = app.update(Message::Languages(LanguagesMsg::Draft(field, text.into())));
+        let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(field)));
+    };
+
+    typed(&mut app, LangField::GoTag, "integration, e2e");
+    typed(&mut app, LangField::GoTag, "e2e");
+    let go = app.proj.lang_choices.go.clone().unwrap();
+    assert_eq!(go.tags, ["integration", "e2e"]);
+    assert!(
+        app.proj.lang_drafts.go_tag.is_empty(),
+        "a used field empties"
+    );
+    typed(&mut app, LangField::GoTag, "a-b");
+    assert!(app.status.contains("is not a build tag"), "{}", app.status);
+    assert_eq!(app.proj.lang_choices.go.as_ref(), Some(&go));
+    assert_eq!(app.proj.lang_drafts.go_tag, "a-b", "kept, to be fixed");
+
+    typed(&mut app, LangField::CFlags, r#"-DNAME="a b" -Iinclude"#);
+    typed(&mut app, LangField::CDatabase, "/srv/p/build");
+    let c = app.proj.lang_choices.c.clone().unwrap();
+    assert_eq!(c.flags, ["-DNAME=a b", "-Iinclude"]);
+    assert_eq!(c.compile_commands.as_deref(), Some("/srv/p/build"));
+
+    typed(&mut app, LangField::RustTarget, "wasm32-unknown-unknown");
+    assert_eq!(
+        app.proj
+            .lang_choices
+            .rust
+            .as_ref()
+            .and_then(|r| r.target.as_deref()),
+        Some("wasm32-unknown-unknown")
+    );
+
+    // A program needs its language.
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        LangField::ServerCommand,
+        "/opt/lua-ls".into(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(
+        LangField::ServerCommand,
+    )));
+    assert!(app.status.contains("Pick the language"), "{}", app.status);
+    assert_eq!(app.proj.lang_choices.servers, None);
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "lua".into(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        LangField::ServerCommand,
+        "/opt/lua-ls".into(),
+    )));
+    typed(&mut app, LangField::ServerArgs, "--stdio \"--log x\"");
+    let chosen = &app.proj.lang_choices.servers.as_ref().unwrap()["lua"];
+    assert_eq!(chosen.command, "/opt/lua-ls");
+    assert_eq!(
+        chosen.args.as_deref(),
+        Some(&["--stdio".to_string(), "--log x".to_string()][..])
+    );
+    // Picked again, it comes back to edit.
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "lua".into(),
+    )));
+    assert_eq!(app.proj.lang_drafts.server_command, "/opt/lua-ls");
+    assert_eq!(app.proj.lang_drafts.server_args, "--stdio \"--log x\"");
+    // Used with no program, it is no program.
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        LangField::ServerCommand,
+        String::new(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(
+        LangField::ServerCommand,
+    )));
+    assert_eq!(app.proj.lang_choices.servers, None);
 }

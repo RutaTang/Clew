@@ -17,5 +17,6 @@ pub mod choices;
 pub mod client;
 pub mod config;
 pub mod langenv;
+pub mod langopts;
 pub mod registry;
 pub mod store;

@@ -2045,6 +2045,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 Request::SpawnLsp {
                     proc: 7,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2096,6 +2097,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 Request::SpawnLsp {
                     proc: 9,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2124,6 +2126,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
             Request::SpawnLsp {
                 proc: 8,
                 language: "rust".into(),
+                choices: Default::default(),
             },
         )
         .await;
@@ -2149,6 +2152,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 Request::SpawnLsp {
                     proc: 9,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2172,6 +2176,7 @@ async fn spawn_lsp_for_a_language_without_a_server_is_answered() {
     let spawn = Request::SpawnLsp {
         proc: 11,
         language: "klingon".into(),
+        choices: Default::default(),
     };
     assert!(server.handle(2, spawn).await.is_none());
     let (mut exited, mut reply) = (false, None);
@@ -2218,6 +2223,7 @@ async fn spawn_lsp_never_installs_without_consent() {
                 Request::SpawnLsp {
                     proc: 7,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2583,6 +2589,7 @@ async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
                 Request::SpawnLsp {
                     proc: 11,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -3230,6 +3237,7 @@ async fn agent_stop_ends_a_turn_mid_request() {
                     history: Vec::new(),
                     context: String::new(),
                     tools: Vec::new(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -3421,6 +3429,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
             history: Vec::new(),
             context: String::new(),
             tools: Vec::new(),
+            choices: Default::default(),
         },
     );
     provider.await_request();
@@ -3471,38 +3480,43 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
 /// reported, not used.
 #[tokio::test]
 #[cfg(unix)]
-async fn python_environments_are_listed_where_the_project_is() {
+async fn language_options_are_listed_where_the_project_is() {
     let (mut server, mut rx) = server();
     let root = temp_project("python-envs");
     let base = TempDir::new("python-envs-base");
     std::fs::write(base.join("python3.12"), b"\x7fELF base").unwrap();
     std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
     std::os::unix::fs::symlink(base.join("python3.12"), root.join(".venv/bin/python")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\n[features]\ndefault = []\nfast = []\n",
+    )
+    .unwrap();
     open_project(&mut server, &mut rx, 1, &root).await;
     let gone = "/no/such/env/bin/python".to_string();
     assert!(
         server
             .handle(
                 2,
-                Request::PythonEnvironments {
+                Request::LanguageOptions {
+                    languages: vec!["python".into(), "rust".into()],
                     choices: clew_protocol::LanguageChoices {
                         python: Some(gone.clone()),
+                        ..Default::default()
                     },
                 },
             )
             .await
             .is_none()
     );
-    let environments = match recv_reply(&mut rx, 2).await {
-        Event::PythonEnvironments {
-            root: at,
-            environments,
-        } => {
+    let options = match recv_reply(&mut rx, 2).await {
+        Event::LanguageOptions { root: at, options } => {
             assert_eq!(at, root.to_string_lossy());
-            environments
+            options
         }
-        other => panic!("expected PythonEnvironments, got {other:?}"),
+        other => panic!("expected LanguageOptions, got {other:?}"),
     };
+    let environments = options.python.expect("python was asked for");
     let venv = root.join(".venv/bin/python").to_string_lossy().into_owned();
     let first = &environments.candidates[0];
     assert_eq!(
@@ -3522,4 +3536,10 @@ async fn python_environments_are_listed_where_the_project_is() {
         Some(venv.as_str())
     );
     assert_eq!(environments.in_effect.unusable_choice, Some(gone));
+    // The project's Cargo features, read on this host.
+    let rust = options.rust.expect("rust was asked for");
+    assert_eq!(rust.packages[0].name, "app");
+    assert_eq!(rust.packages[0].features, ["fast"]);
+    // A language not asked about is not listed.
+    assert_eq!(options.go, None);
 }

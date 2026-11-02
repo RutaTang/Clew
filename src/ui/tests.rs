@@ -6170,26 +6170,29 @@ fn the_languages_section_shows_the_interpreter_in_effect_and_picks_another() {
     app.proj.project_languages = vec!["python".into()];
     let venv = "/p/.venv/bin/python".to_string();
     let poetry = "/cache/pypoetry/virtualenvs/app-AbCd-py3.12/bin/python".to_string();
-    app.proj.python_envs = Some(Ok(PythonEnvironments {
-        candidates: vec![
-            PythonCandidate {
-                interpreter: venv.clone(),
-                kind: PythonEnvKind::Project,
-                name: ".venv".into(),
-                version: Some("3.12.1".into()),
+    app.proj.lang_options = Some(Ok(clew_protocol::LanguageOptions {
+        python: Some(PythonEnvironments {
+            candidates: vec![
+                PythonCandidate {
+                    interpreter: venv.clone(),
+                    kind: PythonEnvKind::Project,
+                    name: ".venv".into(),
+                    version: Some("3.12.1".into()),
+                },
+                PythonCandidate {
+                    interpreter: poetry.clone(),
+                    kind: PythonEnvKind::Poetry,
+                    name: "app-AbCd-py3.12".into(),
+                    version: None,
+                },
+            ],
+            in_effect: PythonInEffect {
+                interpreter: Some(venv.clone()),
+                source: PythonSource::ProjectVenv,
+                unusable_choice: Some("/gone/bin/python".into()),
             },
-            PythonCandidate {
-                interpreter: poetry.clone(),
-                kind: PythonEnvKind::Poetry,
-                name: "app-AbCd-py3.12".into(),
-                version: None,
-            },
-        ],
-        in_effect: PythonInEffect {
-            interpreter: Some(venv.clone()),
-            source: PythonSource::ProjectVenv,
-            unusable_choice: Some("/gone/bin/python".into()),
-        },
+        }),
+        ..Default::default()
     }));
     let mut sim = sim_elem(super::connect::languages_section(&app));
     assert!(sim.find("Python interpreter").is_ok());
@@ -6221,4 +6224,107 @@ fn the_languages_section_shows_the_interpreter_in_effect_and_picks_another() {
         })
         .collect();
     assert_eq!(picked, [Some(venv)]);
+}
+
+/// The settings' build choices, language by language: what is in effect
+/// first — and what the project's lsp.toml also sets — then what there is
+/// to pick, each pick making the choice it names.
+#[test]
+fn the_languages_section_offers_each_languages_build_choices() {
+    use clew_protocol::{
+        COptions, CargoPackage, GoChoices, GoOptions, LanguageChoices, LanguageOptions,
+        RustChoices, RustOptions, ToolchainCandidate,
+    };
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["c".into(), "go".into(), "lean".into(), "rust".into()];
+    app.proj.file_languages = vec!["lua".into()];
+    app.proj.lang_choices = LanguageChoices {
+        rust: Some(RustChoices {
+            features: vec!["cli/color".into()],
+            ..Default::default()
+        }),
+        go: Some(GoChoices {
+            tags: vec!["e2e".into()],
+            goos: Some("windows".into()),
+            goarch: None,
+        }),
+        ..Default::default()
+    };
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        rust: Some(RustOptions {
+            packages: vec![
+                CargoPackage {
+                    name: "app".into(),
+                    root: true,
+                    features: vec!["serde".into(), "tls".into()],
+                    default: vec!["tls".into()],
+                },
+                CargoPackage {
+                    name: "cli".into(),
+                    root: false,
+                    features: vec!["color".into()],
+                    default: vec![],
+                },
+            ],
+            targets: vec!["thumbv7em-none-eabihf".into()],
+            project_sets: vec!["cargo.features".into()],
+        }),
+        go: Some(GoOptions {
+            tags: vec!["integration".into()],
+            project_sets: vec![],
+        }),
+        c: Some(COptions {
+            databases: vec!["/p/build".into()],
+            project_sets: vec![],
+        }),
+        toolchains: [(
+            "lean".to_string(),
+            vec![ToolchainCandidate {
+                command: "/h/.elan/bin/lake".into(),
+                name: "elan".into(),
+                project: true,
+            }],
+        )]
+        .into(),
+        python: None,
+    }));
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    for shown in [
+        "Rust: features and target",
+        "Features cli/color, and the defaults",
+        "Checked for the host's own target",
+        "The project's .clew/lsp.toml sets cargo.features — a choice here wins where both say.",
+        "tls (default)",
+        "Go: build tags and platform",
+        "Build tags e2e",
+        "Read for windows/the host's architecture",
+        "C and C++: compilation",
+        "Compilation database: the one clangd finds beside the sources or in build/",
+        "/p/build",
+        "Lean: toolchain",
+        "The lake found on the PATH",
+        "elan — the project's",
+        "Server programs",
+    ] {
+        assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    let _ = sim.click("serde");
+    let _ = sim.click("integration");
+    let chosen: Vec<LanguageChoices> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chosen.len(), 2, "{chosen:?}");
+    assert_eq!(
+        chosen[0].rust.as_ref().unwrap().features,
+        ["cli/color", "serde"]
+    );
+    assert_eq!(chosen[1].go.as_ref().unwrap().tags, ["e2e", "integration"]);
+    assert_eq!(
+        chosen[1].go.as_ref().unwrap().goos.as_deref(),
+        Some("windows")
+    );
 }

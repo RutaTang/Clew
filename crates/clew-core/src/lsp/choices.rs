@@ -101,6 +101,7 @@ mod tests {
         std::fs::create_dir_all(&b).unwrap();
         let choice = |p: &str| LanguageChoices {
             python: Some(p.to_string()),
+            ..Default::default()
         };
         save(None, &a, &choice("/envs/a/bin/python")).unwrap();
         save(None, &b, &choice("/envs/b/bin/python")).unwrap();
@@ -114,6 +115,52 @@ mod tests {
         save(None, &a, &LanguageChoices::default()).unwrap();
         assert_eq!(load(None, &a), LanguageChoices::default());
         assert_eq!(load(None, &b), choice("/envs/b/bin/python"));
+    }
+
+    /// Choices of every kind are kept as made — nested, with what is left
+    /// unset left out — and read back the same.
+    #[test]
+    fn choices_of_every_kind_are_kept_as_made() {
+        let _data = DataDir::new("choices-every-kind");
+        let choices = LanguageChoices {
+            python: None,
+            rust: Some(clew_protocol::RustChoices {
+                all_features: false,
+                features: vec!["serde".into(), "cli/color".into()],
+                no_default_features: true,
+                target: None,
+            }),
+            go: Some(clew_protocol::GoChoices {
+                tags: vec!["e2e".into()],
+                goos: Some("windows".into()),
+                goarch: None,
+            }),
+            c: Some(clew_protocol::CChoices {
+                compile_commands: Some("/p/build".into()),
+                flags: vec!["-DNAME=a b".into()],
+            }),
+            servers: Some(
+                [
+                    (
+                        "lean".to_string(),
+                        clew_protocol::ServerChoice {
+                            command: "/home/u/.elan/bin/lake".into(),
+                            args: None,
+                        },
+                    ),
+                    (
+                        "lua".to_string(),
+                        clew_protocol::ServerChoice {
+                            command: "lua-language-server".into(),
+                            args: Some(vec![]),
+                        },
+                    ),
+                ]
+                .into(),
+            ),
+        };
+        save(None, Path::new("/p"), &choices).unwrap();
+        assert_eq!(load(None, Path::new("/p")), choices);
     }
 
     /// A record that cannot be parsed is not written over: saving fails and

@@ -1471,6 +1471,9 @@ pub struct ProjectSession {
     pub derived_dir: Option<PathBuf>,
     /// Languages actually present in the project that clew can serve.
     pub project_languages: Vec<String>,
+    /// Every language present in the project, served or not — the ones a
+    /// server program of the user's can be chosen for.
+    pub file_languages: Vec<String>,
     /// Whole-project content-hash oracle: the authority on what changed, so the
     /// watcher's noisy events collapse to real byte changes.
     pub registry: incremental::Registry,
@@ -1772,16 +1775,17 @@ pub struct ProjectSession {
     /// Per-project LSP config from `.clew/lsp.toml`.
     pub lsp_config: lsp::config::ProjectLspConfig,
     /// What the user chose for this project's languages in Settings — its
-    /// Python interpreter — kept in clew's own data directory
-    /// (`lsp::choices`), and sent with every language server and debugger
-    /// set up for it.
+    /// Python interpreter, Rust features and target, Go tags and platform,
+    /// C/C++ compilation, server programs — kept in clew's own data
+    /// directory (`lsp::choices`), and sent with every language server and
+    /// debugger set up for it.
     pub lang_choices: clew_protocol::LanguageChoices,
-    /// The project's Python interpreters and the one in effect, as last
+    /// What there is to choose from for the project's languages, as last
     /// listed for the Settings view (`None` until listed, `Err` when the
     /// listing failed).
-    pub python_envs: Option<Result<clew_protocol::PythonEnvironments, String>>,
-    /// The interpreter path typed into the Settings view.
-    pub python_path_draft: String,
+    pub lang_options: Option<Result<clew_protocol::LanguageOptions, String>>,
+    /// What is typed into the Settings view's language fields.
+    pub lang_drafts: LanguageDrafts,
     /// Per-language `init_options` a remote clew-server sent with
     /// `LspResolved` — the LSP handshake runs client-side even for a remote
     /// server, but the options belong to the host that owns the lsp.toml.
@@ -1890,6 +1894,7 @@ impl Default for ProjectSession {
             project: None,
             derived_dir: Default::default(),
             project_languages: Default::default(),
+            file_languages: Default::default(),
             registry: Default::default(),
             symbol_index: Default::default(),
             symbol_index_stale: Default::default(),
@@ -1985,8 +1990,8 @@ impl Default for ProjectSession {
             acp: Default::default(),
             lsp_config: Default::default(),
             lang_choices: Default::default(),
-            python_envs: Default::default(),
-            python_path_draft: Default::default(),
+            lang_options: Default::default(),
+            lang_drafts: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
             tracked_ignored: Default::default(),
@@ -2233,3 +2238,46 @@ pub struct TimeStart {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
+/// What is typed into the Settings view's language fields, until used.
+#[derive(Debug, Default, Clone)]
+pub struct LanguageDrafts {
+    pub python_path: String,
+    pub rust_target: String,
+    pub go_tag: String,
+    pub c_database: String,
+    pub c_flags: String,
+    /// The language a server program is being chosen for; `None` until
+    /// one is picked.
+    pub server_language: Option<String>,
+    pub server_command: String,
+    pub server_args: String,
+}
+
+impl LanguageDrafts {
+    /// The text of `field`.
+    pub fn field(&self, field: crate::LangField) -> &str {
+        match field {
+            crate::LangField::PythonPath => &self.python_path,
+            crate::LangField::RustTarget => &self.rust_target,
+            crate::LangField::GoTag => &self.go_tag,
+            crate::LangField::CDatabase => &self.c_database,
+            crate::LangField::CFlags => &self.c_flags,
+            crate::LangField::ServerCommand => &self.server_command,
+            crate::LangField::ServerArgs => &self.server_args,
+        }
+    }
+
+    /// The text of `field`, to change.
+    pub fn field_mut(&mut self, field: crate::LangField) -> &mut String {
+        match field {
+            crate::LangField::PythonPath => &mut self.python_path,
+            crate::LangField::RustTarget => &mut self.rust_target,
+            crate::LangField::GoTag => &mut self.go_tag,
+            crate::LangField::CDatabase => &mut self.c_database,
+            crate::LangField::CFlags => &mut self.c_flags,
+            crate::LangField::ServerCommand => &mut self.server_command,
+            crate::LangField::ServerArgs => &mut self.server_args,
+        }
+    }
+}

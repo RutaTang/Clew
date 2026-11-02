@@ -106,9 +106,11 @@ pub use payload::*;
 /// that project; the leave travels in `LspApprovals` like any approval, and
 /// `LspApprovals` names the project its set is for.
 /// v19: [`LanguageChoices`] — what the user chose for a project's languages
-/// in Settings (its Python interpreter) — rides with `LspResolve`,
-/// `LspInstall` and `SpawnAdapter`, and [`Request::PythonEnvironments`] lists
-/// the project's Python interpreters and the one in effect.
+/// in Settings: its Python interpreter, Rust features and target, Go build
+/// tags and platform, C/C++ compilation database and flags, and a server
+/// program per language — rides with `LspResolve`, `LspInstall`, `SpawnLsp`,
+/// `SpawnAdapter` and `AgentAsk`, and [`Request::LanguageOptions`] lists
+/// what there is to choose from on the project's host.
 pub const PROTOCOL_VERSION: u32 = 19;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -659,7 +661,15 @@ pub enum Request {
     /// failed spawn — besides the `ProcessExited` that ends the proxy. A
     /// repo-specified `command` runs only when its fingerprint is approved
     /// (see `LspApprovals`).
-    SpawnLsp { proc: u64, language: String },
+    ///
+    /// `choices` are the user's for the project's languages: a server program
+    /// they chose for `language` runs instead of clew's
+    /// ([`LanguageChoices::servers`]).
+    SpawnLsp {
+        proc: u64,
+        language: String,
+        choices: LanguageChoices,
+    },
     /// Resolve AND spawn the debug adapter for `lang` (a client `Lang` slug:
     /// "native", "python", "dart", …) on this host — where the debuggee
     /// lives — proxying its stdio under `proc` like `SpawnProcess`. Only
@@ -778,12 +788,17 @@ pub enum Request {
     /// `tools` are the client's own tools the turn may call too (see
     /// [`ExternalTool`]) — one the server cannot offer (a name it uses, or
     /// one not shaped as [`ExternalTool::name`] says) is left out.
+    ///
+    /// `choices` are the user's for the project's languages: the language
+    /// servers the turn's semantic tools start are set up with them, as the
+    /// editor's are.
     AgentAsk {
         stream: u64,
         question: String,
         history: Vec<AiChatMsg>,
         context: String,
         tools: Vec<ExternalTool>,
+        choices: LanguageChoices,
     },
     /// The result of the client tool an agent turn asked for with
     /// [`Event::AgentToolCall`]: what the model is shown, and whether the
@@ -804,10 +819,17 @@ pub enum Request {
     /// Build the project's API documentation index (per-file documented
     /// symbols). Reply: `Docs`.
     BuildDocs,
-    /// List the open project's Python interpreters, found on this host by
-    /// looking (none is run), and say which its language server is given with
-    /// the user's `choices`. Reply: `PythonEnvironments`.
-    PythonEnvironments { choices: LanguageChoices },
+    /// What there is to choose from, on this host, for the open project's
+    /// `languages` (the client's names: "python", "rust", "go", "c", "cpp",
+    /// "lean", "dart", …): its Python interpreters and the one in effect with
+    /// the user's `choices`, its Cargo packages' features, the build tags its
+    /// Go files use, its C/C++ compilation databases, the toolchains a
+    /// toolchain's own server can be run from. All found by reading files —
+    /// nothing is run. Reply: `LanguageOptions`.
+    LanguageOptions {
+        languages: Vec<String>,
+        choices: LanguageChoices,
+    },
 }
 
 /// One JSON-array entry change, addressed by the fields that IDENTIFY an entry
@@ -1250,10 +1272,10 @@ pub enum Event {
         root: String,
         resolution: LspResolution,
     },
-    /// Reply to `PythonEnvironments`, for project `root`.
-    PythonEnvironments {
+    /// Reply to `LanguageOptions`, for project `root`.
+    LanguageOptions {
         root: String,
-        environments: PythonEnvironments,
+        options: LanguageOptions,
     },
     /// A request failed; `code` says how (see [`ErrorCode`]). Always a
     /// [`ServerMessage::Reply`] — unsolicited trouble is [`Event::Status`].
@@ -1275,12 +1297,150 @@ impl Event {
 /// never in the project, which is the team's (`.clew/lsp.toml`) — and sent
 /// with each request that sets a language up on the project's host. A choice
 /// wins over the project's `lsp.toml` and over detection.
+///
+/// Every field is optional, `None` being "nothing chosen": a record saved by
+/// an older clew still reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LanguageChoices {
     /// The Python interpreter the language server and the debugger run — a
     /// path on the project's host, as the user picked it, never resolved (a
     /// virtualenv's `bin/python` boots its environment by its own path).
     pub python: Option<String>,
+    /// What rust-analyzer builds the project with.
+    pub rust: Option<RustChoices>,
+    /// What gopls (and the Go debugger) build the project with.
+    pub go: Option<GoChoices>,
+    /// How clangd compiles the project's C and C++.
+    pub c: Option<CChoices>,
+    /// The program to run as a language's server instead of clew's, by
+    /// language (the client's names). For a server that comes with a
+    /// toolchain (Lean's `lake`, Dart's `dart`) this is where the toolchain
+    /// is. A server that builds the project still needs the user's leave to
+    /// build it; a chosen program does not skip that.
+    pub servers: Option<std::collections::BTreeMap<String, ServerChoice>>,
+}
+
+/// The Cargo features and target rust-analyzer loads the project with
+/// (its `cargo.features`, `cargo.noDefaultFeatures` and `cargo.target`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RustChoices {
+    /// Every feature of every package; `features` is then not read.
+    pub all_features: bool,
+    /// The features to turn on, as cargo names them: `feature` for the
+    /// root package's, `package/feature` for a workspace member's.
+    pub features: Vec<String>,
+    /// Leave each package's `default` features off.
+    pub no_default_features: bool,
+    /// The target triple to check for; `None` is the host's.
+    pub target: Option<String>,
+}
+
+/// The build tags and platform gopls loads the project with (its
+/// `buildFlags` and `env`), and the Go debugger builds it with.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoChoices {
+    /// Build tags to set (`-tags`).
+    pub tags: Vec<String>,
+    /// The operating system to load for (`GOOS`); `None` is the host's.
+    pub goos: Option<String>,
+    /// The architecture to load for (`GOARCH`); `None` is the host's.
+    pub goarch: Option<String>,
+}
+
+/// How clangd compiles the project's C and C++.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CChoices {
+    /// The directory holding the `compile_commands.json` to use; `None`
+    /// lets clangd look for one beside the sources and in `build/`.
+    pub compile_commands: Option<String>,
+    /// Flags for a file no compilation database covers (`-DNAME`, `-I…`,
+    /// `-std=…`), as separate arguments.
+    pub flags: Vec<String>,
+}
+
+/// A program the user chose to run as a language's server.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServerChoice {
+    /// The program: a path on the project's host, or a name looked up on
+    /// its `PATH`.
+    pub command: String,
+    /// Its arguments; `None` runs it with the ones clew runs its own server
+    /// of that language with (`serve` for `lake`, `language-server` for
+    /// `dart`), which is what choosing where a toolchain is means.
+    pub args: Option<Vec<String>>,
+}
+
+/// What there is to choose from for a project's languages, on its host
+/// ([`Request::LanguageOptions`]). A language the request did not name, or
+/// one with nothing of the kind, is `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageOptions {
+    pub python: Option<PythonEnvironments>,
+    pub rust: Option<RustOptions>,
+    pub go: Option<GoOptions>,
+    pub c: Option<COptions>,
+    /// The toolchains found for each language whose server is a toolchain's
+    /// own (Lean's `lake`, Dart's `dart`), by language, the project's own
+    /// first.
+    pub toolchains: std::collections::BTreeMap<String, Vec<ToolchainCandidate>>,
+}
+
+/// The project's Cargo packages, read from its `Cargo.toml` files.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RustOptions {
+    /// The root package, then the workspace's members.
+    pub packages: Vec<CargoPackage>,
+    /// Targets the project names (its `rust-toolchain.toml`'s `targets`,
+    /// its `.cargo/config.toml`'s `build.target`).
+    pub targets: Vec<String>,
+    /// What the project's `.clew/lsp.toml` sets of what these choices set
+    /// (`cargo.features`, …): a choice wins over it.
+    pub project_sets: Vec<String>,
+}
+
+/// One Cargo package and its features.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CargoPackage {
+    pub name: String,
+    /// The package at the project's root, whose features cargo names
+    /// without the package (`feature`, not `package/feature`).
+    pub root: bool,
+    /// Its features: the `[features]` table's, and its optional
+    /// dependencies' — sorted, `default` left out.
+    pub features: Vec<String>,
+    /// What its `default` feature turns on.
+    pub default: Vec<String>,
+}
+
+/// The build tags the project's Go files use.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoOptions {
+    /// The tags its `//go:build` lines name — operating systems,
+    /// architectures and Go versions left out — sorted.
+    pub tags: Vec<String>,
+    /// What the project's `.clew/lsp.toml` sets of what these choices set.
+    pub project_sets: Vec<String>,
+}
+
+/// The project's C/C++ compilation databases.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct COptions {
+    /// The directories holding a `compile_commands.json`, the root's first.
+    pub databases: Vec<String>,
+    /// What the project's `.clew/lsp.toml` sets of what these choices set.
+    pub project_sets: Vec<String>,
+}
+
+/// A toolchain a language's server can be run from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolchainCandidate {
+    /// The toolchain's program (`…/bin/lake`, `…/bin/dart`), as found.
+    pub command: String,
+    /// What it goes by: the toolchain's name, or how it was found.
+    pub name: String,
+    /// The one the project names (its `lean-toolchain`), or a manager's
+    /// program that follows what the project names.
+    pub project: bool,
 }
 
 /// A project's Python interpreters, and the one its language server is
@@ -1605,6 +1765,7 @@ mod tests {
                     content: "hi".into(),
                 }],
                 context: "### Selected code\n```rust\nfn f() {}\n```".into(),
+                choices: LanguageChoices::default(),
             },
         };
         let json = serde_json::to_string(&ask).unwrap();

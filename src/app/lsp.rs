@@ -219,7 +219,7 @@ impl App {
             }
             return Task::none();
         }
-        let Some(server) = self.proj.lsp_config.resolve(language) else {
+        let Some(server) = self.effective_server(language) else {
             self.proj.link.lsp.insert(
                 language.to_string(),
                 LspSlot::Unsupported("no server for this language".into()),
@@ -370,7 +370,7 @@ impl App {
                 return Task::none();
             }
         };
-        if self.proj.lsp_config.resolve(&language).as_ref() != Some(&staged.server) {
+        if self.effective_server(&language).as_ref() != Some(&staged.server) {
             self.proj.link.lsp.remove(&language);
             return self.ensure_lsp(&language);
         }
@@ -557,7 +557,7 @@ impl App {
         let (args, init) = if self.connection.is_remote() {
             (Vec::new(), self.proj.remote_lsp_init.get(language).cloned())
         } else {
-            let Some(server) = self.proj.lsp_config.resolve(language) else {
+            let Some(server) = self.effective_server(language) else {
                 return Task::none();
             };
             // A server that builds the project runs the repository's own code
@@ -659,6 +659,7 @@ impl App {
                 clew_protocol::Request::SpawnLsp {
                     proc,
                     language: lang.clone(),
+                    choices: self.proj.lang_choices.clone(),
                 }
             } else {
                 clew_protocol::Request::SpawnProcess {
@@ -1290,7 +1291,7 @@ impl App {
         let resolved: Vec<(String, Option<lsp::config::EffectiveServer>)> = languages
             .into_iter()
             .map(|language| {
-                let server = self.proj.lsp_config.resolve(&language);
+                let server = self.effective_server(&language);
                 (language, server)
             })
             .collect();

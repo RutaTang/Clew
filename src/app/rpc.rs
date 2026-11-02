@@ -459,7 +459,7 @@ pub(crate) fn event_name(event: &clew_protocol::Event) -> &'static str {
         Event::AgentDone { .. } => "AgentDone",
         Event::Status { .. } => "Status",
         Event::LspResolved { .. } => "LspResolved",
-        Event::PythonEnvironments { .. } => "PythonEnvironments",
+        Event::LanguageOptions { .. } => "LanguageOptions",
         Event::Error { .. } => "Error",
     }
 }

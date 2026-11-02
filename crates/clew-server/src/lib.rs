@@ -935,26 +935,27 @@ impl Server {
                 });
                 None
             }
-            // The project's Python interpreters, looked for on this host —
-            // where they are — and the one its server is given with the
-            // user's choices over the project's `lsp.toml`. Reads files only:
-            // none is run. Off the loop, replies itself.
-            Request::PythonEnvironments { choices } => {
+            // What there is to choose from for the project's languages,
+            // looked for on this host — where they are: its Python
+            // interpreters and the one its server is given with the user's
+            // choices, its Cargo features, its Go build tags, its compile
+            // databases, its toolchains. Reads files only: nothing is run.
+            // Off the loop, replies itself.
+            Request::LanguageOptions { languages, choices } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
                 };
-                spawn_reply(&self.out, id, "listing Python environments", move || {
-                    let lsp_toml = clew_core::lsp::config::ProjectLspConfig::load(&root)
-                        .ok()
-                        .and_then(|config| config.resolve("python"))
-                        .and_then(|server| server.init_options);
-                    Event::PythonEnvironments {
+                spawn_reply(&self.out, id, "listing the language options", move || {
+                    // Unreadable, it names nothing a choice would win over.
+                    let config = clew_core::lsp::config::ProjectLspConfig::load(&root).ok();
+                    Event::LanguageOptions {
                         root: root.to_string_lossy().into_owned(),
-                        environments: clew_core::lsp::langenv::python_environments(
+                        options: clew_core::lsp::langopts::language_options(
                             &root,
+                            &languages,
                             &choices,
-                            lsp_toml.as_ref(),
+                            config.as_ref(),
                         ),
                     }
                 });
@@ -1304,7 +1305,11 @@ impl Server {
             // hashes the executable's bytes, and even the bounded worst case
             // must not stall the serial request loop (a queued ProcessKill
             // has to stay reachable).
-            Request::SpawnLsp { proc, language } => {
+            Request::SpawnLsp {
+                proc,
+                language,
+                choices,
+            } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -1322,7 +1327,7 @@ impl Server {
                     let gate_root = root.clone();
                     let gate_lang = language.clone();
                     let resolved = tokio::task::spawn_blocking(move || {
-                        lsp_gate::resolve_spawn_exe(&approvals, &gate_root, &gate_lang)
+                        lsp_gate::resolve_spawn_exe(&approvals, &gate_root, &gate_lang, &choices)
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -1747,6 +1752,7 @@ impl Server {
                 history,
                 context,
                 tools,
+                choices,
             } => {
                 let fail = |out: &UnboundedSender<ServerMessage>, msg: &str| {
                     let _ = out.send(ServerMessage::Notification {
@@ -1774,14 +1780,16 @@ impl Server {
                 let budget = self.out_budget.clone();
                 let embed_cfg = self.ai_embed.clone();
                 // Language-server pool for the semantic tools: reuse across
-                // turns, rebuild when a different project is opened.
+                // turns, rebuild when a different project is opened or the
+                // user's choices for its languages changed. The pool left
+                // behind stops its servers once the turns holding it end.
                 let lsp = match &self.agent_lsp {
-                    Some(pool) if pool.root() == root => pool.clone(),
+                    Some(pool) if pool.serves(&root, &choices) => pool.clone(),
                     _ => {
-                        let pool = Arc::new(agent_lsp::LspPool::new(
-                            root.clone(),
-                            self.lsp_approvals.clone(),
-                        ));
+                        let pool = Arc::new(
+                            agent_lsp::LspPool::new(root.clone(), self.lsp_approvals.clone())
+                                .with_choices(choices),
+                        );
                         self.agent_lsp = Some(pool.clone());
                         pool
                     }

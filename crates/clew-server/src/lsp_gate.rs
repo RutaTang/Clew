@@ -273,17 +273,21 @@ pub(crate) type SpawnRefusal = (ErrorCode, String);
 /// approval gate for repo-specified commands (blocking — it hashes the
 /// executable). `Err((code, message))` is the `Error` the client is told why
 /// with.
+///
+/// `choices` are the user's: a server program they chose for `language`
+/// runs instead ([`ProjectLspConfig::resolve_with`](clew_core::lsp::config::ProjectLspConfig::resolve_with)).
 pub(crate) fn resolve_spawn_exe(
     approvals: &SharedApprovals,
     root: &Path,
     language: &str,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<(PathBuf, Vec<String>), SpawnRefusal> {
     // A config that fails to load is an ERROR, not "use defaults": the
     // default could resolve (and run) a different server than the one
     // the project configured, silently.
     let config =
         clew_core::lsp::config::ProjectLspConfig::load(root).map_err(|e| (ErrorCode::Failed, e))?;
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return Err((
             ErrorCode::Refused,
             format!("no {language} language server is configured for this project"),
@@ -371,7 +375,7 @@ pub(crate) fn resolve_lsp(
         Ok(config) => config,
         Err(message) => return LspResolution::Unsupported { message },
     };
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return LspResolution::Unsupported {
             message: format!("no language server is configured for {language}"),
         };
@@ -523,7 +527,7 @@ pub(crate) fn install_lsp(
         Ok(config) => config,
         Err(message) => return LspResolution::Unsupported { message },
     };
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return LspResolution::Unsupported {
             message: format!("no language server is configured for {language}"),
         };
@@ -741,9 +745,80 @@ mod tests {
         let mine = mine.join("python").to_string_lossy().into_owned();
         let chosen = options(&clew_protocol::LanguageChoices {
             python: Some(mine.clone()),
+            ..Default::default()
         });
         assert_eq!(chosen["python"]["pythonPath"], mine.as_str());
         assert!(chosen["python"].get("analysis").is_none(), "{chosen}");
+    }
+
+    /// A server program the user chose is what a remote spawn runs — in
+    /// place of clew's, with nothing installed first — and choosing one is
+    /// no way around the leave a server that builds the project needs.
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_spawn_runs_the_chosen_server_program() {
+        with_fresh_data_dir("lsp_gate::tests::child_chosen_server_program");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "runs in a child process, from a_remote_spawn_runs_the_chosen_server_program"]
+    fn child_chosen_server_program() {
+        use std::os::unix::fs::PermissionsExt;
+        if !in_child() {
+            return;
+        }
+        let data = data_dir();
+        let program = data.join("tools/bin/my-server");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = data.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let choose = |language: &str| clew_protocol::LanguageChoices {
+            servers: Some(
+                [(
+                    language.to_string(),
+                    clew_protocol::ServerChoice {
+                        command: program.to_string_lossy().into_owned(),
+                        args: Some(vec!["serve".into()]),
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+
+        // gopls is not installed on this host: without a choice it must be
+        // installed first, with one the chosen program runs.
+        assert!(matches!(
+            resolve_lsp(&out, &approvals, &root, "go", &Default::default()),
+            LspResolution::NeedsInstall { .. }
+        ));
+        assert!(matches!(
+            resolve_lsp(&out, &approvals, &root, "go", &choose("go")),
+            LspResolution::Ready { .. }
+        ));
+        let (exe, args) = resolve_spawn_exe(&approvals, &root, "go", &choose("go")).unwrap();
+        assert_eq!((exe, args), (program.clone(), vec!["serve".to_string()]));
+
+        // A chosen rust-analyzer still builds the project: it needs the leave.
+        assert!(matches!(
+            resolve_lsp(&out, &approvals, &root, "rust", &choose("rust")),
+            LspResolution::NeedsBuildTrust { .. }
+        ));
+        let (code, message) =
+            resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap_err();
+        assert_eq!(code, ErrorCode::Refused);
+        assert!(message.contains("not been allowed to build"), "{message}");
+        approvals.lock().unwrap().insert(
+            clew_core::trust::build_key("rust-analyzer"),
+            clew_core::trust::build_fingerprint("rust-analyzer"),
+        );
+        let (exe, _) = resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap();
+        assert_eq!(exe, program);
     }
 
     #[test]
@@ -788,7 +863,8 @@ mod tests {
             }
             other => panic!("expected NeedsBuildTrust, got {other:?}"),
         }
-        let (code, message) = resolve_spawn_exe(&approvals, &root, "rust").unwrap_err();
+        let (code, message) =
+            resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
         // The leave as the client pushes it…
@@ -797,18 +873,18 @@ mod tests {
             clew_core::trust::build_fingerprint("rust-analyzer"),
         );
         approvals.lock().unwrap().insert(key.clone(), leave);
-        assert!(resolve_spawn_exe(&approvals, &root, "rust").is_ok());
+        assert!(resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).is_ok());
         approvals.lock().unwrap().remove(&key);
         // …or as this host's own trust store records it (client and server on
         // one machine, and the MCP server's pool). Kept for the rest.
         clew_core::trust::Trust::load()
             .update(|t| t.trust_build(None, &root, "rust-analyzer"))
             .unwrap();
-        assert!(resolve_spawn_exe(&approvals, &root, "rust").is_ok());
+        assert!(resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).is_ok());
         // Leave for one project is not leave for another.
         let other = data.join("other");
         std::fs::create_dir_all(&other).unwrap();
-        assert!(resolve_spawn_exe(&approvals, &other, "rust").is_err());
+        assert!(resolve_spawn_exe(&approvals, &other, "rust", &Default::default()).is_err());
 
         let resolution = resolve_lsp(&out, &approvals, &root, "rust", &Default::default());
         let offered = match resolution {
@@ -948,6 +1024,7 @@ mod tests {
             args: Vec::new(),
             command: None,
             init_options: None,
+            chosen: None,
         }
     }
 

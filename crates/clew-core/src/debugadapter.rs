@@ -191,15 +191,26 @@ pub fn resolve(
             python_with(&python, program, args, cwd)
         }
         "dart" => {
-            let command = store::find_on_path_unresolved("dart")
-                .ok_or("dart not found — install the Dart/Flutter SDK")?;
+            let command = match chosen_sdk(choices, "dart") {
+                Some(chosen) => store::find_program(chosen)
+                    .map_err(|why| format!("the Dart SDK you chose cannot be run: {why}"))?,
+                None => store::find_on_path_unresolved("dart")
+                    .ok_or("dart not found — install the Dart/Flutter SDK")?,
+            };
             Ok(Resolution::Ready(dart_spec(command, program, args, cwd)))
         }
         "go" => {
             let command = store::find_on_path_unresolved("dlv").ok_or(
                 "dlv not found — run: go install github.com/go-delve/delve/cmd/dlv@latest",
             )?;
-            Ok(Resolution::Ready(go_spec(command, program, args, cwd)))
+            let tags = choices.go.as_ref().and_then(langenv::go_tags_flag);
+            Ok(Resolution::Ready(go_spec(
+                command,
+                program,
+                args,
+                cwd,
+                tags.as_deref(),
+            )))
         }
         "node" => {
             let node =
@@ -208,6 +219,19 @@ pub fn resolve(
         }
         other => Err(format!("no debug adapter for {other}")),
     }
+}
+
+/// The SDK program the user chose for `language`'s server, when they chose
+/// where its toolchain is (a program with no arguments of their own: the
+/// toolchain's, run as clew runs it) — the debugger runs the same SDK.
+fn chosen_sdk<'a>(choices: &'a clew_protocol::LanguageChoices, language: &str) -> Option<&'a str> {
+    choices
+        .servers
+        .as_ref()?
+        .get(language)
+        .filter(|choice| choice.args.is_none())
+        .map(|choice| choice.command.as_str())
+        .filter(|command| !command.trim().is_empty())
 }
 
 /// The interpreter to debug a Python program in `root` under: the one the
@@ -301,18 +325,29 @@ fn dart_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> Ad
 
 /// Delve for Go: `dlv dap` (mode=debug compiles and runs the package). It
 /// listens on a TCP port: port 0, announced as `DAP server listening at:
-/// <addr>`.
-fn go_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
+/// <addr>`. `tags` is the `-tags=…` flag of the build tags the user chose
+/// for the project, so the program is built as the editor reads it.
+fn go_spec(
+    command: PathBuf,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+    tags: Option<&str>,
+) -> AdapterSpec {
+    let mut launch = json!({
+        "request": "launch",
+        "mode": "debug",
+        "program": program,
+        "args": args,
+        "cwd": cwd.to_string_lossy(),
+    });
+    if let Some(tags) = tags {
+        launch["buildFlags"] = json!(tags);
+    }
     AdapterSpec {
         command,
         args: vec!["dap".into(), "--listen".into(), "127.0.0.1:0".into()],
-        launch: json!({
-            "request": "launch",
-            "mode": "debug",
-            "program": program,
-            "args": args,
-            "cwd": cwd.to_string_lossy(),
-        }),
+        launch,
         transport: AdapterTransport::Tcp,
     }
 }
@@ -845,9 +880,78 @@ mod tests {
             assert_eq!(spec.args[0], entry.to_string_lossy());
             assert_eq!(&spec.args[1..], ["0", "127.0.0.1"]);
         });
-        let go = go_spec(PathBuf::from("/bin/dlv"), "/p", &[], Path::new("/p"));
+        let go = go_spec(PathBuf::from("/bin/dlv"), "/p", &[], Path::new("/p"), None);
         assert_eq!(go.args, ["dap", "--listen", "127.0.0.1:0"]);
         assert_eq!(go.transport, AdapterTransport::Tcp);
+        assert_eq!(go.launch.get("buildFlags"), None);
+    }
+
+    /// The Go program is built with the tags the user chose for the
+    /// project, as gopls reads it — and only tags that are tags.
+    #[test]
+    fn a_go_program_is_debugged_with_the_chosen_build_tags() {
+        let go = clew_protocol::GoChoices {
+            tags: vec!["integration".into(), "not a tag".into(), "e2e".into()],
+            ..Default::default()
+        };
+        let flag = langenv::go_tags_flag(&go);
+        let spec = go_spec(
+            PathBuf::from("/bin/dlv"),
+            "/p",
+            &[],
+            Path::new("/p"),
+            flag.as_deref(),
+        );
+        assert_eq!(spec.launch["buildFlags"], "-tags=integration,e2e");
+    }
+
+    /// A Dart program is debugged with the SDK chosen for its server — when
+    /// that choice is where the toolchain is, not a program of its own — and
+    /// a chosen SDK that is gone says so rather than falling back.
+    #[test]
+    #[cfg(unix)]
+    fn a_dart_program_is_debugged_with_the_chosen_sdk() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::testutil::TempDir::new("debug-dart-sdk");
+        let dart = dir.join("flutter/bin/dart");
+        std::fs::create_dir_all(dart.parent().unwrap()).unwrap();
+        std::fs::write(&dart, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&dart, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let sdk = |command: &Path, args: Option<Vec<String>>| clew_protocol::LanguageChoices {
+            servers: Some(
+                [(
+                    "dart".to_string(),
+                    clew_protocol::ServerChoice {
+                        command: command.to_string_lossy().into_owned(),
+                        args,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let resolved = resolve("dart", "/p/main.dart", &[], &dir, &dir, &sdk(&dart, None));
+        let Ok(Resolution::Ready(spec)) = resolved else {
+            panic!("the chosen SDK is used: {resolved:?}");
+        };
+        assert_eq!(spec.command, dart);
+        assert_eq!(spec.args, ["debug_adapter"]);
+        let gone = resolve(
+            "dart",
+            "/p/main.dart",
+            &[],
+            &dir,
+            &dir,
+            &sdk(&dir.join("gone/dart"), None),
+        )
+        .unwrap_err();
+        assert!(gone.contains("the Dart SDK you chose"), "{gone}");
+        // A server program of the user's own (with its own arguments) is
+        // not an SDK: the debugger finds Dart as it would otherwise.
+        assert_eq!(
+            chosen_sdk(&sdk(&dart, Some(vec!["--lsp".into()])), "dart"),
+            None
+        );
     }
 
     /// The js-debug download goes through the store's verified, staged

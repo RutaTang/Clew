@@ -49,8 +49,8 @@ mod app;
 mod shell;
 pub use app::message::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
-    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, IntegrationsMsg, LanguagesMsg, LspMsg, Message,
-    NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg,
+    FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, IntegrationsMsg, LangField, LanguagesMsg, LspMsg,
+    Message, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg, SemanticMsg, ServerMsg, SettingsMsg,
     TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
 };
 pub(crate) use app::message::{Handoff, Origin, Stamp};

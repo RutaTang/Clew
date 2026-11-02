@@ -1255,28 +1255,57 @@ pub enum LanguagesMsg {
         stamp: Stamp,
         choices: clew_protocol::LanguageChoices,
     },
-    /// List the project's Python interpreters again.
+    /// Look again at what there is to choose from.
     Refresh,
     /// The listing landed.
     Listed {
         stamp: Stamp,
-        result: Result<clew_protocol::PythonEnvironments, String>,
+        result: Result<clew_protocol::LanguageOptions, String>,
     },
     /// Use this Python interpreter — `None`: let clew find one.
     ChoosePython(Option<String>),
-    /// The typed interpreter path changed.
-    PathDraft(String),
-    /// Use the typed interpreter path.
-    UsePath,
-    /// Pick an interpreter in a file dialog (a project on this machine).
-    Browse,
-    /// The file dialog closed.
-    Browsed { stamp: Stamp, path: Option<PathBuf> },
+    /// Make these the project's choices: a pick in the view (a feature, a
+    /// tag, a compilation database, a toolchain, a reset).
+    Choose(Box<clew_protocol::LanguageChoices>),
+    /// A typed field changed.
+    Draft(LangField, String),
+    /// Use what is typed in the field.
+    UseDraft(LangField),
+    /// The language a server program is being chosen for.
+    ServerLanguage(String),
+    /// Pick a file (or, for a compilation database, a folder) for the field
+    /// in a dialog — a project on this machine.
+    Browse(LangField),
+    /// The dialog closed.
+    Browsed {
+        stamp: Stamp,
+        field: LangField,
+        path: Option<PathBuf>,
+    },
     /// A choice was saved, or could not be.
     Saved {
         stamp: Stamp,
         result: Result<(), String>,
     },
+}
+
+/// A typed field of the settings' languages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LangField {
+    /// A Python interpreter's path.
+    PythonPath,
+    /// A Rust target triple.
+    RustTarget,
+    /// A Go build tag to add.
+    GoTag,
+    /// A folder holding a `compile_commands.json`.
+    CDatabase,
+    /// Flags for C/C++ files no compilation database covers.
+    CFlags,
+    /// A language server program.
+    ServerCommand,
+    /// Its arguments.
+    ServerArgs,
 }
 
 impl LanguagesMsg {
@@ -1290,9 +1319,11 @@ impl LanguagesMsg {
             | LanguagesMsg::Saved { stamp, .. } => Some(Origin::Stamped(stamp)),
             LanguagesMsg::Refresh
             | LanguagesMsg::ChoosePython(..)
-            | LanguagesMsg::PathDraft(..)
-            | LanguagesMsg::UsePath
-            | LanguagesMsg::Browse => None,
+            | LanguagesMsg::Choose(..)
+            | LanguagesMsg::Draft(..)
+            | LanguagesMsg::UseDraft(..)
+            | LanguagesMsg::ServerLanguage(..)
+            | LanguagesMsg::Browse(..) => None,
         }
     }
 }

@@ -26,10 +26,19 @@ pub(crate) fn scan_status(files: usize, truncated: bool, report: &fs_scan::ScanR
 /// again whenever the file list is: set once, at open, a language whose
 /// first file came later had no row, and one whose last file went kept it.
 fn served_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
+    file_languages(files)
+        .into_iter()
+        .filter(|l| lsp::registry::default_for_language(l).is_some())
+        .collect()
+}
+
+/// Every language among `files`, sorted — served by clew or not: the ones
+/// a server program of the user's can be chosen for
+/// (`ProjectSession::file_languages`).
+fn file_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
     let mut langs: Vec<String> = files
         .iter()
         .filter_map(|f| highlight::detect(&f.abs))
-        .filter(|l| lsp::registry::default_for_language(l).is_some())
         .map(|l| l.to_string())
         .collect();
     langs.sort();
@@ -349,6 +358,7 @@ impl App {
         // saved Settings).
         self.invalidate_llm_config();
         self.proj.project_languages = served_languages(&result.files);
+        self.proj.file_languages = file_languages(&result.files);
         let files = Arc::new(result.files);
         self.proj.project = Some(Project {
             root: result.root,
@@ -789,6 +799,7 @@ impl App {
             p.files = Arc::new(result.files);
             p.truncated = result.truncated;
             self.proj.project_languages = served_languages(&p.files);
+            self.proj.file_languages = file_languages(&p.files);
         }
         self.proj.tracked_ignored = report.tracked_ignored.iter().cloned().collect();
         self.refresh_finder();
@@ -871,6 +882,7 @@ impl App {
         );
         let configs_changed = configs(&project.files) != configs_before;
         self.proj.project_languages = served_languages(&project.files);
+        self.proj.file_languages = file_languages(&project.files);
         // Marked in the tree, as a local rescan marks them.
         self.proj.tracked_ignored = tracked_ignored.into_iter().collect();
         self.refresh_finder();

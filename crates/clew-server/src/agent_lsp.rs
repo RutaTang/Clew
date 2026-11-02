@@ -62,6 +62,10 @@ pub struct LspPool {
     /// `SpawnLsp`. Without this, one semantic tool call could execute a
     /// hostile repo's `command` that the user never approved (or declined).
     approvals: crate::SharedApprovals,
+    /// The user's choices for the project's languages, which the servers
+    /// are set up with as the editor's are — part of the pool's identity:
+    /// other choices, another pool ([`LspPool::serves`]).
+    choices: clew_protocol::LanguageChoices,
     /// Every server this pool started, reachable without the slots' locks:
     /// [`LspPool::close`] stops each one even while a query holds its slot —
     /// a first query holds it through the whole start and index wait.
@@ -309,9 +313,23 @@ impl LspPool {
             root,
             canon: std::sync::OnceLock::new(),
             approvals,
+            choices: Default::default(),
             slots: Mutex::new(HashMap::new()),
             started: std::sync::Mutex::default(),
         }
+    }
+
+    /// This pool, its servers set up with the user's `choices`.
+    pub fn with_choices(mut self, choices: clew_protocol::LanguageChoices) -> Self {
+        self.choices = choices;
+        self
+    }
+
+    /// Whether this pool serves a turn in `root` with `choices`: servers
+    /// started with other choices (another interpreter, other features)
+    /// would answer for a project set up differently from the editor's.
+    pub fn serves(&self, root: &Path, choices: &clew_protocol::LanguageChoices) -> bool {
+        self.root == root && self.choices == *choices
     }
 
     /// The canonical root (see the field): resolved once, by the first query
@@ -504,7 +522,7 @@ impl LspPool {
             *state = LangState::Unstarted;
         }
         if matches!(*state, LangState::Unstarted) {
-            match start(self.canon(), language, &self.approvals).await {
+            match start(self.canon(), language, &self.approvals, &self.choices).await {
                 Ok(client) => {
                     // Closed while this one was starting: it must not
                     // outlive the pool's other servers.
@@ -670,15 +688,18 @@ async fn run_query(
 /// indexing (bounded). Mirrors the `SpawnLsp` resolution, minus installs —
 /// including the approval gate: a repo-specified `command` the user hasn't
 /// approved must not run just because the *agent* asked instead of the GUI.
+/// Set up as the editor's server is: the user's `choices` over the project's
+/// environment over clew's own settings (`langenv::merge`).
 async fn start(
     root: &Path,
     language: &str,
     approvals: &crate::SharedApprovals,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<LspClient, String> {
     // A broken config is an error, not "use defaults" — the default could
     // resolve a different server than the project configured.
     let config = config::ProjectLspConfig::load(root)?;
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return Err(format!(
             "no language server is configured for {language} — use `search` instead"
         ));
@@ -718,7 +739,8 @@ async fn start(
     // exactly as it is not for a `command`. Withheld options only make the
     // server less configured; they never stop the agent's tools.
     let (init_options, _withheld) = crate::approved_init_options(approvals, root, &server);
-    let init_options = clew_core::lsp::langenv::with_pinned(&server, &exe, init_options)?;
+    let init_options =
+        clew_core::lsp::langenv::merge(language, &server, &exe, root, init_options, choices)?;
     let client = LspClient::start(&exe, &server.args, root, init_options).await?;
     // Progress can lag the handshake; give it a moment to appear, then wait
     // (bounded) for the initial index so first queries aren't false negatives.
@@ -768,6 +790,22 @@ fn symbol_byte_col(line: &str, symbol: &str) -> Option<usize> {
 mod tests {
     use super::*;
     use crate::test_support::Scratch;
+
+    /// A pool serves turns in its project with the choices its servers
+    /// were set up with: other choices (another interpreter, other
+    /// features) want servers set up anew.
+    #[test]
+    fn a_pool_serves_only_its_project_with_its_choices() {
+        let root = PathBuf::from("/p");
+        let chosen = clew_protocol::LanguageChoices {
+            python: Some("/envs/app/bin/python".into()),
+            ..Default::default()
+        };
+        let pool = LspPool::new(root.clone(), Default::default()).with_choices(chosen.clone());
+        assert!(pool.serves(&root, &chosen));
+        assert!(!pool.serves(&root, &Default::default()));
+        assert!(!pool.serves(Path::new("/q"), &chosen));
+    }
 
     #[test]
     fn symbol_position_prefers_whole_identifiers() {

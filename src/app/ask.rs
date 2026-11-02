@@ -795,6 +795,8 @@ impl App {
                 history,
                 context,
                 tools,
+                // The agent's language servers are set up as the editor's.
+                choices: self.proj.lang_choices.clone(),
             },
         });
         // Not handed over: no `AgentDone` will ever come for it, so the turn

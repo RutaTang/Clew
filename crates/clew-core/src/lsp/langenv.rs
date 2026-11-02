@@ -8,9 +8,10 @@
 //!   A. Toolchain the server can't find itself — Python venv, Java JDK, Zig
 //!      compiler. clew locates it and passes it through. This module does (A).
 //!   B. Build config that selects which code is active — Rust cargo
-//!      features/target, Go build tags, C/C++ defines. These are user *choices*,
-//!      not auto-detectable, so they come from `.clew/lsp.toml` init_options
-//!      (and, later, a picker), and also drive the inactive-`cfg` reading aid.
+//!      features/target, Go build tags and platform, C/C++ flags. These are
+//!      user *choices*, not auto-detectable: they come from `.clew/lsp.toml`
+//!      init_options, or from Settings ([`chosen`]), which lists what the
+//!      project offers to choose from ([`crate::lsp::langopts`]).
 //!   C. Compilation database / project file the server locates itself — clangd's
 //!      `compile_commands.json`, tsserver's `tsconfig.json`. Nothing to do.
 //!
@@ -22,8 +23,8 @@
 //! Over both lie the user's own choices for the project, made in Settings
 //! ([`crate::lsp::choices`]): the interpreter they picked from the ones
 //! [`python_candidates`] finds — found by looking, never by running one — or
-//! named by path. A choice picks the environment; it does not lift the
-//! boundary ([`chosen_python_env`]).
+//! named by path, and the build settings of (B). A choice picks the
+//! environment; it does not lift the boundary ([`chosen_python_env`]).
 //!
 //! (A) reaches INTO the project for a path the server will then EXECUTE, so it
 //! sits on the same trust boundary as an `lsp.toml` `command` — see
@@ -42,8 +43,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use clew_protocol::{
-    LanguageChoices, PythonCandidate, PythonEnvKind, PythonEnvironments, PythonInEffect,
-    PythonSource,
+    CChoices, GoChoices, LanguageChoices, PythonCandidate, PythonEnvKind, PythonEnvironments,
+    PythonInEffect, PythonSource, RustChoices,
 };
 use serde_json::{Value, json};
 
@@ -58,15 +59,181 @@ pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
 
 /// The settings the user's `choices` give `language`'s server in `root`, or
 /// `None` when they chose nothing for it, or what they chose cannot be used
-/// (see [`chosen_python_env`]).
+/// (see [`chosen_python_env`]). Only what they set: a choice left unset
+/// leaves the project's `lsp.toml`, or the server's default, to say.
 pub fn chosen(language: &str, root: &Path, choices: &LanguageChoices) -> Option<Value> {
     match language {
         "python" => Some(python_settings(&chosen_python_env(
             root,
             choices.python.as_deref()?,
         )?)),
+        "rust" => rust_settings(choices.rust.as_ref()?),
+        "go" => go_settings(choices.go.as_ref()?),
+        "c" | "cpp" => c_settings(root, choices.c.as_ref()?),
         _ => None,
     }
+}
+
+/// rust-analyzer's `cargo` settings for the user's Rust choices. Its check
+/// (`check.features`, `check.targets`) follows these unless told otherwise.
+fn rust_settings(rust: &RustChoices) -> Option<Value> {
+    let mut cargo = serde_json::Map::new();
+    if rust.all_features {
+        cargo.insert("features".into(), json!("all"));
+    } else {
+        let features = cargo_features(rust);
+        if !features.is_empty() {
+            cargo.insert("features".into(), json!(features));
+        }
+    }
+    if rust.no_default_features {
+        cargo.insert("noDefaultFeatures".into(), json!(true));
+    }
+    if let Some(target) = rust.target.as_deref().map(str::trim)
+        && is_target_triple(target)
+    {
+        cargo.insert("target".into(), json!(target));
+    }
+    (!cargo.is_empty()).then(|| json!({ "cargo": cargo }))
+}
+
+/// The chosen features cargo can take: `feature` or `package/feature`, each
+/// part a plain name — what `cargo --features` accepts. Anything else is
+/// dropped rather than handed on to fail the server's every build.
+pub fn cargo_features(rust: &RustChoices) -> Vec<&str> {
+    let plain = |part: &str| {
+        !part.is_empty()
+            && part.len() <= 128
+            && part
+                .chars()
+                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '+' | '.'))
+    };
+    rust.features
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| match f.split_once('/') {
+            Some((package, feature)) => plain(package) && plain(feature),
+            None => plain(f),
+        })
+        .collect()
+}
+
+/// A target triple as rustc names one (`x86_64-unknown-linux-gnu`).
+pub fn is_target_triple(target: &str) -> bool {
+    !target.is_empty()
+        && target.len() <= 128
+        && target
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// gopls's `buildFlags` and `env` for the user's Go choices.
+fn go_settings(go: &GoChoices) -> Option<Value> {
+    let mut out = serde_json::Map::new();
+    if let Some(flag) = go_tags_flag(go) {
+        out.insert("buildFlags".into(), json!([flag]));
+    }
+    let mut env = serde_json::Map::new();
+    for (name, value) in [("GOOS", &go.goos), ("GOARCH", &go.goarch)] {
+        if let Some(value) = value.as_deref().map(str::trim)
+            && is_go_word(value)
+        {
+            env.insert(name.into(), json!(value));
+        }
+    }
+    if !env.is_empty() {
+        out.insert("env".into(), Value::Object(env));
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// The `-tags=…` flag for the chosen build tags — the go command's, so the
+/// debugger builds with it too — or `None` for none. A tag is what a build
+/// constraint can name (letters, digits, `_`, `.`): one with a comma or a
+/// space in it would be several, or none.
+pub fn go_tags_flag(go: &GoChoices) -> Option<String> {
+    let tags: Vec<&str> = go
+        .tags
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| is_go_tag(t))
+        .collect();
+    (!tags.is_empty()).then(|| format!("-tags={}", tags.join(",")))
+}
+
+/// A name a `//go:build` line can use.
+pub fn is_go_tag(tag: &str) -> bool {
+    !tag.is_empty()
+        && tag.len() <= 128
+        && tag
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.'))
+}
+
+/// A `GOOS` or `GOARCH` value.
+fn is_go_word(word: &str) -> bool {
+    !word.is_empty()
+        && word.len() <= 32
+        && word
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
+
+/// clangd's `compilationDatabasePath` and `fallbackFlags` for the user's
+/// C/C++ choices. A database directory given relative to the project is
+/// made absolute — clangd would read it against its own working directory.
+fn c_settings(root: &Path, c: &CChoices) -> Option<Value> {
+    let mut out = serde_json::Map::new();
+    if let Some(dir) = c
+        .compile_commands
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        let dir = match dir.strip_prefix("~/") {
+            Some(rest) => match std::env::var_os("HOME") {
+                Some(home) => PathBuf::from(home).join(rest),
+                None => PathBuf::from(dir),
+            },
+            None => root.join(dir),
+        };
+        out.insert(
+            "compilationDatabasePath".into(),
+            json!(dir.to_string_lossy()),
+        );
+    }
+    let flags: Vec<&str> = c
+        .flags
+        .iter()
+        .map(|f| f.trim())
+        .filter(|f| !f.is_empty())
+        .collect();
+    if !flags.is_empty() {
+        out.insert("fallbackFlags".into(), json!(flags));
+    }
+    (!out.is_empty()).then_some(Value::Object(out))
+}
+
+/// gopls takes its build flags as one list: the chosen `-tags` joins the
+/// project's other flags (`-mod=vendor`, …) in place of any `-tags` of its,
+/// rather than the list as a whole winning.
+fn keep_build_flags(chosen: Option<Value>, explicit: Option<&Value>) -> Option<Value> {
+    let mut chosen = chosen?;
+    let theirs = explicit
+        .and_then(|e| e.get("buildFlags"))
+        .and_then(Value::as_array);
+    if let (Some(theirs), Some(Value::Array(ours))) = (theirs, chosen.get_mut("buildFlags")) {
+        let is_tags = |flag: &Value| {
+            flag.as_str().is_some_and(|f| {
+                let f = f.trim_start_matches('-');
+                f == "tags" || f.starts_with("tags=")
+            })
+        };
+        let mut flags: Vec<Value> = theirs.iter().filter(|f| !is_tags(f)).cloned().collect();
+        flags.append(ours);
+        *ours = flags;
+    }
+    Some(chosen)
 }
 
 /// What the Python servers read the environment from.
@@ -116,19 +283,12 @@ pub fn merge(
         Some(_) => None,
         None => detect(language, &server.server_name, root),
     };
+    let chosen = match language {
+        "go" => keep_build_flags(chosen, explicit.as_ref()),
+        _ => chosen,
+    };
     let auto = layer(layer(detected, explicit), chosen);
     Ok(layer(pinned(server, exe)?, auto))
-}
-
-/// [`merge`] for a host that does not probe the project's environment (the
-/// Ask agent's pool of servers): the pinned settings with the approved
-/// `explicit` options on top.
-pub fn with_pinned(
-    server: &crate::lsp::config::EffectiveServer,
-    exe: &Path,
-    explicit: Option<Value>,
-) -> Result<Option<Value>, String> {
-    Ok(layer(pinned(server, exe)?, explicit))
 }
 
 /// `over` merged onto `base`, `over` winning on conflict.
@@ -156,12 +316,14 @@ fn layer(base: Option<Value>, over: Option<Value>) -> Option<Value> {
 /// `tsserver.path` still wins, merged on top, as the user's own choice.
 ///
 /// Nothing for a `command`: that is the repository's program, approved as
-/// such.
+/// such. Nothing for a program the user chose either: theirs, set up as
+/// they run it everywhere else — and not beside clew's install, where the
+/// pin would look.
 pub fn pinned(
     server: &crate::lsp::config::EffectiveServer,
     exe: &Path,
 ) -> Result<Option<Value>, String> {
-    if server.command.is_some() {
+    if server.command.is_some() || server.chosen.is_some() {
         return Ok(None);
     }
     match server.server_name.as_str() {
@@ -1463,10 +1625,13 @@ mod tests {
         assert_eq!(kept["tsserver"]["path"], tsserver.to_str().unwrap());
         assert_eq!(kept["preferences"]["quotePreference"], "single");
         // …and an approved `tsserver.path` of the user's own still wins.
-        let chosen = with_pinned(
+        let chosen = merge(
+            "typescript",
             &server,
             &exe,
+            &root,
             Some(json!({ "tsserver": { "path": "/mine" } })),
+            &LanguageChoices::default(),
         )
         .unwrap()
         .unwrap();
@@ -1496,6 +1661,7 @@ mod tests {
     fn choose(python: &Path) -> LanguageChoices {
         LanguageChoices {
             python: Some(python.to_string_lossy().into_owned()),
+            ..Default::default()
         }
     }
 
@@ -1591,6 +1757,7 @@ mod tests {
             &root,
             &LanguageChoices {
                 python: Some(planted.to_string()),
+                ..Default::default()
             },
             None,
         );
@@ -1768,5 +1935,131 @@ mod tests {
         assert_eq!(merged["python"]["pythonPath"], "/explicit");
         // …while non-conflicting auto keys survive.
         assert_eq!(merged["python"]["analysis"]["level"], "basic");
+    }
+
+    /// The user's Rust, Go and C/C++ choices become their servers' settings
+    /// — only what they set, and only values the tools can take.
+    #[test]
+    fn build_choices_become_their_servers_settings() {
+        let root = Path::new("/p");
+        let rust = |r: RustChoices| {
+            chosen(
+                "rust",
+                root,
+                &LanguageChoices {
+                    rust: Some(r),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(
+            rust(RustChoices {
+                features: vec!["serde".into(), "cli/color".into(), "bad feature".into()],
+                no_default_features: true,
+                target: Some("wasm32-unknown-unknown".into()),
+                ..Default::default()
+            }),
+            Some(json!({ "cargo": {
+                "features": ["serde", "cli/color"],
+                "noDefaultFeatures": true,
+                "target": "wasm32-unknown-unknown",
+            }}))
+        );
+        assert_eq!(
+            rust(RustChoices {
+                all_features: true,
+                features: vec!["ignored".into()],
+                ..Default::default()
+            }),
+            Some(json!({ "cargo": { "features": "all" } }))
+        );
+        assert_eq!(rust(RustChoices::default()), None);
+
+        let go = chosen(
+            "go",
+            root,
+            &LanguageChoices {
+                go: Some(GoChoices {
+                    tags: vec!["integration".into(), "a,b".into(), " e2e ".into()],
+                    goos: Some("windows".into()),
+                    goarch: Some("ARM 64".into()),
+                }),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            go,
+            Some(json!({
+                "buildFlags": ["-tags=integration,e2e"],
+                "env": { "GOOS": "windows" },
+            }))
+        );
+
+        let c = LanguageChoices {
+            c: Some(CChoices {
+                compile_commands: Some("build/debug".into()),
+                flags: vec!["-DDEBUG".into(), " ".into(), "-Iinclude".into()],
+            }),
+            ..Default::default()
+        };
+        let expected = json!({
+            "compilationDatabasePath": "/p/build/debug",
+            "fallbackFlags": ["-DDEBUG", "-Iinclude"],
+        });
+        assert_eq!(chosen("c", root, &c), Some(expected.clone()));
+        assert_eq!(chosen("cpp", root, &c), Some(expected));
+        // A choice for one language says nothing to another's server.
+        assert_eq!(chosen("rust", root, &c), None);
+    }
+
+    /// The chosen build tags join the flags the project's `lsp.toml` gives
+    /// gopls, in place of its own `-tags`, and its other settings stand.
+    #[test]
+    fn chosen_go_tags_join_the_projects_other_build_flags() {
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("go")
+            .unwrap();
+        let choices = LanguageChoices {
+            go: Some(GoChoices {
+                tags: vec!["e2e".into()],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let explicit = json!({
+            "buildFlags": ["-mod=vendor", "-tags=old", "--tags", "x"],
+            "env": { "GOFLAGS": "-v" },
+            "staticcheck": true,
+        });
+        let merged = merge(
+            "go",
+            &server,
+            Path::new("/store/gopls"),
+            Path::new("/p"),
+            Some(explicit),
+            &choices,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            merged["buildFlags"],
+            json!(["-mod=vendor", "x", "-tags=e2e"])
+        );
+        assert_eq!(merged["env"], json!({ "GOFLAGS": "-v" }));
+        assert_eq!(merged["staticcheck"], true);
+    }
+
+    /// A program the user chose runs with no settings pinned for clew's own
+    /// binary: the pin would look beside clew's install, not theirs.
+    #[test]
+    fn a_chosen_server_program_gets_no_pins() {
+        let mut server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("typescript")
+            .unwrap();
+        server.chosen = Some("/opt/bin/typescript-language-server".into());
+        assert_eq!(
+            pinned(&server, Path::new("/opt/bin/typescript-language-server")),
+            Ok(None)
+        );
     }
 }

@@ -234,36 +234,157 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     )
 }
 
-/// The open project's languages: each one's server and how it stands, and
-/// the Python interpreter its server and debugger run — the one in effect,
-/// who named it, and the user's pick from what was found where the project
-/// is (`App::refresh_python_envs`). A pick is saved at once, for this project
-/// on this machine, and never written into the project.
-pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
+/// A copy of `choices` changed by `change`, chosen.
+fn choose_with(
+    choices: &clew_protocol::LanguageChoices,
+    change: impl FnOnce(&mut clew_protocol::LanguageChoices),
+) -> Message {
+    let mut next = choices.clone();
+    change(&mut next);
+    Message::Languages(crate::LanguagesMsg::Choose(Box::new(next)))
+}
+
+/// Rust targets offered beside the ones the project names.
+const RUST_TARGETS: &[&str] = &[
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+    "wasm32-unknown-unknown",
+    "wasm32-wasip1",
+    "aarch64-linux-android",
+    "aarch64-apple-ios",
+    "thumbv7em-none-eabihf",
+];
+
+/// What a pick list of targets or platforms calls "the host's own".
+const HOST_CHOICE: &str = "The host's";
+
+/// A server program as the view shows it: the program, and its arguments
+/// when they are the user's own.
+fn program_line(choice: &clew_protocol::ServerChoice) -> String {
+    match &choice.args {
+        Some(args) if !args.is_empty() => {
+            format!(
+                "{} {}",
+                choice.command,
+                crate::app::languages::join_args(args)
+            )
+        }
+        Some(_) => format!("{} (no arguments)", choice.command),
+        None => choice.command.clone(),
+    }
+}
+
+fn lang_caption<'a>(s: String) -> iced::widget::Text<'a> {
+    text(s).size(ts::CAPTION).color(theme::dim())
+}
+
+fn lang_heading<'a>(s: &str) -> iced::widget::Text<'a> {
+    text(s.to_string()).size(ts::BODY).color(theme::fg())
+}
+
+fn lang_button<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+    button(text(label.to_string()).size(ts::SMALL))
+        .style(theme::secondary_button)
+        .padding([2, 8])
+        .on_press_maybe(msg)
+}
+
+/// A choice that is on or off, as a toggle.
+fn lang_chip<'a>(label: String, on: bool, msg: Message) -> iced::widget::Button<'a, Message> {
+    button(text(label).size(ts::SMALL))
+        .style(theme::tab_button(on))
+        .padding([2, 8])
+        .on_press(msg)
+}
+
+fn lang_path<'a>(path: String) -> iced::widget::Text<'a> {
+    text(path)
+        .size(ts::CAPTION)
+        .font(iced::Font::MONOSPACE)
+        .color(theme::fg_muted())
+        .wrapping(Wrapping::Glyph)
+}
+
+/// What is in effect, set apart.
+fn lang_effect<'a>(lines: Vec<Element<'a, Message>>) -> Element<'a, Message> {
+    container(iced::widget::Column::with_children(lines).spacing(2))
+        .padding([6, 8])
+        .width(Fill)
+        .style(theme::panel)
+        .into()
+}
+
+/// A typed field of the section: Enter uses it.
+fn lang_field<'a>(
+    app: &'a App,
+    placeholder: &str,
+    field: crate::LangField,
+) -> iced::widget::TextInput<'a, Message> {
     use crate::LanguagesMsg as L;
-    use clew_protocol::{PythonEnvKind, PythonSource};
+    text_input(placeholder, app.proj.lang_drafts.field(field))
+        .on_input(move |v| Message::Languages(L::Draft(field, v)))
+        .on_submit(Message::Languages(L::UseDraft(field)))
+        .size(ts::BASE)
+        .padding(6)
+        .width(Fill)
+}
+
+/// A choice from a list: its label and detail, then "in use" or "Use".
+fn lang_pick<'a>(
+    label: String,
+    detail: Element<'a, Message>,
+    selected: bool,
+    msg: Message,
+) -> Element<'a, Message> {
+    row![
+        column![text(label).size(ts::SMALL).color(theme::fg()), detail]
+            .spacing(1)
+            .width(Fill),
+        if selected {
+            Element::from(text("in use").size(ts::SMALL).color(theme::success()))
+        } else {
+            lang_button("Use", Some(msg)).into()
+        },
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// What the project's `lsp.toml` sets that a choice here also sets.
+fn project_sets_note<'a>(sets: &[String]) -> Option<Element<'a, Message>> {
+    (!sets.is_empty()).then(|| {
+        lang_caption(format!(
+            "The project's .clew/lsp.toml sets {} — a choice here wins where both say.",
+            sets.join(", ")
+        ))
+        .into()
+    })
+}
+
+/// The open project's languages: each one's server and how it stands, and
+/// what the user chooses for them — the Python interpreter, the Rust
+/// features and target, the Go build tags and platform, the C/C++
+/// compilation database and flags, Lean's and Dart's toolchains, a server
+/// program of their own — each showing what is in effect before what there
+/// is to pick, from what was found where the project is
+/// (`App::refresh_language_options`). A pick is saved at once, for this
+/// project on this machine, and never written into the project.
+pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     if app.proj.project.is_none() {
         return space().height(0).into();
     }
-    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
-    let caption = |s: String| text(s).size(ts::CAPTION).color(theme::dim());
-    let small_button = |label: &str, msg: Option<Message>| {
-        button(text(label.to_string()).size(ts::SMALL))
-            .style(theme::secondary_button)
-            .padding([2, 8])
-            .on_press_maybe(msg)
-    };
-    let path_text = |path: String| {
-        text(path)
-            .size(ts::CAPTION)
-            .font(iced::Font::MONOSPACE)
-            .color(theme::fg_muted())
-            .wrapping(Wrapping::Glyph)
-    };
+    let choices = &app.proj.lang_choices;
     let remote = app.connection.is_remote();
     let mut col = column![
-        section("Languages in this project"),
-        caption(format!(
+        text("Languages in this project")
+            .size(ts::BODY)
+            .color(theme::accent()),
+        lang_caption(format!(
             "Set up for this project {} — kept in clew's own data, never written into the \
              project. A choice here wins over its .clew/lsp.toml.",
             if remote {
@@ -274,29 +395,43 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         )),
     ]
     .spacing(8);
-    for language in &app.proj.project_languages {
-        let server = app
-            .proj
-            .lsp_config
-            .resolve(language)
-            .map(|s| match s.command {
-                Some(_) => format!("{} (the project's command)", s.server_name),
-                None => format!("{} {}", s.server_name, s.version),
-            })
-            .unwrap_or_else(|| "no server".into());
+    let mut rows = app.proj.project_languages.clone();
+    if let Some(servers) = &choices.servers {
+        rows.extend(servers.keys().cloned());
+    }
+    rows.sort();
+    rows.dedup();
+    for language in &rows {
+        let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
+            Some(choice) => format!("Your program: {}", program_line(choice)),
+            None => app
+                .effective_server(language)
+                .map(|s| match s.command {
+                    Some(_) => format!("{} (the project's command)", s.server_name),
+                    None => format!("{} {}", s.server_name, s.version),
+                })
+                .unwrap_or_else(|| "no server".into()),
+        };
         let (status, action) = app.lsp_row(language);
         let action: Element<'_, Message> = match action {
-            Some((label, msg)) => small_button(label, Some(msg)).into(),
+            Some((label, msg)) => lang_button(label, Some(msg)).into(),
             None => space().width(0).into(),
         };
         col = col.push(
             row![
-                text(crate::highlight::lang_name(language).unwrap_or(language.as_str()))
-                    .size(ts::BODY)
-                    .color(theme::fg())
-                    .width(90),
+                text(
+                    crate::highlight::lang_name(language)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| language.clone())
+                )
+                .size(ts::BODY)
+                .color(theme::fg())
+                .width(90),
                 column![
-                    text(server).size(ts::SMALL).color(theme::fg_muted()),
+                    text(server)
+                        .size(ts::SMALL)
+                        .color(theme::fg_muted())
+                        .wrapping(Wrapping::Glyph),
                     text(status).size(ts::CAPTION).color(theme::dim()),
                 ]
                 .spacing(1)
@@ -308,111 +443,150 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         );
     }
 
-    let python = app.proj.project_languages.iter().any(|l| l == "python")
-        || app.proj.lang_choices.python.is_some();
-    if !python {
-        return col.into();
-    }
-    col = col.push(text("Python interpreter").size(ts::BODY).color(theme::fg()));
-    let chosen = app.proj.lang_choices.python.as_deref();
-    match &app.proj.python_envs {
-        None => col = col.push(caption("Looking for Python environments…".into())),
+    let has = |l: &str| rows.iter().any(|x| x == l);
+    let python = has("python") || choices.python.is_some();
+    let listed = python
+        || ["rust", "go", "c", "cpp", "lean", "dart"]
+            .iter()
+            .any(|l| has(l));
+    let options = match &app.proj.lang_options {
+        Some(Ok(options)) => Some(options),
         Some(Err(why)) => {
             col = col.push(
-                text(format!("The environments could not be listed: {why}"))
-                    .size(ts::CAPTION)
-                    .color(theme::danger()),
-            )
-        }
-        Some(Ok(envs)) => {
-            let effect = &envs.in_effect;
-            let who = match effect.source {
-                PythonSource::Chosen => "Your choice",
-                PythonSource::LspToml => "Named by the project's .clew/lsp.toml",
-                PythonSource::ProjectVenv => {
-                    "Found in the project — run through its base Python, its packages read, \
-                     as it came with the project"
-                }
-                PythonSource::Activated => "The environment active where clew started",
-                PythonSource::Server => "None — the language server looks for one itself",
-            };
-            let mut in_effect = column![text(who).size(ts::SMALL).color(theme::fg())].spacing(2);
-            if let Some(path) = &effect.interpreter {
-                in_effect = in_effect.push(path_text(path.clone()));
-            }
-            col = col.push(
-                container(in_effect)
-                    .padding([6, 8])
-                    .width(Fill)
-                    .style(theme::panel),
+                text(format!(
+                    "What the project offers could not be listed: {why}"
+                ))
+                .size(ts::CAPTION)
+                .color(theme::danger()),
             );
-            if let Some(bad) = &effect.unusable_choice {
-                col = col.push(
-                    text(format!(
-                        "Your choice {bad} cannot be used: it is gone, or it is a program of \
-                         the repository's own. The one above is used until you pick another."
-                    ))
-                    .size(ts::CAPTION)
-                    .color(theme::warning()),
-                );
+            None
+        }
+        None => {
+            if listed {
+                col = col.push(lang_caption("Looking at what the project offers…".into()));
             }
-            let pick = |label: String, path: Option<String>, selected: bool| {
-                let detail: Element<'_, Message> = match &path {
-                    Some(p) => path_text(p.clone()).into(),
-                    None => caption(
-                        "Whatever clew finds: the project's own venv, else the \
-                                     server's choice"
-                            .into(),
-                    )
-                    .into(),
-                };
-                row![
-                    column![text(label).size(ts::SMALL).color(theme::fg()), detail]
-                        .spacing(1)
-                        .width(Fill),
-                    if selected {
-                        Element::from(text("in use").size(ts::SMALL).color(theme::success()))
-                    } else {
-                        small_button("Use", Some(Message::Languages(L::ChoosePython(path)))).into()
-                    },
-                ]
-                .spacing(8)
-                .align_y(iced::Center)
+            None
+        }
+    };
+    if python {
+        col = col.push(python_block(app, options.and_then(|o| o.python.as_ref())));
+    }
+    if has("rust") {
+        col = col.push(rust_block(app, options.and_then(|o| o.rust.as_ref())));
+    }
+    if has("go") {
+        col = col.push(go_block(app, options.and_then(|o| o.go.as_ref())));
+    }
+    if has("c") || has("cpp") {
+        col = col.push(c_block(app, options.and_then(|o| o.c.as_ref())));
+    }
+    for language in ["lean", "dart"] {
+        if has(language) {
+            let found = options
+                .and_then(|o| o.toolchains.get(language))
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            col = col.push(toolchain_block(app, language, found));
+        }
+    }
+    col = col.push(servers_block(app));
+    if listed {
+        col = col.push(
+            row![
+                space().width(Fill),
+                lang_button(
+                    "Look again",
+                    Some(Message::Languages(crate::LanguagesMsg::Refresh))
+                ),
+            ]
+            .align_y(iced::Center),
+        );
+    }
+    col.into()
+}
+
+/// The Python interpreter: the one in effect and who named it, the ones
+/// found, and a path of the user's own.
+fn python_block<'a>(
+    app: &'a App,
+    envs: Option<&'a clew_protocol::PythonEnvironments>,
+) -> Element<'a, Message> {
+    use crate::{LangField as F, LanguagesMsg as L};
+    use clew_protocol::{PythonEnvKind, PythonSource};
+    let remote = app.connection.is_remote();
+    let chosen = app.proj.lang_choices.python.as_deref();
+    let mut col = column![lang_heading("Python interpreter")].spacing(6);
+    if let Some(envs) = envs {
+        let effect = &envs.in_effect;
+        let who = match effect.source {
+            PythonSource::Chosen => "Your choice",
+            PythonSource::LspToml => "Named by the project's .clew/lsp.toml",
+            PythonSource::ProjectVenv => {
+                "Found in the project — run through its base Python, its packages read, \
+                 as it came with the project"
+            }
+            PythonSource::Activated => "The environment active where clew started",
+            PythonSource::Server => "None — the language server looks for one itself",
+        };
+        let mut lines: Vec<Element<'a, Message>> =
+            vec![text(who).size(ts::SMALL).color(theme::fg()).into()];
+        if let Some(path) = &effect.interpreter {
+            lines.push(lang_path(path.clone()).into());
+        }
+        col = col.push(lang_effect(lines));
+        if let Some(bad) = &effect.unusable_choice {
+            col = col.push(
+                text(format!(
+                    "Your choice {bad} cannot be used: it is gone, or it is a program of \
+                     the repository's own. The one above is used until you pick another."
+                ))
+                .size(ts::CAPTION)
+                .color(theme::warning()),
+            );
+        }
+        col = col.push(lang_pick(
+            "Automatic".into(),
+            lang_caption(
+                "Whatever clew finds: the project's own venv, else the server's choice".into(),
+            )
+            .into(),
+            chosen.is_none(),
+            Message::Languages(L::ChoosePython(None)),
+        ));
+        for candidate in &envs.candidates {
+            let kind = match candidate.kind {
+                PythonEnvKind::Project => "Project",
+                PythonEnvKind::Activated => "Activated",
+                PythonEnvKind::Poetry => "Poetry",
+                PythonEnvKind::Pipenv => "Pipenv",
+                PythonEnvKind::Conda => "conda",
+                PythonEnvKind::Pyenv => "pyenv",
+                PythonEnvKind::Uv => "uv",
+                PythonEnvKind::System => "System",
             };
-            col = col.push(pick("Automatic".into(), None, chosen.is_none()));
-            for candidate in &envs.candidates {
-                let kind = match candidate.kind {
-                    PythonEnvKind::Project => "Project",
-                    PythonEnvKind::Activated => "Activated",
-                    PythonEnvKind::Poetry => "Poetry",
-                    PythonEnvKind::Pipenv => "Pipenv",
-                    PythonEnvKind::Conda => "conda",
-                    PythonEnvKind::Pyenv => "pyenv",
-                    PythonEnvKind::Uv => "uv",
-                    PythonEnvKind::System => "System",
-                };
-                let mut label = format!("{kind} · {}", candidate.name);
-                if let Some(version) = &candidate.version {
-                    label.push_str(&format!(" · Python {version}"));
-                }
-                if candidate.kind == PythonEnvKind::System {
-                    label = match &candidate.version {
-                        Some(version) => format!("{kind} · Python {version}"),
-                        None => kind.to_string(),
-                    };
-                }
-                col = col.push(pick(
-                    label,
-                    Some(candidate.interpreter.clone()),
-                    chosen == Some(candidate.interpreter.as_str()),
-                ));
-            }
-            // A choice the list does not hold (typed, browsed to, or gone).
-            if let Some(other) = chosen
-                && !envs.candidates.iter().any(|c| c.interpreter == other)
-            {
-                col = col.push(pick("Your choice".into(), Some(other.to_string()), true));
-            }
+            let label = match (&candidate.kind, &candidate.version) {
+                (PythonEnvKind::System, Some(version)) => format!("{kind} · Python {version}"),
+                (PythonEnvKind::System, None) => kind.to_string(),
+                (_, Some(version)) => format!("{kind} · {} · Python {version}", candidate.name),
+                (_, None) => format!("{kind} · {}", candidate.name),
+            };
+            col = col.push(lang_pick(
+                label,
+                lang_path(candidate.interpreter.clone()).into(),
+                chosen == Some(candidate.interpreter.as_str()),
+                Message::Languages(L::ChoosePython(Some(candidate.interpreter.clone()))),
+            ));
+        }
+        // A choice the list does not hold (typed, browsed to, or gone).
+        if let Some(other) = chosen
+            && !envs.candidates.iter().any(|c| c.interpreter == other)
+        {
+            col = col.push(lang_pick(
+                "Your choice".into(),
+                lang_path(other.to_string()).into(),
+                true,
+                Message::Languages(L::ChoosePython(Some(other.to_string()))),
+            ));
         }
     }
     let placeholder = if remote {
@@ -420,29 +594,541 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     } else {
         "Path to a Python interpreter"
     };
-    let draft_empty = app.proj.python_path_draft.trim().is_empty();
+    let draft_empty = app.proj.lang_drafts.python_path.trim().is_empty();
     let mut path_row = row![
-        text_input(placeholder, &app.proj.python_path_draft)
-            .on_input(|v| Message::Languages(L::PathDraft(v)))
-            .on_submit(Message::Languages(L::UsePath))
-            .size(ts::BASE)
-            .padding(6)
-            .width(Fill),
-        small_button(
+        lang_field(app, placeholder, F::PythonPath),
+        lang_button(
             "Use",
-            (!draft_empty).then_some(Message::Languages(L::UsePath))
+            (!draft_empty).then_some(Message::Languages(L::UseDraft(F::PythonPath)))
         ),
     ]
     .spacing(6)
     .align_y(iced::Center);
     if !remote {
-        path_row = path_row.push(small_button("Browse…", Some(Message::Languages(L::Browse))));
+        path_row = path_row.push(lang_button(
+            "Browse…",
+            Some(Message::Languages(L::Browse(F::PythonPath))),
+        ));
     }
-    path_row = path_row.push(small_button(
-        "Look again",
-        Some(Message::Languages(L::Refresh)),
-    ));
     col.push(path_row).into()
+}
+
+/// The Cargo features and target rust-analyzer loads the project with.
+fn rust_block<'a>(
+    app: &'a App,
+    options: Option<&'a clew_protocol::RustOptions>,
+) -> Element<'a, Message> {
+    use crate::{LangField as F, LanguagesMsg as L};
+    let choices = &app.proj.lang_choices;
+    let rust = choices.rust.clone().unwrap_or_default();
+    let mut col = column![lang_heading("Rust: features and target")].spacing(6);
+    let features = if rust.all_features {
+        "Every feature of every package".to_string()
+    } else if rust.features.is_empty() {
+        match rust.no_default_features {
+            true => "No features at all".into(),
+            false => "Each package's default features".into(),
+        }
+    } else {
+        format!(
+            "Features {}{}",
+            rust.features.join(", "),
+            match rust.no_default_features {
+                true => ", without the defaults",
+                false => ", and the defaults",
+            }
+        )
+    };
+    let target = match &rust.target {
+        Some(target) => format!("Checked for {target}"),
+        None => "Checked for the host's own target".into(),
+    };
+    col = col.push(lang_effect(vec![
+        text(features).size(ts::SMALL).color(theme::fg()).into(),
+        text(target).size(ts::SMALL).color(theme::fg()).into(),
+    ]));
+    if let Some(note) = options.and_then(|o| project_sets_note(&o.project_sets)) {
+        col = col.push(note);
+    }
+    col = col.push(
+        iced::widget::checkbox(rust.all_features)
+            .label("Every feature of every package")
+            .on_toggle(move |on| {
+                choose_with(choices, |c| {
+                    c.rust.get_or_insert_default().all_features = on
+                })
+            })
+            .text_size(ts::SMALL)
+            .size(14)
+            .spacing(6),
+    );
+    if !rust.all_features {
+        let toggle = |name: String| {
+            choose_with(choices, move |c| {
+                let features = &mut c.rust.get_or_insert_default().features;
+                match features.iter().position(|f| *f == name) {
+                    Some(i) => {
+                        features.remove(i);
+                    }
+                    None => features.push(name),
+                }
+            })
+        };
+        let mut listed = Vec::new();
+        for package in options.map(|o| o.packages.as_slice()).unwrap_or_default() {
+            if package.features.is_empty() {
+                continue;
+            }
+            let mut chips: Vec<Element<'a, Message>> = vec![
+                text(format!("{}:", package.name))
+                    .size(ts::SMALL)
+                    .color(theme::dim())
+                    .into(),
+            ];
+            for feature in &package.features {
+                let name = match package.root {
+                    true => feature.clone(),
+                    false => format!("{}/{feature}", package.name),
+                };
+                let label = match package.default.contains(feature) {
+                    true => format!("{feature} (default)"),
+                    false => feature.clone(),
+                };
+                chips.push(
+                    lang_chip(label, rust.features.contains(&name), toggle(name.clone())).into(),
+                );
+                listed.push(name);
+            }
+            col = col.push(Row::with_children(chips).spacing(4).wrap());
+        }
+        // Chosen ones no package lists (any more): shown, to be turned off.
+        let others: Vec<Element<'a, Message>> = rust
+            .features
+            .iter()
+            .filter(|f| !listed.contains(f))
+            .map(|f| lang_chip(f.clone(), true, toggle(f.clone())).into())
+            .collect();
+        if !others.is_empty() {
+            col = col.push(Row::with_children(others).spacing(4).wrap());
+        }
+        col = col.push(
+            iced::widget::checkbox(rust.no_default_features)
+                .label("Without the packages' default features")
+                .on_toggle(move |on| {
+                    choose_with(choices, |c| {
+                        c.rust.get_or_insert_default().no_default_features = on
+                    })
+                })
+                .text_size(ts::SMALL)
+                .size(14)
+                .spacing(6),
+        );
+    }
+    let mut targets = vec![HOST_CHOICE.to_string()];
+    targets.extend(options.into_iter().flat_map(|o| o.targets.iter().cloned()));
+    targets.extend(RUST_TARGETS.iter().map(|t| t.to_string()));
+    targets.extend(rust.target.iter().cloned());
+    let mut seen = std::collections::HashSet::new();
+    targets.retain(|t| seen.insert(t.clone()));
+    let selected = rust.target.clone().unwrap_or_else(|| HOST_CHOICE.into());
+    col.push(
+        row![
+            text("Target").size(ts::SMALL).color(theme::fg()),
+            pick_list(targets, Some(selected), move |t: String| {
+                choose_with(choices, |c| {
+                    c.rust.get_or_insert_default().target = (t != HOST_CHOICE).then_some(t)
+                })
+            })
+            .text_size(ts::SMALL)
+            .padding([2, 6]),
+            lang_field(app, "Another target triple", F::RustTarget),
+            lang_button(
+                "Use",
+                (!app.proj.lang_drafts.rust_target.trim().is_empty())
+                    .then_some(Message::Languages(L::UseDraft(F::RustTarget)))
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .into()
+}
+
+/// The build tags and platform gopls loads the project with.
+fn go_block<'a>(
+    app: &'a App,
+    options: Option<&'a clew_protocol::GoOptions>,
+) -> Element<'a, Message> {
+    use crate::{LangField as F, LanguagesMsg as L};
+    let choices = &app.proj.lang_choices;
+    let go = choices.go.clone().unwrap_or_default();
+    let mut col = column![lang_heading("Go: build tags and platform")].spacing(6);
+    let tags = match go.tags.is_empty() {
+        true => "No build tags".to_string(),
+        false => format!("Build tags {}", go.tags.join(", ")),
+    };
+    let platform = match (&go.goos, &go.goarch) {
+        (None, None) => "Read for the host's own platform".to_string(),
+        (os, arch) => format!(
+            "Read for {}/{}",
+            os.as_deref().unwrap_or("the host's system"),
+            arch.as_deref().unwrap_or("the host's architecture")
+        ),
+    };
+    col = col.push(lang_effect(vec![
+        text(tags).size(ts::SMALL).color(theme::fg()).into(),
+        text(platform).size(ts::SMALL).color(theme::fg()).into(),
+    ]));
+    if let Some(note) = options.and_then(|o| project_sets_note(&o.project_sets)) {
+        col = col.push(note);
+    }
+    let mut all: Vec<String> = options.map(|o| o.tags.clone()).unwrap_or_default();
+    all.extend(go.tags.iter().cloned());
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|t| seen.insert(t.clone()));
+    if all.is_empty() {
+        col = col.push(lang_caption(
+            "The project's files name no build tags of their own.".into(),
+        ));
+    } else {
+        let chips: Vec<Element<'a, Message>> = all
+            .into_iter()
+            .map(|tag| {
+                let on = go.tags.contains(&tag);
+                let msg = choose_with(choices, |c| {
+                    let tags = &mut c.go.get_or_insert_default().tags;
+                    match tags.iter().position(|t| *t == tag) {
+                        Some(i) => {
+                            tags.remove(i);
+                        }
+                        None => tags.push(tag.clone()),
+                    }
+                });
+                lang_chip(tag, on, msg).into()
+            })
+            .collect();
+        col = col.push(Row::with_children(chips).spacing(4).wrap());
+    }
+    let platform_pick =
+        |label: &'a str,
+         known: &[&str],
+         value: &Option<String>,
+         set: fn(&mut clew_protocol::GoChoices, Option<String>)| {
+            let mut list = vec![HOST_CHOICE.to_string()];
+            list.extend(known.iter().map(|k| k.to_string()));
+            list.extend(value.iter().cloned());
+            let mut seen = std::collections::HashSet::new();
+            list.retain(|t| seen.insert(t.clone()));
+            let selected = value.clone().unwrap_or_else(|| HOST_CHOICE.into());
+            row![
+                text(label).size(ts::SMALL).color(theme::fg()),
+                pick_list(list, Some(selected), move |v: String| {
+                    choose_with(choices, |c| {
+                        set(
+                            c.go.get_or_insert_default(),
+                            (v != HOST_CHOICE).then_some(v),
+                        )
+                    })
+                })
+                .text_size(ts::SMALL)
+                .padding([2, 6]),
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+        };
+    col.push(
+        row![
+            lang_field(app, "Another build tag", F::GoTag),
+            lang_button(
+                "Add",
+                (!app.proj.lang_drafts.go_tag.trim().is_empty())
+                    .then_some(Message::Languages(L::UseDraft(F::GoTag)))
+            ),
+            platform_pick("GOOS", clew_core::lsp::langopts::GOOS, &go.goos, |g, v| g
+                .goos =
+                v),
+            platform_pick(
+                "GOARCH",
+                clew_core::lsp::langopts::GOARCH,
+                &go.goarch,
+                |g, v| { g.goarch = v }
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .into()
+}
+
+/// The compilation database and flags clangd compiles C and C++ with.
+fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> Element<'a, Message> {
+    use crate::{LangField as F, LanguagesMsg as L};
+    let choices = &app.proj.lang_choices;
+    let remote = app.connection.is_remote();
+    let c = choices.c.clone().unwrap_or_default();
+    let mut col = column![lang_heading("C and C++: compilation")].spacing(6);
+    let database: Element<'a, Message> = match &c.compile_commands {
+        Some(dir) => column![
+            text("Compilation database: your choice")
+                .size(ts::SMALL)
+                .color(theme::fg()),
+            lang_path(dir.clone()),
+        ]
+        .into(),
+        None => text("Compilation database: the one clangd finds beside the sources or in build/")
+            .size(ts::SMALL)
+            .color(theme::fg())
+            .into(),
+    };
+    let flags = match c.flags.is_empty() {
+        true => "No flags for files it does not cover".to_string(),
+        false => format!(
+            "For files it does not cover: {}",
+            crate::app::languages::join_args(&c.flags)
+        ),
+    };
+    col = col.push(lang_effect(vec![
+        database,
+        text(flags).size(ts::SMALL).color(theme::fg()).into(),
+    ]));
+    if let Some(note) = options.and_then(|o| project_sets_note(&o.project_sets)) {
+        col = col.push(note);
+    }
+    col = col.push(lang_pick(
+        "Automatic".into(),
+        lang_caption("clangd looks beside each file, and in build/".into()).into(),
+        c.compile_commands.is_none(),
+        choose_with(choices, |c| {
+            c.c.get_or_insert_default().compile_commands = None
+        }),
+    ));
+    let found = options.map(|o| o.databases.as_slice()).unwrap_or_default();
+    for dir in found {
+        col = col.push(lang_pick(
+            "compile_commands.json".into(),
+            lang_path(dir.clone()).into(),
+            c.compile_commands.as_deref() == Some(dir.as_str()),
+            choose_with(choices, |c| {
+                c.c.get_or_insert_default().compile_commands = Some(dir.clone())
+            }),
+        ));
+    }
+    let mut path_row = row![
+        lang_field(
+            app,
+            if remote {
+                "Folder holding compile_commands.json, on the remote host"
+            } else {
+                "Folder holding compile_commands.json"
+            },
+            F::CDatabase
+        ),
+        lang_button(
+            "Use",
+            (!app.proj.lang_drafts.c_database.trim().is_empty())
+                .then_some(Message::Languages(L::UseDraft(F::CDatabase)))
+        ),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if !remote {
+        path_row = path_row.push(lang_button(
+            "Browse…",
+            Some(Message::Languages(L::Browse(F::CDatabase))),
+        ));
+    }
+    col = col.push(path_row);
+    let mut flags_row = row![
+        lang_field(app, "Flags, e.g. -DDEBUG -Iinclude -std=c++20", F::CFlags),
+        lang_button(
+            "Use",
+            (!app.proj.lang_drafts.c_flags.trim().is_empty())
+                .then_some(Message::Languages(L::UseDraft(F::CFlags)))
+        ),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if !c.flags.is_empty() {
+        flags_row = flags_row.push(lang_button(
+            "Clear",
+            Some(choose_with(choices, |c| {
+                c.c.get_or_insert_default().flags.clear()
+            })),
+        ));
+    }
+    col.push(flags_row).into()
+}
+
+/// Where the toolchain `language`'s server is run from (Lean's `lake`,
+/// Dart's `dart`): the ones found, and clew's own lookup on `PATH`.
+fn toolchain_block<'a>(
+    app: &'a App,
+    language: &'static str,
+    found: &'a [clew_protocol::ToolchainCandidate],
+) -> Element<'a, Message> {
+    let choices = &app.proj.lang_choices;
+    let (heading, program) = match language {
+        "lean" => ("Lean: toolchain", "lake"),
+        _ => ("Dart: SDK", "dart"),
+    };
+    let chosen = choices.servers.as_ref().and_then(|s| s.get(language));
+    let mut col = column![lang_heading(heading)].spacing(6);
+    let effect: Vec<Element<'a, Message>> = match chosen {
+        Some(choice) if choice.args.is_none() => vec![
+            text("Your choice")
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .into(),
+            lang_path(choice.command.clone()).into(),
+        ],
+        Some(choice) => vec![
+            text("Your own server program (under Server programs)")
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .into(),
+            lang_path(program_line(choice)).into(),
+        ],
+        None => vec![
+            text(format!("The {program} found on the PATH"))
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .into(),
+        ],
+    };
+    col = col.push(lang_effect(effect));
+    let set = |command: Option<String>| {
+        choose_with(choices, |c| {
+            let servers = c.servers.get_or_insert_default();
+            match command {
+                Some(command) => {
+                    servers.insert(
+                        language.to_string(),
+                        clew_protocol::ServerChoice {
+                            command,
+                            args: None,
+                        },
+                    );
+                }
+                None => {
+                    servers.remove(language);
+                }
+            }
+        })
+    };
+    col = col.push(lang_pick(
+        "Automatic".into(),
+        lang_caption(format!("The {program} on the PATH")).into(),
+        chosen.is_none(),
+        set(None),
+    ));
+    for candidate in found {
+        let label = match candidate.project {
+            true => format!("{} — the project's", candidate.name),
+            false => candidate.name.clone(),
+        };
+        col = col.push(lang_pick(
+            label,
+            lang_path(candidate.command.clone()).into(),
+            chosen.is_some_and(|c| c.args.is_none() && c.command == candidate.command),
+            set(Some(candidate.command.clone())),
+        ));
+    }
+    if found.is_empty() {
+        col = col.push(lang_caption(format!(
+            "No other {program} was found; give one's path under Server programs."
+        )));
+    }
+    col.into()
+}
+
+/// The server programs the user chose, and the form to choose one — for a
+/// language clew serves (another build, another server) or one it does not.
+fn servers_block(app: &App) -> Element<'_, Message> {
+    use crate::{LangField as F, LanguagesMsg as L};
+    let choices = &app.proj.lang_choices;
+    let remote = app.connection.is_remote();
+    let drafts = &app.proj.lang_drafts;
+    let mut col = column![
+        lang_heading("Server programs"),
+        lang_caption(
+            "Run a program of your own as a language's server: another build, another \
+             server, or one for a language clew has none for. With no arguments given, it \
+             runs with the ones clew's server for the language takes. A server that builds \
+             the project still asks before it does."
+                .into(),
+        ),
+    ]
+    .spacing(6);
+    for (language, choice) in choices.servers.iter().flatten() {
+        let name = crate::highlight::lang_name(language).unwrap_or(language.as_str());
+        let remove = choose_with(choices, |c| {
+            c.servers.get_or_insert_default().remove(language);
+        });
+        col = col.push(
+            row![
+                text(name.to_string())
+                    .size(ts::SMALL)
+                    .color(theme::fg())
+                    .width(90),
+                lang_path(program_line(choice)).width(Fill),
+                lang_button(
+                    "Edit",
+                    Some(Message::Languages(L::ServerLanguage(language.clone())))
+                ),
+                lang_button("Reset", Some(remove)),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        );
+    }
+    let mut languages = app.proj.file_languages.clone();
+    languages.extend(app.proj.project_languages.iter().cloned());
+    languages.sort();
+    languages.dedup();
+    let ready = drafts.server_language.is_some();
+    let mut program_row = row![
+        pick_list(languages, drafts.server_language.clone(), |l: String| {
+            Message::Languages(L::ServerLanguage(l))
+        })
+        .placeholder("Language")
+        .text_size(ts::SMALL)
+        .padding([4, 6]),
+        lang_field(
+            app,
+            if remote {
+                "Program on the remote host: a path, or a name on its PATH"
+            } else {
+                "Program: a path, or a name on the PATH"
+            },
+            F::ServerCommand
+        ),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if !remote {
+        program_row = program_row.push(lang_button(
+            "Browse…",
+            Some(Message::Languages(L::Browse(F::ServerCommand))),
+        ));
+    }
+    col = col.push(program_row);
+    col.push(
+        row![
+            lang_field(
+                app,
+                "Its arguments (blank: clew's for the language)",
+                F::ServerArgs
+            ),
+            lang_button(
+                "Use",
+                (ready && !drafts.server_command.trim().is_empty())
+                    .then_some(Message::Languages(L::UseDraft(F::ServerCommand)))
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .into()
 }
 
 /// The settings' MCP servers and ACP agents: what is configured, how each

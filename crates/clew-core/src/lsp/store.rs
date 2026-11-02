@@ -319,6 +319,18 @@ impl Identity {
 
 /// Decide how to obtain the binary for `server` without touching the network.
 pub fn locate(server: &EffectiveServer) -> Located {
+    // The program the user chose: run as found, on this host. Theirs, kept
+    // outside the project, so there is nothing to approve and nothing of the
+    // store's to install.
+    if let Some(program) = &server.chosen {
+        return match find_program(program) {
+            Ok(path) => Located::Ready(path),
+            Err(why) => Located::Unsupported(format!(
+                "the {} server program you chose cannot be run: {why}",
+                server.language
+            )),
+        };
+    }
     // Escape hatch: a custom command bypasses the store — and goes through
     // the approval gate instead.
     if let Some(cmd) = &server.command {
@@ -385,6 +397,38 @@ pub fn locate(server: &EffectiveServer) -> Located {
         Provision::Download(download) => Located::NeedsDownload { download, dest_dir },
         Provision::Install(install) => Located::NeedsInstall { install, dest_dir },
         Provision::Toolchain { .. } => unreachable!("returned above"),
+    }
+}
+
+/// The program a user named (a server program, a toolchain's binary), on
+/// this host: an absolute path, one under the home (`~/…`), or a bare name
+/// looked up on `PATH` ([`find_on_path_unresolved`]) — kept as found, since
+/// a toolchain manager's shim dispatches on the name it was run by. `Err`
+/// says why it cannot be run: a relative path (relative to what, when the
+/// server's working directory is the project?), or no executable file there.
+pub fn find_program(program: &str) -> Result<PathBuf, String> {
+    let program = program.trim();
+    if program.is_empty() {
+        return Err("no program was named".into());
+    }
+    if !program.contains(['/', '\\']) {
+        return find_on_path_unresolved(program)
+            .ok_or_else(|| format!("{program:?} is not on PATH"));
+    }
+    let path = match program.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+            .ok_or("there is no home directory to find ~ in")?
+            .join(rest),
+        None => PathBuf::from(program),
+    };
+    if !path.is_absolute() {
+        return Err(format!("{program:?} is not a full path"));
+    }
+    match is_executable_file(&path) {
+        true => Ok(path),
+        false => Err(format!("{} is not an executable file", path.display())),
     }
 }
 
@@ -1173,6 +1217,7 @@ mod tests {
             args: Vec::new(),
             command: Some(PathBuf::from("tools/ra")),
             init_options: None,
+            chosen: None,
         };
         assert!(matches!(
             locate(&server),
@@ -1638,6 +1683,7 @@ mod tests {
             args: Vec::new(),
             command: None,
             init_options: None,
+            chosen: None,
         };
         match locate(&server) {
             Located::Unsupported(message) => {
@@ -1899,6 +1945,38 @@ mod tests {
         assert!(a.is_dir() && b.is_dir());
         assert_eq!(a.parent(), Some(parent.path()));
         assert_eq!(b.parent(), Some(parent.path()));
+    }
+
+    /// A server program the user chose is run as found when it is an
+    /// executable file; one that is not, or a path relative to nothing,
+    /// says why it cannot run — nothing of the store's is ever offered for it.
+    #[test]
+    #[cfg(unix)]
+    fn a_chosen_program_is_run_as_found_or_said_why_not() {
+        let dir = crate::testutil::TempDir::new("store-chosen");
+        let program = dir.join("bin/my-server");
+        super::testing::script(&program, "");
+        let link = dir.join("shim");
+        std::os::unix::fs::symlink(&program, &link).unwrap();
+        let mut server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("rust")
+            .unwrap();
+        let located = |server: &EffectiveServer| match locate(server) {
+            Located::Ready(path) => Ok(path),
+            Located::Unsupported(why) => Err(why),
+            other => panic!("a chosen program is never installed: {other:?}"),
+        };
+        server.chosen = Some(program.to_string_lossy().into_owned());
+        assert_eq!(located(&server), Ok(program.clone()));
+        // A shim stays the shim: it dispatches on the name it was run by.
+        server.chosen = Some(link.to_string_lossy().into_owned());
+        assert_eq!(located(&server), Ok(link));
+        server.chosen = Some(dir.join("bin/missing").to_string_lossy().into_owned());
+        let why = located(&server).unwrap_err();
+        assert!(why.contains("not an executable file"), "{why}");
+        server.chosen = Some("tools/my-server".into());
+        let why = located(&server).unwrap_err();
+        assert!(why.contains("not a full path"), "{why}");
     }
 }
 

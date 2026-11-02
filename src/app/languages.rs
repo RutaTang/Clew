@@ -1,19 +1,22 @@
 //! The settings' languages of the open project: what its language servers
-//! are given, and the Python interpreter the user picks for it.
+//! are given, and what the user chooses for them — the Python interpreter,
+//! the Cargo features and target, the Go build tags and platform, the C/C++
+//! compilation database and flags, a toolchain or a server program of their
+//! own.
 //!
 //! The choices are the user's, for this project on this machine
 //! (`clew_core::lsp::choices`, in clew's data directory — never the
 //! project's `.clew/`, which is the team's): read when the project opens,
 //! before any language server starts (`App::ensure_lsp` waits for them),
 //! sent with every server and debugger set up for it, and saved the moment
-//! one is made. The Python interpreters to pick from are found where the
-//! project is — this machine, or the remote host it lives on — by looking,
-//! never by running one.
+//! one is made. What there is to choose from is found where the project is —
+//! this machine, or the remote host it lives on — by reading files, never by
+//! running anything (`clew_core::lsp::langopts`).
 
 use crate::app::prelude::*;
 use crate::*;
 
-use clew_protocol::LanguageChoices;
+use clew_protocol::{CChoices, GoChoices, LanguageChoices, RustChoices, ServerChoice};
 
 impl App {
     /// Read the user's choices for the open project's languages, off the UI
@@ -41,6 +44,15 @@ impl App {
         )
     }
 
+    /// The server `language` runs in the open project: the project's
+    /// `lsp.toml` over clew's defaults, with a server program the user chose
+    /// over both (`ProjectLspConfig::resolve_with`).
+    pub(crate) fn effective_server(&self, language: &str) -> Option<lsp::config::EffectiveServer> {
+        self.proj
+            .lsp_config
+            .resolve_with(language, &self.proj.lang_choices)
+    }
+
     pub(crate) fn update_languages(&mut self, message: LanguagesMsg) -> Task<Message> {
         match message {
             LanguagesMsg::ChoicesLoaded { choices, .. } => {
@@ -54,62 +66,163 @@ impl App {
                 }
                 Task::batch(tasks)
             }
-            LanguagesMsg::Refresh => self.refresh_python_envs(),
+            LanguagesMsg::Refresh => self.refresh_language_options(),
             LanguagesMsg::Listed { result, .. } => {
-                self.proj.python_envs = Some(result);
+                self.proj.lang_options = Some(result);
                 Task::none()
             }
-            LanguagesMsg::ChoosePython(python) => self.choose_python(python),
-            LanguagesMsg::PathDraft(text) => {
-                self.proj.python_path_draft = text;
+            LanguagesMsg::ChoosePython(python) => {
+                let mut next = self.proj.lang_choices.clone();
+                next.python = python;
+                self.proj.lang_drafts.python_path.clear();
+                self.choose(next)
+            }
+            LanguagesMsg::Choose(next) => self.choose(*next),
+            LanguagesMsg::Draft(field, text) => {
+                *self.proj.lang_drafts.field_mut(field) = text;
                 Task::none()
             }
-            LanguagesMsg::UsePath => {
-                let path = self.proj.python_path_draft.trim().to_string();
-                if path.is_empty() {
-                    return Task::none();
-                }
-                self.choose_python(Some(path))
+            LanguagesMsg::UseDraft(field) => self.use_draft(field),
+            LanguagesMsg::ServerLanguage(language) => {
+                // The program already chosen for it, to edit.
+                let chosen = self
+                    .proj
+                    .lang_choices
+                    .servers
+                    .as_ref()
+                    .and_then(|s| s.get(&language))
+                    .cloned();
+                let drafts = &mut self.proj.lang_drafts;
+                drafts.server_command = chosen
+                    .as_ref()
+                    .map(|c| c.command.clone())
+                    .unwrap_or_default();
+                drafts.server_args = chosen
+                    .and_then(|c| c.args)
+                    .map(|args| join_args(&args))
+                    .unwrap_or_default();
+                drafts.server_language = Some(language);
+                Task::none()
             }
-            LanguagesMsg::Browse => {
+            LanguagesMsg::Browse(field) => {
                 // The dialog shows this machine's files: a remote project's
-                // interpreter is a path on its host, typed or picked from
-                // the list.
+                // paths are on its host, typed or picked from the lists.
                 if self.connection.is_remote() || self.proj.project.is_none() {
                     return Task::none();
                 }
                 let stamp = self.stamp();
-                crate::app::tasks::pick_file(self.main_window).map(move |path| {
+                let picked = match field {
+                    LangField::CDatabase => crate::app::tasks::pick_folder(self.main_window),
+                    _ => crate::app::tasks::pick_file(self.main_window),
+                };
+                picked.map(move |path| {
                     Message::Languages(LanguagesMsg::Browsed {
                         stamp: stamp.clone(),
+                        field,
                         path,
                     })
                 })
             }
-            LanguagesMsg::Browsed { path, .. } => match path {
-                Some(path) => self.choose_python(Some(path.to_string_lossy().into_owned())),
+            LanguagesMsg::Browsed { field, path, .. } => match path {
+                Some(path) => {
+                    *self.proj.lang_drafts.field_mut(field) = path.to_string_lossy().into_owned();
+                    match field {
+                        // The program also wants its language and arguments:
+                        // it waits in the field for "Use".
+                        LangField::ServerCommand | LangField::ServerArgs => Task::none(),
+                        _ => self.use_draft(field),
+                    }
+                }
                 None => Task::none(),
             },
             LanguagesMsg::Saved { result, .. } => {
                 if let Err(e) = result {
-                    self.status = format!("The Python interpreter was not saved: {e}");
+                    self.status = format!("The language settings were not saved: {e}");
                 }
                 Task::none()
             }
         }
     }
 
-    /// List the open project's Python interpreters and the one in effect,
+    /// Use what is typed in `field`: the choice it makes, made.
+    fn use_draft(&mut self, field: LangField) -> Task<Message> {
+        let text = self.proj.lang_drafts.field(field).trim().to_string();
+        let mut next = self.proj.lang_choices.clone();
+        match field {
+            LangField::PythonPath => {
+                if text.is_empty() {
+                    return Task::none();
+                }
+                next.python = Some(text);
+            }
+            LangField::RustTarget => {
+                let rust = next.rust.get_or_insert_with(RustChoices::default);
+                rust.target = (!text.is_empty()).then_some(text);
+            }
+            LangField::GoTag => {
+                let go = next.go.get_or_insert_with(GoChoices::default);
+                for tag in text
+                    .split([',', ' '])
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    if !lsp::langenv::is_go_tag(tag) {
+                        self.status =
+                            format!("{tag:?} is not a build tag: letters, digits, _ and . only");
+                        return Task::none();
+                    }
+                    if !go.tags.iter().any(|t| t == tag) {
+                        go.tags.push(tag.to_string());
+                    }
+                }
+            }
+            LangField::CDatabase => {
+                let c = next.c.get_or_insert_with(CChoices::default);
+                c.compile_commands = (!text.is_empty()).then_some(text);
+            }
+            LangField::CFlags => {
+                let c = next.c.get_or_insert_with(CChoices::default);
+                c.flags = split_args(&text);
+            }
+            LangField::ServerCommand | LangField::ServerArgs => {
+                let Some(language) = self.proj.lang_drafts.server_language.clone() else {
+                    self.status = "Pick the language the server program is for".into();
+                    return Task::none();
+                };
+                let servers = next.servers.get_or_insert_with(Default::default);
+                let command = self.proj.lang_drafts.server_command.trim().to_string();
+                if command.is_empty() {
+                    servers.remove(&language);
+                } else {
+                    let args = self.proj.lang_drafts.server_args.trim();
+                    servers.insert(
+                        language,
+                        ServerChoice {
+                            command,
+                            args: (!args.is_empty()).then(|| split_args(args)),
+                        },
+                    );
+                }
+                self.proj.lang_drafts.server_command.clear();
+                self.proj.lang_drafts.server_args.clear();
+                self.proj.lang_drafts.server_language = None;
+                return self.choose(next);
+            }
+        }
+        self.proj.lang_drafts.field_mut(field).clear();
+        self.choose(next)
+    }
+
+    /// List what there is to choose from for the open project's languages,
     /// where the project is: here, off the UI thread, or on its remote host.
     /// Lands as `LanguagesMsg::Listed`.
-    pub(crate) fn refresh_python_envs(&mut self) -> Task<Message> {
+    pub(crate) fn refresh_language_options(&mut self) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        // Only for a project the view shows a Python section for.
-        if !self.proj.project_languages.iter().any(|l| l == "python")
-            && self.proj.lang_choices.python.is_none()
-        {
+        let languages = self.proj.project_languages.clone();
+        // Nothing the view would show a list for.
+        if languages.is_empty() && self.proj.lang_choices.python.is_none() {
             return Task::none();
         }
         let choices = self.proj.lang_choices.clone();
@@ -125,14 +238,12 @@ impl App {
             return Task::perform(
                 async move {
                     match ai
-                        .request(clew_protocol::Request::PythonEnvironments { choices })
+                        .request(clew_protocol::Request::LanguageOptions { languages, choices })
                         .await?
                     {
-                        clew_protocol::Event::PythonEnvironments { environments, .. } => {
-                            Ok(environments)
-                        }
+                        clew_protocol::Event::LanguageOptions { options, .. } => Ok(options),
                         other => Err(format!(
-                            "unexpected reply to PythonEnvironments: {}",
+                            "unexpected reply to LanguageOptions: {}",
                             crate::app::rpc::event_name(&other)
                         )),
                     }
@@ -140,45 +251,44 @@ impl App {
                 listed,
             );
         }
-        // What the project's `lsp.toml` names, approved or not: unapproved,
-        // it is still what the server starts with once the user allows it.
-        let lsp_toml = self
-            .proj
-            .lsp_config
-            .resolve("python")
-            .and_then(|server| server.init_options);
+        // The project's `lsp.toml` as loaded with its state, approved or
+        // not: unapproved, it is still what the servers start with once the
+        // user allows it — and what a choice wins over.
+        let config = self.proj.lsp_config.clone();
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    lsp::langenv::python_environments(&root, &choices, lsp_toml.as_ref())
+                    lsp::langopts::language_options(&root, &languages, &choices, Some(&config))
                 })
                 .await
-                .map_err(|_| "listing the Python environments failed".to_string())
+                .map_err(|_| "listing the language options failed".to_string())
             },
             listed,
         )
     }
 
-    /// Make `python` the open project's interpreter (`None`: let clew find
-    /// one): saved for the project, off the UI thread, and taken by its
-    /// Python server — restarted now if one is running — and by the next
-    /// debug session; the Settings view lists what is in effect again.
-    fn choose_python(&mut self, python: Option<String>) -> Task<Message> {
+    /// Make `next` the open project's choices: saved for the project, off
+    /// the UI thread, and taken by each language's server whose choices
+    /// changed — restarted now if one is running — and by the next debug
+    /// session. A Python choice changes what is in effect, so the Settings
+    /// view lists it again.
+    fn choose(&mut self, next: LanguageChoices) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
-        let choices = LanguageChoices { python };
-        if choices == self.proj.lang_choices {
+        let next = normalized(next);
+        if next == self.proj.lang_choices {
             return Task::none();
         }
-        self.proj.lang_choices = choices.clone();
-        self.proj.python_path_draft.clear();
+        let changed = changed_languages(&self.proj.lang_choices, &next);
+        let python_changed = self.proj.lang_choices.python != next.python;
+        self.proj.lang_choices = next.clone();
         let host = self.connection.approval_host().map(str::to_string);
         let stamp = self.stamp();
-        let save = Task::perform(
+        let mut tasks = vec![Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    lsp::choices::save(host.as_deref(), &root, &choices)
+                    lsp::choices::save(host.as_deref(), &root, &next)
                 })
                 .await
                 .unwrap_or_else(|_| Err("the save failed".to_string()))
@@ -189,19 +299,184 @@ impl App {
                     result,
                 })
             },
-        );
-        let restart = if self.proj.link.lsp.contains_key("python") {
-            self.update_lsp(LspMsg::Restart("python".into()))
-        } else {
-            Task::none()
-        };
+        )];
+        for language in changed {
+            if self.proj.link.lsp.contains_key(&language) {
+                tasks.push(self.update_lsp(LspMsg::Restart(language)));
+            }
+        }
         // What is in effect now, for the view the choice was made in (it is
         // listed afresh whenever Settings opens).
-        let listed = if self.settings.open {
-            self.refresh_python_envs()
-        } else {
-            Task::none()
+        if python_changed && self.settings.open {
+            tasks.push(self.refresh_language_options());
+        }
+        Task::batch(tasks)
+    }
+}
+
+/// `choices` with a language's choices that choose nothing taken for none,
+/// so "nothing chosen" has one spelling — the one saved as no entry at all.
+fn normalized(mut choices: LanguageChoices) -> LanguageChoices {
+    if choices.rust.as_ref() == Some(&RustChoices::default()) {
+        choices.rust = None;
+    }
+    if choices.go.as_ref() == Some(&GoChoices::default()) {
+        choices.go = None;
+    }
+    if choices.c.as_ref() == Some(&CChoices::default()) {
+        choices.c = None;
+    }
+    if choices.servers.as_ref().is_some_and(|s| s.is_empty()) {
+        choices.servers = None;
+    }
+    choices
+}
+
+/// The languages whose servers are set up differently under `next` than
+/// under `before`: each is restarted.
+fn changed_languages(before: &LanguageChoices, next: &LanguageChoices) -> Vec<String> {
+    let mut changed = Vec::new();
+    if before.python != next.python {
+        changed.push("python".to_string());
+    }
+    if before.rust != next.rust {
+        changed.push("rust".to_string());
+    }
+    if before.go != next.go {
+        changed.push("go".to_string());
+    }
+    if before.c != next.c {
+        changed.extend(["c".to_string(), "cpp".to_string()]);
+    }
+    let none = Default::default();
+    let (a, b) = (
+        before.servers.as_ref().unwrap_or(&none),
+        next.servers.as_ref().unwrap_or(&none),
+    );
+    for language in a.keys().chain(b.keys()) {
+        if a.get(language) != b.get(language) && !changed.contains(language) {
+            changed.push(language.clone());
+        }
+    }
+    changed
+}
+
+/// Arguments typed on one line: split at spaces, a quoted run (`'…'` or
+/// `"…"`) kept whole, a backslash keeping the character after it.
+pub(crate) fn split_args(line: &str) -> Vec<String> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut started = false;
+    let mut quote: Option<char> = None;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, c) if c.is_whitespace() => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (Some(q), c) if c == q => quote = None,
+            (_, '\\') if quote != Some('\'') => {
+                if let Some(next) = chars.next() {
+                    current.push(next);
+                }
+                started = true;
+            }
+            (_, c) => {
+                current.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        args.push(current);
+    }
+    args
+}
+
+/// `args` on one line, as [`split_args`] reads them back: one with a space,
+/// a quote or a backslash in it quoted.
+pub(crate) fn join_args(args: &[String]) -> String {
+    args.iter()
+        .map(|a| {
+            if !a.is_empty() && !a.contains([' ', '\t', '\'', '"', '\\']) {
+                a.clone()
+            } else {
+                format!("\"{}\"", a.replace('\\', "\\\\").replace('"', "\\\""))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Typed arguments split as a shell would split simple ones, and a list
+    /// shown on one line reads back as itself.
+    #[test]
+    fn typed_arguments_split_and_join_back() {
+        assert_eq!(
+            split_args(r#"-DNAME="a b" -I'inc dir'  -std=c++20 \"x"#),
+            ["-DNAME=a b", "-Iinc dir", "-std=c++20", "\"x"]
+        );
+        assert_eq!(split_args("  "), Vec::<String>::new());
+        assert_eq!(split_args(r#""""#), [""]);
+        for args in [
+            vec!["--stdio".to_string()],
+            vec!["a b".into(), "c\"d".into(), "e\\f".into(), "".into()],
+        ] {
+            assert_eq!(split_args(&join_args(&args)), args);
+        }
+    }
+
+    /// Only the languages whose servers a change sets up differently are
+    /// restarted — C's choices set up both of clangd's languages.
+    #[test]
+    fn a_change_restarts_only_the_languages_it_concerns() {
+        let before = LanguageChoices {
+            rust: Some(RustChoices {
+                all_features: true,
+                ..Default::default()
+            }),
+            ..Default::default()
         };
-        Task::batch([save, restart, listed])
+        let mut next = before.clone();
+        next.c = Some(CChoices {
+            flags: vec!["-DX".into()],
+            ..Default::default()
+        });
+        next.servers = Some(
+            [(
+                "lean".to_string(),
+                ServerChoice {
+                    command: "/e/lake".into(),
+                    args: None,
+                },
+            )]
+            .into(),
+        );
+        assert_eq!(changed_languages(&before, &next), ["c", "cpp", "lean"]);
+        assert!(changed_languages(&next, &next).is_empty());
+    }
+
+    /// A language's choices that choose nothing are no choices at all.
+    #[test]
+    fn choices_of_nothing_are_none() {
+        let empty = LanguageChoices {
+            rust: Some(RustChoices::default()),
+            go: Some(GoChoices::default()),
+            c: Some(CChoices::default()),
+            servers: Some(Default::default()),
+            ..Default::default()
+        };
+        assert_eq!(normalized(empty), LanguageChoices::default());
     }
 }

@@ -211,7 +211,7 @@ fn request_index(r: &Request) -> usize {
         Request::AgentToolResult { .. } => 26,
         Request::ListDir { .. } => 27,
         Request::BuildDocs => 28,
-        Request::PythonEnvironments { .. } => 29,
+        Request::LanguageOptions { .. } => 29,
     }
 }
 
@@ -249,7 +249,7 @@ fn event_index(e: &Event) -> usize {
         Event::Status { .. } => 29,
         Event::LspResolved { .. } => 30,
         Event::Error { .. } => 31,
-        Event::PythonEnvironments { .. } => 32,
+        Event::LanguageOptions { .. } => 32,
     }
 }
 
@@ -276,11 +276,91 @@ fn python_source_index(s: &PythonSource) -> usize {
     }
 }
 
-/// The user's choices: one naming an interpreter, one naming none.
+/// The user's choices, one of every kind (the default is the other sample:
+/// none).
 fn choices() -> LanguageChoices {
     LanguageChoices {
         python: Some("/p/.venv/bin/python".into()),
+        rust: Some(RustChoices {
+            all_features: false,
+            features: vec!["serde".into(), "cli/color".into()],
+            no_default_features: true,
+            target: Some("wasm32-unknown-unknown".into()),
+        }),
+        go: Some(GoChoices {
+            tags: vec!["integration".into()],
+            goos: Some("windows".into()),
+            goarch: Some("arm64".into()),
+        }),
+        c: Some(CChoices {
+            compile_commands: Some("/p/build".into()),
+            flags: vec!["-DDEBUG".into(), "-Iinclude".into()],
+        }),
+        servers: Some(BTreeMap::from([
+            (
+                "lean".to_string(),
+                ServerChoice {
+                    command: "/home/u/.elan/bin/lake".into(),
+                    args: None,
+                },
+            ),
+            (
+                "python".to_string(),
+                ServerChoice {
+                    command: "pylsp".into(),
+                    args: Some(vec!["--check-parent-process".into()]),
+                },
+            ),
+        ])),
     }
+}
+
+/// What there is to choose from for a project of every language, and for
+/// one of none.
+fn language_options() -> Vec<LanguageOptions> {
+    let pythons = python_environments();
+    let mut all: Vec<LanguageOptions> = pythons
+        .into_iter()
+        .map(|python| LanguageOptions {
+            python: Some(python),
+            rust: Some(RustOptions {
+                packages: vec![
+                    CargoPackage {
+                        name: "app".into(),
+                        root: true,
+                        features: vec!["serde".into(), "tls".into()],
+                        default: vec!["tls".into()],
+                    },
+                    CargoPackage {
+                        name: "cli".into(),
+                        root: false,
+                        features: vec!["color".into()],
+                        default: vec![],
+                    },
+                ],
+                targets: vec!["wasm32-unknown-unknown".into()],
+                project_sets: vec!["cargo.features".into()],
+            }),
+            go: Some(GoOptions {
+                tags: vec!["e2e".into(), "integration".into()],
+                project_sets: vec![],
+            }),
+            c: Some(COptions {
+                databases: vec!["/p".into(), "/p/build".into()],
+                project_sets: vec!["fallbackFlags".into()],
+            }),
+            toolchains: BTreeMap::from([(
+                "lean".to_string(),
+                vec![ToolchainCandidate {
+                    command: "/home/u/.elan/bin/lake".into(),
+                    name: "elan".into(),
+                    project: true,
+                }],
+            )]),
+        })
+        .collect();
+    all.push(LanguageOptions::default());
+    all
 }
 
 /// A project's interpreters, one of every kind, and what is in effect under
@@ -849,6 +929,12 @@ fn request_samples() -> Vec<Request> {
         Request::SpawnLsp {
             proc: 1,
             language: "rust".into(),
+            choices: LanguageChoices::default(),
+        },
+        Request::SpawnLsp {
+            proc: 2,
+            language: "lean".into(),
+            choices: choices(),
         },
         Request::SpawnAdapter {
             proc: 1,
@@ -928,6 +1014,7 @@ fn request_samples() -> Vec<Request> {
                 description: "d".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
             }],
+            choices: choices(),
         },
         Request::AgentToolResult {
             stream: 1,
@@ -939,10 +1026,14 @@ fn request_samples() -> Vec<Request> {
             path: Some("~".into()),
         },
         Request::BuildDocs,
-        Request::PythonEnvironments {
+        Request::LanguageOptions {
+            languages: vec![],
             choices: LanguageChoices::default(),
         },
-        Request::PythonEnvironments { choices: choices() },
+        Request::LanguageOptions {
+            languages: vec!["python".into(), "rust".into(), "lean".into()],
+            choices: choices(),
+        },
     ]);
     samples
 }
@@ -1139,12 +1230,14 @@ fn reply_samples() -> Vec<Event> {
                 resolution,
             }),
     );
-    samples.extend(python_environments().into_iter().map(|environments| {
-        Event::PythonEnvironments {
-            root: "/p".into(),
-            environments,
-        }
-    }));
+    samples.extend(
+        language_options()
+            .into_iter()
+            .map(|options| Event::LanguageOptions {
+                root: "/p".into(),
+                options,
+            }),
+    );
     samples.extend(
         error_codes()
             .into_iter()
@@ -1301,7 +1394,7 @@ fn every_variant_has_a_sample() {
     let pythons: Vec<&PythonEnvironments> = events
         .iter()
         .filter_map(|e| match e {
-            Event::PythonEnvironments { environments, .. } => Some(environments),
+            Event::LanguageOptions { options, .. } => options.python.as_ref(),
             _ => None,
         })
         .collect();
@@ -1619,27 +1712,93 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",
+        "Reply.event.LanguageOptions.options.c",
+        "Reply.event.LanguageOptions.options.go",
+        "Reply.event.LanguageOptions.options.python",
+        "Reply.event.LanguageOptions.options.python.candidates[].version",
+        "Reply.event.LanguageOptions.options.python.in_effect.interpreter",
+        "Reply.event.LanguageOptions.options.python.in_effect.unusable_choice",
+        "Reply.event.LanguageOptions.options.rust",
         "Reply.event.LspResolved.resolution.Command.init_options",
         "Reply.event.LspResolved.resolution.Ready.init_options",
         "Reply.event.LspResolved.resolution.Ready.withheld",
         "Reply.event.NotebookContent.cells[].execution_count",
-        "Reply.event.PythonEnvironments.environments.candidates[].version",
-        "Reply.event.PythonEnvironments.environments.in_effect.interpreter",
-        "Reply.event.PythonEnvironments.environments.in_effect.unusable_choice",
         "Reply.event.Ready.fingerprint",
         "Reply.event.SearchResults.error",
         "Reply.event.StateContent.text",
         "Reply.event.StateEdited.text",
         "Reply.event.Stats.report.skipped",
+        "request.AgentAsk.choices.c",
+        "request.AgentAsk.choices.c.compile_commands",
+        "request.AgentAsk.choices.go",
+        "request.AgentAsk.choices.go.goarch",
+        "request.AgentAsk.choices.go.goos",
+        "request.AgentAsk.choices.python",
+        "request.AgentAsk.choices.rust",
+        "request.AgentAsk.choices.rust.target",
+        "request.AgentAsk.choices.servers",
+        "request.AgentAsk.choices.servers.lean.args",
+        "request.AgentAsk.choices.servers.python.args",
         "request.EditState.merge.edit.Patch.insert",
         "request.Hello.fingerprint",
+        "request.LanguageOptions.choices.c",
+        "request.LanguageOptions.choices.c.compile_commands",
+        "request.LanguageOptions.choices.go",
+        "request.LanguageOptions.choices.go.goarch",
+        "request.LanguageOptions.choices.go.goos",
+        "request.LanguageOptions.choices.python",
+        "request.LanguageOptions.choices.rust",
+        "request.LanguageOptions.choices.rust.target",
+        "request.LanguageOptions.choices.servers",
+        "request.LanguageOptions.choices.servers.lean.args",
+        "request.LanguageOptions.choices.servers.python.args",
         "request.ListDir.path",
+        "request.LspInstall.choices.c",
+        "request.LspInstall.choices.c.compile_commands",
+        "request.LspInstall.choices.go",
+        "request.LspInstall.choices.go.goarch",
+        "request.LspInstall.choices.go.goos",
         "request.LspInstall.choices.python",
+        "request.LspInstall.choices.rust",
+        "request.LspInstall.choices.rust.target",
+        "request.LspInstall.choices.servers",
+        "request.LspInstall.choices.servers.lean.args",
+        "request.LspInstall.choices.servers.python.args",
+        "request.LspResolve.choices.c",
+        "request.LspResolve.choices.c.compile_commands",
+        "request.LspResolve.choices.go",
+        "request.LspResolve.choices.go.goarch",
+        "request.LspResolve.choices.go.goos",
         "request.LspResolve.choices.python",
-        "request.PythonEnvironments.choices.python",
+        "request.LspResolve.choices.rust",
+        "request.LspResolve.choices.rust.target",
+        "request.LspResolve.choices.servers",
+        "request.LspResolve.choices.servers.lean.args",
+        "request.LspResolve.choices.servers.python.args",
         "request.SetAiConfig.chat",
         "request.SetAiConfig.embed",
+        "request.SpawnAdapter.choices.c",
+        "request.SpawnAdapter.choices.c.compile_commands",
+        "request.SpawnAdapter.choices.go",
+        "request.SpawnAdapter.choices.go.goarch",
+        "request.SpawnAdapter.choices.go.goos",
         "request.SpawnAdapter.choices.python",
+        "request.SpawnAdapter.choices.rust",
+        "request.SpawnAdapter.choices.rust.target",
+        "request.SpawnAdapter.choices.servers",
+        "request.SpawnAdapter.choices.servers.lean.args",
+        "request.SpawnAdapter.choices.servers.python.args",
+        "request.SpawnLsp.choices.c",
+        "request.SpawnLsp.choices.c.compile_commands",
+        "request.SpawnLsp.choices.go",
+        "request.SpawnLsp.choices.go.goarch",
+        "request.SpawnLsp.choices.go.goos",
+        "request.SpawnLsp.choices.python",
+        "request.SpawnLsp.choices.rust",
+        "request.SpawnLsp.choices.rust.target",
+        "request.SpawnLsp.choices.servers",
+        "request.SpawnLsp.choices.servers.lean.args",
+        "request.SpawnLsp.choices.servers.python.args",
         "request.SpawnProcess.cwd",
         "request.WriteState.text",
     ];

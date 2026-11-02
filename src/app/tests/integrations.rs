@@ -92,6 +92,9 @@ fn tool_result(
 fn an_mcp_call_waits_for_approval_then_its_result_goes_to_the_turn() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut app = scanned_app("mcp-approve");
+    // The project's language choices go with the turn: its language
+    // servers are set up as the editor's are.
+    app.proj.lang_choices.python = Some("/envs/app/bin/python".into());
     let mut rx = attach_server(&mut app);
     let _pump = app.start_agent_turn(
         "why?".into(),
@@ -99,12 +102,13 @@ fn an_mcp_call_waits_for_approval_then_its_result_goes_to_the_turn() {
         shout_tools(&rt, mcp::Approve::Ask),
     );
     let stream = app.proj.link.agent_stream.expect("an agent turn is open");
-    let asked = std::iter::from_fn(|| rx.try_recv().ok())
+    let (asked, choices) = std::iter::from_fn(|| rx.try_recv().ok())
         .find_map(|m| match m.request {
-            clew_protocol::Request::AgentAsk { tools, .. } => Some(tools),
+            clew_protocol::Request::AgentAsk { tools, choices, .. } => Some((tools, choices)),
             _ => None,
         })
         .expect("the turn was asked");
+    assert_eq!(choices, app.proj.lang_choices);
     assert_eq!(
         asked[0].name, "mcp__shout__shout",
         "the turn offers the tool"
