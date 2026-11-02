@@ -1550,6 +1550,7 @@ mod tests {
             &dir,
             &dir,
             &Default::default(),
+            None,
         ) {
             Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
             other => panic!("{other:?}"),

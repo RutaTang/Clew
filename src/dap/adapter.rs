@@ -56,6 +56,12 @@ pub enum Lang {
     Ruby,
     /// C# and the rest of .NET via netcoredbg.
     CSharp,
+    /// PHP via Xdebug, through clew-server's own adapter.
+    Php,
+    /// Erlang via OTP's interpreter, through clew-server's own adapter.
+    Erlang,
+    /// Haskell via GHCi's debugger, through clew-server's own adapter.
+    Haskell,
 }
 
 impl Lang {
@@ -69,6 +75,9 @@ impl Lang {
                 }
                 "ruby" | "rdbg" => Some(Lang::Ruby),
                 "coreclr" | "netcoredbg" | "csharp" | "cs" | "dotnet" => Some(Lang::CSharp),
+                "php" | "xdebug" => Some(Lang::Php),
+                "erlang" | "erl" => Some(Lang::Erlang),
+                "haskell" | "ghc" | "ghci" | "hs" => Some(Lang::Haskell),
                 "python" | "debugpy" => Some(Lang::Python),
                 "go" | "delve" | "dlv" => Some(Lang::Go),
                 "dart" | "flutter" => Some(Lang::Dart),
@@ -87,6 +96,9 @@ impl Lang {
             Some("go") => Some(Lang::Go),
             Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") => Some(Lang::Node),
             Some("rb") => Some(Lang::Ruby),
+            Some("php") => Some(Lang::Php),
+            Some("erl") => Some(Lang::Erlang),
+            Some("hs" | "lhs") => Some(Lang::Haskell),
             // A .NET assembly: what netcoredbg runs.
             Some("dll") => Some(Lang::CSharp),
             None => Some(Lang::Native),
@@ -103,6 +115,9 @@ impl Lang {
             Lang::Node => "Node (js-debug)",
             Lang::Ruby => "Ruby (rdbg)",
             Lang::CSharp => "C# (netcoredbg)",
+            Lang::Php => "PHP (Xdebug)",
+            Lang::Erlang => "Erlang (OTP interpreter)",
+            Lang::Haskell => "Haskell (GHCi)",
         }
     }
 
@@ -117,6 +132,9 @@ impl Lang {
             Lang::Node => "node",
             Lang::Ruby => "ruby",
             Lang::CSharp => "csharp",
+            Lang::Php => "php",
+            Lang::Erlang => "erlang",
+            Lang::Haskell => "haskell",
         }
     }
 }
@@ -138,8 +156,18 @@ pub fn resolve(
     choices: &clew_protocol::LanguageChoices,
 ) -> Result<Resolved, String> {
     let program = program.to_string_lossy();
+    // clew-server serves clew's own adapters (PHP's).
+    let server = crate::backend::server::server_bin_path();
     Ok(
-        match debugadapter::resolve(lang.slug(), &program, args, root, cwd, choices)? {
+        match debugadapter::resolve(
+            lang.slug(),
+            &program,
+            args,
+            root,
+            cwd,
+            choices,
+            server.as_deref(),
+        )? {
             Resolution::Ready(spec) => Resolved::Ready(Adapter {
                 command: spec.command,
                 args: spec.args,
@@ -194,6 +222,9 @@ mod tests {
             ("coreclr", Lang::CSharp),
             ("netcoredbg", Lang::CSharp),
             ("zig", Lang::Native),
+            ("xdebug", Lang::Php),
+            ("ghci", Lang::Haskell),
+            ("erlang", Lang::Erlang),
         ] {
             assert_eq!(
                 Lang::detect(Some(hint), Path::new("x")),
@@ -201,6 +232,26 @@ mod tests {
                 "{hint}"
             );
         }
+        assert_eq!(
+            Lang::detect(None, Path::new("public/index.php")),
+            Some(Lang::Php)
+        );
+        assert_eq!(
+            (Lang::Php.slug(), Lang::Php.label()),
+            ("php", "PHP (Xdebug)")
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("src/shop.erl")),
+            Some(Lang::Erlang)
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("app/Main.hs")),
+            Some(Lang::Haskell)
+        );
+        assert_eq!(
+            (Lang::Erlang.slug(), Lang::Haskell.slug()),
+            ("erlang", "haskell")
+        );
         // Each goes to its own adapter, by the slug the resolver matches.
         assert_eq!((Lang::Ruby.slug(), Lang::CSharp.slug()), ("ruby", "csharp"));
         assert_eq!(Lang::Ruby.label(), "Ruby (rdbg)");

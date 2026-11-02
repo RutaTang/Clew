@@ -176,6 +176,7 @@ pub fn resolve(
     root: &Path,
     cwd: &Path,
     choices: &clew_protocol::LanguageChoices,
+    server: Option<&Path>,
 ) -> Result<Resolution, String> {
     match lang {
         "native" => {
@@ -240,6 +241,54 @@ pub fn resolve(
                 "netcoredbg not found — install it (github.com/Samsung/netcoredbg) and put it on the PATH",
             )?;
             Ok(Resolution::Ready(csharp_spec(command, program, args, cwd)))
+        }
+        "php" => {
+            let php = store::find_on_path_unresolved("php")
+                .ok_or("php not found — install PHP, with Xdebug 3")?;
+            let server = server.ok_or("clew's PHP debug adapter (clew-server) is not available")?;
+            Ok(Resolution::Ready(php_spec(
+                server, &php, program, args, cwd,
+            )))
+        }
+        "erlang" => {
+            let erl = store::find_on_path_unresolved("erl")
+                .ok_or("erl not found — install Erlang/OTP, with its debugger application")?;
+            let erlc = store::find_on_path_unresolved("erlc")
+                .ok_or("erlc not found — install Erlang/OTP")?;
+            let server =
+                server.ok_or("clew's Erlang debug adapter (clew-server) is not available")?;
+            let args_out = vec![
+                "erlang-debug".to_string(),
+                "--erl".to_string(),
+                erl.to_string_lossy().into_owned(),
+                "--erlc".to_string(),
+                erlc.to_string_lossy().into_owned(),
+            ];
+            Ok(Resolution::Ready(own_spec(
+                server, args_out, program, args, cwd,
+            )))
+        }
+        "haskell" => {
+            // The GHC whose language server the user chose (ghcup keeps
+            // them side by side), else the PATH's.
+            let beside_chosen = chosen_sdk(choices, "haskell")
+                .and_then(|chosen| Path::new(chosen.trim()).parent().map(|d| d.join("ghci")))
+                .filter(|ghci| ghci.is_absolute() && ghci.is_file());
+            let ghci = match beside_chosen {
+                Some(ghci) => ghci,
+                None => store::find_on_path_unresolved("ghci")
+                    .ok_or("ghci not found — install GHC (ghcup install ghc)")?,
+            };
+            let server =
+                server.ok_or("clew's Haskell debug adapter (clew-server) is not available")?;
+            let args_out = vec![
+                "haskell-debug".to_string(),
+                "--ghci".to_string(),
+                ghci.to_string_lossy().into_owned(),
+            ];
+            Ok(Resolution::Ready(own_spec(
+                server, args_out, program, args, cwd,
+            )))
         }
         other => Err(format!("no debug adapter for {other}")),
     }
@@ -332,6 +381,49 @@ fn ruby_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> Ad
             "cwd": cwd.to_string_lossy(),
         }),
         transport: AdapterTransport::TcpOnStderr,
+    }
+}
+
+/// PHP, through clew-server's own adapter (`clew-server php-debug`): it
+/// runs the program under `php` with Xdebug and speaks Xdebug's DBGp on one
+/// side, DAP over stdio on the other.
+fn php_spec(server: &Path, php: &Path, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
+    AdapterSpec {
+        command: server.to_path_buf(),
+        args: vec![
+            "php-debug".into(),
+            "--php".into(),
+            php.to_string_lossy().into_owned(),
+        ],
+        launch: json!({
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "cwd": cwd.to_string_lossy(),
+        }),
+        transport: AdapterTransport::Stdio,
+    }
+}
+
+/// One of clew-server's own adapters (Erlang's, Haskell's): `server` run with
+/// `adapter_args`, speaking DAP over stdio.
+fn own_spec(
+    server: &Path,
+    adapter_args: Vec<String>,
+    program: &str,
+    args: &[String],
+    cwd: &Path,
+) -> AdapterSpec {
+    AdapterSpec {
+        command: server.to_path_buf(),
+        args: adapter_args,
+        launch: json!({
+            "request": "launch",
+            "program": program,
+            "args": args,
+            "cwd": cwd.to_string_lossy(),
+        }),
+        transport: AdapterTransport::Stdio,
     }
 }
 
@@ -657,7 +749,7 @@ pub fn resolve_stdio(
             tcp_refusal()
         ));
     }
-    match resolve(lang, program, args, root, root, choices)
+    match resolve(lang, program, args, root, root, choices, bridge)
         .map_err(|e| format!("on the remote host: {e}"))?
     {
         Resolution::Ready(spec) => match (spec.transport, bridge) {
@@ -982,6 +1074,7 @@ mod tests {
             &project,
             &cwd,
             &Default::default(),
+            None,
         )
         .unwrap();
         let Resolution::Ready(spec) = resolved else {
@@ -1106,7 +1199,15 @@ mod tests {
             ),
             ..Default::default()
         };
-        let resolved = resolve("dart", "/p/main.dart", &[], &dir, &dir, &sdk(&dart, None));
+        let resolved = resolve(
+            "dart",
+            "/p/main.dart",
+            &[],
+            &dir,
+            &dir,
+            &sdk(&dart, None),
+            None,
+        );
         let Ok(Resolution::Ready(spec)) = resolved else {
             panic!("the chosen SDK is used: {resolved:?}");
         };
@@ -1119,6 +1220,7 @@ mod tests {
             &dir,
             &dir,
             &sdk(&dir.join("gone/dart"), None),
+            None,
         )
         .unwrap_err();
         assert!(gone.contains("the Dart SDK you chose"), "{gone}");
@@ -1165,6 +1267,7 @@ mod tests {
                 &dir,
                 &dir,
                 choices,
+                None,
             ) {
                 Ok(Resolution::Ready(spec)) => spec,
                 other => panic!("{lang}: {other:?}"),
@@ -1204,10 +1307,150 @@ mod tests {
         assert_eq!(remote.args, ["--interpreter=vscode"]);
 
         let _none = EnvVars::new().set("PATH", dir.join("empty").as_os_str());
-        let err = resolve("ruby", "app.rb", &[], &dir, &dir, &Default::default()).unwrap_err();
+        let err =
+            resolve("ruby", "app.rb", &[], &dir, &dir, &Default::default(), None).unwrap_err();
         assert!(err.contains("gem install debug"), "{err}");
-        let err = resolve("csharp", "App.dll", &[], &dir, &dir, &Default::default()).unwrap_err();
+        let err = resolve(
+            "csharp",
+            "App.dll",
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        )
+        .unwrap_err();
         assert!(err.contains("netcoredbg"), "{err}");
+    }
+
+    /// A PHP program is debugged by clew-server's own adapter, given the
+    /// PATH's `php`; with no clew-server to run it, that is said.
+    #[test]
+    #[cfg(unix)]
+    fn php_runs_under_clew_servers_own_adapter() {
+        let dir = TempDir::new("debug-php");
+        let php = script(&dir.join("bin/php"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", dir.join("bin").as_os_str());
+        let server = Path::new("/opt/clew/clew-server");
+        let resolved = resolve(
+            "php",
+            "app.php",
+            &["x".into()],
+            &dir,
+            &dir,
+            &Default::default(),
+            Some(server),
+        );
+        let Ok(Resolution::Ready(spec)) = resolved else {
+            panic!("{resolved:?}");
+        };
+        assert_eq!(spec.command, server);
+        assert_eq!(spec.args, ["php-debug", "--php", &*php.to_string_lossy()]);
+        assert_eq!(spec.transport, AdapterTransport::Stdio);
+        assert_eq!(spec.launch["program"], "app.php");
+        assert_eq!(spec.launch["args"][0], "x");
+        let err =
+            resolve("php", "app.php", &[], &dir, &dir, &Default::default(), None).unwrap_err();
+        assert!(err.contains("clew-server"), "{err}");
+        // Remotely, the server is its own.
+        let remote = resolve_stdio(
+            "php",
+            "app.php",
+            &[],
+            &dir,
+            &Default::default(),
+            Some(server),
+        )
+        .unwrap();
+        assert_eq!(remote.args[0], "php-debug");
+    }
+
+    /// Erlang and Haskell programs are debugged by clew-server's own
+    /// adapters, given the PATH's `erl`/`erlc` and `ghci` — Haskell's the
+    /// `ghci` beside the language server the user chose, when there is one.
+    #[test]
+    #[cfg(unix)]
+    fn erlang_and_haskell_run_under_clew_servers_own_adapters() {
+        let dir = TempDir::new("debug-erl-hs");
+        let erl = script(&dir.join("bin/erl"), "#!/bin/sh\n");
+        let erlc = script(&dir.join("bin/erlc"), "#!/bin/sh\n");
+        let ghci = script(&dir.join("bin/ghci"), "#!/bin/sh\n");
+        script(
+            &dir.join("ghcup/bin/haskell-language-server-wrapper"),
+            "#!/bin/sh\n",
+        );
+        let chosen_ghci = script(&dir.join("ghcup/bin/ghci"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", dir.join("bin").as_os_str());
+        let server = Path::new("/opt/clew/clew-server");
+        let ready = |lang: &str, choices: &clew_protocol::LanguageChoices| match resolve(
+            lang,
+            "/p/main",
+            &["a".into()],
+            &dir,
+            &dir,
+            choices,
+            Some(server),
+        ) {
+            Ok(Resolution::Ready(spec)) => spec,
+            other => panic!("{lang}: {other:?}"),
+        };
+        let spec = ready("erlang", &Default::default());
+        assert_eq!(spec.command, server);
+        assert_eq!(
+            spec.args,
+            [
+                "erlang-debug",
+                "--erl",
+                &*erl.to_string_lossy(),
+                "--erlc",
+                &*erlc.to_string_lossy()
+            ]
+        );
+        assert_eq!(spec.launch["args"][0], "a");
+        let spec = ready("haskell", &Default::default());
+        assert_eq!(
+            spec.args,
+            ["haskell-debug", "--ghci", &*ghci.to_string_lossy()]
+        );
+        let chosen = clew_protocol::LanguageChoices {
+            servers: Some(
+                [(
+                    "haskell".to_string(),
+                    clew_protocol::ServerChoice {
+                        command: dir
+                            .join("ghcup/bin/haskell-language-server-wrapper")
+                            .to_string_lossy()
+                            .into_owned(),
+                        args: None,
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+        let spec = ready("haskell", &chosen);
+        assert_eq!(
+            spec.args[2],
+            chosen_ghci.to_string_lossy(),
+            "the chosen GHC's ghci"
+        );
+        for lang in ["erlang", "haskell"] {
+            let err =
+                resolve(lang, "/p/main", &[], &dir, &dir, &Default::default(), None).unwrap_err();
+            assert!(err.contains("clew-server"), "{err}");
+        }
+        let _none = EnvVars::new().set("PATH", dir.join("empty").as_os_str());
+        let err = resolve(
+            "erlang",
+            "/p/main",
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            Some(server),
+        )
+        .unwrap_err();
+        assert!(err.contains("Erlang/OTP"), "{err}");
     }
 
     /// The js-debug download goes through the store's verified, staged

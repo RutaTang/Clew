@@ -6,9 +6,12 @@
 //! `clew-server mcp [--root <dir>]` instead serves the project's code tools
 //! to an MCP client on stdin/stdout (see `clew_server::mcp`),
 //! `clew-server acp` serves clew's Ask agent to an ACP client — an editor
-//! (see `clew_server::acp`), and `clew-server dap-bridge` serves a debug
+//! (see `clew_server::acp`), `clew-server dap-bridge` serves a debug
 //! adapter that listens on TCP over stdio, for remote debugging (see
-//! `clew_server::dapbridge`).
+//! `clew_server::dapbridge`), and `clew-server php-debug`, `erlang-debug`
+//! and `haskell-debug` are the debug adapters for PHP (over Xdebug), Erlang
+//! (over OTP's interpreter) and Haskell (over GHCi's debugger) — see
+//! `clew_server::phpdebug`, `erlangdebug`, `haskelldebug`.
 
 /// How long the runtime may take to wind down after the client's stream
 /// ended. `serve_stdio` has already stopped everything the connection started
@@ -77,6 +80,65 @@ fn main() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("[clew-server] dap-bridge: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
+    }
+    if args.first().map(String::as_str) == Some("php-debug") {
+        let php = match args.get(1..) {
+            Some([flag, php]) if flag == "--php" => std::path::PathBuf::from(php),
+            _ => {
+                eprintln!("[clew-server] usage: clew-server php-debug --php <php>");
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::phpdebug::run(php)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] php-debug: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
+    }
+    if args.first().map(String::as_str) == Some("erlang-debug") {
+        let (erl, erlc) = match args.get(1..) {
+            Some([a, erl, b, erlc]) if a == "--erl" && b == "--erlc" => (
+                std::path::PathBuf::from(erl),
+                std::path::PathBuf::from(erlc),
+            ),
+            _ => {
+                eprintln!(
+                    "[clew-server] usage: clew-server erlang-debug --erl <erl> --erlc <erlc>"
+                );
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::erlangdebug::run(erl, erlc)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] erlang-debug: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
+    }
+    if args.first().map(String::as_str) == Some("haskell-debug") {
+        let ghci = match args.get(1..) {
+            Some([flag, ghci @ ..]) if flag == "--ghci" && !ghci.is_empty() => ghci.to_vec(),
+            _ => {
+                eprintln!("[clew-server] usage: clew-server haskell-debug --ghci <ghci> [args…]");
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::haskelldebug::run(ghci)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] haskell-debug: {e}");
                 1
             }
         };
