@@ -31121,6 +31121,18 @@ async fn typed_language_fields_make_their_choices() {
     assert_eq!(c.flags, ["-DNAME=a b", "-Iinclude"]);
     assert_eq!(c.compile_commands.as_deref(), Some("/srv/p/build"));
 
+    typed(
+        &mut app,
+        LangField::TypeScriptPath,
+        "/srv/ts/lib/tsserver.js",
+    );
+    typed(&mut app, LangField::ZigPath, "zig");
+    assert_eq!(
+        app.proj.lang_choices.typescript.as_deref(),
+        Some("/srv/ts/lib/tsserver.js")
+    );
+    assert_eq!(app.proj.lang_choices.zig.as_deref(), Some("zig"));
+
     typed(&mut app, LangField::RustTarget, "wasm32-unknown-unknown");
     assert_eq!(
         app.proj

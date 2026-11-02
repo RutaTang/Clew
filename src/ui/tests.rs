@@ -6328,3 +6328,65 @@ fn the_languages_section_offers_each_languages_build_choices() {
         Some("windows")
     );
 }
+
+/// The TypeScript the TypeScript and JavaScript server runs, and the zig
+/// zls uses: clew's own and the PATH's by default, the ones found to pick
+/// from — the project's own TypeScript named as running its code, and said
+/// so again once it is the one chosen.
+#[test]
+fn the_languages_section_picks_a_typescript_and_a_zig() {
+    use clew_protocol::{LanguageChoices, LanguageOptions, ToolchainCandidate};
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["typescript".into(), "zig".into()];
+    let projects = "/p/node_modules/typescript/lib/tsserver.js".to_string();
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        toolchains: [
+            (
+                "typescript".to_string(),
+                vec![ToolchainCandidate {
+                    command: projects.clone(),
+                    name: "The project's TypeScript 5.4.5 — runs the project's own code".into(),
+                    project: true,
+                }],
+            ),
+            (
+                "zig".to_string(),
+                vec![ToolchainCandidate {
+                    command: "/h/.zvm/0.13.0/zig".into(),
+                    name: "zvm · Zig 0.13.0".into(),
+                    project: true,
+                }],
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    }));
+    let warning = "This is the project's own TypeScript: the server runs its code — choose it \
+                   for a project you trust.";
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    for shown in [
+        "TypeScript and JavaScript: TypeScript version",
+        "clew's own TypeScript 5, installed with the server",
+        "The project's TypeScript 5.4.5 — runs the project's own code",
+        "Zig: compiler",
+        "zvm · Zig 0.13.0",
+    ] {
+        assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    assert!(sim.find(warning).is_err(), "not said before it is chosen");
+    // The first "Use" is the project's TypeScript (both Automatics are in use).
+    let _ = sim.click("Use");
+    let chosen: Vec<LanguageChoices> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(chosen[0].typescript.as_deref(), Some(projects.as_str()));
+
+    app.proj.lang_choices = chosen[0].clone();
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(sim.find(warning).is_ok(), "said once it is the one chosen");
+}

@@ -1310,6 +1310,10 @@ pub enum LangField {
     CDatabase,
     /// Flags for C/C++ files no compilation database covers.
     CFlags,
+    /// A TypeScript's `tsserver.js` (or its folder).
+    TypeScriptPath,
+    /// A `zig` compiler.
+    ZigPath,
     /// A language server program.
     ServerCommand,
     /// Its arguments.

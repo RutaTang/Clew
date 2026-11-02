@@ -85,6 +85,8 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 - **Go** —— gopls 和调试器构建时使用的 build tags（列出项目中 `//go:build` 行用到的 tags），以及按哪个 `GOOS`/`GOARCH` 阅读项目。
 - **C 和 C++** —— clangd 使用的 `compile_commands.json`（列出 CMake、Meson 等在项目中生成的那些），以及编译数据库未覆盖的文件所用的编译参数（如 `-DDEBUG -Iinclude -std=c++20`）。
 - **Lean 和 Dart** —— 语言服务器所用的工具链：elan 安装的各个工具链（项目 `lean-toolchain` 指定的排在最前）、Flutter SDK 以及 fvm 管理的各个版本（项目指定的排在最前）。
+- **TypeScript 和 JavaScript** —— 语言服务器所运行的 TypeScript：默认使用 Clew 自带的版本，除非你主动选择，否则绝不会使用项目自带的版本（列表中会标出它的版本，并注明它会运行项目自身的代码），也可以选择全局安装的版本。
+- **Zig** —— zls 所使用的 `zig` 编译器：zvm 和 zigup 管理的各个版本（项目 `build.zig.zon` 要求的版本排在最前），或你指定的编译器。
 - **任意语言** —— 使用你自己的语言服务器程序：另一个版本的 Clew 自带服务器、另一种服务器，或为 Clew 尚无服务器的语言指定一个。会构建项目的服务器在构建前仍会先征得你的同意。
 
 以上内容都只通过读取文件得到——不会运行任何程序；远程项目则在其所在主机上查找。这些选择保存在 Clew 自己的数据目录中，只对本机上的这个项目生效，绝不会写入项目，优先于项目的 `lsp.toml`，并同样作用于编辑器的语言服务器、调试器以及 Ask 的代码工具。

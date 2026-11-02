@@ -60,13 +60,16 @@ pub fn language_options(
     };
     let host = ToolHost::current();
     let mut toolchains = BTreeMap::new();
-    for language in ["lean", "dart"] {
+    for language in ["lean", "dart", "zig"] {
         if has(language) {
             toolchains.insert(
                 language.to_string(),
                 toolchain_candidates(language, root, &host),
             );
         }
+    }
+    if has("typescript") || has("tsx") || has("javascript") {
+        toolchains.insert("typescript".into(), typescript_installs(root, &host));
     }
     LanguageOptions {
         python: (has("python") || choices.python.is_some())
@@ -579,6 +582,7 @@ pub fn toolchain_candidates(
     let mut found = match language {
         "lean" => lean_toolchains(root, host),
         "dart" => dart_sdks(root, host),
+        "zig" => zig_compilers(root, host),
         _ => Vec::new(),
     };
     let repo = std::fs::canonicalize(root).ok();
@@ -692,6 +696,118 @@ fn dart_sdks(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
     ] {
         out.extend(candidate(PathBuf::from(path), name.into(), false));
     }
+    out
+}
+
+/// Zig's `zig`: one on `PATH`, zvm's (its current one and each version it
+/// keeps), zigup's, and where package managers put one — the version the
+/// project's `build.zig.zon` asks for (`minimum_zig_version`) marked.
+fn zig_compilers(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
+    let wanted =
+        crate::statefile::read_capped(&root.join("build.zig.zon"), 64 * 1024).and_then(|text| {
+            let at = text.find(".minimum_zig_version")?;
+            let rest = &text[at..];
+            let start = rest.find('"')? + 1;
+            let len = rest[start..].find('"')?;
+            Some(rest[start..start + len].to_string())
+        });
+    let names_wanted = |name: &str| wanted.as_deref().is_some_and(|w| name.contains(w));
+    let mut out = Vec::new();
+    if let Some(path) = host.path.as_deref()
+        && let Some(zig) = crate::lsp::store::find_in_unresolved(path, "zig")
+    {
+        out.extend(candidate(zig, "zig on PATH".into(), false));
+    }
+    if let Some(home) = &host.home {
+        out.extend(candidate(
+            home.join(".zvm/bin/zig"),
+            "zvm (its current one)".into(),
+            false,
+        ));
+        for dir in subdirs(&home.join(".zvm")) {
+            let version = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            if version == "bin" || version == "self" {
+                continue;
+            }
+            let project = names_wanted(&version);
+            out.extend(candidate(
+                dir.join("zig"),
+                format!("zvm · Zig {version}"),
+                project,
+            ));
+        }
+        for dir in subdirs(&home.join("zig")) {
+            let version = dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let project = names_wanted(&version);
+            out.extend(candidate(
+                dir.join("files/zig"),
+                format!("zigup · Zig {version}"),
+                project,
+            ));
+        }
+    }
+    for (path, name) in [
+        ("/opt/homebrew/bin/zig", "Homebrew"),
+        ("/usr/local/bin/zig", "/usr/local/bin"),
+        ("/snap/bin/zig", "snap"),
+    ] {
+        out.extend(candidate(PathBuf::from(path), name.into(), false));
+    }
+    out
+}
+
+/// The TypeScripts the TypeScript server can run, as `tsserver.js` files:
+/// the project's own `node_modules/typescript` — marked as the project's,
+/// for running it runs the project's code — and the global installs npm,
+/// Homebrew and Volta leave. clew's own, the default, is not listed.
+pub fn typescript_installs(root: &Path, host: &ToolHost) -> Vec<ToolchainCandidate> {
+    let version = |package: &Path| {
+        let text = crate::statefile::read_capped(&package.join("package.json"), 256 * 1024)?;
+        let json: Value = serde_json::from_str(&text).ok()?;
+        json.get("version")?.as_str().map(str::to_string)
+    };
+    let install = |package: PathBuf, label: &dyn Fn(String) -> String, project: bool| {
+        let tsserver = package.join("lib/tsserver.js");
+        tsserver.is_file().then(|| ToolchainCandidate {
+            command: tsserver.to_string_lossy().into_owned(),
+            name: label(version(&package).unwrap_or_else(|| "(version unknown)".into())),
+            project,
+        })
+    };
+    let mut out: Vec<ToolchainCandidate> = Vec::new();
+    out.extend(install(
+        root.join("node_modules/typescript"),
+        &|v| format!("The project's TypeScript {v} — runs the project's own code"),
+        true,
+    ));
+    let mut globals = vec![
+        PathBuf::from("/usr/local/lib/node_modules/typescript"),
+        PathBuf::from("/opt/homebrew/lib/node_modules/typescript"),
+        PathBuf::from("/usr/lib/node_modules/typescript"),
+    ];
+    if let Some(home) = &host.home {
+        globals.push(home.join(".npm-global/lib/node_modules/typescript"));
+        globals
+            .push(home.join(".volta/tools/image/packages/typescript/lib/node_modules/typescript"));
+    }
+    for package in globals {
+        let place = package.to_string_lossy().into_owned();
+        out.extend(install(
+            package,
+            &|v| format!("TypeScript {v} (installed in {place})"),
+            false,
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    out.retain(|c| seen.insert(c.command.clone()));
     out
 }
 
@@ -941,5 +1057,77 @@ exclude = ["crates/skip"]
             ["cargo.features", "check.targets"]
         );
         assert!(project_sets(None, RUST_KEYS).is_empty());
+    }
+
+    /// The project's own TypeScript is offered — named as running the
+    /// project's code — with its version, beside global installs.
+    #[test]
+    fn the_projects_typescript_is_offered_as_the_projects() {
+        let dir = TempDir::new("langopts-ts");
+        let root = dir.path().join("proj");
+        let package = root.join("node_modules/typescript");
+        write(&package.join("lib/tsserver.js"), "// tsserver");
+        write(
+            &package.join("package.json"),
+            r#"{"name": "typescript", "version": "5.4.5"}"#,
+        );
+        let host = ToolHost {
+            home: Some(dir.path().join("home")),
+            path: None,
+            elan_home: None,
+            flutter_root: None,
+        };
+        let found = typescript_installs(&root, &host);
+        assert_eq!(
+            found[0].name,
+            "The project's TypeScript 5.4.5 — runs the project's own code"
+        );
+        assert!(found[0].project);
+        assert_eq!(
+            found[0].command,
+            package.join("lib/tsserver.js").to_string_lossy()
+        );
+    }
+
+    /// Zig compilers under zvm and zigup, the version the project's
+    /// `build.zig.zon` asks for marked and first.
+    #[cfg(unix)]
+    #[test]
+    fn zig_compilers_are_found_the_projects_version_first() {
+        let dir = TempDir::new("langopts-zig");
+        let home = dir.path().join("home");
+        let root = dir.path().join("proj");
+        write(
+            &root.join("build.zig.zon"),
+            ".{ .name = \"app\", .minimum_zig_version = \"0.13.0\" }",
+        );
+        executable(&home.join(".zvm/bin/zig"));
+        executable(&home.join(".zvm/0.12.0/zig"));
+        executable(&home.join(".zvm/0.13.0/zig"));
+        executable(&home.join("zig/0.11.0/files/zig"));
+        let host = ToolHost {
+            home: Some(home),
+            path: None,
+            elan_home: None,
+            flutter_root: None,
+        };
+        let names: Vec<(String, bool)> = toolchain_candidates("zig", &root, &host)
+            .into_iter()
+            .filter(|c| {
+                !c.command.starts_with("/opt")
+                    && !c.command.starts_with("/usr")
+                    && !c.command.starts_with("/snap")
+            })
+            .map(|c| (c.name, c.project))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("zvm · Zig 0.13.0".to_string(), true),
+                ("zvm (its current one)".to_string(), false),
+                ("zvm · Zig 0.12.0".to_string(), false),
+                ("zigup · Zig 0.11.0".to_string(), false),
+            ]
+        );
     }
 }

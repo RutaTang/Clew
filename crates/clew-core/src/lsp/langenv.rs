@@ -70,8 +70,39 @@ pub fn chosen(language: &str, root: &Path, choices: &LanguageChoices) -> Option<
         "rust" => rust_settings(choices.rust.as_ref()?),
         "go" => go_settings(choices.go.as_ref()?),
         "c" | "cpp" => c_settings(root, choices.c.as_ref()?),
+        "typescript" | "tsx" | "javascript" => {
+            let tsserver = chosen_tsserver(choices.typescript.as_deref()?)?;
+            Some(json!({ "tsserver": { "path": tsserver.to_string_lossy() } }))
+        }
+        "zig" => {
+            let zig = crate::lsp::store::find_program(choices.zig.as_deref()?).ok()?;
+            Some(json!({ "zig_exe_path": zig.to_string_lossy() }))
+        }
         _ => None,
     }
+}
+
+/// The `tsserver.js` the user chose: the file, the TypeScript `lib` folder
+/// holding it, or the package folder above that. `None` when there is none
+/// there — and then clew's own TypeScript stays ([`pinned`]): a path the
+/// server cannot use reads as unset to it, and it would fall back to the
+/// project's copy, which runs only when chosen.
+pub fn chosen_tsserver(chosen: &str) -> Option<PathBuf> {
+    let chosen = chosen.trim();
+    let path = match chosen.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        None => PathBuf::from(chosen),
+    };
+    if !path.is_absolute() {
+        return None;
+    }
+    [
+        path.clone(),
+        path.join("tsserver.js"),
+        path.join("lib/tsserver.js"),
+    ]
+    .into_iter()
+    .find(|p| p.file_name().is_some_and(|n| n == "tsserver.js") && p.is_file())
 }
 
 /// rust-analyzer's `cargo` settings for the user's Rust choices. Its check
@@ -2060,6 +2091,77 @@ mod tests {
         assert_eq!(
             pinned(&server, Path::new("/opt/bin/typescript-language-server")),
             Ok(None)
+        );
+    }
+
+    /// A chosen TypeScript reaches the TypeScript and JavaScript servers as
+    /// the `tsserver.js` it names — given as the file, its `lib` folder or
+    /// the package — over clew's own; one that names none leaves clew's in
+    /// place rather than letting the server fall back to the project's.
+    /// A chosen `zig` reaches zls.
+    #[test]
+    #[cfg(unix)]
+    fn a_chosen_typescript_and_zig_reach_their_servers() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("chosen-ts-zig");
+        let package = dir.join("ts");
+        std::fs::create_dir_all(package.join("lib")).unwrap();
+        let tsserver = package.join("lib/tsserver.js");
+        std::fs::write(&tsserver, "// tsserver").unwrap();
+        let zig = dir.join("bin/zig");
+        std::fs::create_dir_all(zig.parent().unwrap()).unwrap();
+        std::fs::write(&zig, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&zig, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ts = |path: &Path| LanguageChoices {
+            typescript: Some(path.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        for given in [&tsserver, &package.join("lib"), &package] {
+            for language in ["typescript", "tsx", "javascript"] {
+                assert_eq!(
+                    chosen(language, &dir, &ts(given)),
+                    Some(json!({ "tsserver": { "path": tsserver.to_string_lossy() } })),
+                    "{given:?} for {language}"
+                );
+            }
+        }
+        assert_eq!(chosen("typescript", &dir, &ts(&dir.join("gone"))), None);
+
+        // Over clew's own pin, in the merge.
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("typescript")
+            .unwrap();
+        let store = dir.join("store/node_modules");
+        std::fs::create_dir_all(store.join(".bin")).unwrap();
+        std::fs::create_dir_all(store.join("typescript/lib")).unwrap();
+        std::fs::write(store.join("typescript/lib/tsserver.js"), "// clew's").unwrap();
+        let exe = store.join(".bin/typescript-language-server");
+        let merged = merge("typescript", &server, &exe, &dir, None, &ts(&package))
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged["tsserver"]["path"], tsserver.to_str().unwrap());
+        let kept = merge(
+            "typescript",
+            &server,
+            &exe,
+            &dir,
+            None,
+            &ts(&dir.join("gone")),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            kept["tsserver"]["path"],
+            store.join("typescript/lib/tsserver.js").to_str().unwrap()
+        );
+
+        let zig_choice = LanguageChoices {
+            zig: Some(zig.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            chosen("zig", &dir, &zig_choice),
+            Some(json!({ "zig_exe_path": zig.to_string_lossy() }))
         );
     }
 }

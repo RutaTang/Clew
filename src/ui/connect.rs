@@ -447,9 +447,20 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     let has = |l: &str| rows.iter().any(|x| x == l);
     let python = has("python") || choices.python.is_some();
     let listed = python
-        || ["rust", "go", "c", "cpp", "lean", "dart"]
-            .iter()
-            .any(|l| has(l));
+        || [
+            "rust",
+            "go",
+            "c",
+            "cpp",
+            "lean",
+            "dart",
+            "zig",
+            "typescript",
+            "tsx",
+            "javascript",
+        ]
+        .iter()
+        .any(|l| has(l));
     let options = match &app.proj.lang_options {
         Some(Ok(options)) => Some(options),
         Some(Err(why)) => {
@@ -489,6 +500,45 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
                 .unwrap_or_default();
             col = col.push(toolchain_block(app, language, found));
         }
+    }
+    let found = |language: &str| {
+        options
+            .and_then(|o| o.toolchains.get(language))
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    };
+    if has("typescript") || has("tsx") || has("javascript") {
+        col = col.push(path_choice_block(
+            app,
+            PathChoice {
+                heading: "TypeScript and JavaScript: TypeScript version",
+                automatic: "clew's own TypeScript 5, installed with the server",
+                chosen: app.proj.lang_choices.typescript.as_deref(),
+                found: found("typescript"),
+                field: crate::LangField::TypeScriptPath,
+                placeholder: "Path to a tsserver.js, or the TypeScript folder holding it",
+                project_note: Some(
+                    "This is the project's own TypeScript: the server runs its code — \
+                     choose it for a project you trust.",
+                ),
+            },
+            |c, path| c.typescript = path,
+        ));
+    }
+    if has("zig") {
+        col = col.push(path_choice_block(
+            app,
+            PathChoice {
+                heading: "Zig: compiler",
+                automatic: "The zig zls finds on the PATH",
+                chosen: app.proj.lang_choices.zig.as_deref(),
+                found: found("zig"),
+                field: crate::LangField::ZigPath,
+                placeholder: "Path to a zig compiler, or a name on the PATH",
+                project_note: None,
+            },
+            |c, path| c.zig = path,
+        ));
     }
     col = col.push(servers_block(app));
     if listed {
@@ -958,6 +1008,98 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
         ));
     }
     col.push(flags_row).into()
+}
+
+/// A path chosen for a language from what was found, or typed: the
+/// TypeScript its server runs, the `zig` zls uses.
+struct PathChoice<'a> {
+    heading: &'static str,
+    /// What is used when nothing is chosen.
+    automatic: &'static str,
+    chosen: Option<&'a str>,
+    found: &'a [clew_protocol::ToolchainCandidate],
+    field: crate::LangField,
+    placeholder: &'static str,
+    /// Said when the one chosen is the project's own.
+    project_note: Option<&'static str>,
+}
+
+/// A [`PathChoice`]: what is in effect, "Automatic", what was found, and a
+/// typed path — `set` making the choice in a copy of the choices.
+fn path_choice_block<'a>(
+    app: &'a App,
+    choice: PathChoice<'a>,
+    set: fn(&mut clew_protocol::LanguageChoices, Option<String>),
+) -> Element<'a, Message> {
+    use crate::LanguagesMsg as L;
+    let choices = &app.proj.lang_choices;
+    let remote = app.connection.is_remote();
+    let mut col = column![lang_heading(choice.heading)].spacing(6);
+    let effect: Vec<Element<'a, Message>> = match choice.chosen {
+        Some(path) => vec![
+            text("Your choice")
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .into(),
+            lang_path(path.to_string()).into(),
+        ],
+        None => vec![
+            text(choice.automatic)
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .into(),
+        ],
+    };
+    col = col.push(lang_effect(effect));
+    let chosen_is_projects = choice
+        .found
+        .iter()
+        .any(|c| c.project && Some(c.command.as_str()) == choice.chosen);
+    if let Some(note) = choice.project_note.filter(|_| chosen_is_projects) {
+        col = col.push(text(note).size(ts::CAPTION).color(theme::warning()));
+    }
+    col = col.push(lang_pick(
+        "Automatic".into(),
+        lang_caption(choice.automatic.into()).into(),
+        choice.chosen.is_none(),
+        choose_with(choices, |c| set(c, None)),
+    ));
+    for candidate in choice.found {
+        col = col.push(lang_pick(
+            candidate.name.clone(),
+            lang_path(candidate.command.clone()).into(),
+            choice.chosen == Some(candidate.command.as_str()),
+            choose_with(choices, |c| set(c, Some(candidate.command.clone()))),
+        ));
+    }
+    if let Some(other) = choice.chosen
+        && !choice.found.iter().any(|c| c.command == other)
+    {
+        col = col.push(lang_pick(
+            "Your choice".into(),
+            lang_path(other.to_string()).into(),
+            true,
+            choose_with(choices, |c| set(c, Some(other.to_string()))),
+        ));
+    }
+    let field = choice.field;
+    let mut path_row = row![
+        lang_field(app, choice.placeholder, field),
+        lang_button(
+            "Use",
+            (!app.proj.lang_drafts.field(field).trim().is_empty())
+                .then_some(Message::Languages(L::UseDraft(field)))
+        ),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if !remote {
+        path_row = path_row.push(lang_button(
+            "Browse…",
+            Some(Message::Languages(L::Browse(field))),
+        ));
+    }
+    col.push(path_row).into()
 }
 
 /// Where the toolchain `language`'s server is run from (Lean's `lake`,

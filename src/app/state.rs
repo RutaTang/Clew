@@ -2254,6 +2254,8 @@ pub struct LanguageDrafts {
     pub go_tag: String,
     pub c_database: String,
     pub c_flags: String,
+    pub typescript_path: String,
+    pub zig_path: String,
     /// The language a server program is being chosen for; `None` until
     /// one is picked.
     pub server_language: Option<String>,
@@ -2270,6 +2272,8 @@ impl LanguageDrafts {
             crate::LangField::GoTag => &self.go_tag,
             crate::LangField::CDatabase => &self.c_database,
             crate::LangField::CFlags => &self.c_flags,
+            crate::LangField::TypeScriptPath => &self.typescript_path,
+            crate::LangField::ZigPath => &self.zig_path,
             crate::LangField::ServerCommand => &self.server_command,
             crate::LangField::ServerArgs => &self.server_args,
         }
@@ -2283,6 +2287,8 @@ impl LanguageDrafts {
             crate::LangField::GoTag => &mut self.go_tag,
             crate::LangField::CDatabase => &mut self.c_database,
             crate::LangField::CFlags => &mut self.c_flags,
+            crate::LangField::TypeScriptPath => &mut self.typescript_path,
+            crate::LangField::ZigPath => &mut self.zig_path,
             crate::LangField::ServerCommand => &mut self.server_command,
             crate::LangField::ServerArgs => &mut self.server_args,
         }

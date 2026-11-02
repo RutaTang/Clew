@@ -139,6 +139,8 @@ mod tests {
                 compile_commands: Some("/p/build".into()),
                 flags: vec!["-DNAME=a b".into()],
             }),
+            typescript: Some("/p/node_modules/typescript/lib/tsserver.js".into()),
+            zig: None,
             servers: Some(
                 [
                     (

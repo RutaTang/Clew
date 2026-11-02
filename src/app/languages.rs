@@ -197,6 +197,18 @@ impl App {
                 let c = next.c.get_or_insert_with(CChoices::default);
                 c.flags = split_args(&text);
             }
+            LangField::TypeScriptPath => {
+                if text.is_empty() {
+                    return Task::none();
+                }
+                next.typescript = Some(text);
+            }
+            LangField::ZigPath => {
+                if text.is_empty() {
+                    return Task::none();
+                }
+                next.zig = Some(text);
+            }
             LangField::ServerCommand | LangField::ServerArgs => {
                 let Some(language) = self.proj.lang_drafts.server_language.clone() else {
                     self.status = "Pick the language the server program is for".into();
@@ -459,6 +471,11 @@ fn normalized(mut choices: LanguageChoices) -> LanguageChoices {
     if choices.servers.as_ref().is_some_and(|s| s.is_empty()) {
         choices.servers = None;
     }
+    for path in [&mut choices.typescript, &mut choices.zig] {
+        if path.as_deref().is_some_and(|p| p.trim().is_empty()) {
+            *path = None;
+        }
+    }
     choices
 }
 
@@ -477,6 +494,12 @@ fn changed_languages(before: &LanguageChoices, next: &LanguageChoices) -> Vec<St
     }
     if before.c != next.c {
         changed.extend(["c".to_string(), "cpp".to_string()]);
+    }
+    if before.typescript != next.typescript {
+        changed.extend(["typescript", "tsx", "javascript"].map(String::from));
+    }
+    if before.zig != next.zig {
+        changed.push("zig".to_string());
     }
     let none = Default::default();
     let (a, b) = (
@@ -594,6 +617,13 @@ mod tests {
             .into(),
         );
         assert_eq!(changed_languages(&before, &next), ["c", "cpp", "lean"]);
+        let mut ts = before.clone();
+        ts.typescript = Some("/p/node_modules/typescript".into());
+        ts.zig = Some("zig".into());
+        assert_eq!(
+            changed_languages(&before, &ts),
+            ["typescript", "tsx", "javascript", "zig"]
+        );
         assert!(changed_languages(&next, &next).is_empty());
     }
 
@@ -605,6 +635,8 @@ mod tests {
             go: Some(GoChoices::default()),
             c: Some(CChoices::default()),
             servers: Some(Default::default()),
+            typescript: Some(" ".into()),
+            zig: Some(String::new()),
             ..Default::default()
         };
         assert_eq!(normalized(empty), LanguageChoices::default());

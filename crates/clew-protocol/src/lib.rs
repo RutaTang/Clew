@@ -1323,6 +1323,14 @@ pub struct LanguageChoices {
     pub go: Option<GoChoices>,
     /// How clangd compiles the project's C and C++.
     pub c: Option<CChoices>,
+    /// The TypeScript the TypeScript/JavaScript server runs: a path to its
+    /// `tsserver.js` (or the `lib` folder holding it). `None` is clew's own,
+    /// installed beside the server — never the project's, which runs only
+    /// when chosen here.
+    pub typescript: Option<String>,
+    /// The `zig` compiler zls works with: a path, or a name on `PATH`.
+    /// `None` lets zls look for one.
+    pub zig: Option<String>,
     /// The program to run as a language's server instead of clew's, by
     /// language (the client's names). For a server that comes with a
     /// toolchain (Lean's `lake`, Dart's `dart`) this is where the toolchain
@@ -1444,8 +1452,9 @@ pub struct LanguageOptions {
     pub go: Option<GoOptions>,
     pub c: Option<COptions>,
     /// The toolchains found for each language whose server is a toolchain's
-    /// own (Lean's `lake`, Dart's `dart`), by language, the project's own
-    /// first.
+    /// own (Lean's `lake`, Dart's `dart`), or that its server is told to use
+    /// (TypeScript's `tsserver.js`, Zig's `zig`), by language, the project's
+    /// own first.
     pub toolchains: std::collections::BTreeMap<String, Vec<ToolchainCandidate>>,
 }
 
