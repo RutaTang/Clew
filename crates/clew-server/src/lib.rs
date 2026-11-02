@@ -935,6 +935,31 @@ impl Server {
                 });
                 None
             }
+            // The project's Python interpreters, looked for on this host —
+            // where they are — and the one its server is given with the
+            // user's choices over the project's `lsp.toml`. Reads files only:
+            // none is run. Off the loop, replies itself.
+            Request::PythonEnvironments { choices } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                spawn_reply(&self.out, id, "listing Python environments", move || {
+                    let lsp_toml = clew_core::lsp::config::ProjectLspConfig::load(&root)
+                        .ok()
+                        .and_then(|config| config.resolve("python"))
+                        .and_then(|server| server.init_options);
+                    Event::PythonEnvironments {
+                        root: root.to_string_lossy().into_owned(),
+                        environments: clew_core::lsp::langenv::python_environments(
+                            &root,
+                            &choices,
+                            lsp_toml.as_ref(),
+                        ),
+                    }
+                });
+                None
+            }
             // The name-based project call graph, built where the files live.
             // The client supplies its resolved import scope (rel-based); the
             // reply's node paths are project-relative too. CPU-bound: off
@@ -1188,6 +1213,7 @@ impl Server {
                 lang,
                 program,
                 args,
+                choices,
             } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
@@ -1206,6 +1232,7 @@ impl Server {
                             &program,
                             &args,
                             &resolve_root,
+                            &choices,
                         )
                     })
                     .await
@@ -1347,7 +1374,7 @@ impl Server {
             // line (and fingerprint) before granting an approval — or raise
             // the install-consent prompt, or give up, each explicitly. Off
             // the loop: resolving fingerprints the command's bytes.
-            Request::LspResolve { language } => {
+            Request::LspResolve { language, choices } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -1357,7 +1384,7 @@ impl Server {
                 tokio::spawn(async move {
                     let (lang, r, o) = (language.clone(), root.clone(), out.clone());
                     let resolution = tokio::task::spawn_blocking(move || {
-                        lsp_gate::resolve_lsp(&o, &approvals, &r, &lang)
+                        lsp_gate::resolve_lsp(&o, &approvals, &r, &lang, &choices)
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -1385,7 +1412,11 @@ impl Server {
             // The consent is for the install the user was SHOWN, whose digest
             // the request carries back; `install_lsp` runs nothing else. It
             // stops when the connection leaves the project.
-            Request::LspInstall { language, consent } => {
+            Request::LspInstall {
+                language,
+                consent,
+                choices,
+            } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -1396,7 +1427,7 @@ impl Server {
                 tokio::spawn(async move {
                     let (lang, r, o) = (language.clone(), root.clone(), out.clone());
                     let outcome = tokio::task::spawn_blocking(move || {
-                        lsp_gate::install_lsp(&o, &approvals, &r, &lang, &consent, &stop)
+                        lsp_gate::install_lsp(&o, &approvals, &r, &lang, &consent, &stop, &choices)
                     })
                     .await;
                     let resolution = match outcome {
@@ -2281,6 +2312,7 @@ mod tests {
             assert!(matches!(reply(&mut rx, 1), Event::Tree { .. }));
             let resolve = Request::LspResolve {
                 language: "go".into(),
+                choices: Default::default(),
             };
             rt.block_on(server.handle(2, resolve));
             let consent = match reply(&mut rx, 2) {
@@ -2293,6 +2325,7 @@ mod tests {
             let install = Request::LspInstall {
                 language: "go".into(),
                 consent,
+                choices: Default::default(),
             };
             rt.block_on(server.handle(3, install));
             let pid = started_pid(&bin);

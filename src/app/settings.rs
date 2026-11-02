@@ -96,7 +96,9 @@ impl App {
         // The form's text inputs take the keyboard: reading motions must not
         // act on the code behind the modal.
         self.code_focused = false;
-        Task::none()
+        // The project's Python interpreters, listed afresh: environments come
+        // and go between openings.
+        self.refresh_python_envs()
     }
 
     pub(crate) fn on_settings_saved(&mut self) -> Task<Message> {

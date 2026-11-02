@@ -481,10 +481,26 @@ fn writes_clipboard(task: Task<Message>) -> bool {
 /// Complete the project-state load the way its blocking job would — the same
 /// `LoadedProjectState::read` — so a test sees the stored trail, bookmarks,
 /// notes and caches as soon as the project is open.
+/// The user's choices for the open project's languages, read as the open's
+/// task would and handed in at once — which language servers wait for.
+fn load_choices_synchronously(app: &mut App) {
+    let Some(root) = app.proj.project.as_ref().map(|p| p.root.clone()) else {
+        return;
+    };
+    if app.proj.inflight.choices_loading {
+        let choices = clew_core::lsp::choices::load(app.connection.approval_host(), &root);
+        let _ = app.update(Message::Languages(LanguagesMsg::ChoicesLoaded {
+            stamp: app.stamp(),
+            choices,
+        }));
+    }
+}
+
 fn load_state_synchronously(app: &mut App) {
     let Some(root) = app.proj.project.as_ref().map(|p| p.root.clone()) else {
         return;
     };
+    load_choices_synchronously(app);
     if !app.proj.inflight.state_loading {
         return;
     }
@@ -3635,7 +3651,10 @@ fn a_remote_install_in_progress_says_so_and_offers_nothing_to_ask() {
     let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     let mut install = None;
     while let Ok(sent) = rx.try_recv() {
-        if let clew_protocol::Request::LspInstall { language, consent } = &sent.request {
+        if let clew_protocol::Request::LspInstall {
+            language, consent, ..
+        } = &sent.request
+        {
             assert_eq!((language.as_str(), consent.as_str()), ("rust", "digest"));
             install = Some(sent.id);
         }
@@ -4020,7 +4039,7 @@ async fn a_remote_options_only_config_is_approvable_from_the_client() {
     );
     assert!(
         sent.iter().any(
-            |r| matches!(r, clew_protocol::Request::LspResolve { language } if language == "rust")
+            |r| matches!(r, clew_protocol::Request::LspResolve { language, .. } if language == "rust")
         ),
         "the allow must re-ask the host, not start from the modal's copy: {sent:?}"
     );
@@ -7637,6 +7656,7 @@ fn remote_app(
             tracked_ignored: Vec::new(),
         },
     );
+    load_choices_synchronously(&mut app);
     (app, root, rx)
 }
 
@@ -19488,6 +19508,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             path: root.join("notes.md"),
             waited: 1,
         }),
+        Message::Export(ExportMsg::Picked {
+            stamp: s(),
+            path: Some(root.join("stale-notes.md")),
+        }),
         Message::Editor(EditorMsg::FileLoaded {
             stamp: s(),
             req: 1,
@@ -19565,6 +19589,24 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             language: "rust".into(),
             generation: 0,
+            result: Err("stale".into()),
+        }),
+        Message::Languages(LanguagesMsg::ChoicesLoaded {
+            stamp: s(),
+            choices: clew_protocol::LanguageChoices {
+                python: Some("/stale/bin/python".into()),
+            },
+        }),
+        Message::Languages(LanguagesMsg::Listed {
+            stamp: s(),
+            result: Err("stale".into()),
+        }),
+        Message::Languages(LanguagesMsg::Browsed {
+            stamp: s(),
+            path: Some(root.join("stale-python")),
+        }),
+        Message::Languages(LanguagesMsg::Saved {
+            stamp: s(),
             result: Err("stale".into()),
         }),
         Message::Lsp(LspMsg::PanelListed {
@@ -19994,6 +20036,14 @@ fn a_stale_stamp_on_every_stamped_message_is_dropped_by_the_one_check() {
         }
         if line.trim() == "stamp: Stamp," {
             declared.extend(variant.clone());
+        }
+        // A variant rustfmt keeps on one line: `Name { stamp: Stamp, .. },`.
+        if let Some((name, fields)) = line.strip_prefix("    ").and_then(|l| l.split_once(" { "))
+            && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && name.chars().all(char::is_alphanumeric)
+            && fields.split([',', '}']).any(|f| f.trim() == "stamp: Stamp")
+        {
+            declared.extend(feature.as_ref().map(|f| format!("{f}::{name}")));
         }
     }
     declared.remove("Debug::AdapterInstalled");
@@ -30712,4 +30762,123 @@ fn public_cpp_members_remain_visible_after_comment_braces() {
         let entries = &app.proj.docs.page.as_ref().unwrap().entries;
         assert!(entries.iter().any(|entry| entry.name == "shown"));
     }
+}
+
+/// A remote project's language servers wait for the user's choices for it —
+/// read when it opens — and carry them to the host, which hands them to the
+/// server it resolves: started before, the Python server would have had the
+/// interpreter detection found, not the one the user picked.
+#[tokio::test]
+async fn a_remote_language_server_waits_for_the_projects_choices_and_carries_them() {
+    let root = fixture_project("choices-wait-remote");
+    let mut app = blank_app();
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let mut rx = attach_server(&mut app);
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let _ = app.handle_server_reply(
+        1,
+        clew_protocol::Event::Tree {
+            root: root.to_string_lossy().into_owned(),
+            seq: 1,
+            tree: clew_protocol::DirNode {
+                dirs: Vec::new(),
+                files: Vec::new(),
+            },
+            files: vec!["main.py".into()],
+            truncated: false,
+            tracked_ignored: Vec::new(),
+        },
+    );
+    assert!(
+        app.proj.inflight.choices_loading,
+        "the open reads the choices"
+    );
+    while rx.try_recv().is_ok() {}
+    let _ = app.ensure_lsp("python");
+    let resolves = |rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|m| match m.request {
+                clew_protocol::Request::LspResolve { language, choices } => {
+                    Some((language, choices))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        resolves(&mut rx).is_empty(),
+        "nothing resolves before the choices"
+    );
+
+    let chosen = clew_protocol::LanguageChoices {
+        python: Some("/home/me/.venvs/app/bin/python".into()),
+    };
+    let _ = app.update(Message::Languages(LanguagesMsg::ChoicesLoaded {
+        stamp: app.stamp(),
+        choices: chosen.clone(),
+    }));
+    assert_eq!(resolves(&mut rx), [("python".to_string(), chosen)]);
+}
+
+/// Picking an interpreter in Settings saves it for the project on its host —
+/// in clew's data directory, not the project — and restarts the running
+/// Python server so it takes it: the host is asked again, with the choice.
+#[tokio::test]
+async fn choosing_an_interpreter_saves_it_and_restarts_the_python_server() {
+    let data = test_dir("choose-python-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, root, mut rx) = remote_app("choose-python");
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::AwaitingConsent);
+    while rx.try_recv().is_ok() {}
+
+    let path = "/srv/envs/app/bin/python".to_string();
+    let task = app.update(Message::Languages(LanguagesMsg::ChoosePython(Some(
+        path.clone(),
+    ))));
+    let chosen = clew_protocol::LanguageChoices {
+        python: Some(path.clone()),
+    };
+    assert_eq!(app.proj.lang_choices, chosen);
+    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|m| m.request)
+        .collect();
+    assert!(
+        sent.iter().any(|r| matches!(
+            r,
+            clew_protocol::Request::LspResolve { language, choices }
+                if language == "python" && *choices == chosen
+        )),
+        "the Python server is resolved again, with the choice: {sent:?}"
+    );
+    let messages = run_task(task);
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Languages(LanguagesMsg::Saved { result: Ok(()), .. })
+        )),
+        "{messages:?}"
+    );
+    assert_eq!(
+        clew_core::lsp::choices::load(Some("user@host"), &root),
+        chosen,
+        "kept for the project on its host"
+    );
+    assert!(!root.join(".clew/languages.toml").exists());
+
+    // Back to automatic: the record holds nothing for the project.
+    let task = app.update(Message::Languages(LanguagesMsg::ChoosePython(None)));
+    let _ = run_task(task);
+    assert_eq!(
+        clew_core::lsp::choices::load(Some("user@host"), &root),
+        Default::default()
+    );
 }

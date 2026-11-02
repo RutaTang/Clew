@@ -963,6 +963,7 @@ async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
                     lang: "go".into(),
                     program: root.join("main").to_string_lossy().into_owned(),
                     args: vec![],
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2062,6 +2063,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 3,
                 Request::LspResolve {
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2236,6 +2238,7 @@ async fn spawn_lsp_never_installs_without_consent() {
                 3,
                 Request::LspResolve {
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2268,6 +2271,7 @@ async fn lsp_install_refuses_an_install_edited_after_the_prompt() {
                 2,
                 Request::LspResolve {
                     language: "go".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2295,6 +2299,7 @@ async fn lsp_install_refuses_an_install_edited_after_the_prompt() {
                 Request::LspInstall {
                     language: "go".into(),
                     consent: shown.clone(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2546,6 +2551,7 @@ async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
                 2,
                 Request::LspResolve {
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -3458,4 +3464,62 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// The project's Python interpreters are listed where the project is, with
+/// the one its server is given — and a choice the user made that is gone is
+/// reported, not used.
+#[tokio::test]
+#[cfg(unix)]
+async fn python_environments_are_listed_where_the_project_is() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("python-envs");
+    let base = TempDir::new("python-envs-base");
+    std::fs::write(base.join("python3.12"), b"\x7fELF base").unwrap();
+    std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    std::os::unix::fs::symlink(base.join("python3.12"), root.join(".venv/bin/python")).unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let gone = "/no/such/env/bin/python".to_string();
+    assert!(
+        server
+            .handle(
+                2,
+                Request::PythonEnvironments {
+                    choices: clew_protocol::LanguageChoices {
+                        python: Some(gone.clone()),
+                    },
+                },
+            )
+            .await
+            .is_none()
+    );
+    let environments = match recv_reply(&mut rx, 2).await {
+        Event::PythonEnvironments {
+            root: at,
+            environments,
+        } => {
+            assert_eq!(at, root.to_string_lossy());
+            environments
+        }
+        other => panic!("expected PythonEnvironments, got {other:?}"),
+    };
+    let venv = root.join(".venv/bin/python").to_string_lossy().into_owned();
+    let first = &environments.candidates[0];
+    assert_eq!(
+        (first.kind, first.name.as_str(), first.interpreter.as_str()),
+        (
+            clew_protocol::PythonEnvKind::Project,
+            ".venv",
+            venv.as_str()
+        )
+    );
+    assert_eq!(
+        environments.in_effect.source,
+        clew_protocol::PythonSource::ProjectVenv
+    );
+    assert_eq!(
+        environments.in_effect.interpreter.as_deref(),
+        Some(venv.as_str())
+    );
+    assert_eq!(environments.in_effect.unusable_choice, Some(gone));
 }

@@ -379,6 +379,9 @@ impl App {
         // empty placeholders, and nothing writes one of them back over its
         // file (see `InFlight::state_loading`).
         let state_task = self.load_project_state(local_state, store.clone());
+        // The user's choices for its languages, which its language servers
+        // wait for (`ensure_lsp`).
+        let choices_task = self.load_language_choices();
 
         // Build the project-wide symbol index in the background, warm-starting
         // from the persistent cache (only files changed while clew was closed
@@ -445,7 +448,14 @@ impl App {
         // No auto-explain on startup: warm-start from the persisted cache and
         // show what's there. Explanations (re)generate only on an explicit
         // request (whole project / one function) or when a file's hash changes.
-        Task::batch([stop_old, state_task, index_task, open_task, panel_task])
+        Task::batch([
+            stop_old,
+            state_task,
+            choices_task,
+            index_task,
+            open_task,
+            panel_task,
+        ])
     }
 
     /// Forget everything anchored to the open project: its panes, editors and

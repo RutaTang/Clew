@@ -60,6 +60,10 @@ pub enum Message {
     /// The settings' MCP servers and ACP agents. Handled in `app::integrations`
     /// (`App::update_integrations`).
     Integrations(IntegrationsMsg),
+    /// The settings' languages of the open project: what its servers are
+    /// given, and the Python interpreter the user picks. Handled in
+    /// `app::languages` (`App::update_languages`).
+    Languages(LanguagesMsg),
     /// Git history in the reader: time travel and "Why is this here?". Handled in
     /// `app::timetravel` (`App::update_time_travel`).
     TimeTravel(TimeTravelMsg),
@@ -1242,6 +1246,57 @@ impl IntegrationsMsg {
     }
 }
 
+/// The settings' languages of the open project. A choice is saved at once,
+/// for this project on this machine (`clew_core::lsp::choices`).
+#[derive(Debug, Clone)]
+pub enum LanguagesMsg {
+    /// The project's choices, read when it opened.
+    ChoicesLoaded {
+        stamp: Stamp,
+        choices: clew_protocol::LanguageChoices,
+    },
+    /// List the project's Python interpreters again.
+    Refresh,
+    /// The listing landed.
+    Listed {
+        stamp: Stamp,
+        result: Result<clew_protocol::PythonEnvironments, String>,
+    },
+    /// Use this Python interpreter — `None`: let clew find one.
+    ChoosePython(Option<String>),
+    /// The typed interpreter path changed.
+    PathDraft(String),
+    /// Use the typed interpreter path.
+    UsePath,
+    /// Pick an interpreter in a file dialog (a project on this machine).
+    Browse,
+    /// The file dialog closed.
+    Browsed { stamp: Stamp, path: Option<PathBuf> },
+    /// A choice was saved, or could not be.
+    Saved {
+        stamp: Stamp,
+        result: Result<(), String>,
+    },
+}
+
+impl LanguagesMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            LanguagesMsg::ChoicesLoaded { stamp, .. }
+            | LanguagesMsg::Listed { stamp, .. }
+            | LanguagesMsg::Browsed { stamp, .. }
+            | LanguagesMsg::Saved { stamp, .. } => Some(Origin::Stamped(stamp)),
+            LanguagesMsg::Refresh
+            | LanguagesMsg::ChoosePython(..)
+            | LanguagesMsg::PathDraft(..)
+            | LanguagesMsg::UsePath
+            | LanguagesMsg::Browse => None,
+        }
+    }
+}
+
 /// Git history in the reader: time travel and "Why is this here?".
 #[derive(Debug, Clone)]
 pub enum TimeTravelMsg {
@@ -1765,6 +1820,7 @@ impl Message {
             Message::Semantic(m) => m.origin(),
             Message::Ask(m) => m.origin(),
             Message::Integrations(m) => m.origin(),
+            Message::Languages(m) => m.origin(),
             Message::TimeTravel(m) => m.origin(),
             Message::Debug(m) => m.origin(),
             Message::Lsp(m) => m.origin(),

@@ -65,6 +65,7 @@ mod graph;
 mod hover;
 pub(crate) mod integrations;
 mod keys;
+mod languages;
 mod lsp;
 mod navigation;
 mod overview;

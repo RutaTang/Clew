@@ -362,6 +362,7 @@ impl App {
             Message::Semantic(message) => self.update_semantic(message),
             Message::Ask(message) => self.update_ask(message),
             Message::Integrations(message) => self.update_integrations(message),
+            Message::Languages(message) => self.update_languages(message),
             Message::TimeTravel(message) => self.update_time_travel(message),
             Message::Debug(message) => self.update_debug(message),
             Message::Lsp(message) => self.update_lsp(message),

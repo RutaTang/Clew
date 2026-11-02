@@ -105,7 +105,11 @@ pub use payload::*;
 /// project (and so runs its code) starts only once the user lets it build
 /// that project; the leave travels in `LspApprovals` like any approval, and
 /// `LspApprovals` names the project its set is for.
-pub const PROTOCOL_VERSION: u32 = 18;
+/// v19: [`LanguageChoices`] — what the user chose for a project's languages
+/// in Settings (its Python interpreter) — rides with `LspResolve`,
+/// `LspInstall` and `SpawnAdapter`, and [`Request::PythonEnvironments`] lists
+/// the project's Python interpreters and the one in effect.
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -662,19 +666,25 @@ pub enum Request {
     /// stdio-transport adapters work remotely (TCP ones listen on the
     /// server's loopback, unreachable from the client). Reply:
     /// `AdapterSpawned`, carrying the adapter-specific `launch` request body
-    /// built with THIS host's paths.
+    /// built with THIS host's paths. A Python program is debugged under the
+    /// interpreter `choices` names, when it names one.
     SpawnAdapter {
         proc: u64,
         lang: String,
         program: String,
         args: Vec<String>,
+        choices: LanguageChoices,
     },
     /// Resolve what `SpawnLsp` for `language` would execute, without running
     /// anything. Reply: `LspResolved`; when the project's own `lsp.toml`
     /// names a `command`, it carries the full command line and fingerprint so
     /// the client can show the user exactly what would run and record an
-    /// approval against it.
-    LspResolve { language: String },
+    /// approval against it. `choices` are the user's for the project's
+    /// languages, which the `Ready` options carry.
+    LspResolve {
+        language: String,
+        choices: LanguageChoices,
+    },
     /// Install the store-managed server for `language` on this host. Sent
     /// only after the user consented in the client — the server itself never
     /// initiates a download or toolchain install. Reply: `LspResolved` with
@@ -686,7 +696,12 @@ pub enum Request {
     /// nothing whose digest differs — the host's `lsp.toml` edited while the
     /// prompt sat open, say — replying with the current `NeedsInstall`
     /// instead, so the user is asked about what would actually run.
-    LspInstall { language: String, consent: String },
+    /// `choices` as for `LspResolve`.
+    LspInstall {
+        language: String,
+        consent: String,
+        choices: LanguageChoices,
+    },
     /// The user's language-server command approvals for project `root`
     /// (`language` → fingerprint), recorded client-side and pushed here so the
     /// server's spawn paths (SpawnLsp, the Ask agent's semantic tools) honor
@@ -789,6 +804,10 @@ pub enum Request {
     /// Build the project's API documentation index (per-file documented
     /// symbols). Reply: `Docs`.
     BuildDocs,
+    /// List the open project's Python interpreters, found on this host by
+    /// looking (none is run), and say which its language server is given with
+    /// the user's `choices`. Reply: `PythonEnvironments`.
+    PythonEnvironments { choices: LanguageChoices },
 }
 
 /// One JSON-array entry change, addressed by the fields that IDENTIFY an entry
@@ -1231,6 +1250,11 @@ pub enum Event {
         root: String,
         resolution: LspResolution,
     },
+    /// Reply to `PythonEnvironments`, for project `root`.
+    PythonEnvironments {
+        root: String,
+        environments: PythonEnvironments,
+    },
     /// A request failed; `code` says how (see [`ErrorCode`]). Always a
     /// [`ServerMessage::Reply`] — unsolicited trouble is [`Event::Status`].
     Error { code: ErrorCode, message: String },
@@ -1244,6 +1268,98 @@ impl Event {
             message: message.into(),
         }
     }
+}
+
+/// What the user chose for one project's languages, in Settings, where clew
+/// would otherwise detect. Kept by the client, in clew's own data directory —
+/// never in the project, which is the team's (`.clew/lsp.toml`) — and sent
+/// with each request that sets a language up on the project's host. A choice
+/// wins over the project's `lsp.toml` and over detection.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LanguageChoices {
+    /// The Python interpreter the language server and the debugger run — a
+    /// path on the project's host, as the user picked it, never resolved (a
+    /// virtualenv's `bin/python` boots its environment by its own path).
+    pub python: Option<String>,
+}
+
+/// A project's Python interpreters, and the one its language server is
+/// given.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonEnvironments {
+    /// Every interpreter found, the project's own first. Found by looking at
+    /// the files, never by running one.
+    pub candidates: Vec<PythonCandidate>,
+    /// What the Python language server is given, and why.
+    pub in_effect: PythonInEffect,
+}
+
+/// One Python interpreter found for a project.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonCandidate {
+    /// The interpreter as found (a virtualenv's `bin/python`, not resolved).
+    pub interpreter: String,
+    /// Where it was found.
+    pub kind: PythonEnvKind,
+    /// What it goes by: the virtualenv's folder, the conda environment's
+    /// name, the pyenv version.
+    pub name: String,
+    /// Its Python version, where the files say (`pyvenv.cfg`, a folder named
+    /// for it); never asked of the interpreter.
+    pub version: Option<String>,
+}
+
+/// Where a [`PythonCandidate`] was found.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PythonEnvKind {
+    /// A virtualenv in the project (`.venv`, `venv`, …, or one a folder down).
+    Project,
+    /// The virtualenv or conda environment activated where clew was started
+    /// (`VIRTUAL_ENV`, `CONDA_PREFIX`).
+    Activated,
+    /// A Poetry environment of this project.
+    Poetry,
+    /// A Pipenv environment of this project.
+    Pipenv,
+    /// A conda environment.
+    Conda,
+    /// A pyenv-installed Python.
+    Pyenv,
+    /// A uv-installed Python.
+    Uv,
+    /// A Python on `PATH`, or where the system keeps one.
+    System,
+}
+
+/// What the Python language server is given, and why.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythonInEffect {
+    /// The interpreter, as named; `None` when the server is left to find one.
+    pub interpreter: Option<String>,
+    /// Who named it.
+    pub source: PythonSource,
+    /// The interpreter the user chose, when it cannot be used — it no longer
+    /// exists, or it is the repository's own program — and so is not the
+    /// one in effect.
+    pub unusable_choice: Option<String>,
+}
+
+/// Who named the interpreter in [`PythonInEffect`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PythonSource {
+    /// Nobody: the server looks for one itself.
+    #[default]
+    Server,
+    /// The user, in Settings ([`LanguageChoices::python`]).
+    Chosen,
+    /// The project's `.clew/lsp.toml`.
+    LspToml,
+    /// A virtualenv found in the project — run through the base interpreter
+    /// it is a copy or link of, its packages read rather than its start-up
+    /// code run, as it came with the project.
+    ProjectVenv,
+    /// The virtualenv activated where clew was started (`VIRTUAL_ENV`).
+    Activated,
 }
 
 /// The server-side state of a language server, as an explicit enum — the

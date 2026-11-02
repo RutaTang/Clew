@@ -140,6 +140,9 @@ impl App {
         // transport it was started over, as well as to `run` — the transport
         // only while the adapter may ride it (see below).
         let stamp = self.transport_stamp();
+        // The user's choices for the project: a Python program runs under the
+        // interpreter they picked.
+        let choices = self.proj.lang_choices.clone();
 
         let stream = iced::stream::channel(
             64,
@@ -262,6 +265,7 @@ impl App {
                             lang: lang.slug().into(),
                             program: cfg.program.to_string_lossy().into_owned(),
                             args: cfg.args.clone(),
+                            choices: choices.clone(),
                         })
                         .await
                     {
@@ -317,10 +321,15 @@ impl App {
                     // pool: it may run xcrun or probe a Python interpreter.
                     // It never installs anything.
                     let resolved = {
-                        let (program, args, root, cwd) =
-                            (program.clone(), args.clone(), root.clone(), cwd.clone());
+                        let (program, args, root, cwd, choices) = (
+                            program.clone(),
+                            args.clone(),
+                            root.clone(),
+                            cwd.clone(),
+                            choices.clone(),
+                        );
                         tokio::task::spawn_blocking(move || {
-                            dap::adapter::resolve(lang, &program, &args, &root, &cwd)
+                            dap::adapter::resolve(lang, &program, &args, &root, &cwd, &choices)
                         })
                         .await
                         .unwrap_or_else(|e| Err(format!("resolving the debug adapter failed: {e}")))

@@ -6157,3 +6157,68 @@ fn the_graph_legend_says_how_to_read_the_graph_shown() {
         "{imports}"
     );
 }
+
+/// The settings' Python interpreter: what is in effect and who named it, the
+/// interpreters found to pick from, the one picked marked — and a "Use" on
+/// another picks it. A choice that cannot be used says so.
+#[test]
+fn the_languages_section_shows_the_interpreter_in_effect_and_picks_another() {
+    use clew_protocol::{
+        PythonCandidate, PythonEnvKind, PythonEnvironments, PythonInEffect, PythonSource,
+    };
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["python".into()];
+    let venv = "/p/.venv/bin/python".to_string();
+    let poetry = "/cache/pypoetry/virtualenvs/app-AbCd-py3.12/bin/python".to_string();
+    app.proj.python_envs = Some(Ok(PythonEnvironments {
+        candidates: vec![
+            PythonCandidate {
+                interpreter: venv.clone(),
+                kind: PythonEnvKind::Project,
+                name: ".venv".into(),
+                version: Some("3.12.1".into()),
+            },
+            PythonCandidate {
+                interpreter: poetry.clone(),
+                kind: PythonEnvKind::Poetry,
+                name: "app-AbCd-py3.12".into(),
+                version: None,
+            },
+        ],
+        in_effect: PythonInEffect {
+            interpreter: Some(venv.clone()),
+            source: PythonSource::ProjectVenv,
+            unusable_choice: Some("/gone/bin/python".into()),
+        },
+    }));
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(sim.find("Python interpreter").is_ok());
+    assert!(
+        sim.find(
+            "Found in the project — run through its base Python, its packages read, as it \
+             came with the project"
+        )
+        .is_ok()
+    );
+    assert!(sim.find("Project · .venv · Python 3.12.1").is_ok());
+    assert!(sim.find("Poetry · app-AbCd-py3.12").is_ok());
+    assert!(sim.find(poetry.as_str()).is_ok());
+    assert!(sim.find("in use").is_ok(), "Automatic is the one in use");
+    assert!(
+        sim.find(
+            "Your choice /gone/bin/python cannot be used: it is gone, or it is a program of \
+             the repository's own. The one above is used until you pick another."
+        )
+        .is_ok()
+    );
+    // The first "Use" is the project's venv: Automatic is in use.
+    let _ = sim.click("Use");
+    let picked: Vec<_> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::ChoosePython(p)) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(picked, [Some(venv)]);
+}

@@ -171,6 +171,8 @@ const COVERED: &[&str] = &[
     "NotebookOutput",
     "Patch",
     "ProviderFailure",
+    "PythonEnvKind",
+    "PythonSource",
     "Refusal",
     "Request",
     "ServerMessage",
@@ -209,6 +211,7 @@ fn request_index(r: &Request) -> usize {
         Request::AgentToolResult { .. } => 26,
         Request::ListDir { .. } => 27,
         Request::BuildDocs => 28,
+        Request::PythonEnvironments { .. } => 29,
     }
 }
 
@@ -246,7 +249,81 @@ fn event_index(e: &Event) -> usize {
         Event::Status { .. } => 29,
         Event::LspResolved { .. } => 30,
         Event::Error { .. } => 31,
+        Event::PythonEnvironments { .. } => 32,
     }
+}
+
+fn python_env_kind_index(k: &PythonEnvKind) -> usize {
+    match k {
+        PythonEnvKind::Project => 0,
+        PythonEnvKind::Activated => 1,
+        PythonEnvKind::Poetry => 2,
+        PythonEnvKind::Pipenv => 3,
+        PythonEnvKind::Conda => 4,
+        PythonEnvKind::Pyenv => 5,
+        PythonEnvKind::Uv => 6,
+        PythonEnvKind::System => 7,
+    }
+}
+
+fn python_source_index(s: &PythonSource) -> usize {
+    match s {
+        PythonSource::Server => 0,
+        PythonSource::Chosen => 1,
+        PythonSource::LspToml => 2,
+        PythonSource::ProjectVenv => 3,
+        PythonSource::Activated => 4,
+    }
+}
+
+/// The user's choices: one naming an interpreter, one naming none.
+fn choices() -> LanguageChoices {
+    LanguageChoices {
+        python: Some("/p/.venv/bin/python".into()),
+    }
+}
+
+/// A project's interpreters, one of every kind, and what is in effect under
+/// each source.
+fn python_environments() -> Vec<PythonEnvironments> {
+    let kinds = [
+        PythonEnvKind::Project,
+        PythonEnvKind::Activated,
+        PythonEnvKind::Poetry,
+        PythonEnvKind::Pipenv,
+        PythonEnvKind::Conda,
+        PythonEnvKind::Pyenv,
+        PythonEnvKind::Uv,
+        PythonEnvKind::System,
+    ];
+    let candidates: Vec<PythonCandidate> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &kind)| PythonCandidate {
+            interpreter: format!("/envs/{i}/bin/python"),
+            kind,
+            name: format!("env{i}"),
+            version: (i % 2 == 0).then(|| "3.12".to_string()),
+        })
+        .collect();
+    [
+        PythonSource::Server,
+        PythonSource::Chosen,
+        PythonSource::LspToml,
+        PythonSource::ProjectVenv,
+        PythonSource::Activated,
+    ]
+    .into_iter()
+    .map(|source| PythonEnvironments {
+        candidates: candidates.clone(),
+        in_effect: PythonInEffect {
+            interpreter: (source != PythonSource::Server).then(|| "/p/.venv/bin/python".into()),
+            source,
+            unusable_choice: (source == PythonSource::ProjectVenv)
+                .then(|| "/gone/bin/python".into()),
+        },
+    })
+    .collect()
 }
 
 fn git_op_index(op: &GitOp) -> usize {
@@ -778,13 +855,27 @@ fn request_samples() -> Vec<Request> {
             lang: "native".into(),
             program: "/p/bin".into(),
             args: vec![],
+            choices: LanguageChoices::default(),
+        },
+        Request::SpawnAdapter {
+            proc: 2,
+            lang: "python".into(),
+            program: "/p/main.py".into(),
+            args: vec![],
+            choices: choices(),
         },
         Request::LspResolve {
             language: "rust".into(),
+            choices: LanguageChoices::default(),
+        },
+        Request::LspResolve {
+            language: "python".into(),
+            choices: choices(),
         },
         Request::LspInstall {
             language: "rust".into(),
             consent: "c0ffee".into(),
+            choices: choices(),
         },
         Request::LspApprovals {
             root: "/p".into(),
@@ -848,6 +939,10 @@ fn request_samples() -> Vec<Request> {
             path: Some("~".into()),
         },
         Request::BuildDocs,
+        Request::PythonEnvironments {
+            choices: LanguageChoices::default(),
+        },
+        Request::PythonEnvironments { choices: choices() },
     ]);
     samples
 }
@@ -1044,6 +1139,12 @@ fn reply_samples() -> Vec<Event> {
                 resolution,
             }),
     );
+    samples.extend(python_environments().into_iter().map(|environments| {
+        Event::PythonEnvironments {
+            root: "/p".into(),
+            environments,
+        }
+    }));
     samples.extend(
         error_codes()
             .into_iter()
@@ -1197,6 +1298,20 @@ fn every_variant_has_a_sample() {
         })
         .collect();
     assert_covers("StreamOutcome", &outcomes, stream_outcome_index);
+    let pythons: Vec<&PythonEnvironments> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::PythonEnvironments { environments, .. } => Some(environments),
+            _ => None,
+        })
+        .collect();
+    let kinds: Vec<PythonEnvKind> = pythons
+        .iter()
+        .flat_map(|p| p.candidates.iter().map(|c| c.kind))
+        .collect();
+    assert_covers("PythonEnvKind", &kinds, python_env_kind_index);
+    let sources: Vec<PythonSource> = pythons.iter().map(|p| p.in_effect.source).collect();
+    assert_covers("PythonSource", &sources, python_source_index);
     let codes: Vec<ErrorCode> = events
         .iter()
         .filter_map(|e| match e {
@@ -1508,6 +1623,9 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Reply.event.LspResolved.resolution.Ready.init_options",
         "Reply.event.LspResolved.resolution.Ready.withheld",
         "Reply.event.NotebookContent.cells[].execution_count",
+        "Reply.event.PythonEnvironments.environments.candidates[].version",
+        "Reply.event.PythonEnvironments.environments.in_effect.interpreter",
+        "Reply.event.PythonEnvironments.environments.in_effect.unusable_choice",
         "Reply.event.Ready.fingerprint",
         "Reply.event.SearchResults.error",
         "Reply.event.StateContent.text",
@@ -1516,8 +1634,12 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.EditState.merge.edit.Patch.insert",
         "request.Hello.fingerprint",
         "request.ListDir.path",
+        "request.LspInstall.choices.python",
+        "request.LspResolve.choices.python",
+        "request.PythonEnvironments.choices.python",
         "request.SetAiConfig.chat",
         "request.SetAiConfig.embed",
+        "request.SpawnAdapter.choices.python",
         "request.SpawnProcess.cwd",
         "request.WriteState.text",
     ];

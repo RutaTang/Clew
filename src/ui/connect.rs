@@ -202,6 +202,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             .size(ts::CAPTION)
             .color(theme::dim()),
         integrations_section(app),
+        languages_section(app),
     ]
     .spacing(12)
     // Room for the scrollbar, so it never draws over a field's edge.
@@ -231,6 +232,217 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Placement::Center,
         Backdrop::Dim(Some(Message::Settings(SettingsMsg::Close))),
     )
+}
+
+/// The open project's languages: each one's server and how it stands, and
+/// the Python interpreter its server and debugger run — the one in effect,
+/// who named it, and the user's pick from what was found where the project
+/// is (`App::refresh_python_envs`). A pick is saved at once, for this project
+/// on this machine, and never written into the project.
+pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
+    use crate::LanguagesMsg as L;
+    use clew_protocol::{PythonEnvKind, PythonSource};
+    if app.proj.project.is_none() {
+        return space().height(0).into();
+    }
+    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
+    let caption = |s: String| text(s).size(ts::CAPTION).color(theme::dim());
+    let small_button = |label: &str, msg: Option<Message>| {
+        button(text(label.to_string()).size(ts::SMALL))
+            .style(theme::secondary_button)
+            .padding([2, 8])
+            .on_press_maybe(msg)
+    };
+    let path_text = |path: String| {
+        text(path)
+            .size(ts::CAPTION)
+            .font(iced::Font::MONOSPACE)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::Glyph)
+    };
+    let remote = app.connection.is_remote();
+    let mut col = column![
+        section("Languages in this project"),
+        caption(format!(
+            "Set up for this project {} — kept in clew's own data, never written into the \
+             project. A choice here wins over its .clew/lsp.toml.",
+            if remote {
+                "and its host"
+            } else {
+                "on this machine"
+            }
+        )),
+    ]
+    .spacing(8);
+    for language in &app.proj.project_languages {
+        let server = app
+            .proj
+            .lsp_config
+            .resolve(language)
+            .map(|s| match s.command {
+                Some(_) => format!("{} (the project's command)", s.server_name),
+                None => format!("{} {}", s.server_name, s.version),
+            })
+            .unwrap_or_else(|| "no server".into());
+        let (status, action) = app.lsp_row(language);
+        let action: Element<'_, Message> = match action {
+            Some((label, msg)) => small_button(label, Some(msg)).into(),
+            None => space().width(0).into(),
+        };
+        col = col.push(
+            row![
+                text(crate::highlight::lang_name(language).unwrap_or(language.as_str()))
+                    .size(ts::BODY)
+                    .color(theme::fg())
+                    .width(90),
+                column![
+                    text(server).size(ts::SMALL).color(theme::fg_muted()),
+                    text(status).size(ts::CAPTION).color(theme::dim()),
+                ]
+                .spacing(1)
+                .width(Fill),
+                action,
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        );
+    }
+
+    let python = app.proj.project_languages.iter().any(|l| l == "python")
+        || app.proj.lang_choices.python.is_some();
+    if !python {
+        return col.into();
+    }
+    col = col.push(text("Python interpreter").size(ts::BODY).color(theme::fg()));
+    let chosen = app.proj.lang_choices.python.as_deref();
+    match &app.proj.python_envs {
+        None => col = col.push(caption("Looking for Python environments…".into())),
+        Some(Err(why)) => {
+            col = col.push(
+                text(format!("The environments could not be listed: {why}"))
+                    .size(ts::CAPTION)
+                    .color(theme::danger()),
+            )
+        }
+        Some(Ok(envs)) => {
+            let effect = &envs.in_effect;
+            let who = match effect.source {
+                PythonSource::Chosen => "Your choice",
+                PythonSource::LspToml => "Named by the project's .clew/lsp.toml",
+                PythonSource::ProjectVenv => {
+                    "Found in the project — run through its base Python, its packages read, \
+                     as it came with the project"
+                }
+                PythonSource::Activated => "The environment active where clew started",
+                PythonSource::Server => "None — the language server looks for one itself",
+            };
+            let mut in_effect = column![text(who).size(ts::SMALL).color(theme::fg())].spacing(2);
+            if let Some(path) = &effect.interpreter {
+                in_effect = in_effect.push(path_text(path.clone()));
+            }
+            col = col.push(
+                container(in_effect)
+                    .padding([6, 8])
+                    .width(Fill)
+                    .style(theme::panel),
+            );
+            if let Some(bad) = &effect.unusable_choice {
+                col = col.push(
+                    text(format!(
+                        "Your choice {bad} cannot be used: it is gone, or it is a program of \
+                         the repository's own. The one above is used until you pick another."
+                    ))
+                    .size(ts::CAPTION)
+                    .color(theme::warning()),
+                );
+            }
+            let pick = |label: String, path: Option<String>, selected: bool| {
+                let detail: Element<'_, Message> = match &path {
+                    Some(p) => path_text(p.clone()).into(),
+                    None => caption(
+                        "Whatever clew finds: the project's own venv, else the \
+                                     server's choice"
+                            .into(),
+                    )
+                    .into(),
+                };
+                row![
+                    column![text(label).size(ts::SMALL).color(theme::fg()), detail]
+                        .spacing(1)
+                        .width(Fill),
+                    if selected {
+                        Element::from(text("in use").size(ts::SMALL).color(theme::success()))
+                    } else {
+                        small_button("Use", Some(Message::Languages(L::ChoosePython(path)))).into()
+                    },
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+            };
+            col = col.push(pick("Automatic".into(), None, chosen.is_none()));
+            for candidate in &envs.candidates {
+                let kind = match candidate.kind {
+                    PythonEnvKind::Project => "Project",
+                    PythonEnvKind::Activated => "Activated",
+                    PythonEnvKind::Poetry => "Poetry",
+                    PythonEnvKind::Pipenv => "Pipenv",
+                    PythonEnvKind::Conda => "conda",
+                    PythonEnvKind::Pyenv => "pyenv",
+                    PythonEnvKind::Uv => "uv",
+                    PythonEnvKind::System => "System",
+                };
+                let mut label = format!("{kind} · {}", candidate.name);
+                if let Some(version) = &candidate.version {
+                    label.push_str(&format!(" · Python {version}"));
+                }
+                if candidate.kind == PythonEnvKind::System {
+                    label = match &candidate.version {
+                        Some(version) => format!("{kind} · Python {version}"),
+                        None => kind.to_string(),
+                    };
+                }
+                col = col.push(pick(
+                    label,
+                    Some(candidate.interpreter.clone()),
+                    chosen == Some(candidate.interpreter.as_str()),
+                ));
+            }
+            // A choice the list does not hold (typed, browsed to, or gone).
+            if let Some(other) = chosen
+                && !envs.candidates.iter().any(|c| c.interpreter == other)
+            {
+                col = col.push(pick("Your choice".into(), Some(other.to_string()), true));
+            }
+        }
+    }
+    let placeholder = if remote {
+        "Path to a Python interpreter on the remote host"
+    } else {
+        "Path to a Python interpreter"
+    };
+    let draft_empty = app.proj.python_path_draft.trim().is_empty();
+    let mut path_row = row![
+        text_input(placeholder, &app.proj.python_path_draft)
+            .on_input(|v| Message::Languages(L::PathDraft(v)))
+            .on_submit(Message::Languages(L::UsePath))
+            .size(ts::BASE)
+            .padding(6)
+            .width(Fill),
+        small_button(
+            "Use",
+            (!draft_empty).then_some(Message::Languages(L::UsePath))
+        ),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if !remote {
+        path_row = path_row.push(small_button("Browse…", Some(Message::Languages(L::Browse))));
+    }
+    path_row = path_row.push(small_button(
+        "Look again",
+        Some(Message::Languages(L::Refresh)),
+    ));
+    col.push(path_row).into()
 }
 
 /// The settings' MCP servers and ACP agents: what is configured, how each

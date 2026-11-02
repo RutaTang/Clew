@@ -19,6 +19,12 @@
 //! (see [`merge`]): a repository value that wins over a vetted one is not a
 //! preference, it is an override of this module's trust boundary.
 //!
+//! Over both lie the user's own choices for the project, made in Settings
+//! ([`crate::lsp::choices`]): the interpreter they picked from the ones
+//! [`python_candidates`] finds — found by looking, never by running one — or
+//! named by path. A choice picks the environment; it does not lift the
+//! boundary ([`chosen_python_env`]).
+//!
 //! (A) reaches INTO the project for a path the server will then EXECUTE, so it
 //! sits on the same trust boundary as an `lsp.toml` `command` — see
 //! [`foreign_bytes`] and [`find_python_env`] for where that boundary is drawn
@@ -32,36 +38,60 @@
 //! ([`crate::lsp::client`], seeded into its server state at start), so
 //! either way the server sees what this module computed.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use clew_protocol::{
+    LanguageChoices, PythonCandidate, PythonEnvKind, PythonEnvironments, PythonInEffect,
+    PythonSource,
+};
 use serde_json::{Value, json};
 
 /// The auto-detected environment settings for `language`'s server in `root`, or
 /// `None` when there is nothing to add.
 pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
     match language {
-        "python" => {
-            let env = find_python_env(root)?;
-            let path = |p: &Path| p.to_string_lossy().to_string();
-            // Both keys, so pyright (defaultInterpreterPath) and pylsp
-            // (pythonPath) each pick it up.
-            let mut python = json!({
-                "pythonPath": path(&env.run),
-                "defaultInterpreterPath": path(&env.run),
-            });
-            if !env.extra_paths.is_empty() {
-                python["analysis"] = json!({
-                    "extraPaths": env.extra_paths.iter().map(|p| path(p)).collect::<Vec<_>>(),
-                });
-            }
-            Some(json!({ "python": python }))
-        }
+        "python" => Some(python_settings(&find_python_env(root)?)),
         _ => None,
     }
 }
 
+/// The settings the user's `choices` give `language`'s server in `root`, or
+/// `None` when they chose nothing for it, or what they chose cannot be used
+/// (see [`chosen_python_env`]).
+pub fn chosen(language: &str, root: &Path, choices: &LanguageChoices) -> Option<Value> {
+    match language {
+        "python" => Some(python_settings(&chosen_python_env(
+            root,
+            choices.python.as_deref()?,
+        )?)),
+        _ => None,
+    }
+}
+
+/// What the Python servers read the environment from.
+fn python_settings(env: &PythonEnv) -> Value {
+    let path = |p: &Path| p.to_string_lossy().to_string();
+    // Both keys, so pyright (defaultInterpreterPath) and pylsp
+    // (pythonPath) each pick it up.
+    let mut python = json!({
+        "pythonPath": path(&env.run),
+        "defaultInterpreterPath": path(&env.run),
+    });
+    if !env.extra_paths.is_empty() {
+        python["analysis"] = json!({
+            "extraPaths": env.extra_paths.iter().map(|p| path(p)).collect::<Vec<_>>(),
+        });
+    }
+    json!({ "python": python })
+}
+
 /// Merge auto-detected settings under the explicit `lsp.toml` `init_options`,
-/// with explicit values winning on conflict.
+/// with explicit values winning on conflict, and the user's `choices` over
+/// both: what they chose in Settings is theirs to say, for their machine,
+/// where the `lsp.toml` is the repository's. A language they chose for is
+/// not detected at all — a project venv's search paths would otherwise
+/// linger under the interpreter they picked instead.
 ///
 /// `explicit` must already have passed the approval gate — `App::approved_
 /// init_options` on the client, `clew_server::approved_init_options` on the
@@ -79,14 +109,20 @@ pub fn merge(
     exe: &Path,
     root: &Path,
     explicit: Option<Value>,
+    choices: &LanguageChoices,
 ) -> Result<Option<Value>, String> {
-    let auto = layer(detect(language, &server.server_name, root), explicit);
+    let chosen = chosen(language, root, choices);
+    let detected = match chosen {
+        Some(_) => None,
+        None => detect(language, &server.server_name, root),
+    };
+    let auto = layer(layer(detected, explicit), chosen);
     Ok(layer(pinned(server, exe)?, auto))
 }
 
 /// [`merge`] for a host that does not probe the project's environment (the
-/// clew-server's resolutions and the agent's pool): the pinned settings with
-/// the approved `explicit` options on top.
+/// Ask agent's pool of servers): the pinned settings with the approved
+/// `explicit` options on top.
 pub fn with_pinned(
     server: &crate::lsp::config::EffectiveServer,
     exe: &Path,
@@ -191,7 +227,7 @@ struct Vetted {
 }
 
 fn find_vetted(root: &Path) -> Option<Vetted> {
-    const DIRS: [&str; 4] = [".venv", "venv", ".env", "env"];
+    const DIRS: [&str; 4] = PROJECT_VENV_DIRS;
     const EXES: [&str; 3] = ["bin/python", "bin/python3", "Scripts/python.exe"];
     // Containment is only decidable against the real root; without it there is
     // no way to tell a repository file from a system one, so detect nothing.
@@ -222,6 +258,540 @@ fn find_vetted(root: &Path) -> Option<Vetted> {
     let venv = std::env::var_os("VIRTUAL_ENV")?;
     EXES.into_iter()
         .find_map(|exe| vet(Path::new(&venv).join(exe), true))
+}
+
+/// The Python environment the user chose (`chosen`, a path on this host, as
+/// they gave it), made safe to run — or `None` when it cannot be used: it is
+/// not an absolute path to a file, or it is the repository's own program.
+///
+/// A choice names the environment; it does not lift the boundary
+/// [`find_python_env`] draws. Outside the repository (a Poetry, conda, pyenv
+/// or uv environment, a system Python) it is the user's own install, and is
+/// run as found. Inside it, it is held to the same check as a venv found
+/// there by name, and run the same way: through the base interpreter its
+/// bytes are, its packages read — a repository can ship a `.venv` as easily
+/// as anything else, and choosing it from a list does not tell the user
+/// whose its start-up code is.
+fn chosen_python_env(root: &Path, chosen: &str) -> Option<PythonEnv> {
+    let cand = Path::new(chosen);
+    match chosen_in_repository(root, cand)? {
+        None => Some(PythonEnv {
+            run: cand.to_path_buf(),
+            extra_paths: Vec::new(),
+        }),
+        Some(repo) => {
+            let base = foreign_bytes(&repo, cand)?;
+            let venv = cand.parent()?.parent()?;
+            Some(PythonEnv {
+                run: base,
+                extra_paths: site_paths(venv),
+            })
+        }
+    }
+}
+
+/// The interpreter the user chose (`chosen`), to debug a program in `root`
+/// under — as found, a venv's interpreter booting its environment — or
+/// `None` when it cannot be used. Inside the repository it must pass the
+/// same check as a venv found there ([`foreign_bytes`]); what then runs is
+/// the project's program, which is what debugging it asks for.
+pub fn chosen_interpreter(root: &Path, chosen: &str) -> Option<PathBuf> {
+    let cand = Path::new(chosen);
+    match chosen_in_repository(root, cand)? {
+        None => Some(cand.to_path_buf()),
+        Some(repo) => foreign_bytes(&repo, cand).map(|_| cand.to_path_buf()),
+    }
+}
+
+/// Whether the interpreter `cand` (or the environment around it) lies in the
+/// repository holding `root`: `Some(Some(repository))` when it does,
+/// `Some(None)` when it does not, `None` when it cannot be used at all — not
+/// an absolute path to a file, or the project cannot be resolved to tell.
+fn chosen_in_repository(root: &Path, cand: &Path) -> Option<Option<PathBuf>> {
+    if !cand.is_absolute() || !cand.is_file() {
+        return None;
+    }
+    let real_root = std::fs::canonicalize(root).ok()?;
+    let repo = repository_top(&real_root);
+    let inside = |p: &Path| std::fs::canonicalize(p).is_ok_and(|real| real.starts_with(&repo));
+    // The environment, not only the file: `<venv>/bin/python` links out of
+    // the project, but `<venv>` — its `pyvenv.cfg`, its `.pth` files — is
+    // what running it boots.
+    let env = cand.parent().and_then(Path::parent);
+    Some((inside(cand) || env.is_some_and(inside)).then_some(repo))
+}
+
+/// What the Python language server in `root` is given, and who named it: the
+/// user's `choices`, else the project's `lsp.toml` options (`lsp_toml`),
+/// else the virtualenv detection finds — the order [`merge`] layers them in.
+pub fn python_in_effect(
+    root: &Path,
+    choices: &LanguageChoices,
+    lsp_toml: Option<&Value>,
+) -> PythonInEffect {
+    let mut unusable_choice = None;
+    if let Some(chosen) = &choices.python {
+        if chosen_python_env(root, chosen).is_some() {
+            return PythonInEffect {
+                interpreter: Some(chosen.clone()),
+                source: PythonSource::Chosen,
+                unusable_choice: None,
+            };
+        }
+        unusable_choice = Some(chosen.clone());
+    }
+    let named = lsp_toml
+        .and_then(|options| options.get("python"))
+        .and_then(|python| {
+            python
+                .get("pythonPath")
+                .or_else(|| python.get("defaultInterpreterPath"))
+        })
+        .and_then(Value::as_str);
+    let (interpreter, source) = match named {
+        Some(path) => (Some(path.to_string()), PythonSource::LspToml),
+        None => match find_vetted(root) {
+            Some(found) => (
+                Some(found.interpreter.to_string_lossy().into_owned()),
+                match found.activated {
+                    true => PythonSource::Activated,
+                    false => PythonSource::ProjectVenv,
+                },
+            ),
+            None => (None, PythonSource::Server),
+        },
+    };
+    PythonInEffect {
+        interpreter,
+        source,
+        unusable_choice,
+    }
+}
+
+/// The project's Python interpreters on this host, and the one its language
+/// server is given ([`python_candidates`], [`python_in_effect`]).
+pub fn python_environments(
+    root: &Path,
+    choices: &LanguageChoices,
+    lsp_toml: Option<&Value>,
+) -> PythonEnvironments {
+    PythonEnvironments {
+        candidates: python_candidates(root, &PythonHost::current()),
+        in_effect: python_in_effect(root, choices, lsp_toml),
+    }
+}
+
+/// Where a host keeps its Python installations, as its environment says.
+/// Passed in, so a test can point it at a scratch home.
+pub struct PythonHost {
+    /// The user's home.
+    pub home: Option<PathBuf>,
+    /// The search path `python3` is looked for on.
+    pub path: Option<OsString>,
+    /// The environment variables that move where the tools keep their
+    /// environments (see [`PYTHON_HOST_VARS`]), as set.
+    pub vars: Vec<(&'static str, OsString)>,
+    /// Whether this is a Mac, where caches live under `~/Library/Caches`.
+    pub macos: bool,
+}
+
+/// The environment variables [`PythonHost`] reads.
+const PYTHON_HOST_VARS: &[&str] = &[
+    "VIRTUAL_ENV",
+    "CONDA_PREFIX",
+    "POETRY_VIRTUALENVS_PATH",
+    "WORKON_HOME",
+    "PYENV_ROOT",
+    "UV_PYTHON_INSTALL_DIR",
+    "XDG_CACHE_HOME",
+    "XDG_DATA_HOME",
+];
+
+impl PythonHost {
+    /// This process's host.
+    pub fn current() -> PythonHost {
+        PythonHost {
+            home: std::env::var_os("HOME").map(PathBuf::from),
+            path: crate::linerpc::spawn_path(),
+            vars: PYTHON_HOST_VARS
+                .iter()
+                .filter_map(|&name| Some((name, std::env::var_os(name)?)))
+                .collect(),
+            macos: cfg!(target_os = "macos"),
+        }
+    }
+
+    /// The directory variable `name` names, when it names an absolute one.
+    fn dir(&self, name: &str) -> Option<PathBuf> {
+        self.vars
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| PathBuf::from(v))
+            .filter(|p| p.is_absolute())
+    }
+
+    /// The user's home, when absolute.
+    fn home(&self) -> Option<&Path> {
+        self.home.as_deref().filter(|h| h.is_absolute())
+    }
+}
+
+/// Most interpreters listed for one project.
+const MAX_CANDIDATES: usize = 64;
+/// Most entries read from one directory of environments.
+const MAX_ENV_ENTRIES: usize = 256;
+/// `pyproject.toml`, read for the project's name; it ships with the
+/// repository.
+const MAX_PYPROJECT_BYTES: u64 = 256 * 1024;
+/// Conda's list of environments, one path a line.
+const MAX_CONDA_LIST_BYTES: u64 = 64 * 1024;
+
+/// The Python interpreters a user may run the project's language server
+/// under, found by LOOKING where each tool keeps them — none is run, as one
+/// in the project could be the repository's program: the project's own
+/// virtualenvs (in its folder or a folder down), the environment activated
+/// where clew started, this project's Poetry and Pipenv environments, conda's
+/// environments, pyenv's and uv's Pythons, and a `python3` on the search path
+/// or where systems keep one. Most specific first, each interpreter once,
+/// [`MAX_CANDIDATES`] at most.
+///
+/// A virtualenv in the project is listed only when the bytes running it would
+/// run are not the repository's ([`foreign_bytes`]) — the check detection
+/// applies — so the list never offers a planted `.venv/bin/python` as the
+/// user's environment.
+pub fn python_candidates(root: &Path, host: &PythonHost) -> Vec<PythonCandidate> {
+    let mut out: Vec<PythonCandidate> = Vec::new();
+    let add = |out: &mut Vec<PythonCandidate>,
+               interpreter: PathBuf,
+               kind: PythonEnvKind,
+               name: String,
+               version: Option<String>| {
+        let interpreter = interpreter.to_string_lossy().into_owned();
+        if out.len() < MAX_CANDIDATES && !out.iter().any(|c| c.interpreter == interpreter) {
+            out.push(PythonCandidate {
+                interpreter,
+                kind,
+                name,
+                version,
+            });
+        }
+    };
+    // The project's own, vetted as detection vets them.
+    if let Ok(real_root) = std::fs::canonicalize(root) {
+        let repo = repository_top(&real_root);
+        let mut dirs: Vec<(String, PathBuf)> = PROJECT_VENV_DIRS
+            .iter()
+            .map(|d| (d.to_string(), root.join(d)))
+            .collect();
+        for child in sorted_dirs(root) {
+            let Some(name) = child
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if name.starts_with('.') {
+                continue;
+            }
+            for d in [".venv", "venv"] {
+                dirs.push((format!("{name}/{d}"), child.join(d)));
+            }
+        }
+        for (name, dir) in dirs {
+            if let Some(interpreter) = interpreter_in(&dir)
+                && foreign_bytes(&repo, &interpreter).is_some()
+            {
+                add(
+                    &mut out,
+                    interpreter,
+                    PythonEnvKind::Project,
+                    name,
+                    pyvenv_version(&dir),
+                );
+            }
+        }
+    }
+    for var in ["VIRTUAL_ENV", "CONDA_PREFIX"] {
+        if let Some(dir) = host.dir(var)
+            && let Some(interpreter) = interpreter_in(&dir)
+        {
+            let version = pyvenv_version(&dir).or_else(|| conda_version(&dir));
+            add(
+                &mut out,
+                interpreter,
+                PythonEnvKind::Activated,
+                dir_name(&dir),
+                version,
+            );
+        }
+    }
+    let project = project_name(root);
+    if let Some(dir) = poetry_dir(host) {
+        let prefix = format!("{}-", poetry_sanitized(&project));
+        for env in sorted_dirs(&dir) {
+            let name = dir_name(&env);
+            if name.starts_with(&prefix)
+                && let Some(interpreter) = interpreter_in(&env)
+            {
+                add(
+                    &mut out,
+                    interpreter,
+                    PythonEnvKind::Poetry,
+                    name,
+                    pyvenv_version(&env),
+                );
+            }
+        }
+    }
+    if let Some(dir) = host
+        .dir("WORKON_HOME")
+        .or_else(|| host.home().map(|h| h.join(".local/share/virtualenvs")))
+    {
+        let folder = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let prefix = format!("{}-", pipenv_sanitized(&folder));
+        for env in sorted_dirs(&dir) {
+            let name = dir_name(&env);
+            if name.starts_with(&prefix)
+                && let Some(interpreter) = interpreter_in(&env)
+            {
+                add(
+                    &mut out,
+                    interpreter,
+                    PythonEnvKind::Pipenv,
+                    name,
+                    pyvenv_version(&env),
+                );
+            }
+        }
+    }
+    for (name, env) in conda_envs(host) {
+        if let Some(interpreter) = interpreter_in(&env) {
+            add(
+                &mut out,
+                interpreter,
+                PythonEnvKind::Conda,
+                name,
+                conda_version(&env),
+            );
+        }
+    }
+    if let Some(dir) = host
+        .dir("PYENV_ROOT")
+        .or_else(|| host.home().map(|h| h.join(".pyenv")))
+    {
+        // The version the project pins (`.python-version`) first.
+        let pinned = crate::statefile::read_capped(&root.join(".python-version"), 4096)
+            .and_then(|t| t.split_whitespace().next().map(str::to_string));
+        let mut versions = sorted_dirs(&dir.join("versions"));
+        versions.sort_by_key(|v| Some(dir_name(v)) != pinned);
+        for env in versions {
+            let name = dir_name(&env);
+            if let Some(interpreter) = interpreter_in(&env) {
+                let version = name
+                    .starts_with(|c: char| c.is_ascii_digit())
+                    .then(|| name.clone());
+                add(&mut out, interpreter, PythonEnvKind::Pyenv, name, version);
+            }
+        }
+    }
+    if let Some(dir) = host.dir("UV_PYTHON_INSTALL_DIR").or_else(|| {
+        host.dir("XDG_DATA_HOME")
+            .or_else(|| host.home().map(|h| h.join(".local/share")))
+            .map(|d| d.join("uv/python"))
+    }) {
+        for env in sorted_dirs(&dir) {
+            let name = dir_name(&env);
+            if let Some(interpreter) = interpreter_in(&env) {
+                // `cpython-3.12.4-macos-aarch64-none`.
+                let version = name.split('-').nth(1).map(str::to_string);
+                add(&mut out, interpreter, PythonEnvKind::Uv, name, version);
+            }
+        }
+    }
+    let mut system: Vec<PathBuf> = Vec::new();
+    if let Some(path) = &host.path {
+        for dir in std::env::split_paths(path).filter(|d| d.is_absolute()) {
+            system.push(dir.join("python3"));
+        }
+    }
+    for well_known in [
+        "/opt/homebrew/bin/python3",
+        "/usr/local/bin/python3",
+        "/usr/bin/python3",
+    ] {
+        system.push(PathBuf::from(well_known));
+    }
+    for interpreter in system.into_iter().filter(|p| p.is_file()) {
+        let name = interpreter.to_string_lossy().into_owned();
+        add(&mut out, interpreter, PythonEnvKind::System, name, None);
+    }
+    out
+}
+
+/// The folders a project's own virtualenv goes by, most conventional first.
+const PROJECT_VENV_DIRS: [&str; 4] = [".venv", "venv", ".env", "env"];
+
+/// Where a virtualenv's (or a conda environment's, or an installed Python's)
+/// interpreter is, when it has one.
+fn interpreter_in(env: &Path) -> Option<PathBuf> {
+    [
+        "bin/python",
+        "bin/python3",
+        "Scripts/python.exe",
+        "python.exe",
+    ]
+    .into_iter()
+    .map(|exe| env.join(exe))
+    .find(|p| p.is_file())
+}
+
+/// The folders in `dir`, sorted, [`MAX_ENV_ENTRIES`] at most.
+fn sorted_dirs(dir: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .take(MAX_ENV_ENTRIES)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The last part of `dir`'s name.
+fn dir_name(dir: &Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// The Python version a virtualenv's `pyvenv.cfg` records.
+fn pyvenv_version(venv: &Path) -> Option<String> {
+    let cfg = crate::statefile::read_capped(&venv.join("pyvenv.cfg"), MAX_PYVENV_CFG_BYTES)?;
+    cfg.lines().find_map(|line| {
+        let (key, value) = line.split_once('=')?;
+        matches!(key.trim(), "version" | "version_info").then(|| value.trim().to_string())
+    })
+}
+
+/// The Python version a conda environment holds, from the package record
+/// conda keeps of it (`conda-meta/python-3.12.4-h….json`).
+fn conda_version(env: &Path) -> Option<String> {
+    let Ok(entries) = std::fs::read_dir(env.join("conda-meta")) else {
+        return None;
+    };
+    entries.flatten().take(4096).find_map(|e| {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let rest = name.strip_prefix("python-")?;
+        rest.starts_with(|c: char| c.is_ascii_digit())
+            .then(|| rest.split('-').next().unwrap_or(rest).to_string())
+    })
+}
+
+/// The project's name, as Poetry names its environments after it: its
+/// `pyproject.toml`'s (`[tool.poetry]` or `[project]`), else its folder's.
+fn project_name(root: &Path) -> String {
+    let declared = crate::statefile::read_capped(&root.join("pyproject.toml"), MAX_PYPROJECT_BYTES)
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|table| {
+            let name = |t: &toml::Table| t.get("name")?.as_str().map(str::to_string);
+            table
+                .get("tool")
+                .and_then(|t| t.get("poetry"))
+                .and_then(|p| p.as_table())
+                .and_then(name)
+                .or_else(|| table.get("project")?.as_table().and_then(name))
+        });
+    declared.unwrap_or_else(|| {
+        root.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    })
+}
+
+/// A project name as Poetry spells it in an environment's folder name:
+/// lowercased, its shell-unfriendly characters `_`, 42 characters at most.
+fn poetry_sanitized(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            ' ' | '$' | '`' | '!' | '*' | '@' | '"' | '\\' | '\r' | '\n' | '\t' => '_',
+            c => c,
+        })
+        .take(42)
+        .collect()
+}
+
+/// A project folder's name as Pipenv spells it in an environment's folder
+/// name.
+fn pipenv_sanitized(name: &str) -> String {
+    name.chars()
+        .map(|c| match c {
+            ' ' | '&' | '$' | '`' | '!' | '*' | '@' | '"' | '(' | ')' | '[' | ']' | '\\' | '\r'
+            | '\n' | '\t' => '_',
+            c => c,
+        })
+        .take(42)
+        .collect()
+}
+
+/// Where Poetry keeps its environments on `host`.
+fn poetry_dir(host: &PythonHost) -> Option<PathBuf> {
+    if let Some(dir) = host.dir("POETRY_VIRTUALENVS_PATH") {
+        return Some(dir);
+    }
+    let cache = match host.macos {
+        true => host.home()?.join("Library/Caches"),
+        false => host
+            .dir("XDG_CACHE_HOME")
+            .or_else(|| host.home().map(|h| h.join(".cache")))?,
+    };
+    Some(cache.join("pypoetry/virtualenvs"))
+}
+
+/// Conda's environments on `host`, by name: those it lists in
+/// `~/.conda/environments.txt`, and the base and `envs/` of the usual
+/// installs.
+fn conda_envs(host: &PythonHost) -> Vec<(String, PathBuf)> {
+    let Some(home) = host.home() else {
+        return Vec::new();
+    };
+    let mut envs: Vec<(String, PathBuf)> = Vec::new();
+    if let Some(list) =
+        crate::statefile::read_capped(&home.join(".conda/environments.txt"), MAX_CONDA_LIST_BYTES)
+    {
+        for line in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
+            let dir = PathBuf::from(line);
+            if dir.is_absolute() {
+                let name = match dir.parent().and_then(|p| p.file_name()) {
+                    Some(parent) if parent == "envs" => dir_name(&dir),
+                    _ => format!("base ({})", dir_name(&dir)),
+                };
+                envs.push((name, dir));
+            }
+        }
+    }
+    for install in [
+        "miniconda3",
+        "anaconda3",
+        "miniforge3",
+        "mambaforge",
+        "micromamba",
+        ".conda",
+    ] {
+        let base = home.join(install);
+        envs.push((format!("base ({install})"), base.clone()));
+        for env in sorted_dirs(&base.join("envs")) {
+            envs.push((dir_name(&env), env));
+        }
+    }
+    envs
 }
 
 /// What [`detect`] tells the language server of the project's Python.
@@ -886,6 +1456,7 @@ mod tests {
             &exe,
             &root,
             Some(json!({ "preferences": { "quotePreference": "single" } })),
+            &LanguageChoices::default(),
         )
         .unwrap()
         .unwrap();
@@ -909,6 +1480,280 @@ mod tests {
         let mut custom = server.clone();
         custom.command = Some(PathBuf::from("/opt/tls"));
         assert_eq!(pinned(&custom, &exe).unwrap(), None);
+    }
+
+    /// The Python server the registry resolves to, and a stand-in binary.
+    fn python_server() -> (crate::lsp::config::EffectiveServer, PathBuf) {
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("python")
+            .unwrap();
+        (
+            server,
+            PathBuf::from("/store/pyright/bin/pyright-langserver"),
+        )
+    }
+
+    fn choose(python: &Path) -> LanguageChoices {
+        LanguageChoices {
+            python: Some(python.to_string_lossy().into_owned()),
+        }
+    }
+
+    /// The user's choice wins over the project's `lsp.toml` and over the venv
+    /// detection finds — and stands alone: none of the detected venv's search
+    /// paths linger under it. A choice that is gone is passed over, and the
+    /// `lsp.toml` and detection decide as before.
+    #[test]
+    #[cfg(unix)]
+    fn a_chosen_interpreter_wins_over_lsp_toml_and_detection() {
+        let root = scratch("chosen-wins");
+        let base = system_python("chosen-wins-base", BASE_BYTES);
+        let bin = venv_bin(&root, ".venv");
+        std::os::unix::fs::symlink(base.join("python3.12"), bin.join("python")).unwrap();
+        std::fs::create_dir_all(root.join(".venv/lib/python3.12/site-packages")).unwrap();
+        let mine = system_python("chosen-wins-mine", b"\x7fELF the user's own");
+        let mine = mine.join("python3.12");
+        let (server, exe) = python_server();
+        let lsp_toml = Some(json!({ "python": { "pythonPath": "/team/python" } }));
+
+        let merged = merge(
+            "python",
+            &server,
+            &exe,
+            &root,
+            lsp_toml.clone(),
+            &choose(&mine),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(merged["python"]["pythonPath"], mine.to_str().unwrap());
+        assert_eq!(
+            merged["python"]["defaultInterpreterPath"],
+            mine.to_str().unwrap()
+        );
+        assert!(
+            merged["python"].get("analysis").is_none(),
+            "the detected venv's paths stayed: {merged}"
+        );
+
+        let gone = choose(&root.join("gone/bin/python"));
+        let merged = merge("python", &server, &exe, &root, lsp_toml, &gone)
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged["python"]["pythonPath"], "/team/python");
+        let merged = merge("python", &server, &exe, &root, None, &gone)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            merged["python"]["pythonPath"],
+            std::fs::canonicalize(base.join("python3.12"))
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "detection's pick, run through its base"
+        );
+    }
+
+    /// A choice inside the repository does not lift the boundary detection
+    /// draws: a venv there is run through its base interpreter, its packages
+    /// read (the debugger runs it as found); a file of the repository's own
+    /// is not used at all, by the server or the debugger, and is reported as
+    /// such.
+    #[test]
+    #[cfg(unix)]
+    fn a_chosen_interpreter_in_the_repository_is_held_to_detections_check() {
+        let root = scratch("chosen-inside");
+        std::fs::create_dir(root.join(".git")).unwrap();
+        let base = system_python("chosen-inside-base", BASE_BYTES);
+        let bin = venv_bin(&root, "envs/api");
+        std::os::unix::fs::symlink(base.join("python3.12"), bin.join("python")).unwrap();
+        let site = root.join("envs/api/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&site).unwrap();
+        let venv_python = bin.join("python");
+
+        let env = chosen_python_env(&root, venv_python.to_str().unwrap()).unwrap();
+        assert_eq!(
+            env.run,
+            std::fs::canonicalize(base.join("python3.12")).unwrap()
+        );
+        assert_eq!(env.extra_paths, [site]);
+        assert_eq!(
+            chosen_interpreter(&root, venv_python.to_str().unwrap()),
+            Some(venv_python.clone())
+        );
+
+        let planted = venv_bin(&root, "tools").join("python");
+        std::fs::write(&planted, "#!/bin/sh\necho pwned\n").unwrap();
+        let planted = planted.to_str().unwrap();
+        assert!(chosen_python_env(&root, planted).is_none());
+        assert_eq!(chosen_interpreter(&root, planted), None);
+        let effect = python_in_effect(
+            &root,
+            &LanguageChoices {
+                python: Some(planted.to_string()),
+            },
+            None,
+        );
+        assert_eq!(effect.unusable_choice.as_deref(), Some(planted));
+        assert_ne!(effect.source, PythonSource::Chosen);
+
+        // Not a path at all, or a relative one, is not used either.
+        assert!(chosen_python_env(&root, "python3").is_none());
+        assert!(chosen_python_env(&root, "").is_none());
+    }
+
+    /// What the view says of the interpreter in effect: who named it, in the
+    /// order `merge` layers them.
+    #[test]
+    #[cfg(unix)]
+    fn what_is_in_effect_says_who_named_it() {
+        let _env = crate::testutil::EnvVars::new().remove("VIRTUAL_ENV");
+        let root = scratch("in-effect");
+        let none = LanguageChoices::default();
+        assert_eq!(
+            python_in_effect(&root, &none, None),
+            PythonInEffect::default()
+        );
+
+        let base = system_python("in-effect-base", BASE_BYTES);
+        let bin = venv_bin(&root, ".venv");
+        std::os::unix::fs::symlink(base.join("python3.12"), bin.join("python")).unwrap();
+        let venv = bin.join("python").to_string_lossy().into_owned();
+        let effect = python_in_effect(&root, &none, None);
+        assert_eq!(
+            (effect.interpreter.as_deref(), effect.source),
+            (Some(venv.as_str()), PythonSource::ProjectVenv)
+        );
+
+        let lsp_toml = json!({ "python": { "defaultInterpreterPath": "/team/python" } });
+        let effect = python_in_effect(&root, &none, Some(&lsp_toml));
+        assert_eq!(
+            (effect.interpreter.as_deref(), effect.source),
+            (Some("/team/python"), PythonSource::LspToml)
+        );
+
+        let mine = system_python("in-effect-mine", b"\x7fELF mine").join("python3.12");
+        let effect = python_in_effect(&root, &choose(&mine), Some(&lsp_toml));
+        assert_eq!(effect.source, PythonSource::Chosen);
+        assert_eq!(effect.interpreter.as_deref(), mine.to_str());
+        assert_eq!(effect.unusable_choice, None);
+
+        let effect = python_in_effect(&root, &choose(Path::new("/gone/python")), None);
+        assert_eq!(effect.source, PythonSource::ProjectVenv);
+        assert_eq!(effect.unusable_choice.as_deref(), Some("/gone/python"));
+    }
+
+    /// Every tool's environments are found where it keeps them — none run —
+    /// the project's own first, and a planted interpreter in the project is
+    /// not offered as one.
+    #[test]
+    #[cfg(unix)]
+    fn every_tools_environments_are_found_where_it_keeps_them() {
+        use std::os::unix::fs::symlink;
+        let home = scratch("candidates-home");
+        let root = scratch("candidates-project").join("my-app");
+        std::fs::create_dir_all(&root).unwrap();
+        let base = system_python("candidates-base", BASE_BYTES).join("python3.12");
+        let python_at = |dir: &Path, exe: &str| {
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            std::fs::write(dir.join("bin").join(exe), "").unwrap();
+            dir.join("bin").join(exe)
+        };
+        // The project's own: linked out (listed), planted (not).
+        symlink(&base, venv_bin(&root, ".venv").join("python")).unwrap();
+        std::fs::write(
+            root.join(".venv/pyvenv.cfg"),
+            "home = /x\nversion = 3.12.1\n",
+        )
+        .unwrap();
+        symlink(&base, venv_bin(&root, "backend/.venv").join("python")).unwrap();
+        std::fs::write(venv_bin(&root, "venv").join("python"), "#!/bin/sh\n").unwrap();
+        std::fs::write(
+            root.join("pyproject.toml"),
+            "[tool.poetry]\nname = \"My App\"\n",
+        )
+        .unwrap();
+        std::fs::write(root.join(".python-version"), "3.12.4\n").unwrap();
+        // Activated, Poetry, Pipenv, conda, pyenv, uv, PATH.
+        let active = home.join("active-env");
+        python_at(&active, "python");
+        let cache = home.join("cache");
+        let poetry = cache.join("pypoetry/virtualenvs");
+        python_at(&poetry.join("my_app-AbCd1234-py3.12"), "python");
+        std::fs::write(
+            poetry.join("my_app-AbCd1234-py3.12/pyvenv.cfg"),
+            "version_info = 3.12.2\n",
+        )
+        .unwrap();
+        python_at(&poetry.join("other-XyZ-py3.11"), "python");
+        let workon = home.join("workon");
+        python_at(&workon.join("my-app-Q1w2E3r4"), "python");
+        let conda = home.join("miniconda3");
+        python_at(&conda, "python");
+        python_at(&conda.join("envs/ml"), "python");
+        std::fs::create_dir_all(conda.join("envs/ml/conda-meta")).unwrap();
+        std::fs::write(
+            conda.join("envs/ml/conda-meta/python-3.11.5-h1234.json"),
+            "{}",
+        )
+        .unwrap();
+        let pyenv = home.join("pyenv");
+        python_at(&pyenv.join("versions/3.11.9"), "python");
+        python_at(&pyenv.join("versions/3.12.4"), "python");
+        let uv = home.join("uv");
+        python_at(&uv.join("cpython-3.13.0-macos-aarch64-none"), "python3");
+        let on_path = home.join("usr/bin");
+        std::fs::create_dir_all(&on_path).unwrap();
+        std::fs::write(on_path.join("python3"), "").unwrap();
+
+        let host = PythonHost {
+            home: Some(home.clone()),
+            path: Some(std::env::join_paths([&on_path]).unwrap()),
+            vars: vec![
+                ("VIRTUAL_ENV", active.clone().into_os_string()),
+                ("XDG_CACHE_HOME", cache.clone().into_os_string()),
+                ("WORKON_HOME", workon.clone().into_os_string()),
+                ("PYENV_ROOT", pyenv.clone().into_os_string()),
+                ("UV_PYTHON_INSTALL_DIR", uv.clone().into_os_string()),
+            ],
+            macos: false,
+        };
+        let found: Vec<(PythonEnvKind, String, Option<String>)> = python_candidates(&root, &host)
+            .into_iter()
+            .filter(|c| {
+                c.kind != PythonEnvKind::System || c.interpreter.starts_with(home.to_str().unwrap())
+            })
+            .map(|c| (c.kind, c.name, c.version))
+            .collect();
+        let v = |s: &str| Some(s.to_string());
+        assert_eq!(
+            found,
+            [
+                (PythonEnvKind::Project, ".venv".into(), v("3.12.1")),
+                (PythonEnvKind::Project, "backend/.venv".into(), None),
+                (PythonEnvKind::Activated, "active-env".into(), None),
+                (
+                    PythonEnvKind::Poetry,
+                    "my_app-AbCd1234-py3.12".into(),
+                    v("3.12.2")
+                ),
+                (PythonEnvKind::Pipenv, "my-app-Q1w2E3r4".into(), None),
+                (PythonEnvKind::Conda, "base (miniconda3)".into(), None),
+                (PythonEnvKind::Conda, "ml".into(), v("3.11.5")),
+                (PythonEnvKind::Pyenv, "3.12.4".into(), v("3.12.4")),
+                (PythonEnvKind::Pyenv, "3.11.9".into(), v("3.11.9")),
+                (
+                    PythonEnvKind::Uv,
+                    "cpython-3.13.0-macos-aarch64-none".into(),
+                    v("3.13.0")
+                ),
+                (
+                    PythonEnvKind::System,
+                    on_path.join("python3").to_string_lossy().into_owned(),
+                    None
+                ),
+            ]
+        );
     }
 
     #[test]

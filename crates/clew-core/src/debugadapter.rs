@@ -161,13 +161,16 @@ impl AdapterInstall {
 /// configuration names another — and only goes into the `launch` body. The
 /// venv used to be looked for in `cwd`, so a launch configuration running a
 /// script from `tools/` debugged it under whatever `python3` came first on
-/// `PATH`, without the project's packages.
+/// `PATH`, without the project's packages. A Python program is debugged under
+/// the interpreter the user chose for the project (`choices`), when they
+/// chose one and it can be used.
 pub fn resolve(
     lang: &str,
     program: &str,
     args: &[String],
     root: &Path,
     cwd: &Path,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<Resolution, String> {
     match lang {
         "native" => {
@@ -179,8 +182,12 @@ pub fn resolve(
             Ok(Resolution::Ready(native_spec(command, program, args, cwd)))
         }
         "python" => {
-            let python = python_for(root, std::env::var_os("PATH").as_deref())
-                .ok_or("python not found on PATH")?;
+            let python = python_for(
+                root,
+                choices.python.as_deref(),
+                std::env::var_os("PATH").as_deref(),
+            )
+            .ok_or("python not found on PATH")?;
             python_with(&python, program, args, cwd)
         }
         "dart" => {
@@ -203,22 +210,30 @@ pub fn resolve(
     }
 }
 
-/// The interpreter to debug a Python program in `root` under: the project's
-/// own virtualenv, exactly as [`langenv`] picks it for the language server —
-/// and held to the same check of what executing it would run — else the first
-/// `python3` (then `python`) on `path`.
+/// The interpreter to debug a Python program in `root` under: the one the
+/// user `chosen`, when it can be used ([`langenv::chosen_interpreter`]); else
+/// the project's own virtualenv, exactly as [`langenv`] picks it for the
+/// language server — and held to the same check of what executing it would
+/// run — else the first `python3` (then `python`) on `path`.
 ///
 /// Every candidate is kept as found, never resolved: a virtualenv's
 /// `bin/python` is a symlink to the base interpreter, and Python finds its
 /// environment from the path it was run by, so following the link would
 /// debug under the base install instead of the venv whose packages the
 /// program imports.
-fn python_for(root: &Path, path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
-    langenv::find_python_interpreter(root).or_else(|| {
-        let path = path?;
-        store::find_in_unresolved(path, "python3")
-            .or_else(|| store::find_in_unresolved(path, "python"))
-    })
+fn python_for(
+    root: &Path,
+    chosen: Option<&str>,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let chosen = chosen.and_then(|c| langenv::chosen_interpreter(root, c));
+    chosen
+        .or_else(|| langenv::find_python_interpreter(root))
+        .or_else(|| {
+            let path = path?;
+            store::find_in_unresolved(path, "python3")
+                .or_else(|| store::find_in_unresolved(path, "python"))
+        })
 }
 
 /// lldb-dap for native (Rust/C/C++) binaries. Ships with Xcode / LLVM.
@@ -504,12 +519,14 @@ pub struct StdioAdapter {
 ///     error names what to install instead.
 ///
 /// `root` is the project root, which is also the session's working directory:
-/// `SpawnAdapter` carries no other.
+/// `SpawnAdapter` carries no other. `choices` are the user's for the project
+/// (see [`resolve`]).
 pub fn resolve_stdio(
     lang: &str,
     program: &str,
     args: &[String],
     root: &Path,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<StdioAdapter, String> {
     let tcp_refusal = || {
         format!(
@@ -521,7 +538,7 @@ pub fn resolve_stdio(
     if matches!(lang, "go" | "node") {
         return Err(tcp_refusal());
     }
-    match resolve(lang, program, args, root, root)
+    match resolve(lang, program, args, root, root, choices)
         .map_err(|e| format!("on the remote host: {e}"))?
     {
         Resolution::Ready(spec) if spec.transport == AdapterTransport::Stdio => Ok(StdioAdapter {
@@ -547,11 +564,18 @@ mod tests {
     #[test]
     fn tcp_adapters_are_refused_with_a_reason() {
         for lang in ["go", "node"] {
-            let err = resolve_stdio(lang, "/proj/main", &[], Path::new("/proj")).unwrap_err();
+            let err = resolve_stdio(
+                lang,
+                "/proj/main",
+                &[],
+                Path::new("/proj"),
+                &Default::default(),
+            )
+            .unwrap_err();
             assert!(err.contains("TCP"), "{err}");
         }
         assert!(
-            resolve_stdio("cobol", "/p", &[], Path::new("/"))
+            resolve_stdio("cobol", "/p", &[], Path::new("/"), &Default::default())
                 .unwrap_err()
                 .contains("no debug adapter")
         );
@@ -711,7 +735,7 @@ mod tests {
         let elsewhere = fake_python(&dir.join("elsewhere"), "echo '1 0'");
         let search = std::env::join_paths([elsewhere.parent().unwrap()]).unwrap();
 
-        let chosen = python_for(&project, Some(&search)).unwrap();
+        let chosen = python_for(&project, None, Some(&search)).unwrap();
         assert_eq!(chosen, venv_python, "the venv, as found");
         let Resolution::Ready(spec) = python_with(&chosen, "/p/main.py", &[], &project).unwrap()
         else {
@@ -723,7 +747,7 @@ mod tests {
         // Without a venv, PATH decides.
         let bare = dir.join("bare");
         std::fs::create_dir_all(&bare).unwrap();
-        assert_eq!(python_for(&bare, Some(&search)), Some(elsewhere));
+        assert_eq!(python_for(&bare, None, Some(&search)), Some(elsewhere));
     }
 
     /// The venv is looked for at the PROJECT ROOT, not in the session's
@@ -746,6 +770,7 @@ mod tests {
             &["--fast".into()],
             &project,
             &cwd,
+            &Default::default(),
         )
         .unwrap();
         let Resolution::Ready(spec) = resolved else {

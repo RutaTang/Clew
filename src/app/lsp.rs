@@ -164,6 +164,21 @@ impl App {
             None => {}
         }
 
+        // The user's choices for the project (its Python interpreter) are
+        // still being read: a server started now would not have them.
+        if self.proj.inflight.choices_loading {
+            if !self
+                .proj
+                .inflight
+                .deferred_lsp
+                .iter()
+                .any(|l| l == language)
+            {
+                self.proj.inflight.deferred_lsp.push(language.to_string());
+            }
+            return Task::none();
+        }
+
         // Remote project: everything about the server (its lsp.toml, its
         // binaries, its command approvals) lives on the remote host. Ask the
         // server what it would run; the LspResolved reply either starts it
@@ -174,6 +189,7 @@ impl App {
             if self.server.is_up() {
                 let request = clew_protocol::Request::LspResolve {
                     language: language.to_string(),
+                    choices: self.proj.lang_choices.clone(),
                 };
                 if self.send_to_server(request).is_some() {
                     self.proj
@@ -585,7 +601,14 @@ impl App {
             // venv for Python) under any explicit lsp.toml init_options
             // (explicit wins), over the settings clew pins for its own
             // binary — which, when they cannot be pinned, keep it stopped.
-            let init = match langenv::merge(language, &server, &exe, &root, explicit) {
+            let init = match langenv::merge(
+                language,
+                &server,
+                &exe,
+                &root,
+                explicit,
+                &self.proj.lang_choices,
+            ) {
                 Ok(init) => init,
                 Err(e) => {
                     self.proj
@@ -798,6 +821,7 @@ impl App {
                     let sent = self.send_to_server(clew_protocol::Request::LspInstall {
                         language: c.language.clone(),
                         consent,
+                        choices: self.proj.lang_choices.clone(),
                     });
                     if let Some(id) = sent {
                         self.proj.link.remote_installs.insert(c.language, id);

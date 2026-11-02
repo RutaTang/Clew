@@ -9,8 +9,11 @@
 //! - [`client`]: the LSP client, on the shared [`crate::framing`] transport.
 //! - [`langenv`]: the project's language environment (its Python venv),
 //!   handed to servers at `initialize` and to the Python debugger.
+//! - [`choices`]: what the user chose for a project's languages in Settings
+//!   (its Python interpreter), which wins over `lsp.toml` and detection.
 
 mod archive;
+pub mod choices;
 pub mod client;
 pub mod config;
 pub mod langenv;

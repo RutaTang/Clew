@@ -113,17 +113,20 @@ impl Lang {
 /// off the UI thread and off the async executor.
 ///
 /// `root` is the project root, where a Python virtualenv is looked for; `cwd`
-/// is the session's working directory from the launch configuration (see
-/// `clew_core::debugadapter::resolve`).
+/// is the session's working directory from the launch configuration; a
+/// Python program runs under the interpreter `choices` names, when it names
+/// one (see `clew_core::debugadapter::resolve`).
 pub fn resolve(
     lang: Lang,
     program: &Path,
     args: &[String],
     root: &Path,
     cwd: &Path,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<Resolved, String> {
+    let program = program.to_string_lossy();
     Ok(
-        match debugadapter::resolve(lang.slug(), &program.to_string_lossy(), args, root, cwd)? {
+        match debugadapter::resolve(lang.slug(), &program, args, root, cwd, choices)? {
             Resolution::Ready(spec) => Resolved::Ready(Adapter {
                 command: spec.command,
                 args: spec.args,
@@ -200,7 +203,15 @@ mod tests {
         let cfg = crate::app::tasks::read_launch_config(&root).unwrap();
         assert_eq!(cfg.cwd, root.join("tools"));
         let lang = Lang::detect(cfg.type_hint.as_deref(), &cfg.program).unwrap();
-        let resolved = resolve(lang, &cfg.program, &cfg.args, &root, &cfg.cwd).unwrap();
+        let resolved = resolve(
+            lang,
+            &cfg.program,
+            &cfg.args,
+            &root,
+            &cfg.cwd,
+            &Default::default(),
+        )
+        .unwrap();
         let Resolved::Ready(adapter) = resolved else {
             panic!("debugpy is in the project's venv, yet an install was asked for");
         };

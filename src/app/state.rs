@@ -57,8 +57,13 @@ pub struct InFlight {
     /// so the load leaves them alone.
     pub state_touched: HashSet<&'static str>,
     /// Languages whose language server was asked for before `lsp.toml` had
-    /// loaded; started once it has, against the project's real config.
+    /// loaded, or before the user's choices for the project had; started
+    /// once both have, against the project's real config.
     pub deferred_lsp: Vec<String>,
+    /// The user's choices for the project's languages are being read
+    /// (`App::load_language_choices`): no language server starts before
+    /// they are known, as the one started would not have them.
+    pub choices_loading: bool,
     /// A question waiting for its MCP servers' tools before its agent turn
     /// starts: the token minted for it (`AskMsg::McpGathered::token`). Stop
     /// and Ask Clear drop it, and the gathered tools then start nothing.
@@ -1766,6 +1771,17 @@ pub struct ProjectSession {
     // -- Language servers: configuration and consent (the running servers are in `link`) ----
     /// Per-project LSP config from `.clew/lsp.toml`.
     pub lsp_config: lsp::config::ProjectLspConfig,
+    /// What the user chose for this project's languages in Settings — its
+    /// Python interpreter — kept in clew's own data directory
+    /// (`lsp::choices`), and sent with every language server and debugger
+    /// set up for it.
+    pub lang_choices: clew_protocol::LanguageChoices,
+    /// The project's Python interpreters and the one in effect, as last
+    /// listed for the Settings view (`None` until listed, `Err` when the
+    /// listing failed).
+    pub python_envs: Option<Result<clew_protocol::PythonEnvironments, String>>,
+    /// The interpreter path typed into the Settings view.
+    pub python_path_draft: String,
     /// Per-language `init_options` a remote clew-server sent with
     /// `LspResolved` — the LSP handshake runs client-side even for a remote
     /// server, but the options belong to the host that owns the lsp.toml.
@@ -1968,6 +1984,9 @@ impl Default for ProjectSession {
             ask_pins: Default::default(),
             acp: Default::default(),
             lsp_config: Default::default(),
+            lang_choices: Default::default(),
+            python_envs: Default::default(),
+            python_path_draft: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
             tracked_ignored: Default::default(),
