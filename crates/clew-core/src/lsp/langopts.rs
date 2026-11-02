@@ -1546,7 +1546,9 @@ exclude = ["crates/skip"]
         };
         let found: Vec<(String, bool)> = toolchain_candidates("java", &root, &host)
             .into_iter()
-            .filter(|c| c.command.contains("home"))
+            // The scratch JDKs only: the host's own (a CI runner's
+            // Homebrew JDK) are found too.
+            .filter(|c| Path::new(&c.command).starts_with(dir.path()))
             .map(|c| (c.name, c.project))
             .collect();
         assert_eq!(
