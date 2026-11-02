@@ -250,6 +250,36 @@ pub fn resolve(
                 server, &php, program, args, cwd,
             )))
         }
+        "java" => {
+            // The JDK chosen for the project (Settings → Languages), else
+            // the PATH's.
+            let chosen = choices
+                .java
+                .as_deref()
+                .map(|home| Path::new(home.trim()).join("bin"))
+                .filter(|bin| bin.is_absolute() && bin.join("java").is_file());
+            let (java, javac) = match chosen {
+                Some(bin) => (bin.join("java"), bin.join("javac")),
+                None => (
+                    store::find_on_path_unresolved("java")
+                        .ok_or("java not found — install a JDK")?,
+                    store::find_on_path_unresolved("javac")
+                        .ok_or("javac not found — install a JDK (not only a JRE)")?,
+                ),
+            };
+            let server =
+                server.ok_or("clew's Java debug adapter (clew-server) is not available")?;
+            let args_out = vec![
+                "java-debug".to_string(),
+                "--java".to_string(),
+                java.to_string_lossy().into_owned(),
+                "--javac".to_string(),
+                javac.to_string_lossy().into_owned(),
+            ];
+            Ok(Resolution::Ready(own_spec(
+                server, args_out, program, args, cwd,
+            )))
+        }
         "erlang" => {
             let erl = store::find_on_path_unresolved("erl")
                 .ok_or("erl not found — install Erlang/OTP, with its debugger application")?;
@@ -1363,6 +1393,62 @@ mod tests {
         )
         .unwrap();
         assert_eq!(remote.args[0], "php-debug");
+    }
+
+    /// A Java program is debugged by clew-server's own adapter, with the JDK
+    /// chosen for the project (Settings → Languages), else the PATH's.
+    #[test]
+    #[cfg(unix)]
+    fn java_runs_under_clew_servers_own_adapter_with_the_chosen_jdk() {
+        let dir = TempDir::new("debug-java");
+        let java = script(&dir.join("bin/java"), "#!/bin/sh\n");
+        let javac = script(&dir.join("bin/javac"), "#!/bin/sh\n");
+        let jdk = dir.join("jdks/temurin-21");
+        let chosen_java = script(&jdk.join("bin/java"), "#!/bin/sh\n");
+        let chosen_javac = script(&jdk.join("bin/javac"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", dir.join("bin").as_os_str());
+        let server = Path::new("/opt/clew/clew-server");
+        let ready = |choices: &clew_protocol::LanguageChoices| match resolve(
+            "java",
+            "/p/Main.java",
+            &[],
+            &dir,
+            &dir,
+            choices,
+            Some(server),
+        ) {
+            Ok(Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let spec = ready(&Default::default());
+        assert_eq!(
+            spec.args,
+            [
+                "java-debug",
+                "--java",
+                &*java.to_string_lossy(),
+                "--javac",
+                &*javac.to_string_lossy()
+            ]
+        );
+        let chosen = clew_protocol::LanguageChoices {
+            java: Some(jdk.to_string_lossy().into_owned()),
+            ..Default::default()
+        };
+        let spec = ready(&chosen);
+        assert_eq!(spec.args[2], chosen_java.to_string_lossy());
+        assert_eq!(spec.args[4], chosen_javac.to_string_lossy());
+        let err = resolve(
+            "java",
+            "/p/Main.java",
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("clew-server"), "{err}");
     }
 
     /// Erlang and Haskell programs are debugged by clew-server's own

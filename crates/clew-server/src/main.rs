@@ -8,10 +8,11 @@
 //! `clew-server acp` serves clew's Ask agent to an ACP client — an editor
 //! (see `clew_server::acp`), `clew-server dap-bridge` serves a debug
 //! adapter that listens on TCP over stdio, for remote debugging (see
-//! `clew_server::dapbridge`), and `clew-server php-debug`, `erlang-debug`
-//! and `haskell-debug` are the debug adapters for PHP (over Xdebug), Erlang
-//! (over OTP's interpreter) and Haskell (over GHCi's debugger) — see
-//! `clew_server::phpdebug`, `erlangdebug`, `haskelldebug`.
+//! `clew_server::dapbridge`), and `clew-server java-debug`, `php-debug`,
+//! `erlang-debug` and `haskell-debug` are the debug adapters for Java (over
+//! JDWP), PHP (over Xdebug), Erlang (over OTP's interpreter) and Haskell
+//! (over GHCi's debugger) — see `clew_server::javadebug`, `phpdebug`,
+//! `erlangdebug`, `haskelldebug`.
 
 /// How long the runtime may take to wind down after the client's stream
 /// ended. `serve_stdio` has already stopped everything the connection started
@@ -121,6 +122,29 @@ fn main() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("[clew-server] erlang-debug: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
+    }
+    if args.first().map(String::as_str) == Some("java-debug") {
+        let (java, javac) = match args.get(1..) {
+            Some([a, java, b, javac]) if a == "--java" && b == "--javac" => (
+                std::path::PathBuf::from(java),
+                std::path::PathBuf::from(javac),
+            ),
+            _ => {
+                eprintln!(
+                    "[clew-server] usage: clew-server java-debug --java <java> --javac <javac>"
+                );
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::javadebug::run(java, javac)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] java-debug: {e}");
                 1
             }
         };

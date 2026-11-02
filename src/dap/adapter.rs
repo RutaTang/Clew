@@ -60,6 +60,8 @@ pub enum Lang {
     Php,
     /// Erlang via OTP's interpreter, through clew-server's own adapter.
     Erlang,
+    /// Java via JDWP, through clew-server's own adapter.
+    Java,
     /// Haskell via GHCi's debugger, through clew-server's own adapter.
     Haskell,
 }
@@ -77,6 +79,7 @@ impl Lang {
                 "coreclr" | "netcoredbg" | "csharp" | "cs" | "dotnet" => Some(Lang::CSharp),
                 "php" | "xdebug" => Some(Lang::Php),
                 "erlang" | "erl" => Some(Lang::Erlang),
+                "java" | "jdwp" => Some(Lang::Java),
                 "haskell" | "ghc" | "ghci" | "hs" => Some(Lang::Haskell),
                 "python" | "debugpy" => Some(Lang::Python),
                 "go" | "delve" | "dlv" => Some(Lang::Go),
@@ -98,6 +101,7 @@ impl Lang {
             Some("rb") => Some(Lang::Ruby),
             Some("php") => Some(Lang::Php),
             Some("erl") => Some(Lang::Erlang),
+            Some("java") => Some(Lang::Java),
             Some("hs" | "lhs") => Some(Lang::Haskell),
             // A .NET assembly: what netcoredbg runs.
             Some("dll") => Some(Lang::CSharp),
@@ -117,6 +121,7 @@ impl Lang {
             Lang::CSharp => "C# (netcoredbg)",
             Lang::Php => "PHP (Xdebug)",
             Lang::Erlang => "Erlang (OTP interpreter)",
+            Lang::Java => "Java (JDWP)",
             Lang::Haskell => "Haskell (GHCi)",
         }
     }
@@ -134,6 +139,7 @@ impl Lang {
             Lang::CSharp => "csharp",
             Lang::Php => "php",
             Lang::Erlang => "erlang",
+            Lang::Java => "java",
             Lang::Haskell => "haskell",
         }
     }
@@ -224,6 +230,7 @@ mod tests {
             ("zig", Lang::Native),
             ("xdebug", Lang::Php),
             ("ghci", Lang::Haskell),
+            ("java", Lang::Java),
             ("erlang", Lang::Erlang),
         ] {
             assert_eq!(

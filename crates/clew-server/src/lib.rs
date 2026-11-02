@@ -51,6 +51,7 @@ mod files;
 mod gitops;
 pub mod haskelldebug;
 mod index;
+pub mod javadebug;
 mod lsp_gate;
 pub mod mcp;
 pub mod phpdebug;
