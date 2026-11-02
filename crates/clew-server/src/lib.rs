@@ -44,6 +44,7 @@
 pub mod acp;
 pub mod agent;
 pub mod agent_lsp;
+pub mod dapbridge;
 mod files;
 mod gitops;
 mod index;
@@ -1257,12 +1258,16 @@ impl Server {
                     let resolve_root = root.clone();
                     let resolve_lang = lang.clone();
                     let resolved = tokio::task::spawn_blocking(move || {
+                        // An adapter that listens on TCP runs behind this
+                        // binary's own `dap-bridge`.
+                        let bridge = std::env::current_exe().ok();
                         clew_core::debugadapter::resolve_stdio(
                             &resolve_lang,
                             &program,
                             &args,
                             &resolve_root,
                             &choices,
+                            bridge.as_deref(),
                         )
                     })
                     .await

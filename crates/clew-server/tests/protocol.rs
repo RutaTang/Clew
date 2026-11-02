@@ -946,9 +946,10 @@ async fn project_calls_build_where_the_project_lives() {
     }
 }
 
-/// `SpawnAdapter` for a TCP-transport language must refuse with a reason AND
-/// end the proxied stream (ProcessExited), so the client's DAP driver sees
-/// EOF instead of waiting on an adapter that will never exist.
+/// `SpawnAdapter` for an adapter no remote host can serve (vscode-js-debug,
+/// a connection per debugged process) must refuse with a reason AND end the
+/// proxied stream (ProcessExited), so the client's DAP driver sees EOF
+/// instead of waiting on an adapter that will never exist.
 #[tokio::test]
 async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
     let (mut server, mut rx) = server();
@@ -960,8 +961,8 @@ async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
                 2,
                 Request::SpawnAdapter {
                     proc: 9,
-                    lang: "go".into(),
-                    program: root.join("main").to_string_lossy().into_owned(),
+                    lang: "node".into(),
+                    program: root.join("main.js").to_string_lossy().into_owned(),
                     args: vec![],
                     choices: Default::default(),
                 },
@@ -3589,4 +3590,168 @@ async fn language_options_are_listed_where_the_project_is() {
     assert_eq!(rust.packages[0].features, ["fast"]);
     // A language not asked about is not listed.
     assert_eq!(options.go, None);
+}
+
+/// A Ruby program on the server's host is debugged through the real binary:
+/// rdbg listens on that host's loopback, and clew-server's `dap-bridge`
+/// serves it over the process channel — frames both ways, the program held
+/// at a breakpoint, run on, its output sent as events. Needs Ruby's rdbg on
+/// the PATH.
+#[test]
+#[ignore = "needs Ruby's rdbg on the PATH; run explicitly"]
+fn a_remote_ruby_program_is_debugged_through_the_bridge() {
+    let root = temp_project("remote-rdbg");
+    let program = root.join("app.rb");
+    std::fs::write(&program, "x = 41\nx += 1\nputs \"answer #{x}\"\n").unwrap();
+    let mut server = Process::spawn();
+    server.send(
+        1,
+        Request::Hello {
+            protocol: PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        },
+    );
+    server.wait_for("Ready", |msg| match msg {
+        ServerMessage::Reply {
+            id: 1,
+            event: Event::Ready { .. },
+            ..
+        } => Some(()),
+        _ => None,
+    });
+    server.send(
+        2,
+        Request::OpenProject {
+            root: root.to_string_lossy().into_owned(),
+        },
+    );
+    server.wait_for("the Tree", |msg| match msg {
+        ServerMessage::Reply {
+            id: 2,
+            event: Event::Tree { .. },
+            ..
+        } => Some(()),
+        _ => None,
+    });
+    server.send(
+        3,
+        Request::SpawnAdapter {
+            proc: 5,
+            lang: "ruby".into(),
+            program: program.to_string_lossy().into_owned(),
+            args: vec![],
+            choices: Default::default(),
+        },
+    );
+    let launch = server.wait_for("AdapterSpawned", |msg| match msg {
+        ServerMessage::Reply {
+            id: 3,
+            event: Event::AdapterSpawned { launch, .. },
+            ..
+        } => Some(launch),
+        ServerMessage::Reply { id: 3, event, .. } => panic!("refused: {event:?}"),
+        _ => None,
+    });
+    let launch: serde_json::Value = serde_json::from_str(&launch).unwrap();
+
+    let mut seq = 0;
+    let mut request = |server: &mut Process, command: &str, arguments: serde_json::Value| {
+        seq += 1;
+        let body = serde_json::json!({
+            "seq": seq, "type": "request", "command": command, "arguments": arguments,
+        })
+        .to_string();
+        let data = format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes();
+        server.send(100 + seq, Request::ProcessInput { proc: 5, data });
+        seq
+    };
+    let mut buffer: Vec<u8> = Vec::new();
+    // The next DAP message from the adapter, out of the process's output.
+    let next = |server: &Process, buffer: &mut Vec<u8>| -> serde_json::Value {
+        loop {
+            if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header = String::from_utf8_lossy(&buffer[..end]).to_string();
+                let len: usize = header
+                    .trim()
+                    .strip_prefix("Content-Length:")
+                    .expect("a DAP header")
+                    .trim()
+                    .parse()
+                    .unwrap();
+                if buffer.len() >= end + 4 + len {
+                    let body = buffer[end + 4..end + 4 + len].to_vec();
+                    buffer.drain(..end + 4 + len);
+                    return serde_json::from_slice(&body).unwrap();
+                }
+            }
+            let data = server.wait_for("adapter output", |msg| match msg {
+                ServerMessage::Notification {
+                    event: Event::ProcessOutput { proc: 5, data },
+                    ..
+                } => Some(data),
+                ServerMessage::Notification {
+                    event: Event::ProcessExited { proc: 5, code },
+                    ..
+                } => panic!("the adapter exited ({code:?})"),
+                _ => None,
+            });
+            buffer.extend_from_slice(&data);
+        }
+    };
+
+    request(
+        &mut server,
+        "initialize",
+        serde_json::json!({"adapterID": "clew"}),
+    );
+    request(&mut server, "launch", launch);
+    let (mut configured, mut stopped_at, mut output) = (false, None, String::new());
+    while !(output.contains("answer 42") && stopped_at.is_some()) {
+        let message = next(&server, &mut buffer);
+        match (
+            message["type"].as_str(),
+            message["event"].as_str(),
+            message["command"].as_str(),
+        ) {
+            (Some("event"), Some("initialized"), _) if !configured => {
+                configured = true;
+                let source = serde_json::json!({ "path": program.to_string_lossy() });
+                request(
+                    &mut server,
+                    "setBreakpoints",
+                    serde_json::json!({ "source": source, "breakpoints": [{ "line": 2 }] }),
+                );
+                request(&mut server, "configurationDone", serde_json::json!({}));
+            }
+            (Some("event"), Some("stopped"), _) => {
+                let thread = message["body"]["threadId"].as_i64().unwrap_or(1);
+                request(
+                    &mut server,
+                    "stackTrace",
+                    serde_json::json!({ "threadId": thread }),
+                );
+                let frames = loop {
+                    let m = next(&server, &mut buffer);
+                    if m["command"] == "stackTrace" {
+                        break m;
+                    }
+                    if m["event"] == "output" {
+                        output.push_str(m["body"]["output"].as_str().unwrap_or(""));
+                    }
+                };
+                stopped_at = frames["body"]["stackFrames"][0]["line"].as_i64();
+                request(
+                    &mut server,
+                    "continue",
+                    serde_json::json!({ "threadId": thread }),
+                );
+            }
+            (Some("event"), Some("output"), _) if message["body"]["category"] == "stdout" => {
+                output.push_str(message["body"]["output"].as_str().unwrap_or(""));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(stopped_at, Some(2), "held at the breakpoint");
+    assert!(output.contains("answer 42"), "{output:?}");
 }

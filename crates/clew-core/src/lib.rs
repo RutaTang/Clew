@@ -80,6 +80,7 @@ pub mod acp;
 pub mod apidoc;
 pub mod buildfacts;
 pub mod confine;
+pub mod dapwire;
 pub mod debugadapter;
 pub mod derived;
 pub mod docs;

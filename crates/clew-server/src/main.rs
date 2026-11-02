@@ -4,9 +4,11 @@
 //! over SSH — and drives it entirely through clew-protocol on stdin/stdout.
 //!
 //! `clew-server mcp [--root <dir>]` instead serves the project's code tools
-//! to an MCP client on stdin/stdout (see `clew_server::mcp`), and
+//! to an MCP client on stdin/stdout (see `clew_server::mcp`),
 //! `clew-server acp` serves clew's Ask agent to an ACP client — an editor
-//! (see `clew_server::acp`).
+//! (see `clew_server::acp`), and `clew-server dap-bridge` serves a debug
+//! adapter that listens on TCP over stdio, for remote debugging (see
+//! `clew_server::dapbridge`).
 
 /// How long the runtime may take to wind down after the client's stream
 /// ended. `serve_stdio` has already stopped everything the connection started
@@ -62,6 +64,24 @@ fn main() {
         runtime.block_on(clew_server::mcp::serve_mcp(&root));
         runtime.shutdown_timeout(SHUTDOWN_GRACE);
         return;
+    }
+    if args.first().map(String::as_str) == Some("dap-bridge") {
+        let bridge = match clew_server::dapbridge::Bridge::from_args(&args[1..]) {
+            Ok(bridge) => bridge,
+            Err(e) => {
+                eprintln!("[clew-server] dap-bridge: {e}");
+                std::process::exit(2);
+            }
+        };
+        let code = match runtime.block_on(clew_server::dapbridge::run(bridge)) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("[clew-server] dap-bridge: {e}");
+                1
+            }
+        };
+        runtime.shutdown_timeout(SHUTDOWN_GRACE);
+        std::process::exit(code);
     }
     if args.first().map(String::as_str) == Some("acp") {
         runtime.block_on(clew_server::acp::serve_acp());

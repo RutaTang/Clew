@@ -28,16 +28,16 @@
 //! shared machine the stdio adapters (lldb-dap, debugpy, dart) are the ones
 //! without this exposure.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use clew_core::dapwire::{await_listening, connect_retry, from_first_frame};
 use clew_core::framing::{self, CallError, EndReason, Failure, FrameError, Handled, Ids};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::mpsc;
 
@@ -75,12 +75,6 @@ const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long connecting to an announced (or a child session's) port may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
-
-/// Longest stdout line read while waiting for the announcement, and how many
-/// lines an adapter may print before it: the pipe is the adapter's, so the
-/// wait is bounded in bytes as well as in time.
-const MAX_ANNOUNCE_LINE: usize = 4096;
-const MAX_ANNOUNCE_LINES: usize = 200;
 
 /// A cheap, cloneable handle to the debug adapter; talks to the actor over a
 /// channel so it can be moved into iced `Task`s freely.
@@ -875,191 +869,6 @@ async fn run_session<W>(
 /// stdout is a pipe — was lost.
 const DEBUGGEE_EXIT_GRACE: Duration = Duration::from_secs(3);
 
-/// Read the adapter's stdout until it announces where it listens — delve:
-/// `DAP server listening at: 127.0.0.1:PORT`, js-debug: `Debug server
-/// listening at 127.0.0.1:PORT`. Bounded in time, in line length and in line
-/// count; an adapter that exits first ends the wait at once.
-async fn await_listening<R>(
-    out: &mut R,
-    child: &mut Child,
-    limit: Duration,
-) -> Result<SocketAddr, String>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let deadline = tokio::time::sleep(limit);
-    tokio::pin!(deadline);
-    let mut line = Vec::new();
-    for _ in 0..MAX_ANNOUNCE_LINES {
-        line.clear();
-        let mut limited = (&mut *out).take(MAX_ANNOUNCE_LINE as u64);
-        tokio::select! {
-            read = limited.read_until(b'\n', &mut line) => {
-                if matches!(read, Ok(0) | Err(_)) {
-                    // Output closed: the adapter is going. Say how it went —
-                    // and sweep what it started before it is reaped
-                    // (`framing::wait_sweeping`): an adapter that died on
-                    // its own left its group running.
-                    let status = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        framing::wait_sweeping(child),
-                    )
-                    .await;
-                    return Err(match status {
-                        Ok(Ok(status)) => {
-                            format!("the debug adapter exited ({status}) before it was ready")
-                        }
-                        _ => "the debug adapter closed its output before it was ready".into(),
-                    });
-                }
-                if let Some(addr) = parse_listening(&String::from_utf8_lossy(&line))? {
-                    return Ok(addr);
-                }
-            }
-            status = framing::wait_sweeping(child) => {
-                return Err(match status {
-                    Ok(status) => format!("the debug adapter exited ({status}) before it was ready"),
-                    Err(e) => format!("the debug adapter failed: {e}"),
-                });
-            }
-            () = &mut deadline => {
-                return Err(format!(
-                    "the debug adapter did not report its listening port within {} s",
-                    limit.as_secs()
-                ));
-            }
-        }
-    }
-    Err("the debug adapter printed too much before reporting its port".into())
-}
-
-/// The address in an adapter's "listening at" line, if this is that line.
-/// Only a loopback address is usable: it is the only one clew asked for, and
-/// anything else would put the session on the network.
-fn parse_listening(line: &str) -> Result<Option<SocketAddr>, String> {
-    const MARKER: &str = "listening at";
-    // rdbg: `DEBUGGER: Debugger can attach via TCP/IP (127.0.0.1:PORT)`.
-    const RDBG: &str = "can attach via tcp/ip (";
-    let lower = line.to_ascii_lowercase();
-    if let Some(at) = lower.find(RDBG) {
-        let rest = &line[at + RDBG.len()..];
-        let token = rest.split(')').next().unwrap_or("").trim();
-        return usable(token).map(Some);
-    }
-    // ASCII lowercasing keeps byte offsets, so `at` indexes `line` too.
-    let Some(at) = lower.find(MARKER) else {
-        return Ok(None);
-    };
-    // delve writes `listening at: <addr>`, js-debug `listening at <addr>`.
-    // Only a colon FOLLOWED BY WHITESPACE is that separator: the address
-    // itself may start with one (`::1:8123`, node's spelling of IPv6
-    // loopback), and stripping every leading colon turned it into `1:8123`.
-    let rest = line[at + MARKER.len()..].trim_start();
-    let rest = match rest.strip_prefix(':') {
-        Some(after) if after.starts_with(char::is_whitespace) => after.trim_start(),
-        _ => rest,
-    };
-    let token = rest.split_whitespace().next().unwrap_or("");
-    usable(token).map(Some)
-}
-
-/// The address `token` names, if it is one clew connects to: a loopback
-/// address with a port.
-fn usable(token: &str) -> Result<SocketAddr, String> {
-    let addr = parse_addr(token)
-        .filter(|a| a.port() != 0)
-        .ok_or_else(|| format!("the debug adapter announced an unusable address {token:?}"))?;
-    if !addr.ip().is_loopback() {
-        return Err(format!(
-            "the debug adapter listens on {addr}, not on loopback — refusing to connect"
-        ));
-    }
-    Ok(addr)
-}
-
-/// `127.0.0.1:5`, `[::1]:5`, and the unbracketed `::1:5` and `localhost:5`
-/// node prints.
-fn parse_addr(token: &str) -> Option<SocketAddr> {
-    if let Ok(addr) = token.parse::<SocketAddr>() {
-        return Some(addr);
-    }
-    let (host, port) = token.rsplit_once(':')?;
-    let port = port.parse::<u16>().ok()?;
-    let ip = match host.trim_start_matches('[').trim_end_matches(']') {
-        "localhost" => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        host => host.parse().ok()?,
-    };
-    Some(SocketAddr::new(ip, port))
-}
-
-/// Connect to a TCP adapter's port, retrying briefly. When the adapter is our
-/// child, a child that has exited ends the retries at once: there is nothing
-/// left to connect to, and before, the loop spun out its full budget.
-async fn connect_retry(
-    addr: SocketAddr,
-    mut child: Option<&mut Child>,
-    limit: Duration,
-) -> Result<TcpStream, String> {
-    let deadline = Instant::now() + limit;
-    loop {
-        let error = match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => e,
-        };
-        if let Some(child) = child.as_mut()
-            && let Ok(Some(status)) = framing::try_wait_sweeping(child)
-        {
-            return Err(format!(
-                "the debug adapter exited ({status}) before accepting a connection on {addr}"
-            ));
-        }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "could not connect to the debug adapter on {addr}: {error}"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-}
-
-/// Consume a child's stdout/stderr so its pipe buffer never fills and blocks it.
-/// Most lines [`from_first_frame`] passes over before giving up on finding a
-/// frame and handing on the rest as it is.
-const MAX_SKIPPED_LINES: usize = 1000;
-
-/// `read`, from its first DAP header line on. rdbg holds the connection it
-/// accepts before it reads whether the client speaks DAP, and a program it
-/// holds stopped writes its listing to it meanwhile, as text: lines that are
-/// no frame. Once it reads the client's first frame it speaks DAP alone.
-fn from_first_frame(read: tokio::net::tcp::OwnedReadHalf) -> tokio::io::DuplexStream {
-    use tokio::io::AsyncWriteExt;
-    let (mut tx, rx) = tokio::io::duplex(64 * 1024);
-    tokio::spawn(async move {
-        let mut read = BufReader::new(read);
-        let mut line = Vec::new();
-        for _ in 0..MAX_SKIPPED_LINES {
-            line.clear();
-            match (&mut read)
-                .take(MAX_ANNOUNCE_LINE as u64)
-                .read_until(b'\n', &mut line)
-                .await
-            {
-                Ok(0) | Err(_) => return,
-                Ok(_) => {}
-            }
-            if line.starts_with(b"Content-Length:") {
-                break;
-            }
-            line.clear();
-        }
-        if tx.write_all(&line).await.is_err() {
-            return;
-        }
-        let _ = tokio::io::copy(&mut read, &mut tx).await;
-    });
-    rx
-}
-
 /// A debuggee's output stream, as [`DapClient::wire_forwarding`] takes it.
 type BoxedOutput = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 
@@ -1069,11 +878,11 @@ type BoxedOutput = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 /// the rest is drained unread, so the program never blocks on a full pipe.
 async fn forward_output(mut r: BoxedOutput, category: &'static str, mut sink: EventSink) {
     let mut buf = [0u8; 4096];
-    let mut carry: Vec<u8> = Vec::new();
-    let send = |sink: &mut EventSink, bytes: &[u8]| {
+    let mut text = clew_core::dapwire::Utf8Carry::default();
+    let send = |sink: &mut EventSink, text: String| {
         sink.send(DapEvent::Output(Output {
             category: category.into(),
-            text: String::from_utf8_lossy(bytes).into_owned(),
+            text,
         }))
     };
     loop {
@@ -1081,27 +890,19 @@ async fn forward_output(mut r: BoxedOutput, category: &'static str, mut sink: Ev
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        carry.extend_from_slice(&buf[..n]);
-        // A character the read cut in two waits for its other bytes.
-        let cut = match std::str::from_utf8(&carry) {
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            _ => carry.len(),
-        };
-        if cut == 0 {
-            continue;
-        }
-        let sent = send(&mut sink, &carry[..cut]);
-        carry.drain(..cut);
-        if sent.is_err() {
+        if let Some(whole) = text.push(&buf[..n])
+            && send(&mut sink, whole).is_err()
+        {
             drain(r).await;
             return;
         }
     }
-    if !carry.is_empty() {
-        let _ = send(&mut sink, &carry);
+    if let Some(rest) = text.finish() {
+        let _ = send(&mut sink, rest);
     }
 }
 
+/// Consume a child's stdout/stderr so its pipe buffer never fills and blocks it.
 async fn drain<R>(mut r: R)
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1117,7 +918,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clew_core::dapwire::parse_listening;
     use clew_core::framing::{read_message, write_frame};
+    use std::time::Instant;
+    use tokio::net::TcpStream;
 
     /// A client wired to a scripted adapter over in-memory pipes: `respond`
     /// answers each request `(command, arguments)` with a response `body`. Uses

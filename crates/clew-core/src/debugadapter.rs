@@ -621,11 +621,14 @@ pub struct StdioAdapter {
 }
 
 /// The server's view of [`resolve`], for adapters a remote host can proxy
-/// over the protocol:
-///   - stdio adapters only (lldb-dap, debugpy, `dart debug_adapter`): their
-///     frames proxy over `ProcessOutput`/`ProcessInput`. TCP adapters
-///     (delve, vscode-js-debug) listen on the REMOTE's loopback, which the
-///     client cannot reach — refused with a clear message.
+/// over the protocol, whose process channel carries a process's stdio:
+///   - stdio adapters (lldb-dap, debugpy, `dart debug_adapter`, netcoredbg)
+///     run as they are;
+///   - an adapter that listens on TCP (delve, rdbg) listens on the REMOTE's
+///     loopback, which the client cannot reach: it runs behind `bridge` —
+///     clew-server's own `dap-bridge`, which serves it over stdio — and is
+///     refused without one. vscode-js-debug is refused either way: it opens a
+///     session per debugged process, each a connection of its own;
 ///   - no provisioning: installing on a remote host without the user's
 ///     explicit consent would break the rule `LspInstall` exists for. The
 ///     error names what to install instead.
@@ -639,32 +642,62 @@ pub fn resolve_stdio(
     args: &[String],
     root: &Path,
     choices: &clew_protocol::LanguageChoices,
+    bridge: Option<&Path>,
 ) -> Result<StdioAdapter, String> {
     let tcp_refusal = || {
         format!(
             "the {lang} debug adapter speaks DAP over a TCP port on this host, \
-             which a remote client cannot reach — remote debugging currently \
-             supports native (lldb), Python, Dart and C#"
+             which a remote client cannot reach"
         )
     };
-    if matches!(lang, "go" | "node" | "ruby") {
-        return Err(tcp_refusal());
+    if lang == "node" {
+        return Err(format!(
+            "{} — and vscode-js-debug opens a connection per debugged process, \
+             which no bridge carries",
+            tcp_refusal()
+        ));
     }
     match resolve(lang, program, args, root, root, choices)
         .map_err(|e| format!("on the remote host: {e}"))?
     {
-        Resolution::Ready(spec) if spec.transport == AdapterTransport::Stdio => Ok(StdioAdapter {
-            command: spec.command,
-            args: spec.args,
-            launch: spec.launch.to_string(),
-        }),
-        Resolution::Ready(_) => Err(tcp_refusal()),
+        Resolution::Ready(spec) => match (spec.transport, bridge) {
+            (AdapterTransport::Stdio, _) => Ok(StdioAdapter {
+                command: spec.command,
+                args: spec.args,
+                launch: spec.launch.to_string(),
+            }),
+            (transport, Some(bridge)) => Ok(StdioAdapter {
+                command: bridge.to_path_buf(),
+                args: bridge_args(transport, &spec.command, &spec.args),
+                launch: spec.launch.to_string(),
+            }),
+            (_, None) => Err(tcp_refusal()),
+        },
         Resolution::NeedsInstall(install) => Err(format!(
             "{} is not installed on the remote host — install it there: {}",
             install.name(),
             install.describe()
         )),
     }
+}
+
+/// The arguments clew-server's `dap-bridge` runs a TCP adapter with:
+/// `dap-bridge --announce stdout|stderr -- <adapter> <args…>` — where it
+/// announces its port saying what the rest of its output is.
+pub fn bridge_args(transport: AdapterTransport, command: &Path, args: &[String]) -> Vec<String> {
+    let announce = match transport {
+        AdapterTransport::TcpOnStderr => "stderr",
+        AdapterTransport::Tcp | AdapterTransport::Stdio => "stdout",
+    };
+    let mut out = vec![
+        "dap-bridge".to_string(),
+        "--announce".to_string(),
+        announce.to_string(),
+        "--".to_string(),
+        command.to_string_lossy().into_owned(),
+    ];
+    out.extend(args.iter().cloned());
+    out
 }
 
 #[cfg(test)]
@@ -675,22 +708,88 @@ mod tests {
 
     #[test]
     fn tcp_adapters_are_refused_with_a_reason() {
-        for lang in ["go", "node", "ruby"] {
-            let err = resolve_stdio(
-                lang,
-                "/proj/main",
-                &[],
-                Path::new("/proj"),
-                &Default::default(),
-            )
-            .unwrap_err();
-            assert!(err.contains("TCP"), "{err}");
-        }
+        let err = resolve_stdio(
+            "node",
+            "/proj/main.js",
+            &[],
+            Path::new("/proj"),
+            &Default::default(),
+            Some(Path::new("/opt/clew-server")),
+        )
+        .unwrap_err();
+        assert!(err.contains("TCP") && err.contains("js-debug"), "{err}");
         assert!(
-            resolve_stdio("cobol", "/p", &[], Path::new("/"), &Default::default())
-                .unwrap_err()
-                .contains("no debug adapter")
+            resolve_stdio(
+                "cobol",
+                "/p",
+                &[],
+                Path::new("/"),
+                &Default::default(),
+                None
+            )
+            .unwrap_err()
+            .contains("no debug adapter")
         );
+    }
+
+    /// A remote TCP adapter runs behind clew-server's bridge, told where it
+    /// announces its port; with no bridge it is refused, saying why.
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_tcp_adapter_runs_behind_the_bridge() {
+        let dir = TempDir::new("debug-bridge");
+        let bin = dir.join("bin");
+        let rdbg = script(&bin.join("rdbg"), "#!/bin/sh\n");
+        let dlv = script(&bin.join("dlv"), "#!/bin/sh\n");
+        let _env = EnvVars::new().set("PATH", bin.as_os_str());
+        let bridge = Path::new("/opt/clew/clew-server");
+        let ruby = resolve_stdio(
+            "ruby",
+            "app.rb",
+            &[],
+            &dir,
+            &Default::default(),
+            Some(bridge),
+        )
+        .unwrap();
+        assert_eq!(ruby.command, bridge);
+        assert_eq!(
+            ruby.args[..5],
+            [
+                "dap-bridge",
+                "--announce",
+                "stderr",
+                "--",
+                &*rdbg.to_string_lossy()
+            ]
+        );
+        assert!(
+            ruby.args.ends_with(&["--".into(), "app.rb".into()]),
+            "{:?}",
+            ruby.args
+        );
+        let go = resolve_stdio(
+            "go",
+            "./cmd/app",
+            &[],
+            &dir,
+            &Default::default(),
+            Some(bridge),
+        )
+        .unwrap();
+        assert_eq!(
+            go.args[..5],
+            [
+                "dap-bridge",
+                "--announce",
+                "stdout",
+                "--",
+                &*dlv.to_string_lossy()
+            ]
+        );
+        let err =
+            resolve_stdio("ruby", "app.rb", &[], &dir, &Default::default(), None).unwrap_err();
+        assert!(err.contains("TCP"), "{err}");
     }
 
     /// F3: consent is given to the prompt's text, so every argument pip runs
@@ -1100,7 +1199,8 @@ mod tests {
         assert_eq!(spec.transport, AdapterTransport::Stdio);
         assert_eq!(spec.launch["program"], "bin/Debug/net8.0/App.dll");
         assert_eq!(spec.launch["stopAtEntry"], false);
-        let remote = resolve_stdio("csharp", "App.dll", &[], &dir, &Default::default()).unwrap();
+        let remote =
+            resolve_stdio("csharp", "App.dll", &[], &dir, &Default::default(), None).unwrap();
         assert_eq!(remote.args, ["--interpreter=vscode"]);
 
         let _none = EnvVars::new().set("PATH", dir.join("empty").as_os_str());
