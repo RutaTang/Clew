@@ -20,6 +20,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -68,6 +69,7 @@ where
         program: None,
         breakpoints: HashMap::new(),
         refs: Arc::new(Mutex::new(Vec::new())),
+        pause: None,
     };
     let mut input = BufReader::new(input);
     while let Ok(Some(message)) = read_message(&mut input).await {
@@ -115,6 +117,19 @@ struct Adapter {
     breakpoints: HashMap<String, Vec<String>>,
     /// The `variablesReference`s handed out since the program last stopped.
     refs: Arc<Mutex<Vec<VarRef>>>,
+    /// How to pause the running program — when this Xdebug takes a command
+    /// while it runs (`supports_async`); none when it does not.
+    pause: Option<Pause>,
+}
+
+/// A pause, asked of an engine that takes `break` while the program runs.
+#[derive(Clone)]
+struct Pause {
+    breaker: Breaker,
+    /// The program runs: a `break` is due only then.
+    running: Arc<AtomicBool>,
+    /// A pause was asked for: the next stop is it.
+    asked: Arc<AtomicBool>,
 }
 
 impl Adapter {
@@ -156,7 +171,21 @@ impl Adapter {
                 self.resume(dbgp, reason).await;
                 return Flow::Go;
             }
-            "pause" => Err("Xdebug cannot pause a running PHP program".into()),
+            "pause" => match &self.pause {
+                Some(pause) => {
+                    if pause.running.load(Ordering::SeqCst) {
+                        pause.asked.store(true, Ordering::SeqCst);
+                        pause.breaker.send("break").await.map(|()| json!({}))
+                    } else {
+                        Ok(json!({}))
+                    }
+                }
+                None => Err(
+                    "this Xdebug cannot pause a running PHP program: it takes no command \
+                     while the program runs (supports_async is off)"
+                        .into(),
+                ),
+            },
             "stackTrace" => self.stack_trace().await,
             "scopes" => self.scopes(args).await,
             "variables" => self.variables(args).await,
@@ -274,6 +303,15 @@ impl Adapter {
             dbgp.command("feature_set", &[("-n", feature), ("-v", &value)], None)
                 .await?;
         }
+        let supports_async = dbgp
+            .command("feature_get", &[("-n", "supports_async")], None)
+            .await
+            .is_ok_and(|reply| takes_async(&reply));
+        self.pause = supports_async.then(|| Pause {
+            breaker: dbgp.breaker(),
+            running: Arc::default(),
+            asked: Arc::default(),
+        });
         self.session = Some(Arc::new(Mutex::new(dbgp)));
         Ok(())
     }
@@ -355,12 +393,24 @@ impl Adapter {
         let out = self.out.clone();
         let refs = self.refs.clone();
         let exited = self.program.as_ref().map(|p| p.exited.clone());
+        let pause = self.pause.clone();
         tokio::spawn(async move {
             let mut dbgp = session.lock().await;
+            if let Some(pause) = &pause {
+                pause.running.store(true, Ordering::SeqCst);
+            }
             let reply = dbgp.command(command, &[], None).await;
+            let paused = match &pause {
+                Some(pause) => {
+                    pause.running.store(false, Ordering::SeqCst);
+                    pause.asked.swap(false, Ordering::SeqCst)
+                }
+                None => false,
+            };
             match reply.as_ref().map(|r| r.attr("status").unwrap_or("")) {
                 Ok("break") => {
                     refs.lock().await.clear();
+                    let reason = if paused { "pause" } else { reason };
                     out.event(
                         "stopped",
                         json!({ "reason": reason, "threadId": 1, "allThreadsStopped": true }),
@@ -755,8 +805,9 @@ impl Xml {
 /// The DBGp connection: commands out, replies (and the `init` packet) in.
 struct Dbgp {
     read: BufReader<Box<dyn AsyncRead + Unpin + Send>>,
-    write: Box<dyn AsyncWrite + Unpin + Send>,
-    transaction: u64,
+    /// Shared with a [`Breaker`], which writes while a command waits.
+    write: Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
+    transaction: Arc<AtomicU64>,
     /// The session ended: a command is refused rather than written to a
     /// connection that is going.
     closed: bool,
@@ -770,9 +821,18 @@ impl Dbgp {
     {
         Dbgp {
             read: BufReader::new(Box::new(read)),
-            write: Box::new(write),
-            transaction: 0,
+            write: Arc::new(Mutex::new(Box::new(write))),
+            transaction: Arc::default(),
             closed: false,
+        }
+    }
+
+    /// What sends a command while another waits for its reply (`break`,
+    /// while the program runs).
+    fn breaker(&self) -> Breaker {
+        Breaker {
+            write: self.write.clone(),
+            transaction: self.transaction.clone(),
         }
     }
 
@@ -814,8 +874,7 @@ impl Dbgp {
         if self.closed {
             return Err("the program has ended".into());
         }
-        self.transaction += 1;
-        let id = self.transaction.to_string();
+        let id = (self.transaction.fetch_add(1, Ordering::SeqCst) + 1).to_string();
         let mut line = format!("{name} -i {id}");
         for (flag, value) in args {
             line.push(' ');
@@ -828,14 +887,7 @@ impl Dbgp {
             line.push_str(&base64::engine::general_purpose::STANDARD.encode(data));
         }
         line.push('\0');
-        self.write
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| format!("the connection to Xdebug broke: {e}"))?;
-        self.write
-            .flush()
-            .await
-            .map_err(|e| format!("the connection to Xdebug broke: {e}"))?;
+        write_line(&self.write, &line).await?;
         loop {
             let reply = self.packet().await?;
             if reply.name == "response" && reply.attr("transaction_id") == Some(&id) {
@@ -843,6 +895,42 @@ impl Dbgp {
             }
         }
     }
+}
+
+/// Whether a `feature_get -n supports_async` reply says the engine takes a
+/// command while the program runs.
+fn takes_async(reply: &Xml) -> bool {
+    reply.attr("supported") != Some("0") && reply.value().trim() == "1"
+}
+
+/// A command sent with no wait for its reply — its reply is passed over by
+/// whichever command reads next.
+#[derive(Clone)]
+struct Breaker {
+    write: Arc<Mutex<Box<dyn AsyncWrite + Unpin + Send>>>,
+    transaction: Arc<AtomicU64>,
+}
+
+impl Breaker {
+    async fn send(&self, name: &str) -> Result<(), String> {
+        let id = self.transaction.fetch_add(1, Ordering::SeqCst) + 1;
+        write_line(&self.write, &format!("{name} -i {id}\0")).await
+    }
+}
+
+async fn write_line(
+    write: &Mutex<Box<dyn AsyncWrite + Unpin + Send>>,
+    line: &str,
+) -> Result<(), String> {
+    let mut write = write.lock().await;
+    write
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("the connection to Xdebug broke: {e}"))?;
+    write
+        .flush()
+        .await
+        .map_err(|e| format!("the connection to Xdebug broke: {e}"))
 }
 
 /// A DBGp argument value, quoted when it holds a space or a quote.
@@ -962,6 +1050,7 @@ mod tests {
             program: None,
             breakpoints: HashMap::new(),
             refs: Arc::new(Mutex::new(Vec::new())),
+            pause: None,
         };
         (adapter, seen, BufReader::new(from))
     }
@@ -1143,6 +1232,123 @@ mod tests {
         );
         let pause = next_message(&mut from).await;
         assert!(pause["message"].as_str().unwrap().contains("cannot pause"));
+    }
+
+    /// An engine that takes `break` while the program runs (Xdebug with
+    /// `supports_async`): `run` is answered only once `break` comes, as a
+    /// stop — which is reported as the pause; a pause with nothing running
+    /// sends nothing.
+    #[tokio::test]
+    async fn a_running_program_is_paused_where_the_engine_takes_break() {
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let (read, write) = tokio::io::split(ours);
+        let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let (engine_read, mut engine_write) = tokio::io::split(theirs);
+            let mut engine_read = BufReader::new(engine_read);
+            let mut running = None;
+            loop {
+                let mut line = Vec::new();
+                match engine_read.read_until(0, &mut line).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                line.pop();
+                let line = String::from_utf8_lossy(&line).into_owned();
+                let _ = seen_tx.send(line.clone());
+                let mut words = line.split(' ');
+                let name = words.next().unwrap_or("").to_string();
+                let tx = words.nth(1).unwrap_or("0").to_string();
+                let replies = match name.as_str() {
+                    "run" => {
+                        running = Some(tx);
+                        vec![]
+                    }
+                    "break" => {
+                        let mut replies = vec![format!(
+                            r#"<?xml version="1.0"?><response {NS} command="break" transaction_id="{tx}" success="1"></response>"#
+                        )];
+                        if let Some(run) = running.take() {
+                            replies.push(format!(
+                                r#"<?xml version="1.0"?><response {NS} command="run" transaction_id="{run}" status="break" reason="ok"></response>"#
+                            ));
+                        }
+                        replies
+                    }
+                    other => vec![engine_reply(other).replace("TX", &tx)],
+                };
+                for body in replies {
+                    let packet = format!("{}\0{body}\0", body.len());
+                    if engine_write.write_all(packet.as_bytes()).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        let dbgp = Dbgp::new(read, write);
+        let pause = Pause {
+            breaker: dbgp.breaker(),
+            running: Arc::default(),
+            asked: Arc::default(),
+        };
+        let (adapter_out, from) = tokio::io::duplex(1 << 20);
+        let mut from = BufReader::new(from);
+        let mut adapter = Adapter {
+            php: PathBuf::from("php"),
+            out: Out::new(adapter_out),
+            session: Some(Arc::new(Mutex::new(dbgp))),
+            program: None,
+            breakpoints: HashMap::new(),
+            refs: Arc::new(Mutex::new(Vec::new())),
+            pause: Some(pause.clone()),
+        };
+        // Stopped: a pause sends nothing.
+        ask(&mut adapter, &mut from, "pause", json!({ "threadId": 1 })).await;
+        assert!(seen.try_recv().is_err(), "nothing sent while stopped");
+        ask(
+            &mut adapter,
+            &mut from,
+            "continue",
+            json!({ "threadId": 1 }),
+        )
+        .await;
+        assert!(next_line(&mut seen).await.starts_with("run -i "));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !pause.running.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "the run began");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ask(&mut adapter, &mut from, "pause", json!({ "threadId": 1 })).await;
+        assert!(next_line(&mut seen).await.starts_with("break -i "));
+        let stopped = next_message(&mut from).await;
+        assert_eq!(stopped["event"], "stopped", "{stopped}");
+        assert_eq!(stopped["body"]["reason"], "pause");
+        // The break's own reply is passed over by the next command.
+        let stack = ask(
+            &mut adapter,
+            &mut from,
+            "stackTrace",
+            json!({ "threadId": 1 }),
+        )
+        .await;
+        assert_eq!(stack["stackFrames"][0]["line"], 5);
+        // A stop of its own afterwards is not taken for the pause.
+        assert!(!pause.asked.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn the_engine_says_whether_it_takes_commands_while_running() {
+        let reply = |xml: &str| Xml::parse(xml).unwrap();
+        assert!(takes_async(&reply(&format!(
+            r#"<response {NS} command="feature_get" transaction_id="1" feature_name="supports_async" supported="1"><![CDATA[1]]></response>"#
+        ))));
+        assert!(!takes_async(&reply(&format!(
+            r#"<response {NS} command="feature_get" transaction_id="1" feature_name="supports_async" supported="1"><![CDATA[0]]></response>"#
+        ))));
+        assert!(!takes_async(&reply(&format!(
+            r#"<response {NS} command="feature_get" transaction_id="1" feature_name="supports_async" supported="0"></response>"#
+        ))));
     }
 
     #[test]
