@@ -256,6 +256,19 @@ impl Located {
     pub fn is_bodyless_callable(&self) -> bool {
         is_callable(&self.symbol.kind) && self.body.is_none()
     }
+
+    /// This, found in a piece of a file, where it sits in the whole file:
+    /// the piece starting `bytes` and `lines` into it.
+    fn moved(mut self, bytes: usize, lines: usize) -> Located {
+        self.symbol.line += lines;
+        self.symbol.end_line += lines;
+        self.declaration = (self.declaration.0 + bytes, self.declaration.1 + bytes);
+        self.signature_end += bytes;
+        self.decl_line += lines;
+        self.body = self.body.map(|(first, last)| (first + lines, last + lines));
+        self.owner.scope = (self.owner.scope.0 + bytes, self.owner.scope.1 + bytes);
+        self
+    }
 }
 
 /// Extract definition symbols from `source`. Returns an empty list when the
@@ -279,6 +292,9 @@ pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>,
     // Compile (or fetch) the query before parsing, so a language without an
     // outline costs nothing.
     crate::highlight::tags_query(lang)?;
+    if lang == Lang::Lean {
+        return Ok(lean_located(source));
+    }
     let Some(tree) = crate::highlight::parse(source, lang) else {
         return Ok(Vec::new());
     };
@@ -286,8 +302,90 @@ pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>,
 }
 
 /// The outline of an already-parsed file. `tree` must be `source` parsed with
-/// `lang`'s grammar.
+/// `lang`'s grammar. A Lean file's is read one command at a time instead
+/// (see [`crate::lean`]), the tree aside.
 pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
+    match lang {
+        Lang::Lean => lean_located(source),
+        _ => located_in_tree(tree, source, lang),
+    }
+}
+
+/// A Lean file's outline: each command parsed on its own
+/// ([`crate::lean::commands`]), so a command the grammar cannot read costs
+/// that command's declarations and no other's, and its positions moved to
+/// where the command sits in the file.
+fn lean_located(source: &str) -> Vec<Located> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&Lang::Lean.grammar()).is_err() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut lines_before = 0;
+    let mut counted_to = 0;
+    for range in crate::lean::commands(source) {
+        lines_before += source[counted_to..range.start].matches('\n').count();
+        counted_to = range.start;
+        let original = &source[range.clone()];
+        let command = crate::lean::readable(original);
+        let Some(tree) = parser.parse(command.as_bytes(), None) else {
+            continue;
+        };
+        let mut found = located_in_tree(&tree, &command, Lang::Lean);
+        // What the command's first line declares, read from its text: the
+        // grammar half-reads many a declaration (`instance A.b` names `b`
+        // alone; a `↦` it does not know loses the whole), and an outline
+        // that misses one at the start of a line misleads.
+        if let Some(head) = crate::lean::head(original) {
+            let line = original[..head.keyword].matches('\n').count() + 1;
+            let name = &original[head.name.clone()];
+            let main = found.iter_mut().find(|l| {
+                l.symbol.line == line && !matches!(l.symbol.kind.as_str(), "field" | "constructor")
+            });
+            match main {
+                Some(l) if l.symbol.name != name && name.ends_with(l.symbol.name.as_str()) => {
+                    l.symbol.name = name.to_string();
+                }
+                Some(_) => {}
+                None => found.insert(0, lean_head_located(original, &head, line)),
+            }
+        }
+        out.extend(
+            found
+                .into_iter()
+                .map(|l| l.moved(range.start, lines_before)),
+        );
+    }
+    out
+}
+
+/// The outline entry of a Lean declaration the grammar could not read, from
+/// what its text says ([`crate::lean::head`]); `line` is its keyword's.
+fn lean_head_located(command: &str, head: &crate::lean::Head, line: usize) -> Located {
+    let end = command.trim_end().len();
+    let last = (command[..end].matches('\n').count() + 1).max(line);
+    Located {
+        symbol: Symbol {
+            name: command[head.name.clone()].to_string(),
+            kind: head.kind.to_string(),
+            line,
+            end_line: last,
+        },
+        declaration: (0, end),
+        signature_end: head.signature_end,
+        cpp_public: None,
+        decl_line: 1,
+        body: (head.kind != "axiom").then_some((line, last)),
+        container: None,
+        owner: Owner {
+            scope: (0, command.len()),
+            member_of: None,
+        },
+    }
+}
+
+/// The outline of `tree`, `source` parsed with `lang`'s grammar whole.
+fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     let Ok(query) = crate::highlight::tags_query(lang) else {
         return Vec::new();
     };
@@ -321,6 +419,11 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         }
         let (Some(kind), Some(name), Some(def)) = (kind, name, def) else {
             continue;
+        };
+        let name = match lang {
+            Lang::Lean => lean_name(def, source).unwrap_or(name),
+            Lang::Sql => crate::apidoc::unquote_sql(name),
+            _ => name,
         };
         let line = def.start_position().row + 1;
         let (decl_line, body) = shape_of(def, lang);
@@ -456,10 +559,73 @@ fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), us
         // statement or a token in a comment, literal or inner scope.
         top = export;
     }
+    if lang == Lang::Lean {
+        return lean_declaration_bytes(declaration, end);
+    }
+    // A table's signature is its name, not its columns (they are its
+    // members); a view's, not its query; a function's, not its body.
+    let signature_end = match lang {
+        Lang::Sql => {
+            let mut cursor = declaration.walk();
+            declaration
+                .named_children(&mut cursor)
+                .find(|c| {
+                    matches!(
+                        c.kind(),
+                        "column_definitions" | "create_query" | "function_body"
+                    )
+                })
+                .map_or(signature_end, |c| c.start_byte())
+        }
+        _ => signature_end,
+    };
     (
         (top.start_byte(), end),
         signature_end,
         top.start_position().row + 1,
+    )
+}
+
+/// The keywords that may come before a Lean declaration's own (`private`,
+/// `noncomputable`, …): tokens of their own in the tree, outside its node.
+const LEAN_MODIFIERS: &[&str] = &[
+    "noncomputable",
+    "partial",
+    "protected",
+    "private",
+    "public",
+    "meta",
+    "unsafe",
+    "scoped",
+    "local",
+];
+
+/// [`declaration_bytes`] of a Lean declaration ending at byte `end`. It
+/// starts at its attributes (`@[simp]`), which wrap it in a `declaration`
+/// node, or at the modifiers before it, so its doc is looked for above them
+/// and its visibility read from them. Its signature ends where its value or
+/// its fields begin (`:=`, `where`, a match alternative): the statement of a
+/// theorem, not its proof.
+fn lean_declaration_bytes(def: Node, end: usize) -> ((usize, usize), usize, usize) {
+    let mut first = def;
+    if let Some(wrapper) = def.parent().filter(|p| p.kind() == "declaration") {
+        first = wrapper;
+    }
+    while let Some(modifier) = first
+        .prev_sibling()
+        .filter(|n| !n.is_named() && LEAN_MODIFIERS.contains(&n.kind()))
+    {
+        first = modifier;
+    }
+    let mut cursor = def.walk();
+    let signature_end = def
+        .children(&mut cursor)
+        .find(|c| matches!(c.kind(), ":=" | "where" | "match_arm"))
+        .map_or(def.end_byte(), |c| c.start_byte());
+    (
+        (first.start_byte(), end),
+        signature_end,
+        first.start_position().row + 1,
     )
 }
 
@@ -522,6 +688,10 @@ fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
 /// A TypeScript class field whose value is a function (`handler = () => {…}`)
 /// is a method in all but syntax — report it as one, so it is a call-graph
 /// node and an explainable function rather than a data member.
+///
+/// Lean writes several kinds of declaration with one node: a `definition` is
+/// a `def` or an `abbrev`, a `theorem` or a `lemma`, or an `instance`, and a
+/// `structure` is a `structure` or a `class`. Its keyword says which.
 fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
     let function_valued = || {
         def.child_by_field_name("value")
@@ -529,8 +699,29 @@ fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
     };
     match lang {
         Lang::TypeScript | Lang::Tsx if kind == "field" && function_valued() => "method",
+        Lang::Lean => {
+            let keyword = def
+                .child_by_field_name("kind")
+                .or_else(|| def.child(0))
+                .map_or("", |k| k.kind());
+            match (def.kind(), keyword) {
+                ("definition", "theorem" | "lemma") => "theorem",
+                ("definition", "instance") => "instance",
+                ("structure", "class") => "class",
+                _ => kind,
+            }
+        }
         _ => kind,
     }
+}
+
+/// A Lean declaration's whole name: `Group.toMonoid` is several `name` nodes
+/// (`Group`, `.`, `toMonoid`), each of which the outline query matches.
+fn lean_name<'a>(def: Node, source: &'a str) -> Option<&'a str> {
+    let mut cursor = def.walk();
+    let parts: Vec<Node> = def.children_by_field_name("name", &mut cursor).collect();
+    let (first, last) = (parts.first()?, parts.last()?);
+    source.get(first.start_byte()..last.end_byte())
 }
 
 /// `(decl_line, body)` for a definition node (see [`Located`]).
@@ -609,7 +800,9 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
             "method_declaration" if def.child_by_field_name("body").is_none() => (first(def), None),
             _ => (first(def), whole),
         },
-        Lang::Rust | Lang::Python | Lang::JavaScript => (first(def), whole),
+        Lang::Rust | Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => {
+            (first(def), whole)
+        }
         Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
             (first(def), whole)
         }
@@ -758,7 +951,9 @@ fn container_of(def: Node, lang: Lang) -> Option<Container> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => None,
+        | Lang::Zig
+        | Lang::Sql
+        | Lang::Lean => None,
     }
 }
 
@@ -1313,7 +1508,9 @@ impl<'a> EntryPoints<'a> {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
-            | Lang::Zig => Marks::default(),
+            | Lang::Zig
+            | Lang::Sql
+            | Lang::Lean => Marks::default(),
         }
     }
 
@@ -1689,7 +1886,9 @@ impl<'a> EntryPoints<'a> {
             | Lang::Yaml
             | Lang::Toml
             | Lang::Html
-            | Lang::Css => {}
+            | Lang::Css
+            | Lang::Sql
+            | Lang::Lean => {}
         }
         found
     }
@@ -3836,6 +4035,139 @@ fn build_inner() -> B { B }
             Err(QueryError::Unsupported)
         );
         assert_eq!(try_extract_located("", "rust"), Ok(Vec::new()));
+    }
+
+    /// A SQL file's outline: its tables (unquoted) with their columns, views,
+    /// functions, triggers and types, each by the name its `CREATE` gives —
+    /// never the table a trigger is `ON`, nor what a function returns.
+    #[test]
+    fn a_sql_outline_lists_the_objects_a_schema_creates() {
+        let src = "CREATE TABLE IF NOT EXISTS \"Users\" (\n  id int PRIMARY KEY,\n  email text\n);\n\
+                   CREATE VIEW active AS SELECT * FROM \"Users\";\n\
+                   CREATE MATERIALIZED VIEW totals AS SELECT 1;\n\
+                   CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;\n\
+                   CREATE TRIGGER touched BEFORE UPDATE ON \"Users\" FOR EACH ROW EXECUTE PROCEDURE touch();\n\
+                   CREATE TYPE mood AS ENUM ('sad', 'ok');\n";
+        let items = extract_located(src, "sql");
+        let got: Vec<(&str, &str)> = items
+            .iter()
+            .map(|l| (l.symbol.name.as_str(), l.symbol.kind.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Users", "table"),
+                ("id", "field"),
+                ("email", "field"),
+                ("active", "view"),
+                ("totals", "view"),
+                ("touch", "function"),
+                ("touched", "trigger"),
+                ("mood", "type"),
+            ],
+            "{items:#?}"
+        );
+        let users = &items[0];
+        assert_eq!((users.symbol.line, users.symbol.end_line), (1, 4));
+        assert_eq!(
+            &src[users.declaration.0..users.signature_end].trim_end(),
+            &"CREATE TABLE IF NOT EXISTS \"Users\"",
+            "a table's signature is its name, not its columns"
+        );
+    }
+
+    /// A Lean outline: a dotted name read whole, the kind of a `definition`
+    /// from its keyword, and the declaration starting at its attributes and
+    /// modifiers (where its doc sits above).
+    #[test]
+    fn a_lean_outline_reads_whole_names_and_kinds_from_keywords() {
+        let src = "namespace Geo\n\
+                   def Point.norm (p : Nat) : Nat := p\n\
+                   @[simp] theorem norm_zero : Point.norm 0 = 0 := rfl\n\
+                   lemma helper : True := trivial\n\
+                   private def hidden := 1\n\
+                   instance instInhabited : Inhabited Nat := ⟨0⟩\n\
+                   structure Point where\n  x : Nat\n  y : Nat\n\
+                   class Shape (α : Type) where\n  area : α → Nat\n\
+                   inductive Color where\n  | red\n  | green\n\
+                   axiom choice : True\n\
+                   end Geo\n";
+        let items = extract_located(src, "lean");
+        let got: Vec<(&str, &str)> = items
+            .iter()
+            .map(|l| (l.symbol.name.as_str(), l.symbol.kind.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Geo", "module"),
+                ("Point.norm", "function"),
+                ("norm_zero", "theorem"),
+                ("helper", "theorem"),
+                ("hidden", "function"),
+                ("instInhabited", "instance"),
+                ("Point", "struct"),
+                ("x", "field"),
+                ("y", "field"),
+                ("Shape", "class"),
+                ("area", "field"),
+                ("Color", "inductive"),
+                ("red", "constructor"),
+                ("green", "constructor"),
+                ("choice", "axiom"),
+            ],
+            "{items:#?}"
+        );
+        let find = |name: &str| items.iter().find(|l| l.symbol.name == name).unwrap();
+        let signature = |l: &Located| src[l.declaration.0..l.signature_end].trim_end().to_string();
+        assert_eq!(
+            signature(find("norm_zero")),
+            "@[simp] theorem norm_zero : Point.norm 0 = 0"
+        );
+        assert_eq!(signature(find("hidden")), "private def hidden");
+        assert_eq!(signature(find("Point")), "structure Point");
+    }
+
+    /// Mathlib's way of writing Lean: a command the grammar does not know
+    /// (`assert_not_exists`), attributes with arguments, an instance's
+    /// priority, notation. Read as one tree, the first swallowed the file and
+    /// it had no outline; each command is read on its own, and every one of
+    /// these is found, where it is.
+    #[test]
+    fn a_lean_command_the_grammar_cannot_read_costs_only_itself() {
+        let src = "module\n\npublic import Mathlib.Order.Basic\n\n\
+                   assert_not_exists MonoidWithZero DenselyOrdered\n\n\
+                   variable {G : Type*} [Group G]\n\n\
+                   @[to_additive (attr := simp)]\ntheorem inv_mul_cancel (a : G) : a⁻¹ * a = 1 :=\n  Group.inv_mul_cancel a\n\n\
+                   @[to_additive, inherit_doc Foo.bar]\n\
+                   instance (priority := 100) Group.toCancelMonoid : CancelMonoid G where\n  mul_right_cancel := fun a b c h ↦ by\n    simp\n\n\
+                   theorem last : True := trivial\n";
+        let items = extract_located(src, "lean");
+        let got: Vec<(&str, &str, usize, usize)> = items
+            .iter()
+            .map(|l| {
+                (
+                    l.symbol.name.as_str(),
+                    l.symbol.kind.as_str(),
+                    l.symbol.line,
+                    l.decl_line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("inv_mul_cancel", "theorem", 10, 9),
+                ("Group.toCancelMonoid", "instance", 14, 13),
+                ("last", "theorem", 18, 18),
+            ],
+            "{items:#?}"
+        );
+        let last = items.last().unwrap();
+        assert_eq!(
+            &src[last.declaration.0..last.declaration.1],
+            "theorem last : True := trivial"
+        );
     }
 
     #[test]

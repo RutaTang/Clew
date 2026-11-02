@@ -140,6 +140,11 @@ pub struct Resolver {
     /// import of the package — a directory — reaches. From the project's
     /// files, every one of them; the graph only holds those with imports.
     go_packages: Arc<HashMap<PathBuf, Vec<PathBuf>>>,
+    /// Each Lean module name a project file can be imported as, with the
+    /// files that can be it: `A/B/C.lean` is `C`, `B.C` and `A.B.C`, as the
+    /// directory it is imported from (its package's source root) is not
+    /// written down anywhere clew reads. See [`Resolver::resolve_lean`].
+    lean_modules: Arc<HashMap<String, Vec<PathBuf>>>,
 }
 
 impl Resolver {
@@ -626,6 +631,29 @@ impl Resolver {
         for files in go_packages.values_mut() {
             files.sort();
         }
+        let mut lean_modules: HashMap<String, Vec<PathBuf>> = HashMap::new();
+        for file in file_set
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "lean"))
+        {
+            let Ok(rel) = file.strip_prefix(root) else {
+                continue;
+            };
+            let parts: Vec<String> = rel
+                .with_extension("")
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            for start in 0..parts.len() {
+                lean_modules
+                    .entry(parts[start..].join("."))
+                    .or_default()
+                    .push(file.clone());
+            }
+        }
+        for files in lean_modules.values_mut() {
+            files.sort();
+        }
         Resolver {
             root: root.to_path_buf(),
             files: file_set,
@@ -635,6 +663,7 @@ impl Resolver {
             dart_package,
             ts_configs: Arc::default(),
             go_packages: Arc::new(go_packages),
+            lean_modules: Arc::new(lean_modules),
         }
     }
 
@@ -675,8 +704,44 @@ impl Resolver {
             "javascript" | "typescript" | "tsx" => self.resolve_js(raw, from),
             "go" => self.resolve_go(raw),
             "dart" => self.resolve_dart(raw, from),
+            "lean" => self.resolve_lean(raw, from),
             _ => Target::External(raw.module.clone()),
         }
+    }
+
+    // --- Lean ---
+
+    /// `import A.B.C` names the file `A/B/C.lean` under a source root of the
+    /// importer's package — the project's root, its `src/`, a library's own
+    /// directory in a monorepo. Of the files that can be that module, the one
+    /// whose root holds the importer (the deepest, when several do) is it.
+    /// A module no project file can be is another package's: the toolchain's
+    /// (`Init`, `Std`, `Lean`) or a dependency's (`Mathlib`), named by its
+    /// first part.
+    fn resolve_lean(&self, raw: &RawImport, from: &Path) -> Target {
+        let module = raw.module.as_str();
+        let Some(files) = self.lean_modules.get(module) else {
+            let package = module.split('.').next().unwrap_or(module);
+            return Target::External(package.to_string());
+        };
+        let depth = module.split('.').count();
+        let source_root = |file: &Path| {
+            let mut root = file.with_extension("");
+            for _ in 0..depth {
+                root.pop();
+            }
+            root
+        };
+        files
+            .iter()
+            .filter(|f| f.as_path() != from)
+            .map(|f| (source_root(f), f))
+            .filter(|(root, _)| from.starts_with(root))
+            .max_by_key(|(root, _)| root.components().count())
+            .map_or_else(
+                || Target::Unresolved(module.to_string()),
+                |(_, f)| Target::Internal(f.clone()),
+            )
     }
 
     // --- Dart ---
@@ -3780,6 +3845,49 @@ mod tests {
             ),
             Target::Internal(root.join("src/app.rs"))
         );
+    }
+
+    /// A Lean import is the file at its module's path under a source root
+    /// holding the importer: the project's own root, a test tree's own copy
+    /// before it (the deeper root), never a file whose root does not hold the
+    /// importer. A module no file can be is its package's: the toolchain's or
+    /// a dependency's.
+    #[test]
+    fn a_lean_import_resolves_under_the_importers_source_root() {
+        let root = Path::new("/p");
+        let r = resolver(
+            root,
+            &[
+                "Geo/Point.lean",
+                "Geo/Shape.lean",
+                "test/Geo/Point.lean",
+                "test/Run.lean",
+                "lib/Extra/Thing.lean",
+                "main.lean",
+            ],
+        );
+        let at = |module: &str, from: &str| r.resolve(&ri(module), &root.join(from), "lean");
+        assert_eq!(
+            at("Geo.Point", "Geo/Shape.lean"),
+            Target::Internal(root.join("Geo/Point.lean"))
+        );
+        assert_eq!(
+            at("Geo.Point", "main.lean"),
+            Target::Internal(root.join("Geo/Point.lean"))
+        );
+        assert_eq!(
+            at("Geo.Point", "test/Run.lean"),
+            Target::Internal(root.join("test/Geo/Point.lean"))
+        );
+        assert_eq!(
+            at("Extra.Thing", "main.lean"),
+            Target::Unresolved("Extra.Thing".into())
+        );
+        assert_eq!(
+            at("Mathlib.Order.Basic", "main.lean"),
+            Target::External("Mathlib".into())
+        );
+        assert_eq!(at("Init", "main.lean"), Target::External("Init".into()));
     }
 
     #[test]

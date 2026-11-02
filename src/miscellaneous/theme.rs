@@ -838,9 +838,10 @@ pub fn kind_color(kind: &str) -> Color {
 fn kind_ink(t: &TokenColors, kind: &str) -> Option<u32> {
     match kind {
         "function" | "method" | "macro" => Some(t.function),
-        "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" => Some(t.type_),
+        "class" | "struct" | "enum" | "union" | "trait" | "interface" | "type" | "table"
+        | "view" | "inductive" => Some(t.type_),
         "module" | "implementation" => Some(t.keyword),
-        "constant" => Some(t.number),
+        "constant" | "theorem" | "axiom" => Some(t.number),
         _ => None,
     }
 }
@@ -859,12 +860,13 @@ pub fn ansi(idx: u8) -> Color {
 }
 
 /// A distinct base colour per graphed language, so a mixed-language project
-/// reads by hue on the graph map. The six are the languages clew fully
+/// reads by hue on the graph map. The first six are the languages clew fully
 /// supports in the import/call graphs; their hues are spread warm → cool
 /// around the wheel (orange · yellow · green · teal · cyan · blue) and kept
 /// saturated so they survive being shaded by depth on either background.
-/// Anything else is filtered out of the graph upstream, so the neutral
-/// fallback should not normally appear.
+/// Lean (the import map) and SQL (the type map, whose nodes are its tables)
+/// close the wheel: violet, magenta. Anything else is filtered out of the
+/// graph upstream, so the neutral fallback should not normally appear.
 pub fn language_hue(lang: Option<&str>) -> Color {
     match lang {
         Some("rust") => rgb(0xf2843c),
@@ -873,6 +875,8 @@ pub fn language_hue(lang: Option<&str>) -> Color {
         Some("dart") => rgb(0x2fc79c),
         Some("go") => rgb(0x2fc2e4),
         Some("typescript" | "tsx") => rgb(0x5090f0),
+        Some("lean") => rgb(0x9b7cf2),
+        Some("sql") => rgb(0xe05ab0),
         _ => rgb(0x8a93a6),
     }
 }

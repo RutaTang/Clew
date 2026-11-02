@@ -118,6 +118,8 @@ languages! {
     Html => "html",
     Css => "css",
     Zig => "zig",
+    Sql => "sql",
+    Lean => "lean",
 }
 
 /// How many languages there are; sizes the per-language caches below.
@@ -181,6 +183,8 @@ impl Lang {
             Lang::Html => "HTML",
             Lang::Css => "CSS",
             Lang::Zig => "Zig",
+            Lang::Sql => "SQL",
+            Lang::Lean => "Lean",
         }
     }
 
@@ -205,6 +209,8 @@ impl Lang {
             Lang::Html => &["html", "htm"],
             Lang::Css => &["css"],
             Lang::Zig => &["zig"],
+            Lang::Sql => &["sql", "pgsql"],
+            Lang::Lean => &["lean"],
         }
     }
 
@@ -229,6 +235,17 @@ impl Lang {
             Lang::Html => &[],
             Lang::Css => &[],
             Lang::Zig => &[],
+            Lang::Sql => &[
+                "postgresql",
+                "postgres",
+                "pgsql",
+                "plpgsql",
+                "mysql",
+                "sqlite",
+                "tsql",
+                "plsql",
+            ],
+            Lang::Lean => &["lean4"],
         }
     }
 
@@ -253,6 +270,8 @@ impl Lang {
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
             Lang::Css => tree_sitter_css::LANGUAGE.into(),
             Lang::Zig => tree_sitter_zig::LANGUAGE.into(),
+            Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            Lang::Lean => tree_sitter_lean4::LANGUAGE.into(),
         }
     }
 
@@ -297,6 +316,37 @@ impl Lang {
             Lang::Html => &[tree_sitter_html::HIGHLIGHTS_QUERY],
             Lang::Css => &[tree_sitter_css::HIGHLIGHTS_QUERY],
             Lang::Zig => &[tree_sitter_zig::HIGHLIGHTS_QUERY],
+            Lang::Sql => &[
+                tree_sitter_sequel::HIGHLIGHTS_QUERY,
+                SQL_HIGHLIGHT_OVERRIDES,
+            ],
+            Lang::Lean => &[tree_sitter_lean4::HIGHLIGHTS_QUERY],
+        }
+    }
+
+    /// Capture names of this language's highlight query that are not clew's,
+    /// and the style each stands for (see [`SQL_CAPTURE_NAMES`]).
+    fn capture_names(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Lang::Sql => SQL_CAPTURE_NAMES,
+            Lang::Rust
+            | Lang::Python
+            | Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Go
+            | Lang::Dart
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Java
+            | Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css
+            | Lang::Zig
+            | Lang::Lean => &[],
         }
     }
 
@@ -317,6 +367,8 @@ impl Lang {
             Lang::C => &[tree_sitter_c::TAGS_QUERY],
             Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY],
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
+            Lang::Sql => &[SQL_TAGS],
+            Lang::Lean => &[LEAN_TAGS],
             Lang::Json
             | Lang::Bash
             | Lang::Yaml
@@ -342,7 +394,9 @@ impl Lang {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
-            | Lang::Zig => Family::Alone(self),
+            | Lang::Zig
+            | Lang::Sql
+            | Lang::Lean => Family::Alone(self),
         }
     }
 
@@ -368,6 +422,106 @@ impl Lang {
 /// bracket in `'{'` into the bracket matcher as code. Appended last so it wins
 /// (see [`Lang::highlight_parts`]).
 const C_LITERAL_OVERRIDES: &str = "\n(char_literal) @string\n";
+
+/// tree-sitter-sequel's number patterns are written for Neovim's Lua matcher
+/// (`%d`), which tree-sitter's regex reads as a literal `%d`: no literal ever
+/// matched them, and every number was drawn as a string. Appended last so it
+/// wins (see [`Lang::highlight_parts`]).
+const SQL_HIGHLIGHT_OVERRIDES: &str = r#"
+((literal) @number
+  (#match? @number "^[-+]?[0-9]+$"))
+((literal) @number
+  (#match? @number "^[-+]?[0-9]*\\.[0-9]+$"))
+"#;
+
+/// The capture names of tree-sitter-sequel's highlight query that are not
+/// clew's, and the style each stands for (empty: none). A capture
+/// tree-sitter-highlight does not know is not merely unstyled — the LAST
+/// capture on a node wins, so the query's `(comment) @comment @spell` left
+/// every comment uncoloured.
+const SQL_CAPTURE_NAMES: &[(&str, &str)] = &[
+    ("boolean", "constant.builtin"),
+    ("conditional", "keyword"),
+    ("field", "property"),
+    ("float", "number"),
+    ("parameter", "variable.parameter"),
+    ("spell", ""),
+    ("storageclass", "keyword"),
+    ("type.qualifier", "keyword"),
+];
+
+/// `query` with each capture renamed as `names` says (`(from, to)`; an empty
+/// `to` drops the capture). Only whole capture names are renamed: `@field`
+/// is not the start of `@fields`, and an `@` inside a string literal (`"@"`)
+/// names no capture.
+fn rename_captures(query: &str, names: &[(&str, &str)]) -> String {
+    let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    let mut out = String::with_capacity(query.len());
+    let mut rest = query;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let len = after.find(|c| !name_char(c)).unwrap_or(after.len());
+        let name = &after[..len];
+        match names.iter().find(|(from, _)| *from == name) {
+            Some((_, "")) => {}
+            Some((_, to)) => {
+                out.push('@');
+                out.push_str(to);
+            }
+            None => {
+                out.push('@');
+                out.push_str(name);
+            }
+        }
+        rest = &after[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The SQL outline: tables and their columns, views, functions, triggers and
+/// types. Each `CREATE` names its object right after its keyword (or after
+/// `IF NOT EXISTS`); the anchor keeps a trigger's `ON table` and a function's
+/// `RETURNS SETOF table` from naming it too.
+const SQL_TAGS: &str = r#"
+(create_table
+  [(keyword_table) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.table
+(column_definition name: (identifier) @name) @definition.field
+(create_view
+  [(keyword_view) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.view
+(create_materialized_view
+  [(keyword_view) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.view
+(create_function
+  [(keyword_function) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.function
+(create_trigger
+  [(keyword_trigger) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.trigger
+(create_type
+  [(keyword_type) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.type
+"#;
+
+/// The Lean outline. A dotted name (`Group.toMonoid`) is several `name`
+/// nodes; the outline reads it whole (`outline::located_in`), and the kind of
+/// a `definition` — `def`, `theorem`, an `instance` — from its keyword
+/// (`outline::refine_kind`).
+const LEAN_TAGS: &str = r#"
+(definition name: (identifier) @name) @definition.function
+(constant name: (identifier) @name) @definition.constant
+(opaque name: (identifier) @name) @definition.function
+(axiom name: (identifier) @name) @definition.axiom
+(structure name: (identifier) @name) @definition.struct
+(structure_field name: (identifier) @name) @definition.field
+(inductive name: (identifier) @name) @definition.inductive
+(class_inductive name: (identifier) @name) @definition.class
+(constructor name: (identifier) @name) @definition.constructor
+(namespace name: (identifier) @name) @definition.module
+"#;
 
 /// Source-oriented tags query for TypeScript/TSX — captures the symbols in real
 /// `.ts` source (classes, functions, methods, type aliases, enums, interfaces,
@@ -843,7 +997,7 @@ fn config_for(lang: Lang) -> Option<&'static HighlightConfiguration> {
         [const { OnceLock::new() }; LANG_COUNT];
     CONFIGS[lang as usize]
         .get_or_init(|| {
-            let query = lang.highlight_parts().concat();
+            let query = rename_captures(&lang.highlight_parts().concat(), lang.capture_names());
             HighlightConfiguration::new(lang.grammar(), lang.name(), &query, "", "")
                 .map(|mut config| {
                     config.configure(HIGHLIGHT_NAMES);
@@ -963,11 +1117,25 @@ pub fn plain_lines(source: &str) -> Vec<HlLine> {
 /// A `"c"` source written in C++ is highlighted as C++ (see
 /// [`Lang::for_source`]).
 pub fn highlight_lines(source: &str, lang_key: Option<&'static str>) -> Vec<HlLine> {
-    lang_key
-        .and_then(|key| Lang::for_source(key, source))
-        .and_then(config_for)
-        .and_then(|config| highlight_with(source, config))
-        .unwrap_or_else(|| plain_lines(source))
+    let Some(lang) = lang_key.and_then(|key| Lang::for_source(key, source)) else {
+        return plain_lines(source);
+    };
+    let Some(config) = config_for(lang) else {
+        return plain_lines(source);
+    };
+    match lang {
+        // One command at a time (see `crate::lean`): a command the grammar
+        // cannot read would otherwise draw every line after it as one
+        // expression.
+        Lang::Lean => crate::lean::commands(source)
+            .into_iter()
+            .flat_map(|range| {
+                let command = &source[range];
+                highlight_with(command, config).unwrap_or_else(|| plain_lines(command))
+            })
+            .collect(),
+        _ => highlight_with(source, config).unwrap_or_else(|| plain_lines(source)),
+    }
 }
 
 fn highlight_with(source: &str, config: &HighlightConfiguration) -> Option<Vec<HlLine>> {
@@ -1215,6 +1383,11 @@ mod tests {
                 Some("s{"),
                 Some("// c{"),
             ),
+            ("sql", "SELECT 's{'; -- c{\n", Some("s{"), Some("-- c{")),
+            // tree-sitter-lean 0.3.0 reads every `{` in a string as an
+            // interpolation, `s!` or not, so `"s{"` does not parse; a `(` in
+            // one is the bracket this checks.
+            ("lean", "def s := \"s(\" -- c(\n", Some("s("), Some("-- c(")),
         ];
         assert_eq!(cases.len(), Lang::ALL.len(), "a language is missing here");
         for (key, src, string, comment) in cases {
@@ -1427,6 +1600,140 @@ public:
             assert_eq!(style_is_literal(i as u8), literal, "{name}");
         }
         assert!(!style_is_literal(u8::MAX));
+    }
+
+    /// The style index of a highlight name.
+    fn style(name: &str) -> u8 {
+        HIGHLIGHT_NAMES.iter().position(|n| *n == name).unwrap() as u8
+    }
+
+    /// SQL and Lean files are known by their extensions, and code fences by
+    /// the tags models write for them.
+    #[test]
+    fn sql_and_lean_are_detected_by_path_and_fence() {
+        assert_eq!(detect(Path::new("db/schema.sql")), Some("sql"));
+        assert_eq!(detect(Path::new("init.PGSQL")), Some("sql"));
+        assert_eq!(detect(Path::new("Mathlib/Order/Basic.lean")), Some("lean"));
+        for tag in ["sql", "postgresql", "mysql", "sqlite", "plpgsql"] {
+            assert_eq!(lang_for_fence(tag), Some("sql"), "{tag}");
+        }
+        assert_eq!(lang_for_fence("lean4"), Some("lean"));
+        assert_eq!(lang_name("sql"), Some("SQL"));
+        assert_eq!(lang_name("lean"), Some("Lean"));
+    }
+
+    /// Only whole capture names are renamed, an empty name drops the capture,
+    /// and an `@` in a string literal is left alone.
+    #[test]
+    fn captures_are_renamed_by_their_whole_name() {
+        let names = [("field", "property"), ("spell", ""), ("float", "number")];
+        assert_eq!(
+            rename_captures(
+                "(a) @field (b) @fields \"@\" (c) @comment @spell (d) @float)",
+                &names
+            ),
+            "(a) @property (b) @fields \"@\" (c) @comment  (d) @number)"
+        );
+    }
+
+    /// tree-sitter-sequel's query, as clew loads it: a comment is a comment
+    /// (its `@spell` capture, last, left it unstyled), numbers are numbers
+    /// (its patterns for them never matched), booleans constants.
+    #[test]
+    fn sql_comments_numbers_and_booleans_are_styled() {
+        let lines = highlight_lines(
+            "-- totals\nSELECT 42, 2.5, 'x', TRUE FROM t WHERE a = 1;\n",
+            Some("sql"),
+        );
+        assert_eq!(
+            style_of(&lines, "-- totals"),
+            Some(Some(style("comment"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "42"),
+            Some(Some(style("number"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "2.5"),
+            Some(Some(style("number"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "'x'"),
+            Some(Some(style("string"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "TRUE"),
+            Some(Some(style("constant.builtin"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "SELECT"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+    }
+
+    /// Lean's declarations: their keyword, their name, a type, a comment.
+    #[test]
+    fn lean_keywords_and_names_are_styled() {
+        let lines = highlight_lines(
+            "-- note\ntheorem two : 1 + 1 = 2 := rfl\nstructure Point where\n  x : Nat\n",
+            Some("lean"),
+        );
+        assert_eq!(
+            style_of(&lines, "-- note"),
+            Some(Some(style("comment"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "theorem"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "two"),
+            Some(Some(style("function"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "Point"),
+            Some(Some(style("type"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "2"),
+            Some(Some(style("number"))),
+            "{lines:?}"
+        );
+    }
+
+    /// Lean is highlighted a command at a time: a command the grammar does
+    /// not know draws the lines after it as what they are, not as one
+    /// expression. Every line is there, once.
+    #[test]
+    fn a_lean_command_the_grammar_cannot_read_does_not_spread() {
+        let src = "assert_not_exists Field\n\ntheorem t : True := trivial\n-- done\n";
+        let lines = highlight_lines(src, Some("lean"));
+        assert_eq!(lines.len(), src.lines().count());
+        assert_eq!(
+            style_of(&lines, "theorem"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "-- done"),
+            Some(Some(style("comment"))),
+            "{lines:?}"
+        );
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect())
+            .collect();
+        assert_eq!(text, src.lines().collect::<Vec<_>>());
     }
 
     #[test]

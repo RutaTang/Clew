@@ -33,6 +33,12 @@ pub const TYPE_KINDS: &[&str] = &[
     "trait",
     "type",
     "union",
+    // A SQL table (or view) is a type of the schema, and its foreign keys
+    // (what it selects from) are its references; a Lean inductive type is an
+    // algebraic data type.
+    "table",
+    "view",
+    "inductive",
 ];
 
 /// Whether an item of `kind` is a function or method (whose body's types are
@@ -58,10 +64,11 @@ fn family(lang: Option<&str>) -> Option<&str> {
 /// Rust only a trait is implemented or extended; elsewhere anything but an
 /// enum or a union can be a base.
 fn inheritable(kind: &str, lang: Option<&str>) -> bool {
-    if lang == Some("rust") {
-        kind == "trait"
-    } else {
-        !matches!(kind, "enum" | "union")
+    match lang {
+        Some("rust") => kind == "trait",
+        // `extends` takes a structure or a class.
+        Some("lean") => matches!(kind, "struct" | "class"),
+        _ => !matches!(kind, "enum" | "union"),
     }
 }
 
@@ -457,6 +464,56 @@ fn find_word(text: &str, word: &str) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A schema's tables are the type map's nodes and its foreign keys the
+    /// edges between them (a view, to what it selects from); a Lean
+    /// structure that `extends` another inherits from it. Built from the
+    /// docs index the files themselves give.
+    #[test]
+    fn sql_tables_link_by_foreign_key_and_lean_structures_by_extends() {
+        let sql = "CREATE TABLE users (id int PRIMARY KEY);\n\
+                   CREATE TABLE orders (id int, user_id int);\n\
+                   ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (user_id) REFERENCES users(id);\n\
+                   CREATE VIEW recent AS SELECT * FROM orders;\n";
+        let lean = "structure Point where\n  x : Nat\n\
+                    structure Point3 extends Point where\n  z : Nat\n";
+        let file = |rel: &str, source: &str, lang: &str| DocFile {
+            rel: rel.into(),
+            doc: String::new(),
+            items: clew_core::apidoc::build_file(source, lang),
+        };
+        let graph = TypeGraph::build(
+            Path::new("/p"),
+            &[
+                file("db/schema.sql", sql, "sql"),
+                file("Geo/Point.lean", lean, "lean"),
+            ],
+            &StructureIndex::default(),
+        );
+        let id = |name: &str| graph.nodes.iter().position(|n| n.name == name).expect(name);
+        assert_eq!(graph.nodes[id("orders")].kind, "table");
+        assert_eq!(graph.nodes[id("recent")].kind, "view");
+        let mut edges: Vec<(&str, &str, Relation)> = graph
+            .edges
+            .iter()
+            .map(|&(a, b, r)| {
+                (
+                    graph.nodes[a].name.as_str(),
+                    graph.nodes[b].name.as_str(),
+                    r,
+                )
+            })
+            .collect();
+        edges.sort();
+        assert_eq!(
+            edges,
+            [
+                ("Point3", "Point", Relation::Inherits),
+                ("orders", "users", Relation::Uses),
+                ("recent", "orders", Relation::Uses),
+            ]
+        );
+    }
 
     fn item(name: &str, kind: &str, line: usize, signature: &str, refs: &[&str]) -> DocItem {
         DocItem {

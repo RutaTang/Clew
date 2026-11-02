@@ -91,3 +91,5 @@ path = "src/main.rs"
 # patched copy shapes such a line in one direction (vendor/README.md).
 [patch.crates-io]
 cosmic-text = { path = "vendor/cosmic-text" }
+# The Lean 4 grammar, loadable by clew's tree-sitter (vendor/README.md).
+tree-sitter-lean4 = { path = "vendor/tree-sitter-lean4" }

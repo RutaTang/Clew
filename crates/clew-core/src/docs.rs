@@ -8,6 +8,8 @@
 //!   Go      the run of `//` lines immediately above a declaration
 //!   JS/TS/Java/C/C++  a `/** … */` (JSDoc / Doxygen) block above
 //!   Python  the first string literal inside a def/class body (a docstring)
+//!   Lean    a `/-- … -/` block above
+//!   SQL     the run of `--` lines immediately above a `CREATE`
 
 use std::collections::HashMap;
 
@@ -105,12 +107,14 @@ fn extract_with(
     // Only the block styles consult it, and building it costs a scan of every
     // line, so the line-comment and docstring languages do not pay for it.
     let openers = match style {
-        DocStyle::Block => block_openers(&lines),
+        DocStyle::Block(syntax) => block_openers(&lines, syntax.open),
         _ => Vec::new(),
     };
     // Every style that reads above a signature consults this one.
     let ends = match style {
-        DocStyle::Block | DocStyle::RustLike | DocStyle::SlashSlash => doc_ends(&lines),
+        DocStyle::Block(_) | DocStyle::RustLike | DocStyle::SlashSlash | DocStyle::DashDash => {
+            doc_ends(&lines)
+        }
         DocStyle::PyDocstring | DocStyle::None => Vec::new(),
     };
     let mut out = HashMap::new();
@@ -217,17 +221,50 @@ fn has_overloading(lang: Lang) -> bool {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => false,
+        | Lang::Zig
+        | Lang::Sql
+        | Lang::Lean => false,
     }
 }
+
+/// A block-comment doc syntax.
+struct BlockSyntax {
+    /// What opens a doc (`/**`).
+    doc: &'static str,
+    /// What opens any block comment (`/*`), a doc or not.
+    open: &'static str,
+    /// What closes one (`*/`).
+    close: &'static str,
+    /// Whether continuation lines carry a ` * ` gutter to strip. Lean's do
+    /// not, and a `*` starting one of its lines is a Markdown bullet.
+    gutter: bool,
+}
+
+/// JSDoc, Javadoc and Doxygen: `/** … */`.
+const C_BLOCK: BlockSyntax = BlockSyntax {
+    doc: "/**",
+    open: "/*",
+    close: "*/",
+    gutter: true,
+};
+
+/// Lean: `/-- … -/`. A `/-! … -/` block documents the module it sits in.
+const LEAN_BLOCK: BlockSyntax = BlockSyntax {
+    doc: "/--",
+    open: "/-",
+    close: "-/",
+    gutter: false,
+};
 
 enum DocStyle {
     /// Rust: `///` and `//!` line docs above the item.
     RustLike,
     /// Go: the run of `//` lines immediately above the declaration.
     SlashSlash,
-    /// JSDoc / Doxygen: a `/** … */` block above.
-    Block,
+    /// SQL: the run of `--` lines immediately above the statement.
+    DashDash,
+    /// JSDoc / Doxygen (`/** … */`), Lean (`/-- … -/`): a block above.
+    Block(&'static BlockSyntax),
     /// Python: the first string literal inside a def/class body.
     PyDocstring,
     None,
@@ -242,9 +279,11 @@ impl DocStyle {
             Lang::Rust | Lang::Dart => DocStyle::RustLike,
             Lang::Go => DocStyle::SlashSlash,
             Lang::JavaScript | Lang::TypeScript | Lang::Tsx | Lang::Java | Lang::C | Lang::Cpp => {
-                DocStyle::Block
+                DocStyle::Block(&C_BLOCK)
             }
+            Lang::Lean => DocStyle::Block(&LEAN_BLOCK),
             Lang::Python => DocStyle::PyDocstring,
+            Lang::Sql => DocStyle::DashDash,
             Lang::Json
             | Lang::Bash
             | Lang::Yaml
@@ -292,10 +331,11 @@ impl DocStyle {
         // between it and its doc.
         let end = ends.get(sig_line - 2).copied().flatten()?;
         match self {
-            DocStyle::Block => collect_block(lines, openers, end),
+            DocStyle::Block(syntax) => collect_block(lines, openers, end, syntax),
             // `//!` documents the module it sits in, never the item below it.
             DocStyle::RustLike => collect_line_docs(lines, end, &["///"]),
             DocStyle::SlashSlash => collect_line_docs(lines, end, &["//"]),
+            DocStyle::DashDash => collect_line_docs(lines, end, &["--"]),
             _ => None,
         }
     }
@@ -447,7 +487,7 @@ fn glued(t: &str) -> bool {
 }
 
 /// For every line, the nearest line at or above it that contains a
-/// block-comment opener `/*`, or `None` when there is none.
+/// block-comment opener (`open`: `/*`), or `None` when there is none.
 ///
 /// This is precisely the line `collect_block` used to find by walking UPWARD
 /// from each symbol, one line at a time, stopping only at `/*` or at line 0.
@@ -459,12 +499,12 @@ fn glued(t: &str) -> bool {
 /// blocking task, so the file's pane stayed empty with no error for that long.
 /// One forward pass answers the same question in O(1) per symbol, and returns
 /// the identical line for every input.
-fn block_openers(lines: &[&str]) -> Vec<Option<usize>> {
+fn block_openers(lines: &[&str], open: &str) -> Vec<Option<usize>> {
     work::add(lines.len());
     let mut out = Vec::with_capacity(lines.len());
     let mut last: Option<usize> = None;
     for (i, l) in lines.iter().enumerate() {
-        if l.contains("/*") {
+        if l.contains(open) {
             last = Some(i);
         }
         out.push(last);
@@ -485,39 +525,48 @@ fn block_openers(lines: &[&str]) -> Vec<Option<usize>> {
 /// memory.
 const MAX_BLOCK_LINES: usize = 512;
 
-/// Collect a `/** … */` block ending on line `end`, stripping the comment
-/// markers and leading ` * ` continuations. Returns `None` for a plain `/* */`
-/// comment (only `/**` counts as documentation), and for a block that opens
+/// Collect a doc block (`/** … */`, `/-- … -/`: see [`BlockSyntax`]) ending
+/// on line `end`, stripping the comment markers and, where the syntax has one,
+/// the leading ` * ` gutter. Returns `None` for a plain comment (`/* */`: only
+/// the doc opener counts as documentation), and for a block that opens
 /// `MAX_BLOCK_LINES` or more lines above `end` (i.e. one spanning more than
 /// that many lines — the const's own doc states the same bound that way).
-fn collect_block(lines: &[&str], openers: &[Option<usize>], end: usize) -> Option<String> {
+fn collect_block(
+    lines: &[&str],
+    openers: &[Option<usize>],
+    end: usize,
+    syntax: &BlockSyntax,
+) -> Option<String> {
     // `openers` must be the index built for THESE lines. Routing another style
     // here without building it would not look broken — every lookup would miss
     // and the file would simply report no documentation — so say so loudly.
     debug_assert_eq!(openers.len(), lines.len(), "block index not built");
-    if !lines[end].contains("*/") {
+    if !lines[end].contains(syntax.close) {
         return None;
     }
     let start = openers.get(end).copied().flatten()?;
     if end - start >= MAX_BLOCK_LINES {
         return None;
     }
-    if !lines[start].contains("/**") {
+    if !lines[start].contains(syntax.doc) {
         return None;
     }
     work::add(end - start + 1);
     let mut buf: Vec<String> = Vec::new();
     for line in &lines[start..=end] {
         let mut s = line.trim();
-        if let Some(p) = s.find("/**") {
-            s = s[p + 3..].trim_start();
-        } else if let Some(p) = s.find("/*") {
-            s = s[p + 2..].trim_start();
+        if let Some(p) = s.find(syntax.doc) {
+            s = s[p + syntax.doc.len()..].trim_start();
+        } else if let Some(p) = s.find(syntax.open) {
+            s = s[p + syntax.open.len()..].trim_start();
         }
-        if let Some(p) = s.find("*/") {
+        if let Some(p) = s.find(syntax.close) {
             s = s[..p].trim_end();
         }
-        let s = s.strip_prefix('*').map(str::trim_start).unwrap_or(s);
+        let s = match syntax.gutter {
+            true => s.strip_prefix('*').map(str::trim_start).unwrap_or(s),
+            false => s,
+        };
         buf.push(s.to_string());
     }
     let doc = buf.join("\n").trim().to_string();
@@ -551,7 +600,9 @@ fn clean_doc_text(s: &str, lang: Lang) -> String {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => s.to_string(),
+        | Lang::Zig
+        | Lang::Sql
+        | Lang::Lean => s.to_string(),
     }
 }
 
@@ -1415,6 +1466,50 @@ mod markup_tests {
     fn docs_of(src: &str, lang: &str) -> HashMap<usize, String> {
         let syms = crate::outline::extract(src, lang);
         extract(src, lang, &syms)
+    }
+
+    /// The docs the Docs view and the hover peek read: each looked for above
+    /// where its declaration starts.
+    fn located_docs_of(src: &str, lang: &str) -> HashMap<usize, String> {
+        extract_located(src, lang, &crate::outline::extract_located(src, lang))
+    }
+
+    /// A SQL statement's doc is the run of `--` lines right above it; a
+    /// blank line ends it (pg_dump's `-- Name: …; Type: TABLE` banners stand
+    /// apart, and are no doc).
+    #[test]
+    fn a_sql_statements_doc_is_the_dash_comment_above_it() {
+        let src = "-- People who act in films.\n-- One row each.\nCREATE TABLE actor (\n  -- Their given name.\n  first_name text\n);\n\n\
+                   --\n-- Name: film; Type: TABLE\n--\n\nCREATE TABLE film (id int);\n";
+        let docs = located_docs_of(src, "sql");
+        assert_eq!(
+            docs.get(&3).map(String::as_str),
+            Some("People who act in films.\nOne row each.")
+        );
+        assert_eq!(docs.get(&5).map(String::as_str), Some("Their given name."));
+        assert_eq!(docs.get(&12), None, "{docs:?}");
+    }
+
+    /// A Lean doc is the `/-- … -/` block above the declaration — above its
+    /// attributes, which start it. Its lines keep their Markdown: a `*` that
+    /// starts one is a bullet, not a gutter. A `/-! … -/` block documents
+    /// the module, never the declaration below it.
+    #[test]
+    fn a_lean_doc_block_sits_above_the_attributes() {
+        let src = "/-! # Sums -/\ndef zero := 0\n\n/-- Adds one.\n\n* never negative -/\n@[simp]\ntheorem succ_pos : 0 < 1 := by decide\n\
+                   /-- One line. -/\nprivate def one := 1\n";
+        let docs = located_docs_of(src, "lean");
+        assert_eq!(docs.get(&2), None, "{docs:?}");
+        assert_eq!(
+            docs.get(&8).map(String::as_str),
+            Some("Adds one.\n\n* never negative"),
+            "{docs:?}"
+        );
+        assert_eq!(
+            docs.get(&10).map(String::as_str),
+            Some("One line."),
+            "{docs:?}"
+        );
     }
 
     /// Javadoc and JSDoc inline tags keep their words. Deleting every `{@…}`

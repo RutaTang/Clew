@@ -18,3 +18,19 @@ thread and closed every window. The patch analyses such a line again with the
 first paragraph's direction for all of them. The same assert is still present
 upstream (0.19.0); when iced moves to a release that no longer has it, delete
 this copy and the patch entry.
+
+## tree-sitter-lean4 0.3.0
+
+The Lean 4 grammar. The release's binding depends on `tree-sitter = "0.25"`,
+and `tree-sitter` declares `links = "tree-sitter"`, so it cannot share a build
+with clew's 0.26: the crate could not be used at all. This copy exposes the
+grammar as a `tree_sitter_language::LanguageFn` (`src/lib.rs`), as every other
+grammar crate does, and its build script compiles the generated parser the
+release ships without the release's fallback of running the `tree-sitter` CLI
+to generate one. It adds the highlight query of the grammar's repository
+(`queries/highlights.scm`), which the release does not ship, cut to the node
+types of this release and with clew's capture names. The release ships no
+license file; its manifest declares MIT, and `LICENSE` is that of the grammar
+it continues, Julian Berman's tree-sitter-lean. When a release depends on
+`tree-sitter-language` and ships its queries, delete this copy and the patch
+entry.

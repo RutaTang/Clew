@@ -30,6 +30,14 @@ fn graph_language_name(lang: &str) -> bool {
     )
 }
 
+/// Whether a file is a node of the Import graph: [`graph_language`]'s, and
+/// Lean's, whose imports clew resolves but whose calls it does not read
+/// (`clew_core::projectcalls`) — in the call graph its every definition would
+/// be a node without an edge.
+pub(crate) fn import_graph_language(path: &std::path::Path) -> bool {
+    crate::highlight::detect(path).is_some_and(|lang| graph_language_name(lang) || lang == "lean")
+}
+
 /// The same stamp for `project_calls.rev`, written when a build FAILED: the
 /// graph on screen (if any) stays, but no longer reads as current, so the next
 /// `ensure_call_graph` retries instead of trusting it.
@@ -208,7 +216,7 @@ fn import_graph_layout(g: &imports::ImportGraph) -> graphlayout::Layout {
     let files: Vec<PathBuf> = g
         .files()
         .into_iter()
-        .filter(|f| graph_language(f))
+        .filter(|f| import_graph_language(f))
         .collect();
     let idx: HashMap<PathBuf, usize> = files
         .iter()
@@ -2343,5 +2351,37 @@ impl App {
                 generation, result, ..
             } => self.on_remote_ts_configs_loaded(generation, result),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Lean files are nodes of the import map, joined by their imports, and
+    /// stay out of the call graph, where every definition of theirs would be
+    /// a node without an edge. SQL is in neither: its map is the type map.
+    #[test]
+    fn lean_files_map_their_imports_but_stay_out_of_the_call_graph() {
+        let root = Path::new("/p");
+        let point = root.join("Geo/Point.lean");
+        let shape = root.join("Geo/Shape.lean");
+        let resolver = imports::Resolver::new(root, &[point.clone(), shape.clone()]);
+        let mut raw = HashMap::new();
+        raw.insert(
+            shape.clone(),
+            vec![imports::RawImport {
+                module: "Geo.Point".into(),
+                line: 1,
+                is_mod_decl: false,
+            }],
+        );
+        raw.insert(point.clone(), Vec::new());
+        let graph = imports::ImportGraph::build(raw, &resolver, highlight::detect);
+        let layout = import_graph_layout(&graph);
+        assert_eq!(layout.nodes.len(), 2);
+        assert_eq!(layout.edges.len(), 1);
+        assert!(!graph_language(&point));
+        assert!(!import_graph_language(Path::new("/p/db/schema.sql")));
     }
 }

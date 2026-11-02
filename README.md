@@ -78,6 +78,9 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 To analyze code well, Clew tailors its support to each language's characteristics. Its features currently support Rust, Python, TypeScript/JavaScript, Go, and Dart well, and other languages get some basic support for now, such as syntax highlighting. More languages are coming.
 
+- **SQL**: the outline lists a schema's tables (with their columns), views, functions, triggers and types, each with the `--` comment above it as its doc, and the type map draws the tables joined by their foreign keys — declared in the table or in an `ALTER TABLE` of the same file, as `pg_dump` writes them — and each view to what it selects from.
+- **Lean 4**: the outline (definitions, theorems, instances, structures, classes, inductive types) with their `/-- … -/` docs and the file's `/-! … -/` module doc, the import map, structures that `extends` others in the type map, and the Lean language server (`lake serve`, from the Lean toolchain elan installs). Lean's syntax is extensible, so a command clew's grammar cannot read is outlined from its first line, and costs no other command its outline.
+
 ## Contributing
 
 Clew is still early, and all kinds of input are welcome and hoped for, whether feature requests, bug reports, or pull requests.

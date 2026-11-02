@@ -531,6 +531,19 @@ pub static SERVERS: &[ServerSpec] = &[
         source: Source::Toolchain { binary: "dart" },
     },
     ServerSpec {
+        name: "lean",
+        version: "toolchain",
+        languages: &["lean"],
+        args: &["serve"],
+        runs_project_code: Some(
+            "its lakefile, and the macros, tactics and #eval commands of the files it checks",
+        ),
+        // Lean's server is `lake serve`, from the toolchain elan installs: it
+        // checks each file with the project's own Lean and dependencies, which
+        // no build of clew's could match.
+        source: Source::Toolchain { binary: "lake" },
+    },
+    ServerSpec {
         name: "pyright",
         version: "latest",
         languages: &["python"],
@@ -1010,6 +1023,21 @@ mod tests {
                 _ => panic!("{lang} should be an npm install"),
             }
         }
+    }
+
+    /// Lean's server is the toolchain's `lake serve`, and it runs the
+    /// project's code: it starts only once the user has let it.
+    #[test]
+    fn lean_uses_the_toolchains_lake_serve() {
+        let lean = default_for_language("lean").unwrap();
+        assert_eq!(lean.name, "lean");
+        assert_eq!(lean.args, ["serve"]);
+        assert!(lean.runs_project_code.is_some());
+        assert!(matches!(
+            lean.provision(lean.version, Platform::MacArm64),
+            Some(Provision::Toolchain { binary: "lake" })
+        ));
+        assert!(default_for_language("sql").is_none());
     }
 
     #[test]

@@ -78,6 +78,9 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 为了更好地做代码分析，Clew 会针对不同语言的特性，提供贴合它的支持。目前 Clew 提供的功能对 Rust、Python、TypeScript/JavaScript、Go 和 Dart 这 6 种语言支持良好，对其余语言目前也提供了一些基础支持，如语法高亮。未来会支持更多语言。
 
+- **SQL**：大纲列出 schema 中的表（及其列）、视图、函数、触发器和类型，并以其上方的 `--` 注释作为文档；类型图会按外键把表连接起来（无论外键写在表定义中，还是像 `pg_dump` 那样写在同一文件的 `ALTER TABLE` 里），并把每个视图连向它所查询的表。
+- **Lean 4**：大纲（定义、定理、实例、结构体、类、归纳类型）及其 `/-- … -/` 文档与文件的 `/-! … -/` 模块文档、导入图、类型图中 `extends` 其他结构体的继承关系，以及 Lean 语言服务器（`lake serve`，来自 elan 安装的 Lean 工具链）。Lean 的语法可扩展，因此 clew 的语法解析器读不懂的命令会按其首行列入大纲，且不会影响其他命令的大纲。
+
 ## 贡献
 
 目前 Clew 项目仍然处于早期，我们欢迎和期盼各种建议，如功能需求、报告 bugs、PR 等。

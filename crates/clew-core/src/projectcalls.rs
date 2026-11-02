@@ -843,7 +843,19 @@ fn lang_spec(lang: Lang) -> Option<LangSpec> {
             &["method_declaration", "constructor_declaration"],
             &["method_invocation", "object_creation_expression"],
         ),
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
+        // A schema has no calls; a Lean proof names the lemmas it uses inside
+        // tactics (`rw [h]`, `simp [f]`) far more often than it applies them,
+        // so a call graph of applications alone would say a proof uses
+        // nothing.
+        Lang::Json
+        | Lang::Bash
+        | Lang::Yaml
+        | Lang::Toml
+        | Lang::Html
+        | Lang::Css
+        | Lang::Zig
+        | Lang::Sql
+        | Lang::Lean => {
             return None;
         }
     })
@@ -1482,7 +1494,9 @@ fn is_builtin(lang: Lang, name: &str) -> bool {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => false,
+        | Lang::Zig
+        | Lang::Sql
+        | Lang::Lean => false,
     }
 }
 

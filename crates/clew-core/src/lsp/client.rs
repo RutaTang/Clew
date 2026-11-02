@@ -803,8 +803,14 @@ impl LspClient {
         })
     }
 
-    /// Notify the server a document is open (send full text).
+    /// Notify the server a document is open (send full text). `language_id`
+    /// is clew's key for the language, sent as the LSP identifier the
+    /// language's servers know it by (Lean's is `lean4`).
     pub fn did_open(&self, path: &Path, language_id: &str, version: i64, text: &str) {
+        let language_id = match language_id {
+            "lean" => "lean4",
+            other => other,
+        };
         self.notify(
             "textDocument/didOpen",
             json!({

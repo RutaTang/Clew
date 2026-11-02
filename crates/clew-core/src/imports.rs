@@ -25,7 +25,8 @@ pub struct RawImport {
     /// `pub `, see [`crate::rustscope::RustUse`]), a Python dotted/relative
     /// module (`os.path`, `.sibling`; `from . import views` names `.:views`,
     /// see [`PY_NAME_SEP`]), a JS/TS specifier (`./util`, `react`, including
-    /// `require()` and dynamic `import()` of a literal), or a Go import path.
+    /// `require()` and dynamic `import()` of a literal), a Go import path, or
+    /// a Lean module (`Mathlib.Data.Nat.Basic`).
     pub module: String,
     /// 1-based line of the statement (for navigation).
     pub line: usize,
@@ -64,6 +65,7 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         Lang::Python => python_imports(root, source, query),
         Lang::JavaScript | Lang::TypeScript | Lang::Tsx => js_imports(root, source, query),
         Lang::Go | Lang::Dart => path_imports(root, source, query),
+        Lang::Lean => lean_imports(root, source, query),
         Lang::C
         | Lang::Cpp
         | Lang::Java
@@ -73,7 +75,8 @@ pub fn imports_in(tree: &Tree, source: &str, lang: Lang) -> Vec<RawImport> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => Vec::new(),
+        | Lang::Zig
+        | Lang::Sql => Vec::new(),
     }
 }
 
@@ -88,6 +91,7 @@ pub fn import_query(lang: Lang) -> Result<&'static Query, QueryError> {
         Lang::TypeScript | Lang::Tsx => Some(TS_QUERY),
         Lang::Go => Some(GO_QUERY),
         Lang::Dart => Some(DART_QUERY),
+        Lang::Lean => Some(LEAN_QUERY),
         Lang::C
         | Lang::Cpp
         | Lang::Java
@@ -97,7 +101,8 @@ pub fn import_query(lang: Lang) -> Result<&'static Query, QueryError> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => None,
+        | Lang::Zig
+        | Lang::Sql => None,
     })
 }
 
@@ -542,6 +547,30 @@ fn path_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
     out
 }
 
+// Lean `import A.B.C` (`public import`, `import all` and `meta import` too):
+// one module, a dotted name the grammar keeps as several `module` nodes.
+const LEAN_QUERY: &str = r#"
+(import) @import
+"#;
+
+/// Lean: one module per `import`, read whole across its dotted parts.
+fn lean_imports(root: Node, src: &str, query: &Query) -> Vec<RawImport> {
+    let mut out = Vec::new();
+    for_each_match(root, query, src, |caps| {
+        let Some(node) = capture(caps, "import") else {
+            return;
+        };
+        let mut cursor = node.walk();
+        let parts: Vec<Node> = node.children_by_field_name("module", &mut cursor).collect();
+        if let (Some(first), Some(last)) = (parts.first(), parts.last())
+            && let Some(module) = src.get(first.start_byte()..last.end_byte())
+        {
+            push_module(&mut out, module, line_of(node));
+        }
+    });
+    out
+}
+
 /// Strip a single pair of surrounding `"`, `'` or backtick quotes.
 fn strip_quotes(s: &str) -> &str {
     let s = s.trim();
@@ -608,6 +637,19 @@ mod extraction_tests {
             .collect()
     }
 
+    /// A Lean `import` names one module, its dotted name whole, whatever
+    /// comes before it (`public`, `meta`) or after `import` (`all`).
+    #[test]
+    fn a_lean_import_names_its_whole_module() {
+        let src = "module\n\nimport Mathlib.Data.Nat.Basic\npublic import Std.Data.HashMap\nimport Init\n\ndef x := 1\n";
+        assert_eq!(
+            modules(src, "lean"),
+            ["Mathlib.Data.Nat.Basic", "Std.Data.HashMap", "Init"]
+        );
+        let lines: Vec<usize> = imports_of(src, "lean").iter().map(|i| i.line).collect();
+        assert_eq!(lines, [3, 4, 5]);
+    }
+
     /// Every import query compiles, once, for exactly the languages that have
     /// an import model.
     #[test]
@@ -628,6 +670,7 @@ mod extraction_tests {
                             | Lang::Html
                             | Lang::Css
                             | Lang::Zig
+                            | Lang::Sql
                     ),
                     "{lang:?} lost its import model"
                 ),

@@ -133,6 +133,7 @@ pub(crate) fn module_label(rel: &str) -> String {
         Some("ts") | Some("tsx") => "ts",
         Some("js") | Some("jsx") => "js",
         Some("dart") => "dart",
+        Some("lean") => "lean",
         _ => "",
     };
     let no_ext = rel.rsplit_once('.').map(|(a, _)| a).unwrap_or(rel);
@@ -161,7 +162,7 @@ pub(crate) fn module_label(rel: &str) -> String {
     }
     let sep = match lang {
         "rust" => "::",
-        "python" => ".",
+        "python" | "lean" => ".",
         _ => "/",
     };
     segs.join(sep)
@@ -177,6 +178,9 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "trait" | "interface" => "trait",
         "class" => "class",
         "constant" | "const" => "const",
+        "theorem" => "thm",
+        "instance" => "inst",
+        "inductive" => "ind",
         "module" | "mod" | "namespace" => "mod",
         "type" | "typealias" | "type_alias" | clew_core::apidoc::ASSOCIATED_TYPE => "type",
         "impl" => "impl",

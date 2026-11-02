@@ -92,6 +92,7 @@ pub mod highlight;
 pub mod imports;
 pub mod inactive;
 pub mod incremental;
+pub(crate) mod lean;
 pub mod linerpc;
 pub mod llm;
 pub mod lsp;
