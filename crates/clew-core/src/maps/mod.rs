@@ -24,6 +24,8 @@ use crate::fs_scan::FileEntry;
 
 pub mod defs;
 pub mod frameworks;
+pub mod go;
+pub mod python;
 pub mod routes;
 pub mod sql;
 use crate::highlight::{self, Lang};
@@ -155,6 +157,7 @@ fn wanted_without_language(rel: &str) -> bool {
         || name.ends_with(".svelte")
         || name.ends_with(".cabal")
         || name == "pnpm-workspace.yaml"
+        || name == "go.mod"
         || name.ends_with(".lean")
 }
 
@@ -165,8 +168,13 @@ pub fn build(_root: &Path, files: &[FileEntry]) -> Vec<ProjectMap> {
 
 /// Every map of `corpus`, none empty, in the order they are listed.
 pub fn build_from(corpus: &Corpus) -> Vec<ProjectMap> {
-    let extractors: &[fn(&Corpus) -> Vec<ProjectMap>] =
-        &[sql::maps, routes::maps, frameworks::maps];
+    let extractors: &[fn(&Corpus) -> Vec<ProjectMap>] = &[
+        sql::maps,
+        routes::maps,
+        frameworks::maps,
+        python::maps,
+        go::maps,
+    ];
     extractors
         .iter()
         .flat_map(|extract| extract(corpus))
