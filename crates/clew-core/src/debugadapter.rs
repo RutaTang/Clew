@@ -187,7 +187,17 @@ pub fn resolve(
                 .ok_or(
                     "lldb-dap not found — install LLVM (lldb-dap) or the Xcode command-line tools",
                 )?;
-            Ok(Resolution::Ready(native_spec(command, program, args, cwd)))
+            // A Zig source file is built for the session, through LLVM: its
+            // debug information is then one lldb reads variables from.
+            let binary = match is_zig_source(program) {
+                true => build_zig(&zig_for(choices)?, &in_dir(cwd, program), cwd)?,
+                false => PathBuf::from(program),
+            };
+            let mut spec = native_spec(command, &binary.to_string_lossy(), args, cwd);
+            if dwarf_language(&in_dir(cwd, &binary.to_string_lossy())) == Some(DW_LANG_ZIG) {
+                spec.launch[NOTICE] = json!(ZIG_BACKEND_NOTICE);
+            }
+            Ok(Resolution::Ready(spec))
         }
         "python" => {
             let python = python_for(
@@ -375,6 +385,315 @@ fn lldb_dap_names() -> Vec<String> {
     names.push("lldb-vscode".into());
     names.extend((11..=17).rev().map(|v| format!("lldb-vscode-{v}")));
     names
+}
+
+/// A key of a `launch` body that is Clew's, not the adapter's: a notice the
+/// client shows in the debug console as the session starts, and takes out
+/// of the body before sending it.
+pub const NOTICE: &str = "__clewNotice";
+
+/// DWARF's language code for Zig (`DW_LANG_Zig`), which Zig's own code
+/// generator — the default for Debug builds on x86-64 — puts on its compile
+/// units. lldb has no plugin for it and shows no variables there.
+const DW_LANG_ZIG: u16 = 0x27;
+
+/// What a Zig program built by Zig's own code generator is told.
+const ZIG_BACKEND_NOTICE: &str = "This program's debug information is Zig's own (from Zig's \
+     built-in code generator, the default for Debug builds on x86-64), and lldb reads no \
+     variables from it: breakpoints and stepping work, but no variables show. Build it with \
+     -fllvm (or .use_llvm = true in build.zig) to see them.";
+
+/// How long building a Zig program for a session may take.
+const ZIG_BUILD_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// `program`, against `cwd` when it is relative.
+fn in_dir(cwd: &Path, program: &str) -> PathBuf {
+    let program = Path::new(program);
+    match program.is_absolute() {
+        true => program.to_path_buf(),
+        false => cwd.join(program),
+    }
+}
+
+/// Whether `program` is Zig source, built for the session.
+fn is_zig_source(program: &str) -> bool {
+    Path::new(program)
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("zig"))
+}
+
+/// The `zig` compiler: the one chosen for the project (Settings →
+/// Languages), else the PATH's.
+fn zig_for(choices: &clew_protocol::LanguageChoices) -> Result<PathBuf, String> {
+    match choices.zig.as_deref().filter(|z| !z.trim().is_empty()) {
+        Some(chosen) => store::find_program(chosen)
+            .map_err(|why| format!("the zig you chose cannot be run: {why}")),
+        None => store::find_on_path_unresolved("zig")
+            .ok_or_else(|| "zig not found — install Zig to debug a .zig file".to_string()),
+    }
+}
+
+/// Build `source` for a session — Debug, through LLVM (`-fllvm`), whose
+/// debug information lldb reads, unlike that of Zig's own code generator;
+/// a Zig built without LLVM builds it its own way. The build and Zig's cache
+/// for it go in Clew's data directory, not the project.
+fn build_zig(zig: &Path, source: &Path, cwd: &Path) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    let out = store::data_root()
+        .ok_or("no data directory to build the Zig program in")?
+        .join("debug-builds")
+        .join("zig")
+        .join(format!("{:016x}", hasher.finish()));
+    std::fs::create_dir_all(&out).map_err(|e| format!("cannot make {}: {e}", out.display()))?;
+    let stem = source
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "program".into());
+    let binary = out.join(match cfg!(windows) {
+        true => format!("{stem}.exe"),
+        false => stem,
+    });
+    let build = |llvm: bool| {
+        let mut cmd = Command::new(zig);
+        cmd.args(["build-exe", "-O", "Debug"]);
+        if llvm {
+            cmd.arg("-fllvm");
+        }
+        cmd.arg("--cache-dir")
+            .arg(out.join("cache"))
+            .arg(format!("-femit-bin={}", binary.display()))
+            .arg(source)
+            .current_dir(cwd);
+        store::run_bounded(cmd, ZIG_BUILD_TIMEOUT)
+    };
+    let mut built = build(true)?;
+    let said = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).into_owned();
+    if !built.status.success() && said(&built).contains("LLVM") {
+        built = build(false)?;
+    }
+    if !built.status.success() {
+        let said = said(&built);
+        let tail: Vec<&str> = said.lines().rev().take(40).collect();
+        let tail: Vec<&str> = tail.into_iter().rev().collect();
+        return Err(format!(
+            "zig could not build {}:\n{}",
+            source.display(),
+            tail.join("\n")
+        ));
+    }
+    Ok(binary)
+}
+
+/// The language DWARF names for an ELF binary's first compile unit
+/// (`DW_AT_language`), if it has one this can read: 64-bit little-endian
+/// ELF, DWARF 2 to 5, sections not compressed.
+fn dwarf_language(binary: &Path) -> Option<u16> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(binary).ok()?;
+    let mut head = [0u8; 64];
+    file.read_exact(&mut head).ok()?;
+    // ELF, 64-bit, little-endian.
+    if &head[..4] != b"\x7fELF" || head[4] != 2 || head[5] != 1 {
+        return None;
+    }
+    let u16_at =
+        |b: &[u8], at: usize| Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?));
+    let u32_at =
+        |b: &[u8], at: usize| Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?));
+    let u64_at =
+        |b: &[u8], at: usize| Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?));
+    let shoff = u64_at(&head, 0x28)?;
+    let (shentsize, shnum, shstrndx) = (
+        usize::from(u16_at(&head, 0x3a)?),
+        usize::from(u16_at(&head, 0x3c)?),
+        usize::from(u16_at(&head, 0x3e)?),
+    );
+    if shentsize < 64 || shnum == 0 || shnum > 4096 || shstrndx >= shnum {
+        return None;
+    }
+    let mut table = vec![0u8; shentsize * shnum];
+    file.seek(SeekFrom::Start(shoff)).ok()?;
+    file.read_exact(&mut table).ok()?;
+    // Each section: (name offset, flags, file offset, size).
+    let section = |i: usize| {
+        let at = i * shentsize;
+        Some((
+            u32_at(&table, at)? as u64,
+            u64_at(&table, at + 8)?,
+            u64_at(&table, at + 0x18)?,
+            u64_at(&table, at + 0x20)?,
+        ))
+    };
+    let mut read = |offset: u64, size: u64, cap: u64| -> Option<Vec<u8>> {
+        let mut bytes = vec![0u8; size.min(cap) as usize];
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        file.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    };
+    let (_, _, names_at, names_size) = section(shstrndx)?;
+    let names = read(names_at, names_size, 1 << 20)?;
+    let mut info = None;
+    let mut abbrev = None;
+    for i in 0..shnum {
+        let (name, flags, offset, size) = section(i)?;
+        let name = names.get(name as usize..)?;
+        let name = &name[..name.iter().position(|b| *b == 0)?];
+        // SHF_COMPRESSED: not read here.
+        if flags & 0x800 != 0 {
+            continue;
+        }
+        match name {
+            b".debug_info" => info = Some((offset, size)),
+            b".debug_abbrev" => abbrev = Some((offset, size)),
+            _ => {}
+        }
+    }
+    let (info_at, info_size) = info?;
+    let (abbrev_at, abbrev_size) = abbrev?;
+    let info = read(info_at, info_size, 1 << 16)?;
+    let abbrev = read(abbrev_at, abbrev_size, 16 << 20)?;
+    first_unit_language(&info, &abbrev)
+}
+
+/// The `DW_AT_language` of the first compile unit in `info` (a
+/// `.debug_info`, its start at least), its abbreviations in `abbrev`.
+fn first_unit_language(info: &[u8], abbrev: &[u8]) -> Option<u16> {
+    fn uleb(b: &[u8], at: &mut usize) -> Option<u64> {
+        let (mut value, mut shift) = (0u64, 0u32);
+        loop {
+            let byte = *b.get(*at)?;
+            *at += 1;
+            if shift < 64 {
+                value |= u64::from(byte & 0x7f) << shift;
+            }
+            shift += 7;
+            if byte & 0x80 == 0 {
+                return Some(value);
+            }
+        }
+    }
+    fn sleb(b: &[u8], at: &mut usize) -> Option<i64> {
+        let (mut value, mut shift) = (0i64, 0u32);
+        loop {
+            let byte = *b.get(*at)?;
+            *at += 1;
+            if shift < 64 {
+                value |= i64::from(byte & 0x7f) << shift;
+            }
+            shift += 7;
+            if byte & 0x80 == 0 {
+                if shift < 64 && byte & 0x40 != 0 {
+                    value |= -1i64 << shift;
+                }
+                return Some(value);
+            }
+        }
+    }
+    let le = |b: &[u8], at: usize, n: usize| -> Option<u64> {
+        Some(
+            b.get(at..at + n)?
+                .iter()
+                .rev()
+                .fold(0u64, |v, x| (v << 8) | u64::from(*x)),
+        )
+    };
+    let mut at = 0;
+    let mut offset_size = 4;
+    if le(info, 0, 4)? == 0xffff_ffff {
+        offset_size = 8;
+        at = 12;
+    } else {
+        at += 4;
+    }
+    let version = le(info, at, 2)?;
+    at += 2;
+    let (abbrev_offset, address_size) = match version {
+        5 => {
+            // unit_type, address_size, debug_abbrev_offset
+            let address_size = le(info, at + 1, 1)?;
+            let offset = le(info, at + 2, offset_size)?;
+            at += 2 + offset_size;
+            (offset, address_size as usize)
+        }
+        2..=4 => {
+            let offset = le(info, at, offset_size)?;
+            let address_size = le(info, at + offset_size, 1)?;
+            at += offset_size + 1;
+            (offset, address_size as usize)
+        }
+        _ => return None,
+    };
+    let code = uleb(info, &mut at)?;
+    // The unit's abbreviation: its attributes' names and forms.
+    let mut j = usize::try_from(abbrev_offset).ok()?;
+    let specs = loop {
+        let this = uleb(abbrev, &mut j)?;
+        if this == 0 {
+            return None;
+        }
+        uleb(abbrev, &mut j)?; // tag
+        j += 1; // children
+        let mut specs = Vec::new();
+        loop {
+            let name = uleb(abbrev, &mut j)?;
+            let form = uleb(abbrev, &mut j)?;
+            let implicit = match form {
+                0x21 => Some(sleb(abbrev, &mut j)?),
+                _ => None,
+            };
+            if name == 0 && form == 0 {
+                break;
+            }
+            specs.push((name, form, implicit));
+        }
+        if this == code {
+            break specs;
+        }
+    };
+    for (name, form, implicit) in specs {
+        if name == 0x13 {
+            return match form {
+                0x0b => le(info, at, 1),
+                0x05 => le(info, at, 2),
+                0x06 => le(info, at, 4),
+                0x0f => uleb(info, &mut at),
+                0x21 => implicit.map(|v| v as u64),
+                _ => None,
+            }
+            .and_then(|v| u16::try_from(v).ok());
+        }
+        let size = match form {
+            0x01 => address_size,
+            0x0b | 0x0c | 0x11 | 0x25 | 0x29 => 1,
+            0x05 | 0x12 | 0x26 | 0x2a => 2,
+            0x27 | 0x2b => 3,
+            0x06 | 0x13 | 0x1c | 0x28 | 0x2c => 4,
+            0x07 | 0x14 | 0x20 | 0x24 => 8,
+            0x1e => 16,
+            0x0e | 0x10 | 0x17 | 0x1d | 0x1f => offset_size,
+            0x19 | 0x21 => 0,
+            0x08 => info.get(at..)?.iter().position(|b| *b == 0)? + 1,
+            0x0f | 0x15 | 0x1a | 0x1b | 0x22 | 0x23 => {
+                uleb(info, &mut at)?;
+                0
+            }
+            0x0d => {
+                sleb(info, &mut at)?;
+                0
+            }
+            0x09 | 0x18 => usize::try_from(uleb(info, &mut at)?).ok()?,
+            0x0a => {
+                let n = usize::from(*info.get(at)?);
+                at += 1;
+                n
+            }
+            _ => return None,
+        };
+        at = at.checked_add(size)?;
+    }
+    None
 }
 
 fn native_spec(command: PathBuf, program: &str, args: &[String], cwd: &Path) -> AdapterSpec {
@@ -863,6 +1182,209 @@ mod tests {
     use super::*;
     use crate::lsp::store::testing::{script, with_store};
     use crate::testutil::{EnvVars, TempDir};
+
+    /// A compile unit's DWARF: version 5 or 4, its language as `data1` or
+    /// `data2`, after a `strp` producer, before an inline name.
+    fn dwarf_unit(version: u16, language: u16, form: u8) -> (Vec<u8>, Vec<u8>) {
+        let abbrev = vec![1, 0x11, 1, 0x25, 0x0e, 0x13, form, 0x03, 0x08, 0, 0, 0];
+        let mut die = vec![1, 0, 0, 0, 0];
+        match form {
+            0x0b => die.push(language as u8),
+            _ => die.extend_from_slice(&language.to_le_bytes()),
+        }
+        die.extend_from_slice(b"app.zig\0");
+        let mut unit = version.to_le_bytes().to_vec();
+        match version {
+            5 => unit.extend_from_slice(&[1, 8, 0, 0, 0, 0]),
+            _ => unit.extend_from_slice(&[0, 0, 0, 0, 8]),
+        }
+        unit.extend(die);
+        let mut info = (unit.len() as u32).to_le_bytes().to_vec();
+        info.extend(unit);
+        (info, abbrev)
+    }
+
+    /// A 64-bit little-endian ELF file holding `info` and `abbrev` as its
+    /// `.debug_info` and `.debug_abbrev`.
+    fn elf_with(info: &[u8], abbrev: &[u8]) -> Vec<u8> {
+        let names = b"\0.shstrtab\0.debug_info\0.debug_abbrev\0";
+        let mut body = Vec::new();
+        let names_at = 64;
+        body.extend_from_slice(names);
+        let info_at = 64 + body.len();
+        body.extend_from_slice(info);
+        let abbrev_at = 64 + body.len();
+        body.extend_from_slice(abbrev);
+        let shoff = 64 + body.len();
+        let mut file = vec![0u8; 64];
+        file[..6].copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1]);
+        file[0x28..0x30].copy_from_slice(&(shoff as u64).to_le_bytes());
+        file[0x3a..0x3c].copy_from_slice(&64u16.to_le_bytes());
+        file[0x3c..0x3e].copy_from_slice(&4u16.to_le_bytes());
+        file[0x3e..0x40].copy_from_slice(&1u16.to_le_bytes());
+        file.extend(body);
+        let section = |name: u32, offset: usize, size: usize| {
+            let mut header = vec![0u8; 64];
+            header[..4].copy_from_slice(&name.to_le_bytes());
+            header[0x18..0x20].copy_from_slice(&(offset as u64).to_le_bytes());
+            header[0x20..0x28].copy_from_slice(&(size as u64).to_le_bytes());
+            header
+        };
+        file.extend(vec![0u8; 64]);
+        file.extend(section(1, names_at, names.len()));
+        file.extend(section(11, info_at, info.len()));
+        file.extend(section(23, abbrev_at, abbrev.len()));
+        file
+    }
+
+    /// Zig's own code generator marks its units `DW_LANG_Zig`, LLVM marks
+    /// them C99: read from the first unit of an ELF binary, by version and
+    /// form, and nothing read from what is not one.
+    #[test]
+    fn a_binary_s_dwarf_language_is_read() {
+        for (version, language, form) in [(5, 0x27, 0x0b), (4, 0x0c, 0x05), (5, 0x1d, 0x05)] {
+            let (info, abbrev) = dwarf_unit(version, language, form);
+            assert_eq!(
+                first_unit_language(&info, &abbrev),
+                Some(language),
+                "DWARF {version}, form {form:#x}"
+            );
+        }
+        let dir = TempDir::new("dwarf-language");
+        let (info, abbrev) = dwarf_unit(5, DW_LANG_ZIG, 0x0b);
+        let zig = dir.join("zig-app");
+        std::fs::write(&zig, elf_with(&info, &abbrev)).unwrap();
+        assert_eq!(dwarf_language(&zig), Some(DW_LANG_ZIG));
+        let (info, abbrev) = dwarf_unit(4, 0x0c, 0x05);
+        let c = dir.join("c-app");
+        std::fs::write(&c, elf_with(&info, &abbrev)).unwrap();
+        assert_eq!(dwarf_language(&c), Some(0x0c));
+        // Not ELF, cut short, a unit naming an abbreviation that is not there.
+        std::fs::write(dir.join("script"), "#!/bin/sh\n").unwrap();
+        assert_eq!(dwarf_language(&dir.join("script")), None);
+        let whole = elf_with(&info, &abbrev);
+        std::fs::write(dir.join("cut"), &whole[..whole.len() - 70]).unwrap();
+        assert_eq!(dwarf_language(&dir.join("cut")), None);
+        assert_eq!(dwarf_language(&dir.join("missing")), None);
+        let (mut info, abbrev) = dwarf_unit(5, 0x27, 0x0b);
+        info[12] = 9;
+        assert_eq!(first_unit_language(&info, &abbrev), None);
+        assert_eq!(first_unit_language(&info[..7], &abbrev), None);
+    }
+
+    /// A `.zig` program is built for the session through LLVM — its cache
+    /// and binary in Clew's data directory — and debugged as that binary; a
+    /// Zig without LLVM builds it its own way, and that binary's debug
+    /// information (Zig's own) brings the notice on why no variables show.
+    #[test]
+    #[cfg(unix)]
+    fn a_zig_source_file_is_built_for_the_session() {
+        with_store("zig-build", |data| {
+            let dir = TempDir::new("debug-zig");
+            let bin = dir.join("bin");
+            script(&bin.join("lldb-dap"), "#!/bin/sh\n");
+            let (info, abbrev) = dwarf_unit(4, 0x0c, 0x05);
+            std::fs::write(dir.join("llvm.elf"), elf_with(&info, &abbrev)).unwrap();
+            let (info, abbrev) = dwarf_unit(5, DW_LANG_ZIG, 0x0b);
+            std::fs::write(dir.join("own.elf"), elf_with(&info, &abbrev)).unwrap();
+            let log = dir.join("zig.log");
+            script(
+                &bin.join("zig"),
+                &format!(
+                    "#!/bin/sh\necho \"$@\" >> '{log}'\nfor a in \"$@\"; do case \"$a\" in -femit-bin=*) out=\"${{a#-femit-bin=}}\";; esac; done\ncase \"$*\" in *-fllvm*) if [ -f '{dir}/no-llvm' ]; then echo 'error: LLVM has not been enabled' >&2; exit 1; fi; /bin/cp '{dir}/llvm.elf' \"$out\";; *) /bin/cp '{dir}/own.elf' \"$out\";; esac\n",
+                    log = log.display(),
+                    dir = dir.display()
+                ),
+            );
+            let _env = EnvVars::new().set("PATH", bin.as_os_str());
+            std::fs::write(dir.join("app.zig"), "pub fn main() void {}\n").unwrap();
+            let resolve_zig = || match resolve(
+                "native",
+                "app.zig",
+                &["x".into()],
+                &dir,
+                &dir,
+                &Default::default(),
+                None,
+            ) {
+                Ok(Resolution::Ready(spec)) => spec,
+                other => panic!("{other:?}"),
+            };
+            let spec = resolve_zig();
+            let built = PathBuf::from(spec.launch["program"].as_str().unwrap());
+            assert!(
+                built.starts_with(data.join("debug-builds/zig")),
+                "{built:?}"
+            );
+            assert_eq!(built.file_name().unwrap(), "app");
+            assert!(built.is_file());
+            assert_eq!(spec.launch["args"][0], "x");
+            assert!(spec.launch.get(NOTICE).is_none(), "LLVM's: variables show");
+            let ran = std::fs::read_to_string(&log).unwrap();
+            assert!(
+                ran.starts_with("build-exe -O Debug -fllvm --cache-dir ")
+                    && ran.contains(&format!("-femit-bin={}", built.display()))
+                    && ran
+                        .trim_end()
+                        .ends_with(&*dir.join("app.zig").to_string_lossy()),
+                "{ran}"
+            );
+            assert!(
+                !dir.join(".zig-cache").exists(),
+                "nothing left in the project"
+            );
+
+            // A Zig without LLVM: built its own way, and the notice says why
+            // no variables will show.
+            std::fs::write(dir.join("no-llvm"), "").unwrap();
+            let spec = resolve_zig();
+            assert!(
+                spec.launch[NOTICE].as_str().unwrap().contains("-fllvm"),
+                "{}",
+                spec.launch
+            );
+            // A prebuilt binary of Zig's own: debugged as it is, with the notice.
+            let own = dir.join("own.elf").to_string_lossy().into_owned();
+            let Ok(Resolution::Ready(spec)) =
+                resolve("native", &own, &[], &dir, &dir, &Default::default(), None)
+            else {
+                panic!("a binary resolves");
+            };
+            assert_eq!(spec.launch["program"], own.as_str());
+            assert!(spec.launch.get(NOTICE).is_some());
+            // A build error is the error.
+            script(
+                &bin.join("zig"),
+                "#!/bin/sh\necho 'app.zig:1:1: error: expected type' >&2\nexit 1\n",
+            );
+            let err = resolve(
+                "native",
+                "app.zig",
+                &[],
+                &dir,
+                &dir,
+                &Default::default(),
+                None,
+            )
+            .unwrap_err();
+            assert!(err.contains("expected type"), "{err}");
+            // No zig at all.
+            let _empty = EnvVars::new().set("PATH", dir.join("none").as_os_str());
+            let _lldb = EnvVars::new().set("PATH", bin.as_os_str());
+            std::fs::remove_file(bin.join("zig")).unwrap();
+            let err = resolve(
+                "native",
+                "app.zig",
+                &[],
+                &dir,
+                &dir,
+                &Default::default(),
+                None,
+            )
+            .unwrap_err();
+            assert!(err.contains("zig not found"), "{err}");
+        });
+    }
 
     /// On a remote host Node runs under clew-server's own adapter, over its
     /// inspector — not js-debug, whose connection per process no stdio

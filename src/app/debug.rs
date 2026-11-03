@@ -36,6 +36,16 @@ fn push_debug_output(session: &mut DebugSession, category: String, text: String)
     }
 }
 
+/// A `launch` body without Clew's own notice in it (see
+/// `clew_core::debugadapter::NOTICE`), and the notice.
+fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<String>) {
+    let notice = launch
+        .as_object_mut()
+        .and_then(|body| body.remove(clew_core::debugadapter::NOTICE))
+        .and_then(|notice| notice.as_str().map(str::to_string));
+    (launch, notice)
+}
+
 impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
@@ -509,6 +519,22 @@ impl App {
                 if cancelled(&live) {
                     let _ = client.disconnect().await;
                     return; // stopped between handing over the client and launching
+                }
+                // What the adapter's resolution has to say (a Zig binary
+                // whose variables lldb cannot read): to the debug console,
+                // and out of the body the adapter gets.
+                let (launch, notice) = take_notice(launch);
+                if let Some(text) = notice {
+                    let _ = output
+                        .send(Message::Debug(DebugMsg::DapEvent {
+                            stamp: stamp.clone(),
+                            run,
+                            event: dap::DapEvent::Output(dap::proto::Output {
+                                category: "console".into(),
+                                text: format!("{text}\n"),
+                            }),
+                        }))
+                        .await;
                 }
                 let launched = client.launch(launch);
                 tokio::pin!(launched);
@@ -2342,6 +2368,21 @@ pub(crate) struct Closing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Clew's notice comes out of the launch body — the adapter never sees
+    /// it — and is what the console shows; a body without one is untouched.
+    #[test]
+    fn a_launch_notice_is_taken_out_for_the_console() {
+        let launch = serde_json::json!({
+            "program": "/p/app",
+            clew_core::debugadapter::NOTICE: "no variables show",
+        });
+        let (launch, notice) = take_notice(launch);
+        assert_eq!(notice.as_deref(), Some("no variables show"));
+        assert_eq!(launch, serde_json::json!({ "program": "/p/app" }));
+        let plain = serde_json::json!({ "program": "/p/app" });
+        assert_eq!(take_notice(plain.clone()), (plain, None));
+    }
 
     fn blank_session() -> DebugSession {
         DebugSession {

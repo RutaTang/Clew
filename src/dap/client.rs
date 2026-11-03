@@ -1629,6 +1629,140 @@ mod tests {
         assert!(output.contains("answer 10"), "{output:?}");
     }
 
+    /// A Zig program under the real lldb-dap, as Clew debugs Zig: the `.zig`
+    /// file itself launched, Clew building it in Debug through LLVM (whose
+    /// debug information lldb reads, unlike that of Zig's own code
+    /// generator), held at a breakpoint in a function, its stack (the
+    /// caller at its line) and its parameters read, stepped, run on to its
+    /// end with its output shown. A binary of Zig's own code generator is
+    /// launched as it is, with the notice on why no variables show. Needs
+    /// `zig` and `lldb-dap` (or a versioned one) on the PATH.
+    #[tokio::test]
+    #[ignore = "needs zig and lldb-dap on the PATH; run explicitly"]
+    async fn a_zig_program_is_debugged_with_lldb_dap() {
+        let _data = clew_core::testutil::DataDir::new("dap-zig-data");
+        let dir = clew_core::testutil::TempDir::new("dap-zig");
+        let source = dir.join("app.zig");
+        std::fs::write(
+            &source,
+            "const std = @import(\"std\");\n\nfn total(a: i32, b: i32) i32 {\n    const sum = a + b;\n    return sum * 2;\n}\n\npub fn main() void {\n    const t = total(2, 3);\n    std.debug.print(\"answer {d}\\n\", .{t});\n}\n",
+        )
+        .unwrap();
+        let resolve = |program: &str| match clew_core::debugadapter::resolve(
+            "native",
+            program,
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        // Zig's own code generator (its Debug default on x86-64): launched
+        // as it is, with the notice.
+        let own = dir.join("own");
+        let built = std::process::Command::new("zig")
+            .args(["build-exe", "-O", "Debug", "-fno-llvm"])
+            .arg(format!("-femit-bin={}", own.display()))
+            .arg(&source)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let spec = resolve(&own.to_string_lossy());
+        assert_eq!(spec.launch["program"], own.to_string_lossy().as_ref());
+        assert!(
+            spec.launch[clew_core::debugadapter::NOTICE]
+                .as_str()
+                .is_some_and(|n| n.contains("-fllvm")),
+            "{}",
+            spec.launch
+        );
+        // The source launched: built through LLVM, no notice.
+        let spec = resolve("app.zig");
+        assert!(spec.launch.get(clew_core::debugadapter::NOTICE).is_none());
+        assert!(
+            !dir.join(".zig-cache").exists(),
+            "the build left nothing in the project"
+        );
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("lldb-dap started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stops: Vec<(String, usize)> = Vec::new();
+        let mut configured = false;
+        let mut stepped = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client.set_breakpoints(&source, &[(4, None)]).await.unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stops.push((frames[0].name.clone(), frames[0].line));
+                    if !stepped {
+                        assert!(frames[0].name.ends_with("total"), "{frames:?}");
+                        let caller = frames
+                            .iter()
+                            .find(|f| f.name.ends_with("main"))
+                            .unwrap_or_else(|| panic!("main in {frames:?}"));
+                        assert_eq!(caller.line, 9, "main, where it called");
+                        let scopes = client.scopes(frames[0].id).await.unwrap();
+                        let locals = client
+                            .variables(scopes[0].variables_reference)
+                            .await
+                            .unwrap();
+                        assert!(
+                            locals.iter().any(|v| v.name == "a" && v.value == "2"),
+                            "{locals:?}"
+                        );
+                        stepped = true;
+                        client.next(thread).await.unwrap();
+                    } else {
+                        client.continue_(thread).await.unwrap();
+                    }
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        let lines: Vec<usize> = stops.iter().map(|(_, line)| *line).collect();
+        assert_eq!(
+            lines,
+            [4, 5],
+            "held at the breakpoint, then a line on: {stops:?}"
+        );
+        assert!(output.contains("answer 10"), "{output:?}");
+    }
+
     /// Go's real delve, end to end: the program built and held at a
     /// breakpoint, its stack read, run on to its end with its output shown.
     /// Needs `go` and `dlv` on the PATH.
