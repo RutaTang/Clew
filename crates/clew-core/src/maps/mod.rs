@@ -22,11 +22,14 @@ use tree_sitter::{Node, Tree};
 
 use crate::fs_scan::FileEntry;
 
+pub mod cfamily;
 pub mod defs;
 pub mod frameworks;
 pub mod go;
+pub mod js;
 pub mod python;
 pub mod routes;
+pub mod rust;
 pub mod sql;
 use crate::highlight::{self, Lang};
 
@@ -174,6 +177,9 @@ pub fn build_from(corpus: &Corpus) -> Vec<ProjectMap> {
         frameworks::maps,
         python::maps,
         go::maps,
+        js::maps,
+        rust::maps,
+        cfamily::maps,
     ];
     extractors
         .iter()
@@ -396,6 +402,16 @@ pub fn last_name(reference: &str) -> String {
         .unwrap_or(reference)
         .trim()
         .to_string()
+}
+
+/// A word of identifier characters and dashes (a kebab-case tag), at the
+/// front of `s`.
+pub fn ident_dash(s: &str) -> &str {
+    let end = s
+        .char_indices()
+        .find(|(_, c)| !(c.is_alphanumeric() || *c == '_' || *c == '-'))
+        .map_or(s.len(), |(i, _)| i);
+    &s[..end]
 }
 
 /// A word made of identifier characters, starting at the front of `s`.
