@@ -112,7 +112,9 @@ pub use payload::*;
 /// `SpawnAdapter` and `AgentAsk`, and [`Request::LanguageOptions`] lists
 /// what there is to choose from on the project's host;
 /// [`Request::BuildFacts`] says what those choices leave out of the build,
-/// for the reading aid that dims it.
+/// for the reading aid that dims it; [`Request::ProjectMaps`] reads the
+/// project's maps ([`ProjectMap`]) — its schema, routes, supervision trees —
+/// where its files are.
 pub const PROTOCOL_VERSION: u32 = 19;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -862,6 +864,10 @@ pub enum Request {
     /// reading files only. The client dims the code these leave out as it
     /// is read. Reply: `BuildFacts`.
     BuildFacts { choices: LanguageChoices },
+    /// The project's maps ([`ProjectMap`]) — its database schema, routes,
+    /// supervision trees and the like — read from its files on this host.
+    /// Reply: `ProjectMaps`.
+    ProjectMaps,
 }
 
 /// One JSON-array entry change, addressed by the fields that IDENTIFY an entry
@@ -1314,6 +1320,9 @@ pub enum Event {
     },
     /// Reply to `BuildFacts`, for project `root`.
     BuildFacts { root: String, facts: BuildFacts },
+    /// Reply to `ProjectMaps`, for project `root`: the maps there are,
+    /// none empty.
+    ProjectMaps { root: String, maps: Vec<ProjectMap> },
     /// A request failed; `code` says how (see [`ErrorCode`]). Always a
     /// [`ServerMessage::Reply`] — unsolicited trouble is [`Event::Status`].
     Error { code: ErrorCode, message: String },

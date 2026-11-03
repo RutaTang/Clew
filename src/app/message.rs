@@ -767,6 +767,15 @@ pub enum GraphMsg {
         stamp: Stamp,
         graph: Result<projectcalls::ProjectCallGraph, String>,
     },
+    /// The project's maps were read — here, or on its host — at the file
+    /// registry's revision `rev`, or why they could not be.
+    MapsBuilt {
+        stamp: Stamp,
+        rev: u64,
+        maps: Result<Vec<clew_protocol::ProjectMap>, String>,
+    },
+    /// Show the map with this id in the Maps overlay.
+    SelectMap(String),
     /// A map's layout, computed off the UI thread (see
     /// `App::refresh_graph_layout`) for `overlay` — or why it could not be.
     /// Applied only while it is the one requested last (`seq`,
@@ -2102,6 +2111,7 @@ impl GraphMsg {
             GraphMsg::RemoteTsConfigsLoaded { stamp, .. }
             | GraphMsg::ImportGraphUpdated { stamp, .. }
             | GraphMsg::ProjectCallsBuilt { stamp, .. }
+            | GraphMsg::MapsBuilt { stamp, .. }
             | GraphMsg::ChurnLoaded { stamp, .. }
             | GraphMsg::GraphLaidOut { stamp, .. }
             | GraphMsg::RefineWaitOver { stamp, .. }
@@ -2118,6 +2128,7 @@ impl GraphMsg {
             | GraphMsg::Toggle3D
             | GraphMsg::ToggleSpin
             | GraphMsg::ToggleHeat
+            | GraphMsg::SelectMap(..)
             | GraphMsg::RefineProjectCalls => None,
         }
     }

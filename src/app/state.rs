@@ -1567,6 +1567,18 @@ pub struct ProjectSession {
     /// The `(docs generation, structure revision)` `type_graph` was built
     /// from; another pair means it is stale.
     pub type_graph_key: Option<(u64, u64)>,
+    /// The project's maps (`clew_core::maps`): its schema, routes,
+    /// supervision trees — read from its files, here or on its host.
+    pub maps: Arc<Vec<clew_protocol::ProjectMap>>,
+    /// The file registry's revision the maps were read at; another means
+    /// they are stale. `None` before the first read.
+    pub maps_rev: Option<u64>,
+    /// A read of the maps is in flight.
+    pub maps_building: bool,
+    /// Why the last read failed, shown in the overlay.
+    pub maps_error: Option<String>,
+    /// The id of the map shown (`ProjectMap::id`), kept across rebuilds.
+    pub maps_selected: Option<String>,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -1930,6 +1942,11 @@ impl Default for ProjectSession {
             churn_loading: false,
             type_graph: Default::default(),
             type_graph_key: None,
+            maps: Arc::default(),
+            maps_rev: None,
+            maps_building: false,
+            maps_error: None,
+            maps_selected: None,
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
             remote_manifests: Default::default(),

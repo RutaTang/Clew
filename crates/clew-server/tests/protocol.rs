@@ -897,6 +897,40 @@ async fn stats_compute_where_the_project_lives() {
     }
 }
 
+/// `ProjectMaps` reads the project's maps where its files are, with
+/// project-relative paths on the wire, and no empty map among them.
+#[tokio::test]
+async fn project_maps_are_read_where_the_project_lives() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("project-maps");
+    std::fs::create_dir_all(root.join("db")).unwrap();
+    std::fs::write(
+        root.join("db/schema.sql"),
+        "CREATE TABLE users (id int PRIMARY KEY);\nCREATE TABLE posts (id int, user_id int REFERENCES users(id));\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(server.handle(2, Request::ProjectMaps).await.is_none());
+    match recv_reply(&mut rx, 2).await {
+        Event::ProjectMaps {
+            root: maps_root,
+            maps,
+        } => {
+            assert_eq!(maps_root, root.to_string_lossy());
+            let schema = maps
+                .iter()
+                .find(|m| m.id == "sql.schema")
+                .unwrap_or_else(|| panic!("the schema in {maps:?}"));
+            assert!(schema.is_well_formed());
+            assert!(maps.iter().all(|m| !m.nodes.is_empty()));
+            let posts = schema.nodes.iter().find(|n| n.label == "posts").unwrap();
+            assert_eq!((posts.file.as_str(), posts.line), ("db/schema.sql", 2));
+            assert_eq!(schema.edges.len(), 1);
+        }
+        other => panic!("expected ProjectMaps, got {other:?}"),
+    }
+}
+
 /// `ProjectCalls` builds the name-based call graph where the files live,
 /// with project-relative node paths on the wire.
 #[tokio::test]

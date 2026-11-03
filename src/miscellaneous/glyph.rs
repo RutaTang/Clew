@@ -22,6 +22,8 @@ pub enum Glyph {
     ImportGraph,
     /// The type map: a base type over two derived ones.
     TypeMap,
+    /// The project's maps: a table linked to two others.
+    ProjectMaps,
     Settings,
     // More menu
     Note,
@@ -96,6 +98,11 @@ fn body(g: Glyph) -> &'static str {
             "<rect x='9' y='3.5' width='6' height='5' rx='1.3'/><rect x='3.5' y='15.5' width='6' height='5' rx='1.3'/>\
              <rect x='14.5' y='15.5' width='6' height='5' rx='1.3'/>\
              <path d='M12 8.5 V12'/><path d='M6.5 15.5 V12 H17.5 V15.5'/>"
+        }
+        ProjectMaps => {
+            "<rect x='3.5' y='9' width='7' height='6' rx='1.3'/><path d='M3.5 11.5 H10.5'/>\
+             <circle cx='18' cy='6' r='2.4'/><circle cx='18' cy='18' r='2.4'/>\
+             <path d='M10.5 11 L15.8 7.2'/><path d='M10.5 13 L15.8 16.8'/>"
         }
         Settings => {
             "<path d='M4 7.2 H12.5'/><path d='M16.4 7.2 H20'/><circle cx='14.9' cy='7.2' r='2.3'/>\

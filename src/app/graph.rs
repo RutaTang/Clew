@@ -206,6 +206,8 @@ enum LayoutInput {
     Imports(Arc<imports::ImportGraph>),
     Calls(Arc<projectcalls::ProjectCallGraph>),
     Types(Arc<typegraph::TypeGraph>),
+    /// One of the project's maps, its paths under the project's root.
+    Map(Arc<Vec<clew_protocol::ProjectMap>>, usize, PathBuf),
 }
 
 impl LayoutInput {
@@ -215,6 +217,10 @@ impl LayoutInput {
             LayoutInput::Imports(graph) => import_graph_layout(graph),
             LayoutInput::Calls(graph) => calls_graph_layout(graph),
             LayoutInput::Types(graph) => types_graph_layout(graph),
+            LayoutInput::Map(maps, at, root) => maps
+                .get(*at)
+                .map(|map| project_map_layout(map, root))
+                .unwrap_or_else(|| graphlayout::layout(Vec::new(), Vec::new())),
         }
     }
 }
@@ -316,6 +322,41 @@ fn types_graph_layout(g: &typegraph::TypeGraph) -> graphlayout::Layout {
         })
         .collect();
     graphlayout::layout(nodes, g.layout_edges())
+}
+
+/// A project map's layout: a node per map node, opening where it is defined
+/// (a node defined nowhere opens nothing), weighted by its arrows.
+pub(crate) fn project_map_layout(
+    map: &clew_protocol::ProjectMap,
+    root: &Path,
+) -> graphlayout::Layout {
+    let mut degree = vec![0usize; map.nodes.len()];
+    let edges: Vec<(usize, usize)> = map
+        .edges
+        .iter()
+        .filter(|e| e.from < degree.len() && e.to < degree.len())
+        .map(|e| (e.from, e.to))
+        .collect();
+    for &(a, b) in &edges {
+        degree[a] += 1;
+        degree[b] += 1;
+    }
+    let nodes = map
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| graphlayout::NodeInput {
+            label: n.label.clone(),
+            file: match n.file.is_empty() {
+                true => PathBuf::new(),
+                false => root.join(&n.file),
+            },
+            line: n.line.max(1),
+            weight: (degree[i] + 1) as f32,
+            cyclic: false,
+        })
+        .collect();
+    graphlayout::layout(nodes, edges)
 }
 
 /// Mark the nodes of `layout` that are members of `cycles` — its cycle
@@ -434,6 +475,10 @@ impl App {
             self.ensure_docs();
             self.rebuild_type_graph();
         }
+        if which == Overlay::ProjectMaps {
+            // Read when stale; the map shown until then is the last one read.
+            task = Task::batch([task, self.ensure_maps()]);
+        }
         if which == Overlay::ProjectCalls {
             // The call graph is brought up to date on demand
             // (`ensure_call_graph`): rebuilt if what it was built from moved,
@@ -480,6 +525,18 @@ impl App {
             Some(Overlay::ProjectTypes) => (
                 Overlay::ProjectTypes,
                 LayoutInput::Types(self.proj.type_graph.clone()),
+            ),
+            Some(Overlay::ProjectMaps) => (
+                Overlay::ProjectMaps,
+                LayoutInput::Map(
+                    self.proj.maps.clone(),
+                    self.selected_map_index().unwrap_or(usize::MAX),
+                    self.proj
+                        .project
+                        .as_ref()
+                        .map(|p| p.root.clone())
+                        .unwrap_or_default(),
+                ),
             ),
             None => {
                 self.proj.graph_layout = None;
@@ -1165,6 +1222,112 @@ impl App {
     /// A build starts: stamp what it reads — the files (registry revision),
     /// the symbol index and the import scope — so the graph it lands can be
     /// told current or stale from them alone.
+    /// The index of the map the Maps overlay shows: the one chosen, while it
+    /// is there, else the first.
+    pub(crate) fn selected_map_index(&self) -> Option<usize> {
+        let maps = &self.proj.maps;
+        if maps.is_empty() {
+            return None;
+        }
+        Some(
+            self.proj
+                .maps_selected
+                .as_ref()
+                .and_then(|id| maps.iter().position(|m| &m.id == id))
+                .unwrap_or(0),
+        )
+    }
+
+    /// Read the project's maps when they are stale — never twice at once:
+    /// here, on the blocking pool, for a local project; on its host for a
+    /// remote one.
+    pub(crate) fn ensure_maps(&mut self) -> Task<Message> {
+        let rev = self.proj.registry.revision();
+        if self.proj.maps_building || self.proj.maps_rev == Some(rev) {
+            return Task::none();
+        }
+        let Some(project) = &self.proj.project else {
+            return Task::none();
+        };
+        self.proj.maps_building = true;
+        let stamp = self.stamp();
+        if !self.local_project_state() {
+            let ai = self.ai_client();
+            return Task::perform(
+                async move {
+                    match ai.request(clew_protocol::Request::ProjectMaps).await? {
+                        clew_protocol::Event::ProjectMaps { maps, .. } => {
+                            // From another process: each map's arrows are
+                            // checked before anything indexes with them.
+                            match maps.iter().find(|m| !m.is_well_formed()) {
+                                Some(bad) => {
+                                    Err(format!("the {} map did not hold together", bad.title))
+                                }
+                                None => Ok(maps),
+                            }
+                        }
+                        other => Err(format!(
+                            "unexpected reply to ProjectMaps: {}",
+                            crate::app::rpc::event_name(&other)
+                        )),
+                    }
+                },
+                move |maps| {
+                    Message::Graph(GraphMsg::MapsBuilt {
+                        stamp: stamp.clone(),
+                        rev,
+                        maps,
+                    })
+                },
+            );
+        }
+        let root = project.root.clone();
+        let files = project.files.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || clew_core::maps::build(&root, &files))
+                    .await
+                    .map_err(|_| "reading the project's maps failed unexpectedly".to_string())
+            },
+            move |maps| {
+                Message::Graph(GraphMsg::MapsBuilt {
+                    stamp: stamp.clone(),
+                    rev,
+                    maps,
+                })
+            },
+        )
+    }
+
+    /// The maps landed: kept (the map shown stays shown while it is still
+    /// there), and laid out when the overlay is open.
+    fn on_maps_built(
+        &mut self,
+        rev: u64,
+        maps: Result<Vec<clew_protocol::ProjectMap>, String>,
+    ) -> Task<Message> {
+        self.proj.maps_building = false;
+        match maps {
+            Ok(maps) => {
+                let retired =
+                    free_off_thread(std::mem::replace(&mut self.proj.maps, Arc::new(maps)));
+                self.proj.maps_rev = Some(rev);
+                self.proj.maps_error = None;
+                let relayout = match self.proj.overlay == Some(Overlay::ProjectMaps) {
+                    true => self.refresh_graph_layout(),
+                    false => Task::none(),
+                };
+                Task::batch([retired, relayout])
+            }
+            Err(e) => {
+                // Not read: nothing is current, and the overlay says why.
+                self.proj.maps_rev = None;
+                self.proj.maps_error = Some(e);
+                Task::none()
+            }
+        }
+    }
+
     fn stamp_call_graph_build(&mut self) {
         let calls = &mut self.proj.project_calls;
         calls.rev = self.proj.registry.revision();
@@ -2341,6 +2504,11 @@ impl App {
                 self.open_file(abs, Some(line), true)
             }
             GraphMsg::ProjectCallsBuilt { graph, .. } => self.on_project_calls_built(graph),
+            GraphMsg::MapsBuilt { rev, maps, .. } => self.on_maps_built(rev, maps),
+            GraphMsg::SelectMap(id) => {
+                self.proj.maps_selected = Some(id);
+                self.refresh_graph_layout()
+            }
             GraphMsg::ChurnLoaded { result, .. } => self.on_churn_loaded(result),
             GraphMsg::ToggleHeat => {
                 self.graph_heat = !self.graph_heat;

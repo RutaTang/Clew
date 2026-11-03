@@ -213,6 +213,7 @@ fn request_index(r: &Request) -> usize {
         Request::BuildDocs => 28,
         Request::LanguageOptions { .. } => 29,
         Request::BuildFacts { .. } => 30,
+        Request::ProjectMaps => 31,
     }
 }
 
@@ -252,6 +253,7 @@ fn event_index(e: &Event) -> usize {
         Event::Error { .. } => 31,
         Event::LanguageOptions { .. } => 32,
         Event::BuildFacts { .. } => 33,
+        Event::ProjectMaps { .. } => 34,
     }
 }
 
@@ -1055,6 +1057,7 @@ fn request_samples() -> Vec<Request> {
             choices: LanguageChoices::default(),
         },
         Request::BuildFacts { choices: choices() },
+        Request::ProjectMaps,
     ]);
     samples
 }
@@ -1260,6 +1263,39 @@ fn reply_samples() -> Vec<Event> {
             }),
     );
     samples.extend([
+        Event::ProjectMaps {
+            root: "/p".into(),
+            maps: Vec::new(),
+        },
+        Event::ProjectMaps {
+            root: "/p".into(),
+            maps: vec![ProjectMap {
+                id: "sql.schema".into(),
+                title: "Database schema".into(),
+                description: "a table per node; an arrow is a foreign key".into(),
+                nodes: vec![
+                    MapNode {
+                        label: "orders".into(),
+                        kind: "table".into(),
+                        file: "db/schema.sql".into(),
+                        line: 7,
+                        detail: "id, user_id, total".into(),
+                    },
+                    MapNode {
+                        label: "users".into(),
+                        kind: "table".into(),
+                        file: String::new(),
+                        line: 0,
+                        detail: String::new(),
+                    },
+                ],
+                edges: vec![MapEdge {
+                    from: 0,
+                    to: 1,
+                    label: "user_id".into(),
+                }],
+            }],
+        },
         Event::BuildFacts {
             root: "/p".into(),
             facts: BuildFacts::default(),

@@ -57,6 +57,7 @@ pub enum Action {
     CallGraph,
     ImportGraph,
     TypeGraph,
+    ProjectMaps,
     ExplainAll,
     ToggleDiff,
     TimeTravel,
@@ -66,7 +67,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -86,6 +87,7 @@ impl Action {
         Action::CallGraph,
         Action::ImportGraph,
         Action::TypeGraph,
+        Action::ProjectMaps,
         Action::ExplainAll,
         Action::ToggleDiff,
         Action::TimeTravel,
@@ -114,6 +116,7 @@ impl Action {
             Action::StartDebug => "start_debug",
             Action::CallGraph => "call_graph",
             Action::TypeGraph => "type_graph",
+            Action::ProjectMaps => "project_maps",
             Action::ImportGraph => "import_graph",
             Action::ExplainAll => "explain_all",
             Action::ToggleDiff => "toggle_diff",
@@ -151,6 +154,7 @@ impl Action {
             Action::CallGraph => "Project call graph",
             Action::ImportGraph => "Project import graph",
             Action::TypeGraph => "Project type map",
+            Action::ProjectMaps => "Project maps (schema, routes, …)",
             Action::ExplainAll => "Explain All",
             Action::ToggleDiff => "Diff vs HEAD",
             Action::TimeTravel => "Time Travel",
@@ -187,6 +191,7 @@ impl Action {
             Action::CallGraph => at(MenuSection::View, "Call Graph"),
             Action::ImportGraph => at(MenuSection::View, "Import Graph"),
             Action::TypeGraph => at(MenuSection::View, "Type Map"),
+            Action::ProjectMaps => at(MenuSection::View, "Project Maps"),
             Action::ExplainAll => at(MenuSection::View, "Explain All"),
             Action::ToggleDiff => at(MenuSection::View, "Diff vs HEAD"),
             Action::TimeTravel => at(MenuSection::View, "Time Travel"),
@@ -219,6 +224,7 @@ impl Action {
             Action::CallGraph => Chord::cmd_shift('c'),
             Action::ImportGraph => Chord::cmd_shift('i'),
             Action::TypeGraph => Chord::cmd_shift('t'),
+            Action::ProjectMaps => Chord::cmd_shift('m'),
             Action::ExplainAll => Chord::cmd_shift('e'),
             Action::ToggleDiff => Chord::cmd_shift('g'),
             Action::TimeTravel => Chord::cmd_shift('h'),

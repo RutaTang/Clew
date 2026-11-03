@@ -62,6 +62,8 @@ pub(crate) mod export;
 pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
+#[cfg(test)]
+pub(crate) use graph::project_map_layout;
 mod hover;
 pub(crate) mod integrations;
 mod keys;

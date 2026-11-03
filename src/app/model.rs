@@ -289,6 +289,9 @@ pub enum Overlay {
     ProjectCalls,
     /// The whole-project import graph.
     ProjectImports,
+    /// The project's maps: its schema, routes, supervision trees and the
+    /// like (`clew_core::maps`).
+    ProjectMaps,
 }
 
 /// One function's block-detail inputs: its signature, full body, and

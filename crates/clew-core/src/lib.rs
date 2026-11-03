@@ -98,6 +98,7 @@ pub(crate) mod lean;
 pub mod linerpc;
 pub mod llm;
 pub mod lsp;
+pub mod maps;
 pub mod mcp;
 pub mod net;
 pub mod notebook;

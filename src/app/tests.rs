@@ -13639,6 +13639,176 @@ fn settle_graphs(app: &mut App, task: Task<Message>) -> usize {
     builds.get()
 }
 
+/// Run `task` and land the project maps and the layouts it computes: the
+/// maps read on the way, counted.
+fn settle_maps(app: &mut App, task: Task<Message>) -> usize {
+    let reads = std::cell::Cell::new(0);
+    drive(app, task, |m| {
+        let read = matches!(m, Message::Graph(GraphMsg::MapsBuilt { .. }));
+        reads.set(reads.get() + usize::from(read));
+        read || matches!(m, Message::Graph(GraphMsg::GraphLaidOut { .. }))
+    });
+    reads.get()
+}
+
+/// The Maps overlay reads a local project's maps when it opens, lays out
+/// the first, keeps the one chosen across a rebuild, and reads them again
+/// only once a file changed.
+#[test]
+fn the_maps_overlay_reads_a_local_projects_maps_when_they_are_stale() {
+    let root = clew_core::testutil::TempDir::new("app-maps");
+    std::fs::create_dir_all(root.join("db")).unwrap();
+    std::fs::write(
+        root.join("db/schema.sql"),
+        "CREATE TABLE users (id int PRIMARY KEY);\nCREATE TABLE posts (id int, user_id int REFERENCES users(id));\nCREATE VIEW recent AS SELECT * FROM posts;\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    assert_eq!(settle_maps(&mut app, opened), 1);
+    let ids: Vec<&str> = app.proj.maps.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["sql.schema", "sql.lineage"]);
+    assert_eq!(app.selected_map_index(), Some(0));
+    let layout = app.proj.graph_layout.as_ref().expect("the schema laid out");
+    assert_eq!(layout.nodes.len(), app.proj.maps[0].nodes.len());
+    assert!(
+        layout
+            .nodes
+            .iter()
+            .any(|n| n.file == root.join("db/schema.sql"))
+    );
+    // Another map chosen: laid out, and kept across a rebuild.
+    let chosen = app.update(Message::Graph(GraphMsg::SelectMap("sql.lineage".into())));
+    settle_maps(&mut app, chosen);
+    assert_eq!(app.selected_map_index(), Some(1));
+    let layout = app.proj.graph_layout.as_ref().unwrap();
+    assert_eq!(layout.nodes.len(), app.proj.maps[1].nodes.len());
+    // Opened again with nothing changed: not read again.
+    let _ = app.update(Message::Graph(GraphMsg::CloseOverlay));
+    let reopened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    assert_eq!(settle_maps(&mut app, reopened), 0, "nothing changed");
+    // A file changed: read again on the next open; the choice holds.
+    let _ = app.update(Message::Graph(GraphMsg::CloseOverlay));
+    let changed = rewritten(
+        &app,
+        &root,
+        "db/schema.sql",
+        "CREATE TABLE users (id int PRIMARY KEY, email text);\nCREATE VIEW recent AS SELECT * FROM users;\n",
+    );
+    let _ = app.update(changed);
+    let reopened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    assert_eq!(settle_maps(&mut app, reopened), 1, "stale: read again");
+    assert_eq!(
+        app.proj.maps[app.selected_map_index().unwrap()].id,
+        "sql.lineage"
+    );
+    let schema = &app.proj.maps[0];
+    assert_eq!(
+        schema
+            .nodes
+            .iter()
+            .find(|n| n.label == "users")
+            .unwrap()
+            .detail,
+        "id int · primary key\nemail text"
+    );
+}
+
+/// A remote project's maps are read on its host; a map whose arrows name
+/// nodes that are not there is refused, said, and replaces nothing.
+#[test]
+fn a_remote_projects_maps_are_read_on_its_host_and_checked() {
+    let (mut app, root, mut rx) = remote_app("remote-maps");
+    let good = clew_protocol::ProjectMap {
+        id: "routes".into(),
+        title: "Routes".into(),
+        description: "a route to its handler".into(),
+        nodes: vec![
+            clew_protocol::MapNode {
+                label: "GET /".into(),
+                kind: "route".into(),
+                ..Default::default()
+            },
+            clew_protocol::MapNode {
+                label: "index".into(),
+                kind: "handler".into(),
+                file: "app.py".into(),
+                line: 3,
+                detail: String::new(),
+            },
+        ],
+        edges: vec![clew_protocol::MapEdge {
+            from: 0,
+            to: 1,
+            label: "handled by".into(),
+        }],
+    };
+    let mut bad = good.clone();
+    bad.edges[0].to = 9;
+    for (answer, expect_ok) in [(vec![good.clone()], true), (vec![bad], false)] {
+        app.proj.maps_rev = None;
+        let pending = app.server.ai_pending.clone();
+        let root_s = root.to_string_lossy().into_owned();
+        let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+        let running = std::thread::spawn(move || run_task(opened));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut asked = 0;
+        while !running.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the read never finished"
+            );
+            while let Ok(msg) = rx.try_recv() {
+                let reply = match msg.request {
+                    clew_protocol::Request::ProjectMaps => {
+                        asked += 1;
+                        clew_protocol::Event::ProjectMaps {
+                            root: root_s.clone(),
+                            maps: answer.clone(),
+                        }
+                    }
+                    clew_protocol::Request::Git { .. } => clew_protocol::Event::GitResult {
+                        root: root_s.clone(),
+                        result: clew_protocol::GitResult::Churn(Vec::new()),
+                    },
+                    _ => continue,
+                };
+                if let Some(tx) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
+                    let _ = tx.send(reply);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(asked, 1);
+        for msg in running.join().unwrap() {
+            if matches!(msg, Message::Graph(GraphMsg::MapsBuilt { .. })) {
+                let _ = app.update(msg);
+            }
+        }
+        let _ = app.update(Message::Graph(GraphMsg::CloseOverlay));
+        if expect_ok {
+            assert_eq!(app.proj.maps.as_slice(), std::slice::from_ref(&good));
+            assert!(app.proj.maps_error.is_none());
+        } else {
+            assert_eq!(
+                app.proj.maps.as_slice(),
+                std::slice::from_ref(&good),
+                "the bad answer replaced nothing"
+            );
+            assert!(
+                app.proj
+                    .maps_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("Routes")),
+                "{:?}",
+                app.proj.maps_error
+            );
+        }
+    }
+}
+
 /// Run `task` and land the map layouts it computes.
 fn settle_layouts(app: &mut App, task: Task<Message>) {
     drive(app, task, |m| {
@@ -19707,6 +19877,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Graph(GraphMsg::ProjectCallsBuilt {
             stamp: s(),
             graph: Err("stale".into()),
+        }),
+        Message::Graph(GraphMsg::MapsBuilt {
+            stamp: s(),
+            rev: 0,
+            maps: Err("stale".into()),
         }),
         Message::Graph(GraphMsg::ChurnLoaded {
             stamp: s(),

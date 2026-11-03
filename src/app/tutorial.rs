@@ -386,11 +386,20 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             Anchor::ToolbarIcon(6),
         ),
         TutStep::new(
+            "Project maps",
+            "The next icon opens the project's maps: what its languages and frameworks \
+             say about how it fits together. A database's tables and their foreign keys, \
+             a web app's routes and their handlers, an OTP application's supervision \
+             tree, the interfaces a Go type satisfies without saying so. Pick a map at \
+             the top; each node opens where it is defined.",
+            Anchor::ToolbarIcon(7),
+        ),
+        TutStep::new(
             "Settings",
             "The last icon opens Settings. Your AI and embedding keys live here, \
              along with the reading preferences. clew keeps them per project, so \
              each codebase can read the way it should.",
-            Anchor::ToolbarIcon(7),
+            Anchor::ToolbarIcon(8),
         ),
         // -- The ⋯ menu, opened: introduce each item top to bottom. These steps
         //    open the menu (see `apply_tutorial_demo`) so the spotlight lands on

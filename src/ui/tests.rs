@@ -1476,6 +1476,12 @@ fn the_toolbar_geometry_matches_what_is_drawn() {
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
             )
         },
+        |m| {
+            matches!(
+                m,
+                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps))
+            )
+        },
         |m| matches!(m, Message::Settings(crate::SettingsMsg::Open)),
     ];
     let click_at = |x: f32| {
@@ -5127,6 +5133,103 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
         ),
         ["helper"]
     );
+}
+
+/// The Maps overlay's list: the map's counts and its line on how to read
+/// it, its nodes by kind with their detail and their arrows, each opening
+/// where it is defined; nothing yet says so, a failed read says why; the
+/// picker names each map with its size; a node defined nowhere opens
+/// nothing from the graph.
+#[test]
+fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(&mut sim, "No maps for this project."));
+    drop(sim);
+    app.proj.maps_error = Some("the host refused".into());
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(
+        &mut sim,
+        "Couldn't read the project's maps: the host refused"
+    ));
+    drop(sim);
+    app.proj.maps_error = None;
+    let node =
+        |label: &str, kind: &str, file: &str, line: usize, detail: &str| clew_protocol::MapNode {
+            label: label.into(),
+            kind: kind.into(),
+            file: file.into(),
+            line,
+            detail: detail.into(),
+        };
+    app.proj.maps = Arc::new(vec![
+        clew_protocol::ProjectMap {
+            id: "sql.schema".into(),
+            title: "Database schema".into(),
+            description: "an arrow is a foreign key".into(),
+            nodes: vec![
+                node(
+                    "orders",
+                    "table",
+                    "db/schema.sql",
+                    7,
+                    "id int\nuser_id int → users",
+                ),
+                node("users", "table", "db/schema.sql", 1, "id int"),
+            ],
+            edges: vec![clew_protocol::MapEdge {
+                from: 0,
+                to: 1,
+                label: "user_id".into(),
+            }],
+        },
+        clew_protocol::ProjectMap {
+            id: "routes".into(),
+            title: "Routes".into(),
+            description: "a route to its handler".into(),
+            nodes: vec![node("GET /users", "route", "", 0, "")],
+            edges: Vec::new(),
+        },
+    ]);
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(&mut sim, "Database schema · 2 nodes · 1 arrows"));
+    assert!(shows(&mut sim, "an arrow is a foreign key"));
+    assert!(shows(&mut sim, "TABLE"));
+    assert!(shows(&mut sim, "db/schema.sql:7"));
+    assert!(shows(&mut sim, "user_id int → users"));
+    assert!(shows(&mut sim, "→ users (user_id)"));
+    drop(sim);
+    app.proj.maps_selected = Some("routes".into());
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(&mut sim, "Routes · 1 nodes · 0 arrows"));
+    assert!(shows(&mut sim, "GET /users"));
+    drop(sim);
+    assert!(super::map_picker(&app).is_some());
+    let choice = super::MapChoice {
+        id: "routes".into(),
+        title: "Routes".into(),
+        nodes: 1,
+    };
+    assert_eq!(choice.to_string(), "Routes (1)");
+    // From the graph: a node opens where it is defined; one defined nowhere,
+    // nothing.
+    let layout = crate::app::project_map_layout(&app.proj.maps[0], &root);
+    let canvas =
+        super::GraphCanvas::new(&layout, 1, crate::Overlay::ProjectMaps, true, true, false);
+    let orders = layout
+        .nodes
+        .iter()
+        .position(|n| n.label == "orders")
+        .unwrap();
+    assert!(matches!(
+        canvas.open_message(orders),
+        Some(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 7 })) if abs == root.join("db/schema.sql")
+    ));
+    let layout = crate::app::project_map_layout(&app.proj.maps[1], &root);
+    let canvas =
+        super::GraphCanvas::new(&layout, 1, crate::Overlay::ProjectMaps, true, true, false);
+    assert!(canvas.open_message(0).is_none());
 }
 
 /// The type map's list: the counts, the most referenced types, the base

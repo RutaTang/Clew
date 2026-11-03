@@ -45,9 +45,10 @@ pub(crate) fn reply_wait(request: &clew_protocol::Request) -> std::time::Duratio
     use clew_protocol::Request;
     match request {
         Request::Chat { .. } | Request::Embed { .. } => std::time::Duration::from_secs(600),
-        Request::Git { .. } | Request::ProjectCalls { .. } | Request::Stats => {
-            clew_protocol::SLOW_REPLY_WAIT
-        }
+        Request::Git { .. }
+        | Request::ProjectCalls { .. }
+        | Request::ProjectMaps
+        | Request::Stats => clew_protocol::SLOW_REPLY_WAIT,
         _ => std::time::Duration::from_secs(60),
     }
 }
@@ -461,6 +462,7 @@ pub(crate) fn event_name(event: &clew_protocol::Event) -> &'static str {
         Event::LspResolved { .. } => "LspResolved",
         Event::LanguageOptions { .. } => "LanguageOptions",
         Event::BuildFacts { .. } => "BuildFacts",
+        Event::ProjectMaps { .. } => "ProjectMaps",
         Event::Error { .. } => "Error",
     }
 }

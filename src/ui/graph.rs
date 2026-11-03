@@ -122,6 +122,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         crate::Overlay::ProjectImports => "Project Import Graph",
         crate::Overlay::ProjectCalls => "Project Call Graph",
         crate::Overlay::ProjectTypes => "Project Type Map",
+        crate::Overlay::ProjectMaps => "Project Maps",
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
@@ -146,6 +147,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
                 .color(theme::dim())
                 .into()
         }),
+        crate::Overlay::ProjectMaps => map_picker(app),
     };
     let body = if app.graph_mode {
         graph_map_view(app)
@@ -154,6 +156,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             crate::Overlay::ProjectImports => project_imports_body(app),
             crate::Overlay::ProjectCalls => project_calls_body(app),
             crate::Overlay::ProjectTypes => project_types_body(app),
+            crate::Overlay::ProjectMaps => project_maps_body(app),
         }
     };
     graph_modal_frame(
@@ -244,10 +247,10 @@ pub(crate) fn graph_legend(
     visited: bool,
 ) -> String {
     use crate::Overlay;
-    let noun = if kind == Overlay::ProjectTypes {
-        "types"
-    } else {
-        "files"
+    let noun = match kind {
+        Overlay::ProjectTypes => "types",
+        Overlay::ProjectMaps => "nodes",
+        _ => "files",
     };
     let mut parts: Vec<String> = Vec::new();
     if shown.1 > shown.0 {
@@ -268,6 +271,7 @@ pub(crate) fn graph_legend(
             Overlay::ProjectImports => "arrow → the file it imports",
             Overlay::ProjectCalls => "arrow → the file it calls into",
             Overlay::ProjectTypes => "arrow → the type it uses or inherits",
+            Overlay::ProjectMaps => "arrows as the map's own line says",
         }
         .into(),
     );
@@ -777,6 +781,12 @@ impl GraphCanvas<'_> {
                 Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
             }
             crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
+                abs: file,
+                line: node.line,
+            }),
+            // A node defined nowhere (a route's path) opens nothing.
+            crate::Overlay::ProjectMaps if file.as_os_str().is_empty() => return None,
+            crate::Overlay::ProjectMaps => Message::Graph(GraphMsg::OverlayOpenAt {
                 abs: file,
                 line: node.line,
             }),
@@ -1851,6 +1861,194 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         }
     }
     rows.extend(churn_rows(app));
+    scrollable(Column::with_children(rows).spacing(3).width(Fill))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(iced::Length::Fill)
+        .into()
+}
+
+/// A map in the Maps overlay's picker: its title and size.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MapChoice {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) nodes: usize,
+}
+
+impl std::fmt::Display for MapChoice {
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(out, "{} ({})", self.title, self.nodes)
+    }
+}
+
+/// The picker of the project's maps, while there is more than one.
+pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
+    let maps = &app.proj.maps;
+    let choices: Vec<MapChoice> = maps
+        .iter()
+        .map(|m| MapChoice {
+            id: m.id.clone(),
+            title: m.title.clone(),
+            nodes: m.nodes.len(),
+        })
+        .collect();
+    let selected = app
+        .selected_map_index()
+        .and_then(|i| choices.get(i).cloned());
+    match choices.len() {
+        0 => app.proj.maps_building.then(|| {
+            text("Reading the project's maps…")
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into()
+        }),
+        _ => Some(
+            pick_list(choices, selected, |c: MapChoice| {
+                Message::Graph(GraphMsg::SelectMap(c.id))
+            })
+            .text_size(ts::SMALL)
+            .padding([3, 8])
+            .into(),
+        ),
+    }
+}
+
+/// The most nodes the Maps overlay lists (the graph shows them all).
+const MAP_LIST_MAX: usize = 400;
+
+/// The Maps overlay's list: the map's own line on how to read it, then its
+/// nodes by kind — each opening where it is defined, with its detail and the
+/// arrows from it.
+pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
+    let hint = |msg: String| -> Element<'_, Message> {
+        container(text(msg).size(ts::BODY).color(theme::dim()))
+            .padding(8)
+            .into()
+    };
+    let Some(at) = app.selected_map_index() else {
+        return hint(if let Some(e) = &app.proj.maps_error {
+            format!("Couldn't read the project's maps: {e}")
+        } else if app.proj.maps_building || app.scanning {
+            "Reading the project's maps…".into()
+        } else {
+            "No maps for this project. Maps are read from what the code declares: a SQL schema \
+             and its migrations, a web framework's routes, dependency injection and ORM \
+             relations, an OTP supervision tree, Go interfaces and the types that satisfy them, \
+             and more for each language."
+                .into()
+        });
+    };
+    let root = app
+        .proj
+        .project
+        .as_ref()
+        .map(|p| p.root.clone())
+        .unwrap_or_default();
+    let map = &app.proj.maps[at];
+    let mut rows: Vec<Element<'_, Message>> = vec![
+        text(format!(
+            "{} · {} nodes · {} arrows",
+            map.title,
+            map.nodes.len(),
+            map.edges.len()
+        ))
+        .size(ts::BODY)
+        .color(theme::accent())
+        .into(),
+        text(map.description.clone())
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    ];
+    if let Some(e) = &app.proj.maps_error {
+        rows.push(
+            text(format!("The last read failed: {e}"))
+                .size(ts::CAPTION)
+                .color(theme::warning())
+                .into(),
+        );
+    }
+    let mut out_edges: Vec<Vec<(usize, &str)>> = vec![Vec::new(); map.nodes.len()];
+    for e in &map.edges {
+        if let Some(list) = out_edges.get_mut(e.from)
+            && e.to < map.nodes.len()
+        {
+            list.push((e.to, e.label.as_str()));
+        }
+    }
+    let mut kinds: Vec<&str> = Vec::new();
+    for n in &map.nodes {
+        if !kinds.contains(&n.kind.as_str()) {
+            kinds.push(&n.kind);
+        }
+    }
+    let mut listed = 0;
+    'kinds: for kind in kinds {
+        rows.push(section_header(kind));
+        for (i, n) in map.nodes.iter().enumerate().filter(|(_, n)| n.kind == kind) {
+            if listed == MAP_LIST_MAX {
+                break 'kinds;
+            }
+            listed += 1;
+            let place = match n.file.is_empty() {
+                true => String::new(),
+                false => format!("{}:{}", n.file, n.line.max(1)),
+            };
+            let head = row![
+                text(n.label.clone()).size(ts::SMALL).color(theme::fg()),
+                space().width(Fill),
+                text(place).size(ts::CAPTION).color(theme::dim()),
+            ]
+            .spacing(6);
+            let mut button = button(head)
+                .style(theme::list_row(false))
+                .width(Fill)
+                .padding([3, 8]);
+            if !n.file.is_empty() {
+                button = button.on_press(Message::Graph(GraphMsg::OverlayOpenAt {
+                    abs: root.join(&n.file),
+                    line: n.line.max(1),
+                }));
+            }
+            rows.push(button.into());
+            let mut lines: Vec<String> = n
+                .detail
+                .lines()
+                .take(12)
+                .map(|l| format!("  {l}"))
+                .collect();
+            if n.detail.lines().count() > 12 {
+                lines.push("  …".into());
+            }
+            for (to, label) in &out_edges[i] {
+                let target = &map.nodes[*to].label;
+                lines.push(match label.is_empty() {
+                    true => format!("  → {target}"),
+                    false => format!("  → {target} ({label})"),
+                });
+            }
+            if !lines.is_empty() {
+                rows.push(
+                    text(lines.join("\n"))
+                        .size(ts::CAPTION)
+                        .color(theme::dim())
+                        .into(),
+                );
+            }
+        }
+    }
+    if listed < map.nodes.len() {
+        rows.push(
+            text(format!(
+                "{} more — the graph view shows every node",
+                map.nodes.len() - listed
+            ))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+        );
+    }
     scrollable(Column::with_children(rows).spacing(3).width(Fill))
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)

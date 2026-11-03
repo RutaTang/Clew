@@ -1018,6 +1018,25 @@ impl Server {
                 });
                 None
             }
+            // The project's maps — its schema, routes, supervision trees —
+            // read where the files are. Off the loop: every file is read.
+            Request::ProjectMaps => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
+                spawn_reply(&self.out, id, "reading the project's maps", move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return not_ready();
+                    };
+                    Event::ProjectMaps {
+                        root: root.to_string_lossy().into_owned(),
+                        maps: clew_core::maps::build(&root, &files),
+                    }
+                });
+                None
+            }
             // A batch of plain sources for the client's Explain pass —
             // confined, per-file capped, batch capped, and paged by bytes
             // (see `read_sources`). Off the loop.
