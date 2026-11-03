@@ -117,15 +117,27 @@ struct Adapter {
     breakpoints: HashMap<String, Vec<String>>,
     /// The `variablesReference`s handed out since the program last stopped.
     refs: Arc<Mutex<Vec<VarRef>>>,
-    /// How to pause the running program — when this Xdebug takes a command
-    /// while it runs (`supports_async`); none when it does not.
+    /// How to pause the running program, when this Xdebug can be asked to
+    /// ([`PauseBy`]); none when it cannot.
     pause: Option<Pause>,
 }
 
-/// A pause, asked of an engine that takes `break` while the program runs.
+/// How a pause reaches the engine while the program runs.
+#[derive(Clone)]
+enum PauseBy {
+    /// DBGp's `break`, on the debugging connection — where the engine takes
+    /// a command while the program runs (`supports_async`).
+    Break(Breaker),
+    /// Xdebug's control socket (3.4 and later, on Linux): `pause`, on the
+    /// abstract socket it names after the PHP process, which the engine
+    /// reads between statements.
+    ControlSocket(String),
+}
+
+/// A pause, asked of an engine that can be asked while the program runs.
 #[derive(Clone)]
 struct Pause {
-    breaker: Breaker,
+    by: PauseBy,
     /// The program runs: a `break` is due only then.
     running: Arc<AtomicBool>,
     /// A pause was asked for: the next stop is it.
@@ -175,14 +187,23 @@ impl Adapter {
                 Some(pause) => {
                     if pause.running.load(Ordering::SeqCst) {
                         pause.asked.store(true, Ordering::SeqCst);
-                        pause.breaker.send("break").await.map(|()| json!({}))
+                        match &pause.by {
+                            PauseBy::Break(breaker) => {
+                                breaker.send("break").await.map(|()| json!({}))
+                            }
+                            PauseBy::ControlSocket(name) => {
+                                signal_pause(name.clone(), self.out.clone());
+                                Ok(json!({}))
+                            }
+                        }
                     } else {
                         Ok(json!({}))
                     }
                 }
                 None => Err(
                     "this Xdebug cannot pause a running PHP program: it takes no command \
-                     while the program runs (supports_async is off)"
+                     while the program runs (supports_async is off), and has no control \
+                     socket (Xdebug 3.4 and later, on Linux)"
                         .into(),
                 ),
             },
@@ -307,8 +328,12 @@ impl Adapter {
             .command("feature_get", &[("-n", "supports_async")], None)
             .await
             .is_ok_and(|reply| takes_async(&reply));
-        self.pause = supports_async.then(|| Pause {
-            breaker: dbgp.breaker(),
+        let by = match supports_async {
+            true => Some(PauseBy::Break(dbgp.breaker())),
+            false => control_socket(&init).map(PauseBy::ControlSocket),
+        };
+        self.pause = by.map(|by| Pause {
+            by,
             running: Arc::default(),
             asked: Arc::default(),
         });
@@ -667,7 +692,83 @@ fn xdebug_args(port: u16) -> Vec<String> {
         "-dxdebug.start_with_request=yes".into(),
         "-dxdebug.client_host=127.0.0.1".into(),
         format!("-dxdebug.client_port={port}"),
+        // The control socket (pause, Xdebug 3.4+), polled by time: its
+        // default turns it off where the CPU's clock is not one it trusts.
+        "-dxdebug.control_socket=time".into(),
     ]
+}
+
+/// The name of Xdebug's control socket for the PHP process an `init`
+/// packet is from — where this Xdebug has one (3.4 and later, on Linux).
+fn control_socket(init: &Xml) -> Option<String> {
+    let version = init
+        .children
+        .iter()
+        .find(|c| c.name == "engine")?
+        .attr("version")?;
+    let mut parts = version.split(['.', '-']).map(|p| p.parse::<u32>().ok());
+    let (major, minor) = (parts.next()??, parts.next()??);
+    let pid = init.attr("appid")?.parse::<u32>().ok()?;
+    (cfg!(target_os = "linux") && (major, minor) >= (3, 4)).then(|| format!("xdebug-ctrl.{pid}"))
+}
+
+/// Ask Xdebug, on its control socket `name`, to break into the debugger at
+/// the program's next statement — the stop that answers the waiting `run`
+/// is the pause. The engine reads the socket only between statements, so
+/// its reply is waited for in the background — and always read: Xdebug
+/// writes it whether or not anyone reads, and to a closed connection that
+/// would kill PHP (SIGPIPE).
+fn signal_pause(name: String, out: Out) {
+    tokio::task::spawn_blocking(move || {
+        if let Err(e) = ask_control_socket(&name, "pause") {
+            let handle = tokio::runtime::Handle::current();
+            handle.block_on(out.output("console", format!("pause: {e}\n")));
+        }
+    });
+}
+
+/// Send `command` on Xdebug's control socket `name`; Xdebug's reply, read
+/// to its end, or why there was none or it refused.
+#[cfg(target_os = "linux")]
+fn ask_control_socket(name: &str, command: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    use std::os::linux::net::SocketAddrExt;
+    let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes())
+        .map_err(|e| format!("no control socket {name}: {e}"))?;
+    let mut stream = std::os::unix::net::UnixStream::connect_addr(&addr)
+        .map_err(|e| format!("Xdebug's control socket did not answer: {e}"))?;
+    stream
+        .write_all(format!("{command}\0").as_bytes())
+        .map_err(|e| format!("Xdebug's control socket broke: {e}"))?;
+    let mut reply = Vec::new();
+    stream
+        .read_to_end(&mut reply)
+        .map_err(|e| format!("Xdebug's control socket broke: {e}"))?;
+    let text = String::from_utf8_lossy(&reply);
+    let text = text.trim_end_matches('\0').trim();
+    if text.is_empty() {
+        return Err("the program ended before Xdebug read it".into());
+    }
+    let xml = Xml::parse(text).map_err(|e| format!("Xdebug's control socket said: {e}"))?;
+    let refused = xml
+        .children
+        .iter()
+        .find(|c| c.name == "error")
+        .map(
+            |error| match error.children.iter().find(|m| m.name == "message") {
+                Some(message) => message.text.trim().to_string(),
+                None => format!("error {}", error.attr("code").unwrap_or("?")),
+            },
+        );
+    match refused {
+        Some(why) => Err(format!("Xdebug refused: {why}")),
+        None => Ok(text.to_string()),
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn ask_control_socket(name: &str, _command: &str) -> Result<String, String> {
+    Err(format!("no control socket {name} here"))
 }
 
 /// Whether `php` has Xdebug loaded; an error saying how to get it if not.
@@ -1288,7 +1389,7 @@ mod tests {
         });
         let dbgp = Dbgp::new(read, write);
         let pause = Pause {
-            breaker: dbgp.breaker(),
+            by: PauseBy::Break(dbgp.breaker()),
             running: Arc::default(),
             asked: Arc::default(),
         };
@@ -1335,6 +1436,162 @@ mod tests {
         assert_eq!(stack["stackFrames"][0]["line"], 5);
         // A stop of its own afterwards is not taken for the pause.
         assert!(!pause.asked.load(Ordering::SeqCst));
+    }
+
+    /// Xdebug 3.4+ on Linux: the pause goes to its control socket — the
+    /// abstract socket it names after the PHP process — as `pause`, and the
+    /// engine, breaking at the next statement, answers the waiting `run`
+    /// with the stop that is reported as the pause. The socket's reply is
+    /// always read (Xdebug writes it either way).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_running_program_is_paused_through_xdebug_s_control_socket() {
+        use std::io::{Read, Write};
+        use std::os::linux::net::SocketAddrExt;
+        let name = format!(
+            "xdebug-ctrl.clew-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+        // The engine: `run` answered once the control socket says pause.
+        let (signalled_tx, mut signalled) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let ctrl = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut got = Vec::new();
+            let mut byte = [0u8; 1];
+            while conn.read(&mut byte).unwrap() == 1 && byte[0] != 0 {
+                got.push(byte[0]);
+            }
+            let command = String::from_utf8(got).unwrap();
+            let _ = signalled_tx.send(command);
+            let reply = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ctrl-response xmlns:xdebug-ctrl="https://xdebug.org/ctrl/xdebug"><pause success="1"><pid>1</pid><action>Breakpoint Signalled</action></pause></ctrl-response>"#;
+            conn.write_all(reply.as_bytes()).unwrap();
+            conn.write_all(b"\0").unwrap();
+        });
+        let (ours, theirs) = tokio::io::duplex(1 << 20);
+        let (read, write) = tokio::io::split(ours);
+        let (seen_tx, mut seen) = tokio::sync::mpsc::unbounded_channel();
+        let (paused_tx, mut paused) = tokio::sync::mpsc::unbounded_channel::<()>();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let (engine_read, mut engine_write) = tokio::io::split(theirs);
+            let mut engine_read = BufReader::new(engine_read);
+            loop {
+                let mut line = Vec::new();
+                match engine_read.read_until(0, &mut line).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(_) => {}
+                }
+                line.pop();
+                let line = String::from_utf8_lossy(&line).into_owned();
+                let _ = seen_tx.send(line.clone());
+                let mut words = line.split(' ');
+                let name = words.next().unwrap_or("").to_string();
+                let tx = words.nth(1).unwrap_or("0").to_string();
+                let body = match name.as_str() {
+                    "run" => {
+                        // Held until the control socket's pause.
+                        let _ = paused.recv().await;
+                        format!(
+                            r#"<?xml version="1.0"?><response {NS} command="run" transaction_id="{tx}" status="break" reason="ok"></response>"#
+                        )
+                    }
+                    other => engine_reply(other).replace("TX", &tx),
+                };
+                let packet = format!("{}\0{body}\0", body.len());
+                if engine_write.write_all(packet.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        });
+        let pause = Pause {
+            by: PauseBy::ControlSocket(name),
+            running: Arc::default(),
+            asked: Arc::default(),
+        };
+        let (adapter_out, from) = tokio::io::duplex(1 << 20);
+        let mut from = BufReader::new(from);
+        let mut adapter = Adapter {
+            php: PathBuf::from("php"),
+            out: Out::new(adapter_out),
+            session: Some(Arc::new(Mutex::new(Dbgp::new(read, write)))),
+            program: None,
+            breakpoints: HashMap::new(),
+            refs: Arc::new(Mutex::new(Vec::new())),
+            pause: Some(pause.clone()),
+        };
+        ask(
+            &mut adapter,
+            &mut from,
+            "continue",
+            json!({ "threadId": 1 }),
+        )
+        .await;
+        assert!(next_line(&mut seen).await.starts_with("run -i "));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !pause.running.load(Ordering::SeqCst) {
+            assert!(std::time::Instant::now() < deadline, "the run began");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ask(&mut adapter, &mut from, "pause", json!({ "threadId": 1 })).await;
+        let command = tokio::time::timeout(Duration::from_secs(5), signalled.recv())
+            .await
+            .expect("the control socket got the pause")
+            .unwrap();
+        assert_eq!(command, "pause");
+        paused_tx.send(()).unwrap();
+        let stopped = next_message(&mut from).await;
+        assert_eq!(stopped["event"], "stopped", "{stopped}");
+        assert_eq!(stopped["body"]["reason"], "pause");
+        ctrl.join().unwrap();
+    }
+
+    /// The control socket's name comes from the `init` packet — Xdebug 3.4
+    /// and later, the PHP process's id — and a refusal on it is said.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn xdebug_s_control_socket_is_named_and_its_refusals_read() {
+        let init = |version: &str, appid: &str| {
+            Xml::parse(&format!(
+                r#"<init {NS} appid="{appid}" protocol_version="1.0"><engine version="{version}"><![CDATA[Xdebug]]></engine></init>"#
+            ))
+            .unwrap()
+        };
+        assert_eq!(
+            control_socket(&init("3.5.0", "4321")).as_deref(),
+            Some("xdebug-ctrl.4321")
+        );
+        assert_eq!(
+            control_socket(&init("3.4.0beta1", "7")).as_deref(),
+            Some("xdebug-ctrl.7")
+        );
+        assert_eq!(control_socket(&init("3.2.0", "4321")), None, "before 3.4");
+        assert_eq!(control_socket(&init("3.5.0", "")), None);
+        assert!(xdebug_args(9000).contains(&"-dxdebug.control_socket=time".to_string()));
+
+        use std::io::{Read, Write};
+        use std::os::linux::net::SocketAddrExt;
+        let name = format!("xdebug-ctrl.clew-refusal-{}", std::process::id());
+        let addr = std::os::unix::net::SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind_addr(&addr).unwrap();
+        let engine = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).unwrap();
+            conn.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<ctrl-response xmlns:xdebug-ctrl="https://xdebug.org/ctrl/xdebug"><error code="400"><message>step debugger is not enabled</message></error><pause success="1"><pid>1</pid></pause></ctrl-response>"#).unwrap();
+            conn.write_all(b"\0").unwrap();
+        });
+        let err = ask_control_socket(&name, "pause").unwrap_err();
+        assert!(err.contains("step debugger is not enabled"), "{err}");
+        engine.join().unwrap();
+        assert!(ask_control_socket("xdebug-ctrl.nobody-here", "pause").is_err());
     }
 
     #[test]
