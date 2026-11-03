@@ -1763,6 +1763,118 @@ mod tests {
         assert!(output.contains("answer 10"), "{output:?}");
     }
 
+    /// A C# program under the real netcoredbg, as Clew debugs .NET: the
+    /// project built by `dotnet build`, its assembly launched, held at a
+    /// breakpoint in a method, its stack (the caller at its line) and its
+    /// parameters read, stepped, run on to its end with its output shown.
+    /// Needs `dotnet` (an SDK) and `netcoredbg` on the PATH.
+    #[tokio::test]
+    #[ignore = "needs dotnet and netcoredbg on the PATH; run explicitly"]
+    async fn a_csharp_program_is_debugged_with_netcoredbg() {
+        let dir = clew_core::testutil::TempDir::new("dap-csharp");
+        std::fs::write(
+            dir.join("App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+        )
+        .unwrap();
+        let source = dir.join("Program.cs");
+        std::fs::write(
+            &source,
+            "using System;\n\nclass Program\n{\n    static int Total(int a, int b)\n    {\n        int sum = a + b;\n        return sum * 2;\n    }\n\n    static void Main(string[] args)\n    {\n        int t = Total(2, 3);\n        Console.WriteLine($\"answer {t} {args.Length}\");\n    }\n}\n",
+        )
+        .unwrap();
+        let built = std::process::Command::new("dotnet")
+            .args(["build", "-c", "Debug", "--nologo"])
+            .current_dir(&dir)
+            .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+            .env("DOTNET_NOLOGO", "1")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let assembly = dir.join("bin/Debug/net8.0/App.dll");
+        assert!(assembly.is_file());
+        let spec = match clew_core::debugadapter::resolve(
+            "csharp",
+            &assembly.to_string_lossy(),
+            &["x".into()],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("netcoredbg started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stops: Vec<usize> = Vec::new();
+        let mut configured = false;
+        let mut stepped = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(90), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.set_breakpoints(&source, &[(7, None)]).await.unwrap();
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stops.push(frames[0].line);
+                    if !stepped {
+                        assert!(frames[0].name.contains("Total"), "{frames:?}");
+                        let caller = frames
+                            .iter()
+                            .find(|f| f.name.contains("Main"))
+                            .unwrap_or_else(|| panic!("Main in {frames:?}"));
+                        assert_eq!(caller.line, 13, "Main, where it called");
+                        let scopes = client.scopes(frames[0].id).await.unwrap();
+                        let locals = client
+                            .variables(scopes[0].variables_reference)
+                            .await
+                            .unwrap();
+                        assert!(
+                            locals.iter().any(|v| v.name == "a" && v.value == "2"),
+                            "{locals:?}"
+                        );
+                        stepped = true;
+                        client.next(thread).await.unwrap();
+                    } else {
+                        client.continue_(thread).await.unwrap();
+                    }
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stops, [7, 8], "held at the breakpoint, then a line on");
+        assert!(output.contains("answer 10 1"), "{output:?}");
+    }
+
     /// Go's real delve, end to end: the program built and held at a
     /// breakpoint, its stack read, run on to its end with its output shown.
     /// Needs `go` and `dlv` on the PATH.

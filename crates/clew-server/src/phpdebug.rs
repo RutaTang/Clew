@@ -1632,6 +1632,75 @@ mod tests {
         }
     }
 
+    /// A running PHP program paused for real, through Xdebug's control
+    /// socket (Xdebug 3.4 or later, on Linux): stopped where it runs, read
+    /// there, and let go on to its end. Needs `php` with Xdebug 3.4+.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[ignore = "needs php with Xdebug 3.4 or later; run explicitly"]
+    async fn a_running_php_program_is_paused_through_xdebug() {
+        let dir = clew_core::testutil::TempDir::new("php-pause");
+        let program = dir.join("spin.php");
+        std::fs::write(
+            &program,
+            "<?php\n$n = 0;\nwhile ($n < 300) {\n    $n++;\n    usleep(10000);\n}\necho \"spun $n\\n\";\n",
+        )
+        .unwrap();
+        let php = clew_core::lsp::store::find_on_path_unresolved("php").expect("php on PATH");
+        let (mut client, input, output) = Client::pipes();
+        let running = tokio::spawn(serve(php, input, output));
+        client
+            .request("initialize", json!({ "adapterID": "clew" }))
+            .await;
+        let launch = client
+            .send(
+                "launch",
+                json!({ "program": program.to_string_lossy(), "args": [], "cwd": dir.to_string_lossy() }),
+            )
+            .await;
+        let launched = client.answer(launch).await;
+        assert_eq!(launched["success"], true, "{launched}");
+        client.event("initialized").await;
+        client.request("configurationDone", json!({})).await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        client.request("pause", json!({ "threadId": 1 })).await;
+        let stopped = client.event("stopped").await;
+        assert_eq!(stopped["body"]["reason"], "pause", "{stopped}");
+        let stack = client.request("stackTrace", json!({ "threadId": 1 })).await;
+        let top = &stack["stackFrames"][0];
+        assert_eq!(top["name"], "{main}", "{stack}");
+        assert!(
+            (3..=6).contains(&top["line"].as_i64().unwrap()),
+            "in the loop: {stack}"
+        );
+        assert_eq!(top["source"]["path"], program.to_string_lossy().as_ref());
+        let read = client
+            .request(
+                "evaluate",
+                json!({ "expression": "$n * 0 + 7", "frameId": 1, "context": "repl" }),
+            )
+            .await;
+        assert_eq!(read["result"], "7");
+        let n = client
+            .request(
+                "evaluate",
+                json!({ "expression": "$n", "frameId": 1, "context": "repl" }),
+            )
+            .await;
+        let n: i64 = n["result"].as_str().unwrap().parse().unwrap();
+        assert!((1..300).contains(&n), "paused mid-loop, at {n}");
+        client.request("continue", json!({ "threadId": 1 })).await;
+        let exited = client.event("exited").await;
+        assert_eq!(exited["body"]["exitCode"], 0);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !client.output().contains("spun 300") && std::time::Instant::now() < deadline {
+            client.gather(Duration::from_millis(500)).await;
+        }
+        assert!(client.output().contains("spun 300"), "{}", client.output());
+        client.request("disconnect", json!({})).await;
+        assert_eq!(running.await.unwrap(), Ok(()));
+    }
+
     /// A PHP program debugged for real, under Xdebug: held at a breakpoint,
     /// its stack and variables read (an array's elements too), expressions
     /// evaluated, stepped, stopped again where a condition holds, and run to

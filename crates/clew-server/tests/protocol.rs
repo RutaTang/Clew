@@ -3687,6 +3687,50 @@ fn a_remote_node_program_is_debugged_by_clews_own_adapter() {
     debug_remotely(&root, "node", &program, &program, 2, "answer 42");
 }
 
+#[test]
+#[ignore = "needs zig and lldb-dap; run explicitly"]
+fn a_remote_zig_program_is_built_and_debugged_on_its_host() {
+    let root = temp_project("remote-zig");
+    let program = root.join("app.zig");
+    std::fs::write(
+        &program,
+        "const std = @import(\"std\");\n\npub fn main() void {\n    var x: i32 = 41;\n    x += 1;\n    std.debug.print(\"answer {d}\\n\", .{x});\n}\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "native", &program, &program, 5, "answer 42");
+}
+
+#[test]
+#[ignore = "needs dotnet and netcoredbg; run explicitly"]
+fn a_remote_csharp_program_is_debugged_with_netcoredbg() {
+    let root = temp_project("remote-csharp");
+    std::fs::write(
+        root.join("App.csproj"),
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+    )
+    .unwrap();
+    let source = root.join("Program.cs");
+    std::fs::write(
+        &source,
+        "using System;\n\nclass Program\n{\n    static void Main()\n    {\n        int x = 41;\n        x++;\n        Console.WriteLine($\"answer {x}\");\n    }\n}\n",
+    )
+    .unwrap();
+    let built = std::process::Command::new("dotnet")
+        .args(["build", "-c", "Debug", "--nologo"])
+        .current_dir(&root)
+        .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+        .env("DOTNET_NOLOGO", "1")
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stdout)
+    );
+    let assembly = root.join("bin/Debug/net8.0/App.dll");
+    debug_remotely(&root, "csharp", &assembly, &source, 8, "answer 42");
+}
+
 /// Debug `program` (in `lang`) through a real clew-server process: held at
 /// `line` of `source`, its stack read there, run on to its end, `expected`
 /// among its output.
