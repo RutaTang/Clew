@@ -868,6 +868,18 @@ pub enum Request {
     /// supervision trees and the like — read from its files on this host.
     /// Reply: `ProjectMaps`.
     ProjectMaps,
+    /// What the C or C++ macro at byte `column` of 0-based `line` of `rel`
+    /// expands to (the whole line when no macro is there), from the
+    /// `#define`s in effect — the file's above it and those of the headers
+    /// it includes, found where its compile command and the project's
+    /// `include/` say, never outside the project. The groups `#if`s drop
+    /// are read for `target`. Reply: `MacroExpansion`.
+    ExpandMacro {
+        rel: Rel,
+        line: usize,
+        column: usize,
+        target: TargetSpec,
+    },
 }
 
 /// One JSON-array entry change, addressed by the fields that IDENTIFY an entry
@@ -1323,6 +1335,14 @@ pub enum Event {
     /// Reply to `ProjectMaps`, for project `root`: the maps there are,
     /// none empty.
     ProjectMaps { root: String, maps: Vec<ProjectMap> },
+    /// Reply to `ExpandMacro`: `None` when nothing there is a macro the
+    /// file can see.
+    MacroExpansion {
+        rel: Rel,
+        line: usize,
+        column: usize,
+        expansion: Option<MacroExpansion>,
+    },
     /// A request failed; `code` says how (see [`ErrorCode`]). Always a
     /// [`ServerMessage::Reply`] — unsolicited trouble is [`Event::Status`].
     Error { code: ErrorCode, message: String },

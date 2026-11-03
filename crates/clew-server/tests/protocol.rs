@@ -931,6 +931,80 @@ async fn project_maps_are_read_where_the_project_lives() {
     }
 }
 
+/// `ExpandMacro` expands a C macro where the file and its headers are, with
+/// the defining header relative to the project; a path out of the project
+/// is refused before anything is read.
+#[tokio::test]
+async fn macros_expand_where_the_headers_are() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("expand-macro");
+    std::fs::create_dir_all(root.join("include")).unwrap();
+    std::fs::write(
+        root.join("include/util.h"),
+        "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.c"),
+        "#include \"include/util.h\"\nint m = MAX(1, 2);\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let target = clew_protocol::TargetSpec {
+        label: "Linux x86_64".into(),
+        os: "linux".into(),
+        arch: "x86_64".into(),
+        family: "unix".into(),
+    };
+    let ask = Request::ExpandMacro {
+        rel: "main.c".into(),
+        line: 1,
+        column: 8,
+        target: target.clone(),
+    };
+    assert!(server.handle(2, ask).await.is_none());
+    match recv_reply(&mut rx, 2).await {
+        Event::MacroExpansion {
+            rel,
+            line,
+            column,
+            expansion: Some(e),
+        } => {
+            assert_eq!((rel.as_str(), line, column), ("main.c", 1, 8));
+            assert_eq!(e.name, "MAX");
+            assert_eq!(e.invocation, "MAX(1, 2)");
+            assert_eq!(e.expanded, "((1) > (2) ? (1) : (2))");
+            assert_eq!((e.file.as_str(), e.line), ("include/util.h", 1));
+        }
+        other => panic!("expected an expansion, got {other:?}"),
+    }
+    // Nothing there is a macro: an answer, not an error.
+    let ask = Request::ExpandMacro {
+        rel: "include/util.h".into(),
+        line: 5,
+        column: 0,
+        target: target.clone(),
+    };
+    assert!(server.handle(3, ask).await.is_none());
+    assert!(matches!(
+        recv_reply(&mut rx, 3).await,
+        Event::MacroExpansion {
+            expansion: None,
+            ..
+        }
+    ));
+    let ask = Request::ExpandMacro {
+        rel: "../outside.c".into(),
+        line: 0,
+        column: 0,
+        target,
+    };
+    match server.handle(4, ask).await {
+        Some(Event::Error { .. }) => {}
+        other => panic!("refused at once, got {other:?}"),
+    }
+}
+
 /// `ProjectCalls` builds the name-based call graph where the files live,
 /// with project-relative node paths on the wire.
 #[tokio::test]

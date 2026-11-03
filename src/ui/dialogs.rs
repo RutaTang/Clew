@@ -120,6 +120,60 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
     )
 }
 
+/// The popup of a language's answer about the code under the cursor (a
+/// macro's expansion, a Lean goal, a Haskell type), with a way to where it
+/// points. "Asking…" until the answer lands.
+pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> Element<'a, Message> {
+    let body: Element<'_, Message> = if insight.loading {
+        text("Asking…").size(ts::BODY).color(theme::dim()).into()
+    } else {
+        Column::with_children(render_prepared(app, &insight.prepared))
+            .spacing(8)
+            .width(Fill)
+            .into()
+    };
+    let mut buttons = row![space().width(Fill)].spacing(8);
+    if insight.defined.is_some() {
+        buttons = buttons.push(
+            button(text("Open Definition").size(ts::BODY))
+                .style(theme::toolbar_button)
+                .padding([4, 12])
+                .on_press(Message::Hover(HoverMsg::InsightOpenDefinition)),
+        );
+    }
+    buttons = buttons.push(
+        button(text("Close").size(ts::BODY))
+            .style(theme::toolbar_button)
+            .padding([4, 12])
+            .on_press(Message::Hover(HoverMsg::InsightClose)),
+    );
+    let col = Column::new()
+        .spacing(8)
+        .push(
+            text(insight.title.clone())
+                .size(ts::EMPHASIS)
+                .color(theme::fg()),
+        )
+        .push(hairline())
+        .push(
+            scrollable(container(body).width(Fill))
+                .direction(thin_scroll())
+                .style(theme::overlay_scrollbar)
+                .height(Length::Shrink),
+        )
+        .push(buttons);
+    let panel = container(col)
+        .width(WHY_W)
+        .max_height(WHY_MAX_H)
+        .padding(PROMPT_PAD)
+        .style(theme::modal_panel);
+    modal(
+        panel,
+        Placement::Top(WHY_TOP),
+        Backdrop::Dim(Some(Message::Hover(HoverMsg::InsightClose))),
+    )
+}
+
 // ---------------------------------------------------------------- finder modal
 
 pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {

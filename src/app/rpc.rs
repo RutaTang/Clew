@@ -463,6 +463,7 @@ pub(crate) fn event_name(event: &clew_protocol::Event) -> &'static str {
         Event::LanguageOptions { .. } => "LanguageOptions",
         Event::BuildFacts { .. } => "BuildFacts",
         Event::ProjectMaps { .. } => "ProjectMaps",
+        Event::MacroExpansion { .. } => "MacroExpansion",
         Event::Error { .. } => "Error",
     }
 }

@@ -525,6 +525,22 @@ pub enum HoverMsg {
     Cleared,
     /// The cursor entered (true) or left (false) the hover tooltip itself.
     Pin(bool),
+    /// The context menu's language action ([`crate::ContextMenu::insight`]),
+    /// at the menu's position.
+    Insight,
+    /// The same at the caret (`ge`).
+    InsightAtCursor,
+    /// The language's answer: `None` when it had nothing to say there.
+    InsightAnswered {
+        stamp: Stamp,
+        /// Which request it answers ([`crate::app::model::Insight::token`]).
+        token: u64,
+        result: Result<Option<crate::app::model::InsightAnswer>, String>,
+    },
+    /// Close the insight popup.
+    InsightClose,
+    /// Open where the insight points (a macro's definition).
+    InsightOpenDefinition,
     Answered {
         stamp: Stamp,
         /// `ProjectSession::hover_gen` at request time — the peek this text was fetched
@@ -2019,15 +2035,19 @@ impl HoverMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            HoverMsg::Dwell { stamp, .. } | HoverMsg::Answered { stamp, .. } => {
-                Some(Origin::Stamped(stamp))
-            }
+            HoverMsg::Dwell { stamp, .. }
+            | HoverMsg::Answered { stamp, .. }
+            | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
             HoverMsg::ContextMenuOpened { .. }
             | HoverMsg::ContextMenuClosed
             | HoverMsg::ContextGoto(..)
             | HoverMsg::Requested { .. }
             | HoverMsg::Cleared
-            | HoverMsg::Pin(..) => None,
+            | HoverMsg::Pin(..)
+            | HoverMsg::Insight
+            | HoverMsg::InsightAtCursor
+            | HoverMsg::InsightClose
+            | HoverMsg::InsightOpenDefinition => None,
         }
     }
 }

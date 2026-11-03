@@ -230,6 +230,27 @@ impl StatsReport {
 
 // -- project maps -------------------------------------------------------------
 
+/// What a C or C++ macro (or a whole line) expands to at a point, read
+/// from the `#define`s in effect there — the file's and its headers'.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroExpansion {
+    /// The macro expanded; empty when a whole line was.
+    pub name: String,
+    /// What was expanded, as written.
+    pub invocation: String,
+    /// What the preprocessor makes of it.
+    pub expanded: String,
+    /// Where the macro is defined, relative to the project, with its 1-based
+    /// line; empty (and 0) for one the command line defines, or one in a
+    /// header outside the project.
+    pub file: String,
+    pub line: usize,
+    /// Its `#define`, as written.
+    pub definition: String,
+    /// Whether the expansion was cut short.
+    pub truncated: bool,
+}
+
 /// One of a project's maps (reply to `ProjectMaps`): what a language or a
 /// framework says about how its code fits together — a database's tables and
 /// their foreign keys, a web app's routes and the handlers they reach, an OTP

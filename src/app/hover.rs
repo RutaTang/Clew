@@ -380,12 +380,20 @@ impl App {
             .and_then(Option::as_ref)
             .map_or((0.0, 0.0), |v| (v.scroll_x, v.scroll_y));
         let (x, y) = (x - sx, y - sy);
+        let insight = self
+            .proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| v.lang_key)
+            .and_then(InsightKind::for_lang);
         self.proj.context_menu = Some(ContextMenu {
             pane,
             line,
             col,
             x,
             y,
+            insight,
         });
         Task::none()
     }
@@ -413,6 +421,16 @@ impl App {
                 };
                 self.goto_request(menu.pane, menu.line, menu.col, kind)
             }
+            HoverMsg::Insight => self.on_insight_from_menu(),
+            HoverMsg::InsightAtCursor => self.insight_at_cursor(),
+            HoverMsg::InsightAnswered { token, result, .. } => {
+                self.on_insight_answered(token, result)
+            }
+            HoverMsg::InsightClose => {
+                self.proj.insight = None;
+                Task::none()
+            }
+            HoverMsg::InsightOpenDefinition => self.on_insight_open_definition(),
             HoverMsg::Requested {
                 pane,
                 line,

@@ -874,6 +874,78 @@ pub struct ContextMenu {
     pub col: usize,
     pub x: f32,
     pub y: f32,
+    /// The language's own action here, when its file's language has one
+    /// ([`InsightKind::for_lang`]).
+    pub insight: Option<InsightKind>,
+}
+
+/// What a language can say about the code under the cursor that no other
+/// does, asked from the context menu (or `ge`) and shown in a popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsightKind {
+    /// A macro's expansion: rust-analyzer's for Rust, Clew's own reading
+    /// of the `#define`s in effect for C and C++.
+    ExpandMacro,
+    /// The goals of a Lean proof there, or the type a term is expected to
+    /// have, from the Lean server.
+    GoalState,
+    /// The type of a Haskell name, from haskell-language-server.
+    TypeAtPoint,
+}
+
+impl InsightKind {
+    /// The action a file in `lang_key` has.
+    pub fn for_lang(lang_key: &str) -> Option<InsightKind> {
+        Some(match lang_key {
+            "rust" | "c" | "cpp" => InsightKind::ExpandMacro,
+            "lean" => InsightKind::GoalState,
+            "haskell" => InsightKind::TypeAtPoint,
+            _ => return None,
+        })
+    }
+
+    /// Menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            InsightKind::ExpandMacro => "Expand Macro",
+            InsightKind::GoalState => "Show Goal",
+            InsightKind::TypeAtPoint => "Show Type",
+        }
+    }
+
+    /// What the popup says when the language has nothing to say there.
+    pub fn nothing(self) -> &'static str {
+        match self {
+            InsightKind::ExpandMacro => "No macro here, and nothing on this line expands.",
+            InsightKind::GoalState => {
+                "No goal here: the Lean server knows no proof state or expected type at this point."
+            }
+            InsightKind::TypeAtPoint => "The language server knows no type for this name.",
+        }
+    }
+}
+
+/// The language's answer, ready to show: markdown, and where it points (a
+/// macro's definition, relative to the project, with its 1-based line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsightAnswer {
+    pub markdown: String,
+    pub defined: Option<(String, usize)>,
+}
+
+/// The popup of a language's answer ([`InsightKind`]).
+#[derive(Debug)]
+pub struct Insight {
+    /// Which request it shows: a late answer to an earlier one is dropped.
+    pub token: u64,
+    pub kind: InsightKind,
+    /// e.g. "Expansion of MAX".
+    pub title: String,
+    /// True until the answer lands.
+    pub loading: bool,
+    pub prepared: Vec<PreparedSeg>,
+    /// Where the answer points, for its Open button.
+    pub defined: Option<(String, usize)>,
 }
 
 impl GotoKind {

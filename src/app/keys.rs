@@ -146,7 +146,7 @@ impl App {
             {
                 Task::none()
             }
-            // Two-key `g` prefix: gg / gd / gr / gi / gy / gc.
+            // Two-key `g` prefix: gg / gd / gr / gi / gy / gc / ge.
             _ if self.pending_g => {
                 self.pending_g = false;
                 match key.as_ref() {
@@ -156,6 +156,7 @@ impl App {
                     Key::Character("i") => self.goto_at_cursor(GotoKind::Implementation),
                     Key::Character("y") => self.goto_at_cursor(GotoKind::TypeDefinition),
                     Key::Character("c") => self.update(Message::Calls(CallsMsg::Requested)),
+                    Key::Character("e") => self.insight_at_cursor(),
                     _ => Task::none(),
                 }
             }

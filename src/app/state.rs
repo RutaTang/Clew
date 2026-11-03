@@ -1138,6 +1138,8 @@ pub struct App {
     /// Mints [`BlameWhy::token`]. Monotonic for the window's lifetime, so a
     /// token can never be reused by a later request.
     pub blame_why_seq: u64,
+    /// Mints [`crate::app::model::Insight::token`], like `blame_why_seq`.
+    pub insight_seq: u64,
     /// Bumped whenever inlay hints are turned off, invalidating every request
     /// still in flight (see [`crate::app::message::LspMsg::InlayHintsLoaded`]).
     pub inlay_gen: u64,
@@ -1641,6 +1643,9 @@ pub struct ProjectSession {
     pub git_latest: HashMap<PathBuf, u64>,
     /// The "Why is this here?" popup, when open.
     pub blame_why: Option<BlameWhy>,
+    /// The language's answer about the code under the cursor (a macro's
+    /// expansion, a Lean goal, a Haskell type), when open.
+    pub insight: Option<Insight>,
     /// The active git time-travel session, if any.
     pub time_travel: Option<TimeTravel>,
     /// Numbers the time-travel requests — each start (`time_start`), each
@@ -1968,6 +1973,7 @@ impl Default for ProjectSession {
             diff_pending: Default::default(),
             git_latest: Default::default(),
             blame_why: Default::default(),
+            insight: Default::default(),
             time_travel: Default::default(),
             time_gen: Default::default(),
             time_start: Default::default(),

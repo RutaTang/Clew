@@ -7,6 +7,7 @@ use iced::keyboard;
 
 mod ask_space;
 mod build_app;
+mod insight;
 mod integrations;
 mod navigation_debug;
 mod remote_state_refresh;
@@ -11156,6 +11157,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         col: 4,
         x: 10.0,
         y: 10.0,
+        insight: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -19098,6 +19100,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         col: 0,
         x: 0.0,
         y: 0.0,
+        insight: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -19829,6 +19832,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             col: 0,
             text: Some("stale".into()),
         }),
+        Message::Hover(HoverMsg::InsightAnswered {
+            stamp: s(),
+            token: app.insight_seq,
+            result: Err("stale".into()),
+        }),
         Message::Nav(NavMsg::DefinitionResult {
             stamp: s(),
             seq: app.proj.goto_seq,
@@ -20360,6 +20368,7 @@ fn fill_project_session(app: &mut App) {
         col: 4,
         x: 1.0,
         y: 1.0,
+        insight: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -26744,6 +26753,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
             O::Why(_) => "why",
+            O::Insight(_) => "insight",
             O::ToolsMenu => "tools menu",
             O::TargetMenu => "target menu",
             O::Graph(_) => "graph",
@@ -26765,6 +26775,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
         app.proj.blame_why = None;
+        app.proj.insight = None;
         app.show_tools_menu = false;
         app.show_target_menu = false;
         app.proj.overlay = None;
@@ -26829,6 +26840,16 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 prepared: Vec::new(),
             })
         }),
+        Box::new(|a| {
+            a.proj.insight = Some(Insight {
+                token: 1,
+                kind: InsightKind::ExpandMacro,
+                title: "Expansion of MAX".into(),
+                loading: true,
+                prepared: Vec::new(),
+                defined: None,
+            })
+        }),
         Box::new(|a| a.show_tools_menu = true),
         Box::new(|a| a.show_target_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
@@ -26841,6 +26862,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 col: 0,
                 x: 10.0,
                 y: 10.0,
+                insight: None,
             })
         }),
     ];
@@ -26864,7 +26886,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (17, 17),
+        (18, 18),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 

@@ -895,6 +895,47 @@ impl LspClient {
         Ok(parse_hover(&result))
     }
 
+    /// rust-analyzer's `rust-analyzer/expandMacro`: the macro call at a
+    /// 0-based (line, character), expanded — `None` when there is none.
+    pub async fn expand_macro(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<ExpandedMacro>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let result = self.call("rust-analyzer/expandMacro", params).await?;
+        Ok(parse_expanded_macro(&result))
+    }
+
+    /// The Lean server's state at a 0-based (line, character): the tactic
+    /// goals there (`$/lean/plainGoal`), or, outside a tactic block, the
+    /// type the term there is expected to have (`$/lean/plainTermGoal`).
+    /// `None` when it knows neither.
+    pub async fn lean_goal(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<LeanGoal>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let tactic = self.call("$/lean/plainGoal", params.clone()).await?;
+        if let Some(goals) = parse_plain_goal(&tactic) {
+            return Ok(Some(LeanGoal::Tactic(goals)));
+        }
+        let term = self.call("$/lean/plainTermGoal", params).await?;
+        Ok(term
+            .get("goal")
+            .and_then(Value::as_str)
+            .map(|g| LeanGoal::Term(g.to_string())))
+    }
+
     /// Request inlay hints for the 0-based line range `[start_line, end_line)`.
     /// Empty when the server lacks the capability or the request fails.
     pub async fn inlay_hints(
@@ -1697,6 +1738,69 @@ fn parse_diag(v: &Value) -> Option<Diag> {
 }
 
 /// Extract plain text from a hover response (MarkupContent | MarkedString[]).
+/// What rust-analyzer expands a macro call to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedMacro {
+    /// The macro's name, as rust-analyzer gives it (`vec!` for a call).
+    pub name: String,
+    /// The expansion, formatted.
+    pub expansion: String,
+}
+
+/// The Lean server's answer at a position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeanGoal {
+    /// Inside a tactic proof: the goals left, each with its hypotheses —
+    /// none when the proof is done there.
+    Tactic(Vec<String>),
+    /// In a term: the type expected of it, with the context.
+    Term(String),
+}
+
+fn parse_expanded_macro(result: &Value) -> Option<ExpandedMacro> {
+    Some(ExpandedMacro {
+        name: result.get("name")?.as_str()?.to_string(),
+        expansion: result.get("expansion")?.as_str()?.to_string(),
+    })
+}
+
+/// `$/lean/plainGoal`'s goals; `None` for its `null` (no tactic there).
+fn parse_plain_goal(result: &Value) -> Option<Vec<String>> {
+    let goals = result.get("goals")?.as_array()?;
+    Some(
+        goals
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The type a hover's markdown gives first: its first fenced code block
+/// (`haskell-language-server` opens with `name :: Type`), else its first
+/// line.
+pub fn signature_of_hover(markdown: &str) -> Option<String> {
+    let mut lines = markdown.lines();
+    while let Some(line) = lines.next() {
+        if line.trim_start().starts_with("```") {
+            let block: Vec<&str> = lines
+                .by_ref()
+                .take_while(|l| !l.trim_start().starts_with("```"))
+                .collect();
+            let block = block.join("\n");
+            let block = block.trim();
+            if !block.is_empty() {
+                return Some(block.to_string());
+            }
+        }
+    }
+    markdown
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty() && !l.starts_with("```"))
+        .map(str::to_string)
+}
+
 fn parse_hover(result: &Value) -> Option<String> {
     let contents = result.get("contents")?;
     let text = match contents {
@@ -2334,6 +2438,24 @@ mod tests {
     }
 
     #[test]
+    fn hover_signatures() {
+        let hls = "```haskell\nmapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()\n```\n\n*Defined in \u{2018}Data.Foldable\u{2019}*";
+        assert_eq!(
+            signature_of_hover(hls).as_deref(),
+            Some("mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()")
+        );
+        assert_eq!(
+            signature_of_hover("```\n\n```\nx :: Int\n").as_deref(),
+            Some("x :: Int")
+        );
+        assert_eq!(
+            signature_of_hover("\n  plain text\nmore").as_deref(),
+            Some("plain text")
+        );
+        assert_eq!(signature_of_hover(""), None);
+    }
+
+    #[test]
     fn parse_hover_variants() {
         // MarkupContent
         let v =
@@ -2389,6 +2511,46 @@ mod tests {
         // Should point back to the `origin` definition on line 0.
         assert_eq!(targets[0].line, 0);
         assert!(targets[0].path.ends_with("src/main.rs"));
+    }
+
+    /// `rust-analyzer/expandMacro` against a real rust-analyzer: a
+    /// `macro_rules!` call expands to its body, and a position on no macro
+    /// answers `None`. Ignored by default, like the round trip above.
+    #[tokio::test]
+    #[ignore = "spawns the developer's rust-analyzer; run explicitly"]
+    async fn live_expand_macro_against_rust_analyzer() {
+        let exe = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join(".cargo/bin/rust-analyzer");
+        assert!(exe.exists(), "needs rust-analyzer at {exe:?}");
+        let root = crate::testutil::TempDir::new("ra-expand");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let src = "macro_rules! twice {\n    ($e:expr) => { $e * 2 };\n}\n\nfn main() {\n    let x = twice!(3 + 1);\n    let _ = x;\n}\n";
+        let main_rs = root.join("src/main.rs");
+        std::fs::write(&main_rs, src).unwrap();
+        let client = LspClient::start(&exe, &[], &root, None).await.unwrap();
+        client.did_open(&main_rs, "rust", 1, src);
+        // Line 5 (0-based), on `twice` in `twice!(3 + 1)`.
+        let mut expanded = None;
+        for _ in 0..60 {
+            expanded = client.expand_macro(&main_rs, 5, 13).await.ok().flatten();
+            if expanded.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let expanded = expanded.expect("rust-analyzer expanded the call");
+        eprintln!("{expanded:?}");
+        assert_eq!(expanded.name, "twice!");
+        let flat: String = expanded.expansion.split_whitespace().collect();
+        assert_eq!(flat, "(3+1)*2");
+        // `main` is no macro call.
+        assert_eq!(client.expand_macro(&main_rs, 4, 4).await, Ok(None));
+        client.shutdown().await;
     }
 }
 
@@ -2959,6 +3121,84 @@ mod session_tests {
         assert_eq!(client.log_tail(2), Err(StatePoisoned));
         let error = client.error().expect("poisoning is reported as an error");
         assert!(error.contains("restart"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn expand_macro_asks_rust_analyzer() {
+        let (client, mut peer, _) = connected().await;
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.expand_macro(Path::new("/proj/a.rs"), 3, 9).await }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "rust-analyzer/expandMacro");
+        assert_eq!(
+            request["params"]["position"],
+            json!({"line": 3, "character": 9})
+        );
+        assert_eq!(
+            request["params"]["textDocument"]["uri"],
+            "file:///proj/a.rs"
+        );
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"name": "vec!", "expansion": "<[_]>::into_vec(Box::new([1, 2]))"}}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(ExpandedMacro {
+                name: "vec!".into(),
+                expansion: "<[_]>::into_vec(Box::new([1, 2]))".into()
+            }))
+        );
+        // No macro there: rust-analyzer says null.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.expand_macro(Path::new("/proj/a.rs"), 0, 0).await }
+        });
+        let request = peer.next().await;
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": null}))
+            .await;
+        assert_eq!(asked.await.unwrap(), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn lean_goal_falls_back_to_the_term_goal() {
+        let (client, mut peer, _) = connected().await;
+        // In a tactic block: its goals.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.lean_goal(Path::new("/proj/A.lean"), 4, 2).await }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "$/lean/plainGoal");
+        assert_eq!(
+            request["params"]["position"],
+            json!({"line": 4, "character": 2})
+        );
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"rendered": "```lean\nn : Nat\n⊢ n + 0 = n\n```", "goals": ["n : Nat\n⊢ n + 0 = n"]}}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(LeanGoal::Tactic(vec!["n : Nat\n⊢ n + 0 = n".into()])))
+        );
+        // Outside one: plainGoal says null, so the term's expected type.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.lean_goal(Path::new("/proj/A.lean"), 1, 20).await }
+        });
+        let request = peer.next().await;
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": null}))
+            .await;
+        let request = peer.next().await;
+        assert_eq!(request["method"], "$/lean/plainTermGoal");
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"goal": "⊢ Nat", "range": {}}}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(LeanGoal::Term("⊢ Nat".into())))
+        );
+        // A finished proof: no goals, which is an answer.
+        assert_eq!(parse_plain_goal(&json!({"goals": []})), Some(vec![]));
+        assert_eq!(parse_plain_goal(&Value::Null), None);
     }
 
     /// F7: a malformed `Content-Length` used to parse as 0 and desync the

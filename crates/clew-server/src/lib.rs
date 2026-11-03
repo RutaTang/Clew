@@ -1037,6 +1037,36 @@ impl Server {
                 });
                 None
             }
+            // What a C/C++ macro expands to, read where the headers are.
+            // Confined to the project like ReadFile — the headers too — and
+            // off the loop: a header chain is read.
+            Request::ExpandMacro {
+                rel,
+                line,
+                column,
+                target,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                if let Err(e) = clew_core::confine::check_lexical(&rel) {
+                    return Some(files::confine_refusal(&rel, &e));
+                }
+                let target: inactive::Target = target.into();
+                spawn_reply(&self.out, id, "expanding the macro", move || {
+                    match clew_core::cmacro::expand_in_project(&root, &rel, line, column, &target) {
+                        Ok(expansion) => Event::MacroExpansion {
+                            rel,
+                            line,
+                            column,
+                            expansion,
+                        },
+                        Err(e) => failed(e),
+                    }
+                });
+                None
+            }
             // A batch of plain sources for the client's Explain pass —
             // confined, per-file capped, batch capped, and paged by bytes
             // (see `read_sources`). Off the loop.

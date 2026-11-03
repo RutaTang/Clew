@@ -2254,7 +2254,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
     }
 
     // Read-only reading motions (not part of the customizable keymap).
-    let motions: [(&str, &str); 15] = [
+    let motions: [(&str, &str); 16] = [
         ("Move left / down / up / right", "h j k l   ← ↓ ↑ →"),
         ("Word forward / back", "w   b"),
         ("Line start / end", "0   $"),
@@ -2264,6 +2264,7 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
         ("Go to implementation", "gi"),
         ("Go to type definition", "gy"),
         ("Call hierarchy", "gc"),
+        ("Expand macro / show goal / show type", "ge"),
         ("Toggle fold", "za"),
         ("Open all folds", "zR"),
         ("Close all folds", "zM"),

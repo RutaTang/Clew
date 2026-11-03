@@ -1615,6 +1615,7 @@ fn escape_names_the_topmost_overlay() {
         col: 1,
         x: 20.0,
         y: 20.0,
+        insight: None,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -1669,6 +1670,7 @@ fn escape_closes_overlays_one_at_a_time() {
         col: 1,
         x: 20.0,
         y: 20.0,
+        insight: None,
     });
     app.show_tools_menu = true;
     let escape = || {
@@ -5463,6 +5465,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         col: 0,
         x: 10.0,
         y: 10.0,
+        insight: None,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -6652,4 +6655,113 @@ fn the_target_picker_shows_for_languages_the_platform_dims() {
         let mut sim = sim_elem(super::statusbar::statusbar(&app));
         assert_eq!(sim.find(label.as_str()).is_ok(), shown, "{lang}");
     }
+}
+
+/// A file whose language has its own action gets it in the context menu,
+/// under the go-tos; one whose language has none does not.
+#[test]
+fn the_context_menu_offers_the_languages_own_action() {
+    let mut app = reader_app();
+    let menu = |insight| crate::ContextMenu {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+        insight,
+    };
+    app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
+    assert!(shows(&mut sim_of(&app), "Expand Macro"));
+    let sent = click(sim_of(&app), "Expand Macro");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::Insight))),
+        "{sent:?}"
+    );
+    app.proj.context_menu = Some(menu(Some(crate::InsightKind::GoalState)));
+    assert!(shows(&mut sim_of(&app), "Show Goal"));
+    app.proj.context_menu = Some(menu(None));
+    assert!(shows(&mut sim_of(&app), "Go to Definition"));
+    for absent in ["Expand Macro", "Show Goal", "Show Type"] {
+        assert!(!shows(&mut sim_of(&app), absent), "{absent}");
+    }
+}
+
+/// The popup waits with "Asking…", then shows the answer; Open Definition
+/// is there only when the answer points somewhere, and Escape closes it.
+#[test]
+fn the_insight_popup_shows_the_answer_and_where_it_points() {
+    let mut app = reader_app();
+    app.proj.insight = Some(crate::Insight {
+        token: 1,
+        kind: crate::InsightKind::ExpandMacro,
+        title: "Expansion of MAX".into(),
+        loading: true,
+        prepared: Vec::new(),
+        defined: None,
+    });
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Expansion of MAX"));
+        assert!(shows(&mut sim, "Asking…"));
+    }
+    assert!(!shows(&mut sim_of(&app), "Open Definition"));
+    assert!(matches!(
+        super::escape_message(&app),
+        Some(Message::Hover(HoverMsg::InsightClose))
+    ));
+    let answer = crate::app::insight::c_answer(clew_protocol::MacroExpansion {
+        name: "MAX".into(),
+        invocation: "MAX(1, 2)".into(),
+        expanded: "((1) > (2) ? (1) : (2))".into(),
+        file: "include/util.h".into(),
+        line: 1,
+        definition: "#define MAX(a, b) ((a) > (b) ? (a) : (b))".into(),
+        truncated: false,
+    });
+    let (prepared, _) = app.prepare_segments(&answer.markdown);
+    // The answer's code blocks, highlighted as the editor highlights C:
+    // each block's lines, spans joined.
+    let blocks: Vec<String> = prepared
+        .iter()
+        .filter_map(|seg| match seg {
+            crate::PreparedSeg::Code(lines) => Some(
+                lines
+                    .iter()
+                    .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            "MAX(1, 2)",
+            "((1) > (2) ? (1) : (2))",
+            "#define MAX(a, b) ((a) > (b) ? (a) : (b))"
+        ]
+    );
+    if let Some(open) = app.proj.insight.as_mut() {
+        open.loading = false;
+        open.prepared = prepared;
+        open.defined = answer.defined;
+    }
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "Asking…"));
+    }
+    let sent = click(sim_of(&app), "Open Definition");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::InsightOpenDefinition))),
+        "{sent:?}"
+    );
+    let sent = click(sim_of(&app), "Close");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::InsightClose))),
+        "{sent:?}"
+    );
 }

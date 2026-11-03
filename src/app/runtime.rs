@@ -130,6 +130,7 @@ impl App {
             show_right_panel: true,
             lsp_doc_rev: 1,
             blame_why_seq: 0,
+            insight_seq: 0,
             inlay_gen: 0,
             server_panel: false,
             installed_servers: Vec::new(),

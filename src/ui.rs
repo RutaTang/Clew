@@ -160,6 +160,7 @@ pub(crate) enum ActiveOverlay<'a> {
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
     Why(&'a crate::BlameWhy),
+    Insight(&'a crate::Insight),
     ToolsMenu,
     TargetMenu,
     Graph(crate::Overlay),
@@ -198,6 +199,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::ReadingNote(edit)
     } else if let Some(bw) = &app.proj.blame_why {
         O::Why(bw)
+    } else if let Some(insight) = &app.proj.insight {
+        O::Insight(insight)
     } else if app.show_tools_menu {
         O::ToolsMenu
     } else if app.show_target_menu {
@@ -240,6 +243,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Connect => "connect",
             Self::Shortcuts => "shortcuts",
             Self::Why(_) => "why",
+            Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
             Self::TargetMenu => "target-menu",
             Self::Graph(_) => "graph",
@@ -288,6 +292,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
             Self::Why(bw) => why_modal(app, bw),
+            Self::Insight(insight) => insight_modal(app, insight),
             Self::ToolsMenu => tools_menu(app),
             Self::TargetMenu => target_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
@@ -314,6 +319,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),
             Self::Why(_) => Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
+            Self::Insight(_) => Message::Hover(HoverMsg::InsightClose),
             Self::ToolsMenu => Message::Window(WindowMsg::ToggleToolsMenu),
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),

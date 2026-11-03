@@ -214,6 +214,7 @@ fn request_index(r: &Request) -> usize {
         Request::LanguageOptions { .. } => 29,
         Request::BuildFacts { .. } => 30,
         Request::ProjectMaps => 31,
+        Request::ExpandMacro { .. } => 32,
     }
 }
 
@@ -254,6 +255,7 @@ fn event_index(e: &Event) -> usize {
         Event::LanguageOptions { .. } => 32,
         Event::BuildFacts { .. } => 33,
         Event::ProjectMaps { .. } => 34,
+        Event::MacroExpansion { .. } => 35,
     }
 }
 
@@ -1058,6 +1060,12 @@ fn request_samples() -> Vec<Request> {
         },
         Request::BuildFacts { choices: choices() },
         Request::ProjectMaps,
+        Request::ExpandMacro {
+            rel: "src/a.c".into(),
+            line: 41,
+            column: 8,
+            target: target(),
+        },
     ]);
     samples
 }
@@ -1263,6 +1271,26 @@ fn reply_samples() -> Vec<Event> {
             }),
     );
     samples.extend([
+        Event::MacroExpansion {
+            rel: "src/a.c".into(),
+            line: 41,
+            column: 8,
+            expansion: None,
+        },
+        Event::MacroExpansion {
+            rel: "src/a.c".into(),
+            line: 41,
+            column: 8,
+            expansion: Some(MacroExpansion {
+                name: "MAX".into(),
+                invocation: "MAX(a, 1)".into(),
+                expanded: "((a) > (1) ? (a) : (1))".into(),
+                file: "include/util.h".into(),
+                line: 3,
+                definition: "#define MAX(a, b) ((a) > (b) ? (a) : (b))".into(),
+                truncated: false,
+            }),
+        },
         Event::ProjectMaps {
             root: "/p".into(),
             maps: Vec::new(),
@@ -1824,6 +1852,7 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Reply.event.LspResolved.resolution.Command.init_options",
         "Reply.event.LspResolved.resolution.Ready.init_options",
         "Reply.event.LspResolved.resolution.Ready.withheld",
+        "Reply.event.MacroExpansion.expansion",
         "Reply.event.NotebookContent.cells[].execution_count",
         "Reply.event.Ready.fingerprint",
         "Reply.event.SearchResults.error",

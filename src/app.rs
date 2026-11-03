@@ -65,6 +65,7 @@ mod graph;
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;
+pub(crate) mod insight;
 pub(crate) mod integrations;
 mod keys;
 pub(crate) mod languages;
