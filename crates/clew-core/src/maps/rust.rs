@@ -104,11 +104,7 @@ fn traits(corpus: &Corpus) -> Option<ProjectMap> {
             let t = text(name, src).to_string();
             let from = map.node("type", &t, &t);
             map.place(from, &source.rel, line(item));
-            for derived in inner
-                .split(',')
-                .map(type_name)
-                .filter(|d| !d.is_empty())
-            {
+            for derived in inner.split(',').map(type_name).filter(|d| !d.is_empty()) {
                 let to = map.node("trait", &derived, &derived);
                 map.edge(from, to, "derive");
             }

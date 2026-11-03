@@ -23,14 +23,20 @@ use tree_sitter::{Node, Tree};
 use crate::fs_scan::FileEntry;
 
 pub mod cfamily;
+pub mod dart;
 pub mod defs;
+pub mod erlang;
 pub mod frameworks;
 pub mod go;
+pub mod haskell;
 pub mod js;
+pub mod lean;
 pub mod python;
 pub mod routes;
+pub mod ruby;
 pub mod rust;
 pub mod sql;
+pub mod zig;
 use crate::highlight::{self, Lang};
 
 /// The largest file read for a map.
@@ -180,6 +186,12 @@ pub fn build_from(corpus: &Corpus) -> Vec<ProjectMap> {
         js::maps,
         rust::maps,
         cfamily::maps,
+        erlang::maps,
+        haskell::maps,
+        zig::maps,
+        ruby::maps,
+        dart::maps,
+        lean::maps,
     ];
     extractors
         .iter()
