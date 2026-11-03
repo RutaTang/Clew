@@ -22,6 +22,9 @@ use tree_sitter::{Node, Tree};
 
 use crate::fs_scan::FileEntry;
 
+pub mod defs;
+pub mod frameworks;
+pub mod routes;
 pub mod sql;
 use crate::highlight::{self, Lang};
 
@@ -39,12 +42,25 @@ pub struct Source {
     /// Its language, when it is one Clew parses.
     pub lang: Option<Lang>,
     pub text: String,
+    /// Its parse tree, made once for every map that reads it.
+    parsed: std::cell::OnceCell<Option<Tree>>,
 }
 
 impl Source {
-    /// The file's parse tree, for its language.
+    pub fn new(rel: &str, lang: Option<Lang>, text: String) -> Source {
+        Source {
+            rel: rel.to_string(),
+            lang,
+            text,
+            parsed: Default::default(),
+        }
+    }
+
+    /// The file's parse tree, for its language — parsed once.
     pub fn tree(&self) -> Option<Tree> {
-        highlight::parse(&self.text, self.lang?)
+        self.parsed
+            .get_or_init(|| highlight::parse(&self.text, self.lang?))
+            .clone()
     }
 
     /// The file's name (its last path component).
@@ -57,6 +73,8 @@ impl Source {
 #[derive(Debug, Clone, Default)]
 pub struct Corpus {
     pub files: Vec<Source>,
+    /// Every definition in the files, indexed once for every map.
+    defs: std::cell::OnceCell<defs::Defs>,
 }
 
 impl Corpus {
@@ -83,14 +101,13 @@ impl Corpus {
             }
             let text = String::from_utf8_lossy(&bytes).into_owned();
             let lang = lang.and_then(|l| Lang::for_source(l.key(), &text));
-            out.push(Source {
-                rel: entry.rel.replace('\\', "/"),
-                lang,
-                text,
-            });
+            out.push(Source::new(&entry.rel.replace('\\', "/"), lang, text));
         }
         out.sort_by(|a, b| a.rel.cmp(&b.rel));
-        Corpus { files: out }
+        Corpus {
+            files: out,
+            defs: Default::default(),
+        }
     }
 
     /// A corpus of in-memory files, for tests and callers that hold the
@@ -101,15 +118,19 @@ impl Corpus {
             .map(|(rel, text)| {
                 let lang =
                     highlight::detect(Path::new(rel)).and_then(|key| Lang::for_source(key, text));
-                Source {
-                    rel: rel.to_string(),
-                    lang,
-                    text: text.to_string(),
-                }
+                Source::new(rel, lang, text.to_string())
             })
             .collect();
         out.sort_by(|a, b| a.rel.cmp(&b.rel));
-        Corpus { files: out }
+        Corpus {
+            files: out,
+            defs: Default::default(),
+        }
+    }
+
+    /// Every definition in the corpus — indexed once.
+    pub fn defs(&self) -> &defs::Defs {
+        self.defs.get_or_init(|| defs::Defs::of(self))
     }
 
     /// The files in any of `langs`.
@@ -144,7 +165,8 @@ pub fn build(_root: &Path, files: &[FileEntry]) -> Vec<ProjectMap> {
 
 /// Every map of `corpus`, none empty, in the order they are listed.
 pub fn build_from(corpus: &Corpus) -> Vec<ProjectMap> {
-    let extractors: &[fn(&Corpus) -> Vec<ProjectMap>] = &[sql::maps];
+    let extractors: &[fn(&Corpus) -> Vec<ProjectMap>] =
+        &[sql::maps, routes::maps, frameworks::maps];
     extractors
         .iter()
         .flat_map(|extract| extract(corpus))
@@ -356,6 +378,16 @@ pub fn unquote(literal: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The last name of a qualified one (`a.b::C` → `C`).
+pub fn last_name(reference: &str) -> String {
+    reference
+        .rsplit(['.', ':', '\\', '/'])
+        .next()
+        .unwrap_or(reference)
+        .trim()
+        .to_string()
 }
 
 /// A word made of identifier characters, starting at the front of `s`.
