@@ -455,4 +455,12 @@ fn answers_read_as_the_popup_shows_them() {
         "```haskell\nx :: Bool\n```"
     );
     assert_eq!(haskell_answer("   "), None);
+    // As haskell-language-server answers for `print` given an Int: the type
+    // at this use under the declared one; the separators and the `_ ::`
+    // blocks are not shown.
+    let print = haskell_answer("```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\n*Defined in System.IO*\n\n* * *\n\n```haskell\n_ :: Int -> IO ()\n```\n* * *\n\n```haskell\n_ :: forall a. Show a => a -> IO ()\n```").unwrap();
+    assert_eq!(
+        print.markdown,
+        "```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\nHere: `Int -> IO ()`\n\n*Defined in System.IO*"
+    );
 }

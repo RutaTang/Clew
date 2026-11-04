@@ -7,7 +7,7 @@
 //!
 //! Its messages are [`HoverMsg`]'s `Insight*`, through `App::update_hover`.
 
-use clew_core::lsp::client::{ExpandedMacro, LeanGoal, signature_of_hover};
+use clew_core::lsp::client::{ExpandedMacro, LeanGoal, hover_parts};
 
 use crate::app::prelude::*;
 use crate::*;
@@ -278,23 +278,21 @@ pub(crate) fn lean_answer(goal: LeanGoal) -> InsightAnswer {
     }
 }
 
-/// haskell-language-server's hover, its signature first: the type in a
-/// block, and what else it says (where the name is defined) under it.
+/// haskell-language-server's hover: the declared type in a block, the
+/// type at this use when it is another (`print` given an `Int`), then what
+/// else it says (where the name is defined, its docs).
 pub(crate) fn haskell_answer(hover: &str) -> Option<InsightAnswer> {
-    let signature = signature_of_hover(hover)?;
-    // The hover less the block the signature came from.
-    let rest = match hover.find("```") {
-        Some(open) => match hover[open + 3..].find("```") {
-            Some(close) => format!("{}{}", &hover[..open], &hover[open + 3 + close + 3..]),
-            None => String::new(),
-        },
-        None => String::new(),
-    };
-    let rest = rest.trim();
-    let mut markdown = format!("```haskell\n{signature}\n```");
-    if !rest.is_empty() {
+    let parts = hover_parts(hover)?;
+    let mut markdown = format!("```haskell\n{}\n```", parts.signature);
+    if let Some(here) = parts
+        .here
+        .filter(|h| !parts.signature.ends_with(&format!(":: {h}")))
+    {
+        markdown.push_str(&format!("\n\nHere: `{here}`"));
+    }
+    if !parts.prose.is_empty() {
         markdown.push_str("\n\n");
-        markdown.push_str(rest);
+        markdown.push_str(&parts.prose);
     }
     Some(InsightAnswer {
         markdown,

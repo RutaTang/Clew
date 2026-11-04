@@ -1776,29 +1776,101 @@ fn parse_plain_goal(result: &Value) -> Option<Vec<String>> {
     )
 }
 
-/// The type a hover's markdown gives first: its first fenced code block
-/// (`haskell-language-server` opens with `name :: Type`), else its first
-/// line.
-pub fn signature_of_hover(markdown: &str) -> Option<String> {
-    let mut lines = markdown.lines();
-    while let Some(line) = lines.next() {
-        if line.trim_start().starts_with("```") {
-            let block: Vec<&str> = lines
-                .by_ref()
-                .take_while(|l| !l.trim_start().starts_with("```"))
-                .collect();
-            let block = block.join("\n");
-            let block = block.trim();
-            if !block.is_empty() {
-                return Some(block.to_string());
-            }
+/// A hover's markdown read as haskell-language-server writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverParts {
+    /// The declared type: the first code block (`name :: Type`), else the
+    /// first line.
+    pub signature: String,
+    /// The type of the name at this use, when the server gives it (a later
+    /// `_ :: T` block): instantiated, `Int -> IO ()` for `print` given an
+    /// `Int`.
+    pub here: Option<String>,
+    /// The rest: where it is defined, its docs and their examples, less the
+    /// `* * *` separators and the `_ ::` blocks.
+    pub prose: String,
+}
+
+/// [`HoverParts`] of a hover's markdown; `None` for an empty one.
+pub fn hover_parts(markdown: &str) -> Option<HoverParts> {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let fence = |l: &str| l.trim_start().starts_with("```");
+    // Each fenced block: its line span (fences included) and its content.
+    let mut blocks: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if fence(lines[i]) {
+            let close = (i + 1..lines.len())
+                .find(|k| fence(lines[*k]))
+                .unwrap_or(lines.len());
+            let content = lines[i + 1..close.min(lines.len())]
+                .join("\n")
+                .trim()
+                .to_string();
+            blocks.push((i, close.min(lines.len().saturating_sub(1)), content));
+            i = close + 1;
+        } else {
+            i += 1;
         }
     }
-    markdown
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && !l.starts_with("```"))
-        .map(str::to_string)
+    let mut dropped = vec![false; lines.len()];
+    let mut drop = |from: usize, to: usize| {
+        for d in dropped.iter_mut().take(to + 1).skip(from) {
+            *d = true;
+        }
+    };
+    let signature = match blocks.iter().find(|(_, _, c)| !c.is_empty()) {
+        Some((from, to, c)) => {
+            drop(*from, *to);
+            c.clone()
+        }
+        None => {
+            let at = lines
+                .iter()
+                .position(|l| !l.trim().is_empty() && !fence(l))?;
+            drop(at, at);
+            lines[at].trim().to_string()
+        }
+    };
+    let mut here = None;
+    for (from, to, c) in &blocks {
+        if let Some(t) = c.strip_prefix("_ ::") {
+            here.get_or_insert_with(|| t.trim().to_string());
+            drop(*from, *to);
+        } else if c.is_empty() {
+            drop(*from, *to);
+        }
+    }
+    // The prose: what is left, one blank line at most between paragraphs.
+    let mut prose = String::new();
+    let mut blank = false;
+    for (k, l) in lines.iter().enumerate() {
+        if dropped[k] || l.trim() == "* * *" {
+            continue;
+        }
+        if l.trim().is_empty() {
+            blank = !prose.is_empty();
+            continue;
+        }
+        if blank {
+            prose.push('\n');
+            blank = false;
+        }
+        if !prose.is_empty() {
+            prose.push('\n');
+        }
+        prose.push_str(l.trim_end());
+    }
+    Some(HoverParts {
+        signature,
+        here,
+        prose,
+    })
+}
+
+/// The type a hover's markdown gives first ([`HoverParts::signature`]).
+pub fn signature_of_hover(markdown: &str) -> Option<String> {
+    hover_parts(markdown).map(|p| p.signature)
 }
 
 fn parse_hover(result: &Value) -> Option<String> {
@@ -2438,6 +2510,36 @@ mod tests {
     }
 
     #[test]
+    fn haskell_language_servers_hover_in_parts() {
+        // As haskell-language-server 2.4 answers a hover of `print` applied
+        // to an Int.
+        let print = "```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\n*Defined in \u{2018}System.IO\u{2019}* *(base-4.17.2.0)*\n\n\n\nThe  `print`  function outputs a value of any printable type to the\n standard output device.\n\nFor example:\n```haskell\nmain = print ([(n, 2^n) | n <- [0..19]])\n```\n\n\n* * *\n\n```haskell\n_ :: Int -> IO ()\n```\n* * *\n\n```haskell\n_ :: forall a. Show a => a -> IO ()\n```";
+        let parts = hover_parts(print).unwrap();
+        assert_eq!(parts.signature, "print :: forall a. Show a => a -> IO ()");
+        assert_eq!(parts.here.as_deref(), Some("Int -> IO ()"));
+        assert_eq!(
+            parts.prose,
+            "*Defined in \u{2018}System.IO\u{2019}* *(base-4.17.2.0)*\n\nThe  `print`  function outputs a value of any printable type to the\n standard output device.\n\nFor example:\n```haskell\nmain = print ([(n, 2^n) | n <- [0..19]])\n```"
+        );
+        let own = hover_parts("```haskell\nfoo :: Int -> Int\n```\n\n*Defined at /p/Main.hs:4:1*")
+            .unwrap();
+        assert_eq!(
+            own,
+            HoverParts {
+                signature: "foo :: Int -> Int".into(),
+                here: None,
+                prose: "*Defined at /p/Main.hs:4:1*".into(),
+            }
+        );
+        let plain = hover_parts("x :: Bool\nmore").unwrap();
+        assert_eq!(
+            (plain.signature.as_str(), plain.prose.as_str()),
+            ("x :: Bool", "more")
+        );
+        assert_eq!(hover_parts(" \n"), None);
+    }
+
+    #[test]
     fn hover_signatures() {
         let hls = "```haskell\nmapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()\n```\n\n*Defined in \u{2018}Data.Foldable\u{2019}*";
         assert_eq!(
@@ -2550,6 +2652,95 @@ mod tests {
         assert_eq!(flat, "(3+1)*2");
         // `main` is no macro call.
         assert_eq!(client.expand_macro(&main_rs, 4, 4).await, Ok(None));
+        client.shutdown().await;
+    }
+
+    /// The Lean goals against a real Lean server (`lean --server`, the one
+    /// `CLEW_TEST_LEAN` names): a tactic proof's goal before its tactic, no
+    /// goals once it is done, and outside any tactic block the type a term
+    /// is expected to have. Ignored by default: it needs a Lean toolchain.
+    #[tokio::test]
+    #[ignore = "needs a Lean toolchain (CLEW_TEST_LEAN=path/to/lean); run explicitly"]
+    async fn live_lean_goal_against_the_lean_server() {
+        let exe = std::path::PathBuf::from(
+            std::env::var("CLEW_TEST_LEAN").expect("CLEW_TEST_LEAN names the lean binary"),
+        );
+        let root = crate::testutil::TempDir::new("lean-goal");
+        let src = "theorem add_zero' (n : Nat) : n + 0 = n := by\n  simp\n\ndef double (n : Nat) : Nat := n + n\n";
+        let file = root.join("Goal.lean");
+        std::fs::write(&file, src).unwrap();
+        let client = LspClient::start(&exe, &["--server".into()], &root, None)
+            .await
+            .unwrap();
+        client.did_open(&file, "lean4", 1, src);
+        // Line 1, before `simp`: the theorem's goal, with its hypothesis.
+        let mut goal = None;
+        for _ in 0..60 {
+            goal = client.lean_goal(&file, 1, 2).await.ok().flatten();
+            if goal.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        eprintln!("before simp: {goal:?}");
+        assert_eq!(
+            goal,
+            Some(LeanGoal::Tactic(vec!["n : Nat\n⊢ n + 0 = n".into()]))
+        );
+        // After `simp`: the proof is done there.
+        let done = client.lean_goal(&file, 1, 6).await.unwrap();
+        eprintln!("after simp: {done:?}");
+        assert_eq!(done, Some(LeanGoal::Tactic(Vec::new())));
+        // In `n + n`, a term: no tactic goal, so the type expected of it.
+        let term = client.lean_goal(&file, 3, 30).await.unwrap();
+        eprintln!("in the term: {term:?}");
+        assert_eq!(term, Some(LeanGoal::Term("n : Nat\n⊢ Nat".into())));
+        client.shutdown().await;
+    }
+
+    /// The type at a point against a real haskell-language-server (the one
+    /// `CLEW_TEST_HLS` names, built for the GHC on `PATH`): its hover of a
+    /// name defined here and of one from `base`, and the signature Show Type
+    /// takes from each. Ignored by default: it needs the server.
+    #[tokio::test]
+    #[ignore = "needs haskell-language-server (CLEW_TEST_HLS=path); run explicitly"]
+    async fn live_haskell_type_against_haskell_language_server() {
+        let exe = std::path::PathBuf::from(
+            std::env::var("CLEW_TEST_HLS").expect("CLEW_TEST_HLS names the server"),
+        );
+        let root = crate::testutil::TempDir::new("hls-type");
+        let src = "module Main where\n\nfoo :: Int -> Int\nfoo x = x + 1\n\nmain :: IO ()\nmain = print (foo 1)\n";
+        let file = root.join("Main.hs");
+        std::fs::write(&file, src).unwrap();
+        let client = LspClient::start(&exe, &["--lsp".into()], &root, None)
+            .await
+            .unwrap();
+        client.did_open(&file, "haskell", 1, src);
+        // `foo` in `print (foo 1)`, line 6. The server loads the module
+        // first; until then it has no answer.
+        let mut hover = None;
+        for _ in 0..240 {
+            hover = client.hover(&file, 6, 15).await.ok().flatten();
+            if hover.as_deref().is_some_and(|h| h.contains("::")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let hover = hover.expect("the server answered the hover");
+        eprintln!("foo: {hover:?}");
+        assert_eq!(
+            signature_of_hover(&hover).as_deref(),
+            Some("foo :: Int -> Int")
+        );
+        // `print`, from base: its type, its class constraint.
+        let print = client.hover(&file, 6, 8).await.unwrap().unwrap();
+        eprintln!("print: {print:?}");
+        let sig = signature_of_hover(&print).unwrap();
+        assert!(sig.starts_with("print :: "), "{sig}");
+        assert!(
+            sig.contains("Show a") && sig.ends_with("a -> IO ()"),
+            "{sig}"
+        );
         client.shutdown().await;
     }
 }

@@ -121,7 +121,7 @@ The **Project maps** toolbar icon opens the maps Clew reads from the project's f
 - **Dart and Flutter** — the widget tree as written (a `State`'s build is its widget's), and state management across Riverpod, provider and Bloc.
 - **Lean 4** — theorem dependencies, notations and what they mean, and what each `simp` lemma rewrites.
 
-In the code, the right-click menu (and `ge` at the cursor) adds what the file's language can say there: **Expand Macro** for Rust (rust-analyzer's expansion) and for C and C++ (Clew's own reading of the `#define`s in effect — the file's and its headers', found by its compile command and the project's `include/`, the groups `#if`s drop left out — with the `#define` it came from), **Show Goal** for Lean (the proof's goals there, or a term's expected type) and **Show Type** for Haskell (the name's type from the Haskell language server).
+In the code, the right-click menu (and `ge` at the cursor) adds what the file's language can say there: **Expand Macro** for Rust (rust-analyzer's expansion) and for C and C++ (Clew's own reading of the `#define`s in effect — the file's and its headers', found by its compile command and the project's `include/`, the groups `#if`s drop left out — with the `#define` it came from), **Show Goal** for Lean (the proof's goals there, or a term's expected type) and **Show Type** for Haskell (the name's declared type from the Haskell language server, and its type at that use when it is another — `Int -> IO ()` for `print` given an `Int`).
 
 ## Contributing
 

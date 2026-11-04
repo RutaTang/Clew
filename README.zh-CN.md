@@ -121,7 +121,7 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 - **Dart 和 Flutter**：按代码写法嵌套的 widget 树（`State` 的 build 算在它的 widget 上），以及 Riverpod、provider 和 Bloc 的状态管理。
 - **Lean 4**：定理之间的依赖，记号（notation）和它的含义，以及每条 `simp` 引理改写的是什么。
 
-在代码里，右键菜单（以及光标处按 `ge`）会加上这门语言在这里能说的东西：Rust 的 **Expand Macro**（rust-analyzer 给出的展开），C 和 C++ 的 **Expand Macro**（Clew 自己按此处生效的 `#define` 来读：文件自己的和它头文件里的，头文件按编译命令和项目的 `include/` 去找，被 `#if` 丢掉的分组不算，并给出展开来源的那条 `#define`），Lean 的 **Show Goal**（此处证明的目标，或者某个项的期望类型），以及 Haskell 的 **Show Type**（Haskell 语言服务器给出的这个名字的类型）。
+在代码里，右键菜单（以及光标处按 `ge`）会加上这门语言在这里能说的东西：Rust 的 **Expand Macro**（rust-analyzer 给出的展开），C 和 C++ 的 **Expand Macro**（Clew 自己按此处生效的 `#define` 来读：文件自己的和它头文件里的，头文件按编译命令和项目的 `include/` 去找，被 `#if` 丢掉的分组不算，并给出展开来源的那条 `#define`），Lean 的 **Show Goal**（此处证明的目标，或者某个项的期望类型），以及 Haskell 的 **Show Type**（Haskell 语言服务器给出的这个名字声明的类型，以及它在此处用法下不同时的具体类型，比如作用于 `Int` 的 `print` 是 `Int -> IO ()`）。
 
 ## 贡献
 
