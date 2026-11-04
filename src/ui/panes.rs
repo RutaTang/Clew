@@ -899,6 +899,24 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .debug_current(debug_current)
     .inlay_hints(v.inlay_hints(), theme::dim())
     .inactive(v.inactive_lines())
+    // The line that says why the lines under it are left out, with the
+    // reason beside it.
+    .inactive_heads(v.inactive_heads(), move |pred| {
+        use crate::inactive::CfgReason;
+        Some(
+            match crate::inactive::rust_cfg_reason(
+                pred,
+                &app.proj.reading_target,
+                &app.proj.build_facts,
+                Some(&v.rel),
+            )? {
+                CfgReason::Target(target) => {
+                    format!("not built for {}", super::statusbar::target_name(&target))
+                }
+                CfgReason::Features => "not built with these features".to_string(),
+            },
+        )
+    })
     // The summary of those two and the folds, kept current by the viewer's
     // setters — else the view re-derives it, hashing every chip, per build.
     .annotations(v.annotations())
@@ -1035,7 +1053,7 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
 /// with its function before it is drawn.
 const NOTE_H: f32 = 104.0;
 /// Height of the note raised as a card: the one on what the caret is in.
-const ACTIVE_NOTE_H: f32 = 168.0;
+const ACTIVE_NOTE_H: f32 = 190.0;
 /// Room kept between notes that would otherwise overlap.
 const NOTE_GAP: f32 = 8.0;
 /// How far the raised card reaches above its function's first line: its
@@ -1403,7 +1421,6 @@ fn active_note<'a>(
     .spacing(2)
     .align_y(iced::Center);
     if let Some(node @ Node::Function { .. }) = app.proj.explain.view.as_ref() {
-        actions = actions.push(space().width(Fill));
         actions = actions.push(if app.proj.explain.showing_detail {
             action(
                 Glyph::List,
@@ -1428,6 +1445,9 @@ fn active_note<'a>(
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill);
+    // The actions run on to a second line when the card is too narrow for
+    // them on one.
+    let actions = actions.wrap().vertical_spacing(2);
     container(column![note_head(name, meta, code, true), said, actions,].spacing(6))
         .width(Fill)
         .height(Fill)

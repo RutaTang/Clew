@@ -585,10 +585,12 @@ pub enum NavMsg {
         line: Option<usize>,
     },
     FinderConfirm,
-    /// Open the command palette: the finder, its query `>`.
+    /// Open the command bar: the finder, its suggestions showing.
     PaletteOpened,
     /// Run the palette command with this title (see `app::palette`).
     PaletteRun(String),
+    /// Do what one of the command bar's suggestions offers.
+    PaletteSuggestion(crate::app::palette::Suggestion),
     GotoLineRequested,
     DefinitionResult {
         stamp: Stamp,
@@ -2107,6 +2109,7 @@ impl NavMsg {
             | NavMsg::FinderConfirm
             | NavMsg::PaletteOpened
             | NavMsg::PaletteRun(..)
+            | NavMsg::PaletteSuggestion(..)
             | NavMsg::GotoLineRequested
             | NavMsg::JumpToCall { .. } => None,
         }

@@ -87,7 +87,7 @@ fn the_agent_opens_a_file_at_a_line() {
     assert!(sent[0].1.contains("src/lib.rs:3"), "{}", sent[0].1);
     // A step chip says so, and points there.
     let step = app.proj.ask_turns.last().unwrap().steps.last().unwrap();
-    assert_eq!(step.title, "Opened src/lib.rs:3");
+    assert_eq!(step.title, "Opened `src/lib.rs:3`");
     assert_eq!(step.refs, [("src/lib.rs".to_string(), Some(3))]);
     assert_eq!(step.state, StepState::Done);
 }

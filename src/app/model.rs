@@ -469,6 +469,9 @@ pub enum ApprovalKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approval {
     pub key: ApprovalKey,
+    /// The mark its card carries, when not its kind's own: what a window
+    /// command does (the debugger's bug for starting it).
+    pub mark: Option<crate::glyph::Glyph>,
     /// Who wants to do what, in a line.
     pub title: String,
     /// The arguments, or what the agent said the call does.

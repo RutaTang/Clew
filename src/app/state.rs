@@ -1156,6 +1156,9 @@ pub struct App {
     pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
     /// The titles of the palette commands run last, most recent first.
     pub palette_recent: Vec<String>,
+    /// The command bar's suggestions, as last built: what it offers with
+    /// nothing typed (see `app::palette`).
+    pub(crate) palette_home: Vec<crate::app::palette::Suggestion>,
     /// Bumped whenever inlay hints are turned off, invalidating every request
     /// still in flight (see [`crate::app::message::LspMsg::InlayHintsLoaded`]).
     pub inlay_gen: u64,

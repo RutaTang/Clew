@@ -35,11 +35,52 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
 
 /// Height of the status bar. Fixed, so the tutorial can carve the body region
 /// out of the window and the target drop-up can sit right above it.
-pub(crate) const STATUSBAR_H: f32 = 30.0;
+pub(crate) const STATUSBAR_H: f32 = 32.0;
 
 /// One quiet item of the status bar.
 fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(s).size(ts::SMALL).color(theme::fg_muted())
+}
+
+/// Whether the project is current: scanned and indexed, or what it is
+/// doing to be. `None` with no project open.
+fn sync_state(app: &App) -> Option<&'static str> {
+    app.proj.project.as_ref()?;
+    Some(if app.scanning {
+        "Scanning…"
+    } else if app.proj.indexing {
+        "Indexing…"
+    } else {
+        "Up to date"
+    })
+}
+
+/// `n` with its thousands set apart, as a reader writes it: 1,858.
+pub(crate) fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// The platform a file's branches are read for, as the reader says it: the
+/// machine's own as its system's name ("Linux"), another by its label.
+pub(crate) fn target_name(target: &crate::inactive::Target) -> String {
+    if !target.label.starts_with("Host") {
+        return target.label.clone();
+    }
+    match target.os.as_str() {
+        "linux" => "Linux".into(),
+        "macos" => "macOS".into(),
+        "windows" => "Windows".into(),
+        "freebsd" => "FreeBSD".into(),
+        _ => target.label.clone(),
+    }
 }
 
 /// The status bar: one quiet line along the window's foot. On the left,
@@ -67,13 +108,16 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         button(
             row![
                 dot,
-                text(app.connection.label())
-                    .size(ts::SMALL)
-                    .color(if remote {
-                        theme::accent()
-                    } else {
-                        theme::fg_muted()
-                    }),
+                text(match sync_state(app) {
+                    Some(state) => format!("{} · {state}", app.connection.label()),
+                    None => app.connection.label().to_string(),
+                })
+                .size(ts::SMALL)
+                .color(if remote {
+                    theme::accent()
+                } else {
+                    theme::fg_muted()
+                }),
             ]
             .spacing(7)
             .align_y(iced::Center),
@@ -91,9 +135,29 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         tooltip::Position::Top,
     );
 
-    let mut bar = row![conn_indicator, status_text(&app.status)]
-        .spacing(14)
-        .align_y(iced::Center);
+    // What is open, in counts — unless Clew has something to say.
+    let said: Element<'_, Message> = if !app.status.is_empty() {
+        status_text(&app.status).into()
+    } else if let Some(project) = app.proj.project.as_ref() {
+        let files = project.files.len();
+        let symbols = app.proj.symbol_index.len();
+        let mut counts = format!(
+            "{} file{}",
+            thousands(files),
+            if files == 1 { "" } else { "s" }
+        );
+        if symbols > 0 {
+            counts.push_str(&format!(
+                " · {} symbol{}",
+                thousands(symbols),
+                if symbols == 1 { "" } else { "s" }
+            ));
+        }
+        status_text(counts).into()
+    } else {
+        slot()
+    };
+    let mut bar = row![conn_indicator, said].spacing(14).align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
     // pass is slow, so show how far along it is (the status text alone is easy
     // to miss / read as stuck). It is the one place the pass's progress shows:
@@ -178,15 +242,25 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // Language-server status for this file's language, when relevant —
         // from the snapshot this update took (so a state clew cannot read
         // shows as a problem, not as "ready").
+        // A server at work is named ("rust-analyzer ready"); one that is
+        // not says why in words of its own.
         let lsp = v
             .lang_key
-            .and_then(|k| app.lsp_status(k))
-            .map(|status| format!("  ·  LSP {status}"))
+            .and_then(|k| {
+                let status = app.lsp_status(k)?;
+                let at_work = matches!(
+                    app.proj.link.lsp.get(k),
+                    Some(crate::LspSlot::Ready(_) | crate::LspSlot::Starting)
+                );
+                Some(
+                    match crate::lsp::registry::default_for_language(k).filter(|_| at_work) {
+                        Some(server) => format!(" · {} {status}", server.name),
+                        None => format!(" · {status}"),
+                    },
+                )
+            })
             .unwrap_or_default();
-        bar = bar.push(status_text(format!(
-            "{lang}  ·  {} lines{lsp}",
-            v.lines.len()
-        )));
+        bar = bar.push(status_text(format!("{lang}{lsp}")));
         // Diagnostic counts for this file, from the same snapshot.
         let diags = v
             .lang_key
@@ -240,7 +314,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         let picker = button(
             row![
                 text("Reading for").size(ts::SMALL).color(theme::fg_muted()),
-                text(app.proj.reading_target.to_string())
+                text(target_name(&app.proj.reading_target))
                     .size(ts::SMALL)
                     .color(theme::fg()),
                 glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),

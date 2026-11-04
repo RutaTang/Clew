@@ -51,9 +51,9 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
     let top = TOOLBAR_H + update_banner_height(app);
     let bot = wh - STATUSBAR_H;
     // The sheet: between the sidebar and the strip, its gap kept to the
-    // strip and above the status bar.
+    // strip, down to the status bar.
     let sheet_right = ww - STRIP_W - SHEET_GAP;
-    let sheet_bottom = bot - SHEET_GAP;
+    let sheet_bottom = bot;
     // Its panes start under its header and end above the bottom panel.
     let main_top = top + sheet_header_height(app);
     let main_bot = sheet_bottom - bottom;

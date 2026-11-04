@@ -26434,17 +26434,15 @@ fn a_jump_to_another_file_in_the_other_pane_leaves_a_start_loading() {
     // It lands, superseding that open for good, and shows on the left. What
     // the reader's jump said since stays: the history clears only its own
     // "Loading history…".
-    assert_eq!(app.status, "other.txt");
+    let said = app.status.clone();
+    assert!(!said.contains("history"), "{said}");
     let _ = app.update(lib_history(&app, asked));
     assert_eq!(
         app.proj.time_travel.as_ref().map(|t| &t.abs),
         Some(&lib),
         "the history was dropped as it landed"
     );
-    assert_eq!(
-        app.status, "other.txt",
-        "the landing wiped what the jump said"
-    );
+    assert_eq!(app.status, said, "the landing wiped what the jump said");
     assert_eq!(app.proj.link.superseded_open, None);
     assert_eq!(app.proj.link.pane_pending[0], None);
     let _ = app.update(Message::Editor(EditorMsg::PaneFocused(0)));
@@ -29708,14 +29706,14 @@ fn a_failed_appearance_write_is_reported() {
     );
 }
 
-/// B14/B16: a file opens with its path in the status line, and an empty
-/// outline says WHY it is empty: a language without an outline is not a file
-/// without symbols.
+/// B14/B16: a file opens with nothing in the status line (the sheet's
+/// header names it), and an empty outline says WHY it is empty: a language
+/// without an outline is not a file without symbols.
 #[test]
 fn an_empty_outline_says_why() {
     assert_eq!(
         crate::app::editor::open_status("src/lib.rs", Some("rust")),
-        "src/lib.rs"
+        ""
     );
     assert_eq!(
         crate::ui::empty_outline_note(Some("rust")),

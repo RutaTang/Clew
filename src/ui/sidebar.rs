@@ -134,15 +134,17 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                             .style(theme::bare_input),
                     ]
                     .spacing(8)
+                    .height(Fill)
                     .align_y(iced::Center),
                 )
-                .padding([5, 10])
+                .height(Length::Fixed(FILTER_H))
+                .padding([0, 10])
                 .style(theme::field(!app.file_filter.is_empty())),
             )
             .padding(Padding {
                 top: 0.0,
                 right: 10.0,
-                bottom: 6.0,
+                bottom: SIDEBAR_GAP,
                 left: 10.0,
             })
             .into()
@@ -170,7 +172,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         container(tabs).padding(Padding {
             top: 2.0,
             right: 10.0,
-            bottom: 8.0,
+            bottom: SIDEBAR_GAP,
             left: 10.0,
         }),
         filter,
@@ -626,11 +628,16 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         }
     }
     scrollable(
-        container(Column::with_children(rows).width(Fill)).padding(Padding {
+        container(
+            Column::with_children(rows)
+                .spacing(TREE_ROW_GAP)
+                .width(Fill),
+        )
+        .padding(Padding {
             top: 0.0,
-            right: 6.0,
-            bottom: 8.0,
-            left: 6.0,
+            right: 10.0,
+            bottom: 12.0,
+            left: 10.0,
         }),
     )
     .direction(thin_scroll())
@@ -701,6 +708,14 @@ fn quiet_icon(glyph: Glyph, color: iced::Color) -> Element<'static, Message> {
         .into()
 }
 
+/// Height of a row of the file tree, and the gap between rows.
+const TREE_ROW_H: f32 = 28.0;
+const TREE_ROW_GAP: f32 = 1.0;
+/// Height of the Files view's filter field.
+const FILTER_H: f32 = 30.0;
+/// The room between the sidebar's views, its filter and its list.
+const SIDEBAR_GAP: f32 = 12.0;
+
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
 pub(crate) const TRACKED_IGNORED_MARK: &str = "tracked · ignored";
@@ -712,11 +727,11 @@ pub(crate) fn append_tree_rows<'a>(
     depth: u16,
     app: &'a App,
 ) {
-    let indent = 4.0 + depth as f32 * 14.0;
+    let indent = 6.0 + depth as f32 * 14.0;
     let pad = Padding {
-        top: 4.0,
-        right: 6.0,
-        bottom: 4.0,
+        top: 0.0,
+        right: 8.0,
+        bottom: 0.0,
         left: indent,
     };
 
@@ -739,15 +754,17 @@ pub(crate) fn append_tree_rows<'a>(
             // A name in the order it is spelled (`highlight::in_order`).
             text(crate::highlight::in_order(name))
                 .size(ts::BASE)
-                .color(theme::fg())
+                .color(theme::fg_muted())
                 .wrapping(Wrapping::None),
         ]
-        .spacing(4)
+        .spacing(6)
+        .height(Fill)
         .align_y(iced::Center);
         rows.push(
             button(content)
                 .style(theme::list_row(false))
                 .width(Fill)
+                .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
                 .on_press(Message::Project(ProjectMsg::ToggleDir(rel.clone())))
                 .into(),
@@ -783,20 +800,27 @@ pub(crate) fn append_tree_rows<'a>(
             ),
             text(crate::highlight::in_order(name))
                 .size(ts::BASE)
+                .font(if is_current {
+                    crate::fonts::UI_SEMIBOLD
+                } else {
+                    crate::fonts::UI
+                })
                 .color(if is_current {
                     theme::fg_bright()
                 } else {
-                    theme::fg()
+                    theme::fg_muted()
                 })
                 .wrapping(Wrapping::None),
             mark,
         ]
-        .spacing(4)
+        .spacing(6)
+        .height(Fill)
         .align_y(iced::Center);
         rows.push(
             button(content)
                 .style(theme::list_row(is_current))
                 .width(Fill)
+                .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
                 .on_press(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
                 .into(),

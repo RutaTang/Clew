@@ -2645,6 +2645,7 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
     let approval = crate::app::model::Approval {
         key: crate::app::model::ApprovalKey::Mcp { call: 3 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -2913,6 +2914,7 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     // Arguments longer than the card shows: they scroll.
     let card = |call| Approval {
         key: ApprovalKey::Mcp { call },
+        mark: None,
         title: format!("run {call}"),
         detail: (0..30).map(|i| format!("arg {i}\n")).collect(),
         options: vec![ApprovalOption {
@@ -2962,15 +2964,15 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     let _ = turn(&app, still, "Allow once");
 
     app.proj.ask_turns[0].extras.approvals.push(card(1));
-    let title = turn(&app, still, "⚠ run 1").expect("the card shows from its top");
+    let title = turn(&app, still, "run 1").expect("the card shows from its top");
     let allow = turn(&app, still, "Allow once").expect("its answers show");
-    assert_eq!(turn(&app, still, "⚠ run 1"), Some(title));
+    assert_eq!(turn(&app, still, "run 1"), Some(title));
 
     // More cards, steps, plan entries and answer: the card stays put.
     app.proj.ask_turns[0].extras.approvals.push(card(2));
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
     assert!(turn(&app, still, "1 more waiting after this one").is_some());
-    assert_eq!(turn(&app, still, "⚠ run 2"), None, "one card at a time");
+    assert_eq!(turn(&app, still, "run 2"), None, "one card at a time");
     let grown = &mut app.proj.ask_turns[0];
     for i in 0..40 {
         grown.steps.push(AgentStep {
@@ -2986,17 +2988,17 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     }
     grown.answer_md.push_str(&"more ".repeat(400));
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
-    assert_eq!(turn(&app, still, "⚠ run 1"), Some(title));
+    assert_eq!(turn(&app, still, "run 1"), Some(title));
 
     // Its arguments read to their end: the answers stay where they were.
     let over_title = mouse::Cursor::Available(title.center());
     let _ = turn(&app, (&wheel_by(0.0, 2000.0), over_title), "Allow once");
-    assert_eq!(turn(&app, still, "⚠ run 1"), None, "scrolled out of view");
+    assert_eq!(turn(&app, still, "run 1"), None, "scrolled out of view");
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
 
     // The next card, when the first is answered, from its own top.
     app.proj.ask_turns[0].extras.approvals.remove(0);
-    let next = turn(&app, still, "⚠ run 2").expect("the next card from its top");
+    let next = turn(&app, still, "run 2").expect("the next card from its top");
     assert_eq!(next.position(), title.position());
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
 
@@ -3033,7 +3035,7 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     app.acp_agents.clear();
     let _ = turn(&app, still, "Allow once");
     app.proj.ask_turns[0].extras.approvals.clear();
-    assert_eq!(turn(&app, still, "⚠ run 2"), None);
+    assert_eq!(turn(&app, still, "run 2"), None);
     app.proj.ask_turns.clear();
     let _ = turn(&app, still, "Allow once");
 }
@@ -3059,6 +3061,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
         extras: TurnExtras {
             approvals: vec![Approval {
                 key: ApprovalKey::Mcp { call: 1 },
+                mark: None,
                 title: "run it".into(),
                 detail: "a: 1".into(),
                 options: vec![ApprovalOption {
@@ -3376,6 +3379,7 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     );
     let approval = Approval {
         key: ApprovalKey::Mcp { call: 1 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options,
@@ -3554,6 +3558,7 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
             extras: TurnExtras {
                 approvals: vec![Approval {
                     key: ApprovalKey::Mcp { call: 1 },
+                    mark: None,
                     title: "run it".into(),
                     detail: String::new(),
                     options: options.clone(),
@@ -3679,6 +3684,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         extras: TurnExtras {
             approvals: vec![Approval {
                 key: ApprovalKey::Mcp { call: 1 },
+                mark: None,
                 title: "run it".into(),
                 detail: String::new(),
                 options: vec![ApprovalOption {
@@ -3982,6 +3988,7 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
     app.ask_view = crate::AskView::Compact;
     let approval = |call: u64| Approval {
         key: ApprovalKey::Mcp { call },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![ApprovalOption {
@@ -4185,6 +4192,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
 
     let approval = Approval {
         key: ApprovalKey::Acp { id: 4 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -4344,6 +4352,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     );
     let approval = crate::app::model::Approval {
         key: crate::app::model::ApprovalKey::Acp { id: 4 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -4845,7 +4854,8 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         matches!(app.proj.link.lsp_snapshots.get("rust"), Some(Ok(_))),
         "the update took no snapshot"
     );
-    assert!(shows(&mut sim_of(&app), "LSP ready"));
+    // The server at work is named.
+    assert!(shows(&mut sim_of(&app), "rust-analyzer ready"));
     let underlined = |app: &App| {
         app.code_highlights(0, app.proj.panes[0].as_ref().unwrap())
             .iter()
@@ -4860,7 +4870,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         .link
         .lsp_snapshots
         .insert("rust".into(), Err(crate::lsp::client::StatePoisoned));
-    assert!(shows(&mut sim_of(&app), "LSP ⚠ state unreadable"));
+    assert!(shows(&mut sim_of(&app), "rust-analyzer ⚠ state unreadable"));
     assert!(
         !underlined(&app),
         "nothing is read past a poisoned snapshot"
@@ -6728,7 +6738,7 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
 #[test]
 fn the_target_picker_shows_for_languages_the_platform_dims() {
     let mut app = reader_app();
-    let label = app.proj.reading_target.to_string();
+    let label = super::statusbar::target_name(&app.proj.reading_target);
     for (lang, shown) in [
         ("rust", true),
         ("go", true),
@@ -7172,9 +7182,22 @@ fn voice_shows_what_it_is_doing() {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Listening"));
     }
+    // The field's microphone, lit while it listens, stops it.
+    let field = super::toolbar::chat_field_rect(&app);
+    let mut sim = sim_of(&app);
+    sim.point_at(Point::new(
+        field.x + field.width - 17.0,
+        field.y + field.height / 2.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
+    // (Its tooltip opens too, under the pointer.)
+    let voice: Vec<Message> = sent_by(sim)
+        .into_iter()
+        .filter(|m| matches!(m, Message::Voice(_)))
+        .collect();
     assert!(matches!(
-        click(sim_of(&app), "Done").as_slice(),
-        [Message::Voice(crate::VoiceMsg::Stop)]
+        voice.as_slice(),
+        [Message::Voice(crate::VoiceMsg::Toggle)]
     ));
     app.ask_view = crate::AskView::Compact;
     assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");

@@ -341,15 +341,56 @@ fn walk_node(node: Node, src: &[u8], host: &Cfg, out: &mut Vec<(usize, usize)>) 
 /// Evaluate the `cfg` on an `attribute_item`, or `None` if it isn't a
 /// `#[cfg(...)]` we can decide (inner `#![…]`, `cfg_attr`, …).
 fn cfg_of(attr_item: Node, src: &[u8], host: &Cfg) -> Option<bool> {
-    let text = attr_item.utf8_text(src).ok()?.trim();
-    let inner = text.strip_prefix("#[")?.strip_suffix(']')?.trim();
+    eval_cfg_at(cfg_predicate(attr_item.utf8_text(src).ok()?)?, host, 0)
+}
+
+/// The predicate of a Rust `#[cfg(...)]` attribute, `text` being the
+/// attribute alone: `#[cfg(windows)]` gives `windows`. Not `cfg_attr`.
+pub fn cfg_predicate(text: &str) -> Option<&str> {
+    let inner = text.trim().strip_prefix("#[")?.strip_suffix(']')?.trim();
     // `cfg( … )` only — not `cfg_attr(…)` (which starts "cfg_attr" → no "(").
     let pred = inner
         .strip_prefix("cfg")?
         .trim_start()
         .strip_prefix('(')?
         .strip_suffix(')')?;
-    eval_cfg_at(pred.trim(), host, 0)
+    Some(pred.trim())
+}
+
+/// Why a Rust `cfg` leaves what it gates out of the build.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CfgReason {
+    /// It is not built for this target, whatever the features.
+    Target(Target),
+    /// The features its crate builds with leave it out.
+    Features,
+}
+
+/// Why a Rust `cfg` predicate leaves what it gates out of the build of the
+/// file `rel`: the target it is read for, or the features its crate builds
+/// with. `None` when it does not leave it out, or that cannot be told.
+pub fn rust_cfg_reason(
+    pred: &str,
+    target: &Target,
+    facts: &BuildFacts,
+    rel: Option<&str>,
+) -> Option<CfgReason> {
+    let target = match &facts.rust_target {
+        Some(triple) => Target::from_triple(triple),
+        None => target.clone(),
+    };
+    let bare = Cfg {
+        target: &target,
+        features: None,
+    };
+    if eval_cfg_at(pred, &bare, 0) == Some(false) {
+        return Some(CfgReason::Target(target));
+    }
+    let cfg = Cfg {
+        target: &target,
+        features: rel.and_then(|rel| crate_of(facts, rel)),
+    };
+    (eval_cfg_at(pred, &cfg, 0) == Some(false)).then_some(CfgReason::Features)
 }
 
 /// How deeply a `cfg` predicate may nest before clew stops evaluating it.
@@ -3075,5 +3116,38 @@ y() -> ok.
             assert!(!reads_target(lang), "{lang}");
             assert!(!differs(source, lang), "{lang}");
         }
+    }
+
+    #[test]
+    fn a_cfg_says_why_it_leaves_code_out() {
+        let linux = Target::from_triple("x86_64-unknown-linux-gnu");
+        let facts = BuildFacts::default();
+        assert_eq!(cfg_predicate("  #[cfg(windows)] "), Some("windows"));
+        assert_eq!(cfg_predicate("#[cfg_attr(windows, inline)]"), None);
+        assert_eq!(cfg_predicate("fn main() {}"), None);
+        assert_eq!(
+            rust_cfg_reason("windows", &linux, &facts, None),
+            Some(CfgReason::Target(linux.clone()))
+        );
+        assert_eq!(rust_cfg_reason("unix", &linux, &facts, None), None);
+        // Undecided without the crate's features: no reason given.
+        assert_eq!(
+            rust_cfg_reason("feature = \"fast\"", &linux, &facts, None),
+            None
+        );
+        // Off among the crate's known features: they are the reason.
+        let facts = BuildFacts {
+            crates: vec![CrateFeatures {
+                dir: String::new(),
+                known: true,
+                declared: vec!["fast".into()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            rust_cfg_reason("feature = \"fast\"", &linux, &facts, Some("src/lib.rs")),
+            Some(CfgReason::Features)
+        );
     }
 }

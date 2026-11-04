@@ -239,7 +239,10 @@ impl App {
             _ => return None,
         };
         self.proj.finder.move_selection(delta);
-        Some(ui::reveal_finder_selection(self.proj.finder.selected))
+        Some(ui::reveal_finder_selection(
+            self.proj.finder.selected,
+            self.headings_over_selection(),
+        ))
     }
 
     /// Run a rebindable command action. Returns `None` when the action declines

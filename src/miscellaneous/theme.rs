@@ -1588,6 +1588,16 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
     }
 }
 
+/// A row of the finder and the command bar: a [`list_row`], its corners
+/// rounder.
+pub fn finder_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let mut style = list_row(selected)(theme, status);
+        style.border.radius = 8.0.into();
+        style
+    }
+}
+
 /// A scrollbar that stays invisible until you hover the scrollable (or drag it),
 /// so panels aren't littered with always-on bars. Thin and subtle when shown.
 pub fn overlay_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
@@ -1660,6 +1670,21 @@ pub fn switch(_theme: &Theme, status: toggler::Status) -> toggler::Style {
         text_color: Some(fg_muted()),
         border_radius: None,
         padding_ratio: 0.12,
+    }
+}
+
+/// A question before something runs (an approval card): a faint wash of the
+/// accent, edged in it.
+pub fn approve_card(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(with_alpha(accent(), if is_light() { 0.05 } else { 0.07 }).into()),
+        text_color: Some(fg()),
+        border: Border {
+            color: with_alpha(accent(), 0.33),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..container::Style::default()
     }
 }
 

@@ -24,6 +24,10 @@ pub enum Glyph {
     TypeMap,
     /// The project's maps: a table linked to two others.
     ProjectMaps,
+    TextLines,
+    ListOrdered,
+    Plug,
+    Help,
     Settings,
     // More menu
     Note,
@@ -90,6 +94,10 @@ pub enum Glyph {
     Check,
     /// A file: a page with its corner folded.
     File,
+    /// A pair of braces: a symbol, in the command bar.
+    Braces,
+    /// A speech bubble: ask Clew, in the command bar.
+    Message,
 }
 
 /// The window buttons Clew draws on Windows and Linux. Their own family:
@@ -131,19 +139,37 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M12 8.65 L7.3 15.25'/><path d='M12 8.65 L16.7 15.25'/>\
              <circle cx='12' cy='7.25' r='2.2'/><circle cx='6.5' cy='16.75' r='2.2'/><circle cx='17.5' cy='16.75' r='2.2'/>"
         }
+        // What a file brings in: an arrow down into a tray.
         ImportGraph => {
-            "<rect x='4.5' y='5' width='6' height='6' rx='1.4'/><rect x='13.5' y='13' width='6' height='6' rx='1.4'/>\
-             <path d='M11 11 L13 13'/>"
+            "<path d='M12 3v12'/><path d='m8 11 4 4 4-4'/>\
+             <path d='M8 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-4'/>"
         }
         TypeMap => {
             "<rect x='9' y='3.5' width='6' height='5' rx='1.3'/><rect x='3.5' y='15.5' width='6' height='5' rx='1.3'/>\
              <rect x='14.5' y='15.5' width='6' height='5' rx='1.3'/>\
              <path d='M12 8.5 V12'/><path d='M6.5 15.5 V12 H17.5 V15.5'/>"
         }
+        // A folded map.
         ProjectMaps => {
-            "<rect x='3.5' y='9' width='7' height='6' rx='1.3'/><path d='M3.5 11.5 H10.5'/>\
-             <circle cx='18' cy='6' r='2.4'/><circle cx='18' cy='18' r='2.4'/>\
-             <path d='M10.5 11 L15.8 7.2'/><path d='M10.5 13 L15.8 16.8'/>"
+            "<polygon points='3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21'/>\
+             <line x1='9' x2='9' y1='3' y2='18'/><line x1='15' x2='15' y1='6' y2='21'/>"
+        }
+        // Lines of text, the last short: what clew writes of the code.
+        TextLines => "<path d='M17 6.1H3'/><path d='M21 12.1H3'/><path d='M15.1 18H3'/>",
+        // A numbered list: the stops of a walkthrough.
+        ListOrdered => {
+            "<path d='M10 12h11'/><path d='M10 18h11'/><path d='M10 6h11'/><path d='M4 10h2'/>\
+             <path d='M4 6h1v4'/><path d='M6 18H4c0-1 2-2 2-3s-1-1.5-2-1'/>"
+        }
+        // A plug: what a language server is to clew.
+        Plug => {
+            "<path d='M12 22v-5'/><path d='M9 8V2'/><path d='M15 8V2'/>\
+             <path d='M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z'/>"
+        }
+        // A question in a circle: help, the tutorial.
+        Help => {
+            "<circle cx='12' cy='12' r='10'/><path d='M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'/>\
+             <path d='M12 17h.01'/>"
         }
         Settings => {
             "<path d='M4 7.2 H12.5'/><path d='M16.4 7.2 H20'/><circle cx='14.9' cy='7.2' r='2.3'/>\
@@ -296,6 +322,11 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M6.5 3.5 H13.5 L18.5 8.5 V19 A1.5 1.5 0 0 1 17 20.5 H7 A1.5 1.5 0 0 1 5.5 19 V5 A1.5 1.5 0 0 1 7 3.5 Z' transform='translate(0.5 0)'/>\
              <path d='M13.5 3.5 V8.5 H18.5'/>"
         }
+        Braces => {
+            "<path d='M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1'/>\
+             <path d='M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1'/>"
+        }
+        Message => "<path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>",
     }
 }
 

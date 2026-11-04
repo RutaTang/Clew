@@ -554,6 +554,7 @@ impl App {
         if ask {
             turn.extras.approvals.push(Approval {
                 key: ApprovalKey::Mcp { call },
+                mark: None,
                 title: format!(
                     "The MCP server `{}` wants to run {}",
                     target.server.name,
@@ -587,7 +588,7 @@ impl App {
                     deadline: call_deadline(),
                 },
             );
-            return self.ask_to_bottom();
+            return Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()]);
         }
         let run = self.run_mcp_call(stream, call, target, args, call_deadline());
         Task::batch([run, self.ask_to_bottom()])
@@ -1517,6 +1518,7 @@ impl App {
                 );
                 turn.extras.approvals.push(Approval {
                     key: ApprovalKey::Acp { id: request.id },
+                    mark: None,
                     title: format!("{label} asks to {what}"),
                     detail: detail.trim().to_string(),
                     options,
@@ -1525,7 +1527,7 @@ impl App {
                     link.declines.insert(request.id, added);
                 }
                 self.status = format!("{label} waits for your answer in the Ask panel");
-                self.ask_to_bottom()
+                Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()])
             }
             _ => Task::none(),
         }

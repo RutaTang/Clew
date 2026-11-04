@@ -491,6 +491,14 @@ impl App {
             self.refresh_palette();
             return;
         }
+        if self.proj.finder.is_home() {
+            self.refresh_suggestions();
+            return;
+        }
+        if self.proj.finder.is_bar_search() {
+            self.refresh_bar();
+            return;
+        }
         match self.proj.finder.mode {
             FinderMode::Files => {
                 if let Some(p) = &self.proj.project {
@@ -510,6 +518,7 @@ impl App {
             return Task::none();
         }
         self.proj.finder.open = true;
+        self.proj.finder.bar = false;
         self.proj.finder.mode = mode;
         self.proj.finder.query.clear();
         self.code_focused = false; // the finder input takes focus
@@ -529,6 +538,21 @@ impl App {
             return match title {
                 Some(title) => self.run_palette(&title),
                 None => Task::none(),
+            };
+        }
+        if self.proj.finder.is_home() {
+            return match self.palette_home.get(self.proj.finder.selected).cloned() {
+                Some(suggestion) => self.run_suggestion(suggestion),
+                None => Task::none(),
+            };
+        }
+        if self.proj.finder.is_bar_search() {
+            let Some(&idx) = self.proj.finder.results.get(self.proj.finder.selected) else {
+                return Task::none();
+            };
+            return match self.palette.get(idx).map(|c| c.title.clone()) {
+                Some(title) => self.run_palette(&title),
+                None => self.finder_open_index(idx - self.palette.len()),
             };
         }
         if let Some(line) = self.proj.finder.goto_line() {
@@ -555,6 +579,7 @@ impl App {
             return Task::none();
         }
         self.proj.finder.open = true;
+        self.proj.finder.bar = false;
         self.proj.finder.mode = FinderMode::Files;
         self.proj.finder.query = ":".to_string();
         self.refresh_finder();
@@ -753,6 +778,7 @@ impl App {
             NavMsg::FinderConfirm => self.on_finder_confirm(),
             NavMsg::PaletteOpened => self.on_palette_opened(),
             NavMsg::PaletteRun(title) => self.run_palette(&title),
+            NavMsg::PaletteSuggestion(suggestion) => self.run_suggestion(suggestion),
             NavMsg::GotoLineRequested => self.on_goto_line_requested(),
             NavMsg::DefinitionResult { seq, result, .. } => {
                 // A superseded request (a newer gd, a project switch bumping

@@ -710,6 +710,9 @@ pub struct CodeView<'a, Message> {
     inlay_color: Color,
     /// 0-based lines gated off by an inactive `#[cfg]`, drawn dimmed.
     inactive: Option<&'a HashSet<usize>>,
+    /// Of those, the lines that say why (their `cfg` predicate), drawn
+    /// undimmed, and what tells the reason in words for the chip beside them.
+    inactive_heads: Option<InactiveHeads<'a>>,
     /// The [`Annotations`] summary: handed in precomputed
     /// ([`CodeView::annotations`]), else computed at most once per view build
     /// — `draw` needs it for both paragraph caches on every frame.
@@ -782,6 +785,7 @@ impl<'a, Message> CodeView<'a, Message> {
             inlay_hints: None,
             inlay_color: default_color,
             inactive: None,
+            inactive_heads: None,
             annotations: OnceCell::new(),
             visible: None,
             fold_headers: None,
@@ -979,6 +983,27 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
+    /// Of the inactive lines, the ones that say why — line → its `cfg`
+    /// predicate — drawn undimmed, with `note` (the predicate → the reason
+    /// in words, "not built for Windows") in a chip past the line's end.
+    pub fn inactive_heads(
+        mut self,
+        heads: &'a std::collections::BTreeMap<usize, String>,
+        note: impl Fn(&str) -> Option<String> + 'a,
+    ) -> Self {
+        self.inactive_heads = Some(InactiveHeads {
+            heads,
+            note: Box::new(note),
+        });
+        self
+    }
+
+    /// The reason the inactive `line` gives, when it heads a dimmed run.
+    fn inactive_note(&self, line: usize) -> Option<String> {
+        let heads = self.inactive_heads.as_ref()?;
+        (heads.note)(heads.heads.get(&line)?)
+    }
+
     /// Every span highlight on 0-based `line`: the caller's highlights, then
     /// the find matches. Both lists are ordered by line, so a binary search
     /// finds the row's run — a frame costs O(rows · log n), not O(rows · n).
@@ -1018,6 +1043,15 @@ impl<'a, Message> CodeView<'a, Message> {
 
     fn is_inactive(&self, line: usize) -> bool {
         self.inactive.is_some_and(|s| s.contains(&line))
+    }
+
+    /// Whether `line` is dimmed: inactive, and not the one that says why.
+    fn is_dimmed(&self, line: usize) -> bool {
+        self.is_inactive(line)
+            && !self
+                .inactive_heads
+                .as_ref()
+                .is_some_and(|h| h.heads.contains_key(&line))
     }
 
     /// Number of displayed rows (folded-away lines excluded).
@@ -1162,7 +1196,7 @@ impl<'a, Message> CodeView<'a, Message> {
     /// shaped prefix.
     fn line_spans(&self, i: usize) -> (Vec<Span<'_, (), Font>>, bool) {
         let src = &self.lines[i].spans;
-        let dim_line = self.is_inactive(i);
+        let dim_line = self.is_dimmed(i);
         let color_of = |style: &Option<u8>| {
             let c = style.and_then(style_color).unwrap_or(self.default_color);
             // Fade inactive-`cfg` code toward the background so live code stands out.
@@ -1484,6 +1518,10 @@ struct State<P> {
     minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
     sticky_cache: RefCell<StickyCache<P>>,
+    /// The words of the chips past lines' ends, by what they say, shaped
+    /// once. Kept here: a renderer may hold a paragraph only weakly until it
+    /// draws, so one shaped inside `draw` and dropped there was never drawn.
+    chips: RefCell<HashMap<String, P>>,
     /// Right edge (px, from the text origin) of the widest line DRAWN so far —
     /// the shaped paragraph's real width plus anything painted past its end —
     /// for the content described by `measured_key`. The column estimate in
@@ -1508,6 +1546,7 @@ impl<P> Default for State<P> {
             minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
+            chips: RefCell::new(HashMap::new()),
             measured: Cell::new(0.0),
             measured_key: Cell::new((0, 0, 0, 0, 0)),
             laid_out: Cell::new(0.0),
@@ -2126,7 +2165,7 @@ where
                 },
                 Point::new(bounds.x, y),
                 gutter_color,
-                *viewport,
+                text_box(bounds.x, y, gutter_px, lh),
             );
 
             // Fold arrow: collapsed headers always show ▸; expanded headers
@@ -2152,7 +2191,12 @@ where
                         } else {
                             theme::dim()
                         },
-                        *viewport,
+                        text_box(
+                            bounds.x + FOLD_ARROW_COL as f32 * state.char_width,
+                            y,
+                            2.0 * state.char_width,
+                            lh,
+                        ),
                     );
                 }
             }
@@ -2186,9 +2230,59 @@ where
                         },
                         Point::new(text_x0 + text_w + 0.5 * cw, y),
                         theme::dim(),
-                        *viewport,
+                        text_box(text_x0 + text_w + 0.5 * cw, y, 2.0 * cw, lh),
                     );
                     right = right.max(text_w + ELISION_MARKER_COLS * cw);
+                }
+                // Why the build leaves the lines under it out, in a chip
+                // past the line's end ("not built for Windows").
+                if let Some(note) = self.inactive_note(i) {
+                    let size = annotation_size(self.font_size);
+                    let mut chips = state.chips.borrow_mut();
+                    // Shaped for this size and line height; a zoom shapes
+                    // them anew.
+                    let key = format!("{size}/{lh}/{note}");
+                    // A few reasons at a few sizes; zooming on and on would
+                    // keep every size it passed through.
+                    if chips.len() >= MAX_CHIPS && !chips.contains_key(&key) {
+                        chips.clear();
+                    }
+                    let label = chips.entry(key).or_insert_with(|| {
+                        Renderer::Paragraph::with_text(Text {
+                            content: note.as_str(),
+                            bounds: Size::new(CHIP_MAX_W, lh),
+                            size: size.into(),
+                            line_height: text::LineHeight::Absolute(lh.into()),
+                            font: crate::fonts::UI,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Basic,
+                            wrapping: text::Wrapping::None,
+                        })
+                    });
+                    let x = text_x0 + text_w + 1.5 * cw;
+                    let width = label.min_bounds().width + 2.0 * CHIP_PAD_X;
+                    let height = (size + 9.0).min(lh);
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x,
+                                y: y + (lh - height) / 2.0,
+                                width,
+                                height,
+                            },
+                            border: iced::border::rounded(5.0),
+                            ..renderer::Quad::default()
+                        },
+                        theme::with_alpha(theme::fg(), 0.08),
+                    );
+                    renderer.fill_paragraph(
+                        label,
+                        Point::new(x + CHIP_PAD_X, y),
+                        theme::fg_muted(),
+                        text_box(x, y, width, lh),
+                    );
+                    right = right.max(x - text_x0 + width);
                 }
                 // Collapsed cue: a dim ⋯ after the header line's end.
                 if self.is_collapsed(i) {
@@ -2208,7 +2302,7 @@ where
                         },
                         Point::new(end_x, y),
                         theme::dim(),
-                        *viewport,
+                        text_box(end_x, y, 2.0 * state.char_width, lh),
                     );
                 }
                 // The end-of-line blame annotation must stop before the
@@ -2249,7 +2343,12 @@ where
                         },
                         Point::new(end_x, y),
                         theme::with_alpha(theme::dim(), 0.9),
-                        anno_clip,
+                        // Its row, as far across as the code area goes.
+                        Rectangle {
+                            y,
+                            height: lh,
+                            ..anno_clip
+                        },
                     );
                 }
                 state.record_extent(extent_key, right);
@@ -2354,7 +2453,7 @@ where
                     },
                     Point::new(bounds.x, y),
                     theme::dim(),
-                    *viewport,
+                    text_box(bounds.x, y, gutter_px, lh),
                 );
                 if let Some(shaped) = sc.paragraphs.get(k) {
                     renderer.fill_paragraph(
@@ -2392,6 +2491,36 @@ where
                 self.draw_minimap(renderer, band, bounds, viewport, lh)
             });
         }
+    }
+}
+
+/// The room either side of the words in a chip past a line's end, and the
+/// widest its words are laid out.
+const CHIP_PAD_X: f32 = 6.0;
+const CHIP_MAX_W: f32 = 600.0;
+/// Most chip words kept shaped at once.
+const MAX_CHIPS: usize = 32;
+
+/// What tells an inactive line's reason in words, from its `cfg` predicate.
+type NoteOf<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
+
+/// The inactive lines that say why ([`CodeView::inactive_heads`]).
+struct InactiveHeads<'a> {
+    heads: &'a std::collections::BTreeMap<usize, String>,
+    note: NoteOf<'a>,
+}
+
+/// The box a text the code view draws is clipped to: its own, `width`
+/// across and a row `lh` tall from `(x, y)`. Never the whole viewport: the
+/// software renderer masks a text to its layer only when the box it is
+/// given leaves the layer, so the numbers of rows above the viewport, each
+/// given the viewport, were drawn over the header above the code.
+fn text_box(x: f32, y: f32, width: f32, lh: f32) -> Rectangle {
+    Rectangle {
+        x,
+        y,
+        width,
+        height: lh,
     }
 }
 
@@ -3796,6 +3925,8 @@ mod font_tests {
     #[derive(Default)]
     struct Recorder {
         texts: Vec<(String, iced::advanced::text::Shaping)>,
+        /// Each text's content, where it is drawn, and the box it is clipped to.
+        boxes: Vec<(String, iced::Point, iced::Rectangle)>,
     }
 
     impl iced::advanced::Renderer for Recorder {
@@ -3853,11 +3984,78 @@ mod font_tests {
         fn fill_text(
             &mut self,
             text: iced::advanced::text::Text<String, Self::Font>,
-            _: iced::Point,
+            at: iced::Point,
             _: iced::Color,
-            _: iced::Rectangle,
+            clip: iced::Rectangle,
         ) {
+            self.boxes.push((text.content.clone(), at, clip));
             self.texts.push((text.content, text.shaping));
+        }
+    }
+
+    /// Every text the code view draws itself (a line's number, a fold
+    /// arrow, the blame) is clipped to its own row. The software renderer
+    /// masks a text to its layer only when the box it is given leaves the
+    /// layer: given the whole viewport, the numbers of the rows drawn above
+    /// it showed over the header above the code.
+    #[test]
+    fn each_text_is_clipped_to_its_own_row() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        let source: String = (1..=300).map(|n| format!("let x{n} = {n};\n")).collect();
+        let lines = crate::highlight::plain_lines(&source);
+        let lh = 20.0;
+        let mut view = crate::codeview::CodeView::new(
+            &lines,
+            300,
+            13.0,
+            lh,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+        .blame(Some((125, "someone, 3 days ago".to_string())));
+        let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+        let mut tree = Tree::new(&*widget);
+        let mut renderer = Recorder::default();
+        let node = widget.layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(800.0, f32::INFINITY),
+            ),
+        );
+        // Scrolled a hundred and twenty rows down, a part-row in.
+        let viewport = iced::Rectangle::new(
+            iced::Point::new(0.0, 120.0 * lh + 7.0),
+            iced::Size::new(800.0, 400.0),
+        );
+        widget.draw(
+            &tree,
+            &mut renderer,
+            &iced::Theme::Dark,
+            &iced::advanced::renderer::Style::default(),
+            iced::advanced::Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        assert!(
+            renderer.boxes.iter().any(|(text, ..)| text.trim() == "121"),
+            "the part-shown row's number is drawn"
+        );
+        assert!(
+            renderer
+                .boxes
+                .iter()
+                .any(|(text, ..)| text.contains("someone"))
+        );
+        for (text, at, clip) in &renderer.boxes {
+            assert!(
+                clip.y == at.y && clip.height == lh,
+                "{text:?} at {at:?} is clipped to {clip:?}, not its row"
+            );
         }
     }
 

@@ -1023,6 +1023,7 @@ fn ending_an_agent_mid_turn_closes_the_turn_and_old_cards_answer_nothing() {
         .approvals
         .push(crate::app::model::Approval {
             key: ApprovalKey::Acp { id: 1 },
+            mark: None,
             title: "edit".into(),
             detail: String::new(),
             options: Vec::new(),
@@ -1384,6 +1385,7 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
     let stream = app.mint_request_id();
     let card = |id| Approval {
         key: ApprovalKey::Acp { id },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -1480,6 +1482,7 @@ fn an_ended_turn_leaves_no_card_to_answer() {
         extras: TurnExtras {
             approvals: vec![Approval {
                 key: ApprovalKey::Mcp { call: 1 },
+                mark: None,
                 title: "run it".into(),
                 detail: String::new(),
                 options: vec![ApprovalOption {

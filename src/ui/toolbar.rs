@@ -24,7 +24,7 @@ use crate::app::voice::VoicePhase;
 use crate::keymap::{Action, MenuSection};
 
 /// Height of the top bar.
-pub(crate) const TOOLBAR_H: f32 = 44.0;
+pub(crate) const TOOLBAR_H: f32 = 48.0;
 /// Whether the window buttons are macOS's (coloured, top left) rather than
 /// Clew's own (top right, with the app menu's ☰ top left).
 pub(crate) const MAC_CHROME: bool = cfg!(target_os = "macos");
@@ -43,7 +43,7 @@ pub(crate) const NAV_W: f32 = 2.0 * ICON_BTN + 2.0 + 12.0;
 /// The chat field: widest it grows, its height, and the room kept clear
 /// either side of it.
 const FIELD_MAX_W: f32 = 460.0;
-const FIELD_H: f32 = 32.0;
+const FIELD_H: f32 = 34.0;
 const FIELD_MARGIN: f32 = 16.0;
 /// Width of one of the window buttons of Windows and Linux.
 const WIN_BTN_W: f32 = 46.0;
@@ -125,11 +125,16 @@ pub(crate) fn tip_at<'a>(
     tooltip(control, bubble, side).gap(8).into()
 }
 
+/// Height of a key cap.
+const KEYCAP_H: f32 = 19.0;
+
 /// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
 pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
     Row::with_children(split_caps(&caps).into_iter().map(|key| {
         container(text(key).size(ts::CAPTION).color(theme::fg_muted()))
-            .padding([1, 5])
+            .height(Length::Fixed(KEYCAP_H))
+            .align_y(iced::Center)
+            .padding([0, 5])
             .style(theme::keycap)
             .into()
     }))
@@ -480,18 +485,14 @@ fn chat_field(app: &App) -> Element<'_, Message> {
             .into()
         } else {
             match app.voice.phase {
+                // Listening: how loud, and how to stop — the microphone itself,
+                // lit, or Esc.
                 VoicePhase::Listening { level, .. } if !covered => row![
                     text("●").size(ts::SMALL).color(theme::danger()),
                     text("Listening…").size(ts::BASE).color(theme::fg()),
-                    container(
-                        progress_bar(0.0..=1.0, level)
-                            .length(56)
-                            .girth(4)
-                            .style(theme::level_meter)
-                    )
-                    .width(56),
+                    super::askfloat::level_bars(&[5.0, 9.0, 13.0, 8.0, 11.0, 6.0], level, false),
                     space().width(Fill),
-                    small("Done", Message::Voice(VoiceMsg::Stop), true),
+                    keycap("Esc".to_string()),
                 ]
                 .spacing(8)
                 .align_y(iced::Center)
@@ -536,7 +537,7 @@ fn chat_field(app: &App) -> Element<'_, Message> {
             container(glyph::icon(
                 Glyph::Mic,
                 if listening {
-                    theme::danger()
+                    crate::theme::active().on_accent
                 } else {
                     theme::fg_muted()
                 },
@@ -547,7 +548,13 @@ fn chat_field(app: &App) -> Element<'_, Message> {
             .align_x(iced::Center)
             .align_y(iced::Center),
         )
-        .style(theme::icon_button(listening))
+        .style(move |t: &iced::Theme, status| {
+            if listening {
+                theme::round_button(true)(t, status)
+            } else {
+                theme::icon_button(false)(t, status)
+            }
+        })
         .padding(0)
         .width(Length::Fixed(26.0))
         .height(Length::Fixed(26.0))
@@ -823,17 +830,6 @@ impl ToolsRow {
         // Every variant is listed (a test enforces it); unreachable otherwise.
         TOOLS_MENU_ROWS.len()
     }
-
-    /// The rebindable command this row also has, whose chord the row shows.
-    fn action(self) -> Option<Action> {
-        Some(match self {
-            ToolsRow::ExplainAll => Action::ExplainAll,
-            ToolsRow::Walkthrough => Action::Walkthrough,
-            ToolsRow::LspServers => Action::LspServers,
-            ToolsRow::Shortcuts => Action::Shortcuts,
-            _ => return None,
-        })
-    }
 }
 
 /// Width of a menu panel.
@@ -950,14 +946,9 @@ fn menu_chord<'a>(app: &App, action: Action) -> Element<'a, Message> {
 }
 
 /// The ⋯ menu: what the strip has no room for, in [`TOOLS_MENU_ROWS`] order,
-/// opening to the left of its button.
+/// opening to the left of its button. Its rows are a glyph and a name: the
+/// keys of those that have them are in the palette and the shortcuts.
 pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
-    let chord = |r: ToolsRow| -> Element<'_, Message> {
-        match r.action() {
-            Some(action) => menu_chord(app, action),
-            None => slot(),
-        }
-    };
     let has_project = app.proj.project.is_some();
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (i, &r) in TOOLS_MENU_ROWS.iter().enumerate() {
@@ -981,14 +972,14 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 menu_item(
                     Some(Glyph::Close),
                     label,
-                    chord(r),
+                    slot(),
                     Some(Message::Explain(ExplainMsg::Cancel)),
                 )
             }
             ToolsRow::ExplainAll => menu_item(
-                Some(Glyph::Sparkle),
+                Some(Glyph::TextLines),
                 "Explain All".into(),
-                chord(r),
+                slot(),
                 Some(if app.llm_available {
                     Message::Explain(ExplainMsg::Project)
                 } else {
@@ -996,9 +987,9 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 }),
             ),
             ToolsRow::Walkthrough => menu_item(
-                Some(Glyph::Compass),
+                Some(Glyph::ListOrdered),
                 "Walkthrough".into(),
-                chord(r),
+                slot(),
                 Some(Message::Window(WindowMsg::SidebarTabPicked(
                     SidebarTab::Walk,
                 ))),
@@ -1016,7 +1007,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 Some(Message::Project(ProjectMsg::OpenFolderPressed)),
             ),
             ToolsRow::OpenRemote => menu_item(
-                Some(Glyph::Remote),
+                Some(Glyph::Servers),
                 "Open Remote…".into(),
                 slot(),
                 Some(Message::Connect(ConnectMsg::Open)),
@@ -1028,21 +1019,21 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 has_project.then_some(Message::Export(ExportMsg::Start)),
             ),
             ToolsRow::LspServers => menu_item(
-                Some(Glyph::Servers),
+                Some(Glyph::Plug),
                 "Language Servers".into(),
-                chord(r),
+                slot(),
                 Some(Message::Lsp(LspMsg::TogglePanel)),
             ),
             ToolsRow::Shortcuts => menu_item(
                 Some(Glyph::Shortcuts),
                 "Keyboard Shortcuts".into(),
-                chord(r),
+                slot(),
                 Some(Message::Window(WindowMsg::OpenShortcuts)),
             ),
             // The tour needs a project to show: without one the row stays
             // (the menu keeps its shape) but is inert.
             ToolsRow::Tutorial => menu_item(
-                Some(Glyph::Lightbulb),
+                Some(Glyph::Help),
                 "Tutorial".into(),
                 slot(),
                 has_project.then_some(Message::Tutorial(TutorialMsg::Start)),

@@ -522,20 +522,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .collect();
             convo.push(Column::with_children(chips).spacing(2).into());
         }
-        // Tool calls waiting for the user's say-so are asked above the
-        // conversation, one at a time.
-        let waiting = turn.extras.approvals.len();
-        if turn.streaming && waiting > 0 {
-            convo.push(
-                text(match waiting {
-                    1 => "A tool call is waiting for your answer, above".to_string(),
-                    n => format!("{n} tool calls are waiting for your answer, above"),
-                })
-                .size(ts::SMALL)
-                .color(theme::warn())
-                .into(),
-            );
-        }
+        // Tool calls waiting for the user's say-so are asked under the
+        // conversation, one at a time, the card in view there.
         if turn.streaming && !turn.extras.thought.trim().is_empty() {
             let thought = turn.extras.thought.trim();
             let tail: String = {
@@ -556,7 +544,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .into(),
             );
         }
-        if turn.streaming {
+        if turn.streaming && !turn.extras.approvals.is_empty() && !turn.answer.is_empty() {
+            // Paused on a question to the user: what it said so far, drawn
+            // as an answer is (`App::settle_waiting_answers`).
+            convo.extend(render_prepared(app, &turn.answer));
+        } else if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
@@ -605,17 +597,37 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .into_iter()
         .filter(|&row| row)
         .count() as f32;
+    // An approval pinned under it: as tall as it is laid out across the
+    // card, the gap over it and the count under it.
+    let approval_room = match app.first_approval() {
+        Some((_, approval)) if fit => {
+            let width = crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width);
+            let head = (height * 0.5 - 60.0).max(40.0);
+            let more = app
+                .proj
+                .ask_turns
+                .iter()
+                .filter(|t| t.streaming)
+                .map(|t| t.extras.approvals.len())
+                .sum::<usize>()
+                > 1;
+            14.0 + approval_card_height(approval, width - 32.0, head)
+                + if more { 18.0 } else { 0.0 }
+        }
+        _ => 0.0,
+    };
     let conversation = container(conversation).max_height(if fit {
-        (height - CARD_CHROME - COMPOSER_ROW_ROOM * extra_rows).max(40.0)
+        (height - CARD_CHROME - COMPOSER_ROW_ROOM * extra_rows - approval_room).max(40.0)
     } else {
         f32::INFINITY
     });
-    // The tool call waiting for the user's say-so, pinned above the
-    // conversation: drawn in it, a card moved down as its turn grew above
-    // it — a step, a plan entry, each scrolling the panel — its Allow with
-    // it, to under the pointer. Here nothing above it changes while it is
-    // asked. Its Allow is drawn enabled once it has been within reach long
-    // enough to be read (`App::may_allow`); the cards are answered in turn.
+    // The tool call waiting for the user's say-so, pinned under the
+    // conversation, over the composer: drawn in it, a card moved down as its
+    // turn grew above it — a step, a plan entry, each scrolling the panel —
+    // its Allow with it, to under the pointer. Here the conversation grows
+    // in its own scroll while it is asked, and the card stays put. Its Allow
+    // is drawn enabled once it has been within reach long enough to be read
+    // (`App::may_allow`); the cards are answered in turn.
     let pinned: Element<'_, Message> = match app.first_approval() {
         Some((turn, approval)) => {
             let asked = app.asked(crate::app::model::Question::Approval {
@@ -642,9 +654,9 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 _ => 0,
             };
             let card = approval_card(turn.stream, approval, asked, head, page);
-            // The count goes below it, out of what scrolls: one more coming
-            // moves nothing of the card.
-            let mut pinned = column![card].spacing(4);
+            // The count goes over it, out of what scrolls: the card sits on
+            // the composer, so one more coming moves nothing of it.
+            let mut pinned = Column::new().spacing(4);
             if more > 0 {
                 pinned = pinned.push(
                     text(format!("{more} more waiting after this one"))
@@ -652,9 +664,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         .color(theme::dim()),
                 );
             }
-            // Its own gap under it, the column having none.
+            let pinned = pinned.push(card);
+            // Its own gap over it, the column having none.
             container(pinned)
-                .padding(iced::Padding::default().bottom(14))
+                .padding(iced::Padding::default().top(14))
                 .into()
         }
         None => space().into(),
@@ -883,8 +896,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         // No spacing of the column's own: the header and the pinned card
         // are empty places most of the time, and would each add a gap.
         column![header]
-            .push(pinned)
             .push(conversation)
+            .push(pinned)
             .padding(16)
             .height(height),
         hairline(),
@@ -1027,13 +1040,13 @@ pub(crate) fn approval_card<'a>(
                 key: approval.key,
                 option: option.id.clone(),
             });
-            let shown = button(text(option.label.clone()).size(ts::SMALL))
+            let shown = button(text(option.label.clone()).size(ts::BODY))
                 .style(if option.allows {
                     theme::primary_button
                 } else {
-                    theme::secondary_button
+                    theme::toolbar_button
                 })
-                .padding([3, 10])
+                .padding([6, 12])
                 .on_press_maybe((ready || !option.allows).then_some(answer));
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
@@ -1042,17 +1055,32 @@ pub(crate) fn approval_card<'a>(
             }
         })
         .collect();
+    use crate::app::model::ApprovalKey;
+    // What asks: a command of the window's that costs something, a tool of
+    // an MCP server, or the ACP agent itself. A tool's detail is its
+    // arguments, set as code; the others say it in words.
+    let (glyph, code) = match approval.key {
+        ApprovalKey::Window { .. } => (Glyph::Play, false),
+        ApprovalKey::Mcp { .. } => (Glyph::Plug, true),
+        ApprovalKey::Acp { .. } => (Glyph::Ask, true),
+    };
+    let glyph = approval.mark.unwrap_or(glyph);
     let mut asks = column![
-        text(format!("⚠ {}", approval.title))
-            .size(ts::BODY)
-            .color(theme::warn())
+        text(approval.title.clone())
+            .size(ts::BASE)
+            .font(crate::fonts::UI_SEMIBOLD)
+            .color(theme::fg())
     ]
-    .spacing(6);
+    .spacing(3);
     if !approval.detail.is_empty() {
         asks = asks.push(
             text(approval.detail.clone())
-                .size(ts::SMALL)
-                .font(crate::fonts::CODE)
+                .size(ts::BODY)
+                .font(if code {
+                    crate::fonts::CODE
+                } else {
+                    crate::fonts::UI
+                })
                 .color(theme::fg_muted()),
         );
     }
@@ -1079,8 +1107,27 @@ pub(crate) fn approval_card<'a>(
                 .into(),
         );
     }
+    // A yes and a no sit beside the question; more answers than that, a
+    // row under it.
+    let beside = buttons.len() <= 2;
     let answers =
         crate::ui::fresh::fresh(page as u64, Row::with_children(buttons).spacing(6).wrap());
+    let mark = container(glyph::icon(glyph, theme::accent(), 18.0)).padding([2, 0]);
+    let body: Element<'a, Message> = if beside {
+        row![mark, container(asks).width(Fill), answers]
+            .spacing(12)
+            .align_y(iced::Center)
+            .into()
+    } else {
+        column![
+            row![mark, container(asks).width(Fill)]
+                .spacing(12)
+                .align_y(iced::Center),
+            answers
+        ]
+        .spacing(10)
+        .into()
+    };
     // Fresh for each card: one that comes up where another was answered is
     // not handed a press held on that one's buttons, nor where it was
     // scrolled to (`fresh`).
@@ -1089,18 +1136,114 @@ pub(crate) fn approval_card<'a>(
         &asked,
         crate::ui::fresh::fresh_for(
             &(stream, approval.key),
-            container(column![asks, answers].spacing(6))
-                .padding([8, 10])
+            container(body)
+                .padding(Padding {
+                    top: 12.0,
+                    right: 12.0,
+                    bottom: 12.0,
+                    left: 14.0,
+                })
                 .width(Fill)
-                .style(theme::panel),
+                .style(theme::approve_card),
         ),
     )
+}
+
+/// About how tall [`approval_card`] is laid out `width` wide, its words at
+/// most `head` tall: measured, so that a card fitted to its conversation
+/// gives the conversation over it what is left, and no more. A little over
+/// rather than under: under, the input below it would be cut off.
+fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head: f32) -> f32 {
+    use crate::app::model::ApprovalKey;
+    use crate::ui::sheet::{text_height, text_width};
+    let (shown, pages) = shown_answers(&approval.options, 0);
+    let count = shown.len() + usize::from(pages > 1);
+    let beside = count <= 2;
+    let answers: f32 = shown
+        .iter()
+        .map(|o| text_width(&o.label, ts::BODY, crate::fonts::UI) + 24.0)
+        .sum::<f32>()
+        + 6.0 * count.saturating_sub(1) as f32;
+    // Its padding, the mark and the gaps beside the words, its answers
+    // when they sit beside them.
+    let words = width - 26.0 - 18.0 - 12.0 - if beside { answers + 12.0 } else { 0.0 };
+    let code = !matches!(approval.key, ApprovalKey::Window { .. });
+    let mut asks = text_height(&approval.title, ts::BASE, crate::fonts::UI_SEMIBOLD, words);
+    if !approval.detail.is_empty() {
+        let font = if code {
+            crate::fonts::CODE
+        } else {
+            crate::fonts::UI
+        };
+        asks += 3.0 + text_height(&approval.detail, ts::BODY, font, words);
+    }
+    let asks = asks.min(head);
+    // An answer's button: its padding and a line.
+    let button = 12.0 + ts::BODY * 1.3 + 2.0;
+    let body = if beside {
+        asks.max(button)
+    } else {
+        asks + 10.0 + button
+    };
+    body + 24.0 + 4.0
 }
 
 /// One agent exploration step as a chip: a tool glyph + its one-line title.
 /// Clickable when the step touched code (jumps to the first ref).
 /// Height of one step of an agent's turn.
 const STEP_ROW_H: f32 = 28.0;
+
+/// A step's title as the reader takes it in: what was done, in words, then
+/// what it was done to, as code — `read src/lib.rs:1-50` reads "Read
+/// `src/lib.rs:1-50`", and a title in words marks its code with backticks
+/// ("Went to `on_watch_batch`"). A title of another shape is shown as it is.
+fn step_title<'a>(title: &str) -> Element<'a, Message> {
+    let word = |s: &str| {
+        text(s.to_string())
+            .size(ts::BODY)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::None)
+    };
+    let code = |s: &str| {
+        text(s.to_string())
+            .size(ts::BODY)
+            .font(crate::fonts::CODE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None)
+    };
+    // Words with their code in backticks: every other part is code.
+    if title.matches('`').count() >= 2 {
+        let parts = title
+            .split('`')
+            .enumerate()
+            .filter(|(_, part)| !part.trim().is_empty())
+            .map(|(i, part)| {
+                if i % 2 == 1 {
+                    code(part).into()
+                } else {
+                    word(part.trim()).into()
+                }
+            });
+        return Row::with_children(parts)
+            .spacing(6)
+            .align_y(iced::Center)
+            .into();
+    }
+    let verb = title.split_once(' ').filter(|(verb, rest)| {
+        !verb.is_empty() && !rest.trim().is_empty() && verb.chars().all(|c| c.is_ascii_lowercase())
+    });
+    match verb {
+        Some((verb, rest)) => {
+            let mut said = verb.to_string();
+            said[..1].make_ascii_uppercase();
+            row![word(&said), code(rest.trim())]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into()
+        }
+        None => word(title).into(),
+    }
+}
 
 fn agent_step_chip<'a>(
     step: &crate::app::model::AgentStep,
@@ -1145,11 +1288,7 @@ fn agent_step_chip<'a>(
     let mut chip = button(
         row![
             glyph::icon(mark, tint, 14.0),
-            text(step.title.clone())
-                .size(ts::BODY)
-                .color(theme::fg_muted())
-                .width(Fill)
-                .wrapping(Wrapping::None),
+            container(step_title(&step.title)).width(Fill).clip(true),
             show,
         ]
         .spacing(9)

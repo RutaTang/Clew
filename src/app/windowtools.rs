@@ -256,7 +256,7 @@ impl App {
         };
         self.push_window_step(
             stream,
-            &format!("Opened {at}"),
+            &format!("Opened `{at}`"),
             Some((rel, line.unwrap_or(1))),
         );
         self.window_tool_result(stream, call, format!("Opened {at} for the user."), false);
@@ -318,11 +318,7 @@ impl App {
                 others.join("\n")
             ));
         }
-        self.push_window_step(
-            stream,
-            &format!("Went to {name} ({rel}:{line})"),
-            Some((rel, line)),
-        );
+        self.push_window_step(stream, &format!("Went to `{name}`"), Some((rel, line)));
         self.window_tool_result(stream, call, content, false);
         self.open_file(abs, Some(line), true)
     }
@@ -351,6 +347,7 @@ impl App {
             return Task::none();
         };
         let title = command.title.clone();
+        let (mark, does) = command.cost();
         if !command.costly() {
             self.push_window_step(stream, &format!("Ran {title}"), None);
             self.window_tool_result(stream, call, format!("Ran “{title}”."), false);
@@ -376,8 +373,9 @@ impl App {
         });
         turn.extras.approvals.push(Approval {
             key: ApprovalKey::Window { call },
-            title: format!("The agent wants to run “{title}”"),
-            detail: "A command of this window that costs something to run.".into(),
+            mark: Some(mark),
+            title: format!("{title}?"),
+            detail: format!("{does} Clew asks before anything that runs code or costs money."),
             options: vec![
                 ApprovalOption {
                     id: "once".into(),
@@ -400,7 +398,7 @@ impl App {
         );
         self.status = format!("The agent wants to run “{title}” — answer it in Ask");
         self.reveal_ask();
-        self.ask_to_bottom()
+        Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()])
     }
 
     /// The user answered the card of window call `call`.

@@ -184,6 +184,30 @@ impl App {
         operation::focus(ui::ask_input_id())
     }
 
+    /// A turn waiting for the user to answer one of its approvals says
+    /// nothing more until they do: what it has said so far is drawn as a
+    /// finished answer is (code as code, links as links) rather than as the
+    /// raw text a streaming answer shows.
+    pub(crate) fn settle_waiting_answers(&mut self) -> Task<Message> {
+        let waiting: Vec<(usize, String)> = self
+            .proj
+            .ask_turns
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.streaming && !t.extras.approvals.is_empty() && !t.answer_md.trim().is_empty()
+            })
+            .map(|(i, t)| (i, t.answer_md.clone()))
+            .collect();
+        let mut tasks = Vec::new();
+        for (i, md) in waiting {
+            let (prepared, task) = self.prepare_segments(&md);
+            self.proj.ask_turns[i].answer = prepared;
+            tasks.push(task);
+        }
+        Task::batch(tasks)
+    }
+
     /// Bring the conversation on screen without taking the keyboard: a card
     /// when it was put away, as it is when already open.
     pub(crate) fn reveal_ask(&mut self) {

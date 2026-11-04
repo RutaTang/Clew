@@ -13,9 +13,11 @@ use crate::*;
 /// why the text shows uncolored, instead of leaving that to look like a file
 /// without syntax.
 pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
+    // The sheet's header names the file: the status line says something
+    // only when there is something to say about it.
     match lang_key.and_then(highlight::highlight_error) {
         Some(e) => format!("{rel} — shown without highlighting: {e}"),
-        None => rel.to_string(),
+        None => String::new(),
     }
 }
 
@@ -819,7 +821,7 @@ impl App {
         let source = Arc::new(projection);
         let lines = highlight::plain_lines(&source);
         if !refresh {
-            self.status = rel.clone();
+            self.status.clear();
         }
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.

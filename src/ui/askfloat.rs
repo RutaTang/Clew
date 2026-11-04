@@ -34,7 +34,7 @@ const FIELD_GAP: f32 = 6.0;
 pub(crate) const ASK_LARGE_MAX_W: f32 = 960.0;
 pub(crate) const ASK_LARGE_SHARE: f32 = 0.72;
 /// Width of the voice panel that hangs under the field while Ask is away.
-const VOICE_PANEL_W: f32 = 460.0;
+const VOICE_PANEL_W: f32 = 560.0;
 
 /// Where the open Ask window is drawn, in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -223,7 +223,7 @@ const TRY_SAYING: [(&str, &str); 5] = [
     ("“Hide the minimap”", "Clew runs it"),
     (
         "“Take me to where the config is parsed”",
-        "Clew finds it and goes there",
+        "Clew finds it and takes you there",
     ),
     ("“Why is this function here?”", "Clew answers"),
     ("“Start debugging”", "Clew asks you first"),
@@ -245,62 +245,122 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
             0.0,
         ),
     };
-    let mut tries = Column::new().spacing(2);
+    // A question about what is being read, when the caret is in a function.
+    let about = match app.cursor_target() {
+        Some(crate::explain::Node::Function { name, .. }) => {
+            Some(format!("“Why is {name} written this way?”"))
+        }
+        _ => None,
+    };
+    let mut tries = Column::new();
     for (say, does) in TRY_SAYING {
+        let say = match (&about, does) {
+            (Some(about), "Clew answers") => about.clone(),
+            _ => say.to_string(),
+        };
         tries = tries.push(
             row![
-                text(say).size(ts::BODY).color(theme::fg()).width(Fill),
-                container(text(does).size(ts::CAPTION).color(theme::fg_muted()))
-                    .padding([2, 7])
+                text(say).size(ts::BASE).color(theme::fg()).width(Fill),
+                container(text(does).size(ts::SMALL).color(theme::fg_muted()))
+                    .padding([2, 8])
                     .style(theme::chip),
             ]
             .spacing(10)
+            .height(Length::Fixed(TRY_ROW_H))
             .align_y(iced::Center)
-            .padding([5, 10]),
+            .padding([0, 10]),
         );
     }
     let model = app.voice.prefs.model().name;
     container(column![
         column![
-            container(
-                progress_bar(0.0..=1.0, level)
-                    .length(160)
-                    .girth(5)
-                    .style(theme::level_meter)
-            )
-            .width(160),
+            level_bars(&WAVE, level, true),
             text(title).size(ts::SUBTITLE).color(theme::fg_bright()),
-            text(hint).size(ts::SMALL).color(theme::fg_muted()),
+            text(hint).size(HINT_SIZE).color(theme::fg_muted()),
         ]
-        .spacing(9)
+        .spacing(10)
         .align_x(iced::Center)
         .width(Fill)
-        .padding([20, 16]),
+        .padding(Padding {
+            top: 24.0,
+            right: 20.0,
+            bottom: 18.0,
+            left: 20.0,
+        }),
         hairline(),
-        container(
-            column![
-                text("Try saying").size(ts::SMALL).color(theme::dim()),
-                tries,
-            ]
-            .spacing(4),
-        )
-        .padding([8, 6]),
+        container(column![
+            container(text("Try saying").size(ts::SMALL).color(theme::dim())).padding(Padding {
+                top: 8.0,
+                right: 10.0,
+                bottom: 4.0,
+                left: 10.0,
+            }),
+            tries,
+        ])
+        .padding(Padding {
+            top: 4.0,
+            right: 6.0,
+            bottom: 8.0,
+            left: 6.0,
+        }),
         hairline(),
         row![
             glyph::icon(Glyph::Lock, theme::fg_muted(), 13.0),
             text(format!(
                 "Transcribed on this computer by Whisper {model}. Nothing you say \
-                     leaves it."
+                     leaves your computer."
             ))
             .size(ts::SMALL)
             .color(theme::fg_muted()),
         ]
         .spacing(8)
         .align_y(iced::Center)
-        .padding([9, 14]),
+        .padding([10, 16]),
     ])
     .style(theme::floating_card)
     .into()
+}
+
+/// Height of a row of what can be said.
+const TRY_ROW_H: f32 = 34.0;
+/// Size of the line under the voice panel's title.
+const HINT_SIZE: f32 = 12.0;
+
+/// The heights of the voice panel's level meter, quiet at its ends.
+const WAVE: [f32; 28] = [
+    5.0, 8.0, 12.0, 9.0, 16.0, 22.0, 14.0, 26.0, 18.0, 30.0, 24.0, 16.0, 28.0, 34.0, 26.0, 20.0,
+    30.0, 22.0, 14.0, 24.0, 18.0, 12.0, 20.0, 14.0, 9.0, 12.0, 7.0, 5.0,
+];
+
+/// How loud the microphone hears, as bars in the accent: each of `heights`
+/// grown with the `level` (0–1), and, with `fade`, the ends quieter than
+/// the middle.
+pub(crate) fn level_bars<'a>(heights: &[f32], level: f32, fade: bool) -> Element<'a, Message> {
+    // The panel's meter has wide bars; the field's, thin ones.
+    let bar = if fade { 3.0 } else { 2.0 };
+    let n = heights.len().max(2) as f32;
+    let tallest = heights.iter().copied().fold(0.0_f32, f32::max);
+    let gain = 0.35 + 0.65 * level.clamp(0.0, 1.0);
+    let bars = heights.iter().enumerate().map(|(i, &h)| {
+        let alpha = if fade {
+            0.5 + 0.5 * (i as f32 / (n - 1.0) * std::f32::consts::PI).sin()
+        } else {
+            1.0
+        };
+        container(space())
+            .width(Length::Fixed(bar))
+            .height(Length::Fixed((h * gain).max(2.0)))
+            .style(move |_: &iced::Theme| container::Style {
+                background: Some(theme::with_alpha(theme::accent(), alpha).into()),
+                border: iced::border::rounded(bar / 2.0),
+                ..container::Style::default()
+            })
+            .into()
+    });
+    container(Row::with_children(bars).spacing(bar).align_y(iced::Center))
+        .height(Length::Fixed(tallest))
+        .align_y(iced::Center)
+        .into()
 }
 
 /// A small borderless control of the card's header.
@@ -322,11 +382,11 @@ fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Messag
 const ASK_HEADER_H: f32 = 44.0;
 
 /// Whether the card fits its height to its conversation, as the card under
-/// the chat field does. The large window keeps its height, and so does a
-/// card asking for a tool call's approval: that card's room is half the
-/// card's height, the input kept in view under it.
+/// the chat field does; the large window keeps its height. A tool call's
+/// approval is given up to half the card, the conversation over it what is
+/// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
-    app.ask_view == AskView::Compact && app.first_approval().is_none()
+    app.ask_view == AskView::Compact
 }
 
 /// The card: its header (what it is, what is being read, size, close),

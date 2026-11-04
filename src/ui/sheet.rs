@@ -13,12 +13,23 @@ use iced::widget::{column, row};
 
 use crate::keymap::Action;
 
-/// Room kept between the sheet and the tool strip, and under it.
-pub(crate) const SHEET_GAP: f32 = 6.0;
-/// Height of the sheet header's first row (the file's name and its tools).
-pub(crate) const SHEET_HEADER_ROW_H: f32 = 44.0;
-/// Height of the header's trail row, when there is a trail to show.
-pub(crate) const TRAIL_ROW_H: f32 = 22.0;
+/// Room kept between the sheet and the tool strip. Under it there is none:
+/// it runs down to the status bar.
+pub(crate) const SHEET_GAP: f32 = 8.0;
+/// Height of the sheet header's first row (the file's name and its tools):
+/// its controls 28 high, with 14 over them and 6 under.
+pub(crate) const SHEET_HEADER_ROW_H: f32 = 48.0;
+const HEADER_ROW_PAD: Padding = Padding {
+    top: 14.0,
+    right: 0.0,
+    bottom: 6.0,
+    left: 0.0,
+};
+/// Height of the header's trail row, when there is a trail to show: the
+/// trail 22 high, with 12 under it.
+pub(crate) const TRAIL_ROW_H: f32 = 34.0;
+/// Room under the first row when there is no trail under it.
+const NO_TRAIL_PAD: f32 = 6.0;
 /// How many stops of the reading trail the header shows, the current last.
 const TRAIL_STOPS: usize = 4;
 
@@ -29,7 +40,11 @@ pub(crate) fn sheet_header_height(app: &App) -> f32 {
     if !header_shows(app) {
         return 0.0;
     }
-    let trail = if trail_shows(app) { TRAIL_ROW_H } else { 0.0 };
+    let trail = if trail_shows(app) {
+        TRAIL_ROW_H
+    } else {
+        NO_TRAIL_PAD
+    };
     SHEET_HEADER_ROW_H + trail + 1.0
 }
 
@@ -49,6 +64,24 @@ pub(crate) fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
         wrapping: text::Wrapping::None,
     });
     paragraph.min_bounds().width
+}
+
+/// How tall `content` is set at `size` in `font`, wrapped at words to
+/// `width`.
+pub(crate) fn text_height(content: &str, size: f32, font: iced::Font, width: f32) -> f32 {
+    use iced::advanced::text::{self, paragraph::Plain};
+    let paragraph = Plain::<<iced::Renderer as text::Renderer>::Paragraph>::new(text::Text {
+        content: content.to_string(),
+        bounds: iced::Size::new(width.max(1.0), f32::INFINITY),
+        size: size.into(),
+        line_height: text::LineHeight::default(),
+        font,
+        align_x: text::Alignment::Left,
+        align_y: iced::alignment::Vertical::Top,
+        shaping: text::Shaping::default(),
+        wrapping: text::Wrapping::Word,
+    });
+    paragraph.min_bounds().height
 }
 
 /// Left edge of the sheet's content, in window coordinates.
@@ -205,7 +238,7 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
     .padding(Padding {
         top: 0.0,
         right: SHEET_GAP,
-        bottom: SHEET_GAP,
+        bottom: 0.0,
         left: 0.0,
     })
     .width(Fill)
@@ -372,11 +405,15 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         .height(Length::Fixed(SHEET_HEADER_ROW_H))
         .align_y(iced::Center)
         .clip(true)
-        .padding([0.0, HEADER_PAD_X]);
+        .padding(Padding {
+            left: HEADER_PAD_X,
+            right: HEADER_PAD_X,
+            ..HEADER_ROW_PAD
+        });
     let trail: Element<'_, Message> = if trail_shows(app) {
         trail_row(app)
     } else {
-        slot()
+        space().height(Length::Fixed(NO_TRAIL_PAD)).into()
     };
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
@@ -385,10 +422,9 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Center)
             .padding(Padding {
-                top: 0.0,
                 right: 14.0,
-                bottom: 0.0,
                 left: crate::resize::THICKNESS + 8.0,
+                ..HEADER_ROW_PAD
             })
             .into()
     } else {
@@ -409,19 +445,35 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         if i > 0 {
             line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 10.0));
         }
-        let name = match label {
-            Some(label) => label.to_string(),
-            None => loc
+        let current = i == last;
+        // Where the reader is now: the function the caret is in, when it is
+        // in one of this file's.
+        let here = match app.cursor_target() {
+            Some(crate::explain::Node::Function { file, name, .. })
+                if current && file == loc.path =>
+            {
+                Some(name)
+            }
+            _ => None,
+        };
+        let name = match (here, label) {
+            (Some(here), _) => here,
+            (None, Some(label)) => label.to_string(),
+            (None, None) => loc
                 .path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default(),
         };
-        let current = i == last;
         line = line.push(
             button(
                 text(name)
                     .size(ts::BODY)
+                    .font(if current {
+                        crate::fonts::UI_SEMIBOLD
+                    } else {
+                        crate::fonts::UI
+                    })
                     .color(if current {
                         theme::fg()
                     } else {
@@ -443,7 +495,7 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .padding(Padding {
             top: 0.0,
             right: 12.0,
-            bottom: 4.0,
+            bottom: 12.0,
             left: 14.0,
         })
         .into()
