@@ -620,7 +620,7 @@ pub(crate) const STRIP_TOP: [StripTool; 8] = [
 const STRIP_RULE_BEFORE: [usize; 3] = [2, 3, 7];
 
 /// Where the strip's body starts: under the top bar and the update banner.
-fn body_top(app: &App) -> f32 {
+pub(crate) fn body_top(app: &App) -> f32 {
     TOOLBAR_H + update_banner_height(app)
 }
 
@@ -1112,9 +1112,13 @@ pub(crate) fn view_menu_top(app: &App) -> f32 {
     body_top(app) + SHEET_HEADER_ROW_H + 2.0
 }
 
-/// Distance of the View menu from the window's right edge: under the View
-/// button, at the sheet's right end.
-pub(crate) const VIEW_MENU_RIGHT: f32 = STRIP_W + SHEET_GAP + 8.0;
+/// Distance of the View menu from the window's left edge: under the View
+/// button it opens from, kept inside the window.
+pub(crate) fn view_menu_left(app: &App) -> f32 {
+    let x = super::sheet::view_button_rect(app).map_or(0.0, |b| b.x);
+    x.min(app.window_width - STRIP_W - VIEW_MENU_W - 8.0)
+        .max(8.0)
+}
 
 /// Width of the View menu.
 pub(crate) const VIEW_MENU_W: f32 = 220.0;
@@ -1154,9 +1158,9 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
         .style(theme::modal_panel);
     modal(
         panel,
-        Placement::TopRight {
+        Placement::TopLeft {
             top: view_menu_top(app),
-            right: VIEW_MENU_RIGHT,
+            left: view_menu_left(app),
         },
         Backdrop::Clear(Message::Window(WindowMsg::ToggleViewMenu)),
     )

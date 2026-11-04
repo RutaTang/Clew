@@ -1585,12 +1585,15 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
             basis: None,
         },
     );
+    // Nothing explained under the caret: the margin says how to get a note.
+    app.proj.explain.view = None;
+    let margin_hint = |t: &str| t.contains("Move the cursor into a function");
     let mut sim = sim_of(&app);
-    let outline = text_at(&mut sim, |t| t == "In this file", 0).expect("the right panel is drawn");
-    let bottom = region_rect(&app, Anchor::RightBottom).expect("a right-panel hole");
+    let hint = text_at(&mut sim, margin_hint, 0).expect("the margin is drawn");
+    let margin = region_rect(&app, Anchor::RightTop).expect("a margin hole");
     assert!(
-        bottom.contains(outline.center()),
-        "{outline:?} outside {bottom:?}"
+        margin.contains(hint.center()),
+        "{hint:?} outside {margin:?}"
     );
     let code =
         text_at(&mut sim, |t| t.contains("Spotlight heading"), 0).expect("the document is drawn");
@@ -1602,7 +1605,7 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
         crate::resize::THICKNESS,
         "the divider is neither sidebar nor reader"
     );
-    assert_eq!(bottom.x - (main.x + main.width), crate::resize::THICKNESS);
+    assert_eq!(margin.x - (main.x + main.width), crate::resize::THICKNESS);
 
     for (why, hide) in [
         (
@@ -1617,15 +1620,15 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
     ] {
         let mut hidden = reader_app();
         hidden.show_right_panel = true;
+        hidden.proj.explain.view = None;
         hide(&mut hidden);
         let mut sim = sim_of(&hidden);
         assert!(
-            !shows(&mut sim, "In this file"),
+            !shows(&mut sim, "Move the cursor into a function"),
             "{why}: the view hides the panel"
         );
         assert!(
-            region_rect(&hidden, Anchor::RightTop).is_none()
-                && region_rect(&hidden, Anchor::RightBottom).is_none(),
+            region_rect(&hidden, Anchor::RightTop).is_none(),
             "{why}: the spotlight framed a panel that is not drawn"
         );
     }
@@ -6850,12 +6853,73 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
     );
 }
 
-/// The right panel's empty sections say why they are empty, centered under
-/// a muted icon rather than as a line of text in a corner.
+/// The margin's notes sit level with the functions they are about: a
+/// note's name is drawn on its function's first line, and moves with the
+/// code as it scrolls.
+#[test]
+fn a_margin_note_sits_level_with_its_function() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.explain.view = None;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.cache.insert(
+        crate::explain::Node::Function {
+            file: abs,
+            name: "origin".into(),
+            ordinal: 0,
+        },
+        crate::explain::Cached {
+            summary: "Makes the point at zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    // `origin` runs from the file's third line to its fifth.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    let lh = app.line_height();
+    let line_top = |app: &App| {
+        let v = app.active_viewer().unwrap();
+        super::body_top(app) + super::sheet_header_height(app) + 1.0 + v.row_of(2) as f32 * lh
+            - v.scroll_y
+    };
+    let note_y = |app: &App| {
+        let mut sim = sim_of(app);
+        assert!(
+            shows(&mut sim, "Makes the point at zero."),
+            "the note says it"
+        );
+        text_at(&mut sim, |t| t == "origin", 0)
+            .expect("the note's name")
+            .y
+    };
+    let y = note_y(&app);
+    assert!(
+        (y - line_top(&app)).abs() < lh,
+        "{y} level with {}",
+        line_top(&app)
+    );
+    // Scrolled a line, the note goes with its function.
+    app.proj.panes[0].as_mut().unwrap().scroll_y = lh;
+    let scrolled = note_y(&app);
+    assert!(
+        (scrolled - (y - lh)).abs() < 1.0,
+        "{scrolled} moved a line from {y}"
+    );
+}
+
+/// The margin, with no note to show, says why, centered under a muted icon
+/// rather than as a line of text in a corner.
 #[test]
 fn the_right_panels_empty_sections_are_centered_notes() {
     let mut app = reader_app();
     app.show_right_panel = true;
+    app.proj.explain.view = None;
     let mut sim = sim_of(&app);
     let hint = text_at(
         &mut sim,
@@ -6863,19 +6927,14 @@ fn the_right_panels_empty_sections_are_centered_notes() {
         0,
     )
     .expect("the explain hint");
-    let note =
-        text_at(&mut sim, |t| t.contains("No symbols in this file."), 0).expect("the outline note");
-    // Centered in the panel: the two notes share a center line, well in
-    // from the panel's left edge.
+    // Centered in the margin, well in from its left edge.
     let panel_left = WINDOW.width - super::STRIP_W - super::SHEET_GAP - app.right_width;
-    for r in [hint, note] {
-        let center = r.x + r.width / 2.0;
-        let panel_center = panel_left + app.right_width / 2.0;
-        assert!(
-            (center - panel_center).abs() < 12.0,
-            "{r:?} centered in the panel"
-        );
-    }
+    let center = hint.x + hint.width / 2.0;
+    let panel_center = panel_left + app.right_width / 2.0;
+    assert!(
+        (center - panel_center).abs() < 12.0,
+        "{hint:?} centered in the panel"
+    );
 }
 
 /// An empty Ask shows what to ask, not a paragraph about asking; the hint

@@ -280,8 +280,10 @@ impl App {
         self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
     }
 
+    /// The code's line height: airy, as the design sets code — 24 for the
+    /// default 13.
     pub fn line_height(&self) -> f32 {
-        self.font_size + 7.0
+        self.font_size + 11.0
     }
 
     pub fn active_viewer(&self) -> Option<&Viewer> {

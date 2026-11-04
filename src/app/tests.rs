@@ -2938,11 +2938,11 @@ fn search_flow_message_wiring() {
 fn font_size_rescales_scroll() {
     let mut app = scanned_app("font");
     open_synchronously(&mut app, "src/lib.rs", None);
-    app.proj.panes[0].as_mut().unwrap().scroll_y = 40.0; // line 2 at 20px
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 48.0; // line 2 at 24px
     let _ = app.update(Message::Editor(EditorMsg::FontSizeDelta(2.0)));
     assert_eq!(app.font_size, 15.0);
     let v = app.active_viewer().unwrap();
-    assert!((v.scroll_y - 44.0).abs() < 0.01, "{}", v.scroll_y); // 2 * 22px
+    assert!((v.scroll_y - 52.0).abs() < 0.01, "{}", v.scroll_y); // 2 * 26px
     let _ = app.update(Message::Editor(EditorMsg::FontSizeReset));
     assert_eq!(app.font_size, DEFAULT_FONT_SIZE);
 }

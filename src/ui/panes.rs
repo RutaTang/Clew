@@ -1016,83 +1016,326 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     if !right_panel_shown(app) {
         return None;
     }
-    let tab = |label: &'static str, this: crate::MarginTab| {
-        let chosen = app.margin_tab == this;
-        button(
-            text(label)
-                .size(ts::BODY)
-                .font(crate::fonts::UI_SEMIBOLD)
-                .color(if chosen {
-                    theme::fg_bright()
-                } else {
-                    theme::fg_muted()
-                }),
-        )
-        .style(theme::segment(chosen))
-        .padding([5, 10])
-        .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
-    };
-    let tabs = container(
-        row![
-            tab("Notes", crate::MarginTab::Notes),
-            tab("Calls", crate::MarginTab::Calls),
-            tab("History", crate::MarginTab::History),
-        ]
-        .spacing(2),
-    )
-    .padding(Padding {
-        top: 12.0,
-        right: 14.0,
-        bottom: 10.0,
-        left: 10.0,
-    });
     let body: Element<'_, Message> = match app.margin_tab {
-        // One cursor-following reading context, no tab-dance: the note on the
-        // function the caret is in, as a card, over the file's own symbols —
-        // "where am I" and "what's around me" together. An equal split: the
-        // note (which can stream several blocks) gets as much room as the
-        // list, rather than being squeezed into the smaller share.
-        crate::MarginTab::Notes => column![
-            container(
-                container(explain_content(app))
-                    .width(Fill)
-                    .max_height((app.window_height * 0.5).max(160.0))
-                    .style(theme::note_card),
-            )
-            .padding(Padding {
-                top: 0.0,
-                right: 12.0,
-                bottom: 6.0,
-                left: 8.0,
-            }),
-            column![
-                container(
-                    text("In this file")
-                        .size(ts::SMALL)
-                        .font(crate::fonts::UI_SEMIBOLD)
-                        .color(theme::dim())
-                )
-                .padding(Padding {
-                    top: 10.0,
-                    right: 14.0,
-                    bottom: 2.0,
-                    left: 14.0,
-                }),
-                outline_content(app)
-            ]
-            .height(Fill),
-        ]
-        .into(),
+        crate::MarginTab::Notes => margin_notes(app),
         crate::MarginTab::Calls => margin_calls(app),
         crate::MarginTab::History => margin_history(app),
     };
     Some(
-        container(column![tabs, body])
+        container(body)
             .width(Length::Fixed(app.right_width))
             .height(Fill)
             .style(theme::on_sheet)
             .into(),
     )
+}
+
+/// Height given to a note beside the code: its name and up to four lines
+/// of what it says. Every note is as tall, so each can be placed level
+/// with its function before it is drawn.
+const NOTE_H: f32 = 104.0;
+/// Height of the note raised as a card: the one on what the caret is in.
+const ACTIVE_NOTE_H: f32 = 168.0;
+/// Room kept between notes that would otherwise overlap.
+const NOTE_GAP: f32 = 8.0;
+/// How far the raised card reaches above its function's first line: its
+/// name is level with the line, as a plain note's is.
+const ACTIVE_NOTE_LIFT: f32 = 12.0;
+
+/// The margin's Notes: clew's note on each function of the open file,
+/// level with the function in the code; the note on the one the caret is
+/// in raised as a card, with its calls, its history, and a way to ask
+/// about it. Between functions, the file's own note heads the margin.
+fn margin_notes(app: &App) -> Element<'_, Message> {
+    use crate::explain::Node;
+    let Some(v) = app.active_viewer() else {
+        return slot();
+    };
+    let active = app.proj.explain.view.as_ref();
+    let ordinals = crate::outline::fn_ordinals(&v.symbols);
+    let function_node = |sym: &crate::outline::Symbol, ordinal: u32| Node::Function {
+        file: v.abs.clone(),
+        name: sym.name.clone(),
+        ordinal,
+    };
+    let Some(active) = active else {
+        // Nothing under the caret, and nothing of this file explained: say
+        // how a note comes to be.
+        let any_note = v
+            .symbols
+            .iter()
+            .zip(&ordinals)
+            .any(|(sym, &o)| app.proj.explain.cache.contains_key(&function_node(sym, o)));
+        if !any_note {
+            return compact_empty_state(
+                Glyph::Lightbulb,
+                if crate::keymap::MAC_KEYS {
+                    "Move the cursor into a function, or ⌘-click a file or folder."
+                } else {
+                    "Move the cursor into a function, or Ctrl+click a file or folder."
+                },
+            );
+        }
+        return notes_beside_code(app, v, None, ordinals);
+    };
+    // A folder, or another file, ⌘-clicked: its note, whole, at the top.
+    let elsewhere = match active {
+        Node::Function { file, .. } | Node::File(file) => *file != v.abs,
+        Node::Folder(_) => true,
+    };
+    if elsewhere {
+        return container(
+            container(explain_content(app))
+                .width(Fill)
+                .max_height((app.window_height * 0.6).max(160.0))
+                .style(theme::note_card),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 12.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .into();
+    }
+    notes_beside_code(app, v, Some(active), ordinals)
+}
+
+/// The notes of [`margin_notes`], each level with its function: `active`
+/// is what the caret is in, raised as a card.
+fn notes_beside_code<'a>(
+    app: &'a App,
+    v: &'a Viewer,
+    active: Option<&'a crate::explain::Node>,
+    ordinals: Vec<u32>,
+) -> Element<'a, Message> {
+    use crate::explain::Node;
+    iced::widget::responsive(move |size| {
+        let lh = app.line_height();
+        // The code runs down to the margin's foot; what is above it in the
+        // pane (a banner, the find bar) is the difference in height.
+        let offset = (size.height - v.viewport_h).max(0.0);
+        let y_of =
+            |line1: usize| offset + v.row_of(line1.saturating_sub(1)) as f32 * lh - v.scroll_y;
+        let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
+        if matches!(active, Some(Node::File(_))) {
+            let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
+            notes.push((
+                0.0,
+                ACTIVE_NOTE_H,
+                active_note(app, name, "file".into(), false),
+            ));
+        }
+        for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
+            if !matches!(sym.kind.as_str(), "function" | "method") {
+                continue;
+            }
+            // What the caret is in (in this file, the margin's own).
+            let is_active = matches!(
+                active,
+                Some(Node::Function { name, ordinal: o, .. })
+                    if *name == sym.name && *o == ordinal
+            );
+            let y = y_of(sym.line);
+            let (h, lift) = if is_active {
+                (ACTIVE_NOTE_H, ACTIVE_NOTE_LIFT)
+            } else {
+                (NOTE_H, 0.0)
+            };
+            // Only what is in view is looked up.
+            if y + h < 0.0 || y - lift > size.height {
+                continue;
+            }
+            let node = Node::Function {
+                file: v.abs.clone(),
+                name: sym.name.clone(),
+                ordinal,
+            };
+            let cached = app.proj.explain.cache.get(&node);
+            if !is_active && cached.is_none() {
+                continue;
+            }
+            let meta = format!("{} · line {}", short_kind(&sym.kind), sym.line);
+            let note = if is_active {
+                active_note(app, sym.name.clone(), meta, true)
+            } else {
+                let summary = cached
+                    .map(|c| crate::app::shown_summary(c).into_owned())
+                    .unwrap_or_default();
+                plain_note(sym.name.clone(), meta, summary, sym.line)
+            };
+            notes.push(((y - lift).max(0.0), h, note));
+        }
+        notes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Each note level with its function, or just under the one above
+        // when they would overlap.
+        let mut col = Column::new();
+        let mut at = 0.0_f32;
+        for (y, h, note) in notes {
+            let top = y.max(at);
+            col = col.push(space().height(Length::Fixed(top - at)));
+            col = col.push(
+                container(note)
+                    .height(Length::Fixed(h))
+                    .width(Fill)
+                    .clip(true),
+            );
+            at = top + h + NOTE_GAP;
+        }
+        container(col)
+            .width(Fill)
+            .height(Fill)
+            .clip(true)
+            .padding(Padding {
+                top: 0.0,
+                right: 12.0,
+                bottom: 0.0,
+                left: 4.0,
+            })
+            .into()
+    })
+    .into()
+}
+
+/// A note's head: the name it is about (as code, for a function) and what
+/// kind of thing that is, where.
+fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Element<'a, Message> {
+    row![
+        text(name)
+            .size(ts::BODY)
+            .font(if code {
+                crate::fonts::CODE_BOLD
+            } else {
+                crate::fonts::UI_SEMIBOLD
+            })
+            .color(if raised {
+                theme::fg_bright()
+            } else {
+                theme::fg_muted()
+            })
+            .wrapping(Wrapping::None),
+        space().width(Fill),
+        text(meta)
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// A note on a function the caret is not in: what clew says of it, a
+/// click away from the function itself.
+fn plain_note<'a>(
+    name: String,
+    meta: String,
+    summary: String,
+    line: usize,
+) -> Element<'a, Message> {
+    button(
+        column![
+            note_head(name, meta, true, false),
+            text(summary).size(ts::BASE).color(theme::fg_muted()),
+        ]
+        .spacing(6),
+    )
+    .style(theme::menu_row)
+    .width(Fill)
+    .height(Fill)
+    .padding([3, 14])
+    .on_press(Message::Editor(EditorMsg::OutlineJump(line)))
+    .into()
+}
+
+/// The note on what the caret is in, raised as a card: what clew says of
+/// it (as it streams in), and what to do next — its calls, its history,
+/// a question about it, and, for a function, the explanation block by
+/// block, or written afresh.
+fn active_note<'a>(app: &'a App, name: String, meta: String, code: bool) -> Element<'a, Message> {
+    use crate::explain::Node;
+    let action = |glyph: Glyph, label: &'static str, accent: bool, msg: Message| {
+        let tint = if accent {
+            theme::accent()
+        } else {
+            theme::fg_muted()
+        };
+        button(
+            row![
+                glyph::icon(glyph, tint, 13.0),
+                text(label)
+                    .size(ts::SMALL)
+                    .font(if accent {
+                        crate::fonts::UI_SEMIBOLD
+                    } else {
+                        crate::fonts::UI
+                    })
+                    .color(tint),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .style(theme::icon_button(false))
+        .padding([4, 7])
+        .on_press(msg)
+    };
+    let mut actions = row![
+        action(
+            Glyph::CallGraph,
+            "Calls",
+            false,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
+        ),
+        action(
+            Glyph::TimeTravel,
+            "History",
+            false,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
+        ),
+        action(
+            Glyph::Ask,
+            "Ask",
+            true,
+            Message::Ask(AskMsg::Suggested(format!(
+                "What does `{name}` in {} do, and why is it written this way?",
+                app.active_viewer().map_or("", |v| v.rel.as_str())
+            ))),
+        ),
+    ]
+    .spacing(2)
+    .align_y(iced::Center);
+    if let Some(node @ Node::Function { .. }) = app.proj.explain.view.as_ref() {
+        actions = actions.push(space().width(Fill));
+        actions = actions.push(if app.proj.explain.showing_detail {
+            action(
+                Glyph::List,
+                "Summary",
+                false,
+                Message::Explain(ExplainMsg::Show(node.clone())),
+            )
+        } else {
+            action(
+                Glyph::List,
+                "Blocks",
+                false,
+                Message::Explain(ExplainMsg::Blocks(node.clone())),
+            )
+        });
+    }
+    let said = scrollable(
+        Column::with_children(render_prepared(app, &app.proj.explain.prepared))
+            .spacing(6)
+            .width(Fill),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill);
+    container(column![note_head(name, meta, code, true), said, actions,].spacing(6))
+        .width(Fill)
+        .height(Fill)
+        .padding([12, 14])
+        .style(theme::note_card)
+        .into()
 }
 
 /// The margin's Calls: who calls the function the caret is in, and what it

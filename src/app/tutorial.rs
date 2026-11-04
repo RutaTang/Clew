@@ -63,10 +63,8 @@ pub enum Anchor {
     ViewMenu,
     /// The main reading area.
     Main,
-    /// The right panel's top half — the Explain summary.
+    /// The margin beside the code, with its notes.
     RightTop,
-    /// The right panel's bottom half — the Outline.
-    RightBottom,
 }
 
 /// One step of the tour.
@@ -197,24 +195,27 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
              arrow keys to do the same from the keyboard.",
             Anchor::ToolbarLeft,
         ),
-        // -- The right panel: Explain, then Outline (top to bottom) ---------
+        // -- The margin beside the code, then the outline --------------------
         TutStep::new(
-            "Explain the code",
-            "The top of the right panel explains the code for you. clew writes a \
-             short summary of each function, file, and folder, and keeps it current \
-             as you read. Add an AI key in Settings, then run Explain All from the \
-             ⋯ menu on the right to fill it in.",
+            "Notes beside the code",
+            "The margin beside the code holds clew's notes on it: a note on each \
+             function, level with the function, and the one you are in raised as a \
+             card, with its calls, its history, and a way to ask about it. Add an AI \
+             key in Settings, then run Explain All from the ⋯ menu on the right to \
+             fill them in.",
             Anchor::RightTop,
         ),
         TutStep::new(
             "The outline",
             &format!(
-                "Below the explanation is the outline of {file}. It lists every \
-                 function and type in the file, and the one you are reading stays \
-                 highlighted. Click any entry to jump straight to it."
+                "The Reading notes view of the sidebar opens with the outline of \
+                 {file}. It lists every function and type in the file, and the one \
+                 you are reading stays highlighted. Click any entry to jump straight \
+                 to it."
             ),
-            Anchor::RightBottom,
-        ),
+            Anchor::Sidebar,
+        )
+        .demo(tab(SidebarTab::Notes)),
         TutStep::new(
             "Reading notes",
             &format!(
@@ -555,7 +556,7 @@ impl App {
         // its own two steps are on screen (so the reader is uncluttered before
         // and after). The bottom panel is shown only for the steps that demo it.
         self.show_left_sidebar = true;
-        self.show_right_panel = matches!(anchor, Anchor::RightTop | Anchor::RightBottom);
+        self.show_right_panel = matches!(anchor, Anchor::RightTop);
         self.show_bottom = matches!(demo, Some(Message::Window(WindowMsg::ShowDebugPanel)));
         self.ask_view = if matches!(demo, Some(Message::Ask(AskMsg::Open))) {
             AskView::Compact

@@ -31,6 +31,10 @@ pub struct Divider<'a, Message> {
 pub enum Panel {
     /// Between two parts of one panel: a hairline down the middle.
     Within,
+    /// Between two parts that read as one surface (the code and the margin
+    /// beside it): nothing drawn until the pointer finds it, then the
+    /// accent line a drag would move.
+    Seamless,
     /// The panel is before it (left, or above): the strip is its margin.
     Before,
     /// The panel is after it (right, or below).
@@ -249,6 +253,8 @@ pub fn paint(
             let color = if active { colors.accent } else { colors.line };
             vec![(line(thickness / 2.0 - 0.5, 1.0), color)]
         }
+        Panel::Seamless if active => vec![(line(thickness / 2.0 - 0.5, 1.0), colors.accent)],
+        Panel::Seamless => Vec::new(),
         Panel::Before | Panel::After => {
             let mut out = vec![(bounds, colors.panel)];
             if active {

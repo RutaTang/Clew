@@ -1287,12 +1287,43 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 /// The NOTES tab: every reading note grouped by file, with progress. Each note
 /// jumps to its symbol's live line; a note whose symbol has vanished is flagged
 /// "detached" (it opens the file top) rather than pointing at the wrong code.
+/// The Reading notes view: the outline of the open file — where a symbol
+/// is marked understood or given a note — over every note in the project.
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
+    if app.active_viewer().is_none() {
+        return notes_list(app);
+    }
+    let label = |s: &'static str| {
+        container(
+            text(s)
+                .size(ts::SMALL)
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(theme::dim()),
+        )
+        .padding(Padding {
+            top: 8.0,
+            right: 14.0,
+            bottom: 2.0,
+            left: 14.0,
+        })
+    };
+    column![
+        label("In this file"),
+        container(outline_content(app)).height(Length::FillPortion(1)),
+        hairline(),
+        label("All notes"),
+        container(notes_list(app)).height(Length::FillPortion(1)),
+    ]
+    .into()
+}
+
+/// Every reading note in the project, file by file.
+fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
         return empty_state(
             Glyph::Note,
             "No reading notes yet",
-            "In the OUTLINE, click ○ to mark a symbol understood, or ✎ to add a note.",
+            "In this file's outline, click ○ to mark a symbol understood, or ✎ to add a note.",
             None,
         );
     }

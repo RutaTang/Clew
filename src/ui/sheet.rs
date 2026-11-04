@@ -19,9 +19,6 @@ pub(crate) const SHEET_GAP: f32 = 6.0;
 pub(crate) const SHEET_HEADER_ROW_H: f32 = 44.0;
 /// Height of the header's trail row, when there is a trail to show.
 pub(crate) const TRAIL_ROW_H: f32 = 22.0;
-/// Width of the header's file tools (Explain, Skim, Diff, Time Travel and
-/// View), for the tutorial's spotlight.
-pub(crate) const FILE_TOOLS_W: f32 = 420.0;
 /// How many stops of the reading trail the header shows, the current last.
 const TRAIL_STOPS: usize = 4;
 
@@ -34,6 +31,124 @@ pub(crate) fn sheet_header_height(app: &App) -> f32 {
     }
     let trail = if trail_shows(app) { TRAIL_ROW_H } else { 0.0 };
     SHEET_HEADER_ROW_H + trail + 1.0
+}
+
+/// Width of `content` set at `size` in `font`, as a text widget lays it
+/// out — so what follows a run of text can be placed exactly.
+pub(crate) fn text_width(content: &str, size: f32, font: iced::Font) -> f32 {
+    use iced::advanced::text::{self, paragraph::Plain};
+    let paragraph = Plain::<<iced::Renderer as text::Renderer>::Paragraph>::new(text::Text {
+        content: content.to_string(),
+        bounds: iced::Size::INFINITE,
+        size: size.into(),
+        line_height: text::LineHeight::default(),
+        font,
+        align_x: text::Alignment::Left,
+        align_y: iced::alignment::Vertical::Top,
+        shaping: text::Shaping::default(),
+        wrapping: text::Wrapping::None,
+    });
+    paragraph.min_bounds().width
+}
+
+/// Left edge of the sheet's content, in window coordinates.
+fn sheet_content_left(app: &App) -> f32 {
+    let sidebar = if app.show_left_sidebar {
+        app.sidebar_width + crate::resize::THICKNESS
+    } else {
+        0.0
+    };
+    sidebar + 1.0
+}
+
+/// The open file's name and folder, as the header shows them.
+fn title_parts(v: &Viewer) -> (String, String) {
+    match v.rel.rsplit_once('/') {
+        Some((folder, name)) => (
+            crate::highlight::in_order(name).into_owned(),
+            crate::highlight::in_order(folder).into_owned(),
+        ),
+        None => (
+            crate::highlight::in_order(&v.rel).into_owned(),
+            String::new(),
+        ),
+    }
+}
+
+/// Width of a labelled tool of the header ([`file_tool`]).
+fn file_tool_w(label: &str) -> f32 {
+    FILE_TOOL_PAD_X * 2.0
+        + FILE_TOOL_GLYPH
+        + FILE_TOOL_SPACING
+        + text_width(label, ts::BODY, crate::fonts::UI)
+}
+
+/// Inner padding across a header tool, its glyph's size, and the gap
+/// between glyph and label.
+const FILE_TOOL_PAD_X: f32 = 9.0;
+const FILE_TOOL_GLYPH: f32 = 14.0;
+const FILE_TOOL_SPACING: f32 = 6.0;
+/// Gaps between the header's tools, and between its title and them.
+const TOOLS_SPACING: f32 = 2.0;
+const TITLE_GAP: f32 = 12.0;
+/// The rule before the View menu: a hairline with room either side.
+const TOOLS_RULE_W: f32 = 9.0;
+/// Padding along the header's row.
+const HEADER_PAD_X: f32 = 12.0;
+
+/// Width of the header's title: the file's name, its folder, and, for a
+/// markdown file, the switch between it rendered and its source.
+fn title_w(app: &App, v: &Viewer) -> f32 {
+    let (name, folder) = title_parts(v);
+    let mut w = text_width(&name, ts::EMPHASIS, crate::fonts::UI_SEMIBOLD);
+    if !folder.is_empty() {
+        w += 8.0 + text_width(&folder, ts::BODY, crate::fonts::UI);
+    }
+    if v.md.is_some() {
+        let label = if v.show_source { "Rendered" } else { "Source" };
+        w += 8.0 + file_tool_w(label);
+    }
+    let _ = app;
+    w
+}
+
+/// Width of the View menu's button.
+fn view_button_w() -> f32 {
+    8.0 * 2.0 + 14.0 + 6.0 + text_width("View", ts::BODY, crate::fonts::UI) + 6.0 + 11.0
+}
+
+/// Where the header's file tools are drawn (Explain through View), in
+/// window coordinates — following the file's name, as the header lays
+/// them out; `None` while the header is not drawn.
+pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
+    if !header_shows(app) {
+        return None;
+    }
+    let v = app.active_viewer()?;
+    let x = sheet_content_left(app) + HEADER_PAD_X + title_w(app, v) + TITLE_GAP;
+    let tools = ["Explain", "Skim", "Diff", "Time Travel"]
+        .iter()
+        .map(|l| file_tool_w(l))
+        .sum::<f32>();
+    let width = tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING;
+    Some(iced::Rectangle {
+        x,
+        y: body_top(app) + 1.0,
+        width,
+        height: SHEET_HEADER_ROW_H,
+    })
+}
+
+/// Where the View menu's button is drawn, in window coordinates: the last
+/// of the file tools.
+pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
+    let tools = file_tools_rect(app)?;
+    let w = view_button_w();
+    Some(iced::Rectangle {
+        x: tools.x + tools.width - w,
+        width: w,
+        ..tools
+    })
 }
 
 /// Whether the header shows: a file is open, and no page covers the panes.
@@ -61,7 +176,7 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
     let right: Element<'_, Message> = match right_panel(app) {
         Some(panel) => row![
             crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v)))
-                .panel(crate::resize::Panel::Within),
+                .panel(crate::resize::Panel::Seamless),
             panel
         ]
         .into(),
@@ -109,35 +224,61 @@ fn file_tool<'a>(
     let tint = if on { theme::fg() } else { theme::fg_muted() };
     let face = button(
         row![
-            glyph::icon(glyph, tint, 14.0),
+            glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
             text(label).size(ts::BODY).color(tint),
         ]
-        .spacing(6)
+        .spacing(FILE_TOOL_SPACING)
         .align_y(iced::Center),
     )
     .style(theme::icon_button(on))
-    .padding([5, 9])
-    .on_press(msg);
+    .padding([5.0, FILE_TOOL_PAD_X]);
+    let face = face.on_press(msg);
     match shortcut {
         Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
         None => face.into(),
     }
 }
 
+/// The margin's tabs — Notes, Calls, History — in the header, over the
+/// margin they switch.
+fn margin_tabs(app: &App) -> Element<'_, Message> {
+    let tab = |label: &'static str, this: crate::MarginTab| {
+        let chosen = app.margin_tab == this;
+        button(
+            text(label)
+                .size(ts::BODY)
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(if chosen {
+                    theme::fg_bright()
+                } else {
+                    theme::fg_muted()
+                }),
+        )
+        .style(theme::segment(chosen))
+        .padding([5, 10])
+        .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
+    };
+    row![
+        tab("Notes", crate::MarginTab::Notes),
+        tab("Calls", crate::MarginTab::Calls),
+        tab("History", crate::MarginTab::History),
+    ]
+    .spacing(2)
+    .into()
+}
+
 /// The sheet's header: the open file's name and folder, the tools that act
 /// on it — Explain, Skim, Diff, Time Travel, and the View menu of reading
-/// aids — and, under them, the reading trail that led here.
+/// aids — following them, and under them the reading trail that led here;
+/// over the margin, its tabs.
 fn sheet_header(app: &App) -> Element<'_, Message> {
     let Some(v) = app.active_viewer() else {
         return slot();
     };
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
-    let (folder, name) = match v.rel.rsplit_once('/') {
-        Some((folder, name)) => (folder.to_string(), name.to_string()),
-        None => (String::new(), v.rel.clone()),
-    };
+    let (name, folder) = title_parts(v);
     let mut title = row![
-        text(crate::highlight::in_order(&name).into_owned())
+        text(name)
             .size(ts::EMPHASIS)
             .font(crate::fonts::UI_SEMIBOLD)
             .color(theme::fg_bright())
@@ -147,7 +288,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center);
     if !folder.is_empty() {
         title = title.push(
-            text(crate::highlight::in_order(&folder).into_owned())
+            text(folder)
                 .size(ts::BODY)
                 .color(theme::dim())
                 .wrapping(Wrapping::None),
@@ -179,7 +320,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
                 ..container::Style::default()
             }),
     )
-    .padding([0, 4]);
+    .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
     let view_menu = button(
         row![
             glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
@@ -224,22 +365,36 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         rule,
         view_menu,
     ]
-    .spacing(2)
+    .spacing(TOOLS_SPACING)
     .align_y(iced::Center);
-    let first = container(
-        row![title, space().width(Fill), tools]
-            .spacing(12)
-            .align_y(iced::Center),
-    )
-    .height(Length::Fixed(SHEET_HEADER_ROW_H))
-    .align_y(iced::Center)
-    .padding([0.0, 12.0]);
+    let first = container(row![title, tools].spacing(TITLE_GAP).align_y(iced::Center))
+        .width(Fill)
+        .height(Length::Fixed(SHEET_HEADER_ROW_H))
+        .align_y(iced::Center)
+        .clip(true)
+        .padding([0.0, HEADER_PAD_X]);
     let trail: Element<'_, Message> = if trail_shows(app) {
         trail_row(app)
     } else {
         slot()
     };
-    column![first, trail, hairline()].into()
+    // Over the margin, beside the divider, its tabs.
+    let tabs: Element<'_, Message> = if right_panel(app).is_some() {
+        container(margin_tabs(app))
+            .width(Length::Fixed(app.right_width + crate::resize::THICKNESS))
+            .height(Length::Fixed(SHEET_HEADER_ROW_H))
+            .align_y(iced::Center)
+            .padding(Padding {
+                top: 0.0,
+                right: 14.0,
+                bottom: 0.0,
+                left: crate::resize::THICKNESS + 8.0,
+            })
+            .into()
+    } else {
+        slot()
+    };
+    column![row![column![first, trail].width(Fill), tabs], hairline()].into()
 }
 
 /// The reading trail's last stops, oldest first, the current last: where

@@ -87,29 +87,17 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
         // column exactly (no bleed past the panel edge), so the inset outline
         // frames it evenly without catching a neighbour.
         Anchor::ToolbarMenu { first, count } => Some(tools_menu_rows_rect(app, first, count)),
-        Anchor::FileTools if sheet_header_height(app) > 0.0 => rect(
-            sheet_right - FILE_TOOLS_W,
-            top,
-            FILE_TOOLS_W,
-            SHEET_HEADER_ROW_H,
-        ),
+        Anchor::FileTools => file_tools_rect(app),
         Anchor::ViewMenu => rect(
-            ww - VIEW_MENU_RIGHT - VIEW_MENU_W,
+            view_menu_left(app),
             view_menu_top(app),
             VIEW_MENU_W,
             view_menu_height(),
         ),
         Anchor::Sidebar if sidebar > 1.0 => rect(0.0, top, sidebar, bot - top),
-        // The right panel is an equal top/bottom split: Explain over Outline.
-        Anchor::RightTop if right > 1.0 => rect(
-            sheet_right - right,
-            main_top,
-            right,
-            (main_bot - main_top) / 2.0,
-        ),
-        Anchor::RightBottom if right > 1.0 => {
-            let h = (main_bot - main_top) / 2.0;
-            rect(sheet_right - right, main_top + h, right, h)
+        // The margin: its notes, beside the code.
+        Anchor::RightTop if right > 1.0 => {
+            rect(sheet_right - right, main_top, right, main_bot - main_top)
         }
         Anchor::Main => rect(
             sidebar_edge,
@@ -322,21 +310,26 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
                 },
             )
         }
+        // Under the tools, from where they start.
         Anchor::FileTools => (
-            Horizontal::Right,
+            Horizontal::Left,
             Vertical::Top,
             Padding {
                 top: body_top + SHEET_HEADER_ROW_H + gap,
-                right: STRIP_W + SHEET_GAP + gap,
+                left: file_tools_rect(app)
+                    .map_or(gap, |r| r.x)
+                    .min(app.window_width - TUTORIAL_CARD_W - STRIP_W - gap),
                 ..Padding::ZERO
             },
         ),
+        // Beside the open menu.
         Anchor::ViewMenu => (
-            Horizontal::Right,
+            Horizontal::Left,
             Vertical::Top,
             Padding {
                 top: view_menu_top(app),
-                right: VIEW_MENU_RIGHT + VIEW_MENU_W + gap,
+                left: (view_menu_left(app) + VIEW_MENU_W + gap)
+                    .min(app.window_width - TUTORIAL_CARD_W - STRIP_W - gap),
                 ..Padding::ZERO
             },
         ),
@@ -345,15 +338,6 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Top,
             Padding {
                 top: body_top + 34.0,
-                right: STRIP_W + SHEET_GAP + app.right_width + crate::resize::THICKNESS + gap,
-                ..Padding::ZERO
-            },
-        ),
-        Anchor::RightBottom => (
-            Horizontal::Right,
-            Vertical::Bottom,
-            Padding {
-                bottom: STATUSBAR_H + 45.0,
                 right: STRIP_W + SHEET_GAP + app.right_width + crate::resize::THICKNESS + gap,
                 ..Padding::ZERO
             },
