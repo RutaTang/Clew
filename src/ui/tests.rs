@@ -7501,3 +7501,68 @@ fn a_view_off_the_strip_is_named_over_it() {
         "a view on the strip needs no title"
     );
 }
+
+/// The raised note's actions are the three the design gives it — what
+/// leans on it, when it changed, and Ask — and a function's explanation in
+/// blocks is the View menu's (and the palette's): checked while shown,
+/// inert with no function explained, and taken back to the summary there.
+#[test]
+fn blocks_are_the_view_menus_not_the_notes() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "Makes the point at zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: Some("**Block 1.** Builds the point.".into()),
+            basis: None,
+        },
+    );
+    app.proj.explain.view = Some(node);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Ask"), "the note's Ask");
+        assert!(!shows(&mut sim, "Blocks"), "no Blocks on the note");
+    }
+    // The View menu: its row, enabled.
+    app.show_view_menu = true;
+    let sent = click(sim_of(&app), "Explanation in blocks");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Explain(crate::ExplainMsg::ToggleBlocks))),
+        "{sent:?}"
+    );
+    app.show_view_menu = false;
+    // Toggled: the cached blocks, then the summary again.
+    let _ = app.update(Message::Explain(crate::ExplainMsg::ToggleBlocks));
+    assert!(app.proj.explain.showing_detail, "shown in blocks");
+    assert!(
+        app.palette_commands()
+            .iter()
+            .any(|c| c.title == "Explain: Summary"),
+        "and the palette offers the way back"
+    );
+    let _ = app.update(Message::Explain(crate::ExplainMsg::ToggleBlocks));
+    assert!(!app.proj.explain.showing_detail, "the summary again");
+    // No function explained: the row is inert.
+    app.proj.explain.view = None;
+    app.show_view_menu = true;
+    let sent = click(sim_of(&app), "Explanation in blocks");
+    assert!(
+        !sent.iter().any(|m| matches!(m, Message::Explain(_))),
+        "{sent:?}"
+    );
+}

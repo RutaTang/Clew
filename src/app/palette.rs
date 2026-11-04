@@ -546,6 +546,23 @@ impl App {
             ] {
                 add(title.into(), None, send(message));
             }
+            // The note on the function the caret is in, block by block or
+            // summed up.
+            if matches!(
+                self.proj.explain.view,
+                Some(crate::explain::Node::Function { .. })
+            ) {
+                let title = if self.proj.explain.showing_detail {
+                    "Explain: Summary"
+                } else {
+                    "Explain: In Blocks"
+                };
+                add(
+                    title.into(),
+                    None,
+                    send(Message::Explain(ExplainMsg::ToggleBlocks)),
+                );
+            }
             // Where the conversation is, and clearing it.
             let ask = match self.ask_view {
                 AskView::Margin => ("Ask: Take Out of the Margin", AskMsg::Float),

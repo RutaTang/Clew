@@ -1404,7 +1404,6 @@ fn active_note<'a>(
     meta: String,
     of: NoteOf<'a>,
 ) -> Element<'a, Message> {
-    use crate::explain::Node;
     let code = matches!(of, NoteOf::Function { .. });
     let action = |glyph: Glyph, label: String, accent: bool, msg: Message| {
         let tint = if accent {
@@ -1451,7 +1450,7 @@ fn active_note<'a>(
         Some(None) => "Uncommitted".to_string(),
         None => "History".to_string(),
     };
-    let mut actions = row![
+    let actions = row![
         action(
             Glyph::CallGraph,
             calls_label,
@@ -1476,23 +1475,6 @@ fn active_note<'a>(
     ]
     .spacing(2)
     .align_y(iced::Center);
-    if let Some(node @ Node::Function { .. }) = app.proj.explain.view.as_ref() {
-        actions = actions.push(if app.proj.explain.showing_detail {
-            action(
-                Glyph::List,
-                "Summary".into(),
-                false,
-                Message::Explain(ExplainMsg::Show(node.clone())),
-            )
-        } else {
-            action(
-                Glyph::List,
-                "Blocks".into(),
-                false,
-                Message::Explain(ExplainMsg::Blocks(node.clone())),
-            )
-        });
-    }
     let said = scrollable(
         Column::with_children(render_prepared(app, &app.proj.explain.prepared))
             .spacing(6)

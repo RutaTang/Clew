@@ -1062,14 +1062,17 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
 pub(crate) enum ViewRow {
     OutlineSummaries,
     FileSummary,
+    /// The note on the function the caret is in, block by block.
+    Blocks,
     InlayHints,
     Minimap,
 }
 
 /// The View menu's rows, top to bottom.
-pub(crate) const VIEW_MENU_ROWS: [ViewRow; 4] = [
+pub(crate) const VIEW_MENU_ROWS: [ViewRow; 5] = [
     ViewRow::OutlineSummaries,
     ViewRow::FileSummary,
+    ViewRow::Blocks,
     ViewRow::InlayHints,
     ViewRow::Minimap,
 ];
@@ -1080,6 +1083,7 @@ impl ViewRow {
         match self {
             ViewRow::OutlineSummaries => Message::Window(WindowMsg::ToggleInlineSummaries),
             ViewRow::FileSummary => Message::Window(WindowMsg::ToggleFileBanner),
+            ViewRow::Blocks => Message::Explain(ExplainMsg::ToggleBlocks),
             ViewRow::InlayHints => Message::Lsp(LspMsg::ToggleInlayHints),
             ViewRow::Minimap => Message::Window(WindowMsg::ToggleMinimap),
         }
@@ -1092,6 +1096,7 @@ pub(crate) fn closes_view_menu(message: &Message) -> bool {
         message,
         Message::Window(WindowMsg::ToggleInlineSummaries)
             | Message::Window(WindowMsg::ToggleFileBanner)
+            | Message::Explain(ExplainMsg::ToggleBlocks)
             | Message::Lsp(LspMsg::ToggleInlayHints)
             | Message::Window(WindowMsg::ToggleMinimap)
     )
@@ -1137,10 +1142,27 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     (Glyph::Note, "Outline summaries", app.show_inline_summaries)
                 }
                 ViewRow::FileSummary => (Glyph::Info, "File summary", app.show_file_banner),
+                ViewRow::Blocks => (
+                    Glyph::List,
+                    "Explanation in blocks",
+                    app.proj.explain.showing_detail,
+                ),
                 ViewRow::InlayHints => (Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints),
                 ViewRow::Minimap => (Glyph::Minimap, "Minimap", app.show_minimap),
             };
-            menu_item(Some(glyph), label.into(), check(on), Some(r.message()))
+            // Blocks are a function's: with no function explained, the row
+            // is there, inert.
+            let enabled = r != ViewRow::Blocks
+                || matches!(
+                    app.proj.explain.view,
+                    Some(crate::explain::Node::Function { .. })
+                );
+            menu_item(
+                Some(glyph),
+                label.into(),
+                check(on),
+                enabled.then(|| r.message()),
+            )
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))

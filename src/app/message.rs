@@ -899,6 +899,9 @@ pub enum ExplainMsg {
     ReexplainNode,
     /// Show (or generate on demand) a function's block-by-block walkthrough.
     Blocks(explain::Node),
+    /// The function explained now, block by block — or, so shown, its
+    /// summary again (the View menu's "Explanation in blocks").
+    ToggleBlocks,
     /// The block walkthrough for `node` finished (or failed).
     BlocksExplained {
         stamp: Stamp,
@@ -2211,6 +2214,7 @@ impl ExplainMsg {
             | ExplainMsg::RefreshAll
             | ExplainMsg::Show(..)
             | ExplainMsg::ReexplainNode
+            | ExplainMsg::ToggleBlocks
             | ExplainMsg::Blocks(..) => None,
         }
     }

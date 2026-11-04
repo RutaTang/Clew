@@ -1187,6 +1187,17 @@ impl App {
             }
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),
             ExplainMsg::Blocks(node) => self.on_explain_blocks(node),
+            ExplainMsg::ToggleBlocks => match self.proj.explain.view.clone() {
+                Some(node @ explain::Node::Function { .. }) => {
+                    if self.proj.explain.showing_detail {
+                        self.show_right_panel = true;
+                        self.show_explanation(node)
+                    } else {
+                        self.on_explain_blocks(node)
+                    }
+                }
+                _ => Task::none(),
+            },
             ExplainMsg::BlocksExplained { node, detail, .. } => {
                 self.on_blocks_explained(node, detail)
             }

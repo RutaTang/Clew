@@ -68,19 +68,31 @@ pub(crate) fn thousands(n: usize) -> String {
     out
 }
 
-/// The platform a file's branches are read for, as the reader says it: the
-/// machine's own as its system's name ("Linux"), another by its label.
+/// The platform a file's branches are read for, as the reader says it: its
+/// system's name ("Windows"), and its architecture only where that is not
+/// the system's usual one ("Windows (arm64)"). The machine's own is its
+/// system's name. A target of no known system is called by its label.
 pub(crate) fn target_name(target: &crate::inactive::Target) -> String {
-    if !target.label.starts_with("Host") {
-        return target.label.clone();
+    let system = match target.os.as_str() {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "freebsd" => "FreeBSD",
+        _ => return target.label.clone(),
+    };
+    let usual = if target.os == "macos" {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    if target.label.starts_with("Host") || target.arch == usual || target.arch.is_empty() {
+        return system.to_string();
     }
-    match target.os.as_str() {
-        "linux" => "Linux".into(),
-        "macos" => "macOS".into(),
-        "windows" => "Windows".into(),
-        "freebsd" => "FreeBSD".into(),
-        _ => target.label.clone(),
-    }
+    let arch = match target.arch.as_str() {
+        "aarch64" => "arm64",
+        arch => arch,
+    };
+    format!("{system} ({arch})")
 }
 
 /// The status bar: one quiet line along the window's foot. On the left,
@@ -379,4 +391,24 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         b = b.on_press(Message::Explain(ExplainMsg::RefreshAll));
     }
     Some(b.into())
+}
+
+#[cfg(test)]
+mod target_name_tests {
+    use super::target_name;
+    use crate::inactive::Target;
+
+    /// A target reads as its system, its architecture said only where it
+    /// is not that system's usual one; the machine's own as its system.
+    #[test]
+    fn a_target_is_named_by_its_system() {
+        let named = |label: &str| target_name(&Target::from_label(label));
+        assert_eq!(named("Windows (x86_64)"), "Windows");
+        assert_eq!(named("Windows (arm64)"), "Windows (arm64)");
+        assert_eq!(named("Linux (x86_64)"), "Linux");
+        assert_eq!(named("macOS (arm64)"), "macOS");
+        assert_eq!(named("macOS (x86_64)"), "macOS (x86_64)");
+        let host = Target::host();
+        assert!(!target_name(&host).contains('('), "{}", target_name(&host));
+    }
 }
