@@ -313,7 +313,7 @@ impl App {
         // cheap). Leaving native fullscreen also lands here, where AppKit has
         // rebuilt and re-shown the title bar.
         #[cfg(target_os = "macos")]
-        macos::configure_frameless(10.0);
+        macos::configure_frameless(macos::WINDOW_RADIUS);
         // And so does entering or leaving it by the window's own means: the
         // controls show what the window is in.
         // A window maximized by the system's own means (a double click on

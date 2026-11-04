@@ -1277,7 +1277,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // `adopt_keymap`), and the answer to macOS's terminate requests.
             #[cfg(target_os = "macos")]
             {
-                crate::macos::configure_frameless(10.0);
+                crate::macos::configure_frameless(crate::macos::WINDOW_RADIUS);
                 if let Some(app) = clew.windows.get(&id) {
                     crate::macos::menu::install_once(&app.keymap);
                 }
