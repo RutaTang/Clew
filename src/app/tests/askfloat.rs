@@ -121,11 +121,10 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
     assert!(titles.iter().any(|t| t == "View: Show Debug Panel"));
 }
 
-/// The card hangs under the chat field, and moves to the bottom of the
-/// window when the caret's line would be under it, and back when it would
-/// not.
+/// The card hangs under the chat field wherever the caret is, as the design
+/// has it; the large window is centred, wider than the card.
 #[test]
-fn the_card_moves_out_of_the_carets_way() {
+fn the_card_hangs_under_the_field() {
     let mut app = scanned_app("askfloat-dodge");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let body: String = (0..400).map(|i| format!("// line {i}\n")).collect();
@@ -136,21 +135,27 @@ fn the_card_moves_out_of_the_carets_way() {
     let v = app.active_viewer_mut().unwrap();
     v.viewport_h = 700.0;
     v.scroll_y = 0.0;
-    // Near the top of the view: under the card, which moves down.
-    v.caret = Some((2, 0));
-    assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(false));
-    // Near the bottom: clear of the card, which stays under the field.
+    let field = crate::ui::chat_field_rect(&app);
+    let card = crate::ui::ask_place(&app).unwrap();
+    // Near the top of the view, near its foot, scrolled away: the card
+    // stays where it is, under the field.
     let rows = (700.0 / lh) as usize;
-    app.active_viewer_mut().unwrap().caret = Some((rows - 2, 0));
-    assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(true));
-    // Scrolled out of view: no caret to dodge.
-    app.active_viewer_mut().unwrap().scroll_y = 300.0 * lh;
-    assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(true));
+    for (caret, scroll) in [(2, 0.0), (rows - 2, 0.0), (2, 300.0 * lh)] {
+        let v = app.active_viewer_mut().unwrap();
+        v.caret = Some((caret, 0));
+        v.scroll_y = scroll;
+        assert_eq!(crate::ui::ask_place(&app), Some(card), "caret {caret}");
+    }
+    let middle = |left: f32, width: f32| left + width / 2.0;
+    assert!(
+        (middle(card.left, card.width) - middle(field.x, field.width)).abs() < 1.0,
+        "{card:?} under {field:?}"
+    );
     // Large: centred, wider than the card.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let place = crate::ui::ask_place(&app).unwrap();
     assert!(place.width > crate::ui::ASK_CARD_W, "{place:?}");
-    assert!(!place.at_top);
+    assert!((middle(place.left, place.width) - app.window_width / 2.0).abs() < 1.0);
 }
 
 /// The tour's Ask step shows the card; the steps after it put it away.

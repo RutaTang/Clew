@@ -44,9 +44,6 @@ pub(crate) struct AskPlace {
     /// Its left edge: under the chat field for the card, centred for the
     /// large window.
     pub left: f32,
-    /// The card hangs from the top, under the chat field — rather than
-    /// sitting at the bottom, where it moved out of the caret's way.
-    pub at_top: bool,
 }
 
 /// The band of the window the floating Ask may use: under the toolbar (and
@@ -67,7 +64,8 @@ fn band(app: &App) -> (f32, f32) {
 /// conversation opens where it was asked — the card takes the field's
 /// place while it is open.
 fn card_top(app: &App) -> f32 {
-    (chat_field_rect(app).y - FIELD_GAP).max(0.0)
+    // From inside the field's 1 px border, as the design hangs it.
+    (chat_field_rect(app).y + 1.0 - FIELD_GAP).max(0.0)
 }
 
 /// The left edge of a panel `width` wide hanging under the chat field:
@@ -106,19 +104,12 @@ pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
             let width = ASK_CARD_W
                 .min(app.window_width - 2.0 * ASK_MARGIN)
                 .max(200.0);
-            let at_top = (top, top + height);
-            let at_bottom = (bottom - height, bottom);
-            // Moved to the bottom when the caret's line is under the card —
-            // unless it would be under it there too (a short window).
-            let moved = caret_line_y(app).is_some_and(|(y0, y1)| {
-                let under = |(a, b): (f32, f32)| y1 > a && y0 < b;
-                under(at_top) && !under(at_bottom)
-            });
+            // Always hanging from the chat field it opened from, as the
+            // design has it — over the code read, the caret's line too.
             Some(AskPlace {
                 width,
                 height,
                 left: under_field(app, width),
-                at_top: !moved,
             })
         }
         AskView::Expanded => {
@@ -130,28 +121,9 @@ pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
                 width,
                 height,
                 left: ((app.window_width - width) / 2.0).max(0.0),
-                at_top: false,
             })
         }
     }
-}
-
-/// Where the active pane's caret line is on screen, top and bottom, in
-/// window coordinates; `None` with no caret, or with it scrolled out of
-/// view. The code fills its pane to the pane's bottom, which sits on the
-/// band's lower edge.
-fn caret_line_y(app: &App) -> Option<(f32, f32)> {
-    let v = app.active_viewer()?;
-    let (line, _) = v.caret?;
-    let lh = app.line_height();
-    let y = v.row_of(line) as f32 * lh - v.scroll_y;
-    if y + lh < 0.0 || y > v.viewport_h {
-        return None;
-    }
-    let (_, bottom) = band(app);
-    let pane_bottom = bottom + ASK_MARGIN;
-    let pane_top = pane_bottom - v.viewport_h;
-    Some((pane_top + y, pane_top + y + lh))
 }
 
 /// The floating Ask layer of the window: its card under the chat field, or
@@ -175,8 +147,10 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
             .into();
     };
     let (top, bottom) = band(app);
+    // The border is drawn over the card's edge; what is in it starts inside.
     let card = container(opaque(ask_card(app, place)))
         .width(place.width)
+        .padding(1)
         .style(theme::floating_card);
     let card = if card_fits(app) {
         card.max_height(place.height)
@@ -211,19 +185,11 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
                 bottom: app.window_height - bottom,
                 ..Padding::ZERO
             })
-    } else if place.at_top {
+    } else {
         frame
             .align_y(iced::alignment::Vertical::Top)
             .padding(Padding {
                 top: card_top(app),
-                left: place.left,
-                ..Padding::ZERO
-            })
-    } else {
-        frame
-            .align_y(iced::alignment::Vertical::Bottom)
-            .padding(Padding {
-                bottom: app.window_height - bottom,
                 left: place.left,
                 ..Padding::ZERO
             })
@@ -260,12 +226,7 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
         ),
     };
     // A question about what is being read, when the caret is in a function.
-    let about = match app.cursor_target() {
-        Some(crate::explain::Node::Function { name, .. }) => {
-            Some(format!("“Why is {name} written this way?”"))
-        }
-        _ => None,
-    };
+    let about = question_about(app);
     let mut tries = Column::new();
     for (say, does) in TRY_SAYING {
         let say = match (&about, does) {
@@ -289,8 +250,14 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
     container(column![
         column![
             level_bars(&WAVE, level, true),
-            text(title).size(ts::SUBTITLE).color(theme::fg_bright()),
-            text(hint).size(HINT_SIZE).color(theme::fg_muted()),
+            text(title)
+                .size(ts::SUBTITLE)
+                .line_height(ts::NORMAL_LINE)
+                .color(theme::fg_bright()),
+            text(hint)
+                .size(HINT_SIZE)
+                .line_height(ts::NORMAL_LINE)
+                .color(theme::fg_muted()),
         ]
         .spacing(10)
         .align_x(iced::Center)
@@ -303,7 +270,13 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
         }),
         hairline(),
         container(column![
-            container(text("Try saying").size(ts::SMALL).color(theme::dim())).padding(Padding {
+            container(
+                text("Try saying")
+                    .size(ts::SMALL)
+                    .line_height(ts::NORMAL_LINE)
+                    .color(theme::dim()),
+            )
+            .padding(Padding {
                 top: 8.0,
                 right: 10.0,
                 bottom: 4.0,
@@ -325,6 +298,7 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
                      leaves your computer."
             ))
             .size(ts::SMALL)
+            .line_height(ts::NORMAL_LINE)
             .color(theme::fg_muted()),
         ]
         .spacing(8)
@@ -333,6 +307,72 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
     ])
     .style(theme::floating_card)
     .into()
+}
+
+/// A question about the function the caret is in, as a reader would put
+/// it: about its first edit of a string on one character —
+/// `rel.replace('\\', "/")` asks "Why does rel_string replace backslashes?"
+/// — or else why it is written as it is. `None` outside a function.
+fn question_about(app: &App) -> Option<String> {
+    let crate::explain::Node::Function { name, .. } = app.cursor_target()? else {
+        return None;
+    };
+    let v = app.active_viewer()?;
+    let line1 = v.caret?.0 + 1;
+    let edit = v
+        .symbols
+        .iter()
+        .filter(|s| s.name == name && s.line <= line1 && line1 <= s.end_line)
+        .min_by_key(|s| s.end_line.saturating_sub(s.line))
+        .and_then(|sym| {
+            v.source
+                .lines()
+                .skip(sym.line.saturating_sub(1))
+                .take(sym.end_line + 1 - sym.line)
+                .find_map(string_edit)
+        });
+    Some(match edit {
+        Some((verb, what)) => format!("“Why does {name} {verb} {what}?”"),
+        None => format!("“Why is {name} written this way?”"),
+    })
+}
+
+/// The first edit of a string on one character `line` makes, as what is
+/// done and what to: `.replace('\\', "/")` is ("replace", "backslashes").
+fn string_edit(line: &str) -> Option<(&'static str, &'static str)> {
+    const EDITS: [(&str, &str); 6] = [
+        (".replace(", "replace"),
+        (".replacen(", "replace"),
+        (".split(", "split on"),
+        (".trim_matches(", "trim"),
+        (".trim_start_matches(", "trim"),
+        (".trim_end_matches(", "trim"),
+    ];
+    EDITS.iter().find_map(|(call, verb)| {
+        let at = line.find(call)?;
+        let arg = line[at + call.len()..].split([',', ')']).next()?.trim();
+        character_name(arg).map(|what| (*verb, what))
+    })
+}
+
+/// A literal of one character — `'\\'`, `"/"` — by the name of what it is,
+/// in the plural.
+fn character_name(literal: &str) -> Option<&'static str> {
+    let unquote = |q: char| literal.strip_prefix(q).and_then(|s| s.strip_suffix(q));
+    let inner = unquote('\'').or_else(|| unquote('"'))?;
+    Some(match inner {
+        "\\\\" => "backslashes",
+        "/" => "slashes",
+        " " => "spaces",
+        "\\t" => "tabs",
+        "\\n" => "newlines",
+        "." => "dots",
+        ":" => "colons",
+        ";" => "semicolons",
+        "-" => "dashes",
+        "_" => "underscores",
+        _ => return None,
+    })
 }
 
 /// Height of a row of what can be said.
@@ -619,4 +659,31 @@ pub(crate) fn ask_margin(app: &App, height: f32) -> Element<'_, Message> {
     ]
     .height(Fill)
     .into()
+}
+
+#[cfg(test)]
+mod question_tests {
+    use super::{character_name, string_edit};
+
+    /// A string edit on one character reads as what it does and to what;
+    /// anything else is no such edit.
+    #[test]
+    fn a_string_edit_reads_as_what_it_does() {
+        assert_eq!(
+            string_edit(r#"    return rel.replace('\\', "/");"#),
+            Some(("replace", "backslashes"))
+        );
+        assert_eq!(
+            string_edit(r#"let parts = path.split("/").collect();"#),
+            Some(("split on", "slashes"))
+        );
+        assert_eq!(
+            string_edit(r#"s.trim_matches(' ')"#),
+            Some(("trim", "spaces"))
+        );
+        assert_eq!(string_edit(r#"s.replace("abc", "d")"#), None);
+        assert_eq!(string_edit("let rel = rel.to_string_lossy();"), None);
+        assert_eq!(character_name("'\\n'"), Some("newlines"));
+        assert_eq!(character_name("x"), None);
+    }
 }

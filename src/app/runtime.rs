@@ -115,6 +115,8 @@ impl App {
             show_file_banner: true,
             show_inlay_hints: true,
             show_minimap: false,
+            show_inline_blame: false,
+            show_indent_guides: false,
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -552,7 +554,9 @@ impl App {
                 Task::none()
             }
             WindowMsg::ResizeRight(x) => {
-                self.right_width = self.window_width - x;
+                // The margin reaches from the pointer to the sheet's right
+                // edge (its border inside the gap before the tool strip).
+                self.right_width = crate::ui::margin_width_at(self.window_width, x);
                 self.clamp_panel_sizes();
                 Task::none()
             }
@@ -668,6 +672,14 @@ impl App {
             }
             WindowMsg::ToggleMinimap => {
                 self.show_minimap = !self.show_minimap;
+                Task::none()
+            }
+            WindowMsg::ToggleInlineBlame => {
+                self.show_inline_blame = !self.show_inline_blame;
+                Task::none()
+            }
+            WindowMsg::ToggleIndentGuides => {
+                self.show_indent_guides = !self.show_indent_guides;
                 Task::none()
             }
         }

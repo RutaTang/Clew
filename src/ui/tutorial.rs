@@ -21,7 +21,8 @@ const CARD_GAP: f32 = 24.0;
 /// height and the chat field's place (`ui::toolbar`), the strip's slots and
 /// its menus, the update banner's height when one shows (it pushes the body
 /// down), the sheet's margins and header (`ui::sheet`), the panels the view
-/// actually shows (`right_panel_shown`) with the divider strip beside each,
+/// actually shows (`right_panel_shown`) with the divider strip beside the
+/// sidebar and the bottom panel (the margin's lies over its edge),
 /// and the status bar's height.
 pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> {
     let ww = app.window_width;
@@ -42,7 +43,8 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
     } else {
         0.0
     };
-    let right_edge = if right > 0.0 { right + divider } else { 0.0 };
+    // The margin's divider lies over its edge, taking no room of its own.
+    let right_edge = right;
     let bottom = if app.show_bottom {
         app.bottom_height + divider
     } else {
@@ -338,7 +340,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Top,
             Padding {
                 top: body_top + 34.0,
-                right: STRIP_W + SHEET_GAP + app.right_width + crate::resize::THICKNESS + gap,
+                right: STRIP_W + SHEET_GAP + app.right_width + gap,
                 ..Padding::ZERO
             },
         ),

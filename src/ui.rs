@@ -90,6 +90,10 @@ pub(crate) mod ts {
     pub(crate) const HEADING: f32 = ui_size(TextRole::Heading);
     pub(crate) const DISPLAY: f32 = ui_size(TextRole::Display);
     pub(crate) const HERO: f32 = ui_size(TextRole::Hero);
+    /// Inter's own line spacing (the design's `normal`), for text stacked
+    /// in a box its lines size: iced's default of 1.3 sets each such line
+    /// a pixel or two lower than the design.
+    pub(crate) const NORMAL_LINE: f32 = 1.21;
 }
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {

@@ -1563,8 +1563,9 @@ fn the_chrome_geometry_matches_what_is_drawn() {
 /// E2-9 / E2-12: the tutorial's spotlight frames what the view DRAWS — found
 /// on screen — and never a panel the view has hidden: the right panel is not
 /// drawn for a split, a narrow window, or no file, whatever
-/// `show_right_panel` says, and the divider strips beside the side panels
-/// belong to neither the panel nor the reader.
+/// `show_right_panel` says. The sidebar's divider strip belongs to neither
+/// it nor the reader; the margin's lies over the margin's edge, taking no
+/// room of its own, so the margin starts where the reader ends.
 #[test]
 fn the_spotlight_frames_the_regions_the_view_draws() {
     use super::region_rect;
@@ -1605,7 +1606,7 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
         crate::resize::THICKNESS,
         "the divider is neither sidebar nor reader"
     );
-    assert_eq!(margin.x - (main.x + main.width), crate::resize::THICKNESS);
+    assert_eq!(margin.x - (main.x + main.width), 0.0);
 
     for (why, hide) in [
         (
@@ -6821,7 +6822,10 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
 #[test]
 fn the_target_picker_shows_for_languages_the_platform_dims() {
     let mut app = reader_app();
-    let label = super::statusbar::target_name(&app.proj.reading_target);
+    let label = format!(
+        "Reading for {}",
+        super::statusbar::target_name(&app.proj.reading_target)
+    );
     for (lang, shown) in [
         ("rust", true),
         ("go", true),

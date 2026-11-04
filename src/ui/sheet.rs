@@ -84,6 +84,29 @@ pub(crate) fn text_height(content: &str, size: f32, font: iced::Font, width: f32
     paragraph.min_bounds().height
 }
 
+/// Right edge of the sheet's content, in window coordinates: its border is
+/// inside the gap before the tool strip.
+fn sheet_content_right(window_width: f32) -> f32 {
+    window_width - STRIP_W - SHEET_GAP - 1.0
+}
+
+/// How wide the margin is with the middle of its divider at `x` (the
+/// divider lies over the margin's edge).
+pub(crate) fn margin_width_at(window_width: f32, x: f32) -> f32 {
+    sheet_content_right(window_width) - (x - crate::resize::THICKNESS / 2.0)
+}
+
+/// Right edge of the header's file row, in window coordinates: the sheet's
+/// content, less the margin's tabs beside it.
+fn header_right(app: &App) -> f32 {
+    let tabs = if super::panes::right_panel_shown(app) {
+        app.right_width
+    } else {
+        0.0
+    };
+    sheet_content_right(app.window_width) - tabs
+}
+
 /// Left edge of the sheet's content, in window coordinates.
 fn sheet_content_left(app: &App) -> f32 {
     let sidebar = if app.show_left_sidebar {
@@ -123,11 +146,13 @@ const FILE_TOOL_GLYPH: f32 = 14.0;
 const FILE_TOOL_SPACING: f32 = 6.0;
 /// Gaps between the header's tools, and between its title and them.
 const TOOLS_SPACING: f32 = 2.0;
-const TITLE_GAP: f32 = 12.0;
+const TITLE_GAP: f32 = 10.0;
 /// The rule before the View menu: a hairline with room either side.
 const TOOLS_RULE_W: f32 = 9.0;
-/// Padding along the header's row.
-const HEADER_PAD_X: f32 = 12.0;
+/// Padding along the header's row: 20 before the title, 16 after the
+/// tools, as the design has it.
+const HEADER_PAD_X: f32 = 20.0;
+const HEADER_PAD_RIGHT: f32 = 16.0;
 
 /// Width of the header's title: the file's name, its folder, and, for a
 /// markdown file, the switch between it rendered and its source.
@@ -151,19 +176,21 @@ fn view_button_w() -> f32 {
 }
 
 /// Where the header's file tools are drawn (Explain through View), in
-/// window coordinates — following the file's name, as the header lays
-/// them out; `None` while the header is not drawn.
+/// window coordinates — at the header's right end, as the header lays them
+/// out, or just after the file's name when it is too long for that; `None`
+/// while the header is not drawn.
 pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
     if !header_shows(app) {
         return None;
     }
     let v = app.active_viewer()?;
-    let x = sheet_content_left(app) + HEADER_PAD_X + title_w(app, v) + TITLE_GAP;
+    let after_title = sheet_content_left(app) + HEADER_PAD_X + title_w(app, v) + TITLE_GAP;
     let tools = ["Explain", "Skim", "Diff", "Time Travel"]
         .iter()
         .map(|l| file_tool_w(l))
         .sum::<f32>();
     let width = tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING;
+    let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(after_title);
     Some(iced::Rectangle {
         x,
         y: body_top(app) + 1.0,
@@ -205,12 +232,14 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
-    // The reading panel: the cursor-following context, beside the code.
+    // The reading panel: the cursor-following context, beside the code. The
+    // two read as one surface, so the divider between them takes no room of
+    // its own: it lies over the margin's edge, where nothing is written.
     let right: Element<'_, Message> = match right_panel(app) {
-        Some(panel) => row![
+        Some(panel) => stack![
+            panel,
             crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v)))
                 .panel(crate::resize::Panel::Seamless),
-            panel
         ]
         .into(),
         None => slot(),
@@ -372,7 +401,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     .on_press(Message::Window(WindowMsg::ToggleViewMenu));
     let tools = row![
         file_tool(
-            Glyph::Sparkle,
+            Glyph::TextLines,
             "Explain",
             false,
             None,
@@ -404,16 +433,22 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     ]
     .spacing(TOOLS_SPACING)
     .align_y(iced::Center);
-    let first = container(row![title, tools].spacing(TITLE_GAP).align_y(iced::Center))
-        .width(Fill)
-        .height(Length::Fixed(SHEET_HEADER_ROW_H))
-        .align_y(iced::Center)
-        .clip(true)
-        .padding(Padding {
-            left: HEADER_PAD_X,
-            right: HEADER_PAD_X,
-            ..HEADER_ROW_PAD
-        });
+    // The tools at the row's right end, as the design has them: the room
+    // the title leaves goes between the two.
+    let first = container(
+        row![title, space().width(Fill), tools]
+            .spacing(TITLE_GAP / 2.0)
+            .align_y(iced::Center),
+    )
+    .width(Fill)
+    .height(Length::Fixed(SHEET_HEADER_ROW_H))
+    .align_y(iced::Center)
+    .clip(true)
+    .padding(Padding {
+        left: HEADER_PAD_X,
+        right: HEADER_PAD_RIGHT,
+        ..HEADER_ROW_PAD
+    });
     let trail: Element<'_, Message> = if trail_shows(app) {
         trail_row(app)
     } else {
@@ -422,12 +457,12 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         container(margin_tabs(app))
-            .width(Length::Fixed(app.right_width + crate::resize::THICKNESS))
+            .width(Length::Fixed(app.right_width))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
             .align_y(iced::Center)
             .padding(Padding {
-                right: 14.0,
-                left: crate::resize::THICKNESS + 8.0,
+                right: 16.0,
+                left: 12.0,
                 ..HEADER_ROW_PAD
             })
             .into()
@@ -443,11 +478,11 @@ fn trail_row(app: &App) -> Element<'_, Message> {
     let stops = app.proj.history.recent_path(TRAIL_STOPS);
     let last = stops.len().saturating_sub(1);
     let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
-        .spacing(4)
+        .spacing(6)
         .align_y(iced::Center);
     for (i, (id, loc, label)) in stops.into_iter().enumerate() {
         if i > 0 {
-            line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 10.0));
+            line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 11.0));
         }
         let current = i == last;
         // Where the reader is now: the function the caret is in, when it is
@@ -500,7 +535,23 @@ fn trail_row(app: &App) -> Element<'_, Message> {
             top: 0.0,
             right: 12.0,
             bottom: 12.0,
-            left: 14.0,
+            left: HEADER_PAD_X,
         })
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The divider over the margin's edge, held by its middle and not yet
+    /// moved, leaves the margin as wide as it was; moved, the margin follows.
+    #[test]
+    fn the_margin_follows_its_divider() {
+        let (window, margin) = (1216.0, 272.0);
+        let edge = sheet_content_right(window) - margin;
+        let middle = edge + crate::resize::THICKNESS / 2.0;
+        assert_eq!(margin_width_at(window, middle), margin);
+        assert_eq!(margin_width_at(window, middle - 30.0), margin + 30.0);
+    }
 }

@@ -35,7 +35,7 @@ pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
         SidebarTab::Semantic => Glyph::FindMeaning,
         SidebarTab::Marks => Glyph::Bookmark,
         SidebarTab::Trail => Glyph::Route,
-        SidebarTab::Calls => Glyph::CallGraph,
+        SidebarTab::Calls => Glyph::Network,
         SidebarTab::Flow => Glyph::Flow,
         SidebarTab::Imports => Glyph::ImportGraph,
         SidebarTab::Walk => Glyph::Compass,
@@ -152,7 +152,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                         text_input("Filter files", &app.file_filter)
                             .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
                             .size(ts::BODY)
-                            .padding(0)
+                            .padding(iced::padding::left(2))
                             .style(theme::bare_input),
                     ]
                     .spacing(8)
@@ -160,7 +160,9 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     .align_y(iced::Center),
                 )
                 .height(Length::Fixed(FILTER_H))
-                .padding([0, 10])
+                // The design's 10 inside its 1 px border, which here takes
+                // no room of its own.
+                .padding([0, 11])
                 .style(theme::field(!app.file_filter.is_empty())),
             )
             .padding(Padding {
@@ -725,10 +727,7 @@ fn filtered_file_rows<'a>(
 /// A tree row's icon: the chrome's own line glyph in one quiet ink, in the
 /// tree's fixed icon column.
 fn quiet_icon(glyph: Glyph, color: iced::Color) -> Element<'static, Message> {
-    container(glyph::icon(glyph, color, 14.0))
-        .width(18)
-        .align_x(iced::alignment::Horizontal::Center)
-        .into()
+    container(glyph::icon(glyph, color, 14.0)).width(14).into()
 }
 
 /// Height of a row of the file tree, and the gap between rows.

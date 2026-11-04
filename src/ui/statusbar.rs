@@ -37,6 +37,9 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
 /// out of the window and the target drop-up can sit right above it.
 pub(crate) const STATUSBAR_H: f32 = 32.0;
 
+/// Between the status bar's items.
+const STATUS_GAP: f32 = 18.0;
+
 /// One quiet item of the status bar.
 fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
     text(s).size(ts::SMALL).color(theme::fg_muted())
@@ -169,7 +172,11 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
-    let mut bar = row![conn_indicator, said].spacing(14).align_y(iced::Center);
+    // The design's gap after where the code is read from, less the padding
+    // of the button that says it.
+    let mut bar = row![conn_indicator, said]
+        .spacing(STATUS_GAP - 8.0)
+        .align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
     // pass is slow, so show how far along it is (the status text alone is easy
     // to miss / read as stuck). It is the one place the pass's progress shows:
@@ -325,10 +332,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     {
         let picker = button(
             row![
-                text("Reading for").size(ts::SMALL).color(theme::fg_muted()),
-                text(target_name(&app.proj.reading_target))
-                    .size(ts::SMALL)
-                    .color(theme::fg()),
+                text(format!(
+                    "Reading for {}",
+                    target_name(&app.proj.reading_target)
+                ))
+                .size(ts::SMALL)
+                .color(theme::fg()),
                 glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
             ]
             .spacing(5)
@@ -340,11 +349,13 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         bar = bar.push(picker);
     }
 
-    container(bar.spacing(16).padding(Padding {
+    // The design's 20 px in from the left and 14 from the right, less the
+    // padding of the buttons at either end.
+    container(bar.spacing(STATUS_GAP).padding(Padding {
         top: 0.0,
-        right: STRIP_W - 4.0,
+        right: 8.0,
         bottom: 0.0,
-        left: 10.0,
+        left: 12.0,
     }))
     .width(Fill)
     .height(Length::Fixed(STATUSBAR_H))

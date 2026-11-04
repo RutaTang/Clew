@@ -274,7 +274,7 @@ pub(crate) fn time_travel_code<'a>(
         hv.max_cols,
         app.font_size,
         lh,
-        theme::fg(),
+        theme::code_fg(),
         |(line, col)| Message::TimeTravel(TimeTravelMsg::SelectStart { line, col }),
         |(line, col)| Message::TimeTravel(TimeTravelMsg::SelectDrag { line, col }),
         |_, _| Message::Noop,
@@ -285,7 +285,7 @@ pub(crate) fn time_travel_code<'a>(
     .selection(hv.selection_ordered())
     .sticky(sticky)
     .folds(hv.visible_rows(), &hv.fold_header_set, &hv.collapsed)
-    .indent_guides(true)
+    .indent_guides(app.show_indent_guides)
     .git_gutter(hv.git.as_deref());
     // The live pane's scroll id, so the scroll operations aimed at the active
     // pane reach this view too. An id does not carry widget state across the
@@ -873,7 +873,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         v.max_cols,
         app.font_size,
         app.line_height(),
-        theme::fg(),
+        theme::code_fg(),
         move |(line, col)| Message::Editor(EditorMsg::SelectStart { pane, line, col }),
         move |(line, col)| Message::Editor(EditorMsg::SelectDrag { pane, line, col }),
         move |(line, col), at| {
@@ -890,6 +890,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .lines_generation(v.lines_generation())
     .selection(v.selection_ordered())
     .cursor(cursor)
+    .reading_line(
+        (pane == app.proj.active)
+            .then_some(v.caret)
+            .flatten()
+            .map(|(line, _)| line),
+    )
     .highlights(app.code_highlights(pane, v))
     .sticky(app.sticky_headers(v))
     .bookmarks(marked)
@@ -928,13 +934,15 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             line,
         })
     })
-    .indent_guides(true)
+    .indent_guides(app.show_indent_guides)
     .git_gutter(v.git.as_deref())
-    .blame(if pane == app.proj.active && app.code_focused {
-        app.blame_annotation(v)
-    } else {
-        None
-    })
+    .blame(
+        if pane == app.proj.active && app.code_focused && app.show_inline_blame {
+            app.blame_annotation(v)
+        } else {
+            None
+        },
+    )
     .on_hover(move |(line, col), at| {
         Message::Hover(HoverMsg::Requested {
             pane,
@@ -958,8 +966,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         code = code.find_matches(&app.proj.find.matches, app.proj.find.current);
     }
 
+    // Scrolling runs on past the last line until it is the first in view, so
+    // a file's end reads as any other part of it: under the line read, with
+    // room after it, as the design shows the end of `lib.rs`.
+    let overscroll = (v.viewport_h - app.line_height()).max(0.0);
     let scroller = reader_scroll(
-        scrollable(code)
+        scrollable(column![code, space().height(overscroll)])
             .id(code_scroll_id(pane))
             .on_scroll(move |viewport| Message::Editor(EditorMsg::Scrolled(pane, viewport)))
             .direction(both_scroll())
@@ -983,8 +995,17 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     } else {
         None
     };
-    column![banner.unwrap_or_else(slot), scroller].into()
+    // The design's breath between the sheet's header and the first line.
+    column![
+        banner.unwrap_or_else(slot),
+        space().height(CODE_TOP_PAD),
+        scroller
+    ]
+    .into()
 }
+
+/// Room above the code's first line.
+const CODE_TOP_PAD: f32 = 6.0;
 
 /// A one-line file summary pinned at the top of the code view.
 pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
@@ -1061,12 +1082,12 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
 /// with its function before it is drawn.
 const NOTE_H: f32 = 104.0;
 /// Height of the note raised as a card: the one on what the caret is in.
-const ACTIVE_NOTE_H: f32 = 190.0;
+const ACTIVE_NOTE_H: f32 = 193.0;
 /// Room kept between notes that would otherwise overlap.
 const NOTE_GAP: f32 = 8.0;
 /// How far the raised card reaches above its function's first line: its
 /// name is level with the line, as a plain note's is.
-const ACTIVE_NOTE_LIFT: f32 = 12.0;
+const ACTIVE_NOTE_LIFT: f32 = 9.0;
 
 /// The margin's Notes: clew's note on each function of the open file,
 /// level with the function in the code; the note on the one the caret is
@@ -1200,18 +1221,21 @@ fn notes_beside_code<'a>(
         notes.sort_by(|a, b| a.0.total_cmp(&b.0));
         // Each note level with its function, or just under the one above
         // when they would overlap.
+        // `end` is how far down the column has laid out; `floor` the highest
+        // the next note may start, a gap under the one before.
         let mut col = Column::new();
-        let mut at = 0.0_f32;
+        let (mut end, mut floor) = (0.0_f32, 0.0_f32);
         for (y, h, note) in notes {
-            let top = y.max(at);
-            col = col.push(space().height(Length::Fixed(top - at)));
+            let top = y.max(floor);
+            col = col.push(space().height(Length::Fixed(top - end)));
             col = col.push(
                 container(note)
                     .height(Length::Fixed(h))
                     .width(Fill)
                     .clip(true),
             );
-            at = top + h + NOTE_GAP;
+            end = top + h;
+            floor = end + NOTE_GAP;
         }
         container(col)
             .width(Fill)
@@ -1233,7 +1257,7 @@ fn notes_beside_code<'a>(
 fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Element<'a, Message> {
     row![
         text(name)
-            .size(ts::BODY)
+            .size(NOTE_NAME_SIZE)
             .font(if code {
                 crate::fonts::CODE_BOLD
             } else {
@@ -1256,6 +1280,9 @@ fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Elemen
     .into()
 }
 
+/// A note's name, over what is said of it.
+const NOTE_NAME_SIZE: f32 = 12.0;
+
 /// A note on a function the caret is not in: what clew says of it, a
 /// click away from the function itself.
 fn plain_note<'a>(
@@ -1267,7 +1294,10 @@ fn plain_note<'a>(
     button(
         column![
             note_head(name, meta, true, false),
-            text(summary).size(ts::BASE).color(theme::fg_muted()),
+            text(summary)
+                .size(super::explain_view::NOTE_SIZE)
+                .line_height(super::explain_view::NOTE_LINE_HEIGHT)
+                .color(theme::fg_muted()),
         ]
         .spacing(6),
     )
@@ -1411,11 +1441,13 @@ fn active_note<'a>(
         } else {
             theme::fg_muted()
         };
+        // A button lays its content out at its top: the row is given the
+        // button's height to sit in the middle of.
         button(
             row![
                 glyph::icon(glyph, tint, 13.0),
                 text(label)
-                    .size(ts::SMALL)
+                    .size(NOTE_ACTION_SIZE)
                     .font(if accent {
                         crate::fonts::UI_SEMIBOLD
                     } else {
@@ -1424,10 +1456,12 @@ fn active_note<'a>(
                     .color(tint),
             ]
             .spacing(6)
+            .height(Fill)
             .align_y(iced::Center),
         )
         .style(theme::icon_button(false))
-        .padding([4, 7])
+        .height(NOTE_ACTION_H)
+        .padding([0.0, NOTE_ACTION_PAD_X])
         .on_press(msg)
     };
     // How much of the project leans on it, and when it last changed — each
@@ -1452,19 +1486,19 @@ fn active_note<'a>(
     };
     let actions = row![
         action(
-            Glyph::CallGraph,
+            Glyph::Network,
             calls_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
         ),
         action(
-            Glyph::TimeTravel,
+            Glyph::Clock,
             history_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
         ),
         action(
-            Glyph::Ask,
+            Glyph::Message,
             "Ask".into(),
             true,
             Message::Ask(AskMsg::Suggested(format!(
@@ -1476,23 +1510,47 @@ fn active_note<'a>(
     .spacing(2)
     .align_y(iced::Center);
     let said = scrollable(
-        Column::with_children(render_prepared(app, &app.proj.explain.prepared))
-            .spacing(6)
-            .width(Fill),
+        Column::with_children(super::explain_view::render_note(
+            app,
+            &app.proj.explain.prepared,
+        ))
+        .spacing(6)
+        .width(Fill),
     )
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill);
     // The actions run on to a second line when the card is too narrow for
-    // them on one.
+    // them on one. Their icons line up with the text above: the buttons
+    // reach out into the card's padding by their own.
     let actions = actions.wrap().vertical_spacing(2);
-    container(column![note_head(name, meta, code, true), said, actions,].spacing(6))
-        .width(Fill)
-        .height(Fill)
-        .padding([12, 14])
-        .style(theme::note_card)
-        .into()
+    let inset = iced::padding::left(NOTE_ACTION_PAD_X);
+    container(
+        column![
+            container(column![note_head(name, meta, code, true), said].spacing(6))
+                .padding(inset)
+                .height(Fill),
+            actions,
+        ]
+        .spacing(10),
+    )
+    .width(Fill)
+    .height(Fill)
+    .padding(Padding {
+        top: 12.0,
+        right: 14.0,
+        bottom: 12.0,
+        left: 14.0 - NOTE_ACTION_PAD_X,
+    })
+    .style(theme::note_card)
+    .into()
 }
+
+/// A raised note's actions: their text size, height, and the padding either
+/// side of what they say.
+const NOTE_ACTION_SIZE: f32 = 12.0;
+const NOTE_ACTION_H: f32 = 26.0;
+const NOTE_ACTION_PAD_X: f32 = 7.0;
 
 /// The margin's Calls: who calls the function the caret is in, and what it
 /// calls — each a jump — or what to do to see them.

@@ -35,20 +35,23 @@ const ICON: f32 = 16.0;
 pub(crate) const ICON_BTN: f32 = 30.0;
 /// The top bar's inset from the window's left edge, before the window
 /// buttons (macOS) or the app menu's ☰.
-const BAR_PAD_L: f32 = if MAC_CHROME { 16.0 } else { 8.0 };
+const BAR_PAD_L: f32 = if MAC_CHROME { 16.0 } else { 10.0 };
 /// Width of macOS's three window buttons and the gaps between them.
 const TRAFFIC_W: f32 = 3.0 * 12.0 + 2.0 * 8.0;
-/// Width of back / forward, with their gap and the room after them.
-pub(crate) const NAV_W: f32 = 2.0 * ICON_BTN + 2.0 + 12.0;
+/// Width of back / forward: the room before them, and their gap.
+pub(crate) const NAV_W: f32 = NAV_PAD_L + 2.0 * ICON_BTN + 2.0;
+const NAV_PAD_L: f32 = 4.0;
 /// The chat field: widest it grows, its height, and the room kept clear
 /// either side of it.
 const FIELD_MAX_W: f32 = 460.0;
 const FIELD_H: f32 = 34.0;
-const FIELD_MARGIN: f32 = 16.0;
+const FIELD_MARGIN: f32 = 14.0;
 /// Width of one of the window buttons of Windows and Linux.
 const WIN_BTN_W: f32 = 46.0;
-/// The top bar's inset from the right edge, after its last control (macOS).
-const BAR_PAD_R: f32 = 10.0;
+/// The slot the panel toggle is centred in at the top bar's right (macOS).
+const TOGGLE_SLOT_W: f32 = 44.0;
+/// Room before the window buttons (Windows and Linux).
+const WIN_BTNS_GAP: f32 = 14.0;
 
 /// Width of the top bar's left cluster: over the sidebar, when it shows, so
 /// the sidebar toggle sits at the sidebar's edge; else just its controls.
@@ -69,9 +72,9 @@ pub(crate) fn left_cluster_w(app: &App) -> f32 {
 /// window buttons (Windows and Linux).
 fn right_cluster_w() -> f32 {
     if MAC_CHROME {
-        ICON_BTN + BAR_PAD_R
+        TOGGLE_SLOT_W
     } else {
-        3.0 * WIN_BTN_W
+        WIN_BTNS_GAP + 3.0 * WIN_BTN_W
     }
 }
 
@@ -254,7 +257,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         row![
             chrome_tip(
                 nav(
-                    Glyph::ArrowLeft,
+                    Glyph::ChevronLeft,
                     app.proj.history.can_back(),
                     Message::Reading(ReadingMsg::GoBack)
                 ),
@@ -263,7 +266,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             ),
             chrome_tip(
                 nav(
-                    Glyph::ArrowRight,
+                    Glyph::ChevronRight,
                     app.proj.history.can_forward(),
                     Message::Reading(ReadingMsg::GoForward)
                 ),
@@ -274,6 +277,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         .spacing(2)
         .align_y(iced::Center),
     )
+    .padding(iced::padding::left(NAV_PAD_L))
     .width(Length::Fixed(NAV_W));
 
     let field = container(chat_field(app))
@@ -297,13 +301,13 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             "Toggle panel",
             None,
         ))
-        .padding(Padding {
-            right: BAR_PAD_R,
-            ..Padding::ZERO
-        })
+        .width(Length::Fixed(TOGGLE_SLOT_W))
+        .align_x(iced::Center)
         .into()
     } else {
-        window_buttons(app)
+        container(window_buttons(app))
+            .padding(iced::padding::left(WIN_BTNS_GAP))
+            .into()
     };
 
     // A fixed bar height, its content centred. The whole bar is the window's
@@ -512,7 +516,7 @@ fn chat_field(app: &App) -> Element<'_, Message> {
                     let chord = app.keymap.chord(Action::ToggleAsk).caps();
                     button(
                         row![
-                            glyph::icon(Glyph::Ask, theme::accent(), 15.0),
+                            glyph::icon(Glyph::Message, theme::accent(), 15.0),
                             text("Ask a question, or say what to do")
                                 .size(ts::BASE)
                                 .color(theme::dim())
@@ -681,7 +685,7 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
                 Message::Debug(DebugMsg::Start),
             ),
             StripTool::CallGraph => (
-                Glyph::CallGraph,
+                Glyph::Network,
                 "Call Graph",
                 caps(Action::CallGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
@@ -841,11 +845,11 @@ const MENU_ROW_H: f32 = 32.0;
 /// Height of a heading over a group of menu rows.
 const MENU_HEADING_H: f32 = 24.0;
 /// Gap between menu rows.
-const MENU_ROW_SPACING: f32 = 1.0;
+const MENU_ROW_SPACING: f32 = 0.0;
 /// Height of a separator between groups of rows.
-const MENU_SEP_H: f32 = 9.0;
+const MENU_SEP_H: f32 = 11.0;
 /// Gap between the strip and a menu it opened.
-const STRIP_MENU_GAP: f32 = 6.0;
+const STRIP_MENU_GAP: f32 = 3.0;
 
 /// Distance of the ⋯ menu panel from the window's top edge: level with the
 /// ⋯ button it opens from.
@@ -893,9 +897,7 @@ fn menu_item<'a>(
     };
     let mut b = button(
         row![
-            container(gutter)
-                .width(20)
-                .align_x(iced::alignment::Horizontal::Center),
+            container(gutter).width(15),
             text(label).size(ts::BASE),
             space().width(Fill),
             trailing,
@@ -933,7 +935,7 @@ fn menu_separator<'a>() -> Element<'a, Message> {
     container(hairline())
         .height(Length::Fixed(MENU_SEP_H))
         .align_y(iced::Center)
-        .padding([0, 6])
+        .padding([0, 4])
         .into()
 }
 
@@ -1001,7 +1003,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
             ),
             ToolsRow::OpenFolder => menu_item(
-                Some(Glyph::Folder),
+                Some(Glyph::FolderOpen),
                 "Open Folder…".into(),
                 slot(),
                 Some(Message::Project(ProjectMsg::OpenFolderPressed)),
@@ -1065,15 +1067,19 @@ pub(crate) enum ViewRow {
     /// The note on the function the caret is in, block by block.
     Blocks,
     InlayHints,
+    InlineBlame,
+    IndentGuides,
     Minimap,
 }
 
 /// The View menu's rows, top to bottom.
-pub(crate) const VIEW_MENU_ROWS: [ViewRow; 5] = [
+pub(crate) const VIEW_MENU_ROWS: [ViewRow; 7] = [
     ViewRow::OutlineSummaries,
     ViewRow::FileSummary,
     ViewRow::Blocks,
     ViewRow::InlayHints,
+    ViewRow::InlineBlame,
+    ViewRow::IndentGuides,
     ViewRow::Minimap,
 ];
 
@@ -1085,6 +1091,8 @@ impl ViewRow {
             ViewRow::FileSummary => Message::Window(WindowMsg::ToggleFileBanner),
             ViewRow::Blocks => Message::Explain(ExplainMsg::ToggleBlocks),
             ViewRow::InlayHints => Message::Lsp(LspMsg::ToggleInlayHints),
+            ViewRow::InlineBlame => Message::Window(WindowMsg::ToggleInlineBlame),
+            ViewRow::IndentGuides => Message::Window(WindowMsg::ToggleIndentGuides),
             ViewRow::Minimap => Message::Window(WindowMsg::ToggleMinimap),
         }
     }
@@ -1098,6 +1106,8 @@ pub(crate) fn closes_view_menu(message: &Message) -> bool {
             | Message::Window(WindowMsg::ToggleFileBanner)
             | Message::Explain(ExplainMsg::ToggleBlocks)
             | Message::Lsp(LspMsg::ToggleInlayHints)
+            | Message::Window(WindowMsg::ToggleInlineBlame)
+            | Message::Window(WindowMsg::ToggleIndentGuides)
             | Message::Window(WindowMsg::ToggleMinimap)
     )
 }
@@ -1148,6 +1158,10 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     app.proj.explain.showing_detail,
                 ),
                 ViewRow::InlayHints => (Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints),
+                ViewRow::InlineBlame => (Glyph::TimeTravel, "Inline blame", app.show_inline_blame),
+                ViewRow::IndentGuides => {
+                    (Glyph::TextLines, "Indent guides", app.show_indent_guides)
+                }
                 ViewRow::Minimap => (Glyph::Minimap, "Minimap", app.show_minimap),
             };
             // Blocks are a function's: with no function explained, the row

@@ -14,10 +14,127 @@ pub(crate) fn render_prepared<'a>(
     app: &'a App,
     segments: &'a [crate::PreparedSeg],
 ) -> Vec<Element<'a, Message>> {
+    render_segments(app, segments, None)
+}
+
+/// [`render_prepared`] in a margin note's type: the design's 13 px, its
+/// lines set 1.55 apart.
+pub(crate) fn render_note<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+) -> Vec<Element<'a, Message>> {
+    render_segments(
+        app,
+        segments,
+        Some(Prose {
+            size: NOTE_SIZE,
+            line_height: NOTE_LINE_HEIGHT,
+        }),
+    )
+}
+
+/// [`render_prepared`] in an answer's type: the design's 13.5 px, its lines
+/// set 1.6 apart.
+pub(crate) fn render_answer<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+) -> Vec<Element<'a, Message>> {
+    render_segments(
+        app,
+        segments,
+        Some(Prose {
+            size: theme::PROSE_SIZE,
+            line_height: 1.6,
+        }),
+    )
+}
+
+/// A margin note's text size.
+pub(crate) const NOTE_SIZE: f32 = 13.0;
+/// A margin note's line height, relative to its size.
+pub(crate) const NOTE_LINE_HEIGHT: f32 = 1.55;
+/// Code inside prose, as the design sets it: a size of its own, under the
+/// words around it.
+const PROSE_CODE_SIZE: f32 = 12.0;
+
+/// Room either side of code in prose, inside its chip: the design's 5 px,
+/// as an en space (half the size it is set at).
+const PROSE_CODE_ROOM: f32 = 10.0;
+
+/// How the markdown widget sets prose of a type of its own (a note, an
+/// answer): its paragraphs at their size and line height, the code in them
+/// at [`PROSE_CODE_SIZE`] on a chip with room of its own either side (a
+/// span's padding is drawn, not laid out, so the room is an en space);
+/// everything else as in any explanation.
+#[derive(Clone, Copy)]
+struct Prose {
+    size: f32,
+    line_height: f32,
+}
+
+impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
+    fn on_link_click(url: iced::widget::markdown::Uri) -> Message {
+        Message::Content(ContentMsg::OpenLink(url))
+    }
+
+    fn paragraph(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        text: &iced::widget::markdown::Text,
+    ) -> Element<'a, Message> {
+        use iced::widget::text::{LineHeight, Span};
+        // Every span its line height in pixels: a line takes its height from
+        // the spans that state one, so code (sized apart) would otherwise
+        // set the lines it is on closer than the rest.
+        let line = LineHeight::Absolute((self.size * self.line_height).into());
+        let room = || {
+            Span::new("\u{2002}")
+                .size(PROSE_CODE_ROOM)
+                .line_height(line)
+        };
+        let mut spans = Vec::new();
+        for span in text.spans(settings.style).iter().cloned() {
+            if span.font == Some(settings.style.inline_code_font) {
+                spans.push(room());
+                spans.push(
+                    span.size(PROSE_CODE_SIZE)
+                        .line_height(line)
+                        .padding(iced::Padding {
+                            top: 1.0,
+                            bottom: 1.0,
+                            left: PROSE_CODE_ROOM / 2.0,
+                            right: PROSE_CODE_ROOM / 2.0,
+                        }),
+                );
+                spans.push(room());
+            } else {
+                spans.push(span.line_height(line));
+            }
+        }
+        iced::widget::rich_text(spans)
+            .size(settings.text_size)
+            .line_height(line)
+            .on_link_click(Self::on_link_click)
+            .into()
+    }
+}
+
+fn render_segments<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+    prose: Option<Prose>,
+) -> Vec<Element<'a, Message>> {
     use crate::{PreparedInline, PreparedSeg};
     let mut out: Vec<Element<'_, Message>> = Vec::new();
     for seg in segments {
         match seg {
+            PreparedSeg::Markdown(items) if let Some(prose) = prose => {
+                out.push(iced::widget::markdown::view_with(
+                    items,
+                    theme::markdown_settings_at(prose.size),
+                    &prose,
+                ))
+            }
             PreparedSeg::Markdown(items) => out.push(
                 iced::widget::markdown::view(items, theme::markdown_settings())
                     .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
@@ -102,7 +219,7 @@ pub(crate) fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'
                 .iter()
                 .map(|(t, style)| {
                     iced::widget::span(t.as_str())
-                        .color(style.and_then(style_color).unwrap_or(theme::fg()))
+                        .color(style.and_then(style_color).unwrap_or(theme::code_fg()))
                         .font(crate::fonts::CODE)
                         .size(ts::BODY)
                 })

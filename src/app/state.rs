@@ -1105,6 +1105,13 @@ pub struct App {
     pub show_inlay_hints: bool,
     /// Show the code minimap on the right edge of the editor.
     pub show_minimap: bool,
+    /// The caret line's blame past its end (the View menu's "Inline
+    /// blame"). Off as the design has it: when a function last changed is
+    /// the margin's note, and History's.
+    pub show_inline_blame: bool,
+    /// Lines down the code's indentation (the View menu's "Indent guides").
+    /// Off as the design has it.
+    pub show_indent_guides: bool,
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,

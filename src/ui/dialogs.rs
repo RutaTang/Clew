@@ -12,7 +12,7 @@ pub(crate) const FINDER_ROW_H: f32 = 39.0;
 /// The gap under each result row, inside its pitch.
 const FINDER_ROW_GAP: f32 = 1.0;
 /// Height of a heading over a group of the command bar's suggestions.
-pub(crate) const FINDER_HEAD_H: f32 = 28.0;
+pub(crate) const FINDER_HEAD_H: f32 = 29.0;
 /// Size of a command bar row's detail (a symbol's file and line).
 const BAR_DETAIL_SIZE: f32 = 12.0;
 /// Height of the finder's query row, over its results.
@@ -310,6 +310,8 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     ])
     .width(FINDER_W)
     .max_height(FINDER_MAX_H)
+    // The border is drawn over the panel's edge; what is in it starts inside.
+    .padding(1)
     .clip(true)
     .style(theme::modal_panel);
 
@@ -327,7 +329,7 @@ fn finder_footer<'a>() -> Element<'a, Message> {
     } else {
         "Enter to open"
     };
-    let hint = |what: &'a str| text(what).size(ts::CAPTION).color(theme::dim());
+    let hint = |what: &'a str| text(what).size(ts::SMALL).color(theme::dim());
     container(
         row![hint("↑ ↓ to move"), hint(enter), hint("Esc to close")]
             .spacing(16)

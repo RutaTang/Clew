@@ -79,6 +79,17 @@ pub struct TokenColors {
     pub parameter: u32,
     pub operator: u32,
     pub punctuation: u32,
+    /// Code that is none of the above; `None` is the interface's text colour.
+    pub plain: Option<u32>,
+    /// A function where it is defined; `None` is [`Self::function`].
+    pub definition: Option<u32>,
+    /// The module path before a name (`std::path::`); `None` is
+    /// [`Self::type_`].
+    pub module: Option<u32>,
+    /// An attribute, whole; `None` is [`Self::property`].
+    pub attribute: Option<u32>,
+    /// A macro; `None` is [`Self::function`].
+    pub macro_: Option<u32>,
 }
 
 /// A complete theme: its chrome [`Palette`] plus its syntax [`TokenColors`],
@@ -104,10 +115,10 @@ const CLEW_DARK_PAL: Palette = Palette {
     bg_hover: rgb(0x222226),
     bg_active: rgb(0x2a2a2f),
     selected: rgb(0x26262b),
-    fg: rgb(0xe4e4e7),
+    fg: rgb(0xededef),
     fg_bright: rgb(0xfafafa),
     fg_muted: rgb(0xa1a1aa),
-    dim: rgb(0x7a7a83),
+    dim: rgb(0x84848c),
     accent: rgb(0x8e8cf6),
     warn: rgb(0xf87171),
     border: rgb(0x2e2e33),
@@ -124,6 +135,8 @@ const CLEW_DARK_PAL: Palette = Palette {
     find: rgb(0xfbbf24),
     selection: rgb(0x33335a),
 };
+// The design's palette: what is not a keyword, a name defined or called, a
+// type, a string, a module path, an attribute or a comment is plain.
 const CLEW_DARK_TOK: TokenColors = TokenColors {
     comment: 0x8a8f98,
     keyword: 0xe08ab7,
@@ -133,9 +146,14 @@ const CLEW_DARK_TOK: TokenColors = TokenColors {
     function: 0x93b4ff,
     type_: 0xf2c27d,
     property: 0x7fd1c7,
-    parameter: 0xe6c9a8,
-    operator: 0xa1a1aa,
-    punctuation: 0x8b8b94,
+    parameter: 0xd4d4d8,
+    operator: 0xd4d4d8,
+    punctuation: 0xd4d4d8,
+    plain: Some(0xd4d4d8),
+    definition: Some(0x7fd1c7),
+    module: Some(0x8b8b94),
+    attribute: Some(0xc8a2f0),
+    macro_: Some(0xc8a2f0),
 };
 
 const CLEW_LIGHT_PAL: Palette = Palette {
@@ -144,7 +162,7 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     bg_hover: rgb(0xebebee),
     bg_active: rgb(0xe2e2e6),
     selected: rgb(0xe6e6ea),
-    fg: rgb(0x27272a),
+    fg: rgb(0x18181b),
     fg_bright: rgb(0x09090b),
     fg_muted: rgb(0x52525b),
     dim: rgb(0x71717a),
@@ -173,9 +191,14 @@ const CLEW_LIGHT_TOK: TokenColors = TokenColors {
     function: 0x2b50c0,
     type_: 0x9a5b00,
     property: 0x0f766e,
-    parameter: 0x9a3412,
-    operator: 0x52525b,
-    punctuation: 0x71717a,
+    parameter: 0x27272a,
+    operator: 0x27272a,
+    punctuation: 0x27272a,
+    plain: Some(0x27272a),
+    definition: Some(0x0f766e),
+    module: Some(0x71717a),
+    attribute: Some(0x7c3aad),
+    macro_: Some(0x7c3aad),
 };
 
 // ---- One Dark / One Light -------------------------------------------------
@@ -218,6 +241,11 @@ const ONE_DARK_TOK: TokenColors = TokenColors {
     parameter: 0xd19a66,
     operator: 0x56b6c2,
     punctuation: 0x848b98,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 const ONE_LIGHT_PAL: Palette = Palette {
@@ -258,6 +286,11 @@ const ONE_LIGHT_TOK: TokenColors = TokenColors {
     parameter: 0x986801,
     operator: 0x0184bc,
     punctuation: 0x6a6f7a,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 // ---- Gruvbox Soft ---------------------------------------------------------
@@ -300,6 +333,11 @@ const GRUVBOX_DARK_TOK: TokenColors = TokenColors {
     parameter: 0xfe8019,
     operator: 0xfe8019,
     punctuation: 0xa89984,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 const GRUVBOX_LIGHT_PAL: Palette = Palette {
@@ -340,6 +378,11 @@ const GRUVBOX_LIGHT_TOK: TokenColors = TokenColors {
     parameter: 0xaf3a03,
     operator: 0xaf3a03,
     punctuation: 0x7c6f64,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 // ---- Paper ----------------------------------------------------------------
@@ -384,6 +427,11 @@ const PAPER_LIGHT_TOK: TokenColors = TokenColors {
     parameter: 0xa5762f,
     operator: 0x4a7a70,
     punctuation: 0x857a60,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 const PAPER_DARK_PAL: Palette = Palette {
@@ -424,6 +472,11 @@ const PAPER_DARK_TOK: TokenColors = TokenColors {
     parameter: 0xd9a441,
     operator: 0x83a89a,
     punctuation: 0x9d8f70,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 // ---- Cyberpunk ------------------------------------------------------------
@@ -468,6 +521,11 @@ const CYBERPUNK_TOK: TokenColors = TokenColors {
     parameter: 0xb47dff,
     operator: 0x00ffcc,
     punctuation: 0x8b84b8,
+    plain: None,
+    definition: None,
+    module: None,
+    attribute: None,
+    macro_: None,
 };
 
 /// Every theme clew ships. Dark and light variants coexist; the user picks one
@@ -847,6 +905,10 @@ pub fn selected() -> Color {
 pub fn fg() -> Color {
     active().fg
 }
+/// Plain code: what the syntax colours leave uncoloured.
+pub fn code_fg() -> Color {
+    tokens().plain.map_or_else(fg, rgb)
+}
 pub fn fg_bright() -> Color {
     active().fg_bright
 }
@@ -1134,7 +1196,9 @@ pub fn markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
     markdown::Settings::with_text_size(
         size,
         markdown::Style {
-            font: iced::Font::default(),
+            // The interface's face, named: the system's sans-serif (what
+            // `Font::default()` asks for) is not the one Clew is set in.
+            font: crate::fonts::UI,
             // The chip's padding is drawn over the spaces beside it (it takes
             // no room of its own), so it is kept narrower than a space.
             inline_code_padding: iced::padding::left(2).right(2),
@@ -1780,6 +1844,14 @@ pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What Clew writes — explanations, answers, notes — is set in the
+    /// interface's own face, never the system's sans-serif.
+    #[test]
+    fn prose_is_set_in_the_interfaces_face() {
+        assert_eq!(markdown_settings().style.font, crate::fonts::UI);
+        assert_eq!(markdown_settings_at(13.0).style.font, crate::fonts::UI);
+    }
 
     /// The palette is process-global while windows are not, so a window that
     /// did not make the change still has to learn of it. The revision is what

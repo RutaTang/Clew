@@ -52,6 +52,9 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "variable",
     "variable.builtin",
     "variable.parameter",
+    // Appended, so the indices above — the style ids on the wire — stay.
+    "function.definition",
+    "function.macro",
 ];
 
 /// The styles that mark literal text — strings, comments and escapes — where
@@ -335,7 +338,7 @@ impl Lang {
         use tree_sitter_javascript as js;
         use tree_sitter_typescript as ts;
         match self {
-            Lang::Rust => &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+            Lang::Rust => &[tree_sitter_rust::HIGHLIGHTS_QUERY, RUST_REFINEMENTS],
             Lang::Python => &[tree_sitter_python::HIGHLIGHTS_QUERY],
             Lang::JavaScript => &[js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY],
             Lang::TypeScript => &[js::HIGHLIGHT_QUERY, ts::HIGHLIGHTS_QUERY],
@@ -495,6 +498,41 @@ const SQL_HIGHLIGHT_OVERRIDES: &str = r#"
 /// tree-sitter-highlight does not know is not merely unstyled — the LAST
 /// capture on a node wins, so the query's `(comment) @comment @spell` left
 /// every comment uncoloured.
+/// What Clew's palette tells apart in Rust and the grammar's query does not:
+/// a function where it is defined (not where it is called), the module path
+/// before a name (`std::path::` in `std::path::Path`), a macro, and an
+/// attribute as one whole — its brackets and arguments in its own colour.
+///
+/// Attribute arguments nest (`cfg(all(unix, not(windows)))`); a query cannot
+/// say "anywhere inside", so the depths are spelled out, four deep.
+const RUST_REFINEMENTS: &str = r##"
+(function_item name: (identifier) @function.definition)
+(function_signature_item name: (identifier) @function.definition)
+
+(macro_invocation macro: (identifier) @function.macro "!" @function.macro)
+
+((scoped_identifier path: (identifier) @module . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+((scoped_type_identifier path: (identifier) @module . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+((scoped_identifier path: (scoped_identifier name: (identifier) @module) . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+((scoped_type_identifier path: (scoped_identifier name: (identifier) @module) . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+
+(attribute_item ["#" "[" "]"] @attribute)
+(inner_attribute_item ["#" "!" "[" "]"] @attribute)
+(attribute (identifier) @attribute)
+(attribute (token_tree ["(" ")" "[" "]" "," "="] @attribute))
+(attribute (token_tree (identifier) @attribute))
+(attribute (token_tree (token_tree ["(" ")" "[" "]" "," "="] @attribute)))
+(attribute (token_tree (token_tree (identifier) @attribute)))
+(attribute (token_tree (token_tree (token_tree ["(" ")" "[" "]" "," "="] @attribute))))
+(attribute (token_tree (token_tree (token_tree (identifier) @attribute))))
+(attribute (token_tree (token_tree (token_tree (token_tree ["(" ")" "[" "]" "," "="] @attribute)))))
+(attribute (token_tree (token_tree (token_tree (token_tree (identifier) @attribute)))))
+"##;
+
 const SQL_CAPTURE_NAMES: &[(&str, &str)] = &[
     ("boolean", "constant.builtin"),
     ("conditional", "keyword"),
@@ -1346,6 +1384,55 @@ pub fn style_is_literal(idx: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a Rust span is called, by its text, on the line it is on.
+    fn rust_kinds(src: &str) -> Vec<Vec<(String, &'static str)>> {
+        highlight_lines(src, Some("rust"))
+            .into_iter()
+            .map(|l| {
+                l.spans
+                    .into_iter()
+                    .filter(|(t, _)| !t.trim().is_empty())
+                    .map(|(t, s)| (t, s.map_or("-", |i| HIGHLIGHT_NAMES[i as usize])))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Rust's spans tell apart what Clew's palette colours apart: a function
+    /// where it is defined from one called, the module path before a name,
+    /// a macro, and an attribute as one whole, brackets and all.
+    #[test]
+    fn rust_spans_tell_apart_what_the_palette_does() {
+        let lines = rust_kinds(
+            "#[cfg(not(windows))]\n\
+             pub fn rel_string(rel: &std::path::Path) -> String {\n\
+             \x20   if cfg!(windows) { std::env::var_os(v) } else { PathBuf::from(x) }\n\
+             }\n",
+        );
+        let kind = |line: usize, text: &str| {
+            lines[line]
+                .iter()
+                .filter(|(t, _)| t.trim() == text)
+                .map(|(_, k)| *k)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            lines[0].iter().all(|(_, k)| *k == "attribute"),
+            "{:?}",
+            lines[0]
+        );
+        assert_eq!(kind(1, "rel_string"), ["function.definition"]);
+        assert_eq!(kind(1, "std"), ["module"]);
+        assert_eq!(kind(1, "path"), ["module"]);
+        assert_eq!(kind(1, "::"), ["module", "module"]);
+        assert_eq!(kind(1, "Path"), ["type"]);
+        assert_eq!(kind(2, "cfg"), ["function.macro"]);
+        assert_eq!(kind(2, "!"), ["function.macro"]);
+        assert_eq!(kind(2, "var_os"), ["function"]);
+        // A type's `::` is not a module's.
+        assert_eq!(kind(2, "::"), ["module", "module", "punctuation.delimiter"]);
+    }
 
     const RUST_SRC: &str = "/// Doc comment.\npub fn add(a: i32, b: i32) -> i32 {\n\tlet s = \"x\\n\";\n    a + b\n}\n\nstruct Point {\n    x: f64,\n}\n";
 

@@ -1883,6 +1883,10 @@ pub enum WindowMsg {
     ToggleFileBanner,
     /// Toggle the code minimap.
     ToggleMinimap,
+    /// Toggle the caret line's blame, past its end.
+    ToggleInlineBlame,
+    /// Toggle the lines down the code's indentation.
+    ToggleIndentGuides,
     /// Open / close the app menu of Windows and Linux (the top bar's ☰).
     ToggleAppMenu,
     /// Open / close the reader's View menu (the file tools' View ▾).
@@ -2627,6 +2631,8 @@ impl WindowMsg {
             | WindowMsg::ToggleInlineSummaries
             | WindowMsg::ToggleFileBanner
             | WindowMsg::ToggleMinimap
+            | WindowMsg::ToggleInlineBlame
+            | WindowMsg::ToggleIndentGuides
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
             | WindowMsg::FileFilterChanged(..)

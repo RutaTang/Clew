@@ -534,6 +534,16 @@ impl App {
                     "Minimap",
                     Message::Window(WindowMsg::ToggleMinimap),
                 ),
+                (
+                    self.show_inline_blame,
+                    "Inline Blame",
+                    Message::Window(WindowMsg::ToggleInlineBlame),
+                ),
+                (
+                    self.show_indent_guides,
+                    "Indent Guides",
+                    Message::Window(WindowMsg::ToggleIndentGuides),
+                ),
             ] {
                 add(toggle(shown, what), None, send(message));
             }

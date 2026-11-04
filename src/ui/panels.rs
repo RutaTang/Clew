@@ -384,7 +384,15 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
 const CARD_CHROME: f32 = 180.0;
 /// The gap over a pinned approval card, where the count of those waiting
 /// after it shows.
-const COUNT_SLOT_H: f32 = 20.0;
+const COUNT_SLOT_H: f32 = 14.0;
+/// An approval's buttons: their height, and the gap between what is in it.
+const APPROVE_BUTTON_H: f32 = 30.0;
+const APPROVE_GAP: f32 = 12.0;
+/// Size of what an approval says it does, under its question.
+const APPROVE_DETAIL_SIZE: f32 = 12.0;
+/// Widest the question's bubble grows: the design's 82% of the card's
+/// 588 px text column.
+const BUBBLE_MAX_W: f32 = 482.0;
 /// Room for each of the composer's optional rows (the pinned code, an ACP
 /// agent's settings) over the input.
 const COMPOSER_ROW_ROOM: f32 = 36.0;
@@ -473,10 +481,24 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                     container(
                         text(turn.question.as_str())
                             .size(ts::BASE)
+                            .line_height(1.5)
                             .color(theme::fg()),
                     )
                     .padding([9, 12])
-                    .max_width(420)
+                    // As wide as its words up to the design's 82% of the
+                    // card's text column; a question that runs on to a
+                    // second line takes all of that, its lines ragged
+                    // inside it, as the design sets it.
+                    .width(
+                        if super::sheet::text_width(&turn.question, ts::BASE, crate::fonts::UI)
+                            > BUBBLE_MAX_W - 24.0
+                        {
+                            Length::Fixed(BUBBLE_MAX_W)
+                        } else {
+                            Length::Shrink
+                        },
+                    )
+                    .max_width(BUBBLE_MAX_W)
                     .style(theme::bubble),
                 ]
                 .spacing(4)
@@ -550,7 +572,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         if turn.streaming && !turn.extras.approvals.is_empty() && !turn.answer.is_empty() {
             // Paused on a question to the user: what it said so far, drawn
             // as an answer is (`App::settle_waiting_answers`).
-            convo.extend(render_prepared(app, &turn.answer));
+            convo.extend(super::explain_view::render_answer(app, &turn.answer));
         } else if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
@@ -572,7 +594,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 );
             }
         } else {
-            convo.extend(render_prepared(app, &turn.answer));
+            convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
         if !turn.sources.is_empty() {
             convo.push(text("Sources").size(ts::CAPTION).color(theme::dim()).into());
@@ -658,6 +680,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             let count: Element<'_, Message> = if more > 0 {
                 text(format!("{more} more waiting after this one"))
                     .size(ts::CAPTION)
+                    .line_height(ts::NORMAL_LINE)
                     .color(theme::dim())
                     .into()
             } else {
@@ -880,7 +903,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .label("Keep listening")
         .on_toggle(|on| Message::Voice(crate::VoiceMsg::SetKeepListening(on)))
         .size(16)
-        .text_size(ts::BODY)
+        .text_size(KEEP_LISTENING_SIZE)
         .spacing(7)
         .width(Length::Shrink)
         .style(theme::switch);
@@ -911,6 +934,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
 
 /// Side of the composer's round buttons (the microphone, send).
 pub(crate) const ROUND_BUTTON: f32 = 30.0;
+/// Size of the composer's "Keep listening", as the design sets it.
+const KEEP_LISTENING_SIZE: f32 = 12.0;
 /// Padding around the composer's row: a little more room at its start,
 /// where the question begins.
 pub(crate) const COMPOSER_PAD: Padding = Padding {
@@ -1041,14 +1066,28 @@ pub(crate) fn approval_card<'a>(
                 key: approval.key,
                 option: option.id.clone(),
             });
-            let shown = button(text(option.label.clone()).size(ts::BODY))
-                .style(if option.allows {
-                    theme::primary_button
-                } else {
-                    theme::toolbar_button
-                })
-                .padding([6, 12])
-                .on_press_maybe((ready || !option.allows).then_some(answer));
+            // The design's 30 px buttons, the one that allows a little wider.
+            let shown = button(
+                container(
+                    text(option.label.clone())
+                        .size(ts::BODY)
+                        .font(if option.allows {
+                            crate::fonts::UI_SEMIBOLD
+                        } else {
+                            crate::fonts::UI
+                        }),
+                )
+                .height(Fill)
+                .align_y(iced::Center),
+            )
+            .style(if option.allows {
+                theme::primary_button
+            } else {
+                theme::toolbar_button
+            })
+            .height(Length::Fixed(APPROVE_BUTTON_H))
+            .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
+            .on_press_maybe((ready || !option.allows).then_some(answer));
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
             } else {
@@ -1069,14 +1108,16 @@ pub(crate) fn approval_card<'a>(
     let mut asks = column![
         text(approval.title.clone())
             .size(ts::BASE)
+            .line_height(ts::NORMAL_LINE)
             .font(crate::fonts::UI_SEMIBOLD)
             .color(theme::fg())
     ]
-    .spacing(3);
+    .spacing(2);
     if !approval.detail.is_empty() {
         asks = asks.push(
             text(approval.detail.clone())
-                .size(ts::BODY)
+                .size(APPROVE_DETAIL_SIZE)
+                .line_height(ts::NORMAL_LINE)
                 .font(if code {
                     crate::fonts::CODE
                 } else {
@@ -1111,8 +1152,10 @@ pub(crate) fn approval_card<'a>(
     // A yes and a no sit beside the question; more answers than that, a
     // row under it.
     let beside = buttons.len() <= 2;
-    let answers =
-        crate::ui::fresh::fresh(page as u64, Row::with_children(buttons).spacing(6).wrap());
+    let answers = crate::ui::fresh::fresh(
+        page as u64,
+        Row::with_children(buttons).spacing(APPROVE_GAP).wrap(),
+    );
     let mark = container(glyph::icon(glyph, theme::accent(), 18.0)).padding([2, 0]);
     let body: Element<'a, Message> = if beside {
         row![mark, container(asks).width(Fill), answers]
@@ -1137,12 +1180,13 @@ pub(crate) fn approval_card<'a>(
         &asked,
         crate::ui::fresh::fresh_for(
             &(stream, approval.key),
+            // The design's padding, inside the border drawn over its edge.
             container(body)
                 .padding(Padding {
-                    top: 12.0,
-                    right: 12.0,
-                    bottom: 12.0,
-                    left: 14.0,
+                    top: 13.0,
+                    right: 13.0,
+                    bottom: 13.0,
+                    left: 15.0,
                 })
                 .width(Fill)
                 .style(theme::approve_card),
@@ -1162,12 +1206,19 @@ fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head
     let beside = count <= 2;
     let answers: f32 = shown
         .iter()
-        .map(|o| text_width(&o.label, ts::BODY, crate::fonts::UI) + 24.0)
+        .map(|o| {
+            if o.allows {
+                text_width(&o.label, ts::BODY, crate::fonts::UI_SEMIBOLD) + 24.0
+            } else {
+                text_width(&o.label, ts::BODY, crate::fonts::UI) + 20.0
+            }
+        })
         .sum::<f32>()
-        + 6.0 * count.saturating_sub(1) as f32;
+        + APPROVE_GAP * count.saturating_sub(1) as f32;
     // Its padding, the mark and the gaps beside the words, its answers
     // when they sit beside them.
-    let words = width - 26.0 - 18.0 - 12.0 - if beside { answers + 12.0 } else { 0.0 };
+    let words =
+        width - 28.0 - 18.0 - APPROVE_GAP - if beside { answers + APPROVE_GAP } else { 0.0 };
     let code = !matches!(approval.key, ApprovalKey::Window { .. });
     let mut asks = text_height(&approval.title, ts::BASE, crate::fonts::UI_SEMIBOLD, words);
     if !approval.detail.is_empty() {
@@ -1176,17 +1227,16 @@ fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head
         } else {
             crate::fonts::UI
         };
-        asks += 3.0 + text_height(&approval.detail, ts::BODY, font, words);
+        asks += 2.0 + text_height(&approval.detail, APPROVE_DETAIL_SIZE, font, words);
     }
     let asks = asks.min(head);
-    // An answer's button: its padding and a line.
-    let button = 12.0 + ts::BODY * 1.3 + 2.0;
+    let button = APPROVE_BUTTON_H;
     let body = if beside {
         asks.max(button)
     } else {
         asks + 10.0 + button
     };
-    body + 24.0 + 4.0
+    body + 26.0 + 4.0
 }
 
 /// One agent exploration step as a chip: a tool glyph + its one-line title.
@@ -1299,7 +1349,9 @@ fn agent_step_chip<'a>(
     .style(theme::menu_row)
     .width(Fill)
     .height(Length::Fixed(STEP_ROW_H))
-    .padding([0, 8]);
+    // Its mark and words in line with the answer under it, as the design
+    // has them.
+    .padding(0);
     if let Some((abs, line)) = target {
         chip = chip.on_press(Message::Editor(EditorMsg::OpenAbs {
             abs,
