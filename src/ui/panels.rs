@@ -375,6 +375,26 @@ pub(crate) fn index_cap_note(app: &App) -> Option<&str> {
 /// which is `height` tall: the pinned approval card, the turns, and the
 /// compose area. The window's header names it and holds Clear.
 pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
+    ask_panel_in(app, height, false)
+}
+
+/// Room the Ask card keeps, when it fits its height to the conversation,
+/// for what is not the conversation: its header and the voice line under
+/// it, the input row, and the padding and spacing around them.
+const CARD_CHROME: f32 = 180.0;
+/// Room for each of the composer's optional rows (the pinned code, an ACP
+/// agent's settings) over the input.
+const COMPOSER_ROW_ROOM: f32 = 36.0;
+
+/// [`ask_panel`], fitted to its conversation: as tall as what is in it, up
+/// to a card `height` tall, rather than always that tall — the floating
+/// card, which hangs under the chat field and grows as the conversation
+/// does.
+pub(crate) fn ask_panel_fitted(app: &App, height: f32) -> Element<'_, Message> {
+    ask_panel_in(app, height, true)
+}
+
+fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // Every part of the panel keeps its place in the column, there or not
     // (an empty `space()`, not one of no height, which a column leaves out):
     // iced pairs widget state with widgets by position, and one coming or
@@ -560,7 +580,19 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
         .id(ask_scroll_id())
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
-        .height(Fill);
+        .height(if fit { Length::Shrink } else { Fill });
+    // Fitted, the conversation is as tall as it is, up to what leaves the
+    // composer its room: laid out before it, it would otherwise take all of
+    // the card's height and push the input out of it.
+    let extra_rows = [!app.proj.ask_pins.is_empty(), app.ask_agent.is_some()]
+        .into_iter()
+        .filter(|&row| row)
+        .count() as f32;
+    let conversation = container(conversation).max_height(if fit {
+        (height - CARD_CHROME - COMPOSER_ROW_ROOM * extra_rows).max(40.0)
+    } else {
+        f32::INFINITY
+    });
     // The tool call waiting for the user's say-so, pinned above the
     // conversation: drawn in it, a card moved down as its turn grew above
     // it — a step, a plan entry, each scrolling the panel — its Allow with
@@ -806,7 +838,7 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
             .padding([8, 12]),
     )
     .width(Fill)
-    .height(Fill)
+    .height(if fit { Length::Shrink } else { Fill })
     .into()
 }
 

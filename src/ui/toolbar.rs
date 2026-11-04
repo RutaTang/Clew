@@ -125,12 +125,53 @@ pub(crate) fn tip_at<'a>(
     tooltip(control, bubble, side).gap(8).into()
 }
 
-/// A shortcut, drawn as a key cap.
+/// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
 pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
-    container(text(caps).size(ts::CAPTION).color(theme::fg_muted()))
-        .padding([1, 5])
-        .style(theme::keycap)
-        .into()
+    Row::with_children(split_caps(&caps).into_iter().map(|key| {
+        container(text(key).size(ts::CAPTION).color(theme::fg_muted()))
+            .padding([1, 5])
+            .style(theme::keycap)
+            .into()
+    }))
+    .spacing(3)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// The keys of a shortcut as [`Chord::caps`](crate::keymap::Chord::caps)
+/// spells it, each a cap of its own: "Ctrl+Shift+A" and "⌘⇧A" are three
+/// keys, "Ctrl++" two (the second the plus key). A shortcut of several
+/// strokes ("g d") is left whole, as one cap.
+pub(crate) fn split_caps(caps: &str) -> Vec<String> {
+    if caps.contains(' ') || caps.chars().count() <= 1 {
+        return vec![caps.to_string()];
+    }
+    let mac = |c: char| matches!(c, '⌘' | '⇧' | '⌥' | '⌃');
+    if !caps.starts_with(mac) && caps.contains('+') {
+        let mut keys: Vec<String> = caps
+            .split('+')
+            .filter(|part| !part.is_empty())
+            .map(str::to_string)
+            .collect();
+        // "Ctrl++": the key is the plus itself.
+        if caps.ends_with('+') {
+            keys.push("+".into());
+        }
+        return keys;
+    }
+    let mut keys: Vec<String> = Vec::new();
+    let mut rest = String::new();
+    for c in caps.chars() {
+        if rest.is_empty() && mac(c) {
+            keys.push(c.to_string());
+        } else {
+            rest.push(c);
+        }
+    }
+    if !rest.is_empty() {
+        keys.push(rest);
+    }
+    keys
 }
 
 /// A borderless icon button of the chrome.
@@ -1284,6 +1325,22 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
 
 #[cfg(test)]
 mod tests {
+
+    /// A shortcut is drawn a cap per key, however it is spelled.
+    #[test]
+    fn a_shortcut_is_split_into_its_keys() {
+        use super::split_caps;
+        assert_eq!(split_caps("Ctrl+Shift+A"), ["Ctrl", "Shift", "A"]);
+        assert_eq!(split_caps("Ctrl++"), ["Ctrl", "+"]);
+        assert_eq!(split_caps("Alt+←"), ["Alt", "←"]);
+        assert_eq!(split_caps("⌘⇧A"), ["⌘", "⇧", "A"]);
+        assert_eq!(split_caps("⌥⌘F12"), ["⌥", "⌘", "F12"]);
+        assert_eq!(split_caps("⌘+"), ["⌘", "+"]);
+        assert_eq!(split_caps("⌘⇧+"), ["⌘", "⇧", "+"]);
+        assert_eq!(split_caps("F5"), ["F5"]);
+        assert_eq!(split_caps("g d"), ["g d"]);
+        assert_eq!(split_caps("?"), ["?"]);
+    }
     use super::*;
 
     #[test]

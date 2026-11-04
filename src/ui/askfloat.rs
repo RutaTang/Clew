@@ -155,8 +155,12 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     let (top, bottom) = band(app);
     let card = container(opaque(ask_card(app, place)))
         .width(place.width)
-        .height(place.height)
         .style(theme::floating_card);
+    let card = if card_fits(app) {
+        card.max_height(place.height)
+    } else {
+        card.height(place.height)
+    };
     let large = app.ask_view == AskView::Expanded;
     // A click on the dimmed window makes the large window a card again.
     // Under the card, the layer is still the whole window — a stack is as
@@ -335,8 +339,17 @@ fn mic_button<'a>(app: &App) -> Element<'a, Message> {
 
 /// The card: its header (what it is, voice, size, close), what voice is
 /// doing, and the conversation.
+/// Whether the card fits its height to its conversation, as the card under
+/// the chat field does. The large window keeps its height, and so does a
+/// card asking for a tool call's approval: that card's room is half the
+/// card's height, the input kept in view under it.
+fn card_fits(app: &App) -> bool {
+    app.ask_view == AskView::Compact && app.first_approval().is_none()
+}
+
 fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let large = app.ask_view == AskView::Expanded;
+    let fit = card_fits(app);
     let mut header = row![
         glyph::icon(Glyph::Ask, theme::accent(), 16.0),
         text("Ask")
@@ -400,9 +413,13 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         }),
         hairline(),
         voice_strip(app).unwrap_or_else(slot),
-        ask_panel(app, place.height),
+        if fit {
+            ask_panel_fitted(app, place.height)
+        } else {
+            ask_panel(app, place.height)
+        },
     ]
-    .height(Fill)
+    .height(if fit { Length::Shrink } else { Fill })
     .into()
 }
 

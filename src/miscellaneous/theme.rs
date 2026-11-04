@@ -1120,7 +1120,7 @@ pub fn markdown_settings() -> iced::widget::markdown::Settings {
 
 /// Size of the prose clew writes in its panels and cards (explanations,
 /// answers, the overview): a notch over the interface's own text.
-pub const PROSE_SIZE: f32 = 14.0;
+pub const PROSE_SIZE: f32 = 13.5;
 /// Size of a markdown file's text, read as a document in the reader.
 pub const DOCUMENT_SIZE: f32 = 16.0;
 

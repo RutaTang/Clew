@@ -6870,8 +6870,8 @@ fn an_empty_ask_shows_questions_not_instructions() {
     assert!(!shows(&mut sim, "Answers are grounded once"));
 }
 
-/// The palette's rows show each command and its keys; a click sends the
-/// command it shows, by its title.
+/// The palette's rows show each command and its keys, a cap per key; a
+/// click sends the command it shows, by its title.
 #[test]
 fn the_palette_lists_commands_with_their_keys() {
     let mut app = reader_app();
@@ -6881,7 +6881,12 @@ fn the_palette_lists_commands_with_their_keys() {
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Call Graph"));
-        assert!(shows(&mut sim, &crate::keymap::local_keys("⇧⌘C")));
+        // Its keys, a cap each.
+        let keys = super::split_caps(&crate::keymap::local_keys("⇧⌘C"));
+        assert!(keys.len() > 1, "{keys:?}");
+        for key in keys {
+            assert!(shows(&mut sim, &key), "the {key} cap");
+        }
     }
     let sent = click(sim_of(&app), "Call Graph");
     assert!(
