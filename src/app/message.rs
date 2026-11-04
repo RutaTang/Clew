@@ -1849,8 +1849,6 @@ pub enum WindowMsg {
     /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
     /// right panel) or y (bottom panel). See [`resize::Divider`].
     ResizeSidebar(f32),
-    /// The sidebar's tab strip scrolled to this horizontal offset.
-    SidebarTabsScrolled(f32),
     ResizeRight(f32),
     ResizeBottom(f32),
     /// Open the bottom panel: the debugger's.
@@ -1876,6 +1874,20 @@ pub enum WindowMsg {
     ToggleFileBanner,
     /// Toggle the code minimap.
     ToggleMinimap,
+    /// Open / close the app menu of Windows and Linux (the top bar's ☰).
+    ToggleAppMenu,
+    /// Open / close the reader's View menu (the file tools' View ▾).
+    ToggleViewMenu,
+    /// The Files view's filter changed.
+    FileFilterChanged(String),
+    /// Open / close the sidebar's menu of its other views.
+    ToggleViewsMenu,
+    /// Maximize the window, or make it a window again (Windows and Linux).
+    ToggleMaximize,
+    /// The reading panel's view picked.
+    MarginTabPicked(MarginTab),
+    /// Whether the window is maximized now, for its button to show.
+    MaximizedIs(bool),
 }
 
 /// The guided tour.
@@ -2590,7 +2602,6 @@ impl WindowMsg {
             | WindowMsg::ToggleFullscreen
             | WindowMsg::ModeIs(..)
             | WindowMsg::ResizeSidebar(..)
-            | WindowMsg::SidebarTabsScrolled(..)
             | WindowMsg::ResizeRight(..)
             | WindowMsg::ResizeBottom(..)
             | WindowMsg::ShowDebugPanel
@@ -2604,7 +2615,14 @@ impl WindowMsg {
             | WindowMsg::RebindResetAll
             | WindowMsg::ToggleInlineSummaries
             | WindowMsg::ToggleFileBanner
-            | WindowMsg::ToggleMinimap => None,
+            | WindowMsg::ToggleMinimap
+            | WindowMsg::ToggleAppMenu
+            | WindowMsg::ToggleViewMenu
+            | WindowMsg::FileFilterChanged(..)
+            | WindowMsg::ToggleViewsMenu
+            | WindowMsg::ToggleMaximize
+            | WindowMsg::MarginTabPicked(..)
+            | WindowMsg::MaximizedIs(..) => None,
         }
     }
 }

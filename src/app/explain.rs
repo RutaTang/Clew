@@ -808,7 +808,7 @@ impl App {
         }
         if !self.proj.explain.cache.contains_key(&node) {
             self.status =
-                "Nothing to re-explain yet — run Explain in the toolbar to explain the project first.".into();
+                "Nothing to re-explain yet — run Explain All from the ⋯ menu to explain the project first.".into();
             return Task::none();
         }
         // A second pass is refused while one runs (`start_explain_pass`):
@@ -1124,7 +1124,7 @@ pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
             c.summary
         ),
         Some(c) => c.summary.clone(),
-        None => "Not explained yet — press Explain in the toolbar.".to_string(),
+        None => "Not explained yet — run Explain All from the ⋯ menu.".to_string(),
     }
 }
 

@@ -18784,10 +18784,6 @@ fn every_tools_menu_row_dismisses_the_menu() {
     use crate::ui::{TOOLS_MENU_ROWS, ToolsRow};
     let emits = |row: ToolsRow| -> Vec<Message> {
         match row {
-            ToolsRow::OutlineSummaries => vec![Message::Window(WindowMsg::ToggleInlineSummaries)],
-            ToolsRow::FileSummary => vec![Message::Window(WindowMsg::ToggleFileBanner)],
-            ToolsRow::InlayHints => vec![Message::Lsp(LspMsg::ToggleInlayHints)],
-            ToolsRow::Minimap => vec![Message::Window(WindowMsg::ToggleMinimap)],
             ToolsRow::Tutorial => vec![Message::Tutorial(TutorialMsg::Start)],
             ToolsRow::OpenFolder => vec![Message::Project(ProjectMsg::OpenFolderPressed)],
             ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
@@ -18800,11 +18796,6 @@ fn every_tools_menu_row_dismisses_the_menu() {
                 SidebarTab::Walk,
             ))],
             ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
-            ToolsRow::Skim => vec![Message::Editor(EditorMsg::SkimFile)],
-            ToolsRow::Diff => vec![Message::Editor(EditorMsg::ToggleDiff)],
-            ToolsRow::TimeTravel => {
-                vec![Message::TimeTravel(TimeTravelMsg::Start { symbol: false })]
-            }
             ToolsRow::ExportNotes => vec![Message::Export(ExportMsg::Start)],
             ToolsRow::LspServers => vec![Message::Lsp(LspMsg::TogglePanel)],
             ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
@@ -18820,8 +18811,25 @@ fn every_tools_menu_row_dismisses_the_menu() {
     }
     let mut app = blank_app();
     app.show_tools_menu = true;
-    let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
+    let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
+    // The View menu's rows close it too; and the menus open one at a time.
+    app.show_shortcuts = false;
+    app.show_view_menu = true;
+    let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
+    assert!(!app.show_view_menu, "picking a View row left the menu open");
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewMenu));
+    let _ = app.update(Message::Window(WindowMsg::ToggleToolsMenu));
+    assert!(app.show_tools_menu && !app.show_view_menu);
+    let _ = app.update(Message::Window(WindowMsg::ToggleAppMenu));
+    assert!(app.show_app_menu && !app.show_tools_menu);
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::ZoomIn,
+    )));
+    assert!(
+        !app.show_app_menu,
+        "running an action from the app menu left it open"
+    );
     app.show_tools_menu = true;
     let _ = app.update(Message::Noop);
     assert!(
@@ -26753,6 +26761,9 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Insight(_) => "insight",
             O::ToolsMenu => "tools menu",
             O::TargetMenu => "target menu",
+            O::AppMenu => "app menu",
+            O::ViewMenu => "view menu",
+            O::ViewsMenu => "views menu",
             O::Graph(_) => "graph",
             O::ServerPanel => "server panel",
             O::Finder => "finder",
@@ -26775,6 +26786,9 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.proj.insight = None;
         app.show_tools_menu = false;
         app.show_target_menu = false;
+        app.show_app_menu = false;
+        app.show_view_menu = false;
+        app.show_views_menu = false;
         app.proj.overlay = None;
         app.server_panel = false;
         app.proj.finder.open = false;
@@ -26849,6 +26863,9 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         }),
         Box::new(|a| a.show_tools_menu = true),
         Box::new(|a| a.show_target_menu = true),
+        Box::new(|a| a.show_app_menu = true),
+        Box::new(|a| a.show_view_menu = true),
+        Box::new(|a| a.show_views_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
         Box::new(|a| a.server_panel = true),
         Box::new(|a| a.proj.finder.open = true),
@@ -26883,7 +26900,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (18, 18),
+        (21, 21),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 

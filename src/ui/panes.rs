@@ -9,7 +9,7 @@ pub(crate) fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> 
     container(inner)
         .width(Fill)
         .height(Fill)
-        .style(theme::editor)
+        .style(theme::on_sheet)
         .into()
 }
 
@@ -49,7 +49,11 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
             "No file open",
-            "Pick a file from the tree, or press ⌘P.",
+            if crate::keymap::MAC_KEYS {
+                "Pick a file from the tree, or press ⌘P."
+            } else {
+                "Pick a file from the tree, or press Ctrl+P."
+            },
             None,
         ))
         .on_press(Message::Editor(EditorMsg::PaneFocused(pane)))
@@ -208,7 +212,7 @@ pub(crate) fn time_travel_banner<'a>(
         text(short)
             .size(ts::BODY)
             .color(theme::accent())
-            .font(Font::MONOSPACE),
+            .font(crate::fonts::CODE),
         text(format!(
             "{}  ·  {}",
             c.author,
@@ -372,13 +376,13 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
             chrome_tip(
                 step(Glyph::ArrowLeft, older),
                 "Older commit",
-                Some("⌘←".to_string())
+                Some(crate::keymap::local_keys("⌘←"))
             ),
             sl,
             chrome_tip(
                 step(Glyph::ArrowRight, newer),
                 "Newer commit",
-                Some("⌘→".to_string())
+                Some(crate::keymap::local_keys("⌘→"))
             ),
             text(format!("{} / {}", tt.idx + 1, n))
                 .size(ts::SMALL)
@@ -516,7 +520,7 @@ pub(crate) fn diff_view<'a>(
         };
         let mut cell = container(
             text(run.text.as_str())
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .size(app.font_size)
                 .color(fg)
                 .wrapping(Wrapping::None),
@@ -627,7 +631,7 @@ pub(crate) fn measured_mono_advance(size: f32) -> Option<f32> {
         bounds: iced::Size::INFINITE,
         size: size.into(),
         line_height: text::LineHeight::Absolute(size.into()),
-        font: Font::MONOSPACE,
+        font: crate::fonts::CODE,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,
         shaping: text::Shaping::Basic,
@@ -799,8 +803,9 @@ pub(crate) fn markdown_pane<'a>(
     v: &Viewer,
     items: &'a [iced::widget::markdown::Item],
 ) -> Element<'a, Message> {
-    let doc = iced::widget::markdown::view(items, theme::markdown_settings())
-        .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
+    let doc =
+        iced::widget::markdown::view(items, theme::markdown_settings_at(theme::DOCUMENT_SIZE))
+            .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
     let body = container(doc).padding([16, 28]).max_width(920);
     mouse_area(reader_scroll(
         scrollable(body)
@@ -1003,32 +1008,199 @@ pub(crate) fn right_panel_shown(app: &App) -> bool {
         && app.active_viewer().is_some()
 }
 
-/// The right sidebar: a tabbed panel with an Outline tab and an Explain tab
-/// (mirrors the left sidebar's tabs). Hidden on narrow/split windows or with no
-/// file open.
+/// The reading panel — the margin beside the code: notes on what is read
+/// (the note on the function the caret is in, raised as a card, over this
+/// file's symbols with theirs), the calls around that function, and its
+/// history. Hidden on narrow/split windows or with no file open.
 pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     if !right_panel_shown(app) {
         return None;
     }
-
-    // One cursor-following reading-context panel — no tab-dance. The top follows
-    // the caret: the current function's summary, call-flow and quick actions.
-    // The bottom is the file's outline, an annotated table of contents with the
-    // current symbol highlighted, so "where am I" and "what's around me" sit
-    // together.
-    // Equal split: the explanation (which can stream several blocks) gets as much
-    // room as the outline, rather than being squeezed into the smaller share.
-    let context = container(explain_content(app)).height(iced::Length::FillPortion(1));
-    let outline = column![section_header("OUTLINE"), outline_content(app)]
-        .height(iced::Length::FillPortion(1));
-
+    let tab = |label: &'static str, this: crate::MarginTab| {
+        let chosen = app.margin_tab == this;
+        button(
+            text(label)
+                .size(ts::BODY)
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(if chosen {
+                    theme::fg_bright()
+                } else {
+                    theme::fg_muted()
+                }),
+        )
+        .style(theme::segment(chosen))
+        .padding([5, 10])
+        .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
+    };
+    let tabs = container(
+        row![
+            tab("Notes", crate::MarginTab::Notes),
+            tab("Calls", crate::MarginTab::Calls),
+            tab("History", crate::MarginTab::History),
+        ]
+        .spacing(2),
+    )
+    .padding(Padding {
+        top: 12.0,
+        right: 14.0,
+        bottom: 10.0,
+        left: 10.0,
+    });
+    let body: Element<'_, Message> = match app.margin_tab {
+        // One cursor-following reading context, no tab-dance: the note on the
+        // function the caret is in, as a card, over the file's own symbols —
+        // "where am I" and "what's around me" together. An equal split: the
+        // note (which can stream several blocks) gets as much room as the
+        // list, rather than being squeezed into the smaller share.
+        crate::MarginTab::Notes => column![
+            container(
+                container(explain_content(app))
+                    .width(Fill)
+                    .max_height((app.window_height * 0.5).max(160.0))
+                    .style(theme::note_card),
+            )
+            .padding(Padding {
+                top: 0.0,
+                right: 12.0,
+                bottom: 6.0,
+                left: 8.0,
+            }),
+            column![
+                container(
+                    text("In this file")
+                        .size(ts::SMALL)
+                        .font(crate::fonts::UI_SEMIBOLD)
+                        .color(theme::dim())
+                )
+                .padding(Padding {
+                    top: 10.0,
+                    right: 14.0,
+                    bottom: 2.0,
+                    left: 14.0,
+                }),
+                outline_content(app)
+            ]
+            .height(Fill),
+        ]
+        .into(),
+        crate::MarginTab::Calls => margin_calls(app),
+        crate::MarginTab::History => margin_history(app),
+    };
     Some(
-        container(column![context, hairline(), outline])
+        container(column![tabs, body])
             .width(Length::Fixed(app.right_width))
             .height(Fill)
-            .style(theme::panel)
+            .style(theme::on_sheet)
             .into(),
     )
+}
+
+/// The margin's Calls: who calls the function the caret is in, and what it
+/// calls — each a jump — or what to do to see them.
+fn margin_calls(app: &App) -> Element<'_, Message> {
+    let node = app
+        .proj
+        .explain
+        .view
+        .as_ref()
+        .filter(|n| matches!(n, crate::explain::Node::Function { .. }));
+    let Some(node) = node else {
+        return compact_empty_state(
+            Glyph::CallGraph,
+            "Move the cursor into a function to see who calls it and what it calls.",
+        );
+    };
+    let rows = call_flow_rows(app, node);
+    let open = button(
+        row![
+            glyph::icon(Glyph::CallGraph, theme::fg_muted(), 14.0),
+            text("Open the call hierarchy").size(ts::BODY),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .style(theme::menu_row)
+    .width(Fill)
+    .padding([6, 8])
+    .on_press(Message::Window(WindowMsg::SidebarTabPicked(
+        SidebarTab::Calls,
+    )));
+    scrollable(
+        column![Column::with_children(rows).spacing(8).width(Fill), open,]
+            .spacing(10)
+            .padding(Padding {
+                top: 2.0,
+                right: 12.0,
+                bottom: 10.0,
+                left: 12.0,
+            }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
+    .into()
+}
+
+/// The margin's History: the ways into how this code came to be.
+fn margin_history(app: &App) -> Element<'_, Message> {
+    let in_function = matches!(
+        app.proj.explain.view,
+        Some(crate::explain::Node::Function { .. })
+    );
+    let row_of = |glyph: Glyph, title: &'static str, detail: &'static str, msg: Message| {
+        button(
+            row![
+                container(glyph::icon(glyph, theme::fg_muted(), 15.0)).padding([2, 0]),
+                column![
+                    text(title).size(ts::BASE).color(theme::fg()),
+                    text(detail).size(ts::SMALL).color(theme::dim()),
+                ]
+                .spacing(2),
+            ]
+            .spacing(10)
+            .align_y(iced::alignment::Vertical::Top),
+        )
+        .style(theme::menu_row)
+        .width(Fill)
+        .padding([8, 10])
+        .on_press(msg)
+    };
+    let mut rows = Column::new().spacing(2);
+    if in_function {
+        rows = rows.push(row_of(
+            Glyph::TimeTravel,
+            "This function through time",
+            "Scrub its history, commit by commit.",
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
+        ));
+    }
+    rows = rows
+        .push(row_of(
+            Glyph::TimeTravel,
+            "This file through time",
+            "Scrub the whole file back through its commits.",
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
+        ))
+        .push(row_of(
+            Glyph::Info,
+            "Why is this line here?",
+            "The commits that shaped the caret's line, explained.",
+            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+        ))
+        .push(row_of(
+            Glyph::Diff,
+            "Changes since the last commit",
+            "What is new in this file, in the reader.",
+            Message::Editor(EditorMsg::ToggleDiff),
+        ));
+    container(rows)
+        .padding(Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 8.0,
+            left: 8.0,
+        })
+        .into()
 }
 
 /// A 1px horizontal divider spanning the panel width.

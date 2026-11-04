@@ -265,7 +265,7 @@ impl App {
         }
         add(
             "Settings".into(),
-            Some("⌘,".into()),
+            Some(crate::keymap::local_keys("⌘,")),
             send(Message::Settings(SettingsMsg::Open)),
         );
 

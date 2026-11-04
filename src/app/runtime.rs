@@ -103,6 +103,11 @@ impl App {
             llm_config_cache: None,
             show_tools_menu: false,
             show_target_menu: false,
+            show_app_menu: false,
+            margin_tab: MarginTab::default(),
+            show_view_menu: false,
+            show_views_menu: false,
+            file_filter: String::new(),
             keymap: keymap::Keymap::load(),
             show_shortcuts: false,
             rebinding: None,
@@ -151,12 +156,12 @@ impl App {
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,
+            maximized: false,
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
             sidebar_width: 280.0,
-            sidebar_tabs_offset: 0.0,
-            right_width: 400.0,
+            right_width: 320.0,
             bottom_height: 340.0,
             font_size: DEFAULT_FONT_SIZE,
             #[cfg(test)]
@@ -305,20 +310,34 @@ impl App {
         macos::configure_frameless(10.0);
         // And so does entering or leaving it by the window's own means: the
         // controls show what the window is in.
+        // A window maximized by the system's own means (a double click on
+        // the bar, a snap) is a resize too: its button shows "restore".
         match self.main_window {
-            Some(id) => iced::window::mode(id).map(|mode| Message::Window(WindowMsg::ModeIs(mode))),
+            Some(id) => Task::batch([
+                iced::window::mode(id).map(|mode| Message::Window(WindowMsg::ModeIs(mode))),
+                iced::window::is_maximized(id)
+                    .map(|now| Message::Window(WindowMsg::MaximizedIs(now))),
+            ]),
             None => Task::none(),
         }
+    }
+
+    /// Close every menu of the chrome: they open one at a time.
+    pub(crate) fn close_menus(&mut self) {
+        self.show_tools_menu = false;
+        self.show_target_menu = false;
+        self.show_app_menu = false;
+        self.show_view_menu = false;
+        self.show_views_menu = false;
     }
 
     pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
         self.sidebar = tab;
         self.show_left_sidebar = true; // reveal it for external triggers
-        self.show_tools_menu = false; // close the More menu if it opened this
-        // Always scroll the picked tab into view — the strip scrolls horizontally
-        // and a tab off the right edge would otherwise look unselected.
-        let reveal = ui::reveal_sidebar_tab(tab);
-        let action = match tab {
+        // Close the menu that opened this, if one did.
+        self.show_tools_menu = false;
+        self.show_views_menu = false;
+        match tab {
             // The search input takes keyboard focus — except while the
             // tutorial shows the tab, whose keys step the tour.
             SidebarTab::Search if self.tutorial.is_none() => {
@@ -360,8 +379,7 @@ impl App {
                 Task::none()
             }
             _ => Task::none(),
-        };
-        Task::batch([reveal, action])
+        }
     }
 
     pub(crate) fn on_tick(&mut self) -> Task<Message> {
@@ -528,10 +546,6 @@ impl App {
                 self.asking.places.clear();
                 Task::none()
             }
-            WindowMsg::SidebarTabsScrolled(x) => {
-                self.sidebar_tabs_offset = x;
-                Task::none()
-            }
             WindowMsg::ResizeSidebar(x) => {
                 self.sidebar_width = x;
                 self.clamp_panel_sizes();
@@ -556,13 +570,57 @@ impl App {
                 Task::none()
             }
             WindowMsg::ToggleToolsMenu => {
-                self.show_tools_menu = !self.show_tools_menu;
-                self.show_target_menu = false;
+                let open = !self.show_tools_menu;
+                self.close_menus();
+                self.show_tools_menu = open;
                 Task::none()
             }
             WindowMsg::ToggleTargetMenu => {
-                self.show_target_menu = !self.show_target_menu;
-                self.show_tools_menu = false;
+                let open = !self.show_target_menu;
+                self.close_menus();
+                self.show_target_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleAppMenu => {
+                let open = !self.show_app_menu;
+                self.close_menus();
+                self.show_app_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleViewMenu => {
+                let open = !self.show_view_menu;
+                self.close_menus();
+                self.show_view_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleViewsMenu => {
+                let open = !self.show_views_menu;
+                self.close_menus();
+                self.show_views_menu = open;
+                Task::none()
+            }
+            WindowMsg::FileFilterChanged(filter) => {
+                self.file_filter = filter;
+                Task::none()
+            }
+            // Asked first, then set: what the button shows next is what was
+            // asked for, not a read that may race the change.
+            WindowMsg::ToggleMaximize => match self.main_window {
+                Some(id) => iced::window::is_maximized(id).then(move |was| {
+                    Task::batch([
+                        iced::window::maximize(id, !was),
+                        Task::done(Message::Window(WindowMsg::MaximizedIs(!was))),
+                    ])
+                }),
+                None => Task::none(),
+            },
+            WindowMsg::MarginTabPicked(tab) => {
+                self.margin_tab = tab;
+                self.show_right_panel = true;
+                Task::none()
+            }
+            WindowMsg::MaximizedIs(now) => {
+                self.maximized = now;
                 Task::none()
             }
             WindowMsg::OpenShortcuts => {

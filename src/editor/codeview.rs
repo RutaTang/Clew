@@ -1392,7 +1392,7 @@ impl<'a, Message> CodeView<'a, Message> {
             bounds: Size::new(LINE_LAYOUT_WIDTH, self.line_height),
             size: self.font_size.into(),
             line_height: text::LineHeight::Absolute(self.line_height.into()),
-            font: Font::MONOSPACE,
+            font: crate::fonts::CODE,
             align_x: text::Alignment::Left,
             align_y: iced::alignment::Vertical::Top,
             shaping: text::Shaping::Advanced,
@@ -1915,7 +1915,8 @@ where
                     theme::with_alpha(theme::warning(), 0.16),
                 );
             } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
-                // Current line: a whisper-faint full-width wash for orientation.
+                // Current line: a faint full-width wash of the accent — the
+                // accent marks only where the reader is.
                 let width = (viewport.x + viewport.width - bounds.x).max(bounds.width);
                 renderer.fill_quad(
                     renderer::Quad {
@@ -1927,7 +1928,7 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::fg(), 0.04),
+                    theme::with_alpha(theme::accent(), if theme::is_light() { 0.07 } else { 0.08 }),
                 );
             }
             // Debug: a breakpoint dot at the left of the gutter — red normally,
@@ -2117,7 +2118,7 @@ where
                     bounds: Size::new(gutter_px, lh),
                     size: self.font_size.into(),
                     line_height: text::LineHeight::Absolute(lh.into()),
-                    font: Font::MONOSPACE,
+                    font: crate::fonts::CODE,
                     align_x: text::Alignment::Left,
                     align_y: iced::alignment::Vertical::Top,
                     shaping: text::Shaping::Basic,
@@ -2139,7 +2140,7 @@ where
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
                             line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Advanced,
@@ -2177,7 +2178,7 @@ where
                             bounds: Size::new(2.0 * cw, lh),
                             size: self.font_size.into(),
                             line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Basic,
@@ -2199,7 +2200,7 @@ where
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
                             line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Advanced,
@@ -2240,7 +2241,7 @@ where
                             bounds: Size::new(f32::MAX, lh),
                             size: annotation_size(self.font_size).into(),
                             line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: ANNOTATION_SHAPING,
@@ -2345,7 +2346,7 @@ where
                         bounds: Size::new(gutter_px, lh),
                         size: self.font_size.into(),
                         line_height: text::LineHeight::Absolute(lh.into()),
-                        font: Font::MONOSPACE,
+                        font: crate::fonts::CODE,
                         align_x: text::Alignment::Left,
                         align_y: iced::alignment::Vertical::Top,
                         shaping: text::Shaping::Basic,
@@ -2702,7 +2703,7 @@ where
         bounds: Size::INFINITE,
         size: font_size.into(),
         line_height: text::LineHeight::Absolute(font_size.into()),
-        font: Font::MONOSPACE,
+        font: crate::fonts::CODE,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,
         shaping: text::Shaping::Basic,
@@ -3252,7 +3253,7 @@ mod hit_tests {
                 bounds: iced::Size::new(400.0, 40.0),
                 size: iced::Pixels(FONT),
                 line_height: iced::advanced::text::LineHeight::default(),
-                font: iced::Font::MONOSPACE,
+                font: crate::fonts::CODE,
                 align_x: iced::advanced::text::Alignment::Default,
                 align_y: iced::alignment::Vertical::Top,
                 shaping: iced::advanced::text::Shaping::Advanced,

@@ -65,6 +65,43 @@ pub enum Glyph {
     Mic,
     Expand,
     Shrink,
+    // The window's chrome
+    /// The app menu of Windows and Linux (three bars).
+    Menu,
+    /// More (three dots).
+    More,
+    /// Narrow a list down (three bars, each shorter).
+    Filter,
+    /// Search the text of the files: lines of text under a lens.
+    TextSearch,
+    /// Find by meaning: a lens inside a frame's four corners.
+    FindMeaning,
+    /// The reading trail: two stops joined by a winding path.
+    Route,
+    /// A value's flow: a path that bends back on itself to an arrow.
+    Flow,
+    /// What the reader shows (the View menu).
+    Eye,
+    ChevronRight,
+    /// Kept on this computer.
+    Lock,
+    /// Send what was typed (an arrow up).
+    Send,
+    Check,
+    /// A file: a page with its corner folded.
+    File,
+}
+
+/// The window buttons Clew draws on Windows and Linux. Their own family:
+/// hairline geometry on a 10-unit grid, the way those systems draw them,
+/// not the chrome's rounded strokes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowGlyph {
+    Minimize,
+    Maximize,
+    /// Maximized: two overlapping frames, "make it a window again".
+    Restore,
+    Close,
 }
 
 /// The inner SVG for a glyph — original geometry, 24×24, stroked (a few filled
@@ -220,7 +257,68 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M20 10 H14 V4'/><path d='M14 10 L20.5 3.5'/>\
              <path d='M4 14 H10 V20'/><path d='M10 14 L3.5 20.5'/>"
         }
+        Menu => "<path d='M4.5 7 H19.5'/><path d='M4.5 12 H19.5'/><path d='M4.5 17 H19.5'/>",
+        More => {
+            "<circle cx='5.5' cy='12' r='1.3' fill='STROKE' stroke='none'/>\
+             <circle cx='12' cy='12' r='1.3' fill='STROKE' stroke='none'/>\
+             <circle cx='18.5' cy='12' r='1.3' fill='STROKE' stroke='none'/>"
+        }
+        Filter => "<path d='M4 7 H20'/><path d='M7 12 H17'/><path d='M10 17 H14'/>",
+        TextSearch => {
+            "<path d='M4 6 H20'/><path d='M4 11.5 H10'/><path d='M4 17 H9.5'/>\
+             <circle cx='16' cy='14.5' r='3.2'/><path d='M18.4 16.9 L20.5 19'/>"
+        }
+        FindMeaning => {
+            "<path d='M4 8.5 V6 A2 2 0 0 1 6 4 H8.5'/><path d='M15.5 4 H18 A2 2 0 0 1 20 6 V8.5'/>\
+             <path d='M20 15.5 V18 A2 2 0 0 1 18 20 H15.5'/><path d='M8.5 20 H6 A2 2 0 0 1 4 18 V15.5'/>\
+             <circle cx='11.5' cy='11.5' r='3.1'/><path d='M13.8 13.8 L16 16'/>"
+        }
+        Route => {
+            "<circle cx='6' cy='18.5' r='2.2'/><circle cx='18' cy='5.5' r='2.2'/>\
+             <path d='M8.2 18.5 H16 A3.2 3.2 0 0 0 16 12.1 H8 A3.2 3.2 0 0 1 8 5.7 H15.8'/>"
+        }
+        Flow => {
+            "<path d='M4 7 H14.5 A3 3 0 0 1 14.5 13 H9.5 A3 3 0 0 0 9.5 19 H19.5'/>\
+             <path d='M16.5 16 L19.5 19 L16.5 22'/>"
+        }
+        Eye => {
+            "<path d='M2.8 12 C5 7.6 8.2 5.5 12 5.5 C15.8 5.5 19 7.6 21.2 12 C19 16.4 15.8 18.5 12 18.5 C8.2 18.5 5 16.4 2.8 12 Z'/>\
+             <circle cx='12' cy='12' r='2.8'/>"
+        }
+        ChevronRight => "<path d='M9.5 5 L16 12 L9.5 19'/>",
+        Lock => {
+            "<rect x='5' y='10.5' width='14' height='9.5' rx='2'/>\
+             <path d='M8.5 10.5 V8 A3.5 3.5 0 0 1 15.5 8 V10.5'/>"
+        }
+        Send => "<path d='M12 19.5 V5'/><path d='M6 11 L12 5 L18 11'/>",
+        Check => "<path d='M5 12.5 L10 17.5 L19.5 7'/>",
+        File => {
+            "<path d='M6.5 3.5 H13.5 L18.5 8.5 V19 A1.5 1.5 0 0 1 17 20.5 H7 A1.5 1.5 0 0 1 5.5 19 V5 A1.5 1.5 0 0 1 7 3.5 Z' transform='translate(0.5 0)'/>\
+             <path d='M13.5 3.5 V8.5 H18.5'/>"
+        }
     }
+}
+
+/// A window button's glyph, stroked in `color` at `size` logical px.
+pub fn window_icon<'a, M: 'a>(glyph: WindowGlyph, color: Color, size: f32) -> Element<'a, M> {
+    let body = match glyph {
+        WindowGlyph::Minimize => "<path d='M0.5 5 H9.5'/>",
+        WindowGlyph::Maximize => "<rect x='0.5' y='0.5' width='9' height='9' rx='1.2'/>",
+        WindowGlyph::Restore => {
+            "<rect x='0.5' y='2.5' width='7' height='7' rx='1'/>\
+             <path d='M2.5 2.5 V1.5 A1 1 0 0 1 3.5 0.5 H8.5 A1 1 0 0 1 9.5 1.5 V6.5 A1 1 0 0 1 8.5 7.5 H7.5'/>"
+        }
+        WindowGlyph::Close => "<path d='M0.5 0.5 L9.5 9.5'/><path d='M9.5 0.5 L0.5 9.5'/>",
+    };
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10' fill='none' stroke='{}' \
+         stroke-width='1' stroke-linecap='round' stroke-linejoin='round'>{body}</svg>",
+        hex(color),
+    );
+    svg(svg::Handle::from_memory(doc.into_bytes()))
+        .width(size)
+        .height(size)
+        .into()
 }
 
 /// `iced::Color` → `#rrggbb`.

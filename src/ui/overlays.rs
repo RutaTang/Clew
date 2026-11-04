@@ -36,7 +36,7 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
         parts.push(
             text(shown)
                 .size(ts::BODY)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg())
                 .into(),
         );
@@ -254,7 +254,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         .map(|line| {
             text(line.as_str())
                 .size(ts::SMALL)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::dim())
                 .wrapping(Wrapping::None)
                 .into()

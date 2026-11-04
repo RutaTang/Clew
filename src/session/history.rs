@@ -212,6 +212,23 @@ impl History {
         Some(self.nodes[child].loc.clone())
     }
 
+    /// The visits that led to the current one, oldest first and the current
+    /// last — at most `n` of them: the reading trail's line over the code.
+    /// Each with its node id (for [`History::goto`]) and its symbol label.
+    pub fn recent_path(&self, n: usize) -> Vec<(usize, &Loc, Option<&str>)> {
+        let mut out = Vec::new();
+        let mut at = self.current;
+        while let Some(i) = at
+            && out.len() < n
+        {
+            let node = &self.nodes[i];
+            out.push((i, &node.loc, node.label.as_deref()));
+            at = node.parent;
+        }
+        out.reverse();
+        out
+    }
+
     pub fn can_back(&self) -> bool {
         self.current.and_then(|c| self.nodes[c].parent).is_some()
     }

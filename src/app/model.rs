@@ -188,6 +188,16 @@ impl CitationIndex {
     }
 }
 
+/// The reading panel's views (the margin beside the code): notes on what is
+/// read, the calls around the function the caret is in, and its history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MarginTab {
+    #[default]
+    Notes,
+    Calls,
+    History,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SidebarTab {
     Files,

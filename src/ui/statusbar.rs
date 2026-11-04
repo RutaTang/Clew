@@ -35,107 +35,50 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
 
 /// Height of the status bar. Fixed, so the tutorial can carve the body region
 /// out of the window and the target drop-up can sit right above it.
-pub(crate) const STATUSBAR_H: f32 = 27.0;
+pub(crate) const STATUSBAR_H: f32 = 30.0;
 
+/// One quiet item of the status bar.
+fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(s).size(ts::SMALL).color(theme::fg_muted())
+}
+
+/// The status bar: one quiet line along the window's foot. On the left,
+/// where the code is read from and what Clew is doing; on the right, the
+/// open file — its language and language server, its problems, the caret,
+/// and which platform its `#[cfg]`-style branches are read for.
 pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
-    // In time travel, report the revision being viewed — not the live document's
-    // stats (its line count / a caret line that may not exist in this revision).
-    // Only while the session is on screen: off it, the document that is.
-    let right = if let Some(tt) = time_travel_on_screen(app) {
-        let short: String = tt
-            .commits
-            .get(tt.idx)
-            .map(|c| c.sha.chars().take(8).collect())
-            .unwrap_or_default();
-        let scope = match &tt.scope {
-            TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
-            TimeScope::File => String::new(),
-        };
-        let lines = tt
-            .viewer
-            .as_ref()
-            .map(|v| format!("  ·  {} lines", v.lines.len()))
-            .unwrap_or_default();
-        format!(
-            "Time Travel  ·  {short}  ·  {}/{}{}{}",
-            tt.idx + 1,
-            tt.commits.len(),
-            scope,
-            lines
-        )
-    } else {
-        match app.active_viewer() {
-            Some(v) => {
-                let lang = v
-                    .lang_key
-                    .and_then(crate::highlight::lang_name)
-                    .unwrap_or("Plain text");
-                // 1-based line/column of the last click, when there is one.
-                let pos = v
-                    .caret
-                    .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
-                    .unwrap_or_default();
-                // Language-server status for this file's language, when
-                // relevant — from the snapshot this update took (so a state
-                // clew cannot read shows as a problem, not as "ready").
-                let lsp = v
-                    .lang_key
-                    .and_then(|k| app.lsp_status(k))
-                    .map(|status| format!("  ·  LSP {status}"))
-                    .unwrap_or_default();
-                // Diagnostic counts for this file, from the same snapshot.
-                let diags = v
-                    .lang_key
-                    .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
-                        Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
-                        _ => None,
-                    })
-                    .map(|ds| {
-                        let errs = ds.iter().filter(|d| d.severity == 1).count();
-                        let warns = ds.iter().filter(|d| d.severity == 2).count();
-                        if errs + warns == 0 {
-                            String::new()
-                        } else {
-                            format!("  ·  ✘ {errs}  ⚠ {warns}")
-                        }
-                    })
-                    .unwrap_or_default();
-                format!(
-                    "{}{}  ·  {} lines{}{}",
-                    pos,
-                    lang,
-                    v.lines.len(),
-                    diags,
-                    lsp
-                )
-            }
-            None => String::new(),
-        }
-    };
-
-    // Where code is read from — the one place local vs remote shows. Click it to
-    // manage connections / switch hosts.
-    let (conn_glyph, conn_color) = if app.connection.is_remote() {
-        (Glyph::Remote, theme::accent())
-    } else {
-        (Glyph::Circle, theme::dim())
-    };
+    // Where code is read from — the one place local vs remote shows. Click
+    // it to manage connections / switch hosts.
+    let remote = app.connection.is_remote();
+    let dot =
+        container(space().width(6).height(6)).style(move |_: &iced::Theme| container::Style {
+            background: Some(
+                if remote {
+                    theme::accent()
+                } else {
+                    theme::success()
+                }
+                .into(),
+            ),
+            border: iced::border::rounded(3),
+            ..container::Style::default()
+        });
     let conn_indicator = tooltip(
         button(
             row![
-                glyph::icon(conn_glyph, conn_color, 12.0),
+                dot,
                 text(app.connection.label())
                     .size(ts::SMALL)
-                    .color(if app.connection.is_remote() {
+                    .color(if remote {
                         theme::accent()
                     } else {
                         theme::fg_muted()
                     }),
             ]
-            .spacing(4)
+            .spacing(7)
             .align_y(iced::Center),
         )
-        .style(theme::toolbar_button)
+        .style(theme::icon_button(false))
         .padding([2, 8])
         .on_press(Message::Connect(ConnectMsg::Open)),
         container(
@@ -148,13 +91,13 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         tooltip::Position::Top,
     );
 
-    let mut bar = row![conn_indicator, text(&app.status).size(ts::SMALL)]
-        .spacing(12)
+    let mut bar = row![conn_indicator, status_text(&app.status)]
+        .spacing(14)
         .align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
-    // pass is slow, so show how far along it is (the status text alone is easy to
-    // miss / read as stuck). It is the one place the pass's progress shows: the
-    // refresh chip stays out of the way meanwhile (see `refresh_chip`).
+    // pass is slow, so show how far along it is (the status text alone is easy
+    // to miss / read as stuck). It is the one place the pass's progress shows:
+    // the refresh chip stays out of the way meanwhile (see `refresh_chip`).
     if app.proj.explain.running {
         let label = match app.proj.explain.progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
@@ -190,7 +133,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // be stopped without hunting through menus.
         chip = chip.push(
             button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
-                .style(theme::toolbar_button)
+                .style(theme::icon_button(false))
                 .padding([1, 4])
                 .on_press(Message::Explain(ExplainMsg::Cancel)),
         );
@@ -200,7 +143,90 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }
-    bar = bar.push(text(right).size(ts::SMALL));
+
+    // In time travel, report the revision being viewed — not the live
+    // document's (its line count / a caret line that may not exist in this
+    // revision). Only while the session is on screen: off it, the document
+    // that is.
+    if let Some(tt) = time_travel_on_screen(app) {
+        let short: String = tt
+            .commits
+            .get(tt.idx)
+            .map(|c| c.sha.chars().take(8).collect())
+            .unwrap_or_default();
+        let scope = match &tt.scope {
+            TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
+            TimeScope::File => String::new(),
+        };
+        let lines = tt
+            .viewer
+            .as_ref()
+            .map(|v| format!("  ·  {} lines", v.lines.len()))
+            .unwrap_or_default();
+        bar = bar.push(status_text(format!(
+            "Time Travel  ·  {short}  ·  {}/{}{}{}",
+            tt.idx + 1,
+            tt.commits.len(),
+            scope,
+            lines
+        )));
+    } else if let Some(v) = app.active_viewer() {
+        let lang = v
+            .lang_key
+            .and_then(crate::highlight::lang_name)
+            .unwrap_or("Plain text");
+        // Language-server status for this file's language, when relevant —
+        // from the snapshot this update took (so a state clew cannot read
+        // shows as a problem, not as "ready").
+        let lsp = v
+            .lang_key
+            .and_then(|k| app.lsp_status(k))
+            .map(|status| format!("  ·  LSP {status}"))
+            .unwrap_or_default();
+        bar = bar.push(status_text(format!(
+            "{lang}  ·  {} lines{lsp}",
+            v.lines.len()
+        )));
+        // Diagnostic counts for this file, from the same snapshot.
+        let diags = v
+            .lang_key
+            .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
+                Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
+                _ => None,
+            })
+            .map(|ds| {
+                let errs = ds.iter().filter(|d| d.severity == 1).count();
+                let warns = ds.iter().filter(|d| d.severity == 2).count();
+                (errs, warns)
+            });
+        if let Some((errs, warns)) = diags
+            && errs + warns > 0
+        {
+            bar = bar.push(
+                row![
+                    text(format!("✘ {errs}"))
+                        .size(ts::SMALL)
+                        .color(if errs > 0 {
+                            theme::danger()
+                        } else {
+                            theme::fg_muted()
+                        }),
+                    text(format!("⚠ {warns}"))
+                        .size(ts::SMALL)
+                        .color(if warns > 0 {
+                            theme::warning()
+                        } else {
+                            theme::fg_muted()
+                        }),
+                ]
+                .spacing(8),
+            );
+        }
+        // 1-based line/column of the last click, when there is one.
+        if let Some((l, c)) = v.caret {
+            bar = bar.push(status_text(format!("Line {}, Column {}", l + 1, c + 1)));
+        }
+    }
     // For a file whose dimming depends on the platform (Rust's `#[cfg]`, Go's
     // build constraints, C's `#if`, …), a small target control: read another
     // platform's branches as the live ones. A plain button + our own
@@ -213,26 +239,32 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     {
         let picker = button(
             row![
+                text("Reading for").size(ts::SMALL).color(theme::fg_muted()),
                 text(app.proj.reading_target.to_string())
                     .size(ts::SMALL)
-                    .color(theme::fg_muted()),
-                glyph::icon(Glyph::ChevronDown, theme::dim(), 12.0),
+                    .color(theme::fg()),
+                glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
             ]
-            .spacing(4)
+            .spacing(5)
             .align_y(iced::Center),
         )
-        .style(theme::toolbar_button)
-        .padding([1, 6])
+        .style(theme::icon_button(app.show_target_menu))
+        .padding([2, 7])
         .on_press(Message::Window(WindowMsg::ToggleTargetMenu));
         bar = bar.push(picker);
     }
 
-    container(bar.padding([0, 10]))
-        .width(Fill)
-        .height(Length::Fixed(STATUSBAR_H))
-        .align_y(iced::Center)
-        .style(theme::statusbar)
-        .into()
+    container(bar.spacing(16).padding(Padding {
+        top: 0.0,
+        right: STRIP_W - 4.0,
+        bottom: 0.0,
+        left: 10.0,
+    }))
+    .width(Fill)
+    .height(Length::Fixed(STATUSBAR_H))
+    .align_y(iced::Center)
+    .style(theme::statusbar)
+    .into()
 }
 
 /// A freshness indicator for the auto-refreshed understanding: shows whether a
@@ -267,8 +299,8 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         ("↻ Up to date".to_string(), theme::dim(), true)
     };
     let mut b = button(text(label).size(ts::SMALL).color(color))
-        .style(theme::toolbar_button)
-        .padding([1, 8]);
+        .style(theme::icon_button(false))
+        .padding([2, 8]);
     if enabled {
         b = b.on_press(Message::Explain(ExplainMsg::RefreshAll));
     }

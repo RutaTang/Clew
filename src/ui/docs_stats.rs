@@ -327,7 +327,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                             text(kind_badge(&item.kind))
                                 .size(ts::CAPTION)
                                 .color(theme::accent())
-                                .font(Font::MONOSPACE)
+                                .font(crate::fonts::CODE)
                                 .width(42),
                             text(item.name.clone())
                                 .size(ts::BASE)
@@ -433,7 +433,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             text(kind_badge(&e.kind))
                 .size(ts::SMALL)
                 .color(theme::accent())
-                .font(Font::MONOSPACE),
+                .font(crate::fonts::CODE),
             text(e.name.clone()).size(title_size).color(theme::fg()),
         ]
         .spacing(8)
@@ -442,7 +442,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         let signature = container(
             text(e.signature.clone())
                 .size(ts::BODY)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg_muted()),
         )
         .padding([6, 10])
@@ -973,7 +973,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                 text(term.badge.clone())
                     .size(ts::SMALL)
                     .color(theme::accent())
-                    .font(Font::MONOSPACE),
+                    .font(crate::fonts::CODE),
                 space().width(Fill),
                 text(term.location())
                     .size(ts::CAPTION)

@@ -159,8 +159,15 @@ fn the_agent_lists_and_runs_the_windows_commands() {
     let (mut app, stream, mut rx) = turn_app("wt-commands");
     let _ = call(&mut app, stream, 1, LIST_COMMANDS, json!({}));
     let listed = results(&mut rx).remove(0).1;
-    assert!(listed.contains("- Call Graph (⇧⌘C)"), "{listed}");
-    assert!(listed.contains("- Explain All (⇧⌘E) — asks the user first"));
+    let keys = crate::keymap::local_keys;
+    assert!(
+        listed.contains(&format!("- Call Graph ({})", keys("⇧⌘C"))),
+        "{listed}"
+    );
+    assert!(listed.contains(&format!(
+        "- Explain All ({}) — asks the user first",
+        keys("⇧⌘E")
+    )));
     assert!(listed.contains("- Overview\n"), "{listed}");
     // Something that only shows: run at once.
     let _ = call(

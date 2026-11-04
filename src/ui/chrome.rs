@@ -24,7 +24,7 @@ pub(crate) const PROMPT_TOP: f32 = 120.0;
 /// Top offset of the "why is this here?" popup.
 pub(crate) const WHY_TOP: f32 = 110.0;
 /// Top offset of the finder.
-pub(crate) const FINDER_TOP: f32 = 80.0;
+pub(crate) const FINDER_TOP: f32 = 88.0;
 
 /// Dialog widths, narrowest first.
 pub(crate) const PROMPT_W: f32 = 460.0;
@@ -32,7 +32,7 @@ pub(crate) const SETTINGS_W: f32 = 480.0;
 pub(crate) const WHY_W: f32 = 480.0;
 pub(crate) const SHORTCUTS_W: f32 = 540.0;
 pub(crate) const DIALOG_W: f32 = 560.0;
-pub(crate) const FINDER_W: f32 = 640.0;
+pub(crate) const FINDER_W: f32 = 600.0;
 pub(crate) const SERVER_PANEL_W: f32 = 720.0;
 pub(crate) const GRAPH_MODAL_W: f32 = 760.0;
 /// Width of the reading-target dropdown.
@@ -69,6 +69,8 @@ pub(crate) enum Placement {
     Top(f32),
     /// Pinned under a control in the top-right corner (a dropdown).
     TopRight { top: f32, right: f32 },
+    /// Pinned under a control in the top-left corner (the app menu).
+    TopLeft { top: f32, left: f32 },
     /// Pinned above a control in the bottom-right corner (a drop-up).
     BottomRight { bottom: f32, right: f32 },
 }
@@ -116,6 +118,13 @@ pub(crate) fn modal<'a>(
             .padding(Padding {
                 top,
                 right,
+                ..Padding::ZERO
+            }),
+        Placement::TopLeft { top, left } => frame
+            .align_x(iced::alignment::Horizontal::Left)
+            .padding(Padding {
+                top,
+                left,
                 ..Padding::ZERO
             }),
         Placement::BottomRight { bottom, right } => frame

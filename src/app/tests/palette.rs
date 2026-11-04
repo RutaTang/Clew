@@ -57,7 +57,7 @@ fn the_palette_opens_ranks_runs_and_remembers() {
         .iter()
         .find(|c| c.title == "Call Graph")
         .unwrap();
-    assert_eq!(call_graph.keys.as_deref(), Some("⇧⌘C"));
+    assert_eq!(call_graph.keys, Some(crate::keymap::local_keys("⇧⌘C")));
 
     typed(&mut app, "> call gra");
     assert_eq!(titles(&app).first().map(String::as_str), Some("Call Graph"));

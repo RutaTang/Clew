@@ -121,8 +121,9 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
     assert!(titles.iter().any(|t| t == "View: Show Debug Panel"));
 }
 
-/// The card moves to the top of its corner when the caret's line would be
-/// under it, and back when it would not.
+/// The card hangs under the chat field, and moves to the bottom of the
+/// window when the caret's line would be under it, and back when it would
+/// not.
 #[test]
 fn the_card_moves_out_of_the_carets_way() {
     let mut app = scanned_app("askfloat-dodge");
@@ -135,16 +136,16 @@ fn the_card_moves_out_of_the_carets_way() {
     let v = app.active_viewer_mut().unwrap();
     v.viewport_h = 700.0;
     v.scroll_y = 0.0;
-    // Near the top of the view: the card stays at the bottom.
+    // Near the top of the view: under the card, which moves down.
     v.caret = Some((2, 0));
     assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(false));
-    // Near the bottom: under the card, which moves up.
+    // Near the bottom: clear of the card, which stays under the field.
     let rows = (700.0 / lh) as usize;
     app.active_viewer_mut().unwrap().caret = Some((rows - 2, 0));
     assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(true));
     // Scrolled out of view: no caret to dodge.
     app.active_viewer_mut().unwrap().scroll_y = 300.0 * lh;
-    assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(false));
+    assert_eq!(crate::ui::ask_place(&app).map(|p| p.at_top), Some(true));
     // Large: centred, wider than the card.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let place = crate::ui::ask_place(&app).unwrap();
@@ -159,13 +160,21 @@ fn the_tour_shows_the_ask_card() {
     let _ = app.update(Message::Tutorial(TutorialMsg::Start));
     let ask_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Ask clew")
+        .position(|s| s.title == "Ask clew, or tell it what to do")
         .expect("an Ask step");
     while app.tutorial.is_some_and(|s| s < ask_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
     }
     assert_eq!(app.ask_view, AskView::Compact);
     let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
+    assert_eq!(app.ask_view, AskView::Closed);
+    let debug_step = crate::app::tutorial::steps(&app)
+        .iter()
+        .position(|s| s.title == "Debug")
+        .expect("a Debug step");
+    while app.tutorial.is_some_and(|s| s < debug_step) {
+        let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
+    }
     assert_eq!(app.ask_view, AskView::Closed);
     assert!(app.show_bottom, "the Debug step shows the debugger's panel");
 }

@@ -1,4 +1,5 @@
-//! Color palette (One Dark / One Light) and reusable widget styles.
+//! Color palettes (Clew Dark / Clew Light by default) and reusable widget
+//! styles.
 //!
 //! Every color the chrome draws with resolves at runtime from the [`active`]
 //! palette, chosen by a global mode flag ([`set_light`]). The flag is app-wide
@@ -9,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, container, progress_bar, scrollable};
+use iced::widget::{button, container, progress_bar, scrollable, text_input};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -90,6 +91,92 @@ pub struct ThemeDef {
     pub palette: Palette,
     pub tokens: TokenColors,
 }
+
+// ---- Clew Dark / Clew Light (the defaults) --------------------------------
+//
+// Clew's own look: neutral greys that stay out of the code's way, one
+// restrained indigo that marks only what is current (the caret's line, the
+// focused field, links), and a syntax palette tuned to read for hours.
+
+const CLEW_DARK_PAL: Palette = Palette {
+    bg: rgb(0x18181b),
+    bg_panel: rgb(0x121214),
+    bg_hover: rgb(0x222226),
+    bg_active: rgb(0x2a2a2f),
+    selected: rgb(0x26262b),
+    fg: rgb(0xe4e4e7),
+    fg_bright: rgb(0xfafafa),
+    fg_muted: rgb(0xa1a1aa),
+    dim: rgb(0x7a7a83),
+    accent: rgb(0x8e8cf6),
+    warn: rgb(0xf87171),
+    border: rgb(0x2e2e33),
+    hairline: rgb(0x242428),
+    elevated: rgb(0x1c1c1f),
+    on_accent: rgb(0x0b0b0f),
+    accent_hover: rgb(0xa5a3f8),
+    control_border: rgb(0x3a3a40),
+    scrollbar: rgb(0x8e8e96),
+    success: rgb(0x4ade80),
+    warning: rgb(0xfbbf24),
+    danger: rgb(0xf87171),
+    info: rgb(0x7dd3fc),
+    find: rgb(0xfbbf24),
+    selection: rgb(0x33335a),
+};
+const CLEW_DARK_TOK: TokenColors = TokenColors {
+    comment: 0x8a8f98,
+    keyword: 0xe08ab7,
+    escape: 0x7fd1c7,
+    string: 0xb5d98a,
+    number: 0xf5a97f,
+    function: 0x93b4ff,
+    type_: 0xf2c27d,
+    property: 0x7fd1c7,
+    parameter: 0xe6c9a8,
+    operator: 0xa1a1aa,
+    punctuation: 0x8b8b94,
+};
+
+const CLEW_LIGHT_PAL: Palette = Palette {
+    bg: rgb(0xffffff),
+    bg_panel: rgb(0xf4f4f5),
+    bg_hover: rgb(0xebebee),
+    bg_active: rgb(0xe2e2e6),
+    selected: rgb(0xe6e6ea),
+    fg: rgb(0x27272a),
+    fg_bright: rgb(0x09090b),
+    fg_muted: rgb(0x52525b),
+    dim: rgb(0x71717a),
+    accent: rgb(0x5b58d9),
+    warn: rgb(0xdc2626),
+    border: rgb(0xd4d4d8),
+    hairline: rgb(0xe4e4e7),
+    elevated: rgb(0xffffff),
+    on_accent: rgb(0xffffff),
+    accent_hover: rgb(0x4b48c9),
+    control_border: rgb(0xd4d4d8),
+    scrollbar: rgb(0xa1a1aa),
+    success: rgb(0x16a34a),
+    warning: rgb(0xb45309),
+    danger: rgb(0xdc2626),
+    info: rgb(0x0284c7),
+    find: rgb(0xf59e0b),
+    selection: rgb(0xdcdbfb),
+};
+const CLEW_LIGHT_TOK: TokenColors = TokenColors {
+    comment: 0x6b7078,
+    keyword: 0xb4246e,
+    escape: 0x0f766e,
+    string: 0x3f7d1c,
+    number: 0xb45309,
+    function: 0x2b50c0,
+    type_: 0x9a5b00,
+    property: 0x0f766e,
+    parameter: 0x9a3412,
+    operator: 0x52525b,
+    punctuation: 0x71717a,
+};
 
 // ---- One Dark / One Light -------------------------------------------------
 
@@ -388,6 +475,20 @@ const CYBERPUNK_TOK: TokenColors = TokenColors {
 /// chooses between them. Order is stable — ids, not indices, are persisted.
 pub static THEMES: &[ThemeDef] = &[
     ThemeDef {
+        id: "clew-dark",
+        name: "Clew Dark",
+        is_light: false,
+        palette: CLEW_DARK_PAL,
+        tokens: CLEW_DARK_TOK,
+    },
+    ThemeDef {
+        id: "clew-light",
+        name: "Clew Light",
+        is_light: true,
+        palette: CLEW_LIGHT_PAL,
+        tokens: CLEW_LIGHT_TOK,
+    },
+    ThemeDef {
         id: "one-dark",
         name: "One Dark",
         is_light: false,
@@ -438,16 +539,22 @@ pub static THEMES: &[ThemeDef] = &[
     },
 ];
 
-const DEFAULT_DARK: &str = "one-dark";
-const DEFAULT_LIGHT: &str = "one-light";
+const DEFAULT_DARK: &str = "clew-dark";
+const DEFAULT_LIGHT: &str = "clew-light";
+/// The defaults before Clew's own themes, and the config key that says a
+/// saved selection was made knowing of them (see [`init`]).
+const OLD_DEFAULT_DARK: &str = "one-dark";
+const OLD_DEFAULT_LIGHT: &str = "one-light";
+const THEMES_GENERATION_KEY: &str = "theme_generation";
+const THEMES_GENERATION: i64 = 2;
 
 /// 0 = dark, 1 = light. The three-way preference (Dark/Light/System) resolves to
 /// this binary flag whenever it is set (see `apply_pref`).
 static MODE: AtomicU8 = AtomicU8::new(0);
-/// Which THEMES entry is the chosen light / dark variant. Default to the
-/// originals so existing installs are unchanged until the user picks otherwise.
-static LIGHT_ID: AtomicUsize = AtomicUsize::new(1); // one-light
-static DARK_ID: AtomicUsize = AtomicUsize::new(0); // one-dark
+/// Which THEMES entry is the chosen light / dark variant: Clew's own pair
+/// until the user picks otherwise.
+static LIGHT_ID: AtomicUsize = AtomicUsize::new(1); // clew-light
+static DARK_ID: AtomicUsize = AtomicUsize::new(0); // clew-dark
 
 /// Bumped whenever the resolved appearance changes (mode, or either theme
 /// selection). The palette above is process-global while windows are not, so
@@ -646,8 +753,20 @@ pub fn init() -> ThemePref {
             .and_then(|x| x.as_str())
             .map(str::to_string)
     };
-    set_light_theme(get("theme_light").as_deref().unwrap_or(DEFAULT_LIGHT));
-    set_dark_theme(get("theme_dark").as_deref().unwrap_or(DEFAULT_DARK));
+    // A selection saved before Clew had its own themes names the old
+    // defaults because they were the defaults, not because they were
+    // chosen: it moves to the new ones. Saved since (the generation key),
+    // a selection is the user's, whatever it names.
+    let knows_clew_themes = clew_core::globalconfig::get(THEMES_GENERATION_KEY)
+        .as_ref()
+        .and_then(|x| x.as_integer())
+        .is_some_and(|g| g >= THEMES_GENERATION);
+    let pick = |key: &str, old: &str, new: &'static str| match get(key) {
+        Some(id) if knows_clew_themes || id != old => id,
+        _ => new.to_string(),
+    };
+    set_light_theme(&pick("theme_light", OLD_DEFAULT_LIGHT, DEFAULT_LIGHT));
+    set_dark_theme(&pick("theme_dark", OLD_DEFAULT_DARK, DEFAULT_DARK));
     let pref = get("theme")
         .and_then(|s| ThemePref::parse(&s))
         .unwrap_or(ThemePref::System);
@@ -668,6 +787,10 @@ pub fn save(pref: ThemePref) -> Result<(), String> {
         (
             "theme_dark".into(),
             toml::Value::String(current_dark().id.into()),
+        ),
+        (
+            THEMES_GENERATION_KEY.into(),
+            toml::Value::Integer(THEMES_GENERATION),
         ),
     ])
 }
@@ -992,21 +1115,35 @@ pub fn app_theme() -> Theme {
 /// accent-coloured code and links. The rest (body text) inherits the container's
 /// colour, so it already tracks the theme.
 pub fn markdown_settings() -> iced::widget::markdown::Settings {
+    markdown_settings_at(PROSE_SIZE)
+}
+
+/// Size of the prose clew writes in its panels and cards (explanations,
+/// answers, the overview): a notch over the interface's own text.
+pub const PROSE_SIZE: f32 = 14.0;
+/// Size of a markdown file's text, read as a document in the reader.
+pub const DOCUMENT_SIZE: f32 = 16.0;
+
+/// [`markdown_settings`] at a given base text size.
+pub fn markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
     use iced::widget::markdown;
-    markdown::Settings::with_style(markdown::Style {
-        font: iced::Font::default(),
-        inline_code_padding: iced::padding::left(4).right(4),
-        inline_code_highlight: markdown::Highlight {
-            // A faint wash of the foreground: subtle on dark themes, subtle on
-            // light ones, never a hard black box.
-            background: with_alpha(fg(), 0.08).into(),
-            border: iced::border::rounded(4),
+    markdown::Settings::with_text_size(
+        size,
+        markdown::Style {
+            font: iced::Font::default(),
+            inline_code_padding: iced::padding::left(4).right(4),
+            inline_code_highlight: markdown::Highlight {
+                // A faint wash of the foreground: subtle on dark themes, subtle on
+                // light ones, never a hard black box.
+                background: with_alpha(fg(), 0.08).into(),
+                border: iced::border::rounded(4),
+            },
+            inline_code_color: accent(),
+            inline_code_font: crate::fonts::CODE,
+            code_block_font: crate::fonts::CODE,
+            link_color: accent(),
         },
-        inline_code_color: accent(),
-        inline_code_font: iced::Font::MONOSPACE,
-        code_block_font: iced::Font::MONOSPACE,
-        link_color: accent(),
-    })
+    )
 }
 
 /// Sidebar / toolbar panel background.
@@ -1036,7 +1173,7 @@ pub fn statusbar(_theme: &Theme) -> container::Style {
     }
 }
 
-/// Elevated panel used by the fuzzy-finder modal.
+/// Elevated panel: modals, menus, tooltips — lifted off what is under it.
 pub fn modal_panel(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(active().elevated.into()),
@@ -1044,9 +1181,305 @@ pub fn modal_panel(_theme: &Theme) -> container::Style {
         border: Border {
             color: border(),
             width: 1.0,
-            radius: 8.0.into(),
+            radius: MENU_RADIUS.into(),
+        },
+        shadow: iced::Shadow {
+            color: scrim(if is_light() { 0.14 } else { 0.45 }),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 24.0,
         },
         ..container::Style::default()
+    }
+}
+
+/// Corner radius of menus and popovers.
+pub const MENU_RADIUS: f32 = 10.0;
+/// Corner radius of the code's sheet.
+pub const SHEET_RADIUS: f32 = 10.0;
+/// The Windows close button's color under the pointer: a platform constant,
+/// the one place the window buttons of Windows and Linux take a color.
+pub const CLOSE_HOVER: Color = rgb(0xc42b1c);
+
+/// A faint wash of the text color: the one way the chrome tints a surface
+/// (wells, hovers, the active chip), so it reads the same over the chrome
+/// and over the sheet, in light and in dark.
+pub fn wash(strength: f32) -> Color {
+    with_alpha(fg(), strength)
+}
+
+/// The window's chrome — the surface the top bar, the sidebar, the tool
+/// strip and the status bar share, and the code's sheet floats over.
+pub fn chrome(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(bg_panel().into()),
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
+/// What sits on the sheet (the panes, the reading panel, the debugger's
+/// panel): no fill of its own, so the sheet's rounded surface shows through
+/// to its corners.
+pub fn on_sheet(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: None,
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
+/// The code's sheet: the reading surface, raised off the chrome by a
+/// rounded edge and a soft shadow rather than by lines around it.
+pub fn sheet(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(bg().into()),
+        text_color: Some(fg()),
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: SHEET_RADIUS.into(),
+        },
+        shadow: iced::Shadow {
+            color: scrim(if is_light() { 0.06 } else { 0.32 }),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 18.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A field on the chrome (the chat field, the file filter): a faint well,
+/// its edge lit in the accent while it is in use.
+pub fn field(active: bool) -> impl Fn(&Theme) -> container::Style {
+    move |_theme| container::Style {
+        background: Some(wash(if is_light() { 0.035 } else { 0.045 }).into()),
+        text_color: Some(fg()),
+        border: Border {
+            color: if active {
+                with_alpha(accent(), 0.65)
+            } else {
+                hairline()
+            },
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        shadow: if active {
+            iced::Shadow {
+                color: with_alpha(accent(), 0.22),
+                offset: iced::Vector::ZERO,
+                blur_radius: 8.0,
+            }
+        } else {
+            iced::Shadow::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A text input with no face of its own, set inside a [`field`] (the file
+/// filter, the command palette): the field around it is the well.
+pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
+    text_input::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        icon: dim(),
+        placeholder: dim(),
+        value: fg(),
+        selection: selection(),
+    }
+}
+
+/// The face of a field that is really a button (the chat field opens the
+/// conversation): no fill of its own, the field around it is the well.
+pub fn field_face(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => Some(wash(0.03).into()),
+            _ => None,
+        },
+        text_color: fg_muted(),
+        border: Border {
+            radius: 8.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
+/// The track a segmented control's segments sit in.
+pub fn trough(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(0.045).into()),
+        border: Border {
+            radius: 9.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// One segment of a segmented control: the chosen one raised as a chip,
+/// the rest quiet until the pointer is over them.
+pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let background = if chosen {
+            Some(if is_light() { Color::WHITE } else { wash(0.10) }.into())
+        } else {
+            match status {
+                button::Status::Hovered | button::Status::Pressed => Some(wash(0.05).into()),
+                _ => None,
+            }
+        };
+        button::Style {
+            background,
+            text_color: if chosen { fg_bright() } else { fg_muted() },
+            border: Border {
+                radius: 7.0.into(),
+                width: if chosen && !is_light() { 0.5 } else { 0.0 },
+                color: wash(0.10),
+            },
+            shadow: if chosen && is_light() {
+                iced::Shadow {
+                    color: scrim(0.12),
+                    offset: iced::Vector::new(0.0, 1.0),
+                    blur_radius: 2.0,
+                }
+            } else {
+                iced::Shadow::default()
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A borderless icon button of the chrome (the top bar, the tool strip):
+/// nothing until the pointer is over it; `on` keeps it lit (a menu it
+/// opened is showing, a panel it toggles is shown).
+pub fn icon_button(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let background = match status {
+            button::Status::Pressed => Some(wash(0.11).into()),
+            button::Status::Hovered => Some(wash(0.07).into()),
+            _ if on => Some(wash(0.08).into()),
+            _ => None,
+        };
+        button::Style {
+            background,
+            text_color: match status {
+                button::Status::Disabled => dim(),
+                _ => fg(),
+            },
+            border: Border {
+                radius: 7.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// The window buttons Clew draws on Windows and Linux: square and full
+/// height, the close one red under the pointer.
+pub fn window_button(close: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let background = match status {
+            button::Status::Hovered | button::Status::Pressed if close => Some(CLOSE_HOVER.into()),
+            button::Status::Pressed => Some(wash(0.12).into()),
+            button::Status::Hovered => Some(wash(0.07).into()),
+            _ => None,
+        };
+        button::Style {
+            background,
+            text_color: match status {
+                button::Status::Hovered | button::Status::Pressed if close => Color::WHITE,
+                _ => fg(),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A note raised on the sheet: the one the reader is on, among the margin's.
+pub fn note_card(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(active().elevated.into()),
+        text_color: Some(fg()),
+        border: Border {
+            color: if is_light() { border() } else { wash(0.08) },
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: scrim(if is_light() { 0.06 } else { 0.3 }),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 14.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// What the reader asked, in the conversation: a bubble on the right, its
+/// tail corner squared.
+pub fn bubble(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(if is_light() { 0.06 } else { 0.08 }).into()),
+        text_color: Some(fg()),
+        border: Border {
+            radius: iced::border::Radius {
+                top_left: 12.0,
+                top_right: 12.0,
+                bottom_right: 4.0,
+                bottom_left: 12.0,
+            },
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// One key of a shortcut, drawn as a small cap.
+pub fn keycap(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(if is_light() { 0.02 } else { 0.05 }).into()),
+        text_color: Some(fg_muted()),
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A small label chip (a view's tag, a step's state).
+pub fn chip(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(0.06).into()),
+        text_color: Some(fg_muted()),
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A row of a menu: full-width, rounded, lit under the pointer.
+pub fn menu_row(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered | button::Status::Pressed => Some(wash(0.07).into()),
+            _ => None,
+        },
+        text_color: match status {
+            button::Status::Disabled => dim(),
+            _ => fg(),
+        },
+        border: Border {
+            radius: 7.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
     }
 }
 
@@ -1089,25 +1522,6 @@ pub fn floating_card(_theme: &Theme) -> container::Style {
     }
 }
 
-/// The Ask launcher: a pill in the corner, lifted like the card it opens.
-pub fn launcher_pill(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(active().elevated.into()),
-        text_color: Some(fg()),
-        border: Border {
-            color: border(),
-            width: 1.0,
-            radius: 18.0.into(),
-        },
-        shadow: iced::Shadow {
-            color: scrim(if is_light() { 0.14 } else { 0.45 }),
-            offset: iced::Vector::new(0.0, 4.0),
-            blur_radius: 16.0,
-        },
-        ..container::Style::default()
-    }
-}
-
 /// The microphone's level while it listens: a bar in the accent color on a
 /// faint track.
 pub fn level_meter(_theme: &Theme) -> progress_bar::Style {
@@ -1133,9 +1547,9 @@ pub fn backdrop(_theme: &Theme) -> container::Style {
 /// Per-pane header strip; the active pane gets an accent-tinted title.
 pub fn pane_header(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(bg_panel().into()),
+        background: Some(wash(0.025).into()),
         border: Border {
-            color: border(),
+            color: hairline(),
             width: 1.0,
             radius: 0.0.into(),
         },
@@ -1157,6 +1571,10 @@ pub fn list_row(selected: bool) -> impl Fn(&Theme, button::Status) -> button::St
         button::Style {
             background,
             text_color: if selected { fg_bright() } else { fg() },
+            border: Border {
+                radius: 6.0.into(),
+                ..Border::default()
+            },
             ..button::Style::default()
         }
     }

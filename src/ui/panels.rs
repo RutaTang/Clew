@@ -54,14 +54,14 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
         empty_state(
             Glyph::Debug,
             "No debug session",
-            "Press Debug in the toolbar to start one (needs .clew/launch.json).",
+            "Press Debug on the tool strip to start one (needs .clew/launch.json).",
             None,
         )
     };
 
     container(column![tabs, hairline(), content].height(Fill))
         .height(Fill)
-        .style(theme::panel)
+        .style(theme::on_sheet)
         .into()
 }
 
@@ -260,7 +260,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     container(column![header, panels].spacing(6).padding([8, 12]))
         .width(Fill)
         .height(Fill)
-        .style(theme::panel)
+        .style(theme::on_sheet)
         .into()
 }
 
@@ -432,10 +432,19 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
     }
     for turn in &app.proj.ask_turns {
         convo.push(
-            text(format!("❯ {}", turn.question))
-                .size(ts::BASE)
-                .color(theme::accent())
-                .into(),
+            container(
+                container(
+                    text(turn.question.as_str())
+                        .size(ts::BASE)
+                        .color(theme::fg()),
+                )
+                .padding([8, 12])
+                .max_width(420)
+                .style(theme::bubble),
+            )
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .into(),
         );
         if let Some(agent) = &turn.extras.agent {
             convo.push(
@@ -474,7 +483,7 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
                 .iter()
                 .map(|s| agent_step_chip(s, root.as_deref()))
                 .collect();
-            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+            convo.push(Column::with_children(chips).spacing(1).into());
         }
         // Tool calls waiting for the user's say-so are asked above the
         // conversation, one at a time.
@@ -656,7 +665,8 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
         .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
         .on_submit(Message::Ask(AskMsg::Submit))
         .size(ts::BASE)
-        .padding(7);
+        .padding(0)
+        .style(theme::bare_input);
     // Match the input's height (size 13 + 7 padding) so the row lines up. The
     // send button is the panel's primary action, so it gets accent emphasis
     // (dimmed to a plain style while a request is in flight / disabled).
@@ -664,13 +674,25 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
     // retrieval stream — can be stopped from here, not only agent turns.
     let streaming = app.ask_stream_active();
     let idle = !streaming;
-    let mut ask_btn = button(text("Ask").size(ts::BASE))
-        .style(if idle {
-            theme::primary_button
-        } else {
-            theme::toolbar_button
-        })
-        .padding([7, 16]);
+    let send_tint = if idle {
+        crate::theme::active().on_accent
+    } else {
+        theme::dim()
+    };
+    let mut ask_btn = button(
+        row![
+            glyph::icon(Glyph::Send, send_tint, 14.0),
+            text("Ask").size(ts::BASE),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .style(if idle {
+        theme::primary_button
+    } else {
+        theme::toolbar_button
+    })
+    .padding([5, 12]);
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
@@ -758,18 +780,22 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
     let stop: Element<'_, Message> = if streaming {
         button(text("Stop").size(ts::BASE))
             .style(theme::toolbar_button)
-            .padding([7, 12])
+            .padding([5, 12])
             .on_press(Message::Ask(AskMsg::Stop))
             .into()
     } else {
         slot()
     };
-    let compose_row = row![input, stop].spacing(6).align_y(iced::Center);
-    compose.push(
-        row![agent, compose_row.push(ask_btn)]
-            .align_y(iced::Center)
-            .into(),
-    );
+    // The composer: the question typed in a well, sent from inside it.
+    let compose_row = container(row![input, stop, ask_btn].spacing(6).align_y(iced::Center))
+        .padding(Padding {
+            top: 4.0,
+            right: 4.0,
+            bottom: 4.0,
+            left: 12.0,
+        })
+        .style(theme::field(!app.proj.ask_input.is_empty()));
+    compose.push(row![agent, compose_row].align_y(iced::Center).into());
 
     container(
         column![header]
@@ -930,7 +956,7 @@ pub(crate) fn approval_card<'a>(
         asks = asks.push(
             text(approval.detail.clone())
                 .size(ts::SMALL)
-                .font(iced::Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg_muted()),
         );
     }
@@ -982,30 +1008,12 @@ fn agent_step_chip<'a>(
     root: Option<&std::path::Path>,
 ) -> Element<'a, Message> {
     use crate::app::model::StepState;
-    let icon = match step.tool.as_str() {
-        "search" | "semantic_find" => "🔍",
-        "read" => "📄",
-        "outline" => "☰",
-        "files" => "🗂",
-        "history" => "🕘",
-        "changes" => "±",
-        "explanations" => "✦",
-        // An MCP server's tool, and the kinds of an ACP agent's.
-        "mcp" => "🔌",
-        "edit" => "✎",
-        "delete" => "🗑",
-        "move" => "↦",
-        "execute" => "▶",
-        "think" => "💭",
-        "fetch" => "🌐",
-        "switch_mode" => "⇄",
-        _ => "⚙",
-    };
-    let state = match step.state {
-        StepState::Done => "",
-        StepState::Running => " …",
-        StepState::Waiting => " ⏸",
-        StepState::Failed => " ✗",
+    // Its state, as the mark that leads it: ticked when done.
+    let (mark, tint) = match step.state {
+        StepState::Done => (Glyph::Check, theme::success()),
+        StepState::Running => (Glyph::More, theme::fg_muted()),
+        StepState::Waiting => (Glyph::Pause, theme::warning()),
+        StepState::Failed => (Glyph::Close, theme::danger()),
     };
     // `join` discards the root for an absolute argument, so a ref that is not
     // a plain in-project rel would make this chip open somewhere else entirely.
@@ -1030,17 +1038,26 @@ fn agent_step_chip<'a>(
             .map(|(rel, line)| (root.join(rel), *line))
     });
     let clickable = target.is_some();
+    let show: Element<'a, Message> = if clickable {
+        text("Show").size(ts::CAPTION).color(theme::accent()).into()
+    } else {
+        space().into()
+    };
     let mut chip = button(
-        text(format!("{icon} {}{state}", step.title))
-            .size(ts::CAPTION)
-            .color(if clickable {
-                theme::fg_muted()
-            } else {
-                theme::dim()
-            }),
+        row![
+            glyph::icon(mark, tint, 13.0),
+            text(step.title.clone())
+                .size(ts::SMALL)
+                .color(theme::fg_muted())
+                .width(Fill),
+            show,
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
     )
-    .style(theme::toolbar_button)
-    .padding([1, 6]);
+    .style(theme::menu_row)
+    .width(Fill)
+    .padding([3, 6]);
     if let Some((abs, line)) = target {
         chip = chip.on_press(Message::Editor(EditorMsg::OpenAbs {
             abs,
@@ -1210,7 +1227,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
             "(line not read)".to_string()
         })
         .size(ts::SMALL)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::CODE)
         .color(if node.classified {
             theme::fg()
         } else {

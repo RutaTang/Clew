@@ -111,6 +111,17 @@ impl App {
             return task;
         }
 
+        // Settings: ⌘, — the menu bar's on macOS, where AppKit takes it before
+        // this handler; Ctrl+, on Windows and Linux, which have no menu bar
+        // to own it.
+        if cmd
+            && !modifiers.shift()
+            && !modifiers.alt()
+            && matches!(key.as_ref(), Key::Character(","))
+        {
+            return self.update(Message::Settings(SettingsMsg::Open));
+        }
+
         // While time-travelling, swallow any remaining (non-command) keys so
         // plain reading motions don't act on the live file hidden behind the view.
         if time_travel.is_some() {
@@ -334,7 +345,11 @@ impl App {
     /// command chord or another action holds it.
     fn capture_chord(&mut self, action: keymap::Action, chord: keymap::Chord) -> Task<Message> {
         if !chord.is_command() {
-            self.keymap_notice = Some("Shortcut must include ⌘, ⌥, or ⌃".into());
+            self.keymap_notice = Some(if keymap::MAC_KEYS {
+                "Shortcut must include ⌘, ⌥, or ⌃".into()
+            } else {
+                "Shortcut must include Ctrl or Alt".into()
+            });
             return Task::none();
         }
         if let Some(other) = self.keymap.conflict(&chord, action) {

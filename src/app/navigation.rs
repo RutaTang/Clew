@@ -183,7 +183,9 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = format!("No {lang} server ready (⌘T to search symbols)");
+                self.status = crate::keymap::local_keys(&format!(
+                    "No {lang} server ready (⌘T to search symbols)"
+                ));
                 return Task::none();
             }
         };

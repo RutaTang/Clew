@@ -1,9 +1,11 @@
-//! The Ask window, floating over the code rather than taking a panel's
-//! room from it: a launcher in the bottom-right corner while it is put away;
-//! a card there while it is open — moved to the top when it would cover the
-//! line the caret is on — and, made large, a window centred over the
-//! dimmed rest. It holds the conversation ([`ask_panel`]), and shows what
-//! voice is doing ([`voice_strip`]).
+//! The Ask window: the conversation with Clew, opened from the chat field
+//! in the top bar and floating over the code rather than taking a panel's
+//! room from it. A card hangs under the field while it is open — moved to
+//! the bottom when it would cover the line the caret is on — and, made
+//! large, a window centred over the dimmed rest. It holds the conversation
+//! ([`ask_panel`]) and shows what voice is doing ([`voice_strip`]); while it
+//! is put away, voice listening shows a panel of its own under the field
+//! ([`voice_panel`]).
 //!
 //! The card and the large window are one widget tree, sized and placed
 //! differently: going from one to the other keeps the conversation's
@@ -19,24 +21,31 @@ use crate::app::model::AskView;
 use crate::app::voice::{HeardOutcome, VoicePhase};
 
 /// The card's size, where the window has room for it.
-pub(crate) const ASK_CARD_W: f32 = 420.0;
+pub(crate) const ASK_CARD_W: f32 = 560.0;
 pub(crate) const ASK_CARD_H: f32 = 560.0;
 /// Least height the card shrinks to in a short window (or over a tall
 /// debugger's panel).
 pub(crate) const ASK_CARD_MIN_H: f32 = 120.0;
-/// Space between the card (or the launcher) and the edges around it.
+/// Space between the card and the edges around it.
 pub(crate) const ASK_MARGIN: f32 = 16.0;
+/// Gap between the chat field and the card hanging under it.
+const FIELD_GAP: f32 = 6.0;
 /// Widest the large window grows, and its share of the window.
 pub(crate) const ASK_LARGE_MAX_W: f32 = 960.0;
 pub(crate) const ASK_LARGE_SHARE: f32 = 0.72;
+/// Width of the voice panel that hangs under the field while Ask is away.
+const VOICE_PANEL_W: f32 = 460.0;
 
 /// Where the open Ask window is drawn, in window coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AskPlace {
     pub width: f32,
     pub height: f32,
-    /// The card sits at the top of its corner (it moved out of the caret's
-    /// way) rather than at the bottom.
+    /// Its left edge: under the chat field for the card, centred for the
+    /// large window.
+    pub left: f32,
+    /// The card hangs from the top, under the chat field — rather than
+    /// sitting at the bottom, where it moved out of the caret's way.
     pub at_top: bool,
 }
 
@@ -44,7 +53,7 @@ pub(crate) struct AskPlace {
 /// the update banner), over the status bar — and, for the card, over the
 /// debugger's panel too: the large window is over everything.
 fn band(app: &App) -> (f32, f32) {
-    let top = TOOLBAR_H + update_banner_height(app) + ASK_MARGIN;
+    let top = TOOLBAR_H + update_banner_height(app) + FIELD_GAP;
     let bottom_panel = if app.show_bottom && app.ask_view != AskView::Expanded {
         app.bottom_height + crate::resize::THICKNESS
     } else {
@@ -52,6 +61,17 @@ fn band(app: &App) -> (f32, f32) {
     };
     let bottom = app.window_height - STATUSBAR_H - bottom_panel - ASK_MARGIN;
     (top, bottom.max(top))
+}
+
+/// The left edge of a panel `width` wide hanging under the chat field:
+/// centred on it, kept inside the window.
+fn under_field(app: &App, width: f32) -> f32 {
+    let field = chat_field_rect(app);
+    let centre = field.x + field.width / 2.0;
+    (centre - width / 2.0).clamp(
+        ASK_MARGIN,
+        (app.window_width - width - ASK_MARGIN).max(ASK_MARGIN),
+    )
 }
 
 /// Where the Ask window is drawn now; `None` while it is put away.
@@ -64,18 +84,19 @@ pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
             let width = ASK_CARD_W
                 .min(app.window_width - 2.0 * ASK_MARGIN)
                 .max(200.0);
-            let at_bottom = (bottom - height, bottom);
             let at_top = (top, top + height);
-            // Moved to the top when the caret's line is under the card —
+            let at_bottom = (bottom - height, bottom);
+            // Moved to the bottom when the caret's line is under the card —
             // unless it would be under it there too (a short window).
             let moved = caret_line_y(app).is_some_and(|(y0, y1)| {
                 let under = |(a, b): (f32, f32)| y1 > a && y0 < b;
-                under(at_bottom) && !under(at_top)
+                under(at_top) && !under(at_bottom)
             });
             Some(AskPlace {
                 width,
                 height,
-                at_top: moved,
+                left: under_field(app, width),
+                at_top: !moved,
             })
         }
         AskView::Expanded => {
@@ -86,6 +107,7 @@ pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
             Some(AskPlace {
                 width,
                 height,
+                left: ((app.window_width - width) / 2.0).max(0.0),
                 at_top: false,
             })
         }
@@ -110,22 +132,22 @@ fn caret_line_y(app: &App) -> Option<(f32, f32)> {
     Some((pane_top + y, pane_top + y + lh))
 }
 
-/// The floating Ask layer of the window: its launcher, its card, or its
-/// large window over a dimmed backdrop. Nothing without a project, unless
-/// voice has something to show.
+/// The floating Ask layer of the window: its card under the chat field, or
+/// its large window over a dimmed backdrop — or, while it is put away and
+/// voice is listening, the voice panel under the field. Nothing otherwise:
+/// the chat field in the top bar is where Ask opens from.
 pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     let Some(place) = ask_place(app) else {
-        if app.proj.project.is_none() && !app.voice.is_busy() {
+        if !app.voice.is_busy() {
             return slot();
         }
-        return container(launcher(app))
+        let width = VOICE_PANEL_W.min(app.window_width - 2.0 * ASK_MARGIN);
+        return container(container(opaque(voice_panel(app))).width(width))
             .width(Fill)
             .height(Fill)
-            .align_x(iced::alignment::Horizontal::Right)
-            .align_y(iced::alignment::Vertical::Bottom)
             .padding(Padding {
-                bottom: app.window_height - band(app).1,
-                right: ASK_MARGIN,
+                top: band(app).0,
+                left: under_field(app, width),
                 ..Padding::ZERO
             })
             .into();
@@ -165,24 +187,108 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
             })
     } else if place.at_top {
         frame
-            .align_x(iced::alignment::Horizontal::Right)
             .align_y(iced::alignment::Vertical::Top)
             .padding(Padding {
                 top,
-                right: ASK_MARGIN,
+                left: place.left,
                 ..Padding::ZERO
             })
     } else {
         frame
-            .align_x(iced::alignment::Horizontal::Right)
             .align_y(iced::alignment::Vertical::Bottom)
             .padding(Padding {
                 bottom: app.window_height - bottom,
-                right: ASK_MARGIN,
+                left: place.left,
                 ..Padding::ZERO
             })
     };
     stack![backdrop, frame].into()
+}
+
+/// What can be said, and what comes of it: shown while voice listens.
+const TRY_SAYING: [(&str, &str); 5] = [
+    ("“Open the call graph”", "Clew runs it"),
+    ("“Hide the minimap”", "Clew runs it"),
+    (
+        "“Take me to where the config is parsed”",
+        "Clew finds it and goes there",
+    ),
+    ("“Why is this function here?”", "Clew answers"),
+    ("“Start debugging”", "Clew asks you first"),
+];
+
+/// The voice panel, under the chat field while Ask is put away: how loud
+/// the microphone hears, what can be said, and that what is said stays on
+/// this computer.
+fn voice_panel(app: &App) -> Element<'_, Message> {
+    let (title, hint, level): (&str, String, f32) = match app.voice.phase {
+        VoicePhase::Listening { level, .. } => (
+            "Talk to Clew",
+            "Ask anything, or say what to do. Stop talking to finish, Esc to cancel.".into(),
+            level,
+        ),
+        _ => (
+            "Working out what you said…",
+            "On this computer, with the model you chose.".into(),
+            0.0,
+        ),
+    };
+    let mut tries = Column::new().spacing(2);
+    for (say, does) in TRY_SAYING {
+        tries = tries.push(
+            row![
+                text(say).size(ts::BODY).color(theme::fg()).width(Fill),
+                container(text(does).size(ts::CAPTION).color(theme::fg_muted()))
+                    .padding([2, 7])
+                    .style(theme::chip),
+            ]
+            .spacing(10)
+            .align_y(iced::Center)
+            .padding([5, 10]),
+        );
+    }
+    let model = app.voice.prefs.model().name;
+    container(column![
+        column![
+            container(
+                progress_bar(0.0..=1.0, level)
+                    .length(160)
+                    .girth(5)
+                    .style(theme::level_meter)
+            )
+            .width(160),
+            text(title).size(ts::SUBTITLE).color(theme::fg_bright()),
+            text(hint).size(ts::SMALL).color(theme::fg_muted()),
+        ]
+        .spacing(9)
+        .align_x(iced::Center)
+        .width(Fill)
+        .padding([20, 16]),
+        hairline(),
+        container(
+            column![
+                text("Try saying").size(ts::SMALL).color(theme::dim()),
+                tries,
+            ]
+            .spacing(4),
+        )
+        .padding([8, 6]),
+        hairline(),
+        row![
+            glyph::icon(Glyph::Lock, theme::fg_muted(), 13.0),
+            text(format!(
+                "Transcribed on this computer by Whisper {model}. Nothing you say \
+                     leaves it."
+            ))
+            .size(ts::SMALL)
+            .color(theme::fg_muted()),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .padding([9, 14]),
+    ])
+    .style(theme::floating_card)
+    .into()
 }
 
 /// A small borderless control of the card's header.
@@ -233,11 +339,34 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let large = app.ask_view == AskView::Expanded;
     let mut header = row![
         glyph::icon(Glyph::Ask, theme::accent(), 16.0),
-        text("Ask").size(ts::BASE).color(theme::fg()),
-        space().width(Fill),
+        text("Ask")
+            .size(ts::BASE)
+            .font(crate::fonts::UI_SEMIBOLD)
+            .color(theme::fg()),
     ]
-    .spacing(6)
+    .spacing(8)
     .align_y(iced::Center);
+    // What the reader is on, which is what a question is asked against.
+    if let Some(v) = app.active_viewer() {
+        let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
+        let on = match &app.proj.explain.view {
+            Some(crate::explain::Node::Function { file, name: f, .. }) if *file == v.abs => {
+                format!("Reading {name} · {f}")
+            }
+            _ => format!("Reading {name}"),
+        };
+        header = header.push(
+            container(
+                text(on)
+                    .size(ts::CAPTION)
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::None),
+            )
+            .padding([2, 7])
+            .style(theme::chip),
+        );
+    }
+    header = header.push(space().width(Fill));
     if !app.proj.ask_turns.is_empty() {
         header = header.push(
             button(text("Clear").size(ts::SMALL))
@@ -275,32 +404,6 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     ]
     .height(Fill)
     .into()
-}
-
-/// The launcher, while the Ask window is put away: a pill to open it, and
-/// the microphone — and, while voice is busy, what it is doing.
-fn launcher(app: &App) -> Element<'_, Message> {
-    let chord = app.keymap.chord(crate::keymap::Action::ToggleAsk).caps();
-    let open = button(
-        row![
-            glyph::icon(Glyph::Ask, theme::accent(), 15.0),
-            text("Ask").size(ts::BODY).color(theme::fg()),
-            text(chord).size(ts::CAPTION).color(theme::dim()),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .style(theme::toolbar_button)
-    .padding([5, 10])
-    .on_press(Message::Ask(AskMsg::Open));
-    let mut pill = row![].spacing(2).align_y(iced::Center);
-    if let Some(strip) = voice_status(app) {
-        pill = pill.push(container(strip).padding([0, 8]));
-    } else if app.proj.project.is_some() {
-        pill = pill.push(open);
-    }
-    pill = pill.push(mic_button(app));
-    opaque(container(pill).padding([3, 4]).style(theme::launcher_pill))
 }
 
 /// What voice is doing, as one line: listening (with the level), working

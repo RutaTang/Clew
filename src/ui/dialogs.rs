@@ -7,7 +7,11 @@ use iced::widget::row;
 
 /// Height of one finder result row. Fixed so the key handler can compute where
 /// the selected row sits in the list and scroll it into view.
-pub(crate) const FINDER_ROW_H: f32 = 28.0;
+pub(crate) const FINDER_ROW_H: f32 = 36.0;
+/// Height of the finder's query row, over its results.
+const FINDER_INPUT_H: f32 = 52.0;
+/// Height of the finder's foot, the line of key hints under its results.
+const FINDER_FOOT_H: f32 = 34.0;
 
 /// Modal to set a breakpoint's condition — the program only stops there when the
 /// expression is true. Empty condition sets a plain breakpoint.
@@ -74,7 +78,7 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
             row![
                 text(sha.clone())
                     .size(ts::SMALL)
-                    .font(Font::MONOSPACE)
+                    .font(crate::fonts::CODE)
                     .color(theme::accent()),
                 text(truncate_ellipsis(subject, 52))
                     .size(ts::SMALL)
@@ -178,15 +182,35 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
 
 pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let placeholder = match app.proj.finder.mode {
-        FinderMode::Files => "File name…  (:123 jumps to a line)",
-        FinderMode::Symbols => "Symbol name…",
+        FinderMode::Files => "Open a file  ·  > for a command, :123 for a line",
+        FinderMode::Symbols => "Go to a symbol",
     };
-    let input = text_input(placeholder, &app.proj.finder.query)
-        .id(finder_input_id())
-        .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
-        .on_submit(Message::Nav(NavMsg::FinderConfirm))
-        .size(ts::EMPHASIS)
-        .padding(10);
+    let glyph = match app.proj.finder.mode {
+        FinderMode::Symbols if !app.proj.finder.is_commands() => Glyph::Cube,
+        _ => Glyph::Search,
+    };
+    let input = container(
+        row![
+            glyph::icon(glyph, theme::dim(), 16.0),
+            text_input(placeholder, &app.proj.finder.query)
+                .id(finder_input_id())
+                .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
+                .on_submit(Message::Nav(NavMsg::FinderConfirm))
+                .size(ts::EMPHASIS)
+                .padding(0)
+                .style(theme::bare_input),
+        ]
+        .spacing(11)
+        .align_y(iced::Center),
+    )
+    .height(Length::Fixed(FINDER_INPUT_H))
+    .align_y(iced::Center)
+    .padding(Padding {
+        top: 0.0,
+        right: 12.0,
+        bottom: 0.0,
+        left: 16.0,
+    });
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if app.proj.finder.is_commands() {
@@ -234,23 +258,28 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         }
         _ => slot(),
     };
-    let panel = container(
-        iced::widget::column![
-            input,
-            // No spacing or padding inside the list: row `i` must start at
-            // exactly `i * FINDER_ROW_H` for `reveal_finder_selection`.
+    let panel = container(iced::widget::column![
+        input,
+        hairline(),
+        // No spacing or padding inside the list: row `i` must start at
+        // exactly `i * FINDER_ROW_H` for `reveal_finder_selection`.
+        // Capped so the foot under it always shows.
+        container(
             scrollable(Column::with_children(rows).width(Fill))
                 .id(finder_list_id())
                 .direction(thin_scroll())
                 .style(theme::overlay_scrollbar)
                 .height(iced::Length::Shrink),
-            cap_note,
-        ]
-        .spacing(8),
-    )
+        )
+        .max_height(FINDER_MAX_H - FINDER_INPUT_H - FINDER_FOOT_H - 24.0)
+        .padding(6),
+        cap_note,
+        hairline(),
+        finder_footer(),
+    ])
     .width(FINDER_W)
     .max_height(FINDER_MAX_H)
-    .padding(10)
+    .clip(true)
     .style(theme::modal_panel);
 
     modal(
@@ -258,6 +287,25 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         Placement::Top(FINDER_TOP),
         Backdrop::Dim(Some(Message::Nav(NavMsg::FinderClosed))),
     )
+}
+
+/// The palette's foot: how to move through it, open a result, and leave.
+fn finder_footer<'a>() -> Element<'a, Message> {
+    let enter = if crate::keymap::MAC_KEYS {
+        "Return to open"
+    } else {
+        "Enter to open"
+    };
+    let hint = |what: &'a str| text(what).size(ts::CAPTION).color(theme::dim());
+    container(
+        row![hint("↑ ↓ to move"), hint(enter), hint("Esc to close")]
+            .spacing(16)
+            .align_y(iced::Center),
+    )
+    .height(Length::Fixed(FINDER_FOOT_H))
+    .align_y(iced::Center)
+    .padding([0, 16])
+    .into()
 }
 
 /// One finder result: a fixed-height, full-width button. `pick` opens what
@@ -276,7 +324,7 @@ fn finder_row<'a>(
     .style(theme::list_row(selected))
     .width(Fill)
     .height(Length::Fixed(FINDER_ROW_H))
-    .padding([0, 8])
+    .padding([0, 10])
     .on_press(pick)
     .into()
 }
@@ -299,7 +347,7 @@ fn stale_finder_row<'a>(selected: bool) -> Element<'a, Message> {
     .style(theme::list_row(selected))
     .width(Fill)
     .height(Length::Fixed(FINDER_ROW_H))
-    .padding([0, 8])
+    .padding([0, 10])
     .into()
 }
 
@@ -316,18 +364,18 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
             Some((d, n)) => (d, n),
             None => ("", entry.rel.as_str()),
         };
-        let (glyph, color) = crate::icons::file_icon(name);
         rows.push(finder_row(
             row![
-                tree_icon(glyph, color),
+                glyph::icon(Glyph::File, theme::dim(), 15.0),
                 // In the order they are spelled (`highlight::in_order`).
                 text(crate::highlight::in_order(name)).size(ts::BASE),
+                space().width(Fill),
                 text(crate::highlight::in_order(dir))
                     .size(ts::SMALL)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
             ]
-            .spacing(8)
+            .spacing(11)
             .align_y(iced::Center),
             pos == app.proj.finder.selected,
             Message::Nav(NavMsg::FinderPick {
@@ -346,11 +394,7 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
             continue;
         };
         let keys: Element<'_, Message> = match &command.keys {
-            Some(keys) => text(keys.clone())
-                .size(ts::SMALL)
-                .color(theme::dim())
-                .wrapping(Wrapping::None)
-                .into(),
+            Some(keys) => super::toolbar::keycap(keys.clone()),
             None => slot(),
         };
         rows.push(finder_row(

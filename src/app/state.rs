@@ -927,6 +927,8 @@ pub struct App {
     pub trust: clew_core::trust::Trust,
     pub scanning: bool,
     pub sidebar: SidebarTab,
+    /// The reading panel's view.
+    pub margin_tab: MarginTab,
     /// Monotone counter minting call-tree identities. Each tree (and each
     /// `CallsMsg::Prepared` request) gets the next value; results carry it
     /// back, so children fetched for a tree that has since been replaced (a
@@ -1081,6 +1083,14 @@ pub struct App {
     pub tutorial: Option<usize>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
+    /// The app menu of Windows and Linux (the ☰ in the top bar) is open.
+    pub show_app_menu: bool,
+    /// The reader's View menu (View ▾ among the file tools) is open.
+    pub show_view_menu: bool,
+    /// The sidebar's menu of its other views (past the six on its strip).
+    pub show_views_menu: bool,
+    /// What the Files view is narrowed to; empty shows the whole tree.
+    pub file_filter: String,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// Whether the "Keyboard Shortcuts" modal is open.
@@ -1185,6 +1195,9 @@ pub struct App {
     pub window_height: f32,
     /// Whether the window is in fullscreen (toggled by the green control).
     pub fullscreen: bool,
+    /// The window fills the screen's work area (Windows and Linux, whose
+    /// maximize button then shows "restore").
+    pub maximized: bool,
     /// Whether the window has keyboard focus. The custom traffic-light controls
     /// grey out when it doesn't, like native macOS.
     pub window_focused: bool,
@@ -1197,9 +1210,6 @@ pub struct App {
     /// User-draggable panel sizes (px): left sidebar width, right context-panel
     /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
     pub sidebar_width: f32,
-    /// How far the sidebar's tab strip is scrolled, as it last said: where
-    /// its edges fade (see `ui::edgefade`).
-    pub sidebar_tabs_offset: f32,
     pub right_width: f32,
     pub bottom_height: f32,
     pub font_size: f32,

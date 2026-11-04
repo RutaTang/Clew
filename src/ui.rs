@@ -7,15 +7,15 @@ use iced::widget::{
     Column, Row, button, center, column, container, mouse_area, opaque, pick_list, progress_bar,
     row, scrollable, slider, space, stack, text, text_input, tooltip,
 };
-use iced::{Element, Fill, Font, Length, Padding, Task};
+use iced::{Element, Fill, Length, Padding, Task};
 
 use crate::app::model::Question;
 use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
-use crate::glyph::{self, Glyph};
+use crate::glyph::{self, Glyph, WindowGlyph};
 use crate::viewer::Viewer;
-use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
+use crate::{App, AskView, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
     GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
@@ -35,7 +35,6 @@ mod statusbar;
 pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
-mod edgefade;
 mod fresh;
 pub(crate) mod placed;
 mod reader_scroll;
@@ -48,6 +47,8 @@ mod sidebar;
 pub(crate) use sidebar::*;
 mod toolbar;
 pub(crate) use toolbar::*;
+mod sheet;
+pub(crate) use sheet::*;
 mod explain_view;
 pub(crate) use explain_view::*;
 mod connect;
@@ -127,12 +128,6 @@ pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
 }
 
-/// The sidebar's horizontally-scrolling tab strip, so the active tab can be
-/// scrolled into view when it sits off-screen.
-pub fn sidebar_tabs_scroll_id() -> iced::widget::Id {
-    iced::widget::Id::new("sidebar-tabs")
-}
-
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
 }
@@ -168,6 +163,9 @@ pub(crate) enum ActiveOverlay<'a> {
     Insight(&'a crate::Insight),
     ToolsMenu,
     TargetMenu,
+    AppMenu,
+    ViewMenu,
+    ViewsMenu,
     Graph(crate::Overlay),
     ServerPanel,
     Finder,
@@ -210,6 +208,12 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::ToolsMenu
     } else if app.show_target_menu {
         O::TargetMenu
+    } else if app.show_app_menu {
+        O::AppMenu
+    } else if app.show_view_menu {
+        O::ViewMenu
+    } else if app.show_views_menu {
+        O::ViewsMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
     } else if app.server_panel {
@@ -251,6 +255,9 @@ impl<'a> ActiveOverlay<'a> {
             Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
             Self::TargetMenu => "target-menu",
+            Self::AppMenu => "app-menu",
+            Self::ViewMenu => "view-menu",
+            Self::ViewsMenu => "views-menu",
             Self::Graph(_) => "graph",
             Self::ServerPanel => "server-panel",
             Self::ContextMenu(_) => "context-menu",
@@ -300,6 +307,9 @@ impl<'a> ActiveOverlay<'a> {
             Self::Insight(insight) => insight_modal(app, insight),
             Self::ToolsMenu => tools_menu(app),
             Self::TargetMenu => target_menu(app),
+            Self::AppMenu => app_menu(app),
+            Self::ViewMenu => view_menu(app),
+            Self::ViewsMenu => views_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::ServerPanel => server_panel_modal(app),
             Self::Finder => finder_modal(app),
@@ -327,6 +337,9 @@ impl<'a> ActiveOverlay<'a> {
             Self::Insight(_) => Message::Hover(HoverMsg::InsightClose),
             Self::ToolsMenu => Message::Window(WindowMsg::ToggleToolsMenu),
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
+            Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
+            Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
+            Self::ViewsMenu => Message::Window(WindowMsg::ToggleViewsMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
             Self::ServerPanel => Message::Lsp(LspMsg::TogglePanel),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
@@ -365,35 +378,16 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
-    // Right sidebar: the cursor-following reading-context panel.
-    let right: Element<'_, Message> = match right_panel(app) {
-        Some(panel) => row![
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v)))
-                .panel(crate::resize::Panel::After),
-            panel
-        ]
-        .into(),
-        None => slot(),
-    };
-    let main = row![left, pane_area(app), right].height(Fill);
-    // The debugger's panel docks under the code, keeping it visible above.
-    // Its height is user-draggable via the divider between it and the code.
-    // (Ask floats over it all instead: `ask_layer` below.)
-    let bottom: Element<'_, Message> = if app.show_bottom {
-        column![
-            crate::resize::Divider::horizontal(|v| Message::Window(WindowMsg::ResizeBottom(v)))
-                .panel(crate::resize::Panel::After),
-            container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
-        ]
-        .into()
-    } else {
-        slot()
-    };
-    let body = column![main, bottom].height(Fill);
+    // The sidebar on the chrome, the code's sheet raised beside it, and the
+    // tool strip down the right edge.
+    let main = row![left, sheet(app), tool_strip(app)].height(Fill);
     // A slim "update available" / download-progress banner sits between the
     // toolbar and the content, reading as an extension of the toolbar chrome.
     let banner = update_banner(app).unwrap_or_else(slot);
-    let base = column![toolbar(app), banner, body, statusbar(app)];
+    let base = container(column![toolbar(app), banner, main, statusbar(app)])
+        .width(Fill)
+        .height(Fill)
+        .style(theme::chrome);
 
     // The floating Ask window (or its launcher) over the window; over it,
     // the overlay layer (at most one overlay), so the palette or a menu

@@ -305,7 +305,7 @@ fn lang_chip<'a>(label: String, on: bool, msg: Message) -> iced::widget::Button<
 fn lang_path<'a>(path: String) -> iced::widget::Text<'a> {
     text(path)
         .size(ts::CAPTION)
-        .font(iced::Font::MONOSPACE)
+        .font(crate::fonts::CODE)
         .color(theme::fg_muted())
         .wrapping(Wrapping::Glyph)
 }
@@ -1444,7 +1444,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                     .align_y(iced::Center),
                     text(server.summary())
                         .size(ts::CAPTION)
-                        .font(iced::Font::MONOSPACE)
+                        .font(crate::fonts::CODE)
                         .color(theme::fg_muted()),
                     status,
                 ]
@@ -1526,7 +1526,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                     .align_y(iced::Center),
                     text(agent.summary())
                         .size(ts::CAPTION)
-                        .font(iced::Font::MONOSPACE)
+                        .font(crate::fonts::CODE)
                         .color(theme::fg_muted()),
                 ]
                 .spacing(3),
@@ -1711,7 +1711,7 @@ pub(crate) fn trust_host_prompt<'a>(
                 .color(theme::dim()),
             text(key.fingerprint.as_str())
                 .size(ts::BASE)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg()),
         ]
         .spacing(2),
@@ -2052,7 +2052,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
         container(
             text(browser.cwd.clone())
                 .size(ts::BODY)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg())
                 .wrapping(Wrapping::None)
         )
@@ -2142,7 +2142,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
                 .color(theme::dim()),
             text(browser.cwd.clone())
                 .size(ts::BODY)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg())
                 .wrapping(Wrapping::None),
         ]
@@ -2279,7 +2279,9 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             row![
                 text(label).size(ts::BASE).color(theme::fg()),
                 space().width(Fill),
-                text(keys).size(ts::BODY).color(theme::dim()),
+                text(crate::keymap::local_keys(keys))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
             ]
             .align_y(iced::Center)
             .spacing(10)

@@ -250,6 +250,55 @@ impl Action {
     }
 }
 
+/// Whether shortcuts are spelled the Mac's way (`⇧⌘P`) rather than in words
+/// (`Ctrl+Shift+P`, Windows and Linux).
+pub const MAC_KEYS: bool = cfg!(target_os = "macos");
+
+/// `text` with every shortcut in it written the Mac's way (`⌘P`, `⇧⌘F`,
+/// `⌥←`) spelled the way this platform spells shortcuts: unchanged on macOS,
+/// `Ctrl+P`, `Ctrl+Shift+F`, `Alt+←` on Windows and Linux — the same words,
+/// in the same order, as [`Chord::caps`]. The modifiers are read off a run
+/// of the symbols, the key is the character after it.
+pub fn local_keys(text: &str) -> String {
+    if MAC_KEYS {
+        return text.to_string();
+    }
+    let modifier = |c: &char| matches!(c, '⌘' | '⌃' | '⌥' | '⇧');
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !modifier(&c) {
+            out.push(c);
+            continue;
+        }
+        let (mut ctrl, mut alt, mut shift) = (false, false, false);
+        let mut at = Some(c);
+        while let Some(m) = at {
+            match m {
+                '⌥' => alt = true,
+                '⇧' => shift = true,
+                _ => ctrl = true,
+            }
+            at = chars.next_if(modifier);
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if ctrl {
+            parts.push("Ctrl".into());
+        }
+        if alt {
+            parts.push("Alt".into());
+        }
+        if shift {
+            parts.push("Shift".into());
+        }
+        if let Some(key) = chars.next_if(|k| !k.is_whitespace()) {
+            parts.push(key.to_uppercase().collect());
+        }
+        out.push_str(&parts.join("+"));
+    }
+    out
+}
+
 /// A top-level menu that holds keymap actions, in menu-bar order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MenuSection {
@@ -504,6 +553,22 @@ impl Chord {
 
     /// Pretty key-cap string for the UI, e.g. `⌘⇧F` or `⌥←`.
     pub fn caps(self) -> String {
+        // Windows and Linux spell a shortcut in words, ⌘ being Ctrl there
+        // (`Modifiers::command`).
+        if !MAC_KEYS {
+            let mut parts: Vec<String> = Vec::new();
+            if self.cmd || self.ctrl {
+                parts.push("Ctrl".into());
+            }
+            if self.alt {
+                parts.push("Alt".into());
+            }
+            if self.shift {
+                parts.push("Shift".into());
+            }
+            parts.push(self.key.cap());
+            return parts.join("+");
+        }
         let mut s = String::new();
         if self.ctrl {
             s.push('⌃');
@@ -732,6 +797,26 @@ impl Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A shortcut is spelled the platform's way, the same in prose as on
+    /// a key cap: symbols on macOS, words elsewhere, Ctrl first.
+    #[test]
+    fn shortcuts_are_spelled_the_platforms_way() {
+        let chord = Chord::cmd_shift('p');
+        if MAC_KEYS {
+            assert_eq!(chord.caps(), "⇧⌘P");
+            assert_eq!(local_keys("press ⌘P"), "press ⌘P");
+        } else {
+            assert_eq!(chord.caps(), "Ctrl+Shift+P");
+            assert_eq!(local_keys("⇧⌘P"), chord.caps());
+            assert_eq!(
+                local_keys("Press ⌘D to mark it."),
+                "Press Ctrl+D to mark it."
+            );
+            assert_eq!(local_keys("⌥← and ⌘→"), "Alt+← and Ctrl+→");
+            assert_eq!(local_keys("⌘\\ splits"), "Ctrl+\\ splits");
+        }
+    }
 
     #[test]
     fn chord_roundtrips_through_config() {

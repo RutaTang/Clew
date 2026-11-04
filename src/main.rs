@@ -48,7 +48,7 @@ pub(crate) use session::{bookmarks, cache, finder, history, notes, reading};
 mod backend;
 pub(crate) use backend::{connect, langenv, server, sources, updater, watch};
 mod miscellaneous;
-pub(crate) use miscellaneous::{glyph, icons, keymap, resize, stats, theme};
+pub(crate) use miscellaneous::{fonts, glyph, icons, keymap, resize, stats, theme};
 
 mod app;
 mod shell;
@@ -91,13 +91,16 @@ pub fn main() -> iced::Result {
     });
     // A multi-window daemon: the `shell` layer holds one App per window and
     // routes each window's messages to its own App (see `crate::shell`).
-    iced::daemon(shell::boot, shell::update, shell::view)
+    let app = iced::daemon(shell::boot, shell::update, shell::view)
         .title(shell::title)
         .theme(shell::theme)
         .subscription(shell::subscription)
-        // Embed the icon font (Nerd Font symbols) for file-type icons.
+        // Embed the icon font (Nerd Font symbols) for file-type icons, and
+        // the two typefaces Clew is set in: Inter, the interface's default,
+        // and JetBrains Mono for code.
         .font(icons::FONT_BYTES)
-        .run()
+        .default_font(fonts::UI);
+    fonts::sources().fold(app, |app, face| app.font(face)).run()
 }
 
 /// Frameless-looking window settings.

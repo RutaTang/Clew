@@ -7,32 +7,26 @@ use super::*;
 use iced::widget::{column, row};
 
 use crate::app::tutorial::{Anchor, steps};
+use crate::ui::StripTool;
 
-/// Half the width of the spotlight hole over a single toolbar control.
-const TOOL_HOLE_HALF_W: f32 = 22.0;
+/// Half the side of the spotlight hole over a single strip tool.
+const TOOL_HOLE_HALF: f32 = 19.0;
 /// Gap between the callout card and the region it points at.
 const CARD_GAP: f32 = 24.0;
-/// The toolbar's right cluster and its margin, which the left cluster's
-/// spotlight stays clear of.
-const TOOLBAR_RIGHT_SHARE: f32 = 440.0;
-/// The left cluster's spotlight: never narrower than the window controls and
-/// the history buttons, never wider than a long breadcrumb.
-const TOOLBAR_LEFT_MIN_W: f32 = 220.0;
-const TOOLBAR_LEFT_MAX_W: f32 = 560.0;
 
 /// The screen rectangle a step points at, or `None` for a full-window dim (the
 /// welcome / summary steps, or a step whose panel happens to be closed).
 ///
-/// Every number comes from the chrome that is actually drawn: the toolbar's
-/// height and control positions (`ui::toolbar`), the update banner's height
-/// when one shows (it pushes the body down), the panels the view actually
-/// shows (`right_panel_shown`) with the divider strip beside each, and the
-/// status bar's height.
+/// Every number comes from the chrome that is actually drawn: the top bar's
+/// height and the chat field's place (`ui::toolbar`), the strip's slots and
+/// its menus, the update banner's height when one shows (it pushes the body
+/// down), the sheet's margins and header (`ui::sheet`), the panels the view
+/// actually shows (`right_panel_shown`) with the divider strip beside each,
+/// and the status bar's height.
 pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> {
     let ww = app.window_width;
     let wh = app.window_height;
     let divider = crate::resize::THICKNESS;
-    // Each side panel with the divider strip between it and the reader.
     let sidebar = if app.show_left_sidebar {
         app.sidebar_width
     } else {
@@ -56,9 +50,13 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
     };
     let top = TOOLBAR_H + update_banner_height(app);
     let bot = wh - STATUSBAR_H;
-    // The main row (sidebar / reader / right panel) ends above the bottom panel
-    // (and its divider) when it is open, so the side regions stop there.
-    let main_bot = bot - bottom;
+    // The sheet: between the sidebar and the strip, its gap kept to the
+    // strip and above the status bar.
+    let sheet_right = ww - STRIP_W - SHEET_GAP;
+    let sheet_bottom = bot - SHEET_GAP;
+    // Its panes start under its header and end above the bottom panel.
+    let main_top = top + sheet_header_height(app);
+    let main_bot = sheet_bottom - bottom;
     let rect = |x: f32, y: f32, w: f32, h: f32| {
         Some(iced::Rectangle {
             x,
@@ -67,46 +65,57 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
             height: h,
         })
     };
-    let tool_hole = |cx: f32| {
-        rect(
-            cx - TOOL_HOLE_HALF_W,
-            0.0,
-            2.0 * TOOL_HOLE_HALF_W,
-            TOOLBAR_H,
-        )
-    };
     match anchor {
         Anchor::Center => None,
-        // The top bar's left cluster (window controls · back/forward · breadcrumb).
-        // Width is approximate — the breadcrumb grows with the path — but always
-        // covers the controls without spilling into the right cluster: the
-        // window less the right cluster's share, within the left cluster's
-        // narrowest and widest.
-        Anchor::ToolbarLeft => rect(
-            0.0,
-            0.0,
-            (ww - TOOLBAR_RIGHT_SHARE).clamp(TOOLBAR_LEFT_MIN_W, TOOLBAR_LEFT_MAX_W),
-            TOOLBAR_H,
-        ),
-        // A single tool icon in the right cluster, placed by the toolbar.
-        Anchor::ToolbarIcon(i) => tool_hole(toolbar_icon_center_x(ww, i)),
-        Anchor::ToolbarMore => tool_hole(toolbar_more_center_x(ww)),
+        // The top bar's left cluster: the window buttons (or the app menu),
+        // the sidebar toggle, back / forward.
+        Anchor::ToolbarLeft => rect(0.0, 0.0, left_cluster_w(app) + NAV_W, TOOLBAR_H),
+        Anchor::ChatField => {
+            let f = chat_field_rect(app);
+            rect(f.x, f.y, f.width, f.height)
+        }
+        Anchor::Strip(tool) => {
+            let c = strip_tool_center(app, tool);
+            rect(
+                c.x - TOOL_HOLE_HALF,
+                c.y - TOOL_HOLE_HALF,
+                2.0 * TOOL_HOLE_HALF,
+                2.0 * TOOL_HOLE_HALF,
+            )
+        }
         // A row (or run of rows) in the opened ⋯ menu. The hole hugs the item
         // column exactly (no bleed past the panel edge), so the inset outline
         // frames it evenly without catching a neighbour.
-        Anchor::ToolbarMenu { first, count } => Some(tools_menu_rows_rect(ww, first, count)),
-        Anchor::Sidebar if sidebar > 1.0 => rect(0.0, top, sidebar, main_bot - top),
+        Anchor::ToolbarMenu { first, count } => Some(tools_menu_rows_rect(app, first, count)),
+        Anchor::FileTools if sheet_header_height(app) > 0.0 => rect(
+            sheet_right - FILE_TOOLS_W,
+            top,
+            FILE_TOOLS_W,
+            SHEET_HEADER_ROW_H,
+        ),
+        Anchor::ViewMenu => rect(
+            ww - VIEW_MENU_RIGHT - VIEW_MENU_W,
+            view_menu_top(app),
+            VIEW_MENU_W,
+            view_menu_height(),
+        ),
+        Anchor::Sidebar if sidebar > 1.0 => rect(0.0, top, sidebar, bot - top),
         // The right panel is an equal top/bottom split: Explain over Outline.
-        Anchor::RightTop if right > 1.0 => rect(ww - right, top, right, (main_bot - top) / 2.0),
+        Anchor::RightTop if right > 1.0 => rect(
+            sheet_right - right,
+            main_top,
+            right,
+            (main_bot - main_top) / 2.0,
+        ),
         Anchor::RightBottom if right > 1.0 => {
-            let h = (main_bot - top) / 2.0;
-            rect(ww - right, top + h, right, h)
+            let h = (main_bot - main_top) / 2.0;
+            rect(sheet_right - right, main_top + h, right, h)
         }
         Anchor::Main => rect(
             sidebar_edge,
-            top,
-            ww - sidebar_edge - right_edge,
-            main_bot - top,
+            main_top,
+            sheet_right - sidebar_edge - right_edge,
+            main_bot - main_top,
         ),
         _ => None,
     }
@@ -245,6 +254,8 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     let body_top = TOOLBAR_H + update_banner_height(app);
     // The ⋯ dropdown's left edge, measured from the window's right edge.
     let menu_left = TOOLS_MENU_RIGHT + TOOLS_MENU_W;
+    let lo = body_top + 14.0;
+    let hi = (app.window_height - 260.0).max(lo);
     let (ax, ay, pad) = match step.anchor {
         Anchor::Center | Anchor::Main => (Horizontal::Center, Vertical::Center, Padding::ZERO),
         Anchor::Sidebar => (
@@ -264,53 +275,77 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
                 ..Padding::ZERO
             },
         ),
-        // The tool icons sit at the top right, so drop the card just below them
-        // on the right, clear of the main area a live demo fills.
-        Anchor::ToolbarIcon(_) => (
-            Horizontal::Right,
-            Vertical::Top,
+        // Ask hangs under the field in this step: the card goes to the
+        // bottom left, clear of it.
+        Anchor::ChatField => (
+            Horizontal::Left,
+            Vertical::Bottom,
             Padding {
-                top: body_top + gap,
-                right: 40.0,
+                bottom: STATUSBAR_H + gap,
+                left: gap,
                 ..Padding::ZERO
             },
         ),
-        // The ⋯ button and its opened menu sit at the top right. Put the callout
-        // immediately to their left (its right edge a `gap` from the dropdown's
-        // left edge) so the two read as one unit instead of being stranded across
-        // the window.
-        Anchor::ToolbarMore => (
+        // The ⋯ button with its menu open: the card to the menu's left, so
+        // the two read as one.
+        Anchor::Strip(StripTool::More) => (
             Horizontal::Right,
             Vertical::Top,
             Padding {
-                top: TOOLS_MENU_TOP + 16.0,
+                top: (tools_menu_top(app) + 16.0).clamp(lo, hi),
                 right: menu_left + gap,
                 ..Padding::ZERO
             },
         ),
-        // For a menu row, also drop the card so its middle is level with the row
-        // it points at, tracking the row down the menu.
+        // A tool on the strip: the card just left of it, level with it.
+        Anchor::Strip(tool) => (
+            Horizontal::Right,
+            Vertical::Top,
+            Padding {
+                top: (strip_tool_center(app, tool).y - 60.0).clamp(lo, hi),
+                right: STRIP_W + gap,
+                ..Padding::ZERO
+            },
+        ),
+        // For a menu row, the card's middle level with the row it points
+        // at, tracking the row down the menu.
         Anchor::ToolbarMenu { first, count } => {
-            let rows = tools_menu_rows_rect(app.window_width, first, count);
+            let rows = tools_menu_rows_rect(app, first, count);
             let center = rows.y + rows.height / 2.0;
-            let lo = TOOLBAR_H + 14.0;
-            let top = (center - 88.0).clamp(lo, (app.window_height - 200.0).max(lo));
             (
                 Horizontal::Right,
                 Vertical::Top,
                 Padding {
-                    top,
+                    top: (center - 88.0).clamp(lo, hi),
                     right: menu_left + gap,
                     ..Padding::ZERO
                 },
             )
         }
+        Anchor::FileTools => (
+            Horizontal::Right,
+            Vertical::Top,
+            Padding {
+                top: body_top + SHEET_HEADER_ROW_H + gap,
+                right: STRIP_W + SHEET_GAP + gap,
+                ..Padding::ZERO
+            },
+        ),
+        Anchor::ViewMenu => (
+            Horizontal::Right,
+            Vertical::Top,
+            Padding {
+                top: view_menu_top(app),
+                right: VIEW_MENU_RIGHT + VIEW_MENU_W + gap,
+                ..Padding::ZERO
+            },
+        ),
         Anchor::RightTop => (
             Horizontal::Right,
             Vertical::Top,
             Padding {
                 top: body_top + 34.0,
-                right: app.right_width + crate::resize::THICKNESS + gap,
+                right: STRIP_W + SHEET_GAP + app.right_width + crate::resize::THICKNESS + gap,
                 ..Padding::ZERO
             },
         ),
@@ -319,7 +354,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Bottom,
             Padding {
                 bottom: STATUSBAR_H + 45.0,
-                right: app.right_width + crate::resize::THICKNESS + gap,
+                right: STRIP_W + SHEET_GAP + app.right_width + crate::resize::THICKNESS + gap,
                 ..Padding::ZERO
             },
         ),

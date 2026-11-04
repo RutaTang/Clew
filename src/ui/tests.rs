@@ -64,6 +64,7 @@ fn reader_app() -> App {
 
 /// A headless renderer, made the way `iced_test`'s simulator makes one.
 fn renderer() -> iced::Renderer {
+    crate::fonts::load();
     iced_test::futures::futures::executor::block_on(
         <iced::Renderer as iced::advanced::renderer::Headless>::new(
             Font::with_name("Fira Sans"),
@@ -394,7 +395,8 @@ fn a_minimap_drag_ends_with_its_band() {
     let mut app = reader_app();
     app.show_minimap = true;
     let mut renderer = renderer();
-    let on_band = mouse::Cursor::Available(Point::new(1250.0, 400.0));
+    let band_x = WINDOW.width - super::STRIP_W - super::SHEET_GAP - 28.0;
+    let on_band = mouse::Cursor::Available(Point::new(band_x, 400.0));
     let scrolled = |messages: &[Message]| {
         messages
             .iter()
@@ -413,7 +415,7 @@ fn a_minimap_drag_ends_with_its_band() {
     let (cache, _, _) = turn(&app, cache, &mut renderer, &release, on_band);
     // Back, and the pointer moves over it.
     app.show_minimap = true;
-    let elsewhere = Point::new(1250.0, 500.0);
+    let elsewhere = Point::new(band_x, 500.0);
     let moved = [Event::Mouse(mouse::Event::CursorMoved {
         position: elsewhere,
     })];
@@ -1316,23 +1318,21 @@ fn an_empty_call_graph_says_what_is_happening() {
 /// computed with.
 #[test]
 fn the_tutorial_regions_start_under_what_is_drawn_above_them() {
-    let mut app = blank_app();
+    let mut app = reader_app();
     app.window_width = WINDOW.width;
     app.window_height = WINDOW.height;
     app.show_left_sidebar = true;
     app.show_bottom = false;
-    let first_tab = super::SIDEBAR_TABS[0].0.to_string();
     let check = |app: &App| {
-        let region = super::region_rect(app, crate::app::tutorial::Anchor::Sidebar)
-            .expect("the sidebar is shown");
+        let region = super::region_rect(app, crate::app::tutorial::Anchor::FileTools)
+            .expect("the sheet's header is shown");
         let mut sim = sim_of(app);
-        let wanted = first_tab.clone();
-        let tab = text_at(&mut sim, move |t| t == wanted, 0).expect("the sidebar's tabs");
+        let name = text_at(&mut sim, |t| t == "lib.rs", 0).expect("the sheet's header");
         assert!(
-            tab.y >= region.y && tab.y - region.y <= 10.0,
-            "the region starts at {} but the sidebar's first tab is drawn at {}",
+            name.y >= region.y && name.y - region.y <= super::SHEET_HEADER_ROW_H,
+            "the region starts at {} but the header's name is drawn at {}",
             region.y,
-            tab.y
+            name.y
         );
         let banner = text_at(&mut sim, |t| t.contains("is available"), 0);
         (region, banner)
@@ -1454,80 +1454,108 @@ fn the_overview_map_caption_follows_its_mode() {
     }
 }
 
-/// E2-12: the toolbar geometry the tutorial's spotlight places its holes with
-/// is checked against the DRAWN toolbar — a click at each computed icon
-/// center reaches that icon's own action — not re-derived from the formula it
-/// is computed by.
+/// E2-12: the chrome geometry the tutorial's spotlight places its holes with
+/// is checked against the DRAWN chrome — a click at each computed strip
+/// tool's centre reaches that tool's own action, one at the chat field's
+/// centre opens the conversation — not re-derived from the formula it is
+/// computed by.
 #[test]
-fn the_toolbar_geometry_matches_what_is_drawn() {
-    use super::{CORE_TOOLS, TOOLBAR_H, toolbar_icon_center_x, toolbar_more_center_x};
+fn the_chrome_geometry_matches_what_is_drawn() {
+    use super::{StripTool, strip_tool_center};
+    /// Whether a message is the one a tool sends.
+    type Sends = fn(&Message) -> bool;
     let app = reader_app();
-    let expected: [fn(&Message) -> bool; CORE_TOOLS] = [
-        |m| matches!(m, Message::Overview(crate::OverviewMsg::Show)),
-        |m| matches!(m, Message::Overview(crate::OverviewMsg::ShowStats)),
-        |m| matches!(m, Message::Ask(AskMsg::Toggle)),
-        |m| matches!(m, Message::Debug(DebugMsg::Start)),
-        |m| {
+    let expected: [(StripTool, Sends); 9] = [
+        (StripTool::Overview, |m| {
+            matches!(m, Message::Overview(crate::OverviewMsg::Show))
+        }),
+        (StripTool::Stats, |m| {
+            matches!(m, Message::Overview(crate::OverviewMsg::ShowStats))
+        }),
+        (StripTool::Debug, |m| {
+            matches!(m, Message::Debug(DebugMsg::Start))
+        }),
+        (StripTool::CallGraph, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls))
             )
-        },
-        |m| {
+        }),
+        (StripTool::ImportGraph, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
             )
-        },
-        |m| {
+        }),
+        (StripTool::TypeMap, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
             )
-        },
-        |m| {
+        }),
+        (StripTool::ProjectMaps, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps))
             )
-        },
-        |m| matches!(m, Message::Settings(crate::SettingsMsg::Open)),
+        }),
+        (StripTool::More, |m| {
+            matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))
+        }),
+        (StripTool::Settings, |m| {
+            matches!(m, Message::Settings(crate::SettingsMsg::Open))
+        }),
     ];
-    let click_at = |x: f32| {
+    let click_at = |at: Point| {
         let mut sim = sim_of(&app);
-        sim.point_at(Point::new(x, TOOLBAR_H / 2.0));
+        sim.point_at(at);
         let _ = sim.simulate(iced_test::simulator::click());
         sent_by(sim).into_iter().collect::<Vec<_>>()
     };
-    for (i, is_expected) in expected.iter().enumerate() {
-        let sent = click_at(toolbar_icon_center_x(WINDOW.width, i));
+    for (tool, is_expected) in expected {
+        let sent = click_at(strip_tool_center(&app, tool));
         assert!(
             sent.iter().any(is_expected),
-            "icon {i}'s computed center clicked {sent:?}"
+            "{tool:?}'s computed centre clicked {sent:?}"
         );
     }
-    let sent = click_at(toolbar_more_center_x(WINDOW.width));
+    let field = super::chat_field_rect(&app);
+    let sent = click_at(field.center());
     assert!(
         sent.iter()
-            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))),
-        "the ⋯ button's computed center clicked {sent:?}"
+            .any(|m| matches!(m, Message::Ask(AskMsg::Toggle))),
+        "the chat field's computed centre clicked {sent:?}"
     );
 
     // The ⋯ menu's rows: each computed row rect holds that row's label.
     let mut app = reader_app();
     app.show_tools_menu = true;
     for (row, label) in [
-        (super::ToolsRow::OutlineSummaries, "Outline summaries"),
-        (super::ToolsRow::Minimap, "Minimap"),
         (super::ToolsRow::ExplainAll, "Explain All"),
+        (super::ToolsRow::OpenRemote, "Open Remote…"),
+        (super::ToolsRow::Tutorial, "Tutorial"),
     ] {
-        let rect = super::tools_menu_rows_rect(WINDOW.width, row.index(), 1);
+        let rect = super::tools_menu_rows_rect(&app, row.index(), 1);
         let mut sim = sim_of(&app);
         let at = text_at(&mut sim, move |t| t == label, 0)
             .unwrap_or_else(|| panic!("{label} is not drawn"));
         assert!(
             rect.contains(at.center()),
             "{label} is drawn at {at:?}, outside its computed row {rect:?}"
+        );
+    }
+
+    // The View menu: drawn where its spotlight says.
+    let mut app = reader_app();
+    app.show_view_menu = true;
+    let rect = super::region_rect(&app, crate::app::tutorial::Anchor::ViewMenu).unwrap();
+    let mut sim = sim_of(&app);
+    for label in ["Outline summaries", "Minimap"] {
+        let at = text_at(&mut sim, move |t| t == label, 0)
+            .unwrap_or_else(|| panic!("{label} is not drawn"));
+        assert!(
+            rect.contains(at.center()),
+            "{label} is drawn at {at:?}, outside the View menu's {rect:?}"
         );
     }
 }
@@ -1558,7 +1586,7 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
         },
     );
     let mut sim = sim_of(&app);
-    let outline = text_at(&mut sim, |t| t == "OUTLINE", 0).expect("the right panel is drawn");
+    let outline = text_at(&mut sim, |t| t == "In this file", 0).expect("the right panel is drawn");
     let bottom = region_rect(&app, Anchor::RightBottom).expect("a right-panel hole");
     assert!(
         bottom.contains(outline.center()),
@@ -1592,7 +1620,7 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
         hide(&mut hidden);
         let mut sim = sim_of(&hidden);
         assert!(
-            !shows(&mut sim, "OUTLINE"),
+            !shows(&mut sim, "In this file"),
             "{why}: the view hides the panel"
         );
         assert!(
@@ -1792,6 +1820,7 @@ type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 
 /// The whole window, at the app's test size.
 fn sim_of(app: &App) -> Sim<'_> {
+    crate::fonts::load();
     iced_test::Simulator::with_size(Default::default(), WINDOW, super::view(app))
 }
 
@@ -1883,27 +1912,31 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
-/// Every toolbar icon has its one tutorial step, Settings the last icon's
-/// (the type map's icon came in before it); and no text field holds the
-/// keyboard while the tour shows its tab — the SEARCH box did, and took the
-/// → and Enter that step the tour.
+/// Every tool on the strip has its one tutorial step, Settings the last
+/// (the type map's came in before it); and no text field holds the keyboard
+/// while the tour shows its tab — the SEARCH box did, and took the → and
+/// Enter that step the tour.
 #[test]
-fn the_tutorial_points_at_each_icon_and_leaves_no_field_holding_its_keys() {
+fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     use crate::app::tutorial::{Anchor, steps};
+    use crate::ui::StripTool;
     let mut app = reader_app();
     let _ = app.update(Message::Tutorial(TutorialMsg::Start));
     let all = steps(&app);
-    for i in 0..super::CORE_TOOLS {
+    for tool in super::STRIP_TOP.into_iter().chain([StripTool::Settings]) {
         let on: Vec<&str> = all
             .iter()
-            .filter(|s| s.anchor == Anchor::ToolbarIcon(i))
+            .filter(|s| s.anchor == Anchor::Strip(tool))
             .map(|s| s.title.as_str())
             .collect();
-        assert_eq!(on.len(), 1, "icon {i}: {on:?}");
+        assert_eq!(on.len(), 1, "{tool:?}: {on:?}");
     }
     let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
-    assert!(all[at("Settings")].anchor == Anchor::ToolbarIcon(super::CORE_TOOLS - 1));
-    assert!(all[at("The type map")].anchor == Anchor::ToolbarIcon(6));
+    assert!(all[at("Settings")].anchor == Anchor::Strip(StripTool::Settings));
+    assert!(all[at("The type map")].anchor == Anchor::Strip(StripTool::TypeMap));
+    assert!(all.iter().any(|s| s.anchor == Anchor::ChatField));
+    assert!(all.iter().any(|s| s.anchor == Anchor::FileTools));
+    assert!(all.iter().any(|s| s.anchor == Anchor::ViewMenu));
     let search = at("Search the project");
 
     // The search box holds the keys as the step before is left.
@@ -2988,7 +3021,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.ask_view = crate::AskView::Compact;
-    // The debugger's panel under the card, low: its height moves the card.
+    // The debugger's panel under the card, low: its height squeezes it.
     app.show_bottom = true;
     app.bottom_height = 100.0;
     app.proj.ask_turns.push(AskTurn {
@@ -3060,9 +3093,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
     assert!(app.may_allow(&card));
 
-    // The debugger's panel taller: the Ask card above it, and the
-    // approval card in it, move.
-    app.bottom_height += 120.0;
+    // The sidebar put away: the chat field moves, and with it the Ask card
+    // hanging from it and the approval card in it.
+    app.show_left_sidebar = !app.show_left_sidebar;
     let _ = app.update(Message::Noop);
     let moved = frame(&mut app);
     assert!(
@@ -3461,7 +3494,7 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
 
 /// A debugger's panel tall enough that the Ask card above it is too low
 /// for an approval card's answers.
-const SQUEEZING: f32 = 620.0;
+const SQUEEZING: f32 = 660.0;
 
 /// A page of answers taller than the first — its labels running over more
 /// rows — in an Ask card the first page fitted: drawn, and found squeezed,
@@ -6792,85 +6825,6 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
     );
 }
 
-/// The tab strip's horizontal offset after an update that returned `task`:
-/// the view rebuilt over `cache`, the task's widget operations applied.
-fn tab_strip_after(
-    app: &App,
-    task: iced::Task<Message>,
-    cache: Cache,
-    renderer: &mut iced::Renderer,
-) -> (Cache, f32) {
-    let mut ui = UserInterface::build(super::view(app), WINDOW, cache, renderer);
-    for mut op in widget_ops(task) {
-        loop {
-            ui.operate(renderer, &mut black_box(&mut *op));
-            match op.finish() {
-                Outcome::Chain(next) => op = next,
-                _ => break,
-            }
-        }
-    }
-    let mut probe = ScrollProbe {
-        target: super::sidebar_tabs_scroll_id(),
-        found: None,
-    };
-    ui.operate(renderer, &mut probe);
-    let x = probe.found.expect("the tab strip is on screen").x;
-    // The next frame: the strip says where it is now, for its fades.
-    let mut messages = Vec::new();
-    let _ = ui.update(
-        &redraw(),
-        mouse::Cursor::Unavailable,
-        renderer,
-        &mut clipboard::Null,
-        &mut messages,
-    );
-    for m in messages {
-        if let Message::Window(WindowMsg::SidebarTabsScrolled(said)) = m {
-            // The translation drawn is rounded to the pixel.
-            assert!(
-                (said - x).abs() < 1.0,
-                "the strip said where it is: {said} vs {x}"
-            );
-        }
-    }
-    (ui.into_cache(), x)
-}
-
-/// Picking a tab in full view leaves the strip where it is; one cut off at
-/// either end moves it just far enough to show the whole tab. The strip
-/// used to jump to the tab's share of its width on every pick, sliding the
-/// tabs the reader was looking at away.
-#[test]
-fn picking_a_tab_scrolls_the_strip_only_when_the_tab_is_cut_off() {
-    let mut app = reader_app();
-    app.show_left_sidebar = true;
-    let mut renderer = renderer();
-    let mut pick = |app: &mut App, tab, cache| {
-        let task = app.update(Message::Window(WindowMsg::SidebarTabPicked(tab)));
-        tab_strip_after(app, task, cache, &mut renderer)
-    };
-    // MARKS is in full view: nothing moves.
-    let (cache, x) = pick(&mut app, crate::SidebarTab::Marks, Cache::default());
-    assert_eq!(x, 0.0, "a tab in view scrolled the strip");
-    // DOCS, the last, is cut off: the strip moves to show it.
-    let (cache, docs) = pick(&mut app, crate::SidebarTab::Docs, cache);
-    assert!(docs > 0.0, "DOCS stayed cut off");
-    // Picked again, it is in full view now: nothing moves.
-    let (cache, again) = pick(&mut app, crate::SidebarTab::Docs, cache);
-    assert_eq!(again, docs);
-    // FILES is off to the left now: back to the start, and no further.
-    let (cache, files) = pick(&mut app, crate::SidebarTab::Files, cache);
-    assert_eq!(files, 0.0);
-    // Moving only as far as it must: DOCS ends at the strip's right edge
-    // rather than the strip jumping to its end.
-    let (_, docs_again) = pick(&mut app, crate::SidebarTab::Docs, cache);
-    assert_eq!(docs_again, docs);
-    // What the strip says of where it is, the app keeps, for its fades.
-    let _ = app.update(Message::Window(WindowMsg::SidebarTabsScrolled(docs)));
-    assert_eq!(app.sidebar_tabs_offset, docs);
-}
-
 /// The right panel's empty sections say why they are empty, centered under
 /// a muted icon rather than as a line of text in a corner.
 #[test]
@@ -6888,7 +6842,7 @@ fn the_right_panels_empty_sections_are_centered_notes() {
         text_at(&mut sim, |t| t.contains("No symbols in this file."), 0).expect("the outline note");
     // Centered in the panel: the two notes share a center line, well in
     // from the panel's left edge.
-    let panel_left = WINDOW.width - app.right_width;
+    let panel_left = WINDOW.width - super::STRIP_W - super::SHEET_GAP - app.right_width;
     for r in [hint, note] {
         let center = r.x + r.width / 2.0;
         let panel_center = panel_left + app.right_width / 2.0;
@@ -6927,7 +6881,7 @@ fn the_palette_lists_commands_with_their_keys() {
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Call Graph"));
-        assert!(shows(&mut sim, "⇧⌘C"));
+        assert!(shows(&mut sim, &crate::keymap::local_keys("⇧⌘C")));
     }
     let sent = click(sim_of(&app), "Call Graph");
     assert!(
@@ -6947,13 +6901,12 @@ fn the_palette_lists_commands_with_their_keys() {
 #[test]
 fn the_floating_ask_is_driven_from_the_screen() {
     let mut app = reader_app();
-    // Put away: the launcher, with its key.
-    let chord = app.keymap.chord(crate::keymap::Action::ToggleAsk).caps();
+    // Put away: the chat field in the top bar opens it.
     assert!(matches!(
-        click(sim_of(&app), &chord).as_slice(),
-        [Message::Ask(AskMsg::Open)]
+        click(sim_of(&app), "Ask a question, or say what to do").as_slice(),
+        [Message::Ask(AskMsg::Toggle)]
     ));
-    // A card, with a conversation in it.
+    // A card under the field, with a conversation in it.
     app.ask_view = crate::AskView::Compact;
     app.proj.ask_turns.push(crate::app::model::AskTurn {
         stream: 1,
@@ -6962,11 +6915,17 @@ fn the_floating_ask_is_driven_from_the_screen() {
     });
     {
         let mut sim = sim_of(&app);
-        let question = text_at(&mut sim, |t| t == "❯ where is the origin?", 0)
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 0)
             .expect("the conversation is on the card");
+        let place = super::ask_place(&app).unwrap();
+        let field = super::chat_field_rect(&app);
         assert!(
-            question.x > WINDOW.width - super::ASK_CARD_W - 40.0,
-            "in the right-hand corner: {question:?}"
+            question.x >= place.left && question.x < place.left + place.width,
+            "on the card: {question:?} in {place:?}"
+        );
+        assert!(
+            question.y > field.y + field.height && question.y < WINDOW.height / 2.0,
+            "hanging under the field: {question:?}"
         );
     }
     assert!(matches!(
@@ -6975,7 +6934,8 @@ fn the_floating_ask_is_driven_from_the_screen() {
     ));
     // The code beside the card takes its own clicks.
     let mut sim = sim_of(&app);
-    sim.point_at(iced::Point::new(200.0, 300.0));
+    let beside = super::ask_place(&app).unwrap().left - 60.0;
+    sim.point_at(iced::Point::new(beside, 300.0));
     let _ = sim.simulate(iced_test::simulator::click());
     let sent = sent_by(sim);
     assert!(
@@ -6986,12 +6946,18 @@ fn the_floating_ask_is_driven_from_the_screen() {
     app.ask_view = crate::AskView::Expanded;
     {
         let mut sim = sim_of(&app);
-        let question = text_at(&mut sim, |t| t == "❯ where is the origin?", 0).unwrap();
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 0).unwrap();
         let place = super::ask_place(&app).unwrap();
+        // The card is centred; the question, a bubble, sits at its right.
         let left = (WINDOW.width - place.width) / 2.0;
         assert!(
-            (question.x - left).abs() < 40.0,
-            "centred: {question:?}, from {left}"
+            (place.left - left).abs() < 1.0,
+            "centred: {place:?}, from {left}"
+        );
+        assert!(
+            question.x > left + place.width / 2.0
+                && question.x + question.width < left + place.width,
+            "the question at the card's right: {question:?} in {place:?}"
         );
     }
     let mut sim = sim_of(&app);

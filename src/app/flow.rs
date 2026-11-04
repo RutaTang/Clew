@@ -364,8 +364,7 @@ impl App {
         self.proj.flow = Some(tree);
         self.sidebar = SidebarTab::Flow;
         let stamp = self.stamp();
-        let reveal = ui::reveal_sidebar_tab(SidebarTab::Flow);
-        let found = Task::perform(
+        Task::perform(
             async move {
                 let defs = client
                     .navigate("textDocument/definition", &path, line, character)
@@ -384,8 +383,7 @@ impl App {
                     result,
                 })
             },
-        );
-        Task::batch([reveal, found])
+        )
     }
 
     pub(crate) fn on_flow_found(

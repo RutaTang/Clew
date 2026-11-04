@@ -62,7 +62,7 @@ pub(crate) fn render_prepared<'a>(
                                 // while the render is on its way, and what
                                 // stays when the renderer rejects it.
                                 None => text(tex.as_str())
-                                    .font(Font::MONOSPACE)
+                                    .font(crate::fonts::CODE)
                                     .size(ts::SMALL)
                                     .color(if app.proj.explain.svg_failed.contains_key(key) {
                                         theme::warning()
@@ -95,7 +95,7 @@ pub(crate) fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'
         .map(|l| {
             if l.spans.is_empty() {
                 // Keep blank lines from collapsing to zero height.
-                return text(" ").font(Font::MONOSPACE).size(ts::BODY).into();
+                return text(" ").font(crate::fonts::CODE).size(ts::BODY).into();
             }
             let spans: Vec<iced::widget::text::Span<'_, Message>> = l
                 .spans
@@ -103,7 +103,7 @@ pub(crate) fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'
                 .map(|(t, style)| {
                     iced::widget::span(t.as_str())
                         .color(style.and_then(style_color).unwrap_or(theme::fg()))
-                        .font(Font::MONOSPACE)
+                        .font(crate::fonts::CODE)
                         .size(ts::BODY)
                 })
                 .collect();
@@ -137,7 +137,7 @@ pub(crate) fn svg_widget<'a>(sv: &crate::ExplainSvg) -> Element<'a, Message> {
 /// says so above the source.
 pub(crate) fn source_block<'a>(source: &'a str, what: &str, failed: bool) -> Element<'a, Message> {
     let code = text(source)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::CODE)
         .size(ts::SMALL)
         .color(theme::dim());
     let body: Element<'a, Message> = if failed {
@@ -420,13 +420,26 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     let Some(node) = app.proj.explain.view.as_ref() else {
         return compact_empty_state(
             Glyph::Lightbulb,
-            "Move the cursor into a function, or Cmd+click a file/folder.",
+            if crate::keymap::MAC_KEYS {
+                "Move the cursor into a function, or ⌘-click a file or folder."
+            } else {
+                "Move the cursor into a function, or Ctrl+click a file or folder."
+            },
         );
     };
-    let title = match node {
-        Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
-        Node::File(p) => rel_of(app, p),
-        Node::Function { file, name, .. } => format!("{name} · {}", rel_of(app, file)),
+    // The note's head: what it is about, in the face it is written in (a
+    // function's name as code), and what kind of thing that is.
+    let (title, meta, code) = match node {
+        Node::Folder(p) => (rel_of(app, p), "folder".to_string(), false),
+        Node::File(p) => (rel_of(app, p), "file".to_string(), false),
+        Node::Function { file, name, .. } => (
+            name.clone(),
+            match file.file_name() {
+                Some(f) => format!("fn · {}", f.to_string_lossy()),
+                None => "fn".to_string(),
+            },
+            true,
+        ),
     };
 
     // Call-flow navigation first (callers/callees), then the explanation prose.
@@ -505,11 +518,31 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     };
     container(
         column![
-            container(text(title).size(ts::BASE).color(theme::fg())).padding(Padding {
-                top: 10.0,
-                right: 12.0,
+            container(
+                row![
+                    text(title)
+                        .size(if code { ts::BODY } else { ts::BASE })
+                        .font(if code {
+                            crate::fonts::CODE_BOLD
+                        } else {
+                            crate::fonts::UI_SEMIBOLD
+                        })
+                        .color(theme::fg_bright())
+                        .wrapping(Wrapping::None),
+                    space().width(Fill),
+                    text(meta)
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+            )
+            .padding(Padding {
+                top: 12.0,
+                right: 14.0,
                 bottom: 0.0,
-                left: 12.0,
+                left: 14.0,
             }),
             // left 4 so the button's own inner padding lands its text at ~12,
             // aligned with the title above (not indented past it).
@@ -532,12 +565,11 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
                 )
                 .direction(thin_scroll())
                 .style(theme::overlay_scrollbar)
-                .height(iced::Length::Fill),
+                .height(iced::Length::Shrink),
             ),
         ]
         .spacing(8),
     )
-    .height(Fill)
     .into()
 }
 
@@ -647,7 +679,7 @@ pub(crate) fn lsp_consent_modal(
                 })
                 .size(ts::BODY)
                 .color(theme::accent())
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .wrapping(Wrapping::None),
             )
             .padding(8)
@@ -735,7 +767,7 @@ pub(crate) fn lsp_command_modal(
                 text(line)
                     .size(ts::BODY)
                     .color(theme::warn())
-                    .font(Font::MONOSPACE),
+                    .font(crate::fonts::CODE),
             )
             .padding(8)
             .width(Fill)
@@ -756,7 +788,7 @@ pub(crate) fn lsp_command_modal(
                     text(options)
                         .size(ts::BODY)
                         .color(theme::warn())
-                        .font(Font::MONOSPACE),
+                        .font(crate::fonts::CODE),
                 )
                 .height(Length::Fixed(160.0)),
             )
@@ -858,7 +890,7 @@ pub(crate) fn consent_modal(
                 text(format!("{}/.clew", root.display()))
                     .size(ts::BODY)
                     .color(theme::accent())
-                    .font(Font::MONOSPACE)
+                    .font(crate::fonts::CODE)
                     .wrapping(Wrapping::Glyph),
             )
             .padding(8)
