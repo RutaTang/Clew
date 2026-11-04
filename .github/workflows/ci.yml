@@ -4,7 +4,10 @@ name: CI
 # dependencies (objc2/AppKit), so the full workspace is built on macOS; the
 # headless backend (`clew-server` + `clew-core` + `clew-protocol`) is the piece
 # deployed to remote hosts over SSH, so it is also built and tested on Linux,
-# and cross-built for the static musl targets the release ships.
+# and cross-built for the static musl targets the release ships. Voice
+# (`clew-voice`: the microphone and whisper.cpp's offline speech recognition)
+# is built and tested on Linux and Windows as well, where it must work the
+# same as on macOS.
 #
 # Supply chain: every action is pinned to a full commit SHA (the tag is in the
 # trailing comment), checkouts do not persist the token, and the workflow token
@@ -81,6 +84,54 @@ jobs:
         run: cargo clippy -p clew-server -p clew-core -p clew-protocol --all-targets --locked -- -D warnings
       - name: Test (server + core + protocol)
         run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
+
+  # Voice is meant to work the same on every desktop: the microphone through
+  # each system's own audio stack (ALSA, WASAPI — Core Audio is the macOS
+  # job's), and whisper.cpp compiled by each platform's C++ toolchain. Built,
+  # linted and tested on Linux and Windows here; macOS builds and tests it with
+  # the whole workspace above. The microphone test opens the runner's default
+  # input for real (it has none, and must say so in words, not crash).
+  voice:
+    name: Build & test · voice · ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+          - os: Windows
+            runner: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: voice
+      # cpal reads ALSA's headers on Linux; Windows needs nothing beyond the
+      # runner's MSVC and CMake.
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Clippy (voice, deny warnings)
+        run: cargo clippy -p clew-voice --all-targets --locked -- -D warnings
+      - name: Test (voice)
+        env:
+          CLEW_TEST_MICROPHONE: "1"
+        run: cargo test -p clew-voice --locked
 
   # The release ships static musl builds for both Linux architectures; building
   # them here means a change that breaks the musl/cross build fails its PR, not

@@ -28,5 +28,8 @@
   <string>public.app-category.developer-tools</string>
   <key>NSHumanReadableCopyright</key>
   <string>Clew — a reader for code</string>
+  <!-- Voice: macOS asks the user before Clew first listens, with this text. -->
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Clew listens when you press the voice key or the microphone button, so you can say a command or ask about the code. What you say is turned into text on this Mac and never leaves it.</string>
 </dict>
 </plist>

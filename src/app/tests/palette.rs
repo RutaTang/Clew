@@ -169,9 +169,11 @@ fn without_a_project_only_what_needs_none_is_listed() {
     for absent in ["Call Graph", "Go to File…", "Sidebar: Files", "Overview"] {
         assert!(!all.iter().any(|t| t == absent), "{absent} in {all:?}");
     }
+    // The window's own preference: the palette in effect is the process's,
+    // which another test may be previewing at the same moment.
     typed(&mut app, ">theme light");
     let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
-    assert_eq!(crate::theme::current_pref(), crate::theme::ThemePref::Light);
+    assert_eq!(app.theme_pref, crate::theme::ThemePref::Light);
 }
 
 /// Every title is listed once — a click finds its command by its title —

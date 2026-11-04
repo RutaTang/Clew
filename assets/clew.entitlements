@@ -2,8 +2,15 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
   Hardened-runtime entitlements for the notarized Clew.app — the `clew` GUI
-  binary and the bundle. Deliberately EMPTY: the hardened runtime applies in
-  full to the process that holds the user's API keys and approvals.
+  binary and the bundle. Deliberately as good as EMPTY: the hardened runtime
+  applies in full to the process that holds the user's API keys and
+  approvals. The one key is a resource the user grants, not a protection
+  weakened:
+    - com.apple.security.device.audio-input — voice (src/app/voice.rs,
+      crates/clew-voice): under the hardened runtime a process may not open
+      the microphone without it, whatever the user answers. It only lets
+      macOS ask them (with Info.plist's NSMicrophoneUsageDescription); Clew
+      listens only when they press the voice key.
 
   Clew is not App-Sandboxed (it is a developer tool that reads arbitrary local
   projects and spawns external toolchains), so no sandbox or network
@@ -31,5 +38,8 @@
   that needs it.
 -->
 <plist version="1.0">
-<dict/>
+<dict>
+  <key>com.apple.security.device.audio-input</key>
+  <true/>
+</dict>
 </plist>

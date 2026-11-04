@@ -61,6 +61,10 @@ pub enum Glyph {
     Play,
     Book,
     Export,
+    // Voice and the Ask window
+    Mic,
+    Expand,
+    Shrink,
 }
 
 /// The inner SVG for a glyph — original geometry, 24×24, stroked (a few filled
@@ -199,6 +203,22 @@ fn body(g: Glyph) -> &'static str {
         Export => {
             "<path d='M12 14.5 V4'/><path d='M8.2 7.8 L12 4 L15.8 7.8'/>\
              <path d='M5 13.5 V18.5 A1.5 1.5 0 0 0 6.5 20 H17.5 A1.5 1.5 0 0 0 19 18.5 V13.5'/>"
+        }
+        // A microphone on its stand.
+        Mic => {
+            "<rect x='9' y='3' width='6' height='11.5' rx='3'/>\
+             <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21'/>\
+             <path d='M8.5 21 H15.5'/>"
+        }
+        // Two corners pulled outward: make larger.
+        Expand => {
+            "<path d='M14 4 H20 V10'/><path d='M20 4 L13.5 10.5'/>\
+             <path d='M10 20 H4 V14'/><path d='M4 20 L10.5 13.5'/>"
+        }
+        // Two corners pushed inward: make smaller.
+        Shrink => {
+            "<path d='M20 10 H14 V4'/><path d='M14 10 L20.5 3.5'/>\
+             <path d='M4 14 H10 V20'/><path d='M10 14 L3.5 20.5'/>"
         }
     }
 }

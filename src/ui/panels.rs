@@ -1,4 +1,5 @@
-//! Bottom panels (debug/ask) and the calls/imports tabs.
+//! The bottom panel (the debugger), the Ask conversation the floating Ask
+//! window holds (`ui::askfloat`), and the calls/imports tabs.
 
 use super::*;
 // Explicit macro imports shadow the glob from `super`, disambiguating
@@ -19,56 +20,43 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
     .into()
 }
 
-/// The collapsible bottom panel: a tab bar (Ask / Debug, like the left sidebar)
-/// with a collapse control, above the selected tab's content.
+/// The collapsible bottom panel: the debugger's, under a title strip with a
+/// collapse control. (Ask floats over the code instead: `ui::askfloat`.)
 pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
-    use crate::BottomTab;
-    let tab = |g: Glyph, label: &'static str, this: BottomTab| {
-        let active = app.bottom_tab == this;
-        let tint = if active {
-            theme::fg_bright()
-        } else {
-            theme::fg_muted()
-        };
-        button(
-            row![glyph::icon(g, tint, 16.0), text(label).size(ts::SMALL)]
-                .spacing(6)
-                .align_y(iced::Center),
-        )
-        .style(theme::tab_button(active))
-        .padding([5, 12])
-        .on_press(Message::Window(WindowMsg::BottomTabPicked(this)))
-    };
+    let title = container(
+        row![
+            glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
+            text("Debug").size(ts::SMALL).color(theme::fg_bright()),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding([5, 12]);
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
     let collapse = button(text("⌄").size(ts::BASE))
         .style(theme::list_row(false))
         .padding([3, 10])
         .on_press(Message::Window(WindowMsg::CollapseBottom));
-    let tabs = row![
-        tab(Glyph::Ask, "Ask", BottomTab::Ask),
-        tab(Glyph::Debug, "Debug", BottomTab::Debug),
-        space().width(Fill),
-        collapse,
-    ]
-    .spacing(2)
-    .align_y(iced::Center)
-    .padding(Padding {
-        top: 2.0,
-        right: 6.0,
-        bottom: 2.0,
-        left: 6.0,
-    });
+    let tabs = row![title, space().width(Fill), collapse,]
+        .spacing(2)
+        .align_y(iced::Center)
+        .padding(Padding {
+            top: 2.0,
+            right: 6.0,
+            bottom: 2.0,
+            left: 6.0,
+        });
 
-    let content: Element<'_, Message> = match app.bottom_tab {
-        BottomTab::Ask => ask_panel(app),
-        BottomTab::Debug if app.debug.session.is_some() => debug_panel(app),
-        BottomTab::Debug => empty_state(
+    let content: Element<'_, Message> = if app.debug.session.is_some() {
+        debug_panel(app)
+    } else {
+        empty_state(
             Glyph::Debug,
             "No debug session",
             "Press Debug in the toolbar to start one (needs .clew/launch.json).",
             None,
-        ),
+        )
     };
 
     container(column![tabs, hairline(), content].height(Fill))
@@ -383,27 +371,16 @@ pub(crate) fn index_cap_note(app: &App) -> Option<&str> {
 /// The "Ask clew" bottom panel: a scrollable multi-turn Q&A over a question box.
 /// Answers are grounded in retrieved code, cite it with jump links, and list
 /// their retrieved sources as clickable chips.
-pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
-    // The tab bar already names the panel and offers collapse, so the only header
-    // control left is "Clear", and only once there's a conversation to clear.
+/// The Ask conversation, filling the floating Ask window (`ui::askfloat`),
+/// which is `height` tall: the pinned approval card, the turns, and the
+/// compose area. The window's header names it and holds Clear.
+pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
     // Every part of the panel keeps its place in the column, there or not
     // (an empty `space()`, not one of no height, which a column leaves out):
     // iced pairs widget state with widgets by position, and one coming or
     // going handed the conversation's scroll, or the input's focus, to
     // another widget.
-    let header: Element<'_, Message> = if app.proj.ask_turns.is_empty() {
-        space().into()
-    } else {
-        row![
-            space().width(Fill),
-            button(text("Clear").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Ask(AskMsg::Clear)),
-        ]
-        .align_y(iced::Center)
-        .into()
-    };
+    let header: Element<'_, Message> = space().into();
 
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.proj.ask_turns.is_empty() && !app.proj.asking {
@@ -597,7 +574,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 - 1;
             // About half the panel at most, the input kept in view: a card
             // whose arguments run longer scrolls them, above its answers.
-            let head = (app.bottom_height * 0.5 - 60.0).max(40.0);
+            let head = (height * 0.5 - 60.0).max(40.0);
             let page = match &app.asking.answers_page {
                 Some((crate::app::model::Question::Approval { stream, key }, page))
                     if *stream == turn.stream && *key == approval.key =>
@@ -804,7 +781,6 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .height(Fill)
-    .style(theme::panel)
     .into()
 }
 

@@ -48,6 +48,12 @@ impl App {
         // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        // The large Ask window steps aside to a card for the code it opens
+        // (a citation clicked, a file the agent opened): the code is what
+        // the reader goes there to see.
+        if self.ask_view == AskView::Expanded {
+            self.ask_view = AskView::Compact;
+        }
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
         self.proj.time_travel = None;

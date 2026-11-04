@@ -95,7 +95,8 @@ impl App {
             lsp_gen: std::collections::HashMap::new(),
             embed_available: embed::Config::available(),
             show_bottom: false,
-            bottom_tab: BottomTab::Ask,
+            ask_view: AskView::Closed,
+            voice: crate::app::voice::VoiceState::new(),
             debug: DebugState::default(),
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
@@ -229,6 +230,14 @@ impl App {
         if self.wants_tick() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick),
+            );
+        }
+        // The level meter and the pause that ends listening, read only while
+        // the microphone is open.
+        if self.voice.is_listening() {
+            subs.push(
+                iced::time::every(crate::app::voice::LISTEN_TICK)
+                    .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
             );
         }
         // No per-frame clock for the graph maps: the canvas requests its own
@@ -533,9 +542,8 @@ impl App {
                 self.clamp_panel_sizes();
                 Task::none()
             }
-            WindowMsg::BottomTabPicked(tab) => {
+            WindowMsg::ShowDebugPanel => {
                 self.show_bottom = true;
-                self.bottom_tab = tab;
                 Task::none()
             }
             WindowMsg::CollapseBottom => {

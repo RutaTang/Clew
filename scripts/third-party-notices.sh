@@ -56,6 +56,8 @@ cargo tree "${PACKAGES[@]}" "${TREE_ARGS[@]}" \
   echo "declared in its manifest, and the license files it ships with."
   missing=0
   while IFS='|' read -r pkg license repo; do
+    # `cargo tree` separates the trees of several packages with a blank line.
+    [[ -n "${pkg// /}" ]] || continue
     name="${pkg%% *}"
     version="${pkg#* v}"
     echo
@@ -69,16 +71,24 @@ cargo tree "${PACKAGES[@]}" "${TREE_ARGS[@]}" \
     fi
     for dir in "$VENDOR/$name" "$REGISTRY"/*/"$name-$version"; do
       [[ -d "$dir" ]] || continue
-      for file in "$dir"/LICENSE* "$dir"/LICENCE* "$dir"/COPYING* "$dir"/NOTICE* "$dir"/COPYRIGHT*; do
+      # A crate that builds a C library it carries (whisper-rs-sys builds
+      # whisper.cpp) may ship only that library's license, in its folder:
+      # looked for one level down when the crate has none of its own.
+      files=("$dir"/LICENSE* "$dir"/LICENCE* "$dir"/COPYING* "$dir"/NOTICE* "$dir"/COPYRIGHT*)
+      if ! compgen -G "$dir/LICENSE*" >/dev/null && ! compgen -G "$dir/LICENCE*" >/dev/null \
+        && ! compgen -G "$dir/COPYING*" >/dev/null; then
+        files+=("$dir"/*/LICENSE* "$dir"/*/LICENCE* "$dir"/*/COPYING*)
+      fi
+      for file in "${files[@]}"; do
         [[ -f "$file" ]] || continue
         found=1
         key="$SEEN/$(cksum < "$file" | tr -c '0-9\n' '-')"
         echo "--------------------------------------------------------------------------------"
         if [[ -e "$key" ]]; then
-          echo "${file##*/}: same text as $(cat "$key")"
+          echo "${file#"$dir"/}: same text as $(cat "$key")"
         else
-          echo "the ${file##*/} of $name $version" > "$key"
-          echo "${file##*/}:"
+          echo "the ${file#"$dir"/} of $name $version" > "$key"
+          echo "${file#"$dir"/}:"
           echo
           cat "$file"
         fi

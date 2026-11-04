@@ -65,10 +65,11 @@ pub enum Action {
     LspServers,
     Shortcuts,
     CommandPalette,
+    Voice,
 }
 
 impl Action {
-    pub const ALL: [Action; 27] = [
+    pub const ALL: [Action; 28] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -96,6 +97,7 @@ impl Action {
         Action::LspServers,
         Action::Shortcuts,
         Action::CommandPalette,
+        Action::Voice,
     ];
 
     /// Stable identifier used as the TOML key. Never change these.
@@ -128,6 +130,7 @@ impl Action {
             Action::TraceValue => "trace_value",
             Action::Shortcuts => "shortcuts",
             Action::CommandPalette => "command_palette",
+            Action::Voice => "voice",
         }
     }
 
@@ -165,6 +168,7 @@ impl Action {
             Action::LspServers => "Language servers",
             Action::Shortcuts => "Keyboard shortcuts",
             Action::CommandPalette => "Command palette",
+            Action::Voice => "Talk (voice)",
         }
     }
 
@@ -203,6 +207,7 @@ impl Action {
             Action::LspServers => at(MenuSection::View, "Language Servers…"),
             Action::Shortcuts => at(MenuSection::View, "Keyboard Shortcuts…"),
             Action::CommandPalette => at(MenuSection::View, "Command Palette…"),
+            Action::Voice => at(MenuSection::View, "Talk"),
         }
     }
 
@@ -238,6 +243,9 @@ impl Action {
             Action::TraceValue => Chord::cmd_shift('v'),
             Action::Shortcuts => Chord::cmd('/'),
             Action::CommandPalette => Chord::cmd_shift('p'),
+            // "Speak". Pressed again — or a pause once something was said —
+            // it stops listening.
+            Action::Voice => Chord::cmd_shift('s'),
         }
     }
 }
@@ -856,7 +864,7 @@ mod tests {
         let mut km = Keymap::defaults();
         let table: toml::Table = toml::from_str(
             "goto_line = \"cmd+q\"\nopen_symbol = \"cmd+p\"\nzoom_in = \"j\"\n\
-             toggle_split = \"cmd+shift+s\"\nnot_an_action = \"cmd+k\"\n",
+             toggle_split = \"cmd+shift+k\"\nnot_an_action = \"cmd+k\"\n",
         )
         .unwrap();
         km.apply_overrides(&table);
@@ -867,7 +875,7 @@ mod tests {
         );
         assert_eq!(km.chord(Action::ZoomIn), Action::ZoomIn.default_chord());
         // A clean override still applies.
-        assert_eq!(km.chord(Action::ToggleSplit), Chord::cmd_shift('s'));
+        assert_eq!(km.chord(Action::ToggleSplit), Chord::cmd_shift('k'));
     }
 
     /// Only ⌘-chords outside the text-editing set may become key equivalents.

@@ -64,6 +64,10 @@ mod overlays;
 pub(crate) use overlays::*;
 mod updater;
 pub(crate) use updater::*;
+mod askfloat;
+pub(crate) use askfloat::*;
+mod voice;
+pub(crate) use voice::*;
 #[cfg(test)]
 mod tests;
 
@@ -372,10 +376,9 @@ pub fn view(app: &App) -> Element<'_, Message> {
         None => slot(),
     };
     let main = row![left, pane_area(app), right].height(Fill);
-    // A bottom panel docks under the code, keeping it visible above. "Ask clew"
-    // surfaces over the debugger when opened, so you can ask about the live state
-    // while paused (the answer is grounded in the current stack + variables). Its
-    // height is user-draggable via the divider between it and the code.
+    // The debugger's panel docks under the code, keeping it visible above.
+    // Its height is user-draggable via the divider between it and the code.
+    // (Ask floats over it all instead: `ask_layer` below.)
     let bottom: Element<'_, Message> = if app.show_bottom {
         column![
             crate::resize::Divider::horizontal(|v| Message::Window(WindowMsg::ResizeBottom(v)))
@@ -392,8 +395,11 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let banner = update_banner(app).unwrap_or_else(slot);
     let base = column![toolbar(app), banner, body, statusbar(app)];
 
-    // The overlay layer (at most one overlay) and, above everything, the
-    // tutorial — whose callout stays on top while it drives the UI underneath.
+    // The floating Ask window (or its launcher) over the window; over it,
+    // the overlay layer (at most one overlay), so the palette or a menu
+    // opens above Ask too; and, above everything, the tutorial — whose
+    // callout stays on top while it drives the UI underneath.
+    let ask = ask_layer(app);
     let overlay = active_overlay(app).map_or_else(slot, |o| o.view(app));
     let tutorial = if app.tutorial.is_some() {
         tutorial_overlay(app)
@@ -401,7 +407,7 @@ pub fn view(app: &App) -> Element<'_, Message> {
         slot()
     };
     // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
-    placed::watch_overlays(app.overlay_open, stack![base, overlay, tutorial])
+    placed::watch_overlays(app.overlay_open, stack![base, ask, overlay, tutorial])
 }
 
 // ---------------------------------------------------------------- hover tooltip

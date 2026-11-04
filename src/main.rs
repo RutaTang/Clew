@@ -63,6 +63,7 @@ pub use app::state::{
     StatsState, SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
 };
 pub(crate) use app::tasks::*;
+pub use app::voice::VoiceMsg;
 
 use iced::Size;
 

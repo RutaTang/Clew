@@ -219,13 +219,25 @@ pub enum WalkMode {
     Walk,
 }
 
-/// The two views that share the collapsible bottom panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BottomTab {
-    /// "Ask clew" Q&A.
-    Ask,
-    /// The debugger (call stack, variables, output).
-    Debug,
+/// Where the Ask window is. It floats over the code rather than taking a
+/// panel's room from it: put away (a launcher in the corner), a card in the
+/// bottom-right corner, or large and centred over the dimmed window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskView {
+    /// Put away: only its launcher shows, in the corner.
+    #[default]
+    Closed,
+    /// A card in the bottom-right corner, the code beside it in view.
+    Compact,
+    /// Large and centred, the window dimmed behind it.
+    Expanded,
+}
+
+impl AskView {
+    /// Whether the conversation is on screen.
+    pub fn is_open(self) -> bool {
+        self != AskView::Closed
+    }
 }
 
 /// How often the project's files changed over the recent history — the
@@ -436,6 +448,9 @@ pub enum ApprovalKey {
     Mcp { call: u64 },
     /// The ACP agent's permission request `id`.
     Acp { id: u64 },
+    /// The agent turn's call `call` of a window command that costs
+    /// something (`app::windowtools`).
+    Window { call: u64 },
 }
 
 /// A question to the user before a tool runs.
@@ -1436,8 +1451,8 @@ pub struct Asking {
     /// since when (`ui::placed`), the latest last.
     pub places: Vec<Placement>,
     /// The approval card last drawn for the first time, whose first report
-    /// decided whether the bottom panel opened to fit it
-    /// (`CARD_PANEL_HEIGHT`).
+    /// decided whether the Ask window opened large to fit it
+    /// (`App::on_placed`).
     pub raised_for: Option<Question>,
     /// When the redraw `App::wake_after` asked for is due, and whether one
     /// is waiting.
@@ -1458,10 +1473,6 @@ pub struct Placement {
     pub place: Option<iced::Rectangle>,
     pub since: std::time::Instant,
 }
-
-/// The bottom panel's height an approval card drawn too low for it opens the
-/// panel to: all of it in view, its answers in reach (`App::on_placed`).
-pub const CARD_PANEL_HEIGHT: f32 = 260.0;
 
 /// Most placements kept: a few questions are drawn at a time.
 pub const MAX_PLACEMENTS: usize = 16;

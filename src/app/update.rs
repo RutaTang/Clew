@@ -120,7 +120,9 @@ impl App {
             // from under a pointer resting on an Allow — and its delay
             // starts when the peek goes. The cards are answered in turn, so
             // the next one coming up where the last was answered waits too.
-            None => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
+            None => self
+                .ask_view
+                .is_open()
                 .then(|| self.first_approval())
                 .flatten()
                 .map(|(turn, approval)| Question::Approval {
@@ -265,17 +267,16 @@ impl App {
         {
             return Task::none();
         }
-        // An approval card first drawn in a bottom panel too low to show
-        // all of it — its answers out of reach — opens the panel to where
-        // it fits. Its first report only: a card that fit, squeezed by the
-        // user's own drag, and one the user makes lower once opened, stay.
+        // An approval card first drawn in an Ask card too low to show all
+        // of it — its answers out of reach, in a short window — opens the
+        // Ask window large, where it fits. Its first report only: one the
+        // user makes small again once opened stays small.
         if matches!(question, crate::app::model::Question::Approval { .. })
             && self.asking.raised_for.as_ref() != Some(&question)
         {
             self.asking.raised_for = Some(question.clone());
-            if place.is_none() && self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT {
-                self.bottom_height = crate::app::model::CARD_PANEL_HEIGHT;
-                self.clamp_panel_sizes();
+            if place.is_none() && self.ask_view == AskView::Compact {
+                self.ask_view = AskView::Expanded;
             }
         }
         let places = &mut self.asking.places;
@@ -373,6 +374,7 @@ impl App {
             Message::Updater(message) => self.update_updater(message),
             Message::Window(message) => self.update_window(message),
             Message::Tutorial(message) => self.update_tutorial(message),
+            Message::Voice(message) => self.update_voice(message),
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),

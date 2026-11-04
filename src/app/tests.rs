@@ -6,6 +6,7 @@ use crate::*;
 use iced::keyboard;
 
 mod ask_space;
+mod askfloat;
 mod build_app;
 mod insight;
 mod integrations;
@@ -13,6 +14,8 @@ mod navigation_debug;
 mod palette;
 mod remote_state_refresh;
 mod semantic_space;
+mod voice;
+mod windowtools;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flow_call_with_turbofish_arguments_follows_the_correct_parameter() {

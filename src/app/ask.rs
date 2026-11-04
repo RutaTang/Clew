@@ -166,16 +166,47 @@ impl App {
                 .is_some_and(|l| l.turn.is_some() || l.pending.is_some())
     }
 
+    /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, its input
+    /// focused — or, open in either size, put it away.
     pub(crate) fn on_toggle_ask(&mut self) -> Task<Message> {
-        // Toolbar "Ask": open the bottom panel on the Ask tab, or collapse
-        // it if Ask is already the shown tab.
-        if self.show_bottom && self.bottom_tab == BottomTab::Ask {
-            self.show_bottom = false;
-        } else {
-            self.show_bottom = true;
-            self.bottom_tab = BottomTab::Ask;
+        if self.ask_view.is_open() {
+            self.close_ask();
+            return Task::none();
         }
-        Task::none()
+        self.on_open_ask()
+    }
+
+    /// Open the Ask window (a card, unless it is open already in either
+    /// size) and give its input the keyboard.
+    pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
+        self.reveal_ask();
+        self.code_focused = false;
+        operation::focus(ui::ask_input_id())
+    }
+
+    /// Bring the conversation on screen without taking the keyboard: a card
+    /// when it was put away, as it is when already open.
+    pub(crate) fn reveal_ask(&mut self) {
+        if !self.ask_view.is_open() {
+            self.ask_view = AskView::Compact;
+        }
+    }
+
+    /// Put the Ask window away, the keyboard back with the code.
+    pub(crate) fn close_ask(&mut self) {
+        self.ask_view = AskView::Closed;
+        self.code_focused = true;
+    }
+
+    /// Esc's step down for the Ask window: large to a card, a card put away.
+    /// `false` when it is put away already, for Esc to do what else it does.
+    pub(crate) fn step_ask_down(&mut self) -> bool {
+        match self.ask_view {
+            AskView::Expanded => self.ask_view = AskView::Compact,
+            AskView::Compact => self.close_ask(),
+            AskView::Closed => return false,
+        }
+        true
     }
 
     pub(crate) fn on_ask_submit(&mut self) -> Task<Message> {
@@ -247,8 +278,7 @@ impl App {
         if self.proj.ask_input.trim() == question.trim() {
             self.proj.ask_input.clear();
         }
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
+        self.reveal_ask();
         self.proj.asking = true;
         let stamp = self.stamp();
         // The stream id is minted now, at submit: it is the identity the
@@ -740,6 +770,10 @@ impl App {
         if !self.server.is_up() {
             return Task::none();
         }
+        // The window's own tools beside the MCP servers': the agent can open
+        // what it finds and run the window's commands (`app::windowtools`).
+        let mut tools = tools;
+        tools.extend(crate::app::windowtools::window_tools());
         // Client-side grounding the server can't see: the paused debugger state
         // and any pinned selections travel verbatim.
         let mut context = String::new();
@@ -778,8 +812,7 @@ impl App {
             extras: Default::default(),
         });
         self.proj.asking = false;
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
+        self.reveal_ask();
 
         self.proj.link.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
@@ -1108,8 +1141,7 @@ impl App {
                 if !dup {
                     self.proj.ask_pins.push(pin);
                 }
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::Ask;
+                self.reveal_ask();
                 self.code_focused = false; // the Ask input takes focus
                 self.status = "Added selection to Ask — ask your question".into();
                 operation::focus(ui::ask_input_id())
@@ -1222,6 +1254,22 @@ impl App {
     pub(crate) fn update_ask(&mut self, message: AskMsg) -> Task<Message> {
         match message {
             AskMsg::Toggle => self.on_toggle_ask(),
+            AskMsg::Open => self.on_open_ask(),
+            AskMsg::Expand => {
+                self.ask_view = AskView::Expanded;
+                self.code_focused = false;
+                operation::focus(ui::ask_input_id())
+            }
+            AskMsg::Shrink => {
+                if self.ask_view == AskView::Expanded {
+                    self.ask_view = AskView::Compact;
+                }
+                Task::none()
+            }
+            AskMsg::Close => {
+                self.close_ask();
+                Task::none()
+            }
             AskMsg::InputChanged(s) => {
                 self.proj.ask_input = s;
                 Task::none()

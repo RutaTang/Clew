@@ -1,9 +1,11 @@
 # The clew workspace: the `clew` GUI client (this package), `clew-core` (the
 # backend logic both binaries share), `clew-protocol` (the client <-> server wire
-# contract) and `clew-server` (the headless backend the client runs as a local
-# child or deploys over SSH).
+# contract), `clew-server` (the headless backend the client runs as a local
+# child or deploys over SSH) and `clew-voice` (listening and offline speech
+# recognition, free of anything platform-bound: built and tested on Linux,
+# macOS and Windows alike).
 [workspace]
-members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
+members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server", "crates/clew-voice"]
 # Third-party crates carried with a fix of clew's (see vendor/README.md): built
 # as dependencies, not linted, formatted or tested as clew's own.
 exclude = ["vendor"]
@@ -18,6 +20,8 @@ rust-version = "1.95"
 [dependencies]
 clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
+# Voice: the microphone, and whisper.cpp's speech recognition on this machine.
+clew-voice = { path = "crates/clew-voice" }
 # `access(2)` / `getuid(2)` for the self-update and SSH control-socket checks.
 libc = "0.2"
 # NB: no "highlighter" feature. clew highlights code with its own tree-sitter

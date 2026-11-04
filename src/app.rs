@@ -85,8 +85,10 @@ mod timetravel;
 pub(crate) mod tutorial;
 mod update;
 mod updater;
+pub(crate) mod voice;
 mod walkthrough;
 mod watch;
+pub(crate) mod windowtools;
 
 // The edits a closing window would lose, which the shell asks the user about
 // before it lets the window go (`crate::shell`).

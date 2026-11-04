@@ -201,6 +201,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         text(format!("Stored in {}", crate::llm::config_hint()))
             .size(ts::CAPTION)
             .color(theme::dim()),
+        voice_section(app),
         integrations_section(app),
         languages_section(app),
     ]

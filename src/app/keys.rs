@@ -40,6 +40,12 @@ impl App {
             self.pending_z = false;
             return self.update(msg);
         }
+        // The large Ask window is over everything but the overlays: Esc
+        // makes it a card first, before it reaches what is under it.
+        if matches!(key.as_ref(), Key::Named(Named::Escape)) && self.ask_view == AskView::Expanded {
+            self.step_ask_down();
+            return Task::none();
+        }
         // While the shortcuts panel is open (and not capturing), swallow every
         // key so nothing acts behind the modal. (Esc never gets here: the
         // panel is an overlay, so `escape_message` above closed it.)
@@ -120,14 +126,24 @@ impl App {
                     1
                 })))
             }
-            // Only what is NOT an overlay is left for Esc here — the find bar,
-            // then the selection. Every overlay (the context menu and the
+            // Only what is NOT an overlay is left for Esc here — listening,
+            // the find bar, the selection, then the Ask card: each press puts
+            // away the nearest. Every overlay (the context menu and the
             // finder included) was dismissed through `escape_message` above.
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
                 self.pending_z = false;
+                if self.voice.is_busy() {
+                    return self.update(Message::Voice(VoiceMsg::Cancel));
+                }
                 if self.proj.find.open {
                     return self.update(Message::Editor(EditorMsg::FindClosed));
+                }
+                let marked = self
+                    .active_viewer()
+                    .is_some_and(|v| v.selection.is_some() || v.target_line.is_some());
+                if !marked && self.step_ask_down() {
+                    return Task::none();
                 }
                 if let Some(v) = self.active_viewer_mut() {
                     v.selection = None;
@@ -267,6 +283,7 @@ impl App {
             LspServers => self.update(Message::Lsp(LspMsg::TogglePanel)),
             Shortcuts => self.update(Message::Window(WindowMsg::OpenShortcuts)),
             CommandPalette => self.update(Message::Nav(NavMsg::PaletteOpened)),
+            Voice => self.update(Message::Voice(VoiceMsg::Toggle)),
         })
     }
 

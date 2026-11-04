@@ -343,14 +343,14 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         .demo(Message::Overview(OverviewMsg::ShowStats)),
         TutStep::new(
             "Ask clew",
-            "The speech icon opens Ask in the bottom panel. Put a question about the \
+            "The speech icon opens Ask, a window that floats over the code: a card \
+             in the corner, or large in the middle. Put a question about the \
              codebase to it, such as where is auth handled, and clew answers with \
-             links that jump straight into the real files.",
+             links that jump straight into the real files. It can open files and \
+             run commands for you too, and you can talk to it.",
             Anchor::ToolbarIcon(2),
         )
-        .demo(Message::Window(WindowMsg::BottomTabPicked(
-            crate::BottomTab::Ask,
-        ))),
+        .demo(Message::Ask(AskMsg::Open)),
         TutStep::new(
             "Debug",
             "The bug icon opens the debugger in the bottom panel. Set a breakpoint \
@@ -358,9 +358,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
              variables, and watches all show here.",
             Anchor::ToolbarIcon(3),
         )
-        .demo(Message::Window(WindowMsg::BottomTabPicked(
-            crate::BottomTab::Debug,
-        ))),
+        .demo(Message::Window(WindowMsg::ShowDebugPanel)),
         TutStep::new(
             "The call graph",
             &format!(
@@ -570,7 +568,12 @@ impl App {
         // and after). The bottom panel is shown only for the steps that demo it.
         self.show_left_sidebar = true;
         self.show_right_panel = matches!(anchor, Anchor::RightTop | Anchor::RightBottom);
-        self.show_bottom = matches!(demo, Some(Message::Window(WindowMsg::BottomTabPicked(_))));
+        self.show_bottom = matches!(demo, Some(Message::Window(WindowMsg::ShowDebugPanel)));
+        self.ask_view = if matches!(demo, Some(Message::Ask(AskMsg::Open))) {
+            AskView::Compact
+        } else {
+            AskView::Closed
+        };
         // The ⋯-menu steps open the menu (expanded) so their spotlight has the
         // real items to point at; every other step keeps it closed.
         self.show_tools_menu = matches!(anchor, Anchor::ToolbarMore | Anchor::ToolbarMenu { .. });

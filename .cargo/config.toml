@@ -1,0 +1,7 @@
+# Environment for every cargo build of the workspace.
+[env]
+# whisper.cpp (built by whisper-rs-sys for clew-voice) otherwise compiles for
+# the CPU it is built on (`-march=native`): a release built on a machine with
+# AVX-512 would crash on one without. Off, it targets the common baseline
+# (AVX2 on x86-64; any Apple Silicon), as other whisper.cpp apps ship.
+GGML_NATIVE = "OFF"

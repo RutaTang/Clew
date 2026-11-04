@@ -91,6 +91,9 @@ pub enum Message {
     Window(WindowMsg),
     /// The guided tour. Handled in `app::tutorial` (`App::update_tutorial`).
     Tutorial(TutorialMsg),
+    /// Talking to the window: listening, the words heard, the speech
+    /// models. Handled in `app::voice` (`App::update_voice`).
+    Voice(crate::VoiceMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -1051,8 +1054,17 @@ pub enum SemanticMsg {
 /// The Ask panel: questions, answers streaming in, pinned selections.
 #[derive(Debug, Clone)]
 pub enum AskMsg {
-    /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
+    /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, or put it away.
     Toggle,
+    /// Open the Ask window (as a card, when it is put away) with its input
+    /// focused.
+    Open,
+    /// Make the card large and centred.
+    Expand,
+    /// Make the large window a card in the corner again.
+    Shrink,
+    /// Put the Ask window away.
+    Close,
     /// The Ask input box text changed.
     InputChanged(String),
     /// Submit the current question.
@@ -1838,8 +1850,8 @@ pub enum WindowMsg {
     SidebarTabsScrolled(f32),
     ResizeRight(f32),
     ResizeBottom(f32),
-    /// Switch the bottom panel's tab (Ask / Debug), opening it if collapsed.
-    BottomTabPicked(BottomTab),
+    /// Open the bottom panel: the debugger's.
+    ShowDebugPanel,
     /// Collapse the bottom panel.
     CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
@@ -1912,6 +1924,7 @@ impl Message {
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
+            Message::Voice(m) => m.origin(),
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }
@@ -2329,6 +2342,10 @@ impl AskMsg {
             | AskMsg::AcpOptionSet { stamp, .. }
             | AskMsg::AcpCancelOverdue { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
+            | AskMsg::Open
+            | AskMsg::Expand
+            | AskMsg::Shrink
+            | AskMsg::Close
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
             | AskMsg::Suggested(..)
@@ -2572,7 +2589,7 @@ impl WindowMsg {
             | WindowMsg::SidebarTabsScrolled(..)
             | WindowMsg::ResizeRight(..)
             | WindowMsg::ResizeBottom(..)
-            | WindowMsg::BottomTabPicked(..)
+            | WindowMsg::ShowDebugPanel
             | WindowMsg::CollapseBottom
             | WindowMsg::ToggleToolsMenu
             | WindowMsg::ToggleTargetMenu

@@ -114,7 +114,6 @@ impl App {
             addr: None,
         });
         self.show_bottom = true;
-        self.bottom_tab = BottomTab::Debug; // reveal the debug panel
         self.debug.last_fn = None;
         // A new run: its trace starts empty.
         self.debug.trace.clear();
@@ -1677,7 +1676,6 @@ impl App {
             saved = self.save_history();
         }
         self.show_bottom = true;
-        self.bottom_tab = BottomTab::Debug;
         match target {
             Some((path, line)) => Task::batch([
                 saved,

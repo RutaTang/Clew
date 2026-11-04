@@ -25,6 +25,30 @@ pub(crate) struct PaletteCommand {
     pub(crate) action: PaletteAction,
 }
 
+impl PaletteCommand {
+    /// Whether running it costs something beyond what the window shows —
+    /// a paid pass over the project, the program started or stepped, a
+    /// breakpoint set in it, another project opened, a file written — so
+    /// that a command run for the user (by voice, by the agent) asks first.
+    /// Everything else only changes what is on screen.
+    pub(crate) fn costly(&self) -> bool {
+        use keymap::Action;
+        match &self.action {
+            PaletteAction::Send(message) | PaletteAction::AtCaret(message) => matches!(
+                message,
+                Message::Editor(EditorMsg::RunAction(
+                    Action::ExplainAll | Action::StartDebug
+                )) | Message::Debug(_)
+                    | Message::Explain(_)
+                    | Message::Project(ProjectMsg::OpenFolderPressed)
+                    | Message::Connect(ConnectMsg::Open)
+                    | Message::Export(_)
+            ),
+            PaletteAction::Goto(_) | PaletteAction::Insight => false,
+        }
+    }
+}
+
 /// What running a command does.
 #[derive(Debug, Clone)]
 pub(crate) enum PaletteAction {
@@ -268,19 +292,14 @@ impl App {
                 send(Message::Window(WindowMsg::ToggleRightPanel)),
             );
             add(
-                "View: Debug Panel".into(),
+                toggle(self.show_bottom, "Debug Panel"),
                 None,
-                send(Message::Window(WindowMsg::BottomTabPicked(
-                    BottomTab::Debug,
-                ))),
+                send(Message::Window(if self.show_bottom {
+                    WindowMsg::CollapseBottom
+                } else {
+                    WindowMsg::ShowDebugPanel
+                })),
             );
-            if self.show_bottom {
-                add(
-                    "View: Hide Bottom Panel".into(),
-                    None,
-                    send(Message::Window(WindowMsg::CollapseBottom)),
-                );
-            }
             // The ⋯ menu's view toggles.
             for (shown, what, message) in [
                 (

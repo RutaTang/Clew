@@ -366,8 +366,7 @@ fn running_turn(app: &mut App, agent: Arc<acp::Agent>) -> u64 {
     link.turn = Some(stream);
     app.proj.acp = Some(link);
     // On screen, as a question asked opens it.
-    app.show_bottom = true;
-    app.bottom_tab = BottomTab::Ask;
+    app.ask_view = AskView::Compact;
     stream
 }
 
@@ -1433,15 +1432,14 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
             delay,
         );
     }
-    // The panel hidden: out of reach, however long.
-    app.show_bottom = false;
+    // The Ask window put away: out of reach, however long.
+    app.ask_view = AskView::Closed;
     let _ = app.update(Message::Noop);
     read(&mut app);
     answer(&mut app, 1, "ok");
     assert_eq!(left(&app).len(), 3, "allowed out of sight");
     // Shown: within reach from then.
-    app.show_bottom = true;
-    app.bottom_tab = BottomTab::Ask;
+    app.ask_view = AskView::Compact;
     let _ = app.update(Message::Noop);
     answer(&mut app, 1, "ok");
     assert_eq!(left(&app).len(), 3, "allowed unread");
@@ -1489,8 +1487,7 @@ fn an_ended_turn_leaves_no_card_to_answer() {
         },
         ..AskTurn::default()
     });
-    app.show_bottom = true;
-    app.bottom_tab = BottomTab::Ask;
+    app.ask_view = AskView::Compact;
     assert!(app.question_on_screen().is_some());
     let _ = app.on_ask_stream_ended(
         stream,

@@ -222,6 +222,14 @@ fn panels_coming_and_going_never_reset_the_code_scroll() {
             Box::new(|a| a.show_bottom = true),
         ),
         (
+            "opening the Ask card",
+            Box::new(|a| a.ask_view = crate::AskView::Compact),
+        ),
+        (
+            "making Ask large",
+            Box::new(|a| a.ask_view = crate::AskView::Expanded),
+        ),
+        (
             "the update banner appearing",
             Box::new(|a| {
                 a.update.available = Some(crate::AvailableUpdate {
@@ -249,6 +257,7 @@ fn panels_coming_and_going_never_reset_the_code_scroll() {
                 a.show_file_banner = false;
                 a.show_left_sidebar = false;
                 a.show_bottom = false;
+                a.ask_view = crate::AskView::Closed;
                 a.update.available = None;
                 a.show_right_panel = false;
                 a.show_tools_menu = false;
@@ -2653,7 +2662,7 @@ fn a_press_on_stop_is_not_one_on_ask() {
         }
     };
     let mut ui = UserInterface::build(
-        super::panels::ask_panel(&app),
+        super::panels::ask_panel(&app, size.height),
         size,
         Cache::default(),
         &mut renderer,
@@ -2672,7 +2681,12 @@ fn a_press_on_stop_is_not_one_on_ask() {
     let cache = ui.into_cache();
     // The answer ends while it is held; let go of over Ask.
     app.proj.asking = false;
-    let mut ui = UserInterface::build(super::panels::ask_panel(&app), size, cache, &mut renderer);
+    let mut ui = UserInterface::build(
+        super::panels::ask_panel(&app, size.height),
+        size,
+        cache,
+        &mut renderer,
+    );
     let ask = find(&mut ui, &renderer, "Ask");
     let mut sent = Vec::new();
     let _ = ui.update(
@@ -2786,7 +2800,12 @@ fn ask_panel_turn(
     use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
     use iced_test::selector::{Candidate, Selector};
     let size = Size::new(800.0, app.bottom_height);
-    let mut ui = UserInterface::build(super::panels::ask_panel(app), size, cache, renderer);
+    let mut ui = UserInterface::build(
+        super::panels::ask_panel(app, size.height),
+        size,
+        cache,
+        renderer,
+    );
     let mut messages = Vec::new();
     let _ = ui.update(
         events,
@@ -2829,8 +2848,7 @@ fn ask_panel_turn(
 fn an_approval_card_stays_put_while_its_turn_grows() {
     use crate::app::model::{AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState};
     let mut app = reader_app();
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     // Arguments longer than the card shows: they scroll.
     let card = |call| Approval {
         key: ApprovalKey::Mcp { call },
@@ -2852,7 +2870,7 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     let mut renderer = renderer();
     let mut cache = {
         let mut ui = UserInterface::build(
-            super::panels::ask_panel(&app),
+            super::panels::ask_panel(&app, app.bottom_height),
             Size::new(800.0, app.bottom_height),
             Cache::default(),
             &mut renderer,
@@ -2960,8 +2978,8 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
 }
 
 /// A question's Allow counts once its answers have been in view for the
-/// delay, where they are now (`ui::placed`): the panel resized under them
-/// moves them, and a panel too low for them hides them — each waits again.
+/// delay, where they are now (`ui::placed`): the Ask card moved under them
+/// moves them, and a card too low for them hides them — each waits again.
 /// And a hover's peek over the window counts as over the card.
 #[test]
 fn a_question_moved_or_out_of_view_waits_again() {
@@ -2969,8 +2987,10 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
+    app.ask_view = crate::AskView::Compact;
+    // The debugger's panel under the card, low: its height moves the card.
     app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.bottom_height = 100.0;
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -3040,7 +3060,8 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
     assert!(app.may_allow(&card));
 
-    // The panel taller: its top, and the card, move.
+    // The debugger's panel taller: the Ask card above it, and the
+    // approval card in it, move.
     app.bottom_height += 120.0;
     let _ = app.update(Message::Noop);
     let moved = frame(&mut app);
@@ -3052,8 +3073,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     read(&mut app);
     assert!(app.may_allow(&card));
 
-    // A panel too low for the card: not all of it in view, however long.
-    app.bottom_height = 100.0;
+    // An Ask card too low for the approval card (the debugger's panel tall
+    // under it): not all of it in view, however long.
+    app.bottom_height = SQUEEZING;
     assert_eq!(frame(&mut app), [None]);
     read(&mut app);
     assert!(!app.may_allow(&card), "out of view");
@@ -3322,14 +3344,15 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
     assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
 
-    // In a panel too low for it: drawn, and found squeezed, it opens the
-    // panel to where it fits, and is answered there once read.
+    // In an Ask card too low for it — the debugger's panel tall under it —
+    // drawn, and found squeezed, it opens the Ask window large, where it
+    // fits, and is answered there once read.
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
+    app.ask_view = crate::AskView::Compact;
     app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
-    app.bottom_height = 120.0;
+    app.bottom_height = SQUEEZING;
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -3378,11 +3401,11 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
         }
     };
     let _ = app.update(Message::Noop);
-    assert_eq!(frame(&mut app), [None], "squeezed at 120");
-    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert_eq!(frame(&mut app), [None], "squeezed in the card");
+    assert_eq!(app.ask_view, crate::AskView::Expanded);
     assert!(
         matches!(frame(&mut app).as_slice(), [Some(_)]),
-        "in view at the height it opened to"
+        "in view, large"
     );
     read(&mut app);
     assert!(app.may_allow(&card(1)), "answerable there");
@@ -3406,38 +3429,43 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     read(&mut app);
     assert!(app.may_allow(&card(1)), "read on its page");
 
-    // Made lower by the user, it stays so.
-    app.bottom_height = 120.0;
+    // Made small again by the user, it stays so.
+    let _ = app.update(Message::Ask(AskMsg::Shrink));
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, 120.0);
-    // Another card, squeezed when first drawn: opened for, once — and on
-    // its own first page, not the one the last was turned to.
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    // Another card, squeezed when first drawn: made large for, once — and
+    // on its own first page, not the one the last was turned to.
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
     let _ = app.update(Message::Noop);
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert_eq!(app.ask_view, crate::AskView::Expanded);
     assert!(text_at(&mut sim_of(&app), |t| t == "Allow 0", 0).is_some());
     // One that fits when first drawn moves nothing — nor does the user's
-    // own drag squeezing it after.
-    app.bottom_height = 340.0;
+    // own drag of the debugger's panel squeezing it after.
+    let _ = app.update(Message::Ask(AskMsg::Shrink));
+    app.bottom_height = 120.0;
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
     let _ = app.update(Message::Noop);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
-    assert_eq!(app.bottom_height, 340.0);
-    app.bottom_height = 120.0;
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    app.bottom_height = SQUEEZING;
     assert_eq!(frame(&mut app), [None], "squeezed by the user");
-    assert_eq!(app.bottom_height, 120.0, "and left so");
+    assert_eq!(app.ask_view, crate::AskView::Compact, "and left so");
     // Reported again from nothing (the window moved): still left so.
     let _ = app.update(Message::Window(crate::WindowMsg::Moved));
     assert!(app.asking.places.is_empty());
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, 120.0);
+    assert_eq!(app.ask_view, crate::AskView::Compact);
     let _ = card;
 }
 
+/// A debugger's panel tall enough that the Ask card above it is too low
+/// for an approval card's answers.
+const SQUEEZING: f32 = 620.0;
+
 /// A page of answers taller than the first — its labels running over more
-/// rows — in a bottom panel the first page fitted: drawn, and found
-/// squeezed, it opens the panel to where it fits, as a card come up does.
+/// rows — in an Ask card the first page fitted: drawn, and found squeezed,
+/// it opens the Ask window large, as a card come up does.
 #[test]
 fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, TurnExtras};
@@ -3450,12 +3478,13 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
         option(format!("yes{i}"), label, true)
     }));
     options.push(option("no".into(), "Deny".into(), false));
-    // At `height`: where the card was placed on its first page, then on
-    // its second, and the panel's height after.
-    let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, f32) {
+    // With the debugger's panel `height` tall under the Ask card: where the
+    // card was placed on its first page, then on its second, and the Ask
+    // window's size after.
+    let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, crate::AskView) {
         let mut app = reader_app();
+        app.ask_view = crate::AskView::Compact;
         app.show_bottom = true;
-        app.bottom_tab = crate::BottomTab::Ask;
         app.bottom_height = height;
         app.proj.ask_turns.push(AskTurn {
             stream: 9,
@@ -3507,17 +3536,17 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
             page: 1,
         }));
         let second = frame(&mut app).expect("placed anew");
-        (first, second, app.bottom_height)
+        (first, second, app.ask_view)
     };
-    let height = (100..240)
+    let height = (300..680)
         .step_by(5)
         .map(|h| h as f32)
         .find(|&h| {
             let (first, second, _) = at(h);
             first.is_some() && second.is_none()
         })
-        .expect("precondition: a panel the first page fits and the second does not");
-    assert_eq!(at(height).2, crate::app::model::CARD_PANEL_HEIGHT);
+        .expect("precondition: a card the first page fits and the second does not");
+    assert_eq!(at(height).2, crate::AskView::Expanded);
 }
 
 /// The redraw that enables an Allow once its delay is over comes once for
@@ -3581,8 +3610,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.arm_on_enter = true;
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -3890,8 +3918,7 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.arm_on_enter = true;
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     let approval = |call: u64| Approval {
         key: ApprovalKey::Mcp { call },
         title: "run it".into(),
@@ -5606,8 +5633,7 @@ fn rows_send_the_identity_of_what_they_show() {
         code: "let x = 1;".into(),
     };
     app.proj.ask_pins = vec![pin.clone()];
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     let sent = click(sim_of(&app), "📎 src/lib.rs · L4");
     assert!(
         matches!(sent.as_slice(), [Message::Ask(AskMsg::PinGoto(k))] if *k == pin.key()),
@@ -6880,13 +6906,13 @@ fn the_right_panels_empty_sections_are_centered_notes() {
 fn an_empty_ask_shows_questions_not_instructions() {
     let mut app = reader_app();
     {
-        let mut sim = sim_elem(super::ask_panel(&app));
+        let mut sim = sim_elem(super::ask_panel(&app, 560.0));
         assert!(!shows(&mut sim, "Ask a question about this codebase"));
         assert!(!shows(&mut sim, "Run “Explain All”"));
         assert!(shows(&mut sim, "Answers are grounded once"));
     }
     app.proj.project = None;
-    let mut sim = sim_elem(super::ask_panel(&app));
+    let mut sim = sim_elem(super::ask_panel(&app, 560.0));
     assert!(!shows(&mut sim, "Answers are grounded once"));
 }
 
@@ -6912,4 +6938,157 @@ fn the_palette_lists_commands_with_their_keys() {
     app.proj.finder.query = ">nothing like this".into();
     app.refresh_palette();
     assert!(shows(&mut sim_of(&app), "No matching command"));
+}
+
+/// The floating Ask, on screen: the launcher opens the card; the card's
+/// conversation and its Clear are there; the large window's dimmed rest
+/// makes it a card again when clicked; and the card leaves the code beside
+/// it to the reader's clicks.
+#[test]
+fn the_floating_ask_is_driven_from_the_screen() {
+    let mut app = reader_app();
+    // Put away: the launcher, with its key.
+    let chord = app.keymap.chord(crate::keymap::Action::ToggleAsk).caps();
+    assert!(matches!(
+        click(sim_of(&app), &chord).as_slice(),
+        [Message::Ask(AskMsg::Open)]
+    ));
+    // A card, with a conversation in it.
+    app.ask_view = crate::AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "where is the origin?".into(),
+        ..Default::default()
+    });
+    {
+        let mut sim = sim_of(&app);
+        let question = text_at(&mut sim, |t| t == "❯ where is the origin?", 0)
+            .expect("the conversation is on the card");
+        assert!(
+            question.x > WINDOW.width - super::ASK_CARD_W - 40.0,
+            "in the right-hand corner: {question:?}"
+        );
+    }
+    assert!(matches!(
+        click(sim_of(&app), "Clear").as_slice(),
+        [Message::Ask(AskMsg::Clear)]
+    ));
+    // The code beside the card takes its own clicks.
+    let mut sim = sim_of(&app);
+    sim.point_at(iced::Point::new(200.0, 300.0));
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent = sent_by(sim);
+    assert!(
+        !sent.iter().any(|m| matches!(m, Message::Ask(_))),
+        "{sent:?}"
+    );
+    // Large: centred, and a click on the dimmed rest makes it a card.
+    app.ask_view = crate::AskView::Expanded;
+    {
+        let mut sim = sim_of(&app);
+        let question = text_at(&mut sim, |t| t == "❯ where is the origin?", 0).unwrap();
+        let place = super::ask_place(&app).unwrap();
+        let left = (WINDOW.width - place.width) / 2.0;
+        assert!(
+            (question.x - left).abs() < 40.0,
+            "centred: {question:?}, from {left}"
+        );
+    }
+    let mut sim = sim_of(&app);
+    sim.point_at(iced::Point::new(20.0, 400.0));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(matches!(
+        sent_by(sim).as_slice(),
+        [Message::Ask(AskMsg::Shrink)]
+    ));
+}
+
+/// What voice is doing shows where the user looks: on the launcher while
+/// Ask is put away, on the card while it is open — with a way to stop, and
+/// for a command that asks first, a way to say yes.
+#[test]
+fn voice_shows_what_it_is_doing() {
+    use crate::app::voice::{Heard, HeardOutcome, VoicePhase};
+    let mut app = reader_app();
+    app.voice.phase = VoicePhase::Listening {
+        since: std::time::Instant::now(),
+        level: 0.5,
+    };
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Listening"));
+    }
+    assert!(matches!(
+        click(sim_of(&app), "Done").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Stop)]
+    ));
+    app.ask_view = crate::AskView::Compact;
+    assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");
+    app.voice.phase = VoicePhase::Transcribing { token: 1 };
+    assert!(shows(&mut sim_of(&app), "Working out what you said"));
+    assert!(matches!(
+        click(sim_of(&app), "Cancel").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Cancel)]
+    ));
+    app.voice.phase = VoicePhase::Idle;
+    app.voice.confirm = Some("Explain All".into());
+    assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));
+    assert!(matches!(
+        click(sim_of(&app), "Run").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Confirm)]
+    ));
+    // Idle: what was last heard, and what came of it.
+    app.voice.confirm = None;
+    app.voice.heard = Some(Heard {
+        text: "open the call graph".into(),
+        outcome: HeardOutcome::Ran("Call Graph".into()),
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "“open the call graph”"));
+    assert!(shows(&mut sim, "→ Call Graph"));
+}
+
+/// The settings' Voice section: every model with its size, downloaded
+/// only on the user's word; one downloading shows how far it got; one
+/// downloaded can be removed; a multilingual one asks the language.
+#[test]
+fn the_voice_settings_offer_each_model_and_its_size() {
+    let mut app = reader_app();
+    let dir = crate::app::tests::test_dir("ui-voice-settings");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    app.voice.prefs = crate::app::voice::VoicePrefs::default();
+    {
+        let mut sim = sim_elem(super::voice_section(&app));
+        for model in clew_voice::models::MODELS {
+            assert!(shows(&mut sim, model.name), "{}", model.name);
+        }
+        assert!(shows(&mut sim, "nothing you say leaves it"));
+        assert!(!shows(&mut sim, "Language"), "base.en hears English only");
+    }
+    assert!(matches!(
+        click(sim_elem(super::voice_section(&app)), "Download (148 MB)").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Download("base.en"))]
+    ));
+    assert!(matches!(
+        click(sim_elem(super::voice_section(&app)), "Large v3 Turbo").as_slice(),
+        [Message::Voice(crate::VoiceMsg::PickModel(
+            "large-v3-turbo-q5_0"
+        ))]
+    ));
+    // Downloaded: Remove. A multilingual one picked: its language.
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(app.voice.prefs.model()), b"x").unwrap();
+    app.voice.prefs.model = "small".into();
+    {
+        let mut sim = sim_elem(super::voice_section(&app));
+        assert!(shows(&mut sim, "Downloaded"));
+        assert!(shows(&mut sim, "Language"));
+    }
+    assert!(matches!(
+        click(sim_elem(super::voice_section(&app)), "Remove").as_slice(),
+        [Message::Voice(crate::VoiceMsg::RemoveModel("base.en"))]
+    ));
+    let _ = std::fs::remove_dir_all(store.dir());
 }

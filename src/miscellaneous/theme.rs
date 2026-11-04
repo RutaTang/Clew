@@ -1069,6 +1069,59 @@ pub const fn scrim(alpha: f32) -> Color {
     with_alpha(Color::BLACK, alpha)
 }
 
+/// The floating Ask window: the elevated surface, lifted off the code under
+/// it by a soft shadow.
+pub fn floating_card(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(active().elevated.into()),
+        text_color: Some(fg()),
+        border: Border {
+            color: border(),
+            width: 1.0,
+            radius: 12.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: scrim(if is_light() { 0.16 } else { 0.5 }),
+            offset: iced::Vector::new(0.0, 8.0),
+            blur_radius: 28.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The Ask launcher: a pill in the corner, lifted like the card it opens.
+pub fn launcher_pill(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(active().elevated.into()),
+        text_color: Some(fg()),
+        border: Border {
+            color: border(),
+            width: 1.0,
+            radius: 18.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: scrim(if is_light() { 0.14 } else { 0.45 }),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// The microphone's level while it listens: a bar in the accent color on a
+/// faint track.
+pub fn level_meter(_theme: &Theme) -> progress_bar::Style {
+    progress_bar::Style {
+        background: iced::Background::Color(with_alpha(danger(), 0.14)),
+        bar: iced::Background::Color(danger()),
+        border: Border {
+            color: Color::TRANSPARENT,
+            width: 0.0,
+            radius: 2.0.into(),
+        },
+    }
+}
+
 /// Dimmed backdrop behind the modal.
 pub fn backdrop(_theme: &Theme) -> container::Style {
     container::Style {

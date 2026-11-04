@@ -414,8 +414,8 @@ jobs:
           echo "Detected signing identity: $IDENTITY"
 
       # Hardened runtime everywhere. The app gets assets/clew.entitlements
-      # (currently empty — see the file for why and how to re-add one);
-      # clew-server gets NO entitlements file at all.
+      # (the microphone only — see the file for why, and what it takes to
+      # add another); clew-server gets NO entitlements file at all.
       - name: Sign with Developer ID (hardened runtime)
         if: env.SIGN_IDENTITY != ''
         run: |

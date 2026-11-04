@@ -1052,10 +1052,12 @@ pub struct App {
     pub lsp_gen: std::collections::HashMap<String, u64>,
     /// Whether an embedding endpoint is configured.
     pub embed_available: bool,
-    /// The collapsible bottom panel: whether it's shown, and which of its two
-    /// tabs (Ask / Debug) is active.
+    /// Whether the collapsible bottom panel — the debugger's — is shown.
     pub show_bottom: bool,
-    pub bottom_tab: BottomTab,
+    /// Where the floating Ask window is.
+    pub ask_view: AskView,
+    /// Voice: listening, the words heard, the speech models.
+    pub(crate) voice: crate::app::voice::VoiceState,
     /// The debugger (DAP): the active session plus breakpoints and watches that
     /// persist across sessions (see [`DebugState`]).
     pub debug: DebugState,
@@ -2192,6 +2194,9 @@ pub struct ProjectLink {
     pub agent_tools: HashMap<u64, Arc<crate::app::integrations::ToolMap>>,
     /// MCP tool calls waiting for the user's approval, by `(stream, call)`.
     pub mcp_pending: HashMap<(u64, u64), crate::app::integrations::PendingCall>,
+    /// Window commands the agent asked to run, waiting for the user's
+    /// approval, by `(stream, call)` (`app::windowtools`).
+    pub window_pending: HashMap<(u64, u64), crate::app::windowtools::PendingCommand>,
     /// Stream id of the in-flight server-side `ChatStream`, if any. Abandoning
     /// the answer (project switch, Ask Clear) must tell the SERVER to stop:
     /// dropping the client-side pump leaves the provider call running on the

@@ -28,14 +28,15 @@ Unlike an editor or IDE, Clew builds in a range of capabilities made for reading
 
 Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releases/latest). On the welcome screen, click **Open Folder** and open the codebase you want to read. Then click the **⋯** button in the top right to open the menu and choose **Tutorial**, and Clew will walk you through how to use it right inside the project you opened.
 
-Everything Clew does is also a keystroke away: **⌘⇧P** opens the command palette, where you can search for any command — the graphs and maps, the sidebar's tabs and panels, what the right-click menu does at the cursor, the debugger's controls, the theme — and run it with Enter. Typing `>` in the file finder (⌘P) does the same, and **⌘/** lists the shortcuts.
+Everything Clew does is also a keystroke away: **⌘⇧P** opens the command palette, where you can search for any command — the graphs and maps, the sidebar's tabs and panels, what the right-click menu does at the cursor, the debugger's controls, the theme — and run it with Enter. Typing `>` in the file finder (⌘P) does the same, and **⌘/** lists the shortcuts. Or say it: **⌘⇧S** listens for a command or a question (see [Voice](#voice)).
 
 ![Clew welcome screen](assets/welcome.png)
 
 ## Features
 
 - 🗺️ **The big picture**: Looking at a project from a high level helps you grasp what it is overall, how it is structured, and why it is designed the way it is. Clew gives you an AI-powered **Architecture Overview** and a **Code Statistics** view, so you can catch the main architecture and understand the project as a whole.
-- 💬 **Ask Clew**: Questions come up constantly while reading code, like "where is Authentication done?" or "why is this written this way?". Clew gives you an AI agent that knows your whole project and answers with grounding in its actual content.
+- 💬 **Ask Clew**: Questions come up constantly while reading code, like "where is Authentication done?" or "why is this written this way?". Clew gives you an AI agent that knows your whole project and answers with grounding in its actual content. Ask floats over the code: a card in the corner (**⌘⇧A**) that moves out of the way of the line you are on, or, made large, a window in the middle; Esc steps it back. The agent can also act in the window — open a file at a line, go to a symbol, run any command of the palette ("show me the call graph") — asking you first for a command that costs something.
+- 🎙️ **Voice**: Press **⌘⇧S** (or the microphone on Ask) and talk: say a command ("open the call graph", "hide the minimap", "dark mode") and it runs; ask a question and it goes to Ask. Speech is recognized **on your computer** by [whisper.cpp](https://github.com/ggml-org/whisper.cpp) — nothing you say leaves it — with a model you pick and download once in **Settings → Voice**, from the small English ones to Large v3 Turbo, each checked against whisper.cpp's published checksum. See [Voice](#voice).
 - 🕸️ **Call Graph and Import Graph**: To see which modules depend on which, and which functions call which, plain reading rarely adds up to a full picture. Clew draws the import and call relationships as a live 3D force-directed map you can orbit, spin, and drag, colored by language and hierarchy depth, with arrows marking the direction of dependency and cycles highlighted, so the structure of the code is visible at a glance.
 - 🧱 **Project maps**: Much of how a project fits together is said in its languages' and frameworks' own terms, which no import or call graph shows: the database's tables, the web app's routes, what Spring injects where, an OTP supervision tree, the interfaces a Go type satisfies without saying so. Clew reads these from the files and draws each as a map, each node opening where it is defined (see [Project maps](#project-maps)).
 - 🧭 **Walkthrough**: Getting into a new project is rarely easy. Whether you want to understand the project's main flow and the code it involves, or a specific feature's flow and code, and figure out where to start and what order to read in, it takes work. Clew's AI-powered **Walkthrough** can, for the whole project or a specific question, generate an ordered, code-anchored guided tour that walks you step by step through the key files and functions and lays out the main thread of reading.
@@ -76,6 +77,16 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
   "Clew": { "command": "/Applications/Clew.app/Contents/MacOS/clew-server", "args": ["acp"] }
 }
 ```
+
+## Voice
+
+**Talking.** Press **⌘⇧S** (Ctrl+Shift+S on Linux and Windows; rebindable, and in the palette as **Talk**) or the microphone button, and say what you want. Listening stops on its own when you pause, or when you press the key again; **Esc** cancels. What you said is then either one of the window's commands — said the way you would say it, in any order, with or without "open" or "show"; a command that costs something (an Explain All pass, starting the program, opening another folder) asks before it runs — or a question, which goes to Ask and is asked at once (both can be turned off in **Settings → Voice**).
+
+**On your machine.** The microphone is read through the system's own audio (Core Audio, WASAPI, ALSA — which PipeWire and PulseAudio serve), the audio is resampled to 16 kHz, cut to where there is speech, and transcribed by whisper.cpp on this computer, on the GPU through Metal on a Mac and on the CPU elsewhere. Nothing is sent anywhere; only a question you choose to ask goes to your language model, as typed ones do.
+
+**Models.** Whisper.cpp's own models, downloaded only when you click a model's **Download** (its size is on the button) and accepted only if they match the SHA-1 whisper.cpp publishes for them: Tiny and Base (English) for quick commands, Base and Small (multilingual), and the quantized Large v3 Turbo and Large v3 for the best accuracy. They are kept in Clew's data folder (`voice/`), and can be removed there. On macOS, the first time Clew listens, the system asks whether it may use the microphone.
+
+Voice works the same on macOS, Linux and Windows: the voice engine (`crates/clew-voice`) is built and tested on all three in CI. Clew's window itself is built and shipped for macOS today.
 
 ## Language support
 
