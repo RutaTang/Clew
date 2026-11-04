@@ -4366,10 +4366,17 @@ pub(crate) fn describe_io(e: &io::Error) -> String {
     if let Some(e) = inner.and_then(|inner| inner.downcast_ref::<ureq::Error>()) {
         return describe(e);
     }
-    if e.kind() == io::ErrorKind::UnexpectedEof {
-        return "the connection closed before the whole response arrived".into();
+    // The connection ending, in the same words on every system: Windows
+    // says a reset as "an existing connection was forcibly closed by the
+    // remote host", which names neither the reset nor who did it plainly.
+    match e.kind() {
+        io::ErrorKind::UnexpectedEof => {
+            "the connection closed before the whole response arrived".into()
+        }
+        io::ErrorKind::ConnectionReset => "the server reset the connection".into(),
+        io::ErrorKind::ConnectionAborted => "the connection was aborted".into(),
+        _ => e.to_string(),
     }
-    e.to_string()
 }
 
 /// Send one request — `send` is a ureq `call` or `send` — with a panic
@@ -4949,6 +4956,25 @@ mod tests {
     /// The setting of the proxy [`via`] decides on for `url`.
     fn proxy_for(url: &str, sources: &ProxySources<'_>) -> Option<String> {
         via(url, sources).map(|via| via.spec)
+    }
+
+    /// A connection the server ends is said the same way on every system —
+    /// Windows words a reset "an existing connection was forcibly closed by
+    /// the remote host", which says neither "reset" nor much at all.
+    #[test]
+    fn a_reset_or_aborted_connection_is_said_the_same_everywhere() {
+        let reset = describe_io(&io::Error::from(io::ErrorKind::ConnectionReset));
+        assert_eq!(reset, "the server reset the connection");
+        let os_reset = describe_io(&io::Error::from_raw_os_error(if cfg!(windows) {
+            10054
+        } else {
+            104
+        }));
+        if cfg!(any(windows, target_os = "linux")) {
+            assert_eq!(os_reset, reset, "the OS's own reset");
+        }
+        let aborted = describe_io(&io::Error::from(io::ErrorKind::ConnectionAborted));
+        assert_eq!(aborted, "the connection was aborted");
     }
 
     #[test]
