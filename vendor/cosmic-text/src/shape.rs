@@ -21,6 +21,13 @@ use core_maths::CoreFloat;
 use unicode_script::{Script, UnicodeScript};
 use unicode_segmentation::UnicodeSegmentation;
 
+/// clew patch: the tracking text is set with where none is asked for, in
+/// em. Clew's design sets all its text 0.048 px tighter than the face's own
+/// spacing (`letter-spacing: -0.003em` at its 16 px root, inherited as a
+/// length), which at the 11.5 to 13.5 px it is read at is -0.004 em; iced
+/// 0.14 has no way to ask for tracking, so it is the shaper's default.
+const DEFAULT_LETTER_SPACING: f32 = -0.004;
+
 /// The shaping strategy of some text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Shaping {
@@ -212,7 +219,9 @@ fn shape_fallback(
 
         let attrs = attrs_list.get_span(start_glyph);
         let x_advance = pos.x_advance as f32 / font_scale
-            + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+            + attrs
+                .letter_spacing_opt
+                .map_or(DEFAULT_LETTER_SPACING, |spacing| spacing.0);
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
         let y_offset = pos.y_offset as f32 / font_scale;
@@ -511,7 +520,9 @@ fn shape_skip(
             .map(|(chr_idx, codepoint)| {
                 let glyph_id = charmap.map(codepoint);
                 let x_advance = glyph_metrics.advance_width(glyph_id)
-                    + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+                    + attrs
+                        .letter_spacing_opt
+                        .map_or(DEFAULT_LETTER_SPACING, |spacing| spacing.0);
                 let attrs = attrs_list.get_span(start_run + chr_idx);
 
                 ShapeGlyph {

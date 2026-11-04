@@ -1281,6 +1281,24 @@ pub fn wash(strength: f32) -> Color {
 
 /// The window's chrome — the surface the top bar, the sidebar, the tool
 /// strip and the status bar share, and the code's sheet floats over.
+/// The frame Clew draws round its borderless window: the design's hairline
+/// of the window's edge (`winBorder`), over the chrome.
+pub fn window_frame(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(bg_panel().into()),
+        border: iced::Border {
+            color: if is_light() {
+                Color::from_rgba(0.0, 0.0, 0.0, 0.12)
+            } else {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+            },
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    }
+}
+
 pub fn chrome(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(bg_panel().into()),

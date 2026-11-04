@@ -1074,7 +1074,7 @@ pub(crate) fn approval_card<'a>(
                         .font(if option.allows {
                             crate::fonts::UI_SEMIBOLD
                         } else {
-                            crate::fonts::UI
+                            crate::fonts::UI_MEDIUM
                         }),
                 )
                 .height(Fill)
@@ -1210,7 +1210,7 @@ fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head
             if o.allows {
                 text_width(&o.label, ts::BODY, crate::fonts::UI_SEMIBOLD) + 24.0
             } else {
-                text_width(&o.label, ts::BODY, crate::fonts::UI) + 20.0
+                text_width(&o.label, ts::BODY, crate::fonts::UI_MEDIUM) + 20.0
             }
         })
         .sum::<f32>()

@@ -5,8 +5,8 @@ embeds both (unmodified) so it reads the same on every system:
 
 | File (`assets/fonts/`) | Font | Version |
 | --- | --- | --- |
-| `Inter-Regular.otf`, `Inter-SemiBold.otf` | Inter, by Rasmus Andersson and the Inter Project Authors (<https://github.com/rsms/inter>) | 4.0 |
-| `JetBrainsMono-Regular.ttf`, `JetBrainsMono-Bold.ttf`, `JetBrainsMono-Italic.ttf` | JetBrains Mono, by JetBrains (<https://github.com/JetBrains/JetBrainsMono>) | 2.304 |
+| `Inter-Regular.otf`, `Inter-Medium.otf`, `Inter-SemiBold.otf` | Inter, by Rasmus Andersson and the Inter Project Authors (<https://github.com/rsms/inter>) | 4.0 |
+| `JetBrainsMono-Regular.ttf`, `JetBrainsMono-SemiBold.ttf`, `JetBrainsMono-Bold.ttf`, `JetBrainsMono-Italic.ttf` | JetBrains Mono, by JetBrains (<https://github.com/JetBrains/JetBrainsMono>) | 2.304 |
 
 > Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter)
 >

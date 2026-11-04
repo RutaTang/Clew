@@ -369,11 +369,16 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// deeper), its scrollable was rebuilt at offset 0 and reported that offset,
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
+    // The divider says where the pointer is in the window; the sidebar is
+    // inside its frame.
+    let frame = app.window_frame;
     let left: Element<'_, Message> = if app.show_left_sidebar {
         row![
             sidebar(app),
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeSidebar(v)))
-                .panel(crate::resize::Panel::Before),
+            crate::resize::Divider::vertical(move |v| {
+                Message::Window(WindowMsg::ResizeSidebar(v - frame))
+            })
+            .panel(crate::resize::Panel::Before),
         ]
         .into()
     } else {
@@ -401,12 +406,29 @@ pub fn view(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
+    // Inside the frame Clew draws round its borderless window (none on macOS
+    // or maximized: padding 0, the same tree), every layer, so all of them
+    // share one origin; the resize grips at the window's very edge.
+    let framed = container(stack![base, ask, overlay, tutorial])
+        .padding(app.window_frame)
+        .style(theme::window_frame);
     // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
-    placed::watch_overlays(
-        app.overlay_open,
-        stack![base, ask, overlay, tutorial, resize_grips()],
-    )
+    placed::watch_overlays(app.overlay_open, stack![framed, resize_grips()])
 }
+
+/// The width of the frame drawn round the window: the design's 1 px border
+/// on Linux and Windows, whose window is borderless; none on macOS, whose
+/// window keeps the system's frame, nor on a maximized window.
+pub(crate) fn window_frame_for(maximized: bool) -> f32 {
+    if cfg!(target_os = "macos") || maximized {
+        0.0
+    } else {
+        WINDOW_BORDER
+    }
+}
+
+/// The design's window border.
+const WINDOW_BORDER: f32 = 1.0;
 
 /// How wide the band along each edge is where a drag resizes the window.
 const GRIP: f32 = 4.0;

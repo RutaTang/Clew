@@ -265,12 +265,17 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     };
 
     let narration_block = walk_narration(app, wt);
+    // The divider says where the pointer is in the window; the narration
+    // is inside its frame.
+    let frame = app.window_frame;
     column![
         header,
         review,
         hairline(),
         list,
-        crate::resize::Divider::horizontal(|v| Message::Walk(WalkMsg::ResizeNarration(v))),
+        crate::resize::Divider::horizontal(move |v| {
+            Message::Walk(WalkMsg::ResizeNarration(v - frame))
+        }),
         narration_block,
     ]
     .height(Fill)
@@ -823,12 +828,12 @@ pub(crate) fn append_tree_rows<'a>(
             text(crate::highlight::in_order(name))
                 .size(ts::BASE)
                 .font(if is_current {
-                    crate::fonts::UI_SEMIBOLD
+                    crate::fonts::UI_MEDIUM
                 } else {
                     crate::fonts::UI
                 })
                 .color(if is_current {
-                    theme::fg_bright()
+                    theme::fg()
                 } else {
                     theme::fg_muted()
                 })

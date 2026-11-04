@@ -337,6 +337,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                     target_name(&app.proj.reading_target)
                 ))
                 .size(ts::SMALL)
+                .font(crate::fonts::UI_MEDIUM)
                 .color(theme::fg()),
                 glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
             ]

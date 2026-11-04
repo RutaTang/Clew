@@ -367,16 +367,21 @@ fn finder_row<'a>(
 
 /// A heading over a group of the command bar's suggestions.
 fn finder_heading<'a>(title: &'static str) -> Element<'a, Message> {
-    container(text(title).size(ts::SMALL).color(theme::dim()))
-        .height(Length::Fixed(FINDER_HEAD_H))
-        .align_y(iced::alignment::Vertical::Bottom)
-        .padding(Padding {
-            top: 0.0,
-            right: 10.0,
-            bottom: 4.0,
-            left: 10.0,
-        })
-        .into()
+    container(
+        text(title)
+            .size(ts::SMALL)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::dim()),
+    )
+    .height(Length::Fixed(FINDER_HEAD_H))
+    .align_y(iced::alignment::Vertical::Bottom)
+    .padding(Padding {
+        top: 0.0,
+        right: 10.0,
+        bottom: 4.0,
+        left: 10.0,
+    })
+    .into()
 }
 
 /// A row of the command bar: its icon, what it does, a detail, its keys.

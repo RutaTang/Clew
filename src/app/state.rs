@@ -1206,6 +1206,13 @@ pub struct App {
     /// The window fills the screen's work area (Windows and Linux, whose
     /// maximize button then shows "restore").
     pub maximized: bool,
+    /// The window's size as the system gives it; [`Self::window_width`] and
+    /// [`Self::window_height`] are what is inside its frame.
+    pub window_outer: iced::Size,
+    /// The width of the frame Clew draws round its borderless window (the
+    /// design's 1 px border), `0` where there is none: on macOS, whose
+    /// window keeps the system's, and while the window is maximized.
+    pub window_frame: f32,
     /// Whether the window has keyboard focus. The custom traffic-light controls
     /// grey out when it doesn't, like native macOS.
     pub window_focused: bool,

@@ -232,14 +232,19 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
     } else {
         slot()
     };
+    // The dividers say where the pointer is in the window; the panels are
+    // inside its frame.
+    let frame = app.window_frame;
     // The reading panel: the cursor-following context, beside the code. The
     // two read as one surface, so the divider between them takes no room of
     // its own: it lies over the margin's edge, where nothing is written.
     let right: Element<'_, Message> = match right_panel(app) {
         Some(panel) => stack![
             panel,
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v)))
-                .panel(crate::resize::Panel::Seamless),
+            crate::resize::Divider::vertical(move |v| {
+                Message::Window(WindowMsg::ResizeRight(v - frame))
+            })
+            .panel(crate::resize::Panel::Seamless),
         ]
         .into(),
         None => slot(),
@@ -247,8 +252,10 @@ pub(crate) fn sheet(app: &App) -> Element<'_, Message> {
     // The debugger's panel docks under the code, keeping it visible above.
     let bottom: Element<'_, Message> = if app.show_bottom {
         column![
-            crate::resize::Divider::horizontal(|v| Message::Window(WindowMsg::ResizeBottom(v)))
-                .panel(crate::resize::Panel::Within),
+            crate::resize::Divider::horizontal(move |v| {
+                Message::Window(WindowMsg::ResizeBottom(v - frame))
+            })
+            .panel(crate::resize::Panel::Within),
             container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
         ]
         .into()
@@ -287,7 +294,10 @@ fn file_tool<'a>(
     let face = button(
         row![
             glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
-            text(label).size(ts::BODY).color(tint),
+            text(label)
+                .size(ts::BODY)
+                .font(crate::fonts::UI_MEDIUM)
+                .color(tint),
         ]
         .spacing(FILE_TOOL_SPACING)
         .align_y(iced::Center),
@@ -309,9 +319,9 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
         button(
             text(label)
                 .size(ts::BODY)
-                .font(crate::fonts::UI_SEMIBOLD)
+                .font(crate::fonts::UI_MEDIUM)
                 .color(if chosen {
-                    theme::fg_bright()
+                    theme::fg()
                 } else {
                     theme::fg_muted()
                 }),
@@ -390,7 +400,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     let view_menu = button(
         row![
             glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
-            text("View").size(ts::BODY).color(theme::fg_muted()),
+            text("View")
+                .size(ts::BODY)
+                .font(crate::fonts::UI_MEDIUM)
+                .color(theme::fg_muted()),
             glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
         ]
         .spacing(6)
@@ -509,7 +522,7 @@ fn trail_row(app: &App) -> Element<'_, Message> {
                 text(name)
                     .size(ts::BODY)
                     .font(if current {
-                        crate::fonts::UI_SEMIBOLD
+                        crate::fonts::UI_MEDIUM
                     } else {
                         crate::fonts::UI
                     })

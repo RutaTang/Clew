@@ -2300,7 +2300,7 @@ where
                             bounds: Size::new(CHIP_MAX_W, lh),
                             size: size.into(),
                             line_height: text::LineHeight::Absolute(lh.into()),
-                            font: crate::fonts::UI,
+                            font: crate::fonts::UI_MEDIUM,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Basic,

@@ -111,18 +111,24 @@ pub(crate) fn tip_at<'a>(
     shortcut: Option<String>,
     side: tooltip::Position,
 ) -> Element<'a, Message> {
-    let mut body = row![text(name).size(ts::BODY).color(theme::fg())]
-        .spacing(8)
-        .align_y(iced::Center);
+    let mut body = row![
+        text(name)
+            .size(TIP_SIZE)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::fg())
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
     if let Some(sc) = shortcut {
         body = body.push(keycap(sc));
     }
+    // The design's padding, inside the border drawn over the bubble's edge.
     let bubble = container(body)
         .padding(Padding {
-            top: 4.0,
-            right: 6.0,
-            bottom: 4.0,
-            left: 9.0,
+            top: 7.0,
+            right: 9.0,
+            bottom: 7.0,
+            left: 11.0,
         })
         .style(theme::modal_panel);
     tooltip(control, bubble, side).gap(8).into()
@@ -130,16 +136,23 @@ pub(crate) fn tip_at<'a>(
 
 /// Height of a key cap.
 const KEYCAP_H: f32 = 19.0;
+/// Size of a tooltip's words.
+const TIP_SIZE: f32 = 12.0;
 
 /// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
 pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
     Row::with_children(split_caps(&caps).into_iter().map(|key| {
-        container(text(key).size(ts::CAPTION).color(theme::fg_muted()))
-            .height(Length::Fixed(KEYCAP_H))
-            .align_y(iced::Center)
-            .padding([0, 5])
-            .style(theme::keycap)
-            .into()
+        container(
+            text(key)
+                .size(ts::CAPTION)
+                .font(crate::fonts::UI_MEDIUM)
+                .color(theme::fg_muted()),
+        )
+        .height(Length::Fixed(KEYCAP_H))
+        .align_y(iced::Center)
+        .padding([0, 5])
+        .style(theme::keycap)
+        .into()
     }))
     .spacing(3)
     .align_y(iced::Center)
@@ -920,16 +933,21 @@ fn menu_item<'a>(
 
 /// A heading over a group of menu rows, naming it.
 fn menu_heading<'a>(label: &'a str) -> Element<'a, Message> {
-    container(text(label).size(ts::SMALL).color(theme::dim()))
-        .height(Length::Fixed(MENU_HEADING_H))
-        .align_y(iced::alignment::Vertical::Bottom)
-        .padding(Padding {
-            top: 6.0,
-            right: 9.0,
-            bottom: 4.0,
-            left: 9.0,
-        })
-        .into()
+    container(
+        text(label)
+            .size(ts::SMALL)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::dim()),
+    )
+    .height(Length::Fixed(MENU_HEADING_H))
+    .align_y(iced::alignment::Vertical::Bottom)
+    .padding(Padding {
+        top: 6.0,
+        right: 9.0,
+        bottom: 4.0,
+        left: 9.0,
+    })
+    .into()
 }
 
 /// A separator between groups of menu rows.

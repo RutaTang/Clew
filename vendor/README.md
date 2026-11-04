@@ -19,6 +19,12 @@ first paragraph's direction for all of them. The same assert is still present
 upstream (0.19.0); when iced moves to a release that no longer has it, delete
 this copy and the patch entry.
 
+A second patch sets the tracking text is shaped with where none is asked
+for (`DEFAULT_LETTER_SPACING` in `src/shape.rs`): -0.004 em, the design's
+`letter-spacing` (-0.048 px at the sizes Clew's text is read at). iced 0.14
+has no way to ask for tracking; when it has, ask for it there and drop this
+one.
+
 ## tree-sitter-lean4 0.3.0
 
 The Lean 4 grammar. The release's binding depends on `tree-sitter = "0.25"`,

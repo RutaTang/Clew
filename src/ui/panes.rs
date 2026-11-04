@@ -860,6 +860,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         .filter(|(p, _)| *p == v.abs)
         .map(|(_, line)| *line);
 
+    let frame = app.window_frame;
     // The block cursor shows only on the active pane while the code view has
     // keyboard focus.
     let cursor = if pane == app.proj.active && app.code_focused {
@@ -876,13 +877,15 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         theme::code_fg(),
         move |(line, col)| Message::Editor(EditorMsg::SelectStart { pane, line, col }),
         move |(line, col)| Message::Editor(EditorMsg::SelectDrag { pane, line, col }),
+        // The pointer is in the window's coordinates; what is placed at it
+        // is inside the window's frame.
         move |(line, col), at| {
             Message::Hover(HoverMsg::ContextMenuOpened {
                 pane,
                 line,
                 col,
-                x: at.x,
-                y: at.y,
+                x: at.x - frame,
+                y: at.y - frame,
             })
         },
     )
@@ -948,8 +951,8 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             pane,
             line,
             col,
-            x: at.x,
-            y: at.y,
+            x: at.x - frame,
+            y: at.y - frame,
         })
     })
     .on_hover_end(|| Message::Hover(HoverMsg::Cleared));
@@ -1259,12 +1262,12 @@ fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Elemen
         text(name)
             .size(NOTE_NAME_SIZE)
             .font(if code {
-                crate::fonts::CODE_BOLD
+                crate::fonts::CODE_SEMIBOLD
             } else {
                 crate::fonts::UI_SEMIBOLD
             })
             .color(if raised {
-                theme::fg_bright()
+                theme::fg()
             } else {
                 theme::fg_muted()
             })
@@ -1451,7 +1454,7 @@ fn active_note<'a>(
                     .font(if accent {
                         crate::fonts::UI_SEMIBOLD
                     } else {
-                        crate::fonts::UI
+                        crate::fonts::UI_MEDIUM
                     })
                     .color(tint),
             ]
@@ -1536,11 +1539,12 @@ fn active_note<'a>(
     )
     .width(Fill)
     .height(Fill)
+    // The design's 12 and 14, inside the border drawn over the card's edge.
     .padding(Padding {
-        top: 12.0,
-        right: 14.0,
-        bottom: 12.0,
-        left: 14.0 - NOTE_ACTION_PAD_X,
+        top: 13.0,
+        right: 15.0,
+        bottom: 13.0,
+        left: 15.0 - NOTE_ACTION_PAD_X,
     })
     .style(theme::note_card)
     .into()

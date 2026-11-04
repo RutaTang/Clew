@@ -68,6 +68,15 @@ fn card_top(app: &App) -> f32 {
     (chat_field_rect(app).y + 1.0 - FIELD_GAP).max(0.0)
 }
 
+/// The top of the voice panel: the design's 42 px down from inside the chat
+/// field's 1 px border, which it hangs from.
+fn voice_panel_top(app: &App) -> f32 {
+    chat_field_rect(app).y + 1.0 + VOICE_PANEL_DROP
+}
+
+/// How far below the chat field's top the voice panel hangs.
+const VOICE_PANEL_DROP: f32 = 42.0;
+
 /// The left edge of a panel `width` wide hanging under the chat field:
 /// centred on it, kept inside the window.
 fn under_field(app: &App, width: f32) -> f32 {
@@ -140,7 +149,7 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
             .width(Fill)
             .height(Fill)
             .padding(Padding {
-                top: band(app).0,
+                top: voice_panel_top(app),
                 left: under_field(app, width),
                 ..Padding::ZERO
             })
@@ -253,7 +262,8 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
             text(title)
                 .size(ts::SUBTITLE)
                 .line_height(ts::NORMAL_LINE)
-                .color(theme::fg_bright()),
+                .font(crate::fonts::UI_MEDIUM)
+                .color(theme::fg()),
             text(hint)
                 .size(HINT_SIZE)
                 .line_height(ts::NORMAL_LINE)
@@ -274,6 +284,7 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
                 text("Try saying")
                     .size(ts::SMALL)
                     .line_height(ts::NORMAL_LINE)
+                    .font(crate::fonts::UI_MEDIUM)
                     .color(theme::dim()),
             )
             .padding(Padding {
@@ -305,6 +316,8 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
         .align_y(iced::Center)
         .padding([10, 16]),
     ])
+    // What is in it starts inside the border drawn over its edge.
+    .padding(1)
     .style(theme::floating_card)
     .into()
 }

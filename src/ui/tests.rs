@@ -7570,3 +7570,24 @@ fn blocks_are_the_view_menus_not_the_notes() {
         "{sent:?}"
     );
 }
+
+/// On Linux and Windows the window is borderless and Clew draws the design's
+/// 1 px border round it, the room inside it what everything is laid out in;
+/// maximized, there is no frame, and restored, it is back. macOS keeps the
+/// system's frame.
+#[test]
+fn the_window_is_framed_as_designed_unless_maximized() {
+    let mut app = reader_app();
+    let size = iced::Size::new(1216.0, 910.0);
+    let _ = app.on_window_resized(size);
+    let frame = if cfg!(target_os = "macos") { 0.0 } else { 1.0 };
+    assert_eq!(app.window_frame, frame);
+    assert_eq!(app.window_width, size.width - 2.0 * frame);
+    assert_eq!(app.window_height, size.height - 2.0 * frame);
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(true)));
+    assert_eq!(app.window_frame, 0.0);
+    assert_eq!(app.window_width, size.width);
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(false)));
+    assert_eq!(app.window_frame, frame);
+    assert_eq!(app.window_width, size.width - 2.0 * frame);
+}

@@ -35,7 +35,7 @@ pub fn style_color(idx: u8) -> Option<Color> {
 }
 
 /// The code face a style index is set in, where it is not the regular one:
-/// a function where it is defined reads in bold, as the design sets it.
+/// a function where it is defined reads in semibold, as the design sets it.
 pub fn style_font(idx: u8) -> Option<iced::Font> {
     static DEFINITION: LazyLock<Option<u8>> = LazyLock::new(|| {
         HIGHLIGHT_NAMES
@@ -43,7 +43,7 @@ pub fn style_font(idx: u8) -> Option<iced::Font> {
             .position(|n| *n == "function.definition")
             .and_then(|i| u8::try_from(i).ok())
     });
-    (Some(idx) == *DEFINITION).then_some(crate::fonts::CODE_BOLD)
+    (Some(idx) == *DEFINITION).then_some(crate::fonts::CODE_SEMIBOLD)
 }
 
 fn build_table(tokens: &TokenColors) -> Vec<Option<Color>> {

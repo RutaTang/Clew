@@ -159,6 +159,8 @@ impl App {
             window_height: 800.0,
             fullscreen: false,
             maximized: false,
+            window_outer: iced::Size::ZERO,
+            window_frame: 0.0,
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
@@ -297,8 +299,8 @@ impl App {
     }
 
     pub(crate) fn on_window_resized(&mut self, size: Size) -> Task<Message> {
-        self.window_width = size.width;
-        self.window_height = size.height;
+        self.window_outer = size;
+        self.reframe();
         // Keep panel sizes sane against the new window bounds.
         self.clamp_panel_sizes();
         // Keep the materialized window generous enough for the new
@@ -324,6 +326,18 @@ impl App {
             ]),
             None => Task::none(),
         }
+    }
+
+    /// The frame round the window and the room inside it, from the window's
+    /// size and whether it is maximized. Before the system has said the
+    /// window's size there is nothing to frame.
+    pub(crate) fn reframe(&mut self) {
+        if self.window_outer == Size::ZERO {
+            return;
+        }
+        self.window_frame = crate::ui::window_frame_for(self.maximized);
+        self.window_width = self.window_outer.width - 2.0 * self.window_frame;
+        self.window_height = self.window_outer.height - 2.0 * self.window_frame;
     }
 
     /// Close every menu of the chrome: they open one at a time.
@@ -619,6 +633,9 @@ impl App {
             }
             WindowMsg::MaximizedIs(now) => {
                 self.maximized = now;
+                // Maximized, the window has no frame; restored, it has again.
+                self.reframe();
+                self.clamp_panel_sizes();
                 Task::none()
             }
             WindowMsg::OpenShortcuts => {
