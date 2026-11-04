@@ -33,6 +33,37 @@ const PANEL_TOGGLE_W: f32 = TOOL_ICON + 12.0;
 const DIVIDER_W: f32 = 1.0;
 /// The primary tool icons on the bar, left → right.
 pub(crate) const CORE_TOOLS: usize = 9;
+/// The core tools in their groups, left → right: seeing the whole project
+/// (Overview, Stats), asking and running it (Ask, Debug), its graphs and maps,
+/// and Settings. A thin rule stands between neighbouring groups.
+const TOOL_GROUPS: [usize; 4] = [2, 2, 4, 1];
+const _: () = {
+    let mut n = 0;
+    let mut g = 0;
+    while g < TOOL_GROUPS.len() {
+        n += TOOL_GROUPS[g];
+        g += 1;
+    }
+    assert!(n == CORE_TOOLS, "TOOL_GROUPS must count every core tool");
+};
+/// Width of the slot a group rule stands in (the rule itself is 1px).
+const GROUP_RULE_W: f32 = 9.0;
+/// Height of a group rule.
+const GROUP_RULE_H: f32 = 14.0;
+
+/// How many group rules stand after core tool `i` (0-based).
+fn rules_after(i: usize) -> usize {
+    let mut start = 0;
+    let mut rules = 0;
+    for (g, n) in TOOL_GROUPS.iter().enumerate() {
+        start += n;
+        // A rule stands before each group but the first.
+        if g + 1 < TOOL_GROUPS.len() && start > i {
+            rules += 1;
+        }
+    }
+    rules
+}
 
 /// Center x of core tool icon `i` (0-based, left → right) in a window
 /// `window_w` wide. The right cluster is right-aligned with fixed-width parts,
@@ -41,7 +72,11 @@ pub(crate) fn toolbar_icon_center_x(window_w: f32, i: usize) -> f32 {
     let core_right =
         window_w - BAR_PAD_X - PANEL_TOGGLE_W - MORE_W - DIVIDER_W - 3.0 * CLUSTER_SPACING;
     let after = CORE_TOOLS.saturating_sub(i + 1) as f32;
-    core_right - after * (TOOL_W + TOOL_SPACING) - TOOL_W / 2.0
+    let rules = rules_after(i) as f32;
+    core_right
+        - after * (TOOL_W + TOOL_SPACING)
+        - rules * (GROUP_RULE_W + TOOL_SPACING)
+        - TOOL_W / 2.0
 }
 
 /// Center x of the ⋯ (More) button in a window `window_w` wide.
@@ -394,64 +429,87 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     // Primary reading actions stay on the bar; everything else moves to "More".
     // Hand-drawn line icons (see `glyph`), one family with the traffic lights.
     // Each names itself (and its shortcut) on hover. `CORE_TOOLS` counts them.
-    let core = row![
+    let tools: [Element<'_, Message>; CORE_TOOLS] = [
         tool_icon(
             Glyph::Overview,
             "Overview",
             None,
-            Message::Overview(OverviewMsg::Show)
+            Message::Overview(OverviewMsg::Show),
         ),
         tool_icon(
             Glyph::Stats,
             "Stats",
             None,
-            Message::Overview(OverviewMsg::ShowStats)
+            Message::Overview(OverviewMsg::ShowStats),
         ),
         tool_icon(
             Glyph::Ask,
             "Ask",
             caps(Action::ToggleAsk),
-            Message::Ask(AskMsg::Toggle)
+            Message::Ask(AskMsg::Toggle),
         ),
         tool_icon(
             Glyph::Debug,
             "Debug",
             caps(Action::StartDebug),
-            Message::Debug(DebugMsg::Start)
+            Message::Debug(DebugMsg::Start),
         ),
         tool_icon(
             Glyph::CallGraph,
             "Call Graph",
             caps(Action::CallGraph),
-            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls))
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
         ),
         tool_icon(
             Glyph::ImportGraph,
             "Import Graph",
             caps(Action::ImportGraph),
-            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
         ),
         tool_icon(
             Glyph::TypeMap,
             "Type Map",
             caps(Action::TypeGraph),
-            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
         ),
         tool_icon(
             Glyph::ProjectMaps,
             "Project Maps",
             caps(Action::ProjectMaps),
-            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps))
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
         ),
         tool_icon(
             Glyph::Settings,
             "Settings",
             Some("⌘,".to_string()),
-            Message::Settings(SettingsMsg::Open)
+            Message::Settings(SettingsMsg::Open),
         ),
-    ]
-    .spacing(TOOL_SPACING)
-    .align_y(iced::Center);
+    ];
+    // The tools in their groups, a thin rule between neighbouring groups.
+    let rule = || {
+        container(
+            container(space())
+                .width(Length::Fixed(1.0))
+                .height(Length::Fixed(GROUP_RULE_H))
+                .style(|_: &iced::Theme| container::Style {
+                    background: Some(theme::hairline().into()),
+                    ..container::Style::default()
+                }),
+        )
+        .width(Length::Fixed(GROUP_RULE_W))
+        .align_x(iced::Center)
+    };
+    let mut core = Row::new();
+    let mut tools = tools.into_iter();
+    for (g, n) in TOOL_GROUPS.iter().enumerate() {
+        if g > 0 {
+            core = core.push(rule());
+        }
+        for tool in tools.by_ref().take(*n) {
+            core = core.push(tool);
+        }
+    }
+    let core = core.spacing(TOOL_SPACING).align_y(iced::Center);
 
     let divider = container(space())
         .width(Length::Fixed(DIVIDER_W))
@@ -772,6 +830,14 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rule stands between neighbouring groups — after Stats, after Debug,
+    /// after Project Maps — and so after every icon of the groups before it.
+    #[test]
+    fn group_rules_stand_between_the_groups() {
+        let after: Vec<usize> = (0..CORE_TOOLS).map(rules_after).collect();
+        assert_eq!(after, [3, 3, 2, 2, 1, 1, 1, 1, 0]);
+    }
 
     #[test]
     fn every_tools_row_is_listed_once_and_knows_its_index() {

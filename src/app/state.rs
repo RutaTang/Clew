@@ -1191,6 +1191,9 @@ pub struct App {
     /// User-draggable panel sizes (px): left sidebar width, right context-panel
     /// width, and the bottom debug/ask panel height. See [`resize::Divider`].
     pub sidebar_width: f32,
+    /// How far the sidebar's tab strip is scrolled, as it last said: where
+    /// its edges fade (see `ui::edgefade`).
+    pub sidebar_tabs_offset: f32,
     pub right_width: f32,
     pub bottom_height: f32,
     pub font_size: f32,

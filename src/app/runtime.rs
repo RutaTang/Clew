@@ -152,6 +152,7 @@ impl App {
             asking: Default::default(),
             controls_hovered: false,
             sidebar_width: 280.0,
+            sidebar_tabs_offset: 0.0,
             right_width: 400.0,
             bottom_height: 340.0,
             font_size: DEFAULT_FONT_SIZE,
@@ -509,6 +510,10 @@ impl App {
             // there reaches it as the pointer's own motion.)
             WindowMsg::Moved => {
                 self.asking.places.clear();
+                Task::none()
+            }
+            WindowMsg::SidebarTabsScrolled(x) => {
+                self.sidebar_tabs_offset = x;
                 Task::none()
             }
             WindowMsg::ResizeSidebar(x) => {

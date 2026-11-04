@@ -1830,6 +1830,8 @@ pub enum WindowMsg {
     /// Drag a panel divider: the payload is the cursor's absolute x (sidebar /
     /// right panel) or y (bottom panel). See [`resize::Divider`].
     ResizeSidebar(f32),
+    /// The sidebar's tab strip scrolled to this horizontal offset.
+    SidebarTabsScrolled(f32),
     ResizeRight(f32),
     ResizeBottom(f32),
     /// Switch the bottom panel's tab (Ask / Debug), opening it if collapsed.
@@ -2561,6 +2563,7 @@ impl WindowMsg {
             | WindowMsg::ToggleFullscreen
             | WindowMsg::ModeIs(..)
             | WindowMsg::ResizeSidebar(..)
+            | WindowMsg::SidebarTabsScrolled(..)
             | WindowMsg::ResizeRight(..)
             | WindowMsg::ResizeBottom(..)
             | WindowMsg::BottomTabPicked(..)

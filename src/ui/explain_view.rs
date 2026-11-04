@@ -418,13 +418,10 @@ fn reached_from_rows<'a>(
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.proj.explain.view.as_ref() else {
-        return container(
-            text("Move the cursor into a function, or Cmd+click a file/folder.")
-                .size(ts::SMALL)
-                .color(theme::dim()),
-        )
-        .padding(10)
-        .into();
+        return compact_empty_state(
+            Glyph::Lightbulb,
+            "Move the cursor into a function, or Cmd+click a file/folder.",
+        );
     };
     let title = match node {
         Node::Folder(p) => format!("📁 {}", rel_of(app, p)),

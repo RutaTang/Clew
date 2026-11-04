@@ -35,6 +35,7 @@ mod statusbar;
 pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
+mod edgefade;
 mod fresh;
 pub(crate) mod placed;
 mod reader_scroll;

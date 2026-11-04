@@ -6790,6 +6790,24 @@ fn tab_strip_after(
     };
     ui.operate(renderer, &mut probe);
     let x = probe.found.expect("the tab strip is on screen").x;
+    // The next frame: the strip says where it is now, for its fades.
+    let mut messages = Vec::new();
+    let _ = ui.update(
+        &redraw(),
+        mouse::Cursor::Unavailable,
+        renderer,
+        &mut clipboard::Null,
+        &mut messages,
+    );
+    for m in messages {
+        if let Message::Window(WindowMsg::SidebarTabsScrolled(said)) = m {
+            // The translation drawn is rounded to the pixel.
+            assert!(
+                (said - x).abs() < 1.0,
+                "the strip said where it is: {said} vs {x}"
+            );
+        }
+    }
     (ui.into_cache(), x)
 }
 
@@ -6822,6 +6840,37 @@ fn picking_a_tab_scrolls_the_strip_only_when_the_tab_is_cut_off() {
     // rather than the strip jumping to its end.
     let (_, docs_again) = pick(&mut app, crate::SidebarTab::Docs, cache);
     assert_eq!(docs_again, docs);
+    // What the strip says of where it is, the app keeps, for its fades.
+    let _ = app.update(Message::Window(WindowMsg::SidebarTabsScrolled(docs)));
+    assert_eq!(app.sidebar_tabs_offset, docs);
+}
+
+/// The right panel's empty sections say why they are empty, centered under
+/// a muted icon rather than as a line of text in a corner.
+#[test]
+fn the_right_panels_empty_sections_are_centered_notes() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let mut sim = sim_of(&app);
+    let hint = text_at(
+        &mut sim,
+        |t| t.contains("Move the cursor into a function"),
+        0,
+    )
+    .expect("the explain hint");
+    let note =
+        text_at(&mut sim, |t| t.contains("No symbols in this file."), 0).expect("the outline note");
+    // Centered in the panel: the two notes share a center line, well in
+    // from the panel's left edge.
+    let panel_left = WINDOW.width - app.right_width;
+    for r in [hint, note] {
+        let center = r.x + r.width / 2.0;
+        let panel_center = panel_left + app.right_width / 2.0;
+        assert!(
+            (center - panel_center).abs() < 12.0,
+            "{r:?} centered in the panel"
+        );
+    }
 }
 
 /// An empty Ask shows what to ask, not a paragraph about asking; the hint

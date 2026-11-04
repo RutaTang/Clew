@@ -51,7 +51,7 @@ const GUTTER_CHARS: usize = 7;
 const FOLD_ARROW_COL: usize = 5;
 const OVERSCAN: usize = 8;
 /// Minimap band width, and the smallest file (in rows) worth showing one for.
-const MINIMAP_WIDTH: f32 = 68.0;
+const MINIMAP_WIDTH: f32 = 56.0;
 const MINIMAP_MIN_ROWS: usize = 40;
 /// Display columns a full-width minimap bar represents.
 const MINIMAP_FULL_COLS: f32 = 100.0;
@@ -2380,29 +2380,44 @@ where
         }
 
         // Minimap: a compressed overview pinned to the right of the viewport,
-        // one sampled bar per pixel row, shaped by indentation and line length,
-        // with a translucent box marking the visible range.
+        // one sampled bar per few pixel rows, shaped by indentation and line
+        // length, with a soft rounded box marking the visible range. It is
+        // drawn on the code's own background, light, so it reads as a quiet
+        // map of the file rather than a grey block beside it.
+        // A layer of its own, over the code: within one, iced draws every
+        // quad before any text, so a long line ran across the minimap.
         if let Some(band) = self.minimap_band(viewport) {
+            renderer.with_layer(band, |renderer| {
+                self.draw_minimap(renderer, band, bounds, viewport, lh)
+            });
+        }
+    }
+}
+
+impl<Message> CodeView<'_, Message> {
+    /// The minimap over `band`: the code view laid out over `bounds`, seen
+    /// through `viewport`, rows `lh` tall.
+    fn draw_minimap<R: renderer::Renderer>(
+        &self,
+        renderer: &mut R,
+        band: Rectangle,
+        bounds: Rectangle,
+        viewport: &Rectangle,
+        lh: f32,
+    ) {
+        {
             let total = self.row_count().max(1);
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: band,
                     ..renderer::Quad::default()
                 },
-                theme::with_alpha(theme::bg_panel(), 0.85),
-            );
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: Rectangle { width: 1.0, ..band },
-                    ..renderer::Quad::default()
-                },
-                theme::border(),
+                theme::bg(),
             );
 
             let max_bar = band.width - 6.0;
             let row_px = band.height / total as f32;
-            let step = (1.0 / row_px).ceil().max(1.0) as usize;
-            let bar_h = row_px.max(1.0);
+            let layout = minimap_rows(row_px);
             let mut row = 0;
             while row < total {
                 let line = self.line_at_row(row).unwrap_or(0);
@@ -2422,14 +2437,14 @@ where
                                 x,
                                 y,
                                 width: w,
-                                height: bar_h,
+                                height: layout.bar_h,
                             },
                             ..renderer::Quad::default()
                         },
-                        theme::with_alpha(self.line_minimap_color(line), 0.55),
+                        theme::with_alpha(self.line_minimap_color(line), 0.4),
                     );
                 }
-                row += step;
+                row += layout.step;
             }
 
             // Visible-range indicator.
@@ -2440,16 +2455,39 @@ where
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: band.x,
+                        x: band.x + 1.0,
                         y: iy,
-                        width: band.width,
+                        width: band.width - 2.0,
                         height: ih,
+                    },
+                    border: iced::Border {
+                        radius: 3.0.into(),
+                        ..iced::Border::default()
                     },
                     ..renderer::Quad::default()
                 },
-                theme::with_alpha(theme::accent(), 0.16),
+                theme::with_alpha(theme::fg(), 0.07),
             );
         }
+    }
+}
+
+/// How the minimap samples a file whose rows are `row_px` pixels tall in it:
+/// every `step`-th row, each bar `bar_h` tall. Bars sit at least 2px apart
+/// with a gap between them, so a long file reads as lines rather than a
+/// solid block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MinimapRows {
+    step: usize,
+    bar_h: f32,
+}
+
+fn minimap_rows(row_px: f32) -> MinimapRows {
+    let step = (2.0 / row_px.max(f32::MIN_POSITIVE)).ceil().max(1.0) as usize;
+    let pitch = row_px * step as f32;
+    MinimapRows {
+        step,
+        bar_h: (pitch * 0.6).max(1.0),
     }
 }
 
@@ -2682,6 +2720,27 @@ impl<'a, Message: 'a> From<CodeView<'a, Message>> for Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The minimap draws bars at least 2px apart with a gap between them —
+    /// a long file used to fill the band solid — and a short file's rows
+    /// each get their own bar.
+    #[test]
+    fn minimap_bars_keep_a_gap_between_them() {
+        // A long file: half a pixel a row; every fourth row, 1.2px bars.
+        let dense = super::minimap_rows(0.5);
+        assert_eq!(dense.step, 4);
+        assert!((dense.bar_h - 1.2).abs() < 1e-4, "{dense:?}");
+        // 1.75px a row (400 lines in 700px): every other row.
+        let medium = super::minimap_rows(1.75);
+        assert_eq!(medium.step, 2);
+        assert!(medium.bar_h < 1.75 * 2.0 - 1.0, "a gap: {medium:?}");
+        // A short file: each row its own bar, with a gap below it.
+        let sparse = super::minimap_rows(6.0);
+        assert_eq!(sparse.step, 1);
+        assert!(sparse.bar_h < 6.0, "{sparse:?}");
+        // Never thinner than a pixel.
+        assert!(super::minimap_rows(0.01).bar_h >= 1.0);
+    }
     use super::{ColMap, ident_range};
 
     fn chars(s: &str) -> Vec<char> {

@@ -1075,13 +1075,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         return space().into();
     };
     if v.symbols.is_empty() {
-        return container(
-            text(empty_outline_note(v.lang_key))
-                .size(ts::SMALL)
-                .color(theme::dim()),
-        )
-        .padding(10)
-        .into();
+        return compact_empty_state(Glyph::List, empty_outline_note(v.lang_key));
     }
     // The symbol the reading cursor is currently inside, to highlight its row.
     let current = match &app.proj.explain.view {

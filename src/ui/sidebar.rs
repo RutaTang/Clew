@@ -54,12 +54,19 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         .fold(Row::new().spacing(1), |r, (label, this)| {
             r.push(tab(label, *this))
         });
-    let tabs = scrollable(tabs_row)
-        .id(sidebar_tabs_scroll_id())
-        .direction(Direction::Horizontal(
-            Scrollbar::new().width(0.0).scroller_width(0.0),
-        ))
-        .width(Fill);
+    // An end with more tabs past it fades out, so a cut-off tab reads as
+    // "more this way".
+    let tabs = super::edgefade::edge_fade(
+        scrollable(tabs_row)
+            .id(sidebar_tabs_scroll_id())
+            .direction(Direction::Horizontal(
+                Scrollbar::new().width(0.0).scroller_width(0.0),
+            ))
+            .on_scroll(|v| Message::Window(WindowMsg::SidebarTabsScrolled(v.absolute_offset().x)))
+            .width(Fill),
+        app.sidebar_tabs_offset,
+        theme::bg_panel(),
+    );
 
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),
@@ -658,6 +665,24 @@ pub(crate) fn empty_state<'a>(
         );
     }
     center(col).padding(20).into()
+}
+
+/// [`empty_state`] for a small region — a panel section — where a title and
+/// a 42px icon would crowd it: a small muted icon over one centered line.
+pub(crate) fn compact_empty_state<'a>(g: Glyph, note: impl Into<String>) -> Element<'a, Message> {
+    let col = column![
+        glyph::icon(g, theme::empty_state_icon(), 22.0),
+        container(
+            text(note.into())
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .align_x(iced::Center)
+        )
+        .max_width(240),
+    ]
+    .spacing(8)
+    .align_x(iced::Center);
+    center(col).padding(16).into()
 }
 
 pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
