@@ -104,12 +104,12 @@ pub mod mcp;
 pub mod net;
 pub mod notebook;
 pub mod outline;
-#[cfg(unix)]
 pub mod procgroup;
 pub mod projectcalls;
 pub mod rustscope;
 pub mod search;
 pub mod server_dist;
+pub mod spawn;
 pub mod statefile;
 pub mod stats;
 pub mod structure;
@@ -117,3 +117,33 @@ pub mod structure;
 pub mod testutil;
 pub mod trust;
 pub mod update;
+
+/// A project-relative path as Clew writes one — in the protocol, in its
+/// state files, on the screen: `src/app/main.rs`, separated by `/` on every
+/// system. Windows also spells a separator `\`, which no other system reads
+/// as one: a rel built from a Windows path and sent to a Linux host named no
+/// file there, and matched none of the scan's own rels.
+pub fn rel_string(rel: &std::path::Path) -> String {
+    let rel = rel.to_string_lossy();
+    #[cfg(windows)]
+    return rel.replace('\\', "/");
+    #[cfg(not(windows))]
+    rel.into_owned()
+}
+
+/// The user's home directory: `HOME`, or — on Windows, which does not set
+/// it — `USERPROFILE`. `None` when neither names an absolute path.
+pub fn home_dir() -> Option<std::path::PathBuf> {
+    let named = |var: &str| {
+        std::env::var_os(var)
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_absolute())
+    };
+    named("HOME").or_else(|| {
+        if cfg!(windows) {
+            named("USERPROFILE")
+        } else {
+            None
+        }
+    })
+}

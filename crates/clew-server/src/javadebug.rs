@@ -1040,7 +1040,7 @@ impl Adapter {
             })
             .unwrap_or_default();
         let joined = std::env::join_paths(&classpath).map_err(|e| e.to_string())?;
-        let mut command = tokio::process::Command::new(&self.java);
+        let mut command = clew_core::spawn::tokio_command(&self.java);
         command
             .arg("-agentlib:jdwp=transport=dt_socket,server=y,suspend=y,address=127.0.0.1:0")
             .args(&vm_args)
@@ -1112,7 +1112,7 @@ impl Adapter {
         classpath: &[PathBuf],
         into: &Path,
     ) -> Result<(), String> {
-        let mut command = tokio::process::Command::new(&self.javac);
+        let mut command = clew_core::spawn::tokio_command(&self.javac);
         command
             .arg("-g")
             .arg("-d")
@@ -2797,6 +2797,9 @@ fn scratch_dir() -> Result<PathBuf, String> {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // (Only Unix has a mode to set; on Windows the directory takes its
+        // parent's per-user access list.)
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);

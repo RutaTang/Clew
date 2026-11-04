@@ -391,8 +391,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
     let Some(dest_dir) = server_dir(&server.server_name, &server.version) else {
         return Located::Unsupported("no data directory".into());
     };
-    let path = dest_dir.join(binary);
-    if path.is_file() {
+    if let Some(path) = installed_program(&dest_dir, binary) {
         return Located::Ready(path);
     }
     match provision {
@@ -433,9 +432,7 @@ pub fn find_program(program: &str) -> Result<PathBuf, String> {
             .ok_or_else(|| format!("{program:?} is not on PATH"));
     }
     let path = match program.strip_prefix("~/") {
-        Some(rest) => std::env::var_os("HOME")
-            .or_else(|| std::env::var_os("USERPROFILE"))
-            .map(PathBuf::from)
+        Some(rest) => crate::home_dir()
             .ok_or("there is no home directory to find ~ in")?
             .join(rest),
         None => PathBuf::from(program),
@@ -484,18 +481,85 @@ fn find_in(path: &OsStr, binary: &str, canonical: bool) -> Option<PathBuf> {
     if binary.is_empty() || binary.contains(['/', '\\']) {
         return None;
     }
+    let names = executable_names(binary);
     std::env::split_paths(path)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join(binary))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find_map(|p| {
             if canonical {
-                std::fs::canonicalize(&p)
-                    .ok()
-                    .filter(|c| is_executable_file(c))
+                canonical_path(&p).filter(|c| is_executable_file(c))
             } else {
                 is_executable_file(&p).then_some(p)
             }
         })
+}
+
+/// The names `binary` may have on disk. On Windows a program is found by
+/// its name and one of the extensions `PATHEXT` lists (`rust-analyzer.exe`,
+/// `npx.cmd`) — the name alone when it already ends in one; everywhere else
+/// by the name alone.
+pub(crate) fn executable_names(binary: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let pathext = std::env::var("PATHEXT")
+            .ok()
+            .filter(|e| !e.trim().is_empty())
+            .unwrap_or_else(|| ".COM;.EXE;.BAT;.CMD".into());
+        let exts: Vec<String> = pathext
+            .split(';')
+            .map(|e| e.trim().to_ascii_lowercase())
+            .filter(|e| e.starts_with('.') && e.len() > 1)
+            .collect();
+        let lower = binary.to_ascii_lowercase();
+        if exts.iter().any(|e| lower.ends_with(e.as_str())) {
+            return vec![binary.to_string()];
+        }
+        exts.iter().map(|e| format!("{binary}{e}")).collect()
+    }
+    #[cfg(not(windows))]
+    {
+        vec![binary.to_string()]
+    }
+}
+
+/// The program `binary` names under `dir`, if it is there. On Windows a
+/// toolchain names what it installs for the system — `go install` writes
+/// `gopls.exe`, npm a `.cmd` beside a shell script Windows cannot run — so
+/// the name is tried with each executable extension; as it is only when it
+/// has an extension of its own (`rust-analyzer.exe`, a script an
+/// interpreter runs).
+pub(crate) fn installed_program(dir: &Path, binary: &str) -> Option<PathBuf> {
+    #[cfg(windows)]
+    let names = {
+        let mut names = executable_names(binary);
+        if Path::new(binary).extension().is_some() && !names.iter().any(|n| n == binary) {
+            names.push(binary.to_string());
+        }
+        names
+    };
+    #[cfg(not(windows))]
+    let names = [binary];
+    names
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|path| path.is_file())
+}
+
+/// `path` with its links resolved. On Windows without the `\\?\` prefix
+/// `canonicalize` puts on a drive path: `cmd.exe`, which runs a `.cmd` or a
+/// `.bat`, refuses a path that has it.
+pub(crate) fn canonical_path(path: &Path) -> Option<PathBuf> {
+    let resolved = std::fs::canonicalize(path).ok()?;
+    #[cfg(windows)]
+    {
+        let text = resolved.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            return Some(PathBuf::from(rest));
+        }
+    }
+    Some(resolved)
 }
 
 /// A regular file (after following links) that the OS would execute.
@@ -590,28 +654,35 @@ fn toolchain_install_with(
                 tail_lines(err.trim(), 12)
             ));
         }
-        let binary = staging.join(install.binary);
-        if !binary.is_file() {
+        let Some(binary) = installed_program(&staging, install.binary) else {
             return Err(format!(
                 "install completed but '{}' is missing",
                 install.binary
             ));
-        }
-        make_executable(&binary)
+        };
+        make_executable(&binary)?;
+        Ok(binary)
     })();
-    if let Err(e) = built {
-        let _ = std::fs::remove_dir_all(&staging);
-        return Err(e);
-    }
+    let binary = match built {
+        Ok(binary) => binary,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(e);
+        }
+    };
     swap_into_place(&staging, dest_dir)?;
-    Ok(dest_dir.join(install.binary))
+    // The same name, now under the store.
+    let name = binary
+        .strip_prefix(&staging)
+        .map_err(|_| "the installed program is outside its install".to_string())?;
+    Ok(dest_dir.join(name))
 }
 
 /// The command a toolchain install runs: `tool`, then exactly
 /// [`Install::args`] — what the consent prompt ([`Install::describe`])
 /// shows — then only the destination, which is clew's own staging directory.
 pub(crate) fn install_command(install: &Install, tool: &Path, dir: &Path) -> std::process::Command {
-    let mut cmd = std::process::Command::new(tool);
+    let mut cmd = crate::spawn::command(tool);
     // Run from the staging directory, not from wherever clew was launched.
     // These tools read configuration from the working directory and its
     // ancestors (`.cargo/config.toml`, `.npmrc`), so inheriting a project's
@@ -675,6 +746,10 @@ pub(crate) fn run_bounded_cancellable(
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not run {name}: {e}"))?;
+    // Windows' process group: a job object, ended — with whatever the
+    // installer left in it — when this returns.
+    #[cfg(windows)]
+    let _job = crate::procgroup::adopt_scoped(&child);
     let collect = |stream: Option<Box<dyn Read + Send>>| {
         let (tx, rx) = std::sync::mpsc::channel();
         if let Some(mut stream) = stream {
@@ -717,7 +792,6 @@ pub(crate) fn run_bounded_cancellable(
                     std::thread::sleep(Duration::from_millis(20));
                     continue;
                 }
-                #[cfg(unix)]
                 crate::procgroup::kill(child.id());
                 let _ = child.kill();
                 let _ = child.wait();
@@ -973,7 +1047,7 @@ fn make_executable(_path: &Path) -> Result<(), String> {
 /// Test support shared by this module and `debugadapter`.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// Point the data dir at a fresh temp directory (with a `servers/` store)
     /// for the duration of `f`, holding the env lock (CLEW_DATA_DIR is
@@ -987,7 +1061,7 @@ pub(crate) mod testing {
 
     /// Write an executable shell script.
     #[cfg(unix)]
-    pub(crate) fn script(path: &Path, body: &str) -> PathBuf {
+    pub(crate) fn script(path: &Path, body: &str) -> std::path::PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         crate::testutil::write_script(path, body);
         path.to_path_buf()

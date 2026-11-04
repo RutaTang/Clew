@@ -510,7 +510,7 @@ async fn refine_pass(
             let mut rels: Vec<String> = query_defs
                 .iter()
                 .filter_map(|d| d.file.strip_prefix(&root).ok())
-                .map(|r| r.to_string_lossy().into_owned())
+                .map(clew_core::rel_string)
                 .collect();
             rels.sort();
             rels.dedup();
@@ -3240,6 +3240,7 @@ mod tests {
         // project, as a host says of it — which is not a file that could not
         // be read.
         let size = std::fs::metadata(&big).unwrap().len();
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut refused = HashMap::from([(big.clone(), explain::Unexplainable::TooLarge(size))]);
         #[cfg(unix)]
         refused.insert(

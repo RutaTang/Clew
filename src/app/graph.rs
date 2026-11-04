@@ -133,11 +133,11 @@ fn remote_scope(
         .filter_map(|(file, imports)| {
             let rel = file.strip_prefix(root).ok()?;
             Some((
-                rel.to_string_lossy().into_owned(),
+                clew_core::rel_string(rel),
                 imports
                     .iter()
                     .filter_map(|i| i.strip_prefix(root).ok())
-                    .map(|i| i.to_string_lossy().into_owned())
+                    .map(clew_core::rel_string)
                     .collect(),
             ))
         })

@@ -242,7 +242,7 @@ impl Adapter {
             .local_addr()
             .map_err(|e| format!("cannot listen for the node: {e}"))?
             .port();
-        let mut command = tokio::process::Command::new(&self.erl);
+        let mut command = clew_core::spawn::tokio_command(&self.erl);
         command
             .arg("-noshell")
             .arg("-pa")
@@ -362,7 +362,7 @@ impl Adapter {
         if sources.is_empty() {
             return Ok(HashMap::new());
         }
-        let mut command = tokio::process::Command::new(&self.erlc);
+        let mut command = clew_core::spawn::tokio_command(&self.erlc);
         command.arg("+debug_info").arg("-o").arg(into);
         for include in includes {
             command.arg("-I").arg(include);
@@ -690,6 +690,9 @@ fn scratch_dir() -> Result<PathBuf, String> {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
+        // (Only Unix has a mode to set; on Windows the directory takes its
+        // parent's per-user access list.)
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = std::fs::DirBuilder::new();
         #[cfg(unix)]
         std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -924,7 +927,7 @@ mod tests {
                 s.strip_prefix(&*dir)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect();
         assert_eq!(names, ["src/a.erl", "src/b.erl", "apps/web/src/w.erl"]);

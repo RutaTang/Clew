@@ -4764,8 +4764,8 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     // The stub reports an error on line 2 of the open file, so what a
     // poisoned snapshot must NOT show is shown by a healthy one.
     let diagnostic = format!(
-        r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"file://{}","diagnostics":[{{"range":{{"start":{{"line":1,"character":3}},"end":{{"line":1,"character":9}}}},"severity":1,"message":"boom"}}]}}}}"#,
-        root.join("src/lib.rs").display()
+        r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{}","diagnostics":[{{"range":{{"start":{{"line":1,"character":3}},"end":{{"line":1,"character":9}}}},"severity":1,"message":"boom"}}]}}}}"#,
+        crate::lsp::client::path_to_uri(&root.join("src/lib.rs"))
     );
     let client = stub_lsp_client_saying(&root, vec![diagnostic]).await;
     for _ in 0..200 {
@@ -7065,14 +7065,30 @@ fn the_voice_settings_offer_each_model_and_its_size() {
             assert!(shows(&mut sim, model.name), "{}", model.name);
         }
         assert!(shows(&mut sim, "nothing you say leaves it"));
-        assert!(!shows(&mut sim, "Language"), "base.en hears English only");
+        assert!(
+            shows(&mut sim, "Language"),
+            "Echo's Small hears any language"
+        );
+        assert!(
+            shows(&mut sim, "Download (190 MB)"),
+            "its size, before anything"
+        );
     }
+    app.voice.prefs.model = "base.en".into();
+    assert!(
+        !shows(&mut sim_elem(super::voice_section(&app)), "Language"),
+        "base.en hears English only"
+    );
     assert!(matches!(
         click(sim_elem(super::voice_section(&app)), "Download (148 MB)").as_slice(),
         [Message::Voice(crate::VoiceMsg::Download("base.en"))]
     ));
     assert!(matches!(
-        click(sim_elem(super::voice_section(&app)), "Large v3 Turbo").as_slice(),
+        click(
+            sim_elem(super::voice_section(&app)),
+            "Medium (Large v3 Turbo)"
+        )
+        .as_slice(),
         [Message::Voice(crate::VoiceMsg::PickModel(
             "large-v3-turbo-q5_0"
         ))]
@@ -7080,7 +7096,7 @@ fn the_voice_settings_offer_each_model_and_its_size() {
     // Downloaded: Remove. A multilingual one picked: its language.
     std::fs::create_dir_all(store.dir()).unwrap();
     std::fs::write(store.path(app.voice.prefs.model()), b"x").unwrap();
-    app.voice.prefs.model = "small".into();
+    app.voice.prefs.model = "small-q5_1".into();
     {
         let mut sim = sim_elem(super::voice_section(&app));
         assert!(shows(&mut sim, "Downloaded"));
@@ -7091,4 +7107,43 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         [Message::Voice(crate::VoiceMsg::RemoveModel("base.en"))]
     ));
     let _ = std::fs::remove_dir_all(store.dir());
+}
+
+/// The borderless window resizes from its edges and corners on Linux and
+/// Windows: a press on one starts the system's resize toward it. Inside the
+/// band nothing changes — a press there reaches what is drawn. (macOS keeps
+/// the system's own frame, and no grip.)
+#[test]
+fn the_window_resizes_from_its_edges_and_corners() {
+    let app = reader_app();
+    let pressed_at = |at: Point| {
+        let mut sim = sim_of(&app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    let resized = |sent: &[Message]| {
+        sent.iter().find_map(|m| match m {
+            Message::Window(crate::WindowMsg::ResizeDragged(edge)) => Some(format!("{edge:?}")),
+            _ => None,
+        })
+    };
+    let (w, h) = (WINDOW.width, WINDOW.height);
+    for (at, edge) in [
+        (Point::new(1.0, h / 2.0), "West"),
+        (Point::new(w - 1.0, h / 2.0), "East"),
+        (Point::new(w / 2.0, 1.0), "North"),
+        (Point::new(w / 2.0, h - 1.0), "South"),
+        (Point::new(1.0, 1.0), "NorthWest"),
+        (Point::new(w - 1.0, 1.0), "NorthEast"),
+        (Point::new(1.0, h - 1.0), "SouthWest"),
+        (Point::new(w - 1.0, h - 1.0), "SouthEast"),
+    ] {
+        let sent = pressed_at(at);
+        let expected = (!cfg!(target_os = "macos")).then(|| edge.to_string());
+        assert_eq!(resized(&sent), expected, "{at:?}: {sent:?}");
+    }
+    for inside in [Point::new(w / 2.0, h / 2.0), Point::new(12.0, h / 2.0)] {
+        assert_eq!(resized(&pressed_at(inside)), None, "{inside:?}");
+    }
 }

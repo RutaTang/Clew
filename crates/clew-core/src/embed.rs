@@ -2353,6 +2353,8 @@ mod integrity_tests {
         let problem = stored_index_problem(&dir).expect("an over-cap file is a problem");
         assert!(problem.contains("read cap"), "{problem}");
         assert!(load(&dir, Path::new("/p")).entries.is_empty());
+        // Closed first: Windows keeps an open file's name until it is.
+        drop(f);
         std::fs::remove_file(index_path(&dir)).unwrap();
         assert_eq!(stored_index_problem(&dir), None, "absent is not a problem");
     }

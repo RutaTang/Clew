@@ -7,6 +7,7 @@ use iced::keyboard;
 
 mod ask_space;
 mod askfloat;
+#[cfg(unix)]
 mod build_app;
 mod insight;
 mod integrations;
@@ -354,15 +355,26 @@ fn the_app_tests_run_against_an_isolated_data_directory() {
         isolated_data_dir(),
         "the tests are not pointed at the isolated data directory"
     );
-    // `data_root()`'s fallback is always somewhere under `$HOME` (on macOS
-    // `Library/Application Support/clew`), and the isolated directory lives in
-    // the temp dir, so this catches the fallback being taken at all.
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    assert!(
-        !root.starts_with(&home),
-        "the tests write inside the developer's home: {}",
-        root.display()
-    );
+    // `data_root()`'s fallback is the platform's own data directory (on
+    // macOS `~/Library/Application Support/clew`, on Windows
+    // `%APPDATA%\clew`), and the isolated directory lives in the temp dir, so
+    // this catches the fallback being taken at all.
+    if let Some(fallback) = clew_core::lsp::store::default_data_root() {
+        assert!(
+            !root.starts_with(&fallback),
+            "the tests write into the developer's data directory: {}",
+            root.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+        assert!(
+            !root.starts_with(&home),
+            "the tests write inside the developer's home: {}",
+            root.display()
+        );
+    }
 }
 
 /// A test that points `CLEW_DATA_DIR` somewhere of its own must hand the
@@ -3310,7 +3322,8 @@ fn fake_installed_rust_analyzer(data: &Path) {
         .join("rust-analyzer")
         .join(lsp::registry::by_name("rust-analyzer").unwrap().version);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
+    let program = format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX);
+    std::fs::write(dir.join(program), b"#!/bin/sh\nexit 0\n").unwrap();
 }
 
 /// Record that rust-analyzer may build `root`, as the user's Allow on a first
@@ -21365,37 +21378,10 @@ fn a_late_provider_holds_its_port_until_it_answers() {
 /// `SO_REUSEADDR` std sets on each listener it binds — can be bound to
 /// `port` on the loopback: whether no socket holds the port.
 fn bindable(port: u16) -> bool {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    // SAFETY: `socket` returns a descriptor nothing else owns (or -1,
-    // checked), which the `OwnedFd` then closes.
-    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
-    let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
-    // SAFETY: an all-zero `sockaddr_in` is a valid value of it.
-    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    {
-        addr.sin_len = len as u8;
-    }
-    addr.sin_family = libc::AF_INET as libc::sa_family_t;
-    addr.sin_port = port.to_be();
-    addr.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
-    // SAFETY: `addr` is a `sockaddr_in` of `len` bytes.
-    let bound = unsafe {
-        libc::bind(
-            socket.as_raw_fd(),
-            (&raw const addr).cast::<libc::sockaddr>(),
-            len,
-        )
-    };
-    bound == 0
+    let socket =
+        socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("a socket");
+    let at = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    socket.bind(&at.into()).is_ok()
 }
 
 /// The messages that carry an explain pass: what starts one, and its end.
@@ -28386,9 +28372,15 @@ fn every_write_of_a_panes_annotations_keeps_its_summary_current() {
     open_synchronously(&mut app, "src/cfg.rs", None);
     let dimmed = |app: &App| app.active_viewer().unwrap().inactive_lines().clone();
     let before = dimmed(&app);
+    // The other family than the host's.
     let mut other = inactive::Target::host();
-    other.os = "windows".into();
-    other.family = "windows".into();
+    if other.family == "windows" {
+        other.os = "linux".into();
+        other.family = "unix".into();
+    } else {
+        other.os = "windows".into();
+        other.family = "windows".into();
+    }
     let _ = app.update(Message::Reading(ReadingMsg::TargetSelected(other)));
     assert_ne!(dimmed(&app), before, "the target switch changed no dimming");
     assert!(
@@ -30415,7 +30407,7 @@ async fn following_a_value_reads_a_wrapped_signature_from_disk() {
         "pub(crate) fn save_markdown(\n    window: Option<u32>,\n    file_name: String,\n) -> String {\n    file_name\n}\n\nfn start() {\n        let file_name = String::new();\n        save_markdown(None, file_name);\n}\n",
     )
     .unwrap();
-    let uri = format!("file://{}", shop.display());
+    let uri = lsp::client::path_to_uri(&shop);
     let at = |line: u64, character: u64| {
         serde_json::json!({
             "uri": uri,
@@ -30778,7 +30770,7 @@ async fn trace_call_in_fixture(
     let file = root.join("src/shop.rs");
     std::fs::write(&file, source).unwrap();
     open_synchronously(&mut app, "src/shop.rs", None);
-    let uri = format!("file://{}", file.display());
+    let uri = lsp::client::path_to_uri(&file);
     let script = NavScript::leak(
         serde_json::json!([{
             "uri": uri,
@@ -31174,6 +31166,7 @@ fn the_build_facts_dim_what_the_build_leaves_out() {
 }
 
 /// A program of the user's own, standing in for a language's server.
+#[cfg(unix)]
 fn server_program(
     language: &str,
     command: &Path,

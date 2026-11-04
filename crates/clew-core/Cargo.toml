@@ -94,3 +94,16 @@ tree-sitter-haskell = "0.24.1"
 # CoreFoundation crate is already in the build.
 [target.'cfg(target_os = "macos")'.dependencies]
 system-configuration = "0.8"
+
+# Winsock, for the socket calls std has no way to make (net.rs `sockets`):
+# waiting on several connects at once, and a peek that does not wait; and
+# job objects, Windows' process groups (procgroup.rs). The version socket2
+# and mio already bring in, so the build carries one copy.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }

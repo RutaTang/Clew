@@ -407,7 +407,62 @@ pub fn view(app: &App) -> Element<'_, Message> {
         slot()
     };
     // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
-    placed::watch_overlays(app.overlay_open, stack![base, ask, overlay, tutorial])
+    placed::watch_overlays(
+        app.overlay_open,
+        stack![base, ask, overlay, tutorial, resize_grips()],
+    )
+}
+
+/// How wide the band along each edge is where a drag resizes the window.
+const GRIP: f32 = 4.0;
+
+/// The window's edges and corners, where a drag resizes it. On Linux and
+/// Windows the window is borderless — clew draws its own controls — and a
+/// borderless window has no frame of the system's to be resized by: these
+/// thin bands, over everything, are that frame. Between them is empty space,
+/// which takes no event and shows no cursor, so everything under it works as
+/// before. On macOS the window keeps the system's frame (`window_settings`).
+fn resize_grips<'a>() -> Element<'a, Message> {
+    if cfg!(target_os = "macos") {
+        return slot();
+    }
+    use iced::mouse::Interaction as Cursor;
+    use iced::window::Direction as Edge;
+    let grip =
+        |edge: Edge, cursor: Cursor, width: Length, height: Length| -> Element<'a, Message> {
+            mouse_area(space().width(width).height(height))
+                .on_press(Message::Window(WindowMsg::ResizeDragged(edge)))
+                .interaction(cursor)
+                .into()
+        };
+    let (band, corner) = (Length::Fixed(GRIP), Length::Fixed(GRIP * 2.0));
+    let top = row![
+        grip(
+            Edge::NorthWest,
+            Cursor::ResizingDiagonallyDown,
+            corner,
+            band
+        ),
+        grip(Edge::North, Cursor::ResizingVertically, Fill, band),
+        grip(Edge::NorthEast, Cursor::ResizingDiagonallyUp, corner, band),
+    ];
+    let sides = row![
+        grip(Edge::West, Cursor::ResizingHorizontally, band, Fill),
+        space().width(Fill).height(Fill),
+        grip(Edge::East, Cursor::ResizingHorizontally, band, Fill),
+    ]
+    .height(Fill);
+    let bottom = row![
+        grip(Edge::SouthWest, Cursor::ResizingDiagonallyUp, corner, band),
+        grip(Edge::South, Cursor::ResizingVertically, Fill, band),
+        grip(
+            Edge::SouthEast,
+            Cursor::ResizingDiagonallyDown,
+            corner,
+            band
+        ),
+    ];
+    column![top, sides, bottom].width(Fill).height(Fill).into()
 }
 
 // ---------------------------------------------------------------- hover tooltip

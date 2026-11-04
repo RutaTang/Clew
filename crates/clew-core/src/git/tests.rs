@@ -812,6 +812,7 @@ fn repository_configured_programs_never_run() {
 
 /// Runs plain git's working-tree diff of `file` in `dir`, which runs the
 /// repository's clean filter for it: a fixture's precondition.
+#[cfg(unix)]
 fn plain_diff_runs_the_filter(dir: &Path, file: &str, marker: &Path) {
     let plain = plain_git()
         .args([

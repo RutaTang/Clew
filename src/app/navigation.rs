@@ -800,6 +800,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     /// `call_site_line` falls back to this machine's disk when the caller is
@@ -809,8 +810,8 @@ mod tests {
     /// another file's call sites under this project's name, and an over-cap
     /// file was pulled whole into the iced update loop that serves EVERY
     /// window (a FIFO there froze the entire interface).
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn call_site_line_refuses_a_symlink_out_of_the_project_and_an_over_cap_file() {
         use crate::app::tests::{blank_app, test_dir};
         const SRC: &str = "fn caller() {\n    callee();\n}\n";
@@ -873,6 +874,7 @@ mod tests {
 
 #[cfg(test)]
 mod location_tests {
+    #[cfg(unix)]
     use super::*;
 
     /// The reference preview is read off this machine's disk at whatever path
@@ -885,8 +887,8 @@ mod location_tests {
     /// (the `external_local` allowance `open_file` makes, and the same choice
     /// the server's own reference preview makes in `agent_lsp.rs`) — so this
     /// pins the external preview as WORKING alongside the two refusals.
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn reference_preview_refuses_a_symlink_and_an_over_cap_file_but_keeps_external_sources() {
         use crate::app::tests::{blank_app, run_task, test_dir};
         let dir = test_dir("refpreview-guard");

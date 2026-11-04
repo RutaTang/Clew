@@ -1,10 +1,12 @@
 //! The speech models Clew can listen with, and where they are kept.
 //!
-//! Each is one of whisper.cpp's own ggml files, as published in its
-//! repository's model list with a SHA-1 for every file: the catalog below
-//! ([`MODELS`]) is that list's checksums, and a download is accepted only if
-//! its bytes hash to the one listed ([`Install::finish`]). The choice runs
-//! from the fastest English-only model to Echo's most accurate one.
+//! Each is one of whisper.cpp's own ggml files, fetched from where
+//! whisper.cpp publishes them. The three Echo offers — its Small, Medium
+//! and Large: `small-q5_1`, `large-v3-turbo-q5_0`, `large-v3-q5_0` — come
+//! with the SHA-256 and the exact size Echo checks them against; the
+//! English-only ones for slower machines with the SHA-1 whisper.cpp lists
+//! in its `models/README.md`. A download is accepted only if its bytes hash
+//! to that, and are as many as that ([`Install::finish`]).
 //!
 //! Fetching is the caller's — Clew's own transport, with its proxy and
 //! trust — writing into an [`Install`]: this crate decides what a model is,
@@ -15,20 +17,48 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use sha1::{Digest, Sha1};
+use sha1::Sha1;
+use sha2::{Digest, Sha256};
+
+/// What a model's bytes must hash to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checksum {
+    /// SHA-256, lowercase hex.
+    Sha256(&'static str),
+    /// SHA-1, lowercase hex — as whisper.cpp's model list gives them.
+    Sha1(&'static str),
+}
+
+impl Checksum {
+    /// The expected digest, lowercase hex.
+    pub fn hex(&self) -> &'static str {
+        match self {
+            Checksum::Sha256(h) | Checksum::Sha1(h) => h,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            Checksum::Sha256(_) => "SHA-256",
+            Checksum::Sha1(_) => "SHA-1",
+        }
+    }
+}
 
 /// One whisper model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Model {
-    /// Its name in whisper.cpp's list (`base.en`), and the id Clew's
+    /// Its name in whisper.cpp's list (`small-q5_1`), and the id Clew's
     /// settings store.
     pub id: &'static str,
     /// What the settings call it.
     pub name: &'static str,
     /// Its download size, in MB: shown before anything is fetched.
     pub size_mb: u32,
-    /// The SHA-1 whisper.cpp lists for the file, lowercase hex.
-    pub sha1: &'static str,
+    /// Its exact size in bytes, where it is published.
+    pub bytes: Option<u64>,
+    /// What its bytes hash to.
+    pub checksum: Checksum,
     /// Understands English only — and English better, size for size.
     pub english_only: bool,
     /// One line on when to pick it.
@@ -36,7 +66,7 @@ pub struct Model {
 }
 
 impl Model {
-    /// The file's name, in the store and upstream: `ggml-base.en.bin`.
+    /// The file's name, in the store and upstream: `ggml-small-q5_1.bin`.
     pub fn file_name(&self) -> String {
         format!("ggml-{}.bin", self.id)
     }
@@ -49,21 +79,23 @@ impl Model {
         )
     }
 
-    /// Largest download accepted for it: its size and a margin, so a
-    /// server that never stops sending is cut off.
+    /// Largest download accepted for it: its exact size where that is
+    /// known, else its size and a margin — so a server that never stops
+    /// sending is cut off.
     pub fn max_bytes(&self) -> u64 {
-        u64::from(self.size_mb) * 1_000_000 * 5 / 4 + 16_000_000
+        self.bytes
+            .unwrap_or(u64::from(self.size_mb) * 1_000_000 * 5 / 4 + 16_000_000)
     }
 }
 
-/// Every model Clew offers, smallest first. The checksums are those of
-/// whisper.cpp's `models/README.md`.
+/// Every model Clew offers, smallest first.
 pub const MODELS: &[Model] = &[
     Model {
         id: "tiny.en",
         name: "Tiny (English)",
         size_mb: 78,
-        sha1: "c78c86eb1a8faa21b369bcd33207cc90d64ae9df",
+        bytes: None,
+        checksum: Checksum::Sha1("c78c86eb1a8faa21b369bcd33207cc90d64ae9df"),
         english_only: true,
         about: "Fastest; fine for short commands on a slow machine.",
     },
@@ -71,47 +103,49 @@ pub const MODELS: &[Model] = &[
         id: "base.en",
         name: "Base (English)",
         size_mb: 148,
-        sha1: "137c40403d78fd54d454da0f9bd998f78703390c",
+        bytes: None,
+        checksum: Checksum::Sha1("137c40403d78fd54d454da0f9bd998f78703390c"),
         english_only: true,
-        about: "Quick and accurate for commands and short questions.",
+        about: "Quick and accurate for commands and short questions in English.",
     },
     Model {
-        id: "base",
-        name: "Base (multilingual)",
-        size_mb: 148,
-        sha1: "465707469ff3a37a2b9b8d8f89f2f99de7299dac",
+        id: "small-q5_1",
+        name: "Small",
+        size_mb: 190,
+        bytes: Some(190_085_487),
+        checksum: Checksum::Sha256(
+            "ae85e4a935d7a567bd102fe55afc16bb595bdb618e11b2fc7591bc08120411bb",
+        ),
         english_only: false,
-        about: "Base for any of whisper's languages.",
-    },
-    Model {
-        id: "small",
-        name: "Small (multilingual)",
-        size_mb: 488,
-        sha1: "55356645c2b361a969dfd0ef2c5a50d530afd8d5",
-        english_only: false,
-        about: "Better with accents, names and other languages.",
+        about: "Fastest multilingual model, for lower-memory computers.",
     },
     Model {
         id: "large-v3-turbo-q5_0",
-        name: "Large v3 Turbo",
+        name: "Medium (Large v3 Turbo)",
         size_mb: 574,
-        sha1: "e050f7970618a659205450ad97eb95a18d69c9ee",
+        bytes: Some(574_041_195),
+        checksum: Checksum::Sha256(
+            "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",
+        ),
         english_only: false,
-        about: "Near the best accuracy at a fraction of its cost.",
+        about: "Best balance of accuracy and speed, in any language.",
     },
     Model {
         id: "large-v3-q5_0",
-        name: "Large v3",
-        size_mb: 1080,
-        sha1: "e6e2ed78495d403bef4b7cff42ef4aaadcfea8de",
+        name: "Large (Large v3)",
+        size_mb: 1081,
+        bytes: Some(1_081_140_203),
+        checksum: Checksum::Sha256(
+            "d75795ecff3f83b5faa89d1900604ad8c780abd5739fae406de19f23ecd98ad1",
+        ),
         english_only: false,
-        about: "Most accurate; slow without a fast GPU.",
+        about: "Highest accuracy, for powerful computers.",
     },
 ];
 
-/// The model offered first: small enough to fetch in a moment, and good at
-/// what voice in Clew is mostly for.
-pub const DEFAULT_MODEL: &str = "base.en";
+/// The model offered first: Echo's default, small enough to fetch in a
+/// moment, in any language.
+pub const DEFAULT_MODEL: &str = "small-q5_1";
 
 /// The model `id` names.
 pub fn find(id: &str) -> Option<&'static Model> {
@@ -168,7 +202,7 @@ impl Store {
             file: Some(file),
             part,
             dest: self.path(model),
-            hasher: Sha1::new(),
+            hasher: Hasher::of(&model.checksum),
             written: 0,
         })
     }
@@ -197,8 +231,37 @@ pub struct Install {
     file: Option<File>,
     part: PathBuf,
     dest: PathBuf,
-    hasher: Sha1,
+    hasher: Hasher,
     written: u64,
+}
+
+/// The digest a download is hashed with as it arrives.
+enum Hasher {
+    Sha256(Sha256),
+    Sha1(Sha1),
+}
+
+impl Hasher {
+    fn of(checksum: &Checksum) -> Self {
+        match checksum {
+            Checksum::Sha256(_) => Hasher::Sha256(Sha256::new()),
+            Checksum::Sha1(_) => Hasher::Sha1(Sha1::new()),
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        match self {
+            Hasher::Sha256(h) => h.update(bytes),
+            Hasher::Sha1(h) => h.update(bytes),
+        }
+    }
+
+    fn finish(self) -> String {
+        match self {
+            Hasher::Sha256(h) => hex(&h.finalize()),
+            Hasher::Sha1(h) => hex(&h.finalize()),
+        }
+    }
 }
 
 impl Install {
@@ -215,13 +278,24 @@ impl Install {
             .and_then(|()| file.sync_all())
             .map_err(|e| format!("could not save the model: {e}"))?;
         drop(file);
-        let digest = hex(&std::mem::take(&mut self.hasher).finalize());
-        if digest != self.model.sha1 {
+        let expected = self.model.checksum;
+        if let Some(bytes) = self.model.bytes.filter(|b| *b != self.written) {
             return Err(format!(
-                "the download is not {} as published (its checksum is {digest}, not {}) — \
-                 it was discarded",
+                "the download is not {} as published ({} bytes, not {bytes}) — it was \
+                 discarded",
                 self.model.file_name(),
-                self.model.sha1
+                self.written
+            ));
+        }
+        let hasher = std::mem::replace(&mut self.hasher, Hasher::of(&expected));
+        let digest = hasher.finish();
+        if digest != expected.hex() {
+            return Err(format!(
+                "the download is not {} as published (its {} is {digest}, not {}) — it \
+                 was discarded",
+                self.model.file_name(),
+                expected.name(),
+                expected.hex()
             ));
         }
         fs::rename(&self.part, &self.dest).map_err(|e| format!("could not save the model: {e}"))?;
@@ -271,14 +345,30 @@ fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// A model whose checksum is that of `bytes`, for a test's install.
+    /// A model whose SHA-256 is that of `bytes`, and its size theirs, for
+    /// a test's install.
     fn model_of(bytes: &[u8]) -> &'static Model {
-        let sha1: &'static str = Box::leak(hex(&Sha1::digest(bytes)).into_boxed_str());
+        let sha: &'static str = Box::leak(hex(&Sha256::digest(bytes)).into_boxed_str());
         Box::leak(Box::new(Model {
             id: "test",
             name: "Test",
             size_mb: 1,
-            sha1,
+            bytes: Some(bytes.len() as u64),
+            checksum: Checksum::Sha256(sha),
+            english_only: true,
+            about: "",
+        }))
+    }
+
+    /// The same, by SHA-1 and with no size published.
+    fn sha1_model_of(bytes: &[u8]) -> &'static Model {
+        let sha: &'static str = Box::leak(hex(&Sha1::digest(bytes)).into_boxed_str());
+        Box::leak(Box::new(Model {
+            id: "test1",
+            name: "Test",
+            size_mb: 1,
+            bytes: None,
+            checksum: Checksum::Sha1(sha),
             english_only: true,
             about: "",
         }))
@@ -290,29 +380,94 @@ mod tests {
         Store::new(dir)
     }
 
+    /// Echo's three models, as Echo checks them, and whisper.cpp's small
+    /// English ones by the checksums its model list gives.
     #[test]
-    fn the_catalog_is_whisper_cpps() {
+    fn the_catalog_is_echos_and_whisper_cpps() {
         assert!(find(DEFAULT_MODEL).is_some());
         let mut ids = std::collections::HashSet::new();
         for m in MODELS {
             assert!(ids.insert(m.id), "{} twice", m.id);
-            assert_eq!(m.sha1.len(), 40, "{}", m.id);
+            let (len, hex) = match m.checksum {
+                Checksum::Sha256(h) => (64, h),
+                Checksum::Sha1(h) => (40, h),
+            };
+            assert_eq!(hex.len(), len, "{}", m.id);
             assert!(
-                m.sha1
-                    .bytes()
+                hex.bytes()
                     .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
             );
             assert_eq!(m.english_only, m.id.ends_with(".en"), "{}", m.id);
-            assert!(m.max_bytes() > u64::from(m.size_mb) * 1_000_000);
+            match m.bytes {
+                // Its size in MB is its size in bytes, rounded.
+                Some(bytes) => {
+                    assert_eq!(
+                        u64::from(m.size_mb),
+                        (bytes + 500_000) / 1_000_000,
+                        "{}",
+                        m.id
+                    );
+                    assert_eq!(m.max_bytes(), bytes);
+                }
+                None => assert!(m.max_bytes() > u64::from(m.size_mb) * 1_000_000),
+            }
         }
-        let base = find("base.en").unwrap();
-        assert_eq!(base.file_name(), "ggml-base.en.bin");
+        for (id, file) in [
+            ("small-q5_1", "ggml-small-q5_1.bin"),
+            ("large-v3-turbo-q5_0", "ggml-large-v3-turbo-q5_0.bin"),
+            ("large-v3-q5_0", "ggml-large-v3-q5_0.bin"),
+        ] {
+            let m = find(id).unwrap();
+            assert_eq!(m.file_name(), file);
+            assert!(matches!(m.checksum, Checksum::Sha256(_)), "{id}");
+            assert!(m.bytes.is_some(), "{id}");
+        }
+        assert_eq!(DEFAULT_MODEL, "small-q5_1");
         assert_eq!(
-            base.url(),
+            find("base.en").unwrap().url(),
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin"
         );
         // Smallest first.
         assert!(MODELS.windows(2).all(|w| w[0].size_mb <= w[1].size_mb));
+    }
+
+    /// A model checked by SHA-1 (whisper.cpp's list) installs alike.
+    #[test]
+    fn a_model_checked_by_sha1_installs() {
+        let store = temp_store("sha1");
+        let bytes = b"a smaller model".repeat(100);
+        let model = sha1_model_of(&bytes);
+        let mut install = store.begin(model).unwrap();
+        install.write_all(&bytes).unwrap();
+        install.finish().unwrap();
+        assert!(store.installed(model));
+        let mut install = store.begin(model).unwrap();
+        install.write_all(b"other bytes").unwrap();
+        let err = install.finish().unwrap_err();
+        assert!(err.contains("its SHA-1 is"), "{err}");
+        let _ = fs::remove_dir_all(store.dir());
+    }
+
+    /// A download of the published size is still refused when one byte
+    /// differs; one of another size, before its hash is even looked at.
+    #[test]
+    fn size_and_hash_must_both_match() {
+        let store = temp_store("size");
+        let model = model_of(b"0123456789");
+        let mut install = store.begin(model).unwrap();
+        install.write_all(b"0123456780").unwrap();
+        let err = install.finish().unwrap_err();
+        assert!(err.contains("its SHA-256 is"), "{err}");
+        let mut install = store.begin(model).unwrap();
+        install.write_all(b"012345678").unwrap();
+        let err = install.finish().unwrap_err();
+        assert!(err.contains("9 bytes, not 10"), "{err}");
+        // One byte more than published is cut off as it arrives.
+        let mut install = store.begin(model).unwrap();
+        assert!(install.write_all(b"0123456789X").is_err());
+        drop(install);
+        assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 0);
+        let _ = fs::remove_dir_all(store.dir());
     }
 
     #[test]
@@ -355,17 +510,17 @@ mod tests {
     #[test]
     fn an_abandoned_download_leaves_nothing() {
         let store = temp_store("drop");
-        let model = model_of(b"x");
+        let model = model_of(b"whole");
         let mut install = store.begin(model).unwrap();
-        install.write_all(b"half").unwrap();
+        install.write_all(b"wh").unwrap();
         drop(install);
         assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 0);
         // Nor does an earlier attempt's partial file stop a new one.
         fs::write(store.dir().join("ggml-test.bin.part"), b"stale").unwrap();
         let mut install = store.begin(model).unwrap();
-        install.write_all(b"x").unwrap();
+        install.write_all(b"whole").unwrap();
         install.finish().unwrap();
-        assert_eq!(fs::read(store.path(model)).unwrap(), b"x");
+        assert_eq!(fs::read(store.path(model)).unwrap(), b"whole");
         let _ = fs::remove_dir_all(store.dir());
     }
 

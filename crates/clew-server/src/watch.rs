@@ -348,7 +348,7 @@ pub(crate) fn on_watch_batch(
             if changes_set && in_walked_folder(rel, &mut walked, files, cb_root) {
                 structural = true;
             }
-            rels.push(rel.to_string_lossy().into_owned());
+            rels.push(clew_core::rel_string(rel));
         }
     }
     // A create/delete — or an edit to the ignore rules — changes the
@@ -662,7 +662,7 @@ fn listed_below_the_top(
             .map(|p| p.files.iter().map(|f| f.rel.clone()).collect())
             .unwrap_or_default()
     });
-    rel.to_str().is_some_and(|r| listed.contains(r))
+    listed.contains(&clew_core::rel_string(rel))
 }
 
 /// Whether a create, remove or rename at `rel` can change the file set: it

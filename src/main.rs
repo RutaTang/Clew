@@ -4,6 +4,11 @@
 //! fuzzy file finder (Cmd+P), project symbol search (Cmd+T), full-text
 //! search (Cmd+Shift+F), navigation history, outline, split view (Cmd+\),
 //! line selection + copy (Cmd+C), bookmarks (Cmd+D), go-to-line (:N).
+// A release build on Windows is a GUI program: started from Explorer or the
+// Start menu it opens its window and no console beside it. (Debug builds keep
+// the console, for what they log.) Every child it starts is started without a
+// console window of its own: `clew_core::spawn`.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod dap;
 pub use clew_core::docs;

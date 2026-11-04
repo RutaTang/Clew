@@ -595,7 +595,9 @@ mod tests {
         SharedApprovals, approved_init_options, install_lsp, install_offer, resolve_lsp,
         resolve_spawn_exe,
     };
-    use crate::test_support::{Scratch, alive, fake_slow_go, in_child, run_in_child, started_pid};
+    use crate::test_support::{Scratch, in_child, run_in_child};
+    #[cfg(unix)]
+    use crate::test_support::{alive, fake_slow_go, started_pid};
     use clew_protocol::{ErrorCode, Event, LspResolution, ServerMessage};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -653,7 +655,7 @@ mod tests {
         });
         assert!(approved);
     }
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     /// The data directory a child-side test was given (see `run_in_child`,
@@ -839,7 +841,8 @@ mod tests {
             .version;
         let store = data.join("servers").join("rust-analyzer").join(version);
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(store.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
+        let program = format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(store.join(program), b"#!/bin/sh\nexit 0\n").unwrap();
 
         let root = data.join("proj");
         std::fs::create_dir_all(root.join(".clew")).unwrap();
@@ -1176,6 +1179,7 @@ mod tests {
     /// project, or closing — together with the toolchain command it started,
     /// instead of running on (up to the toolchain's deadline) for a project
     /// nobody has open. The `go` on PATH here only says it started and waits.
+    #[cfg(unix)]
     #[test]
     fn an_install_stops_when_its_flag_is_set() {
         let data = Scratch::new("lsp-gate-install-stop");
@@ -1187,6 +1191,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "runs in a child process, from an_install_stops_when_its_flag_is_set"]
     fn child_install_stops_when_its_flag_is_set() {
@@ -1221,7 +1226,7 @@ mod tests {
         });
         let pid = started_pid(&bin);
         let stopped = std::time::Instant::now();
-        stop.store(true, Ordering::Relaxed);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let resolution = install.join().unwrap();
         assert!(
             stopped.elapsed() < std::time::Duration::from_secs(5),

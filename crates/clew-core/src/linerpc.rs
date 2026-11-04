@@ -333,7 +333,7 @@ impl Session {
                 launch.program
             )
         })?;
-        let mut command = tokio::process::Command::new(&program);
+        let mut command = crate::spawn::tokio_command(&program);
         command
             .args(&launch.args)
             .stdin(std::process::Stdio::piped())
@@ -350,6 +350,8 @@ impl Session {
         let mut child = command
             .spawn()
             .map_err(|e| format!("could not start {}: {e}", program.display()))?;
+        #[cfg(windows)]
+        crate::procgroup::adopt_tokio(&child);
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
         let stderr = child.stderr.take().ok_or("no stderr")?;
@@ -558,9 +560,9 @@ pub fn resolve_program(program: &str) -> Option<PathBuf> {
 /// `~/rest` as a path under the home directory; anything else as it is.
 pub fn expand_home(path: &str) -> PathBuf {
     if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
+        && let Some(home) = crate::home_dir()
     {
-        return Path::new(&home).join(rest);
+        return home.join(rest);
     }
     PathBuf::from(path)
 }
@@ -574,9 +576,7 @@ pub fn expand_home(path: &str) -> PathBuf {
 /// directory could choose what they run. The project reaches an ACP agent
 /// as the session's `cwd`.
 pub fn neutral_dir() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|h| h.is_absolute() && h.is_dir());
+    let home = crate::home_dir().filter(|h| h.is_dir());
     home.unwrap_or_else(|| {
         if cfg!(unix) {
             PathBuf::from("/")
@@ -689,7 +689,7 @@ fn login_shell_path() -> Option<OsString> {
 fn shell_path(shell: &std::ffi::OsStr, wait: Duration) -> Option<OsString> {
     use std::os::unix::process::CommandExt;
     let marker = login_marker();
-    let mut child = std::process::Command::new(shell)
+    let mut child = crate::spawn::command(shell)
         .args([
             "-l",
             "-c",
@@ -1196,13 +1196,20 @@ mod tests {
         assert!(!session.alive());
     }
 
+    /// An absolute path to `name` on this system: `/name`, or `C:\name`.
+    fn abs(name: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\{name}")
+        } else {
+            format!("/{name}")
+        }
+    }
+
     #[test]
     fn programs_resolve_as_paths_or_on_path() {
         assert_eq!(resolve_program(""), None);
-        assert_eq!(
-            resolve_program("/opt/x/bin/server"),
-            Some(PathBuf::from("/opt/x/bin/server"))
-        );
+        let server = abs("opt/x/bin/server");
+        assert_eq!(resolve_program(&server), Some(PathBuf::from(&server)));
         assert_eq!(
             resolve_program("./bin/s"),
             None,
@@ -1215,8 +1222,11 @@ mod tests {
 
     #[test]
     fn paths_merge_without_repeats() {
-        let merged = merge_paths(Some("/a:/b".into()), Some("/b:.:/c".into())).unwrap();
-        assert_eq!(merged, OsString::from("/a:/b:/c"));
+        // In this system's `PATH` syntax: `:`-separated, or `;` on Windows.
+        let path = |dirs: &[&str]| std::env::join_paths(dirs).unwrap();
+        let (a, b, c) = (abs("a"), abs("b"), abs("c"));
+        let merged = merge_paths(Some(path(&[&a, &b])), Some(path(&[&b, ".", &c]))).unwrap();
+        assert_eq!(merged, path(&[&a, &b, &c]));
         assert_eq!(merge_paths(None, None), None);
     }
 

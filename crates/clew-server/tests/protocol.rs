@@ -13,9 +13,11 @@
 //! 127.0.0.1 only, every wait has a timeout, and no child outlives its test.
 
 use clew_core::testutil::TempDir;
+#[cfg(unix)]
+use clew_protocol::Refusal;
 use clew_protocol::{
     AiChatConfig, AiChatMsg, ClientMessage, ErrorCode, Event, GitResult, PROTOCOL_VERSION,
-    ProviderFailure, Refusal, Request, ServerMessage, StreamOutcome, TargetSpec,
+    ProviderFailure, Request, ServerMessage, StreamOutcome, TargetSpec,
 };
 use clew_server::{Server, SpawnPolicy};
 use std::io::{Read, Write};
@@ -283,6 +285,7 @@ impl FakeProvider {
     }
 
     /// Block until the first request has arrived.
+    #[cfg(unix)]
     fn await_request(&self) {
         let began = Instant::now();
         while self.requests.load(Ordering::SeqCst) == 0 {

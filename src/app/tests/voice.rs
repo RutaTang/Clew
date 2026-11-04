@@ -386,6 +386,19 @@ fn model_downloads_are_verified() {
         let _ = app.update(message);
     }
     assert_eq!(app.status, before, "a cancelled download says nothing");
+    // One of Echo's, whose exact size is published: a download of another
+    // size is refused for that before its hash is looked at.
+    let task = app.update(Message::Voice(VoiceMsg::Download("small-q5_1")));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let error = app
+        .voice
+        .download_errors
+        .get("small-q5_1")
+        .cloned()
+        .unwrap();
+    assert!(error.contains("13 bytes, not 190085487"), "{error}");
     // Removing a model that is there.
     std::fs::write(store.path(model), b"x").unwrap();
     assert!(app.voice.installed(model));
@@ -403,18 +416,18 @@ fn voice_settings_are_kept() {
     let _env = data_dir_override(&data);
     let mut app = scanned_app("voice-prefs");
     assert_eq!(app.voice.prefs, VoicePrefs::default(), "none kept yet");
-    let _ = app.update(Message::Voice(VoiceMsg::PickModel("small")));
+    let _ = app.update(Message::Voice(VoiceMsg::PickModel("large-v3-turbo-q5_0")));
     let _ = app.update(Message::Voice(VoiceMsg::SetLanguage(Some("de"))));
     let _ = app.update(Message::Voice(VoiceMsg::SetRunCommands(false)));
     let _ = app.update(Message::Voice(VoiceMsg::SetSendQuestions(false)));
     let read = VoicePrefs::load();
     assert_eq!(read, app.voice.prefs);
-    assert_eq!(read.model, "small");
+    assert_eq!(read.model, "large-v3-turbo-q5_0");
     assert_eq!(read.language.as_deref(), Some("de"));
     assert!(!read.run_commands && !read.send_questions);
     // An unknown model is not taken.
     let _ = app.update(Message::Voice(VoiceMsg::PickModel("huge")));
-    assert_eq!(app.voice.prefs.model, "small");
+    assert_eq!(app.voice.prefs.model, "large-v3-turbo-q5_0");
     let _ = app.update(Message::Voice(VoiceMsg::SetLanguage(None)));
     assert_eq!(VoicePrefs::load().language, None);
 }

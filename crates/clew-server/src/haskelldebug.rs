@@ -223,7 +223,7 @@ impl Adapter {
             None => self.ghci.clone(),
         };
         let (program_name, ghci_args) = ghci.split_first().ok_or("no GHCi to run")?;
-        let mut command = tokio::process::Command::new(program_name);
+        let mut command = clew_core::spawn::tokio_command(program_name);
         command
             .args(ghci_args)
             .arg("-ignore-dot-ghci")

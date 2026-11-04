@@ -598,6 +598,7 @@ fn split_known_hosts_list(value: &str, exists: &impl Fn(&str) -> bool) -> Option
     if value.trim() == "none" {
         return Some(Vec::new());
     }
+    let value = ssh_path(value);
     let words: Vec<&str> = value.split(' ').collect();
     let mut paths = Vec::new();
     let mut i = 0;
@@ -617,10 +618,20 @@ fn split_known_hosts_list(value: &str, exists: &impl Fn(&str) -> bool) -> Option
 /// parser treats specially — `"` and `\` (quoting), `$` (`${…}` expansion)
 /// and control characters. `%` is fine: it is doubled on the way out.
 fn repassable_path(path: &str) -> bool {
-    path.starts_with('/')
+    (path.starts_with('/') || Path::new(path).is_absolute())
         && !path
             .chars()
             .any(|c| c.is_control() || matches!(c, '"' | '\\' | '$'))
+}
+
+/// `path` as ssh reads one. On Windows, `/` for each separator: the OpenSSH
+/// Windows ships takes `C:/Users/…`, and its config parser reads a `\` as
+/// quoting (no Windows file name holds one). Elsewhere, as it is.
+fn ssh_path(path: &str) -> String {
+    #[cfg(windows)]
+    return path.replace('\\', "/");
+    #[cfg(not(windows))]
+    path.to_string()
 }
 
 /// One known_hosts path as a token of an ssh option value: quoted, with `%`
@@ -773,11 +784,13 @@ pub(crate) fn fingerprint_of(keygen_stdout: &str, key_type: &str) -> Option<(Str
     (kind == expected).then(|| (kind.to_string(), hash.to_string()))
 }
 
-/// clew's own known_hosts: `<data dir>/known_hosts`. `None` without a data
-/// directory, or when the path could not be handed to `ssh` intact (see
-/// [`ssh_config_safe`]) — then no host can be trusted from inside clew.
+/// clew's own known_hosts: `<data dir>/known_hosts`, spelled as ssh reads it
+/// ([`ssh_path`]). `None` without a data directory, or when the path could
+/// not be handed to `ssh` intact (see [`ssh_config_safe`]) — then no host can
+/// be trusted from inside clew.
 pub fn known_hosts_path() -> Option<PathBuf> {
     let path = clew_core::lsp::store::data_root()?.join("known_hosts");
+    let path = PathBuf::from(ssh_path(path.to_str()?));
     ssh_config_safe(&path).then_some(path)
 }
 
@@ -1199,6 +1212,7 @@ mod tests {
     /// refused and the file left as it was. Running it without the lock (as
     /// this edit once did when locking failed) let a second clew process
     /// interleave between the read and the rename and lose an entry.
+    #[cfg(unix)]
     #[test]
     fn an_edit_that_cannot_lock_the_store_changes_nothing() {
         use std::os::unix::fs::PermissionsExt;
@@ -1531,7 +1545,10 @@ mod known_hosts_tests {
             split_known_hosts_list("/tmp/with space/kh", &|_| false),
             None
         );
-        for unsafe_path in ["/a\"b", "/a\\b", "/${HOME}/kh", "relative/kh", "/a\u{7}b"] {
+        // (A `\` is a separator on Windows, where it is read as one.)
+        #[cfg(not(windows))]
+        assert_eq!(split_known_hosts_list("/a\\b", &|_| false), None);
+        for unsafe_path in ["/a\"b", "/${HOME}/kh", "relative/kh", "/a\u{7}b"] {
             assert_eq!(
                 split_known_hosts_list(unsafe_path, &|_| false),
                 None,
@@ -1563,7 +1580,7 @@ mod known_hosts_tests {
                     format!(
                         "UserKnownHostsFile=\"/Users/me/.ssh/known_hosts_work\" \
                          \"/Users/me/100%%/kh\" \"{}\"",
-                        clew.display()
+                        ssh_path(&clew.to_string_lossy())
                     ),
                     "-o".into(),
                     "UpdateHostKeys=no".into(),
@@ -1639,9 +1656,11 @@ mod known_hosts_tests {
         ] {
             assert!(!ssh_config_safe(Path::new(bad)), "{bad}");
         }
-        assert!(ssh_config_safe(Path::new(
-            "/Users/me/Library/Application Support/clew/known_hosts"
-        )));
+        #[cfg(not(windows))]
+        let fine = "/Users/me/Library/Application Support/clew/known_hosts";
+        #[cfg(windows)]
+        let fine = "C:/Users/me/AppData/Roaming/clew/known_hosts";
+        assert!(ssh_config_safe(Path::new(fine)));
     }
 
     /// Trusting writes EXACTLY the key line shown, into clew's own
@@ -1692,6 +1711,7 @@ mod known_hosts_tests {
 
     /// A known_hosts clew cannot read (here a symlink planted at its name) is
     /// never overwritten: the trust fails and the link is left as it was.
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_known_hosts_is_never_overwritten() {
         let (result, still_link) = isolated("unreadable", |data| {
@@ -1815,6 +1835,7 @@ mod known_hosts_tests {
     }
 
     /// Like trusting, forgetting never rewrites a known_hosts it cannot read.
+    #[cfg(unix)]
     #[test]
     fn forgetting_never_overwrites_an_unreadable_known_hosts() {
         let (result, kept) = isolated("forget-unreadable", |data| {

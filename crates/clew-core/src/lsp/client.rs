@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::Command;
 
 use crate::framing::{self, CallError, EndReason, Failure, FrameError, Goodbye, Handled, Ids};
 
@@ -660,7 +659,7 @@ impl LspClient {
         root: &Path,
         init_options: Option<Value>,
     ) -> Result<Self, String> {
-        let mut command = Command::new(exe);
+        let mut command = crate::spawn::tokio_command(exe);
         command
             .args(args)
             .current_dir(root)
@@ -678,6 +677,8 @@ impl LspClient {
         let mut child = command
             .spawn()
             .map_err(|e| format!("failed to launch {}: {e}", exe.display()))?;
+        #[cfg(windows)]
+        crate::procgroup::adopt_tokio(&child);
 
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -1966,7 +1967,9 @@ fn parse_inlay_label(label: &Value) -> String {
     }
 }
 
-fn path_to_uri(path: &Path) -> String {
+/// The `file://` URI of `path`, as a language server (or an ACP agent)
+/// reads one: `file:///home/me/a.rs`, `file:///C:/work/a.rs`.
+pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().into_owned();
     // Only Windows spells a separator `\`. On unix it is an ordinary filename
     // character, and rewriting it there turned `back\slash.rs` into a URI

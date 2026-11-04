@@ -369,11 +369,7 @@ pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> 
 /// Path relative to the project root, for compact display in the overlays.
 pub(crate) fn rel_of(app: &App, path: &std::path::Path) -> String {
     match &app.proj.project {
-        Some(p) => path
-            .strip_prefix(&p.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string(),
+        Some(p) => clew_core::rel_string(path.strip_prefix(&p.root).unwrap_or(path)),
         None => path.to_string_lossy().to_string(),
     }
 }

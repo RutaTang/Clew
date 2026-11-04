@@ -1693,7 +1693,7 @@ pub enum LspMsg {
         stamp: Stamp,
         language: String,
         generation: u64,
-        result: Result<LspStagedCommand, String>,
+        result: Result<Box<LspStagedCommand>, String>,
     },
     /// The Language Servers panel's background listing finished: the store's
     /// installed servers (with their on-disk sizes) and, per language, where
@@ -1831,6 +1831,9 @@ pub enum WindowMsg {
     Moved,
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
+    /// Start resizing the window from one of its edges or corners: the
+    /// borderless window's own grips (`ui::resize_grips`).
+    ResizeDragged(iced::window::Direction),
     /// The window gained or lost focus (greys out the custom controls).
     FocusChanged(bool),
     /// The pointer entered or left the traffic-light cluster (shows the icons).
@@ -2579,6 +2582,7 @@ impl WindowMsg {
             | WindowMsg::Resized(..)
             | WindowMsg::Moved
             | WindowMsg::TitleBarDragged
+            | WindowMsg::ResizeDragged(..)
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
             | WindowMsg::Close

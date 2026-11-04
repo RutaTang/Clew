@@ -38,7 +38,7 @@ use clew_core::dapwire::{await_listening, connect_retry, from_first_frame};
 use clew_core::framing::{self, CallError, EndReason, Failure, FrameError, Handled, Ids};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::proto::{Breakpoint, DapEvent, EvalContext, Output, Scope, StackFrame, Variable};
@@ -114,7 +114,7 @@ impl DapClient {
         transport: Transport,
         announce: Duration,
     ) -> Result<(DapClient, DapEvents), String> {
-        let mut command = Command::new(adapter);
+        let mut command = clew_core::spawn::tokio_command(adapter);
         command
             .args(args)
             .current_dir(cwd)
@@ -133,6 +133,8 @@ impl DapClient {
             Transport::Stdio => {
                 command.stdin(std::process::Stdio::piped());
                 let mut child = command.spawn().map_err(spawn_failed)?;
+                #[cfg(windows)]
+                clew_core::procgroup::adopt_tokio(&child);
                 let stdin = child.stdin.take().ok_or("no stdin")?;
                 let stdout = child.stdout.take().ok_or("no stdout")?;
                 // Drain stderr: an adapter that logs enough to fill the pipe
@@ -145,6 +147,8 @@ impl DapClient {
             Transport::Tcp => {
                 command.stdin(std::process::Stdio::null());
                 let mut child = command.spawn().map_err(spawn_failed)?;
+                #[cfg(windows)]
+                clew_core::procgroup::adopt_tokio(&child);
                 if let Some(e) = child.stderr.take() {
                     tokio::spawn(drain(e));
                 }
@@ -174,6 +178,8 @@ impl DapClient {
             Transport::TcpOnStderr => {
                 command.stdin(std::process::Stdio::null());
                 let mut child = command.spawn().map_err(spawn_failed)?;
+                #[cfg(windows)]
+                clew_core::procgroup::adopt_tokio(&child);
                 let stdout = child.stdout.take().ok_or("no stdout")?;
                 let stderr = child.stderr.take().ok_or("no stderr")?;
                 let mut err = BufReader::new(stderr);
@@ -2263,7 +2269,7 @@ mod tests {
         // reaped yet, as the connect loop finds it.
         let dir = clew_core::testutil::TempDir::new("dap-connect-exit");
         let pidfile = dir.join("helper.pid");
-        let mut child = Command::new("/bin/sh")
+        let mut child = tokio::process::Command::new("/bin/sh")
             .arg("-c")
             .arg("sleep 30 >/dev/null 2>&1 & echo $! > \"$1\"; exit 0")
             .arg("sh")

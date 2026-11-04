@@ -1182,7 +1182,13 @@ mod tests {
             ),
             ("/p/src/a.c", ""),
         ]);
-        let src = "#include <util.h>\n#if 0\n#define PAGE 1\n#endif\n#ifdef _WIN32\n#define PAGE 2\n#endif\n#define GONE 1\n#undef GONE\nint p = PAGE + GONE;\n#define LATER 1\n";
+        // A group of another system's macro, which the host's own defines
+        // say is not set: `_WIN32` — or, on Windows, `__linux__`.
+        let foreign = if cfg!(windows) { "__linux__" } else { "_WIN32" };
+        let src = format!(
+            "#include <util.h>\n#if 0\n#define PAGE 1\n#endif\n#ifdef {foreign}\n#define PAGE 2\n#endif\n#define GONE 1\n#undef GONE\nint p = PAGE + GONE;\n#define LATER 1\n"
+        );
+        let src = src.as_str();
         let cx = Context {
             include_dirs: vec![PathBuf::from("/p/include")],
             ..Default::default()

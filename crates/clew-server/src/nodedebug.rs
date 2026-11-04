@@ -508,7 +508,7 @@ impl Adapter {
             })
             .unwrap_or_default();
         self.stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(false);
-        let mut command = tokio::process::Command::new(&self.node);
+        let mut command = clew_core::spawn::tokio_command(&self.node);
         command.arg("--inspect-brk=127.0.0.1:0");
         // TypeScript runs as Node runs it, its types stripped — blanked in
         // place, so each line is where the source has it.
@@ -1172,7 +1172,7 @@ fn is_typescript(program: &str) -> bool {
 async fn node_version(node: &std::path::Path) -> Result<(u32, u32), String> {
     let output = tokio::time::timeout(
         START_TIMEOUT,
-        tokio::process::Command::new(node)
+        clew_core::spawn::tokio_command(node)
             .arg("--version")
             .stdin(std::process::Stdio::null())
             .kill_on_drop(true)

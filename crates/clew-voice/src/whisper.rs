@@ -251,6 +251,75 @@ mod tests {
         let _ = std::fs::remove_file(&junk);
     }
 
+    /// Spoken commands, through everything voice does with them — the
+    /// clip resampled from its own rate, cut to its speech, transcribed with
+    /// the window's command names as the hint, and read as a command: each
+    /// must come out as the command it names. Opt in with
+    /// `CLEW_TEST_WHISPER_MODEL` (a real model) and
+    /// `CLEW_TEST_SPOKEN_COMMANDS`, a folder of WAV clips with a
+    /// `commands.txt` of `clip.wav|Title` lines.
+    #[test]
+    fn spoken_commands_come_out_as_the_commands_they_name() {
+        let (Ok(model), Ok(dir)) = (
+            std::env::var("CLEW_TEST_WHISPER_MODEL"),
+            std::env::var("CLEW_TEST_SPOKEN_COMMANDS"),
+        ) else {
+            eprintln!("skipped: set CLEW_TEST_WHISPER_MODEL and CLEW_TEST_SPOKEN_COMMANDS");
+            return;
+        };
+        const TITLES: &[&str] = &[
+            "Call Graph",
+            "Import Graph",
+            "Go to File…",
+            "Go to Symbol…",
+            "Go to Definition",
+            "Find References",
+            "Zoom In",
+            "Zoom Out",
+            "Overview",
+            "Stats",
+            "Settings",
+            "Sidebar: Files",
+            "Sidebar: Marks",
+            "View: Hide Minimap",
+            "View: Show Context Panel",
+            "Theme: Light",
+            "Theme: Dark",
+            "Explain All",
+        ];
+        let whisper = Whisper::load(Path::new(&model)).unwrap();
+        let options = Options {
+            hint: TITLES
+                .iter()
+                .map(|t| t.trim_end_matches('…'))
+                .collect::<Vec<_>>()
+                .join(", "),
+            ..Options::default()
+        };
+        let dir = Path::new(&dir);
+        let index = std::fs::read_to_string(dir.join("commands.txt")).unwrap();
+        let mut wrong = Vec::new();
+        for line in index.lines().filter(|l| !l.trim().is_empty()) {
+            let (clip, title) = line.split_once('|').unwrap();
+            let (samples, rate) =
+                crate::wav::read(&std::fs::read(dir.join(clip)).unwrap()).unwrap();
+            let audio = crate::audio::prepare(&samples, rate).expect("speech in the clip");
+            let started = std::time::Instant::now();
+            let text = whisper
+                .transcribe(&audio, &options, &AtomicBool::new(false))
+                .unwrap();
+            let heard = crate::intent::command(&text, TITLES).map(|i| TITLES[i]);
+            eprintln!(
+                "{clip} at {rate} Hz: {text:?} → {heard:?} in {:.1?}",
+                started.elapsed()
+            );
+            if heard != Some(title) {
+                wrong.push(format!("{clip}: {text:?} → {heard:?}, not {title}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+    }
+
     /// A real model, transcribing real speech: opt in with
     /// `CLEW_TEST_WHISPER_MODEL` (a ggml model, such as whisper.cpp's
     /// `ggml-tiny.en.bin`) and `CLEW_TEST_WHISPER_WAV` (a PCM WAV, such as

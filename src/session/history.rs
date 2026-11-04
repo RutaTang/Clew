@@ -727,9 +727,8 @@ pub fn to_text(root: &Path, h: &History) -> Option<String> {
                 .loc
                 .path
                 .strip_prefix(root)
-                .unwrap_or(&n.loc.path)
-                .to_string_lossy()
-                .to_string(),
+                .map(clew_core::rel_string)
+                .unwrap_or_else(|_| n.loc.path.to_string_lossy().to_string()),
             line: n.loc.line,
             label: n.label.clone(),
             parent: n.parent,

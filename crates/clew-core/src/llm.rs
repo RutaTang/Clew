@@ -4278,6 +4278,8 @@ mod tests {
     /// around the proxy the user configured, API key included. Driven through
     /// each production call site, in a child that has the variable from birth
     /// (set here, it would race every request the tests beside it make).
+    // (Only Unix lets a variable hold bytes that are not text.)
+    #[cfg(unix)]
     #[test]
     fn a_proxy_variable_that_is_not_utf8_is_not_ignored() {
         use std::os::unix::ffi::OsStrExt;
@@ -4300,6 +4302,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "runs in a child process, from a_proxy_variable_that_is_not_utf8_is_not_ignored"]
     fn child_a_proxy_variable_that_is_not_utf8_is_not_ignored() {

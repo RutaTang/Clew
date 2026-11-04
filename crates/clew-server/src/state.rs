@@ -541,6 +541,7 @@ mod tests {
     /// answered `Refused`, which the client drops; one that failed — here the
     /// edit ledger cannot be written — `Failed`, which it sends again. Both
     /// used to be `Failed`, and the client dropped every one.
+    #[cfg(unix)]
     #[test]
     fn a_refused_merge_and_a_failed_one_are_told_apart() {
         use std::os::unix::fs::PermissionsExt;

@@ -109,8 +109,8 @@ pub fn in_walked_folder(rel: &Path, folders: &HashSet<String>) -> bool {
     let parent = rel.parent().unwrap_or(Path::new(""));
     parent.as_os_str().is_empty()
         || parent.components().count() >= MAX_TREE_DEPTH
-        || parent.to_str().is_some_and(|p| folders.contains(p))
-        || rel.to_str().is_some_and(|r| folders.contains(r))
+        || folders.contains(&crate::rel_string(parent))
+        || folders.contains(&crate::rel_string(rel))
 }
 
 /// Directories a code reader should never scan: clew/git internals, and the

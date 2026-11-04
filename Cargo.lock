@@ -759,6 +759,7 @@ dependencies = [
  "rfd",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "toml 1.1.3+spec-1.1.0",
  "unicode-segmentation",
@@ -821,6 +822,7 @@ dependencies = [
  "ureq",
  "url",
  "webpki-roots",
+ "windows-sys 0.61.2",
  "zip",
 ]
 
@@ -854,6 +856,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "sha1",
+ "sha2 0.11.0",
  "whisper-rs",
 ]
 

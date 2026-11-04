@@ -87,6 +87,7 @@ objc2-foundation = { version = "0.3", features = [
 
 [dev-dependencies]
 iced_test = "0.14"
+socket2 = "0.6"
 
 [[bin]]
 name = "clew"

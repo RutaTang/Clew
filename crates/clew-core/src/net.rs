@@ -97,7 +97,6 @@ use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -2461,36 +2460,23 @@ fn connect_with(
         } else {
             deadline
         };
-        let mut polled: Vec<libc::pollfd> = attempts
-            .iter()
-            .map(|attempt| libc::pollfd {
-                fd: attempt.socket.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            })
-            .collect();
         // At least a millisecond: a wait of none returns at once, and spins.
         let millis = wake
             .saturating_duration_since(now)
             .min(TICK)
             .as_millis()
-            .max(1) as libc::c_int;
-        // SAFETY: `polled` holds one valid `pollfd` per attempt, for a socket
-        // `attempts` keeps open throughout, and is as long as it says.
-        let ready =
-            unsafe { libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, millis) };
-        if ready < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::Interrupted {
-                return Err(e);
-            }
-            continue;
-        }
+            .max(1) as i32;
+        let sockets: Vec<&socket2::Socket> = attempts.iter().map(|a| &a.socket).collect();
+        let polled = match sockets::settled(&sockets, millis) {
+            Ok(polled) => polled,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         // The attempts that ended, the last first, so the rest keep their
         // places: the first that connected wins, and one that failed makes
         // way for the next address.
         for at in (0..attempts.len()).rev() {
-            if polled[at].revents == 0 {
+            if !polled[at] {
                 continue;
             }
             let attempt = attempts.swap_remove(at);
@@ -2570,10 +2556,9 @@ fn telling(e: &io::Error) -> u8 {
         | io::ErrorKind::NetworkDown
         | io::ErrorKind::AddrNotAvailable
         | io::ErrorKind::PermissionDenied => 2,
-        _ if matches!(
-            e.raw_os_error(),
-            Some(libc::EAFNOSUPPORT | libc::EPFNOSUPPORT | libc::EPROTONOSUPPORT)
-        ) =>
+        _ if e
+            .raw_os_error()
+            .is_some_and(|code| sockets::NO_SUCH_FAMILY.contains(&code)) =>
         {
             2
         }
@@ -2596,8 +2581,10 @@ fn start_attempt(
     match socket.connect(&addr.into()) {
         Ok(()) => {}
         // Under way; an interrupted connect goes on without its caller too.
+        // (Windows says a connect under way would block.)
         Err(e)
-            if e.raw_os_error() == Some(libc::EINPROGRESS)
+            if e.raw_os_error() == Some(sockets::IN_PROGRESS)
+                || e.kind() == io::ErrorKind::WouldBlock
                 || e.kind() == io::ErrorKind::Interrupted => {}
         Err(e) => return Err(e),
     }
@@ -2952,17 +2939,123 @@ impl Transport for Tcp {
         if self.abandoned() {
             return false;
         }
+        sockets::nothing_waiting(&self.stream)
+    }
+}
+
+/// The socket calls the standard library has no way to make: waiting on
+/// several connects at once, and looking at what is waiting on a connection
+/// without waiting for it — `poll` and `recv` on Unix, their Winsock
+/// counterparts on Windows.
+mod sockets {
+    use std::io;
+    use std::net::TcpStream;
+
+    /// The error of a non-blocking connect that is under way.
+    #[cfg(unix)]
+    pub(super) const IN_PROGRESS: i32 = libc::EINPROGRESS;
+    #[cfg(windows)]
+    pub(super) const IN_PROGRESS: i32 = windows_sys::Win32::Networking::WinSock::WSAEINPROGRESS;
+
+    /// The errors of an address family (or protocol) this machine has none
+    /// of: IPv6 on a host without it.
+    #[cfg(unix)]
+    pub(super) const NO_SUCH_FAMILY: [i32; 3] = [
+        libc::EAFNOSUPPORT,
+        libc::EPFNOSUPPORT,
+        libc::EPROTONOSUPPORT,
+    ];
+    #[cfg(windows)]
+    pub(super) const NO_SUCH_FAMILY: [i32; 3] = {
+        use windows_sys::Win32::Networking::WinSock::{
+            WSAEAFNOSUPPORT, WSAEPFNOSUPPORT, WSAEPROTONOSUPPORT,
+        };
+        [WSAEAFNOSUPPORT, WSAEPFNOSUPPORT, WSAEPROTONOSUPPORT]
+    };
+
+    /// Which of `sockets`, each connecting without blocking, have settled —
+    /// connected, or failed — waiting up to `millis` for one to.
+    #[cfg(unix)]
+    pub(super) fn settled(sockets: &[&socket2::Socket], millis: i32) -> io::Result<Vec<bool>> {
+        use std::os::fd::AsRawFd;
+        let mut polled: Vec<libc::pollfd> = sockets
+            .iter()
+            .map(|socket| libc::pollfd {
+                fd: socket.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `polled` holds one valid `pollfd` per socket, each held
+        // open by the caller throughout, and is as long as it says.
+        let ready = unsafe {
+            libc::poll(
+                polled.as_mut_ptr(),
+                polled.len() as libc::nfds_t,
+                millis as libc::c_int,
+            )
+        };
+        if ready < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(polled.iter().map(|p| p.revents != 0).collect())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn settled(sockets: &[&socket2::Socket], millis: i32) -> io::Result<Vec<bool>> {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            POLLWRNORM, SOCKET_ERROR, WSAGetLastError, WSAPOLLFD, WSAPoll,
+        };
+        let mut polled: Vec<WSAPOLLFD> = sockets
+            .iter()
+            .map(|socket| WSAPOLLFD {
+                fd: socket.as_raw_socket() as usize,
+                events: POLLWRNORM,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `polled` holds one valid `WSAPOLLFD` per socket, each held
+        // open by the caller throughout, and is as long as it says. A
+        // connect that fails reports POLLERR / POLLHUP in `revents`.
+        let ready = unsafe { WSAPoll(polled.as_mut_ptr(), polled.len() as u32, millis) };
+        if ready == SOCKET_ERROR {
+            // SAFETY: no arguments; reads this thread's last Winsock error.
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+        Ok(polled.iter().map(|p| p.revents != 0).collect())
+    }
+
+    /// Whether nothing is waiting to be read on `stream` and it is still
+    /// open: a one-byte peek that does not wait, and finds nothing yet.
+    #[cfg(unix)]
+    pub(super) fn nothing_waiting(stream: &TcpStream) -> bool {
+        use std::os::fd::AsRawFd;
         let mut probe = [0u8; 1];
-        // SAFETY: a socket this transport owns, and a one-byte buffer.
+        // SAFETY: a socket the caller owns, and a one-byte buffer.
         let peeked = unsafe {
             libc::recv(
-                self.stream.as_raw_fd(),
+                stream.as_raw_fd(),
                 probe.as_mut_ptr().cast(),
                 probe.len(),
                 libc::MSG_PEEK | libc::MSG_DONTWAIT,
             )
         };
         peeked < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    }
+
+    /// (Winsock has no flag for a peek that does not wait: the socket is
+    /// made non-blocking for it, and blocking again after — a socket that
+    /// cannot be is not used again.)
+    #[cfg(windows)]
+    pub(super) fn nothing_waiting(stream: &TcpStream) -> bool {
+        if stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut probe = [0u8; 1];
+        let peeked = stream.peek(&mut probe);
+        stream.set_nonblocking(false).is_ok()
+            && matches!(peeked, Err(e) if e.kind() == io::ErrorKind::WouldBlock)
     }
 }
 
@@ -6982,13 +7075,7 @@ mod tests {
             let probe = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
             probe.set_nonblocking(true).unwrap();
             let _ = probe.connect(&addr.into());
-            let mut polled = libc::pollfd {
-                fd: probe.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-            // SAFETY: one valid `pollfd`, for a socket held open meanwhile.
-            let unanswered = unsafe { libc::poll(&mut polled, 1, 300) } == 0;
+            let unanswered = !sockets::settled(&[&probe], 300).unwrap()[0];
             if !unanswered && probe.take_error().ok().flatten().is_some() {
                 eprintln!("no black hole: this system refuses a connect to a full queue");
                 return None;

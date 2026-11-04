@@ -280,7 +280,11 @@ mod tests {
         ServerConfig {
             name: name.into(),
             transport: Transport::Stdio(Launch {
-                program: "/definitely/not/here/mcp-server".into(),
+                program: if cfg!(windows) {
+                    r"C:\definitely\not\here\mcp-server.exe".into()
+                } else {
+                    "/definitely/not/here/mcp-server".into()
+                },
                 ..Launch::default()
             }),
             enabled: true,

@@ -510,7 +510,11 @@ pub fn compile_databases(root: &Path) -> Vec<String> {
     ] {
         dirs.push(root.join(name));
     }
-    for parent in [root.join("build"), root.join("out/build"), root.join("out")] {
+    for parent in [
+        root.join("build"),
+        root.join("out").join("build"),
+        root.join("out"),
+    ] {
         dirs.extend(subdirs(&parent));
     }
     dirs.extend(subdirs(root).into_iter().filter(|d| {
@@ -1053,7 +1057,7 @@ fn solutions(root: &Path) -> Vec<ToolchainCandidate> {
         for path in found {
             let name = path
                 .strip_prefix(root)
-                .map(|r| r.to_string_lossy().into_owned())
+                .map(crate::rel_string)
                 .unwrap_or_default();
             out.push(ToolchainCandidate {
                 command: path.to_string_lossy().into_owned(),
@@ -1326,7 +1330,7 @@ exclude = ["crates/skip"]
                     .strip_prefix(root)
                     .unwrap()
                     .to_string_lossy()
-                    .into_owned()
+                    .replace('\\', "/")
             })
             .collect();
         assert_eq!(

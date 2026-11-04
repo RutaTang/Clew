@@ -1476,11 +1476,7 @@ fn exec_tool_basic(
             // for — while the gutter's blame, of the same file, has them.
             let tracked = std::fs::canonicalize(&ctx.root)
                 .ok()
-                .and_then(|root| {
-                    abs.strip_prefix(root)
-                        .ok()
-                        .map(|r| r.to_string_lossy().into_owned())
-                })
+                .and_then(|root| abs.strip_prefix(root).ok().map(clew_core::rel_string))
                 .unwrap_or_else(|| rel.to_string());
             // The project itself is no file, and git takes no name inside it
             // for it: said so, rather than as git refusing ".".
@@ -1617,12 +1613,9 @@ fn exec_tool_basic(
             let content = hits
                 .iter()
                 .map(|(node, score)| {
-                    let rel = node
-                        .path()
-                        .strip_prefix(&ctx.root)
-                        .unwrap_or(node.path())
-                        .to_string_lossy()
-                        .into_owned();
+                    let rel = clew_core::rel_string(
+                        node.path().strip_prefix(&ctx.root).unwrap_or(node.path()),
+                    );
                     let label = match node {
                         explain::Node::Function { name, .. } => format!("{rel} :: {name}"),
                         _ => rel.clone(),
@@ -1807,12 +1800,9 @@ fn exec_tool_basic(
             let cache = ctx.explain_cache.get_or_init(|| ctx.load_explain_cache());
             let mut lines: Vec<String> = Vec::new();
             for (node, cached) in cache.iter() {
-                let node_rel = node
-                    .path()
-                    .strip_prefix(&ctx.root)
-                    .unwrap_or(node.path())
-                    .to_string_lossy()
-                    .into_owned();
+                let node_rel = clew_core::rel_string(
+                    node.path().strip_prefix(&ctx.root).unwrap_or(node.path()),
+                );
                 if node_rel != rel {
                     continue;
                 }

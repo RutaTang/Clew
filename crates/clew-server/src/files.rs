@@ -145,7 +145,7 @@ pub(crate) fn list_dir(path: Option<String>) -> Event {
 }
 
 fn list_dir_capped(path: Option<String>, cap: usize) -> Event {
-    let home = std::env::var("HOME").ok();
+    let home = clew_core::home_dir().map(|h| h.to_string_lossy().into_owned());
     // Resolve the target directory: home when unset, `~`-expanded, else as given.
     let dir: PathBuf = match path.as_deref() {
         None | Some("") | Some("~") => match &home {
@@ -264,7 +264,9 @@ pub(crate) fn notebook_event(rel: String, nb: clew_core::notebook::Notebook) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{list_dir_capped, read_file_event};
+    use super::list_dir_capped;
+    #[cfg(unix)]
+    use super::read_file_event;
     use clew_protocol::Event;
 
     /// A link at the name a `ReadFile` asks for is no file of the project,

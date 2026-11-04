@@ -304,9 +304,7 @@ fn commit_cache(dir: &Path, verified: &VerifiedServer) -> Result<PathBuf, String
 
 /// Mark a release directory as used, so the sweep keeps it.
 fn touch(dir: &Path) {
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.set_modified(std::time::SystemTime::now());
-    }
+    let _ = crate::statefile::set_modified(dir, std::time::SystemTime::now());
 }
 
 /// Bounded housekeeping for `<data>/server-dist/`: every client version and
@@ -480,10 +478,7 @@ mod tests {
         }
         let old = std::time::SystemTime::now() - Duration::from_secs(30 * 24 * 60 * 60);
         for v in ["v1.0.0-p10", "v1.2.0-p12"] {
-            std::fs::File::open(dist.join(v))
-                .unwrap()
-                .set_modified(old)
-                .unwrap();
+            crate::statefile::set_modified(&dist.join(v), old).unwrap();
         }
         sweep_older_than(
             &dist,

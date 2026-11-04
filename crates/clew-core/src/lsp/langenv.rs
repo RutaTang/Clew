@@ -150,7 +150,7 @@ fn chosen_solution(root: &Path, chosen: &str) -> Option<PathBuf> {
 fn expand_home(chosen: &str) -> Option<PathBuf> {
     let chosen = chosen.trim();
     let path = match chosen.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        Some(rest) => crate::home_dir()?.join(rest),
         None => PathBuf::from(chosen),
     };
     path.is_absolute().then_some(path)
@@ -164,7 +164,7 @@ fn expand_home(chosen: &str) -> Option<PathBuf> {
 pub fn chosen_tsserver(chosen: &str) -> Option<PathBuf> {
     let chosen = chosen.trim();
     let path = match chosen.strip_prefix("~/") {
-        Some(rest) => PathBuf::from(std::env::var_os("HOME")?).join(rest),
+        Some(rest) => crate::home_dir()?.join(rest),
         None => PathBuf::from(chosen),
     };
     if !path.is_absolute() {
@@ -296,8 +296,8 @@ fn c_settings(root: &Path, c: &CChoices) -> Option<Value> {
         .filter(|d| !d.is_empty())
     {
         let dir = match dir.strip_prefix("~/") {
-            Some(rest) => match std::env::var_os("HOME") {
-                Some(home) => PathBuf::from(home).join(rest),
+            Some(rest) => match crate::home_dir() {
+                Some(home) => home.join(rest),
                 None => PathBuf::from(dir),
             },
             None => root.join(dir),
@@ -678,7 +678,7 @@ impl PythonHost {
     /// This process's host.
     pub fn current() -> PythonHost {
         PythonHost {
-            home: std::env::var_os("HOME").map(PathBuf::from),
+            home: crate::home_dir(),
             path: crate::linerpc::spawn_path(),
             vars: PYTHON_HOST_VARS
                 .iter()
@@ -1465,7 +1465,16 @@ mod tests {
         let root = scratch("realvenv");
         // By absolute path, never a bare name resolved against every PATH
         // entry.
-        let python3 = crate::lsp::store::find_on_path_unresolved("python3")
+        // (Windows' Python is `python`; its `python3`, where there is one, is
+        // the Store's stand-in.)
+        let names: &[&str] = if cfg!(windows) {
+            &["python", "python3"]
+        } else {
+            &["python3"]
+        };
+        let python3 = names
+            .iter()
+            .find_map(|name| crate::lsp::store::find_on_path_unresolved(name))
             .expect("this test needs python3 on PATH");
         let built = std::process::Command::new(python3)
             .args(["-m", "venv", "--without-pip", ".venv"])
@@ -1713,7 +1722,10 @@ mod tests {
         std::fs::write(lib.join("tsserver.js"), "// clew's own").unwrap();
         let tsserver = lib.join("tsserver.js");
         let opts = pinned(&server, &exe).unwrap().unwrap();
-        assert_eq!(opts["tsserver"]["path"], tsserver.to_str().unwrap());
+        assert_eq!(
+            Path::new(opts["tsserver"]["path"].as_str().unwrap()),
+            tsserver
+        );
 
         // Merged beneath everything: other options keep it…
         let root = scratch("tsproject");
@@ -1727,7 +1739,10 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        assert_eq!(kept["tsserver"]["path"], tsserver.to_str().unwrap());
+        assert_eq!(
+            Path::new(kept["tsserver"]["path"].as_str().unwrap()),
+            tsserver
+        );
         assert_eq!(kept["preferences"]["quotePreference"], "single");
         // …and an approved `tsserver.path` of the user's own still wins.
         let chosen = merge(
@@ -1753,6 +1768,7 @@ mod tests {
     }
 
     /// The Python server the registry resolves to, and a stand-in binary.
+    #[cfg(unix)]
     fn python_server() -> (crate::lsp::config::EffectiveServer, PathBuf) {
         let server = crate::lsp::config::ProjectLspConfig::default()
             .resolve("python")
@@ -1763,6 +1779,7 @@ mod tests {
         )
     }
 
+    #[cfg(unix)]
     fn choose(python: &Path) -> LanguageChoices {
         LanguageChoices {
             python: Some(python.to_string_lossy().into_owned()),
@@ -2108,7 +2125,7 @@ mod tests {
             ..Default::default()
         };
         let expected = json!({
-            "compilationDatabasePath": "/p/build/debug",
+            "compilationDatabasePath": root.join("build/debug"),
             "fallbackFlags": ["-DDEBUG", "-Iinclude"],
         });
         assert_eq!(chosen("c", root, &c), Some(expected.clone()));

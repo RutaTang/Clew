@@ -881,6 +881,7 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(elsewhere.join("secret.txt"), dir.join("link.rs")).unwrap();
         let pool = LspPool::new(dir.to_path_buf(), Default::default());
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut targets = vec![Target {
             path: elsewhere.canonicalize().unwrap().join("secret.txt"),
             line: 0,

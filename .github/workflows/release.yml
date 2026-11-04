@@ -11,9 +11,14 @@ name: Release
 #   - the macOS app: signed with a Developer ID, notarized (so it launches on
 #     other Macs with no Gatekeeper prompt), packed into a drag-to-Applications
 #     DMG. It is built AFTER the servers, because it embeds their digests.
+#   - the same app for Linux (x86_64, a .tar.gz) and Windows (x86_64, a .zip):
+#     `clew` and the `clew-server` it opens local projects with, side by side,
+#     with the license notices of both and a `.sha256` sidecar. Built after the
+#     servers too, for the same digests.
 #
 # Order: preflight (versions agree; fmt, clippy, rustdoc and the FULL test
-# suite pass) → server builds → app build → publish.
+# suite pass, on macOS, Linux and Windows) → server builds → app builds →
+# publish.
 #
 # Server digests embedded into the app — CLEW_SERVER_DIGESTS:
 #   The app job downloads the server jobs' artifacts, checks each binary against
@@ -82,8 +87,9 @@ env:
 jobs:
   # Nothing is built until the tag, the crate version and the protocol agree,
   # the toolchain pins agree, and the whole suite passes: fmt, clippy and
-  # rustdoc at `-D warnings`, and every workspace test, client included (the
-  # client is macOS-only, hence a macOS runner). A release that disagrees with
+  # rustdoc at `-D warnings`, and every workspace test, client included (here
+  # on macOS; `preflight-desktop` runs the client on Linux and Windows). A
+  # release that disagrees with
   # itself is the failure mode this guards: v0.1.12 shipped assets named for a
   # protocol its own source no longer spoke, so every fresh remote install
   # 404'd.
@@ -175,12 +181,72 @@ jobs:
       - name: Test (server + core + protocol)
         run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
 
+  # The client on Linux and Windows, as CI's `desktop` job runs it, for a tag
+  # on a commit CI never passed: the window, voice and every tool are shipped
+  # there too.
+  preflight-desktop:
+    name: Preflight · app tests on ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+            packages: -p clew -p clew-voice
+          - os: Windows
+            runner: windows-latest
+            packages: --workspace
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: desktop
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # The rendering tests measure real glyphs: a monospace face and a CJK
+      # one, as a Linux desktop has (a bare runner may have neither).
+      - name: Install fonts
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y fonts-dejavu-core fonts-noto-cjk
+      - name: Clippy (deny warnings)
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: cargo clippy $PACKAGES --all-targets --locked -- -D warnings
+      - name: Test (Linux, hermetic)
+        if: runner.os == 'Linux'
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: scripts/hermetic-test.sh $PACKAGES --locked
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: cargo test $PACKAGES --locked
+
   # Headless clew-server for the Linux remotes the client can auto-deploy to.
   # Static musl, so one binary per arch runs on any Linux. Remote macOS is not
   # supported yet, so no darwin targets.
   server:
     name: Server · ${{ matrix.slug }}
-    needs: [preflight, preflight-linux]
+    needs: [preflight, preflight-linux, preflight-desktop]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     permissions:
@@ -537,9 +603,172 @@ jobs:
   # One release for the tag, holding the DMG and every server binary. Only on a
   # tag push (a manual dispatch just builds, as a dry run). The only job with
   # write access, and it runs no code from the repository.
+  # The license notices of what the Linux and Windows apps compile in, read
+  # from `cargo tree` for each target. Made here, on Linux, for both: the
+  # script is a Unix shell script, and the dependency graph of a target does
+  # not depend on the machine that reads it.
+  desktop-notices:
+    name: App notices · Linux, Windows
+    needs: [preflight]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - name: Notices for each app
+        run: |
+          set -euo pipefail
+          mkdir -p notices
+          for pair in linux-x86_64:x86_64-unknown-linux-gnu windows-x86_64:x86_64-pc-windows-msvc; do
+            slug="${pair%%:*}"; target="${pair#*:}"
+            cargo fetch --locked --target "$target"
+            scripts/third-party-notices.sh "notices/$slug.THIRD-PARTY-NOTICES.txt" --target "$target" clew clew-server
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: desktop-notices
+          path: notices/
+          if-no-files-found: error
+
+  # The app for Linux and Windows: `clew` and `clew-server` built for release,
+  # with this release's server digests embedded exactly as in the macOS app,
+  # packed with their notices. Not signed: clew does not update itself on
+  # these systems (its update notice opens the release page), and nothing in
+  # the archive asks for more than the user who unpacks it. The Linux build
+  # links the system's C library and ALSA's (libasound2); the window finds
+  # X11 or Wayland when it starts.
+  desktop:
+    name: App · ${{ matrix.os }}
+    needs: [preflight, server, desktop-notices]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+            slug: linux-x86_64
+          - os: Windows
+            runner: windows-latest
+            slug: windows-x86_64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      # No build cache here: this job builds a shipped app (see the top).
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch this release's server builds
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: clew-server-*
+          path: server-assets
+          merge-multiple: true
+      - name: Fetch the notices
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: desktop-notices
+          path: notices
+      # As in the macOS app job: exactly one digest per shipped slug, at this
+      # release's protocol, each binary checked against its own sidecar.
+      - name: Embed the server digests (CLEW_SERVER_DIGESTS)
+        env:
+          PROTO: ${{ needs.preflight.outputs.protocol }}
+        run: |
+          set -euo pipefail
+          test -n "$PROTO"
+          cd server-assets
+          for sum in clew-server-*.sha256; do
+            sha256sum -c "$sum"
+          done
+          LIST="$(cat clew-server-*.sha256)"
+          expected=0
+          for slug in $SERVER_SLUGS; do
+            name="clew-server-$slug-p$PROTO"
+            n=$(printf '%s\n' "$LIST" | grep -cE "^[0-9a-f]{64}  ${name}\$" || true)
+            if [[ "$n" -ne 1 ]]; then
+              echo "::error::the digest list must name $name exactly once (found $n)"
+              exit 1
+            fi
+            expected=$((expected + 1))
+          done
+          total=$(printf '%s\n' "$LIST" | grep -c . || true)
+          if [[ "$total" -ne "$expected" ]]; then
+            echo "::error::the digest list has $total entries, expected $expected:"
+            printf '%s\n' "$LIST"
+            exit 1
+          fi
+          {
+            echo 'CLEW_SERVER_DIGESTS<<CLEW_SERVER_DIGESTS_END'
+            printf '%s\n' "$LIST"
+            echo 'CLEW_SERVER_DIGESTS_END'
+          } >> "$GITHUB_ENV"
+      - name: Build clew and clew-server (release)
+        run: cargo build --release --locked -p clew -p clew-server
+      # The archive: one folder, named for the release and the platform, with
+      # both programs (clew looks for its server beside itself) and the
+      # notices. The server must start and speak this release's protocol.
+      - name: Package
+        env:
+          SLUG: ${{ matrix.slug }}
+          PROTO: ${{ needs.preflight.outputs.protocol }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            V="${GITHUB_REF#refs/tags/}"; V="${V#v}"
+          else
+            V="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          EXE=""
+          if [[ "$RUNNER_OS" == Windows ]]; then EXE=".exe"; fi
+          DIR="Clew-$V-$SLUG"
+          mkdir "$DIR"
+          cp "target/release/clew$EXE" "target/release/clew-server$EXE" "$DIR/"
+          cp "notices/$SLUG.THIRD-PARTY-NOTICES.txt" "$DIR/THIRD-PARTY-NOTICES.txt"
+          "$DIR/clew-server$EXE" --version | tee version.txt
+          grep -q "$PROTO" version.txt
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            ASSET="$DIR.zip"
+            7z a -tzip "$ASSET" "$DIR" >/dev/null
+          else
+            ASSET="$DIR.tar.gz"
+            tar -czf "$ASSET" "$DIR"
+          fi
+          sha256sum "$ASSET" > "$ASSET.sha256"
+          echo "ASSET=$ASSET" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET }}
+            ${{ env.ASSET }}.sha256
+          if-no-files-found: error
+
   publish:
     name: Publish the release
-    needs: [preflight, app, server]
+    needs: [preflight, app, desktop, server]
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -569,6 +798,13 @@ jobs:
             done
           done
           ls dist/*.dmg >/dev/null 2>&1 || { echo "::error::no DMG in the release"; missing=1; }
+          for app in "Clew-*-linux-x86_64.tar.gz" "Clew-*-windows-x86_64.zip"; do
+            # shellcheck disable=SC2086 # the pattern is meant to glob
+            if ! compgen -G "dist/$app" >/dev/null || ! compgen -G "dist/$app.sha256" >/dev/null; then
+              echo "::error::missing release asset $app (or its .sha256)"
+              missing=1
+            fi
+          done
           test "$missing" -eq 0
       - name: Attach all assets to the release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2

@@ -322,12 +322,12 @@ impl App {
                     } else {
                         None
                     };
-                    Ok(LspStagedCommand {
+                    Ok(Box::new(LspStagedCommand {
                         fingerprint,
                         source,
                         exec_path,
                         server,
-                    })
+                    }))
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("staging the command failed: {e}")))
@@ -353,7 +353,7 @@ impl App {
         language: String,
         generation: u64,
         root: PathBuf,
-        result: Result<LspStagedCommand, String>,
+        result: Result<Box<LspStagedCommand>, String>,
     ) -> Task<Message> {
         // (The project and the transport were checked in `dispatch`.)
         if self.lsp_gen.get(&language) != Some(&generation) {

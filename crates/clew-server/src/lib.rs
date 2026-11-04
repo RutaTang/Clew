@@ -2349,6 +2349,7 @@ mod tests {
     /// and when the connection closes: `LspInstall` hands the install the
     /// connection's stop flag, which both set. (In a child process: it needs
     /// a data dir, and a `go` of its own on PATH that only waits.)
+    #[cfg(unix)]
     #[test]
     fn an_install_stops_when_the_connection_leaves_the_project_or_closes() {
         use crate::test_support::{Scratch, fake_slow_go, run_in_child};
@@ -2361,6 +2362,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "runs in a child process, from an_install_stops_when_the_connection_leaves_the_project_or_closes"]
     fn child_install_stops_on_leave_and_close() {
@@ -3097,11 +3099,15 @@ mod tests {
         let scratch = crate::test_support::Scratch::new("sources-unreadable");
         let root = scratch.canonicalize().unwrap();
         // A name no file system takes, in a directory that is there: its
-        // lookup fails, whatever the permissions.
+        // lookup fails, whatever the permissions. (Windows may say of it
+        // only that it is not found: that half is Unix's.)
         std::fs::create_dir_all(root.join("src")).unwrap();
-        let long = format!("src/{}.rs", "n".repeat(300));
-        let lookup = std::fs::symlink_metadata(root.join(&long)).expect_err("no such name");
-        assert_eq!(settled_as(&root, &long), format!("unreadable: {lookup}"));
+        #[cfg(unix)]
+        {
+            let long = format!("src/{}.rs", "n".repeat(300));
+            let lookup = std::fs::symlink_metadata(root.join(&long)).expect_err("no such name");
+            assert_eq!(settled_as(&root, &long), format!("unreadable: {lookup}"));
+        }
         let gone = root.join("gone");
         let why = settled_as(&gone, "src/lib.rs");
         assert!(

@@ -614,10 +614,10 @@ impl App {
     /// `path` as the status line names a file: relative to the project.
     fn shown_path(&self, path: &Path) -> String {
         let root = self.proj.project.as_ref().map(|p| p.root.as_path());
-        root.and_then(|root| path.strip_prefix(root).ok())
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        clew_core::rel_string(
+            root.and_then(|root| path.strip_prefix(root).ok())
+                .unwrap_or(path),
+        )
     }
 
     pub(crate) fn request_auto_refresh(&mut self) -> Task<Message> {
@@ -871,11 +871,7 @@ impl App {
         let remote_rel = (!self.local_project_state())
             .then(|| self.proj.project.as_ref().map(|p| p.root.clone()))
             .flatten()
-            .and_then(|root| {
-                file.strip_prefix(&root)
-                    .ok()
-                    .map(|r| r.to_string_lossy().into_owned())
-            });
+            .and_then(|root| file.strip_prefix(&root).ok().map(clew_core::rel_string));
         // The local gather reads this disk, so it needs the project root to
         // confine that read to.
         let root = self.proj.project.as_ref().map(|p| p.root.clone());

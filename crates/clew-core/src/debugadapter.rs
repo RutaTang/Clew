@@ -456,7 +456,7 @@ fn build_zig(zig: &Path, source: &Path, cwd: &Path) -> Result<PathBuf, String> {
         false => stem,
     });
     let build = |llvm: bool| {
-        let mut cmd = Command::new(zig);
+        let mut cmd = crate::spawn::command(zig);
         cmd.args(["build-exe", "-O", "Debug"]);
         if llvm {
             cmd.arg("-fllvm");
@@ -932,7 +932,7 @@ fn probe_python(python: &Path) -> Result<PythonProbe, String> {
 }
 
 fn probe_python_within(python: &Path, limit: Duration) -> Result<PythonProbe, String> {
-    let mut cmd = Command::new(python);
+    let mut cmd = crate::spawn::command(python);
     cmd.args(["-c", PROBE]);
     neutral(&mut cmd);
     let out = store::run_bounded(cmd, limit)
@@ -987,7 +987,7 @@ fn pip_args(user: bool) -> Vec<String> {
 }
 
 fn pip_command(python: &Path, user: bool) -> Command {
-    let mut cmd = Command::new(python);
+    let mut cmd = crate::spawn::command(python);
     cmd.args(pip_args(user));
     neutral(&mut cmd);
     cmd
@@ -1057,7 +1057,7 @@ fn xcrun_find(tool: &str) -> Option<PathBuf> {
     if !cfg!(target_os = "macos") || !Path::new(XCRUN).is_file() {
         return None;
     }
-    let mut cmd = Command::new(XCRUN);
+    let mut cmd = crate::spawn::command(XCRUN);
     cmd.args(["-f", tool]).current_dir("/");
     let out = store::run_bounded(cmd, XCRUN_TIMEOUT).ok()?;
     if !out.status.success() {
@@ -1180,8 +1180,12 @@ pub fn bridge_args(transport: AdapterTransport, command: &Path, args: &[String])
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lsp::store::testing::{script, with_store};
-    use crate::testutil::{EnvVars, TempDir};
+    #[cfg(unix)]
+    use crate::lsp::store::testing::script;
+    use crate::lsp::store::testing::with_store;
+    #[cfg(unix)]
+    use crate::testutil::EnvVars;
+    use crate::testutil::TempDir;
 
     /// A compile unit's DWARF: version 5 or 4, its language as `data1` or
     /// `data2`, after a `strp` producer, before an inline name.
@@ -1540,7 +1544,12 @@ mod tests {
             assert!(args.contains(&format!("debugpy=={DEBUGPY_VERSION}").as_str()));
             assert_eq!(args.contains(&"--user"), user);
             // Never run from the project: `-m pip` imports from the cwd.
-            assert_eq!(cmd.get_current_dir(), Some(Path::new("/")));
+            let neutral = if cfg!(unix) {
+                PathBuf::from("/")
+            } else {
+                std::env::temp_dir()
+            };
+            assert_eq!(cmd.get_current_dir(), Some(neutral.as_path()));
         }
         let js = AdapterInstall::JsDebug.describe();
         assert!(
@@ -1775,7 +1784,7 @@ mod tests {
                 panic!("installed now");
             };
             assert_eq!(spec.transport, AdapterTransport::Tcp);
-            assert_eq!(spec.args[0], entry.to_string_lossy());
+            assert_eq!(Path::new(&spec.args[0]), entry);
             assert_eq!(&spec.args[1..], ["0", "127.0.0.1"]);
         });
         let go = go_spec(PathBuf::from("/bin/dlv"), "/p", &[], Path::new("/p"), None);

@@ -693,7 +693,7 @@ impl Resolver {
         let rels: Vec<String> = files
             .iter()
             .filter_map(|f| f.strip_prefix(root).ok())
-            .map(|rel| rel.to_string_lossy().into_owned())
+            .map(clew_core::rel_string)
             .collect();
         r = r.with_manifests(&clew_core::imports::source_manifests(root, &rels));
         r
@@ -2080,8 +2080,14 @@ fn read_ts_configs(root: &Path, files: &[PathBuf]) -> TsConfigs {
         Ok(text) => text,
         Err(why) => {
             // Every file a resolve reads is under the root (`TsLoader`).
-            if let Some(rel) = path.strip_prefix(root).ok().and_then(Path::to_str) {
-                not_read.borrow_mut().push((rel.to_string(), why));
+            if let Some(rel) = path
+                .strip_prefix(root)
+                .ok()
+                .filter(|r| r.to_str().is_some())
+            {
+                not_read
+                    .borrow_mut()
+                    .push((clew_core::rel_string(rel), why));
             }
             None
         }
@@ -2259,9 +2265,9 @@ where
     let rel = |p: &Path| {
         p.strip_prefix(root)
             .ok()
-            .and_then(|r| r.to_str())
+            .filter(|r| r.to_str().is_some())
+            .map(clew_core::rel_string)
             .filter(|r| clew_core::statefile::safe_rel(r))
-            .map(str::to_string)
     };
     let mut texts: HashMap<PathBuf, String> = HashMap::new();
     let mut not_read: Vec<(String, TsNotRead)> = Vec::new();
@@ -4051,7 +4057,7 @@ fn rel_path(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
         .parent()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(clew_core::rel_string)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| ".".to_string())
 }

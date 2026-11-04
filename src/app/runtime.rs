@@ -448,6 +448,11 @@ impl App {
                 Some(id) => iced::window::drag(id),
                 None => Task::none(),
             },
+            // The system resizes it from here, as from a frame of its own.
+            WindowMsg::ResizeDragged(direction) => match self.main_window {
+                Some(id) => iced::window::drag_resize(id, direction),
+                None => Task::none(),
+            },
             WindowMsg::FocusChanged(focused) => {
                 self.window_focused = focused;
                 // The window coming to the front: the question in it is

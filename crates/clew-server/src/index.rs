@@ -270,12 +270,8 @@ pub(crate) fn build_project_calls_graph(
             )
         })
         .collect();
-    clew_core::projectcalls::ProjectCallGraph::build_from_calls(defs, &calls, &scope).to_wire(|p| {
-        p.strip_prefix(root)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .into_owned()
-    })
+    clew_core::projectcalls::ProjectCallGraph::build_from_calls(defs, &calls, &scope)
+        .to_wire(|p| clew_core::rel_string(p.strip_prefix(root).unwrap_or(p)))
 }
 
 /// Build the project's API documentation index: for every file with a

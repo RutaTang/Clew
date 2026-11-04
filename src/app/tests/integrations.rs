@@ -1241,6 +1241,8 @@ fn an_acp_agent_is_asked_only_about_a_local_project_it_knows() {
 
 #[test]
 fn the_settings_add_and_remove_servers_and_agents() {
+    // A program on PATH everywhere.
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
     let data = test_dir("integrations-settings");
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
@@ -1253,7 +1255,7 @@ fn the_settings_add_and_remove_servers_and_agents() {
     send(&mut app, IntegrationsMsg::McpName("gh".into()));
     send(
         &mut app,
-        IntegrationsMsg::McpTarget("sh -c 'exit 0' \"two words\"".into()),
+        IntegrationsMsg::McpTarget(format!("{shell} -c 'exit 0' \"two words\"")),
     );
     send(&mut app, IntegrationsMsg::McpExtra("TOKEN=abc".into()));
     send(&mut app, IntegrationsMsg::McpAdd);
@@ -1291,7 +1293,10 @@ fn the_settings_add_and_remove_servers_and_agents() {
     // Agents: a preset, then a custom one; the Ask panel's picker follows.
     send(&mut app, IntegrationsMsg::AcpPreset(0));
     send(&mut app, IntegrationsMsg::AcpName("mine".into()));
-    send(&mut app, IntegrationsMsg::AcpCommand("sh --acp".into()));
+    send(
+        &mut app,
+        IntegrationsMsg::AcpCommand(format!("{shell} --acp")),
+    );
     send(&mut app, IntegrationsMsg::AcpAdd);
     assert_eq!(
         app.acp_agents.len(),
@@ -1310,7 +1315,7 @@ fn the_settings_add_and_remove_servers_and_agents() {
 
     // A form that cannot be saved says why.
     send(&mut app, IntegrationsMsg::McpName("bad name".into()));
-    send(&mut app, IntegrationsMsg::McpTarget("sh".into()));
+    send(&mut app, IntegrationsMsg::McpTarget(shell.into()));
     send(&mut app, IntegrationsMsg::McpAdd);
     assert!(
         app.settings

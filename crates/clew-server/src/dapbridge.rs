@@ -29,7 +29,6 @@ use clew_core::dapwire::{self, Utf8Carry};
 use clew_core::framing::{read_message, write_frame};
 use serde_json::json;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
 use tokio::sync::Mutex;
 
 /// How long the adapter may take to announce its port.
@@ -112,7 +111,7 @@ where
     I: AsyncRead + Unpin + Send + 'static,
     O: tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
-    let mut child = Command::new(&bridge.command)
+    let mut child = clew_core::spawn::tokio_command(&bridge.command)
         .args(&bridge.args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

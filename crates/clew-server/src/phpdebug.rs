@@ -245,7 +245,7 @@ impl Adapter {
             .local_addr()
             .map_err(|e| format!("cannot listen for Xdebug: {e}"))?
             .port();
-        let mut command = tokio::process::Command::new(&self.php);
+        let mut command = clew_core::spawn::tokio_command(&self.php);
         command
             .args(xdebug_args(port))
             .arg(&program)
@@ -773,7 +773,7 @@ fn ask_control_socket(name: &str, _command: &str) -> Result<String, String> {
 
 /// Whether `php` has Xdebug loaded; an error saying how to get it if not.
 async fn xdebug_loaded(php: &Path) -> Result<(), String> {
-    let probe = tokio::process::Command::new(php)
+    let probe = clew_core::spawn::tokio_command(php)
         .args(["-r", "exit(extension_loaded('xdebug') ? 0 : 3);"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
