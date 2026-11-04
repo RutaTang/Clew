@@ -1552,10 +1552,13 @@ fn show(target: &SocksAddr, port: u16) -> String {
 }
 
 /// A socket whose every read and write must end by `deadline`: a proxy's
-/// handshake, which a proxy that stalls must not outlast.
+/// handshake, which a proxy that stalls must not outlast — nor an abandon of
+/// the request (`line`) once made.
 struct Timed<'a> {
     stream: &'a TcpStream,
     deadline: Instant,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    line: Option<&'a Line>,
 }
 
 impl Timed<'_> {
@@ -1571,6 +1574,10 @@ impl Timed<'_> {
 
 impl Read for Timed<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        await_readable(self.stream, Some(self.left()?), || {
+            self.line.is_some_and(Line::is_closed)
+        })?;
         self.stream.set_read_timeout(Some(self.left()?))?;
         let mut stream = self.stream;
         stream.read(buf)
@@ -1838,6 +1845,43 @@ impl std::error::Error for Abandoned {}
 
 fn abandoned() -> io::Error {
     io::Error::other(Abandoned)
+}
+
+/// Wait, on Windows, for `stream` to have something to read — input, its
+/// end, an error — before a read that would block on it. A thread blocked in
+/// `recv` there is not woken by another thread's `shutdown`, which is how an
+/// abandon ends a wait everywhere else ([`Line::close`]): the request went on
+/// waiting for a provider nobody would read, and the provider was never told
+/// to stop. So the wait is made here, a [`TICK`] at a time, with `abandoned`
+/// asked between; for `wait` at most (`None`: for as long as it takes).
+/// `Ok` once there is something to read; else the abandon ([`abandoned`]) or
+/// a timeout.
+#[cfg(windows)]
+fn await_readable(
+    stream: &TcpStream,
+    wait: Option<Duration>,
+    abandoned: impl Fn() -> bool,
+) -> io::Result<()> {
+    let began = Instant::now();
+    loop {
+        if abandoned() {
+            return Err(self::abandoned());
+        }
+        let tick = match wait {
+            Some(wait) => {
+                let left = wait.saturating_sub(began.elapsed());
+                if left.is_zero() {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+                }
+                left.min(TICK)
+            }
+            None => TICK,
+        };
+        let millis = i32::try_from(tick.as_millis()).unwrap_or(i32::MAX).max(1);
+        if sockets::readable(stream, millis)? {
+            return Ok(());
+        }
+    }
 }
 
 /// Whether `e` is an abandon's ([`abandoned`]).
@@ -2747,7 +2791,11 @@ impl Socks {
         // A name that does not resolve is the target's failure, not the
         // proxy's.
         let address = self.address(&target.host, target.port, &resolve)?;
-        let mut io = Timed { stream, deadline };
+        let mut io = Timed {
+            stream,
+            deadline,
+            line,
+        };
         self.handshake(&mut io, &address, target.port).map_err(|e| {
             if line.is_some_and(Line::is_closed) {
                 return abandoned().into();
@@ -2917,6 +2965,14 @@ impl Transport for Tcp {
         if self.buffers.input_append_buf().is_empty() {
             return Err(unending_line(&self.buffers));
         }
+        #[cfg(windows)]
+        if let Err(e) = await_readable(&self.stream, wait, || self.abandoned()) {
+            return Err(if is_abandon(&e) {
+                e.into()
+            } else {
+                self.failed(e, timeout, idle, true)
+            });
+        }
         let read = loop {
             match self.stream.read(self.buffers.input_append_buf()) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -3024,6 +3080,30 @@ mod sockets {
             return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
         }
         Ok(polled.iter().map(|p| p.revents != 0).collect())
+    }
+
+    /// Whether `stream` has something to read — input, its end, an error —
+    /// waiting up to `millis` for it.
+    #[cfg(windows)]
+    pub(super) fn readable(stream: &TcpStream, millis: i32) -> io::Result<bool> {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            POLLRDNORM, SOCKET_ERROR, WSAGetLastError, WSAPOLLFD, WSAPoll,
+        };
+        let mut polled = [WSAPOLLFD {
+            fd: stream.as_raw_socket() as usize,
+            events: POLLRDNORM,
+            revents: 0,
+        }];
+        // SAFETY: one valid `WSAPOLLFD` for a socket the caller holds open,
+        // and the length it has. The end of the connection and its errors
+        // report as POLLHUP / POLLERR, which a read then meets.
+        let ready = unsafe { WSAPoll(polled.as_mut_ptr(), 1, millis) };
+        if ready == SOCKET_ERROR {
+            // SAFETY: no arguments; reads this thread's last Winsock error.
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+        Ok(polled[0].revents != 0)
     }
 
     /// Whether nothing is waiting to be read on `stream` and it is still
@@ -7206,7 +7286,10 @@ mod tests {
                 open_socket(addr)
             }
         };
-        let refused = io::Error::from(io::ErrorKind::ConnectionRefused).to_string();
+        // The system's own words for a refused connection.
+        let refused = std::net::TcpStream::connect(closed)
+            .expect_err("nothing listens there")
+            .to_string();
         let lost = io::Error::from_raw_os_error(libc::ENETUNREACH).to_string();
         for addrs in [[closed, v6], [v6, closed]] {
             let deadline = Instant::now() + Duration::from_secs(10);

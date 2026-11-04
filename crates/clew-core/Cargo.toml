@@ -98,8 +98,11 @@ system-configuration = "0.8"
 # Winsock, for the socket calls std has no way to make (net.rs `sockets`):
 # waiting on several connects at once, and a peek that does not wait; and
 # job objects, Windows' process groups (procgroup.rs). The version socket2
-# and mio already bring in, so the build carries one copy.
+# and mio already bring in, so the build carries one copy. `same-file`
+# (walkdir's) tells one file under two spellings, which Windows gives no
+# inode to do by (fs_scan.rs).
 [target.'cfg(windows)'.dependencies]
+same-file = "1"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Networking_WinSock",

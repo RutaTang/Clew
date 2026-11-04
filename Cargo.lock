@@ -784,6 +784,7 @@ dependencies = [
  "ring",
  "rustls",
  "rustls-native-certs",
+ "same-file",
  "serde",
  "serde_json",
  "sha2 0.11.0",

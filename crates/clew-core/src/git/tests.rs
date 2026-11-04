@@ -2328,7 +2328,7 @@ fn git_runs_by_its_absolute_path_with_an_absolute_path() {
     let cmd = base_command(&dir);
     let program = Path::new(cmd.get_program());
     assert!(
-        program.is_absolute() && program.ends_with("git"),
+        program.is_absolute() && program.file_stem().is_some_and(|stem| stem == "git"),
         "{program:?}"
     );
     let path = cmd

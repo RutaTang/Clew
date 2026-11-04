@@ -21361,12 +21361,15 @@ fn a_late_provider_holds_its_port_until_it_answers() {
     let base = late.config.base_url.trim_end_matches("/v1").to_string();
     let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
     let at = ("127.0.0.1", port);
-    // (Windows lets a listener bind a port a connected socket holds: there
-    // the refused connection below is the whole of it.)
+    // Not yet. (Windows lets a listener bind a port a connected socket
+    // holds, and tries a refused connect again for a second or so — past the
+    // provider's start: there only the answer below shows.)
     #[cfg(unix)]
-    assert!(!bindable(port), "the port was let go of");
-    let refused = std::net::TcpStream::connect(at).expect_err("nothing answers yet");
-    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    {
+        assert!(!bindable(port), "the port was let go of");
+        let refused = std::net::TcpStream::connect(at).expect_err("nothing answers yet");
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
     let began = std::time::Instant::now();
     while std::net::TcpStream::connect(at).is_err() {
         assert!(

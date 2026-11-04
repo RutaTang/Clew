@@ -1236,9 +1236,10 @@ fn repository_top(real_root: &Path) -> PathBuf {
 ///     and costs neither a prompt nor any accuracy.
 ///   * The real file is inside the project but is byte-identical to the base
 ///     interpreter named by the venv's own `pyvenv.cfg`, whose `home` must
-///     itself resolve outside the project. A `--copies` venv, and every
-///     Windows venv, is a real copy, so without this arm they would be refused
-///     for being exactly what they are.
+///     itself resolve outside the project. A `--copies` venv is a real copy,
+///     so without this arm it would be refused for being exactly what it is;
+///     so is a Windows venv's interpreter, a copy of the base installation's
+///     venv launcher ([`windows_venv_launcher`]).
 ///
 /// What this prevents: a repository shipping `.venv/bin/python` as its own
 /// script or binary and having clew nominate it for execution. Repo-authored
@@ -1322,6 +1323,34 @@ fn copies_the_base_interpreter(repo: &Path, cand: &Path, real_cand: &Path) -> Op
             return Some(base);
         }
     }
+    windows_venv_launcher(repo, &home, real_cand)
+}
+
+/// The Windows arm of [`copies_the_base_interpreter`]. A Windows venv's
+/// `python.exe` is no copy of the base interpreter: it is the venv launcher
+/// the base installation ships — `venvlauncher.exe` beside it, or
+/// `Lib\venv\scripts\nt\python.exe` before Python 3.13 — which runs `home`'s
+/// own `python.exe`. A byte-for-byte copy of that launcher, from a `home`
+/// outside the project, runs the same bytes as the base; the base is what
+/// it returns. Every Windows venv was refused for being exactly what it is.
+#[cfg(windows)]
+fn windows_venv_launcher(repo: &Path, home: &Path, real_cand: &Path) -> Option<PathBuf> {
+    const LAUNCHERS: [&str; 3] = [
+        "venvlauncher.exe",
+        "Lib/venv/scripts/nt/python.exe",
+        "Lib/venv/scripts/nt/venvlauncher.exe",
+    ];
+    let base = std::fs::canonicalize(home.join("python.exe"))
+        .ok()
+        .filter(|base| !base.starts_with(repo))?;
+    LAUNCHERS.iter().find_map(|launcher| {
+        let launcher = std::fs::canonicalize(home.join(launcher)).ok()?;
+        (!launcher.starts_with(repo) && same_bytes(real_cand, &launcher)).then(|| base.clone())
+    })
+}
+
+#[cfg(not(windows))]
+fn windows_venv_launcher(_repo: &Path, _home: &Path, _real_cand: &Path) -> Option<PathBuf> {
     None
 }
 
