@@ -293,9 +293,8 @@ fn body(g: Glyph) -> &'static str {
         }
         Menu => "<path d='M4.5 7 H19.5'/><path d='M4.5 12 H19.5'/><path d='M4.5 17 H19.5'/>",
         More => {
-            "<circle cx='5.5' cy='12' r='1.3' fill='STROKE' stroke='none'/>\
-             <circle cx='12' cy='12' r='1.3' fill='STROKE' stroke='none'/>\
-             <circle cx='18.5' cy='12' r='1.3' fill='STROKE' stroke='none'/>"
+            "<circle cx='12' cy='12' r='1'/><circle cx='19' cy='12' r='1'/>\
+             <circle cx='5' cy='12' r='1'/>"
         }
         Filter => "<path d='M4 7 H20'/><path d='M7 12 H17'/><path d='M10 17 H14'/>",
         TextSearch => {

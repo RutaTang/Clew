@@ -721,9 +721,11 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
                 Message::Settings(SettingsMsg::Open),
             ),
         };
+        // Its menu open, the ⋯ is lit: drawn in the text's colour.
         let on = tool == StripTool::More && app.show_tools_menu;
+        let tint = if on { theme::fg() } else { theme::fg_muted() };
         tip_at(
-            icon_button(glyph, theme::fg_muted(), on).on_press(msg),
+            icon_button(glyph, tint, on).on_press(msg),
             label,
             shortcut,
             tooltip::Position::Left,
