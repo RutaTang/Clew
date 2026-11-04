@@ -779,10 +779,14 @@ pub(crate) fn append_tree_rows<'a>(
             .align_x(iced::Center),
             quiet_icon(Glyph::Folder, theme::fg_muted()),
             // A name in the order it is spelled (`highlight::in_order`).
-            text(crate::highlight::in_order(name))
-                .size(ts::BASE)
-                .color(theme::fg_muted())
-                .wrapping(Wrapping::None),
+            ts::set_in(
+                text(crate::highlight::in_order(name))
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::None),
+                TREE_ROW_H,
+                ts::INTER,
+                ts::BASE,
+            ),
         ]
         .spacing(6)
         .height(Fill)
@@ -825,19 +829,23 @@ pub(crate) fn append_tree_rows<'a>(
                     theme::dim()
                 }
             ),
-            text(crate::highlight::in_order(name))
-                .size(ts::BASE)
-                .font(if is_current {
-                    crate::fonts::UI_MEDIUM
-                } else {
-                    crate::fonts::UI
-                })
-                .color(if is_current {
-                    theme::fg()
-                } else {
-                    theme::fg_muted()
-                })
-                .wrapping(Wrapping::None),
+            ts::set_in(
+                text(crate::highlight::in_order(name))
+                    .font(if is_current {
+                        crate::fonts::UI_MEDIUM
+                    } else {
+                        crate::fonts::UI
+                    })
+                    .color(if is_current {
+                        theme::fg()
+                    } else {
+                        theme::fg_muted()
+                    })
+                    .wrapping(Wrapping::None),
+                TREE_ROW_H,
+                ts::INTER,
+                ts::BASE,
+            ),
             mark,
         ]
         .spacing(6)

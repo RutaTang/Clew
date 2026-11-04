@@ -390,9 +390,23 @@ const APPROVE_BUTTON_H: f32 = 30.0;
 const APPROVE_GAP: f32 = 12.0;
 /// Size of what an approval says it does, under its question.
 const APPROVE_DETAIL_SIZE: f32 = 12.0;
-/// Widest the question's bubble grows: the design's 82% of the card's
-/// 588 px text column.
-const BUBBLE_MAX_W: f32 = 482.0;
+/// Size of the "Said" over a question said rather than typed, and of its
+/// microphone: the design's 11.
+const SAID_SIZE: f32 = 11.0;
+/// Widest the question's bubble grows, of the conversation's text column:
+/// the design's 82%.
+const BUBBLE_SHARE: f32 = 0.82;
+
+/// The width of the conversation's text column: the card's, or the
+/// margin's while it is kept there, less the 16 either side.
+fn conversation_width(app: &App) -> f32 {
+    let panel = if crate::ui::askfloat::ask_in_margin(app) {
+        app.right_width
+    } else {
+        crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width)
+    };
+    panel - 32.0
+}
 /// Room for each of the composer's optional rows (the pinned code, an ACP
 /// agent's settings) over the input.
 const COMPOSER_ROW_ROOM: f32 = 36.0;
@@ -461,23 +475,33 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
     }
+    // The question's bubble grows to the design's 82% of the column it is
+    // in: the card's, or the margin's.
+    let bubble_max = BUBBLE_SHARE * conversation_width(app);
     for turn in &app.proj.ask_turns {
-        // A question said rather than typed is marked so, over it.
-        let said: Element<'_, Message> = if turn.spoken {
-            row![
-                glyph::icon(Glyph::Mic, theme::dim(), 11.0),
-                text("Said").size(ts::CAPTION).color(theme::dim()),
-            ]
-            .spacing(5)
-            .align_y(iced::Center)
-            .into()
-        } else {
-            slot()
-        };
+        // A question said rather than typed is marked so, over it (with
+        // the design's 4 between them; a typed one has neither).
+        let mut asked = Column::new()
+            .spacing(4)
+            .align_x(iced::alignment::Horizontal::Right);
+        if turn.spoken {
+            asked = asked.push(
+                row![
+                    glyph::icon(Glyph::Mic, theme::dim(), SAID_SIZE),
+                    ts::set_in(
+                        text("Said").color(theme::dim()),
+                        ts::INTER.normal(SAID_SIZE),
+                        ts::INTER,
+                        SAID_SIZE,
+                    ),
+                ]
+                .spacing(5)
+                .align_y(iced::Center),
+            );
+        }
         convo.push(
             container(
-                column![
-                    said,
+                asked.push(
                     container(
                         text(turn.question.as_str())
                             .size(ts::BASE)
@@ -486,23 +510,21 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                     )
                     .padding([9, 12])
                     // As wide as its words up to the design's 82% of the
-                    // card's text column; a question that runs on to a
-                    // second line takes all of that, its lines ragged
-                    // inside it, as the design sets it.
+                    // text column; a question that runs on to a second
+                    // line takes all of that, its lines ragged inside it,
+                    // as the design sets it.
                     .width(
                         if super::sheet::text_width(&turn.question, ts::BASE, crate::fonts::UI)
-                            > BUBBLE_MAX_W - 24.0
+                            > bubble_max - 24.0
                         {
-                            Length::Fixed(BUBBLE_MAX_W)
+                            Length::Fixed(bubble_max)
                         } else {
                             Length::Shrink
                         },
                     )
-                    .max_width(BUBBLE_MAX_W)
+                    .max_width(bubble_max)
                     .style(theme::bubble),
-                ]
-                .spacing(4)
-                .align_x(iced::alignment::Horizontal::Right),
+                ),
             )
             .width(Fill)
             .align_x(iced::alignment::Horizontal::Right)
@@ -680,7 +702,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             let count: Element<'_, Message> = if more > 0 {
                 text(format!("{more} more waiting after this one"))
                     .size(ts::CAPTION)
-                    .line_height(ts::NORMAL_LINE)
+                    .line_height(ts::normal_line(ts::CAPTION))
                     .color(theme::dim())
                     .into()
             } else {
@@ -1108,7 +1130,7 @@ pub(crate) fn approval_card<'a>(
     let mut asks = column![
         text(approval.title.clone())
             .size(ts::BASE)
-            .line_height(ts::NORMAL_LINE)
+            .line_height(ts::normal_line(ts::BASE))
             .font(crate::fonts::UI_SEMIBOLD)
             .color(theme::fg())
     ]
@@ -1117,7 +1139,7 @@ pub(crate) fn approval_card<'a>(
         asks = asks.push(
             text(approval.detail.clone())
                 .size(APPROVE_DETAIL_SIZE)
-                .line_height(ts::NORMAL_LINE)
+                .line_height(ts::normal_line(APPROVE_DETAIL_SIZE))
                 .font(if code {
                     crate::fonts::CODE
                 } else {

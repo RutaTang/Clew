@@ -1211,8 +1211,21 @@ pub struct App {
     pub window_outer: iced::Size,
     /// The width of the frame Clew draws round its borderless window (the
     /// design's 1 px border), `0` where there is none: on macOS, whose
-    /// window keeps the system's, and while the window is maximized.
+    /// window keeps the system's, and while the window fills the screen.
     pub window_frame: f32,
+    /// The radius Clew rounds its window's corners to (the design's 12),
+    /// `0` where it leaves them square: on macOS and Windows, which round
+    /// the window themselves; and on Linux while the window fills the
+    /// screen, or where its corners cannot be left clear (see
+    /// [`Self::composited`] and [`Self::software_renderer`]).
+    pub window_radius: f32,
+    /// Whether the window system composites the window over the desktop,
+    /// so a corner left clear shows what is under it: always on Wayland;
+    /// on X while a compositing manager runs (`app::corners`).
+    pub composited: bool,
+    /// Whether iced draws the window with its software renderer, whose
+    /// Wayland surface has no alpha to leave a corner clear with.
+    pub software_renderer: bool,
     /// Whether the window has keyboard focus. The custom traffic-light controls
     /// grey out when it doesn't, like native macOS.
     pub window_focused: bool,

@@ -95,6 +95,7 @@ pub fn main() -> iced::Result {
         .title(shell::title)
         .theme(shell::theme)
         .subscription(shell::subscription)
+        .style(shell::style)
         // Embed the icon font (Nerd Font symbols) for file-type icons, and
         // the two typefaces Clew is set in: Inter, the interface's default,
         // and JetBrains Mono for code.
@@ -128,7 +129,14 @@ pub(crate) fn window_settings() -> iced::window::Settings {
         titlebar_transparent: true,
         fullsize_content_view: true,
     };
-    #[cfg(not(target_os = "macos"))]
+    // Windows 11 rounds the borderless window's corners itself, as the
+    // design's are (its own radius; Windows 10 has none to round with).
+    #[cfg(target_os = "windows")]
+    let platform_specific = iced::window::settings::PlatformSpecific {
+        corner_preference: iced::window::settings::platform::CornerPreference::Round,
+        ..iced::window::settings::PlatformSpecific::default()
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let platform_specific = iced::window::settings::PlatformSpecific::default();
 
     iced::window::Settings {
@@ -140,9 +148,11 @@ pub(crate) fn window_settings() -> iced::window::Settings {
         // macOS keeps decorations on (a standard, tile-manageable window) and
         // hides the chrome in AppKit; elsewhere, borderless is the frameless look.
         decorations: cfg!(target_os = "macos"),
-        // The rounded corners are clipped from the content layer (see
-        // `macos::configure_frameless`), which needs the window surface to carry
-        // an alpha channel so the clipped-away corners composite over the desktop.
+        // The rounded corners are clipped from the content layer on macOS (see
+        // `macos::configure_frameless`), and left clear by Clew's own drawing
+        // on Linux (`ui::window_radius_for`): either needs the window surface
+        // to carry an alpha channel, for the corners to composite over the
+        // desktop.
         transparent: true,
         // A close the OS asks for (a window manager, the Accessibility API)
         // comes to the shell as a request, like ⌘W: a window holding edits it

@@ -1088,9 +1088,13 @@ const NOTE_H: f32 = 104.0;
 const ACTIVE_NOTE_H: f32 = 193.0;
 /// Room kept between notes that would otherwise overlap.
 const NOTE_GAP: f32 = 8.0;
-/// How far the raised card reaches above its function's first line: its
-/// name is level with the line, as a plain note's is.
-const ACTIVE_NOTE_LIFT: f32 = 9.0;
+/// How far the raised card reaches above its function's first line: the
+/// design's 9, and the pixel of the edge it draws round itself (outside its
+/// box, where iced draws a border inside), so its name is where the
+/// design's is.
+const ACTIVE_NOTE_LIFT: f32 = 10.0;
+/// The raised card's edge: the design draws it as a ring round the card.
+const NOTE_EDGE: f32 = 1.0;
 
 /// The margin's Notes: clew's note on each function of the open file,
 /// level with the function in the code; the note on the one the caret is
@@ -1240,15 +1244,17 @@ fn notes_beside_code<'a>(
             end = top + h;
             floor = end + NOTE_GAP;
         }
+        // The design's 4 and 12 to a note's box, less the edge the raised
+        // card draws outside its own: a plain note pads that pixel back.
         container(col)
             .width(Fill)
             .height(Fill)
             .clip(true)
             .padding(Padding {
                 top: 0.0,
-                right: 12.0,
+                right: 12.0 - NOTE_EDGE,
                 bottom: 0.0,
-                left: 4.0,
+                left: 4.0 - NOTE_EDGE,
             })
             .into()
     })
@@ -1258,9 +1264,16 @@ fn notes_beside_code<'a>(
 /// A note's head: the name it is about (as code, for a function) and what
 /// kind of thing that is, where.
 fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Element<'a, Message> {
+    // Each in its face's own line height, as the design sets the head: the
+    // row as tall as the taller, the two on one baseline.
     row![
         text(name)
             .size(NOTE_NAME_SIZE)
+            .line_height(if code {
+                ts::normal_line_code(NOTE_NAME_SIZE)
+            } else {
+                ts::normal_line(NOTE_NAME_SIZE)
+            })
             .font(if code {
                 crate::fonts::CODE_SEMIBOLD
             } else {
@@ -1275,6 +1288,7 @@ fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Elemen
         space().width(Fill),
         text(meta)
             .size(ts::SMALL)
+            .line_height(ts::normal_line(ts::SMALL))
             .color(theme::dim())
             .wrapping(Wrapping::None),
     ]
@@ -1307,7 +1321,7 @@ fn plain_note<'a>(
     .style(theme::menu_row)
     .width(Fill)
     .height(Fill)
-    .padding([3, 14])
+    .padding([3.0, 14.0 + NOTE_EDGE])
     .on_press(Message::Editor(EditorMsg::OutlineJump(line)))
     .into()
 }
@@ -1539,12 +1553,12 @@ fn active_note<'a>(
     )
     .width(Fill)
     .height(Fill)
-    // The design's 12 and 14, inside the border drawn over the card's edge.
+    // The design's 12 and 14, inside the edge iced draws in the card's box.
     .padding(Padding {
-        top: 13.0,
-        right: 15.0,
-        bottom: 13.0,
-        left: 15.0 - NOTE_ACTION_PAD_X,
+        top: 12.0 + NOTE_EDGE,
+        right: 14.0 + NOTE_EDGE,
+        bottom: 12.0 + NOTE_EDGE,
+        left: 14.0 + NOTE_EDGE - NOTE_ACTION_PAD_X,
     })
     .style(theme::note_card)
     .into()

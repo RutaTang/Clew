@@ -370,6 +370,7 @@ fn finder_heading<'a>(title: &'static str) -> Element<'a, Message> {
     container(
         text(title)
             .size(ts::SMALL)
+            .line_height(ts::normal_line(ts::SMALL))
             .font(crate::fonts::UI_MEDIUM)
             .color(theme::dim()),
     )

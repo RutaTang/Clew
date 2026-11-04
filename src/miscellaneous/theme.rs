@@ -1236,10 +1236,14 @@ pub fn editor(_theme: &Theme) -> container::Style {
     }
 }
 
-/// Status bar background.
+/// Status bar background, its corners as the window's (see [`chrome`]).
 pub fn statusbar(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(bg_panel().into()),
+        border: Border {
+            radius: window_corners().into(),
+            ..Border::default()
+        },
         text_color: Some(dim()),
         ..container::Style::default()
     }
@@ -1279,29 +1283,62 @@ pub fn wash(strength: f32) -> Color {
     with_alpha(fg(), strength)
 }
 
-/// The window's chrome — the surface the top bar, the sidebar, the tool
-/// strip and the status bar share, and the code's sheet floats over.
-/// The frame Clew draws round its borderless window: the design's hairline
-/// of the window's edge (`winBorder`), over the chrome.
-pub fn window_frame(_theme: &Theme) -> container::Style {
-    container::Style {
+/// The frame Clew draws round its borderless window, its corners rounded
+/// to `radius`: the design's hairline of the window's edge (`winBorder`:
+/// black at 12% in light, white at 8% in dark), over the chrome — laid on
+/// it here, opaque, as iced draws a border in place of what it edges, and
+/// a window whose corners are clear shows the desktop through anything
+/// less.
+pub fn window_frame(radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |_| container::Style {
         background: Some(bg_panel().into()),
         border: iced::Border {
             color: if is_light() {
-                Color::from_rgba(0.0, 0.0, 0.0, 0.12)
+                mix(bg_panel(), Color::BLACK, 0.12)
             } else {
-                Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+                mix(bg_panel(), Color::WHITE, 0.08)
             },
             width: 1.0,
-            radius: 0.0.into(),
+            radius: radius.into(),
         },
         ..container::Style::default()
     }
 }
 
+thread_local! {
+    /// See [`window_corners`].
+    static WINDOW_CORNERS: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+}
+
+/// The radius of the corners of the window being drawn, inside its frame:
+/// what a surface reaching the window's corners (the chrome, the status
+/// bar, a modal's veil) rounds its own to, for the corners to stay clear
+/// (`ui::window_radius_for`). Set while the window's content is drawn
+/// ([`with_window_corners`]): iced draws one window at a time, on one
+/// thread, and reads a style as it draws.
+pub fn window_corners() -> f32 {
+    WINDOW_CORNERS.with(std::cell::Cell::get)
+}
+
+/// Draw with the window's corners `radius` (see [`window_corners`]).
+pub fn with_window_corners<R>(radius: f32, draw: impl FnOnce() -> R) -> R {
+    let before = WINDOW_CORNERS.replace(radius);
+    let drawn = draw();
+    WINDOW_CORNERS.set(before);
+    drawn
+}
+
+/// The window's chrome — the surface the top bar, the sidebar, the tool
+/// strip and the status bar share, and the code's sheet floats over —
+/// rounded as the window's corners are: unseen over the chrome itself,
+/// and the corners kept clear where it reaches them.
 pub fn chrome(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(bg_panel().into()),
+        border: Border {
+            radius: window_corners().into(),
+            ..Border::default()
+        },
         text_color: Some(fg()),
         ..container::Style::default()
     }
@@ -1626,10 +1663,15 @@ pub fn level_meter(_theme: &Theme) -> progress_bar::Style {
     }
 }
 
-/// Dimmed backdrop behind the modal.
+/// Dimmed backdrop behind the modal: over the whole window, its corners
+/// as the window's, so they stay clear.
 pub fn backdrop(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(scrim(0.45).into()),
+        border: Border {
+            radius: window_corners().into(),
+            ..Border::default()
+        },
         ..container::Style::default()
     }
 }

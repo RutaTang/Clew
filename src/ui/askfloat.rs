@@ -261,12 +261,12 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
             level_bars(&WAVE, level, true),
             text(title)
                 .size(ts::SUBTITLE)
-                .line_height(ts::NORMAL_LINE)
+                .line_height(ts::normal_line(ts::SUBTITLE))
                 .font(crate::fonts::UI_MEDIUM)
                 .color(theme::fg()),
             text(hint)
                 .size(HINT_SIZE)
-                .line_height(ts::NORMAL_LINE)
+                .line_height(ts::normal_line(HINT_SIZE))
                 .color(theme::fg_muted()),
         ]
         .spacing(10)
@@ -283,7 +283,7 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
             container(
                 text("Try saying")
                     .size(ts::SMALL)
-                    .line_height(ts::NORMAL_LINE)
+                    .line_height(ts::normal_line(ts::SMALL))
                     .font(crate::fonts::UI_MEDIUM)
                     .color(theme::dim()),
             )
@@ -309,7 +309,7 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
                      leaves your computer."
             ))
             .size(ts::SMALL)
-            .line_height(ts::NORMAL_LINE)
+            .line_height(ts::normal_line(ts::SMALL))
             .color(theme::fg_muted()),
         ]
         .spacing(8)
@@ -433,9 +433,11 @@ pub(crate) fn level_bars<'a>(heights: &[f32], level: f32, fade: bool) -> Element
 /// A small borderless control of the card's header.
 fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Message> {
     tooltip(
-        button(glyph::icon(g, theme::fg_muted(), 15.0))
+        button(container(glyph::icon(g, theme::fg_muted(), 15.0)).center(Fill))
             .style(theme::toolbar_button)
-            .padding([4, 6])
+            .width(Length::Fixed(HEADER_BUTTON))
+            .height(Length::Fixed(HEADER_BUTTON))
+            .padding(0)
             .on_press(msg),
         text(tip).size(ts::CAPTION),
         tooltip::Position::Bottom,
@@ -447,6 +449,16 @@ fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Messag
 
 /// Height of the card's header row.
 const ASK_HEADER_H: f32 = 44.0;
+/// Side of the header's buttons, as the design's.
+const HEADER_BUTTON: f32 = 28.0;
+/// Padding along the header's row: the design's 16 before what it says,
+/// 8 after its buttons.
+const ASK_HEADER_PAD: Padding = Padding {
+    top: 0.0,
+    right: 8.0,
+    bottom: 0.0,
+    left: 16.0,
+};
 
 /// Whether the card fits its height to its conversation, as the card under
 /// the chat field does; the large window keeps its height. A tool call's
@@ -463,10 +475,14 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let fit = card_fits(app);
     let mut header = row![
         glyph::icon(Glyph::Message, theme::accent(), 15.0),
-        text("Ask")
-            .size(ts::BASE)
-            .font(crate::fonts::UI_SEMIBOLD)
-            .color(theme::fg()),
+        ts::set_in(
+            text("Ask")
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(theme::fg()),
+            ASK_HEADER_H,
+            ts::INTER,
+            ts::BASE,
+        ),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -480,12 +496,12 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
             _ => format!("Reading {name}"),
         };
         header = header.push(
-            container(
-                text(on)
-                    .size(ts::CAPTION)
-                    .color(theme::fg_muted())
-                    .wrapping(Wrapping::None),
-            )
+            container(ts::set_in(
+                text(on).color(theme::fg_muted()).wrapping(Wrapping::None),
+                ts::INTER.normal(ts::SMALL),
+                ts::INTER,
+                ts::SMALL,
+            ))
             .padding([2, 7])
             .style(theme::chip),
         );
@@ -516,12 +532,7 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         container(header)
             .height(Length::Fixed(ASK_HEADER_H))
             .align_y(iced::Center)
-            .padding(Padding {
-                top: 0.0,
-                right: 8.0,
-                bottom: 0.0,
-                left: 16.0,
-            }),
+            .padding(ASK_HEADER_PAD),
         hairline(),
         voice_strip(app).unwrap_or_else(slot),
         if fit {
@@ -629,20 +640,32 @@ pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
 pub(crate) fn ask_margin(app: &App, height: f32) -> Element<'_, Message> {
     let mut header = row![
         glyph::icon(Glyph::Message, theme::accent(), 15.0),
-        text("Ask")
-            .size(ts::BASE)
-            .font(crate::fonts::UI_SEMIBOLD)
-            .color(theme::fg()),
+        ts::set_in(
+            text("Ask")
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(theme::fg()),
+            ASK_HEADER_H,
+            ts::INTER,
+            ts::BASE,
+        ),
         space().width(Fill),
     ]
     .spacing(8)
     .align_y(iced::Center);
+    // Clearing it, in the design's words-only button (as its "Not now").
     if !app.proj.ask_turns.is_empty() {
         header = header.push(
-            button(text("Clear").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Ask(AskMsg::Clear)),
+            button(ts::set_in(
+                text("Clear")
+                    .font(crate::fonts::UI_MEDIUM)
+                    .color(theme::fg_muted()),
+                HEADER_BUTTON,
+                ts::INTER,
+                ts::BODY,
+            ))
+            .style(theme::toolbar_button)
+            .padding([0, 10])
+            .on_press(Message::Ask(AskMsg::Clear)),
         );
     }
     let header = header
@@ -656,16 +679,12 @@ pub(crate) fn ask_margin(app: &App, height: f32) -> Element<'_, Message> {
             "Put away (Esc)",
             Message::Ask(AskMsg::Close),
         ));
+    // In the margin as on the card: the same header row.
     column![
         container(header)
             .height(Length::Fixed(ASK_HEADER_H))
             .align_y(iced::Center)
-            .padding(Padding {
-                top: 0.0,
-                right: 6.0,
-                bottom: 0.0,
-                left: 12.0,
-            }),
+            .padding(ASK_HEADER_PAD),
         hairline(),
         voice_strip(app).unwrap_or_else(slot),
         ask_panel(app, (height - ASK_HEADER_H).max(ASK_CARD_MIN_H)),

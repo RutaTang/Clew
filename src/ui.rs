@@ -22,6 +22,8 @@ use crate::{
     SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
 };
 mod anchored;
+// A line of text on the design's baseline wherever it lands (`ts::set_in`).
+mod baseline;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
@@ -90,10 +92,101 @@ pub(crate) mod ts {
     pub(crate) const HEADING: f32 = ui_size(TextRole::Heading);
     pub(crate) const DISPLAY: f32 = ui_size(TextRole::Display);
     pub(crate) const HERO: f32 = ui_size(TextRole::Hero);
-    /// Inter's own line spacing (the design's `normal`), for text stacked
-    /// in a box its lines size: iced's default of 1.3 sets each such line
-    /// a pixel or two lower than the design.
-    pub(crate) const NORMAL_LINE: f32 = 1.21;
+    /// A face's ascent and descent, in em.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Face {
+        ascent: f32,
+        descent: f32,
+    }
+
+    /// Inter, the interface's face (1984 and 494 of 2048 units).
+    pub(crate) const INTER: Face = Face {
+        ascent: 0.968_75,
+        descent: 0.241_211,
+    };
+    /// JetBrains Mono, the code's (1020 and 300 of 1000).
+    pub(crate) const MONO: Face = Face {
+        ascent: 1.02,
+        descent: 0.3,
+    };
+
+    impl Face {
+        /// Its ascent and descent at `size`, each rounded to a whole
+        /// pixel, as the design's renderer takes them (at every scale).
+        fn rounded(self, size: f32) -> (f32, f32) {
+            ((self.ascent * size).round(), (self.descent * size).round())
+        }
+
+        /// Its `line-height: normal` at `size`: the two rounded together.
+        pub(crate) fn normal(self, size: f32) -> f32 {
+            let (ascent, descent) = self.rounded(size);
+            ascent + descent
+        }
+
+        /// The line height to lay a line of it out with, at `size`, for
+        /// its baseline to fall exactly its rounded ascent below the
+        /// line's top — a whole pixel, where cosmic-text, centring the
+        /// face's exact ascent and descent, puts it anywhere. Drawn at a
+        /// whole pixel (see [`baseline_top`]), such a line keeps its
+        /// baseline on one at every whole scale: iced truncates where a
+        /// line starts to a device pixel and rounds how far down its
+        /// baseline is, each on its own, and a fractional pair loses a
+        /// device pixel between them.
+        pub(crate) fn snapped_line(self, size: f32) -> f32 {
+            let (ascent, _) = self.rounded(size);
+            2.0 * ascent - (self.ascent - self.descent) * size
+        }
+    }
+
+    /// The design's `line-height: normal` for Inter at `size`: the face's
+    /// rounded ascent and descent (see [`Face`]). For text stacked in a box
+    /// its lines size: iced's default of 1.3 sets each such line a pixel
+    /// or so off the design.
+    pub(crate) fn normal_line(size: f32) -> iced::widget::text::LineHeight {
+        normal_of(INTER, size)
+    }
+
+    /// [`normal_line`] for JetBrains Mono.
+    pub(crate) fn normal_line_code(size: f32) -> iced::widget::text::LineHeight {
+        normal_of(MONO, size)
+    }
+
+    fn normal_of(face: Face, size: f32) -> iced::widget::text::LineHeight {
+        iced::widget::text::LineHeight::Absolute(face.normal(size).into())
+    }
+
+    /// Where to draw a line of `face` at `size`, laid out
+    /// [`Face::snapped_line`] tall, for its text to sit where the design's
+    /// renderer paints it in a line `line` tall from `top`: a `normal` box
+    /// centred in the line, its baseline that box's rounded ascent down,
+    /// then snapped to a whole pixel. Left to centre itself in the line,
+    /// cosmic-text paints the text up to a pixel higher (a line number at
+    /// 11.5 px in a 24 px line, by one; the code at 13 px, by a half).
+    pub(crate) fn baseline_top(top: f32, line: f32, face: Face, size: f32) -> f32 {
+        let (ascent, descent) = face.rounded(size);
+        (top + (line - (ascent + descent)) / 2.0 + ascent).round() - ascent
+    }
+
+    /// `content`, a line of `face` at `size`, set in a box `height` tall as
+    /// the design centres a line in one (a button, a row of the chrome, a
+    /// menu's): its baseline where the design's renderer paints it, by
+    /// [`baseline_top`], wherever the box lands (`ui::baseline`). Left to
+    /// centre itself, a text widget lands up to a pixel higher.
+    pub(crate) fn set_in<'a, M: 'a>(
+        content: iced::widget::Text<'a>,
+        height: f32,
+        face: Face,
+        size: f32,
+    ) -> iced::Element<'a, M> {
+        let line = iced::widget::text::LineHeight::Absolute(face.snapped_line(size).into());
+        let laid = iced::widget::container(content.size(size).line_height(line))
+            .height(iced::Length::Fixed(height))
+            .padding(iced::Padding {
+                top: baseline_top(0.0, height, face, size),
+                ..iced::Padding::ZERO
+            });
+        super::baseline::Snapped::new(laid.into(), height, face, size).into()
+    }
 }
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
@@ -411,16 +504,26 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // share one origin; the resize grips at the window's very edge.
     let framed = container(stack![base, ask, overlay, tutorial])
         .padding(app.window_frame)
-        .style(theme::window_frame);
-    // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
-    placed::watch_overlays(app.overlay_open, stack![framed, resize_grips()])
+        .style(theme::window_frame(app.window_radius));
+    // Whether a widget's own overlay is drawn over it all, and which
+    // renderer draws the window (`watch_overlays`); inside the frame, every
+    // layer reaching the window's corners rounds its own as they are.
+    let inner = (app.window_radius - app.window_frame).max(0.0);
+    placed::watch_overlays(
+        placed::Known {
+            overlay_open: app.overlay_open,
+            software_renderer: app.software_renderer,
+            corners: inner,
+        },
+        stack![framed, resize_grips()],
+    )
 }
 
 /// The width of the frame drawn round the window: the design's 1 px border
 /// on Linux and Windows, whose window is borderless; none on macOS, whose
-/// window keeps the system's frame, nor on a maximized window.
-pub(crate) fn window_frame_for(maximized: bool) -> f32 {
-    if cfg!(target_os = "macos") || maximized {
+/// window keeps the system's frame, nor on a window filling the screen.
+pub(crate) fn window_frame_for(full: bool) -> f32 {
+    if cfg!(target_os = "macos") || full {
         0.0
     } else {
         WINDOW_BORDER
@@ -429,6 +532,23 @@ pub(crate) fn window_frame_for(maximized: bool) -> f32 {
 
 /// The design's window border.
 const WINDOW_BORDER: f32 = 1.0;
+
+/// The radius Clew rounds its window's corners to: the design's 12 on
+/// Linux, where Clew draws the window whole, while the window does not
+/// fill the screen and its corners can be left clear (`clear`: the window
+/// system composites it, and the renderer leaves them so; see
+/// `app::corners`). None elsewhere: macOS rounds the window itself
+/// (`macos::WINDOW_RADIUS`), and Windows 11 too (`window_settings`).
+pub(crate) fn window_radius_for(full: bool, clear: bool) -> f32 {
+    if cfg!(all(unix, not(target_os = "macos"))) && clear && !full {
+        WINDOW_RADIUS
+    } else {
+        0.0
+    }
+}
+
+/// The design's window corner.
+pub(crate) const WINDOW_RADIUS: f32 = 12.0;
 
 /// How wide the band along each edge is where a drag resizes the window.
 const GRIP: f32 = 4.0;

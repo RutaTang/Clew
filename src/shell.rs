@@ -434,8 +434,9 @@ pub enum Shell {
         expect(dead_code, reason = "sent by macOS's menu bar")
     )]
     NewWindow,
-    /// A window finished opening — set up its native chrome (main thread).
-    Opened(window::Id),
+    /// A window finished opening, at this size — set up its native chrome
+    /// (main thread).
+    Opened(window::Id, iced::Size),
     /// The OS asked a window to close — a window manager, a script. It
     /// goes once its host has confirmed the edits it sends as it goes, and
     /// what it would leave unsaved is asked about first — as when clew's
@@ -1270,7 +1271,7 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             None => Task::none(),
         },
         Shell::NewWindow => clew.open_window(false),
-        Shell::Opened(id) => {
+        Shell::Opened(id, size) => {
             // Strip the OS chrome to the frameless look and round the corners,
             // and install the native menu bar (both main-thread; the menu once,
             // from the keymap — later keymap changes rebuild it, see
@@ -1284,9 +1285,16 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
                 crate::macos::appearance::install_once();
                 crate::macos::terminate::install_once();
             }
-            #[cfg(not(target_os = "macos"))]
-            let _ = id;
-            Task::none()
+            let Some(app) = clew.windows.get_mut(&id) else {
+                return Task::none();
+            };
+            // The size it opened at: a window the system opens at the size
+            // it asked for is told of no resize (X11), and the frame round
+            // it, its corners and all laid out in it go by its size. And
+            // whether X composites it, for its corners (Wayland always
+            // does; nothing to ask elsewhere).
+            Task::batch([app.on_window_resized(size), app.ask_composited()])
+                .map(move |m| Shell::Window(id, m))
         }
         Shell::CloseRequested(id) => clew.request_close(id, Asker::Outside),
         Shell::Closed(id) => clew.close_window(id),
@@ -1323,6 +1331,22 @@ pub fn title(clew: &Clew, id: window::Id) -> String {
 
 pub fn theme(clew: &Clew, id: window::Id) -> Theme {
     clew.windows.get(&id).map(App::theme).unwrap_or(Theme::Dark)
+}
+
+/// What a window is cleared to before it is drawn: on Linux nothing, so
+/// the corners Clew leaves clear show the desktop (`ui::window_radius_for`)
+/// — its view covers all the rest; elsewhere iced's own, the theme's
+/// background.
+pub fn style(_: &Clew, theme: &Theme) -> iced::theme::Style {
+    let style = <Theme as iced::theme::Base>::base(theme);
+    if cfg!(all(unix, not(target_os = "macos"))) {
+        iced::theme::Style {
+            background_color: iced::Color::TRANSPARENT,
+            ..style
+        }
+    } else {
+        style
+    }
 }
 
 /// Hand the keymap `from` just changed to every other window, and rebuild the
@@ -1402,7 +1426,9 @@ fn route(event: iced::Event, status: iced::event::Status, window: window::Id) ->
             window,
             Message::Window(WindowMsg::Resized(size)),
         )),
-        iced::Event::Window(iced::window::Event::Opened { .. }) => Some(Shell::Opened(window)),
+        iced::Event::Window(iced::window::Event::Opened { size, .. }) => {
+            Some(Shell::Opened(window, size))
+        }
         // A close the OS asks for only *asks* (iced is told to leave it to
         // us: `exit_on_close_request`), like ⌘W and clew's own red control.
         iced::Event::Window(iced::window::Event::CloseRequested) => {

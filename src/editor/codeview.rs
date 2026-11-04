@@ -42,6 +42,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use crate::analyze::{MAX_WORD_CHARS, ident_range, line_window, word_range_at};
 use crate::highlight::{HlLine, style_color, style_font};
 use crate::theme;
+use crate::ui::ts;
 use crate::viewer::{InlayHints, display_cols};
 
 /// Room between the line numbers and the code at 13 px, as the design has
@@ -1459,7 +1460,9 @@ impl<'a, Message> CodeView<'a, Message> {
             content: spans,
             bounds: Size::new(LINE_LAYOUT_WIDTH, self.line_height),
             size: self.font_size.into(),
-            line_height: text::LineHeight::Absolute(self.line_height.into()),
+            // Laid out so its baseline lands on a whole pixel, and drawn
+            // where the design sets it (`ts::baseline_top`).
+            line_height: text::LineHeight::Absolute(ts::MONO.snapped_line(self.font_size).into()),
             font: crate::fonts::CODE,
             align_x: text::Alignment::Left,
             align_y: iced::alignment::Vertical::Top,
@@ -1968,6 +1971,10 @@ where
                 continue;
             };
             let y = bounds.y + row as f32 * lh;
+            // Where the line's code and its number are set, so each sits
+            // on the design's baseline (`ts::baseline_top`).
+            let code_y = ts::baseline_top(y, lh, ts::MONO, self.font_size);
+            let number_y = ts::baseline_top(y, lh, ts::MONO, self.font_size * NUMBER_SCALE);
             let shaped = cache.paragraphs.get(row - cache.first);
             let cw = state.char_width;
             let cols_x = |c0: usize, c1: Option<usize>| self.cols_x(i, shaped, cw, c0, c1);
@@ -2201,14 +2208,16 @@ where
                     content: (i + 1).to_string(),
                     bounds: Size::new(number_w, lh),
                     size: (self.font_size * NUMBER_SCALE).into(),
-                    line_height: text::LineHeight::Absolute(lh.into()),
+                    line_height: text::LineHeight::Absolute(
+                        ts::MONO.snapped_line(self.font_size * NUMBER_SCALE).into(),
+                    ),
                     font: crate::fonts::CODE,
                     align_x: text::Alignment::Right,
                     align_y: iced::alignment::Vertical::Top,
                     shaping: text::Shaping::Basic,
                     wrapping: text::Wrapping::None,
                 },
-                Point::new(bounds.x + number_w, y),
+                Point::new(bounds.x + number_w, number_y),
                 gutter_color,
                 text_box(bounds.x, y, number_w, lh),
             );
@@ -2223,14 +2232,16 @@ where
                             content: if collapsed { "▸" } else { "▾" }.to_string(),
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.snapped_line(self.font_size).into(),
+                            ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Advanced,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(bounds.x + FOLD_ARROW_COL as f32 * state.char_width, y),
+                        Point::new(bounds.x + FOLD_ARROW_COL as f32 * state.char_width, code_y),
                         if collapsed {
                             theme::accent()
                         } else {
@@ -2252,7 +2263,7 @@ where
                 let text_w = paragraph.min_bounds().width;
                 renderer.fill_paragraph(
                     paragraph,
-                    Point::new(text_x0, y),
+                    Point::new(text_x0, code_y),
                     style.text_color,
                     *viewport,
                 );
@@ -2266,14 +2277,16 @@ where
                             content: "…".to_string(),
                             bounds: Size::new(2.0 * cw, lh),
                             size: self.font_size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.snapped_line(self.font_size).into(),
+                            ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Basic,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(text_x0 + text_w + 0.5 * cw, y),
+                        Point::new(text_x0 + text_w + 0.5 * cw, code_y),
                         theme::dim(),
                         text_box(text_x0 + text_w + 0.5 * cw, y, 2.0 * cw, lh),
                     );
@@ -2299,7 +2312,9 @@ where
                             content: note.as_str(),
                             bounds: Size::new(CHIP_MAX_W, lh),
                             size: size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
+                            line_height: text::LineHeight::Absolute(
+                                ts::INTER.snapped_line(size).into(),
+                            ),
                             font: crate::fonts::UI_MEDIUM,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
@@ -2309,7 +2324,9 @@ where
                     });
                     let x = text_x0 + text_w + 12.0 * scale;
                     let width = label.min_bounds().width + 2.0 * CHIP_PAD_X;
-                    let height = (size * 1.25 + 2.0).min(lh);
+                    // The design's chip: its words' `normal` line and a
+                    // pixel above and below.
+                    let height = (ts::INTER.normal(size) + 2.0).min(lh);
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -2325,7 +2342,7 @@ where
                     );
                     renderer.fill_paragraph(
                         label,
-                        Point::new(x + CHIP_PAD_X, y),
+                        Point::new(x + CHIP_PAD_X, ts::baseline_top(y, lh, ts::INTER, size)),
                         theme::fg_muted(),
                         text_box(x, y, width, lh),
                     );
@@ -2340,14 +2357,16 @@ where
                             content: "⋯".to_string(),
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.snapped_line(self.font_size).into(),
+                            ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Advanced,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(end_x, y),
+                        Point::new(end_x, code_y),
                         theme::dim(),
                         text_box(end_x, y, 2.0 * state.char_width, lh),
                     );
@@ -2381,14 +2400,21 @@ where
                             content: annotation.clone(),
                             bounds: Size::new(f32::MAX, lh),
                             size: annotation_size(self.font_size).into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO
+                                    .snapped_line(annotation_size(self.font_size))
+                                    .into(),
+                            ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: ANNOTATION_SHAPING,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(end_x, y),
+                        Point::new(
+                            end_x,
+                            ts::baseline_top(y, lh, ts::MONO, annotation_size(self.font_size)),
+                        ),
                         theme::with_alpha(theme::dim(), 0.9),
                         // Its row, as far across as the code area goes.
                         Rectangle {
@@ -2486,26 +2512,29 @@ where
             let sc = state.sticky_cache.borrow();
             for (k, &line) in self.sticky.iter().enumerate() {
                 let y = viewport.y + k as f32 * lh;
+                let number_y = ts::baseline_top(y, lh, ts::MONO, self.font_size * NUMBER_SCALE);
                 renderer.fill_text(
                     text::Text {
                         content: (line + 1).to_string(),
                         bounds: Size::new(number_w, lh),
                         size: (self.font_size * NUMBER_SCALE).into(),
-                        line_height: text::LineHeight::Absolute(lh.into()),
+                        line_height: text::LineHeight::Absolute(
+                            ts::MONO.snapped_line(self.font_size * NUMBER_SCALE).into(),
+                        ),
                         font: crate::fonts::CODE,
                         align_x: text::Alignment::Right,
                         align_y: iced::alignment::Vertical::Top,
                         shaping: text::Shaping::Basic,
                         wrapping: text::Wrapping::None,
                     },
-                    Point::new(bounds.x + number_w, y),
+                    Point::new(bounds.x + number_w, number_y),
                     theme::dim(),
                     text_box(bounds.x, y, number_w, lh),
                 );
                 if let Some(shaped) = sc.paragraphs.get(k) {
                     renderer.fill_paragraph(
                         &shaped.paragraph,
-                        Point::new(text_x0, y),
+                        Point::new(text_x0, ts::baseline_top(y, lh, ts::MONO, self.font_size)),
                         self.default_color,
                         *viewport,
                     );
@@ -4102,9 +4131,11 @@ mod font_tests {
                 .iter()
                 .any(|(text, ..)| text.contains("someone"))
         );
+        // Each drawn within its row (set where its baseline falls in it,
+        // `ui::ts::baseline_top`), and clipped to that row.
         for (text, at, clip) in &renderer.boxes {
             assert!(
-                clip.y == at.y && clip.height == lh,
+                clip.height == lh && (0.0..lh).contains(&(at.y - clip.y)),
                 "{text:?} at {at:?} is clipped to {clip:?}, not its row"
             );
         }

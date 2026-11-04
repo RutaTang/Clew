@@ -603,8 +603,8 @@ fn chat_field(app: &App) -> Element<'_, Message> {
 /// Width of the tool strip down the window's right edge.
 pub(crate) const STRIP_W: f32 = 44.0;
 /// Space above the strip's first tool, and below its last.
-const STRIP_PAD_TOP: f32 = 4.0;
-const STRIP_PAD_BOTTOM: f32 = 8.0;
+const STRIP_PAD_TOP: f32 = 2.0;
+const STRIP_PAD_BOTTOM: f32 = 10.0;
 /// Gap between the strip's slots.
 const STRIP_SPACING: f32 = 2.0;
 /// Height of the slot a group rule stands in (the rule itself is 1px).
@@ -853,8 +853,9 @@ impl ToolsRow {
 
 /// Width of a menu panel.
 pub(crate) const TOOLS_MENU_W: f32 = 248.0;
-/// Inner padding of a menu panel.
-const MENU_PAD: f32 = 5.0;
+/// Inner padding of a menu panel: the design's 5, inside the panel's 1 px
+/// edge — which CSS lays outside the padding and iced draws inside it.
+const MENU_PAD: f32 = 5.0 + 1.0;
 /// Height of one menu row.
 const MENU_ROW_H: f32 = 32.0;
 /// Height of a heading over a group of menu rows.
@@ -913,7 +914,7 @@ fn menu_item<'a>(
     let mut b = button(
         row![
             container(gutter).width(15),
-            text(label).size(ts::BASE),
+            ts::set_in(text(label), MENU_ROW_H, ts::INTER, ts::BASE),
             space().width(Fill),
             trailing,
         ]
@@ -933,12 +934,14 @@ fn menu_item<'a>(
 
 /// A heading over a group of menu rows, naming it.
 fn menu_heading<'a>(label: &'a str) -> Element<'a, Message> {
-    container(
+    container(ts::set_in(
         text(label)
-            .size(ts::SMALL)
             .font(crate::fonts::UI_MEDIUM)
             .color(theme::dim()),
-    )
+        ts::INTER.normal(ts::SMALL),
+        ts::INTER,
+        ts::SMALL,
+    ))
     .height(Length::Fixed(MENU_HEADING_H))
     .align_y(iced::alignment::Vertical::Bottom)
     .padding(Padding {

@@ -1899,6 +1899,12 @@ pub enum WindowMsg {
     MarginTabPicked(MarginTab),
     /// Whether the window is maximized now, for its button to show.
     MaximizedIs(bool),
+    /// Whether the window system composites the window over the desktop
+    /// now, for its corners (`app::corners`).
+    Composited(bool),
+    /// Whether iced draws the window with its software renderer, as the
+    /// window's own view finds it drawn (`ui::placed::watch_overlays`).
+    SoftwareRenderer(bool),
 }
 
 /// The guided tour.
@@ -2638,7 +2644,9 @@ impl WindowMsg {
             | WindowMsg::FileFilterChanged(..)
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
-            | WindowMsg::MaximizedIs(..) => None,
+            | WindowMsg::MaximizedIs(..)
+            | WindowMsg::Composited(..)
+            | WindowMsg::SoftwareRenderer(..) => None,
         }
     }
 }

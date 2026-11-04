@@ -60,6 +60,11 @@ unicode-width = "0.2"
 # Native AppKit access (macOS only), all of it under src/macos/: the menu bar,
 # the frameless look of clew's titled windows (hidden title bar, rounded
 # corners) and the live system-appearance observer.
+# Whether X composites Clew's window, so it can round its corners
+# (src/app/corners.rs): the version winit already brings in.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
@@ -88,6 +93,16 @@ objc2-foundation = { version = "0.3", features = [
 [dev-dependencies]
 iced_test = "0.14"
 socket2 = "0.6"
+
+# A borderless window of winit's kind, asked of Windows' compositor to be
+# rounded (src/app/corners.rs): the version the build already carries.
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Graphics_Dwm",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [[bin]]
 name = "clew"

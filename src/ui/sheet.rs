@@ -28,6 +28,13 @@ const HEADER_ROW_PAD: Padding = Padding {
 /// Height of the header's trail row, when there is a trail to show: the
 /// trail 22 high, with 12 under it.
 pub(crate) const TRAIL_ROW_H: f32 = 34.0;
+/// Height of a stop of the trail, a button.
+const TRAIL_STOP_H: f32 = 22.0;
+/// Height of the controls of the header's first row: the title's line and
+/// the tools, each a button.
+const HEADER_CONTROL_H: f32 = 28.0;
+/// Height of a margin tab.
+const MARGIN_TAB_H: f32 = 26.0;
 /// Room under the first row when there is no trail under it.
 const NO_TRAIL_PAD: f32 = 6.0;
 /// How many stops of the reading trail the header shows, the current last.
@@ -294,16 +301,18 @@ fn file_tool<'a>(
     let face = button(
         row![
             glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
-            text(label)
-                .size(ts::BODY)
-                .font(crate::fonts::UI_MEDIUM)
-                .color(tint),
+            ts::set_in(
+                text(label).font(crate::fonts::UI_MEDIUM).color(tint),
+                HEADER_CONTROL_H,
+                ts::INTER,
+                ts::BODY,
+            ),
         ]
         .spacing(FILE_TOOL_SPACING)
         .align_y(iced::Center),
     )
     .style(theme::icon_button(on))
-    .padding([5.0, FILE_TOOL_PAD_X]);
+    .padding([0.0, FILE_TOOL_PAD_X]);
     let face = face.on_press(msg);
     match shortcut {
         Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
@@ -316,18 +325,18 @@ fn file_tool<'a>(
 fn margin_tabs(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: crate::MarginTab| {
         let chosen = app.margin_tab == this;
-        button(
-            text(label)
-                .size(ts::BODY)
-                .font(crate::fonts::UI_MEDIUM)
-                .color(if chosen {
-                    theme::fg()
-                } else {
-                    theme::fg_muted()
-                }),
-        )
+        button(ts::set_in(
+            text(label).font(crate::fonts::UI_MEDIUM).color(if chosen {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            }),
+            MARGIN_TAB_H,
+            ts::INTER,
+            ts::BODY,
+        ))
         .style(theme::segment(chosen))
-        .padding([5, 10])
+        .padding([0, 10])
         .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
     };
     let mut tabs = row![
@@ -353,22 +362,24 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     };
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let (name, folder) = title_parts(v);
-    let mut title = row![
+    let mut title = row![ts::set_in(
         text(name)
-            .size(ts::EMPHASIS)
             .font(crate::fonts::UI_SEMIBOLD)
             .color(theme::fg_bright())
             .wrapping(Wrapping::None),
-    ]
+        HEADER_CONTROL_H,
+        ts::INTER,
+        ts::EMPHASIS,
+    )]
     .spacing(8)
     .align_y(iced::Center);
     if !folder.is_empty() {
-        title = title.push(
-            text(folder)
-                .size(ts::BODY)
-                .color(theme::dim())
-                .wrapping(Wrapping::None),
-        );
+        title = title.push(ts::set_in(
+            text(folder).color(theme::dim()).wrapping(Wrapping::None),
+            HEADER_CONTROL_H,
+            ts::INTER,
+            ts::BODY,
+        ));
     }
     // A markdown file reads rendered or as its source.
     if v.md.is_some() {
@@ -400,17 +411,21 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     let view_menu = button(
         row![
             glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
-            text("View")
-                .size(ts::BODY)
-                .font(crate::fonts::UI_MEDIUM)
-                .color(theme::fg_muted()),
+            ts::set_in(
+                text("View")
+                    .font(crate::fonts::UI_MEDIUM)
+                    .color(theme::fg_muted()),
+                HEADER_CONTROL_H,
+                ts::INTER,
+                ts::BODY,
+            ),
             glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
         ]
         .spacing(6)
         .align_y(iced::Center),
     )
     .style(theme::icon_button(app.show_view_menu))
-    .padding([5, 8])
+    .padding([0, 8])
     .on_press(Message::Window(WindowMsg::ToggleViewMenu));
     let tools = row![
         file_tool(
@@ -469,10 +484,11 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     };
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
+        // At the row's top, as the design has them: 14 down.
         container(margin_tabs(app))
             .width(Length::Fixed(app.right_width))
             .height(Length::Fixed(SHEET_HEADER_ROW_H))
-            .align_y(iced::Center)
+            .align_y(iced::Top)
             .padding(Padding {
                 right: 16.0,
                 left: 12.0,
@@ -518,9 +534,8 @@ fn trail_row(app: &App) -> Element<'_, Message> {
                 .unwrap_or_default(),
         };
         line = line.push(
-            button(
+            button(ts::set_in(
                 text(name)
-                    .size(ts::BODY)
                     .font(if current {
                         crate::fonts::UI_MEDIUM
                     } else {
@@ -532,9 +547,12 @@ fn trail_row(app: &App) -> Element<'_, Message> {
                         theme::fg_muted()
                     })
                     .wrapping(Wrapping::None),
-            )
+                TRAIL_STOP_H,
+                ts::INTER,
+                ts::BODY,
+            ))
             .style(theme::icon_button(false))
-            .padding([1, 5])
+            .padding([0, 5])
             .on_press(Message::Reading(ReadingMsg::HistoryJump {
                 id,
                 loc: loc.clone(),

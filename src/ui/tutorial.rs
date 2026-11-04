@@ -142,36 +142,39 @@ impl iced::widget::canvas::Program<Message> for Spotlight {
         let w = bounds.width;
         let h = bounds.height;
 
-        match self.hole {
-            None => frame.fill_rectangle(pt(0.0, 0.0), sz(w, h), dim),
-            Some(r) => {
-                // Dim everything around the hole (top / bottom / left / right).
-                frame.fill_rectangle(pt(0.0, 0.0), sz(w, r.y), dim);
-                frame.fill_rectangle(pt(0.0, r.y + r.height), sz(w, h - (r.y + r.height)), dim);
-                frame.fill_rectangle(pt(0.0, r.y), sz(r.x, r.height), dim);
-                frame.fill_rectangle(
-                    pt(r.x + r.width, r.y),
-                    sz(w - (r.x + r.width), r.height),
-                    dim,
-                );
-                // Accent outline offset from the region by `outline_pad`:
-                // positive frames just outside (so it never covers the region's
-                // own content, e.g. the breadcrumb or first code line); negative
-                // frames just inside (for tight ⋯-menu rows, so it hugs the row
-                // without spilling onto the panel edge or the neighbouring row).
-                let pad = self.outline_pad;
-                let ox = (r.x - pad).max(0.0);
-                let oy = (r.y - pad).max(0.0);
-                let ow = ((r.x + r.width + pad).min(w) - ox).max(0.0);
-                let oh = ((r.y + r.height + pad).min(h) - oy).max(0.0);
-                let outline = Path::rounded_rectangle(pt(ox, oy), sz(ow, oh), 6.0.into());
-                frame.stroke(
-                    &outline,
-                    Stroke::default()
-                        .with_color(theme::accent())
-                        .with_width(2.0),
-                );
+        // Dim the window, its corners rounded as the window's are (so
+        // they stay clear), all but the hole.
+        let veil = Path::new(|p| {
+            p.rounded_rectangle(pt(0.0, 0.0), sz(w, h), theme::window_corners().into());
+            if let Some(r) = self.hole {
+                p.rectangle(pt(r.x, r.y), sz(r.width, r.height));
             }
+        });
+        frame.fill(
+            &veil,
+            iced::widget::canvas::Fill {
+                style: iced::widget::canvas::Style::Solid(dim),
+                rule: iced::widget::canvas::fill::Rule::EvenOdd,
+            },
+        );
+        if let Some(r) = self.hole {
+            // Accent outline offset from the region by `outline_pad`:
+            // positive frames just outside (so it never covers the region's
+            // own content, e.g. the breadcrumb or first code line); negative
+            // frames just inside (for tight ⋯-menu rows, so it hugs the row
+            // without spilling onto the panel edge or the neighbouring row).
+            let pad = self.outline_pad;
+            let ox = (r.x - pad).max(0.0);
+            let oy = (r.y - pad).max(0.0);
+            let ow = ((r.x + r.width + pad).min(w) - ox).max(0.0);
+            let oh = ((r.y + r.height + pad).min(h) - oy).max(0.0);
+            let outline = Path::rounded_rectangle(pt(ox, oy), sz(ow, oh), 6.0.into());
+            frame.stroke(
+                &outline,
+                Stroke::default()
+                    .with_color(theme::accent())
+                    .with_width(2.0),
+            );
         }
         vec![frame.into_geometry()]
     }

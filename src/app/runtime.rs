@@ -161,6 +161,9 @@ impl App {
             maximized: false,
             window_outer: iced::Size::ZERO,
             window_frame: 0.0,
+            window_radius: 0.0,
+            composited: window_unplaced(),
+            software_renderer: false,
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
@@ -328,14 +331,17 @@ impl App {
         }
     }
 
-    /// The frame round the window and the room inside it, from the window's
-    /// size and whether it is maximized. Before the system has said the
-    /// window's size there is nothing to frame.
+    /// The frame round the window, its corners, and the room inside it,
+    /// from the window's size and whether it fills the screen. Before the
+    /// system has said the window's size there is nothing to frame.
     pub(crate) fn reframe(&mut self) {
         if self.window_outer == Size::ZERO {
             return;
         }
-        self.window_frame = crate::ui::window_frame_for(self.maximized);
+        let full = self.maximized || self.fullscreen;
+        self.window_frame = crate::ui::window_frame_for(full);
+        self.window_radius =
+            crate::ui::window_radius_for(full, self.composited && !self.software_renderer);
         self.window_width = self.window_outer.width - 2.0 * self.window_frame;
         self.window_height = self.window_outer.height - 2.0 * self.window_frame;
     }
@@ -505,6 +511,9 @@ impl App {
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.
                     self.invalidate_llm_config();
+                    // A compositing manager may have come or gone meanwhile
+                    // (a desktop's switch for games, say).
+                    return self.ask_composited();
                 }
                 Task::none()
             }
@@ -550,6 +559,20 @@ impl App {
             },
             WindowMsg::ModeIs(mode) => {
                 self.fullscreen = mode == iced::window::Mode::Fullscreen;
+                // Filling the screen, the window has no frame or rounded
+                // corners; a window again, it has them again.
+                self.reframe();
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            WindowMsg::Composited(now) => {
+                self.composited = now;
+                self.reframe();
+                Task::none()
+            }
+            WindowMsg::SoftwareRenderer(now) => {
+                self.software_renderer = now;
+                self.reframe();
                 Task::none()
             }
             WindowMsg::Resized(size) => self.on_window_resized(size),
@@ -709,6 +732,32 @@ impl App {
 /// noted at start ([`note_window_system`]), or read now.
 fn window_unplaced() -> bool {
     *UNPLACED.get_or_init(wayland_named)
+}
+
+impl App {
+    /// Ask whether X composites this window (`app::corners`), for its
+    /// corners: where they can be left clear, they are rounded. Nothing to
+    /// ask on Wayland, which always composites, nor off Linux.
+    pub(crate) fn ask_composited(&self) -> Task<Message> {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(id) = self.main_window
+            && !window_unplaced()
+        {
+            return iced::window::raw_id::<Message>(id).then(|window| {
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::app::corners::x11_composited(window)
+                        })
+                        .await
+                        .unwrap_or(false)
+                    },
+                    |now| Message::Window(WindowMsg::Composited(now)),
+                )
+            });
+        }
+        Task::none()
+    }
 }
 
 /// What [`window_unplaced`] says, once noted.

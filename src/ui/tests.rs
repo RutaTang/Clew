@@ -1876,7 +1876,12 @@ fn click_nth(mut sim: Sim<'_>, label: &str, nth: usize) -> Vec<Message> {
 /// (`ui::placed`): the runtime's own bookkeeping, not a press's message.
 fn sent_by(sim: Sim<'_>) -> Vec<Message> {
     sim.into_messages()
-        .filter(|m| !matches!(m, Message::Placed { .. }))
+        .filter(|m| {
+            !matches!(
+                m,
+                Message::Placed { .. } | Message::Window(WindowMsg::SoftwareRenderer(..))
+            )
+        })
         .collect()
 }
 
@@ -7590,4 +7595,102 @@ fn the_window_is_framed_as_designed_unless_maximized() {
     let _ = app.update(Message::Window(WindowMsg::MaximizedIs(false)));
     assert_eq!(app.window_frame, frame);
     assert_eq!(app.window_width, size.width - 2.0 * frame);
+}
+
+/// The design rounds the window's corners (12) on every system. On Linux,
+/// where Clew draws the window whole, it rounds them where they can be
+/// left clear — the window system composites the window, and iced draws
+/// it on the GPU — while the window does not fill the screen; macOS and
+/// Windows round the window themselves.
+#[test]
+fn the_window_rounds_its_corners_where_they_can_be_left_clear() {
+    let mut app = reader_app();
+    let _ = app.on_window_resized(iced::Size::new(1216.0, 912.0));
+    let round = if cfg!(all(unix, not(target_os = "macos"))) {
+        12.0
+    } else {
+        0.0
+    };
+    let _ = app.update(Message::Window(WindowMsg::Composited(true)));
+    assert_eq!(app.window_radius, round);
+    // Filling the screen, square and unframed.
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(true)));
+    assert_eq!(app.window_radius, 0.0);
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(false)));
+    assert_eq!(app.window_radius, round);
+    let _ = app.update(Message::Window(WindowMsg::ModeIs(window::Mode::Fullscreen)));
+    assert_eq!((app.window_radius, app.window_frame), (0.0, 0.0));
+    let _ = app.update(Message::Window(WindowMsg::ModeIs(window::Mode::Windowed)));
+    assert_eq!(app.window_radius, round);
+    // Drawn in software, whose Wayland surface has no alpha: square.
+    let _ = app.update(Message::Window(WindowMsg::SoftwareRenderer(true)));
+    assert_eq!(app.window_radius, 0.0);
+    let _ = app.update(Message::Window(WindowMsg::SoftwareRenderer(false)));
+    assert_eq!(app.window_radius, round);
+    // Not composited (X with no compositing manager): square.
+    let _ = app.update(Message::Window(WindowMsg::Composited(false)));
+    assert_eq!(app.window_radius, 0.0);
+}
+
+/// Rounded, the window's corners are clear and what is inside them is not
+/// — whatever is over the window: every layer reaching a corner (the
+/// chrome, the status bar, a dialog's veil, the tutorial's) rounds its
+/// own as the window's are.
+#[test]
+fn every_layer_leaves_the_rounded_corners_clear() {
+    let size = iced::Size::new(640.0, 420.0);
+    let pixels = |app: &App| {
+        use iced::advanced::renderer::Headless as _;
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(crate::ui::view(app), size, Cache::default(), &mut renderer);
+        let _ = ui.update(
+            &[Event::Window(window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            ))],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut Vec::new(),
+        );
+        let theme = crate::theme::app_theme();
+        ui.draw(
+            &mut renderer,
+            &theme,
+            &iced::advanced::renderer::Style {
+                text_color: iced::Color::BLACK,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        let physical = iced::Size::new(size.width as u32, size.height as u32);
+        renderer.screenshot(physical, 1.0, iced::Color::TRANSPARENT)
+    };
+    let alpha = |rgba: &[u8], x: u32, y: u32| rgba[((y * size.width as u32 + x) * 4 + 3) as usize];
+    let (w, h) = (size.width as u32, size.height as u32);
+    for what in ["the window", "a dialog", "the tutorial"] {
+        let mut app = reader_app();
+        let _ = app.on_window_resized(size);
+        app.window_frame = 1.0;
+        app.window_radius = crate::ui::WINDOW_RADIUS;
+        match what {
+            "a dialog" => app.show_shortcuts = true,
+            "the tutorial" => app.tutorial = Some(0),
+            _ => {}
+        }
+        let rgba = pixels(&app);
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            assert_eq!(alpha(&rgba, x, y), 0, "{what}: corner ({x}, {y})");
+        }
+        // Just off each corner, outside its arc; and inside it.
+        for (x, y) in [(2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3)] {
+            assert_eq!(alpha(&rgba, x, y), 0, "{what}: off the arc at ({x}, {y})");
+        }
+        // Inside the arcs; and the frame's edge, opaque over the desktop.
+        for (x, y) in [(6, 6), (w - 7, 6), (6, h - 7), (w - 7, h - 7)] {
+            assert_eq!(alpha(&rgba, x, y), 255, "{what}: inside at ({x}, {y})");
+        }
+        for (x, y) in [(w / 2, 0), (0, h / 2), (w / 2, h - 1), (w - 1, h / 2)] {
+            assert_eq!(alpha(&rgba, x, y), 255, "{what}: the edge at ({x}, {y})");
+        }
+    }
 }
