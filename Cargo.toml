@@ -27,6 +27,9 @@ libc = "0.2"
 # blocks showed as empty black boxes). Without it, iced falls back to plain,
 # visible monospace text.
 iced = { version = "0.14", features = ["advanced", "canvas", "image", "markdown", "svg", "tokio"] }
+# For `task::effect`: a widget operation sent with no answer awaited, as
+# iced's own `snap_to` is (iced re-exports neither).
+iced_runtime = "0.14.0"
 # Rasterizes graph node labels to textures so they move smoothly when the 3D
 # map spins (canvas `fill_text` snaps to the pixel grid, which shakes at the slow
 # idle-spin speed); see `src/ui/graph_labels.rs`.

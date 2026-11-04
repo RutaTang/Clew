@@ -353,7 +353,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     let left: Element<'_, Message> = if app.show_left_sidebar {
         row![
             sidebar(app),
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeSidebar(v))),
+            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeSidebar(v)))
+                .panel(crate::resize::Panel::Before),
         ]
         .into()
     } else {
@@ -362,7 +363,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // Right sidebar: the cursor-following reading-context panel.
     let right: Element<'_, Message> = match right_panel(app) {
         Some(panel) => row![
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v))),
+            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v)))
+                .panel(crate::resize::Panel::After),
             panel
         ]
         .into(),
@@ -375,7 +377,8 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // height is user-draggable via the divider between it and the code.
     let bottom: Element<'_, Message> = if app.show_bottom {
         column![
-            crate::resize::Divider::horizontal(|v| Message::Window(WindowMsg::ResizeBottom(v))),
+            crate::resize::Divider::horizontal(|v| Message::Window(WindowMsg::ResizeBottom(v)))
+                .panel(crate::resize::Panel::After),
             container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
         ]
         .into()

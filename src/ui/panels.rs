@@ -407,30 +407,23 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
 
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.proj.ask_turns.is_empty() && !app.proj.asking {
-        convo.push(
-            text(
-                "Ask a question about this codebase. Answers cite the code and jump to it. \
-                  Follow-ups keep the conversation. Select code and right-click → “Add to Ask” \
-                  to attach snippets as context.",
-            )
-            .size(ts::BODY)
-            .color(theme::dim())
-            .into(),
-        );
-        // Agent mode explores the project itself, so it needs no semantic
-        // index — the "build the index first" nudge only applies when Ask
-        // would run in retrieval mode (no server channel to run an agent on).
-        if !app.server.is_up()
+        // An empty conversation shows what to ask, not a paragraph about
+        // asking: the box below says what it is for, and "Add to Ask" is in
+        // the code's own context menu. The one thing worth saying is when
+        // answers would have nothing to stand on — Ask in retrieval mode (no
+        // server to run an agent on) with no index and nothing pinned — and
+        // it is said quietly, as a hint, not as an error.
+        if app.proj.project.is_some()
+            && !app.server.is_up()
             && app.proj.embed_index.entries.is_empty()
             && app.proj.ask_pins.is_empty()
         {
             convo.push(
                 text(
-                    "Run “Explain All” to ground answers in the code — or right-click code → \
-                      “Add to Ask” to ground a single question now.",
+                    "Answers are grounded once “Explain All” has run, or in code you “Add to Ask”.",
                 )
-                .size(ts::SMALL)
-                .color(theme::warn())
+                .size(ts::CAPTION)
+                .color(theme::dim())
                 .into(),
             );
         }

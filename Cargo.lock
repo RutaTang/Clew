@@ -682,6 +682,7 @@ dependencies = [
  "clew-core",
  "clew-protocol",
  "iced",
+ "iced_runtime",
  "iced_test",
  "libc",
  "mermaid-rs-renderer",

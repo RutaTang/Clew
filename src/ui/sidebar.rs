@@ -21,32 +21,29 @@ pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
     ("DOCS", SidebarTab::Docs),
 ];
 
+/// A tab's padding either side of its label.
+const TAB_PAD_X: f32 = 7.0;
+
 /// A Task that scrolls the tab strip so `tab` is visible. The strip scrolls
 /// horizontally and the active tab can otherwise sit off-screen to the right
 /// (so it reads as "no tab selected"); this keeps the selection in view whenever
-/// a tab is picked — including when the tour switches tabs for the user.
+/// a tab is picked — including when the tour switches tabs for the user. A tab
+/// already in full view leaves the strip where it is, and one cut off moves it
+/// only as far as it must: the strip used to jump to the tab's share of its
+/// width on every pick, sliding tabs the reader had just looked at away.
 pub(crate) fn reveal_sidebar_tab(tab: SidebarTab) -> iced::Task<Message> {
-    let n = SIDEBAR_TABS.len();
-    let idx = SIDEBAR_TABS
+    let label = SIDEBAR_TABS
         .iter()
-        .position(|(_, t)| *t == tab)
-        .unwrap_or(0);
-    let x = if n > 1 {
-        idx as f32 / (n - 1) as f32
-    } else {
-        0.0
-    };
-    iced::widget::operation::snap_to(
-        sidebar_tabs_scroll_id(),
-        iced::widget::scrollable::RelativeOffset { x, y: 0.0 },
-    )
+        .find(|(_, t)| *t == tab)
+        .map_or(SIDEBAR_TABS[0].0, |(label, _)| *label);
+    super::ops::reveal_label(sidebar_tabs_scroll_id(), label, TAB_PAD_X)
 }
 
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: SidebarTab| {
         button(text(label).size(ts::SMALL))
             .style(theme::tab_button(app.sidebar == this))
-            .padding([5, 7])
+            .padding([5.0, TAB_PAD_X])
             .on_press(Message::Window(WindowMsg::SidebarTabPicked(this)))
     };
     // The tabs rarely all fit a narrow sidebar, so they keep their natural width

@@ -6765,3 +6765,78 @@ fn the_insight_popup_shows_the_answer_and_where_it_points() {
         "{sent:?}"
     );
 }
+
+/// The tab strip's horizontal offset after an update that returned `task`:
+/// the view rebuilt over `cache`, the task's widget operations applied.
+fn tab_strip_after(
+    app: &App,
+    task: iced::Task<Message>,
+    cache: Cache,
+    renderer: &mut iced::Renderer,
+) -> (Cache, f32) {
+    let mut ui = UserInterface::build(super::view(app), WINDOW, cache, renderer);
+    for mut op in widget_ops(task) {
+        loop {
+            ui.operate(renderer, &mut black_box(&mut *op));
+            match op.finish() {
+                Outcome::Chain(next) => op = next,
+                _ => break,
+            }
+        }
+    }
+    let mut probe = ScrollProbe {
+        target: super::sidebar_tabs_scroll_id(),
+        found: None,
+    };
+    ui.operate(renderer, &mut probe);
+    let x = probe.found.expect("the tab strip is on screen").x;
+    (ui.into_cache(), x)
+}
+
+/// Picking a tab in full view leaves the strip where it is; one cut off at
+/// either end moves it just far enough to show the whole tab. The strip
+/// used to jump to the tab's share of its width on every pick, sliding the
+/// tabs the reader was looking at away.
+#[test]
+fn picking_a_tab_scrolls_the_strip_only_when_the_tab_is_cut_off() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    let mut renderer = renderer();
+    let mut pick = |app: &mut App, tab, cache| {
+        let task = app.update(Message::Window(WindowMsg::SidebarTabPicked(tab)));
+        tab_strip_after(app, task, cache, &mut renderer)
+    };
+    // MARKS is in full view: nothing moves.
+    let (cache, x) = pick(&mut app, crate::SidebarTab::Marks, Cache::default());
+    assert_eq!(x, 0.0, "a tab in view scrolled the strip");
+    // DOCS, the last, is cut off: the strip moves to show it.
+    let (cache, docs) = pick(&mut app, crate::SidebarTab::Docs, cache);
+    assert!(docs > 0.0, "DOCS stayed cut off");
+    // Picked again, it is in full view now: nothing moves.
+    let (cache, again) = pick(&mut app, crate::SidebarTab::Docs, cache);
+    assert_eq!(again, docs);
+    // FILES is off to the left now: back to the start, and no further.
+    let (cache, files) = pick(&mut app, crate::SidebarTab::Files, cache);
+    assert_eq!(files, 0.0);
+    // Moving only as far as it must: DOCS ends at the strip's right edge
+    // rather than the strip jumping to its end.
+    let (_, docs_again) = pick(&mut app, crate::SidebarTab::Docs, cache);
+    assert_eq!(docs_again, docs);
+}
+
+/// An empty Ask shows what to ask, not a paragraph about asking; the hint
+/// that answers have nothing to stand on yet is a quiet line, and only for
+/// a project open with no server to run the agent, no index, nothing pinned.
+#[test]
+fn an_empty_ask_shows_questions_not_instructions() {
+    let mut app = reader_app();
+    {
+        let mut sim = sim_elem(super::ask_panel(&app));
+        assert!(!shows(&mut sim, "Ask a question about this codebase"));
+        assert!(!shows(&mut sim, "Run “Explain All”"));
+        assert!(shows(&mut sim, "Answers are grounded once"));
+    }
+    app.proj.project = None;
+    let mut sim = sim_elem(super::ask_panel(&app));
+    assert!(!shows(&mut sim, "Answers are grounded once"));
+}
