@@ -36,6 +36,8 @@ pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
 mod fresh;
+// A height held while what is under it is asked about.
+mod held;
 pub(crate) mod placed;
 mod reader_scroll;
 pub(crate) use reader_scroll::*;
@@ -166,7 +168,6 @@ pub(crate) enum ActiveOverlay<'a> {
     TargetMenu,
     AppMenu,
     ViewMenu,
-    ViewsMenu,
     Graph(crate::Overlay),
     ServerPanel,
     Finder,
@@ -213,8 +214,6 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::AppMenu
     } else if app.show_view_menu {
         O::ViewMenu
-    } else if app.show_views_menu {
-        O::ViewsMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
     } else if app.server_panel {
@@ -258,7 +257,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::TargetMenu => "target-menu",
             Self::AppMenu => "app-menu",
             Self::ViewMenu => "view-menu",
-            Self::ViewsMenu => "views-menu",
             Self::Graph(_) => "graph",
             Self::ServerPanel => "server-panel",
             Self::ContextMenu(_) => "context-menu",
@@ -310,7 +308,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::TargetMenu => target_menu(app),
             Self::AppMenu => app_menu(app),
             Self::ViewMenu => view_menu(app),
-            Self::ViewsMenu => views_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::ServerPanel => server_panel_modal(app),
             Self::Finder => finder_modal(app),
@@ -340,7 +337,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
             Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
             Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
-            Self::ViewsMenu => Message::Window(WindowMsg::ToggleViewsMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
             Self::ServerPanel => Message::Lsp(LspMsg::TogglePanel),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),

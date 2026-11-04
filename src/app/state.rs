@@ -1087,8 +1087,6 @@ pub struct App {
     pub show_app_menu: bool,
     /// The reader's View menu (View ▾ among the file tools) is open.
     pub show_view_menu: bool,
-    /// The sidebar's menu of its other views (past the six on its strip).
-    pub show_views_menu: bool,
     /// What the Files view is narrowed to; empty shows the whole tree.
     pub file_filter: String,
     /// The customizable command keymap (loaded from the global config).

@@ -81,12 +81,26 @@ fn under_field(app: &App, width: f32) -> f32 {
     )
 }
 
-/// Where the Ask window is drawn now; `None` while it is put away.
+/// Whether the conversation is kept in the margin and the margin shows it
+/// — not floating over the code.
+pub(crate) fn ask_in_margin(app: &App) -> bool {
+    app.ask_view == AskView::Margin && super::right_panel_shown(app)
+}
+
+/// Whether the conversation is a card under the chat field: as a card, or
+/// kept in a margin that cannot show.
+pub(crate) fn ask_is_card(app: &App) -> bool {
+    app.ask_view == AskView::Compact || (app.ask_view == AskView::Margin && !ask_in_margin(app))
+}
+
+/// Where the Ask window is drawn now; `None` while it is put away, or kept
+/// in the margin.
 pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
     let (top, bottom) = band(app);
     match app.ask_view {
         AskView::Closed => None,
-        AskView::Compact => {
+        AskView::Margin if ask_in_margin(app) => None,
+        AskView::Compact | AskView::Margin => {
             let top = card_top(app);
             let height = ASK_CARD_H.min(bottom - top).max(ASK_CARD_MIN_H);
             let width = ASK_CARD_W
@@ -386,7 +400,7 @@ const ASK_HEADER_H: f32 = 44.0;
 /// approval is given up to half the card, the conversation over it what is
 /// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
-    app.ask_view == AskView::Compact
+    ask_is_card(app)
 }
 
 /// The card: its header (what it is, what is being read, size, close),
@@ -395,7 +409,7 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let large = app.ask_view == AskView::Expanded;
     let fit = card_fits(app);
     let mut header = row![
-        glyph::icon(Glyph::Ask, theme::accent(), 16.0),
+        glyph::icon(Glyph::Message, theme::accent(), 15.0),
         text("Ask")
             .size(ts::BASE)
             .font(crate::fonts::UI_SEMIBOLD)
@@ -424,14 +438,8 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         );
     }
     header = header.push(space().width(Fill));
-    if !app.proj.ask_turns.is_empty() {
-        header = header.push(
-            button(text("Clear").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Ask(AskMsg::Clear)),
-        );
-    }
+    // The card keeps the conversation in the margin; the large window is
+    // made small again. Clearing it is the margin's, and the palette's.
     header = header
         .push(if large {
             header_button(
@@ -440,7 +448,11 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
                 Message::Ask(AskMsg::Shrink),
             )
         } else {
-            header_button(Glyph::Expand, "Make large", Message::Ask(AskMsg::Expand))
+            header_button(
+                Glyph::PanelRight,
+                "Keep in the margin",
+                Message::Ask(AskMsg::KeepInMargin),
+            )
         })
         .push(header_button(
             Glyph::Close,
@@ -555,4 +567,56 @@ pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
         }
     };
     Some(container(line).padding([6, 12]).width(Fill).into())
+}
+
+/// The conversation kept in the margin: the margin's Ask tab, as tall as
+/// the margin, `height` — its header (what it is, clearing it, taking it
+/// out of the margin, putting it away), what voice is doing, and the
+/// conversation with its composer.
+pub(crate) fn ask_margin(app: &App, height: f32) -> Element<'_, Message> {
+    let mut header = row![
+        glyph::icon(Glyph::Message, theme::accent(), 15.0),
+        text("Ask")
+            .size(ts::BASE)
+            .font(crate::fonts::UI_SEMIBOLD)
+            .color(theme::fg()),
+        space().width(Fill),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+    if !app.proj.ask_turns.is_empty() {
+        header = header.push(
+            button(text("Clear").size(ts::SMALL))
+                .style(theme::toolbar_button)
+                .padding([2, 8])
+                .on_press(Message::Ask(AskMsg::Clear)),
+        );
+    }
+    let header = header
+        .push(header_button(
+            Glyph::Expand,
+            "Take out of the margin",
+            Message::Ask(AskMsg::Float),
+        ))
+        .push(header_button(
+            Glyph::Close,
+            "Put away (Esc)",
+            Message::Ask(AskMsg::Close),
+        ));
+    column![
+        container(header)
+            .height(Length::Fixed(ASK_HEADER_H))
+            .align_y(iced::Center)
+            .padding(Padding {
+                top: 0.0,
+                right: 6.0,
+                bottom: 0.0,
+                left: 12.0,
+            }),
+        hairline(),
+        voice_strip(app).unwrap_or_else(slot),
+        ask_panel(app, (height - ASK_HEADER_H).max(ASK_CARD_MIN_H)),
+    ]
+    .height(Fill)
+    .into()
 }

@@ -2856,18 +2856,33 @@ fn ask_panel_turn(
     app: &App,
     cache: Cache,
     renderer: &mut iced::Renderer,
+    events: (&[Event], mouse::Cursor),
+    label: &str,
+) -> (Cache, Option<Rectangle>, Option<Id>) {
+    panel_turn(
+        super::panels::ask_panel,
+        app,
+        cache,
+        renderer,
+        events,
+        label,
+    )
+}
+
+/// [`ask_panel_turn`] with the panel `panel` builds — the large window's,
+/// or the card's fitted to its conversation.
+fn panel_turn(
+    panel: for<'a> fn(&'a App, f32) -> Element<'a, Message>,
+    app: &App,
+    cache: Cache,
+    renderer: &mut iced::Renderer,
     (events, cursor): (&[Event], mouse::Cursor),
     label: &str,
 ) -> (Cache, Option<Rectangle>, Option<Id>) {
     use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
     use iced_test::selector::{Candidate, Selector};
     let size = Size::new(800.0, app.bottom_height);
-    let mut ui = UserInterface::build(
-        super::panels::ask_panel(app, size.height),
-        size,
-        cache,
-        renderer,
-    );
+    let mut ui = UserInterface::build(panel(app, size.height), size, cache, renderer);
     let mut messages = Vec::new();
     let _ = ui.update(
         events,
@@ -3038,6 +3053,74 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     assert_eq!(turn(&app, still, "run 2"), None);
     app.proj.ask_turns.clear();
     let _ = turn(&app, still, "Allow once");
+}
+
+/// The card fitted to its conversation holds the conversation's height
+/// while an approval is asked: steps and words arriving over it, and more
+/// cards coming after it, move none of its answers — though fitted, the
+/// card grows with what it holds.
+#[test]
+fn a_fitted_cards_approval_stays_put_while_its_turn_grows() {
+    use crate::app::model::{AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState};
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    app.bottom_height = 560.0;
+    let card = |call| Approval {
+        key: ApprovalKey::Mcp { call },
+        mark: None,
+        title: format!("run {call}"),
+        detail: "x".into(),
+        options: vec![ApprovalOption {
+            id: "once".into(),
+            label: "Allow once".into(),
+            allows: true,
+        }],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        answer_md: "so far".into(),
+        ..AskTurn::default()
+    });
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    let still: (&[Event], mouse::Cursor) = (&[], mouse::Cursor::Unavailable);
+    let mut turn = |app: &App, label: &str| {
+        let (next, found, _) = panel_turn(
+            super::panels::ask_panel_fitted,
+            app,
+            std::mem::take(&mut cache),
+            &mut renderer,
+            still,
+            label,
+        );
+        cache = next;
+        found
+    };
+    app.proj.ask_turns[0].extras.approvals.push(card(1));
+    let _ = turn(&app, "Allow once");
+    let allow = turn(&app, "Allow once").expect("its answers show");
+
+    // Steps and words arrive over it; one more card comes after it.
+    let grown = &mut app.proj.ask_turns[0];
+    for i in 0..30 {
+        grown.steps.push(AgentStep {
+            tool: "read".into(),
+            title: format!("read src/{i}.rs"),
+            refs: Vec::new(),
+            state: StepState::Done,
+        });
+    }
+    grown.answer_md.push_str(&" more".repeat(300));
+    assert_eq!(turn(&app, "Allow once"), Some(allow));
+    app.proj.ask_turns[0].extras.approvals.push(card(2));
+    assert_eq!(turn(&app, "Allow once"), Some(allow));
+    assert!(turn(&app, "1 more waiting after this one").is_some());
+
+    // Answered, the card lets the conversation grow again.
+    app.proj.ask_turns[0].extras.approvals.clear();
+    assert_eq!(turn(&app, "Allow once"), None);
 }
 
 /// A question's Allow counts once its answers have been in view for the
@@ -7019,7 +7102,33 @@ fn the_raised_note_says_when_its_function_changed() {
         )
         .expect("a call graph"),
     );
+    // Their call sites unknown (a remote project's graph comes without
+    // them): the functions that call it.
     assert!(shows(&mut sim_of(&app), "2 callers"));
+    // Known: each place that calls it — `a` twice, `b` once — and not a
+    // call of another name.
+    let site = |caller: &str, callee: &str, line| crate::projectcalls::CallSite {
+        caller: Some(caller.into()),
+        callee: callee.into(),
+        method: false,
+        line,
+    };
+    let lib = root.join("src/lib.rs");
+    app.proj.calls_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::new(
+            lib,
+            crate::highlight::Lang::Rust,
+            vec![
+                site("a", "origin", 7),
+                site("a", "origin", 8),
+                site("b", "origin", 11),
+                site("b", "other", 12),
+            ],
+            &[],
+        )),
+    );
+    assert!(shows(&mut sim_of(&app), "3 references"));
 }
 
 /// The margin, with no note to show, says why, centered under a muted icon
@@ -7093,7 +7202,8 @@ fn the_palette_lists_commands_with_their_keys() {
 }
 
 /// The floating Ask, on screen: the launcher opens the card; the card's
-/// conversation and its Clear are there; the large window's dimmed rest
+/// conversation is there; kept in the margin it is the margin's, cleared
+/// there, and taken out a card again; the large window's dimmed rest
 /// makes it a card again when clicked; and the card leaves the code beside
 /// it to the reader's clicks.
 #[test]
@@ -7126,10 +7236,50 @@ fn the_floating_ask_is_driven_from_the_screen() {
             "hanging under the field: {question:?}"
         );
     }
+    assert!(
+        !shows(&mut sim_of(&app), "Clear"),
+        "the card's header is what it is, the margin, and put away"
+    );
+    // Kept in the margin: no card; the conversation in the margin, under a
+    // tab of its own, clearing it there; taken out, a card again.
+    let _ = app.update(Message::Ask(AskMsg::KeepInMargin));
+    assert_eq!(app.ask_view, crate::AskView::Margin);
+    assert!(
+        super::ask_place(&app).is_none(),
+        "no card while in the margin"
+    );
+    {
+        let mut sim = sim_of(&app);
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 0)
+            .expect("the conversation is in the margin");
+        let margin_left = WINDOW.width - super::STRIP_W - super::SHEET_GAP - app.right_width;
+        assert!(
+            question.x >= margin_left && question.x < WINDOW.width - super::STRIP_W,
+            "in the margin: {question:?}, from {margin_left}"
+        );
+        assert!(shows(&mut sim, "Ask"), "its tab over the margin");
+    }
     assert!(matches!(
         click(sim_of(&app), "Clear").as_slice(),
         [Message::Ask(AskMsg::Clear)]
     ));
+    // Its tab is one of the margin's: the notes, and back.
+    let _ = app.update(Message::Window(crate::WindowMsg::MarginTabPicked(
+        crate::MarginTab::Notes,
+    )));
+    assert!(text_at(&mut sim_of(&app), |t| t == "where is the origin?", 0).is_none());
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert_eq!(app.margin_tab, crate::MarginTab::Ask, "opening it shows it");
+    // Where the margin cannot show, the card stands in for it.
+    app.proj.split = true;
+    assert!(
+        super::ask_place(&app).is_some(),
+        "a card while the panes split"
+    );
+    app.proj.split = false;
+    let _ = app.update(Message::Ask(AskMsg::Float));
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    assert_eq!(app.margin_tab, crate::MarginTab::Notes);
     // The code beside the card takes its own clicks.
     let mut sim = sim_of(&app);
     let beside = super::ask_place(&app).unwrap().left - 60.0;
@@ -7323,4 +7473,31 @@ fn the_window_resizes_from_its_edges_and_corners() {
     for inside in [Point::new(w / 2.0, h / 2.0), Point::new(12.0, h / 2.0)] {
         assert_eq!(resized(&pressed_at(inside)), None, "{inside:?}");
     }
+}
+
+/// The sidebar's strip holds its six everyday views and nothing else; a
+/// view opened by what shows it (a value traced, the import graph, a
+/// walkthrough, a symbol's docs) is named over it, with the way back to
+/// the files.
+#[test]
+fn a_view_off_the_strip_is_named_over_it() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    assert_eq!(super::sidebar::STRIP_VIEWS, 6);
+    assert!(!shows(&mut sim_of(&app), "Value flow"));
+    for (tab, name) in [
+        (crate::SidebarTab::Flow, "Value flow"),
+        (crate::SidebarTab::Imports, "Imports"),
+        (crate::SidebarTab::Walk, "Walkthroughs"),
+        (crate::SidebarTab::Docs, "API docs"),
+        (crate::SidebarTab::Notes, "Reading notes"),
+    ] {
+        app.sidebar = tab;
+        assert!(shows(&mut sim_of(&app), name), "{name} is named");
+    }
+    app.sidebar = crate::SidebarTab::Marks;
+    assert!(
+        !shows(&mut sim_of(&app), "Marks"),
+        "a view on the strip needs no title"
+    );
 }

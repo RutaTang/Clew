@@ -382,6 +382,9 @@ pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
 /// for what is not the conversation: its header and the voice line under
 /// it, the input row, and the padding and spacing around them.
 const CARD_CHROME: f32 = 180.0;
+/// The gap over a pinned approval card, where the count of those waiting
+/// after it shows.
+const COUNT_SLOT_H: f32 = 20.0;
 /// Room for each of the composer's optional rows (the pinned code, an ACP
 /// agent's settings) over the input.
 const COMPOSER_ROW_ROOM: f32 = 36.0;
@@ -598,21 +601,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .filter(|&row| row)
         .count() as f32;
     // An approval pinned under it: as tall as it is laid out across the
-    // card, the gap over it and the count under it.
+    // card, and the place for the count over it.
     let approval_room = match app.first_approval() {
         Some((_, approval)) if fit => {
             let width = crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width);
             let head = (height * 0.5 - 60.0).max(40.0);
-            let more = app
-                .proj
-                .ask_turns
-                .iter()
-                .filter(|t| t.streaming)
-                .map(|t| t.extras.approvals.len())
-                .sum::<usize>()
-                > 1;
-            14.0 + approval_card_height(approval, width - 32.0, head)
-                + if more { 18.0 } else { 0.0 }
+            COUNT_SLOT_H + approval_card_height(approval, width - 32.0, head)
         }
         _ => 0.0,
     };
@@ -621,6 +615,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     } else {
         f32::INFINITY
     });
+    // Fitted, the card would grow with what arrives above an approval and
+    // move its answers down: while one is asked, the conversation keeps the
+    // height it had, and what arrives scrolls in it.
+    let conversation = super::held::held(conversation, fit && app.first_approval().is_some());
     // The tool call waiting for the user's say-so, pinned under the
     // conversation, over the composer: drawn in it, a card moved down as its
     // turn grew above it — a step, a plan entry, each scrolling the panel —
@@ -654,21 +652,24 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 _ => 0,
             };
             let card = approval_card(turn.stream, approval, asked, head, page);
-            // The count goes over it, out of what scrolls: the card sits on
-            // the composer, so one more coming moves nothing of it.
-            let mut pinned = Column::new().spacing(4);
-            if more > 0 {
-                pinned = pinned.push(
-                    text(format!("{more} more waiting after this one"))
-                        .size(ts::CAPTION)
-                        .color(theme::dim()),
-                );
-            }
-            let pinned = pinned.push(card);
-            // Its own gap over it, the column having none.
-            container(pinned)
-                .padding(iced::Padding::default().top(14))
-                .into()
+            // The count goes over it, out of what scrolls, in a place of its
+            // own that is there with no count to show — the gap over the
+            // card — so one more coming moves nothing of it.
+            let count: Element<'_, Message> = if more > 0 {
+                text(format!("{more} more waiting after this one"))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .into()
+            } else {
+                space().into()
+            };
+            column![
+                container(count)
+                    .height(Length::Fixed(COUNT_SLOT_H))
+                    .align_y(iced::alignment::Vertical::Center),
+                card
+            ]
+            .into()
         }
         None => space().into(),
     };

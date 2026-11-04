@@ -26767,7 +26767,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::TargetMenu => "target menu",
             O::AppMenu => "app menu",
             O::ViewMenu => "view menu",
-            O::ViewsMenu => "views menu",
             O::Graph(_) => "graph",
             O::ServerPanel => "server panel",
             O::Finder => "finder",
@@ -26792,7 +26791,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.show_target_menu = false;
         app.show_app_menu = false;
         app.show_view_menu = false;
-        app.show_views_menu = false;
         app.proj.overlay = None;
         app.server_panel = false;
         app.proj.finder.open = false;
@@ -26869,7 +26867,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.show_target_menu = true),
         Box::new(|a| a.show_app_menu = true),
         Box::new(|a| a.show_view_menu = true),
-        Box::new(|a| a.show_views_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
         Box::new(|a| a.server_panel = true),
         Box::new(|a| a.proj.finder.open = true),
@@ -26904,7 +26901,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (21, 21),
+        (20, 20),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 

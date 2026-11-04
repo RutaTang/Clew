@@ -106,7 +106,6 @@ impl App {
             show_app_menu: false,
             margin_tab: MarginTab::default(),
             show_view_menu: false,
-            show_views_menu: false,
             file_filter: String::new(),
             keymap: keymap::Keymap::load(),
             show_shortcuts: false,
@@ -331,7 +330,6 @@ impl App {
         self.show_target_menu = false;
         self.show_app_menu = false;
         self.show_view_menu = false;
-        self.show_views_menu = false;
     }
 
     pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
@@ -339,7 +337,6 @@ impl App {
         self.show_left_sidebar = true; // reveal it for external triggers
         // Close the menu that opened this, if one did.
         self.show_tools_menu = false;
-        self.show_views_menu = false;
         match tab {
             // The search input takes keyboard focus — except while the
             // tutorial shows the tab, whose keys step the tour.
@@ -594,12 +591,6 @@ impl App {
                 let open = !self.show_view_menu;
                 self.close_menus();
                 self.show_view_menu = open;
-                Task::none()
-            }
-            WindowMsg::ToggleViewsMenu => {
-                let open = !self.show_views_menu;
-                self.close_menus();
-                self.show_views_menu = open;
                 Task::none()
             }
             WindowMsg::FileFilterChanged(filter) => {

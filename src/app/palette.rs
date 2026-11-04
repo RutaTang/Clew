@@ -546,6 +546,26 @@ impl App {
             ] {
                 add(title.into(), None, send(message));
             }
+            // Where the conversation is, and clearing it.
+            let ask = match self.ask_view {
+                AskView::Margin => ("Ask: Take Out of the Margin", AskMsg::Float),
+                _ => ("Ask: Keep in the Margin", AskMsg::KeepInMargin),
+            };
+            add(ask.0.into(), None, send(Message::Ask(ask.1)));
+            if self.ask_view != AskView::Expanded {
+                add(
+                    "Ask: Make Large".into(),
+                    None,
+                    send(Message::Ask(AskMsg::Expand)),
+                );
+            }
+            if !self.proj.ask_turns.is_empty() {
+                add(
+                    "Ask: Clear Conversation".into(),
+                    None,
+                    send(Message::Ask(AskMsg::Clear)),
+                );
+            }
         }
         add(
             "Open Folder…".into(),

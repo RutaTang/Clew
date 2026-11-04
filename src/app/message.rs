@@ -1065,6 +1065,10 @@ pub enum AskMsg {
     Expand,
     /// Make the large window a card in the corner again.
     Shrink,
+    /// Keep the conversation in the margin, as a tab of its own.
+    KeepInMargin,
+    /// Take it out of the margin: a card over the code again.
+    Float,
     /// Put the Ask window away.
     Close,
     /// The Ask input box text changed.
@@ -1882,8 +1886,6 @@ pub enum WindowMsg {
     ToggleViewMenu,
     /// The Files view's filter changed.
     FileFilterChanged(String),
-    /// Open / close the sidebar's menu of its other views.
-    ToggleViewsMenu,
     /// Maximize the window, or make it a window again (Windows and Linux).
     ToggleMaximize,
     /// The reading panel's view picked.
@@ -2363,6 +2365,8 @@ impl AskMsg {
             | AskMsg::Open
             | AskMsg::Expand
             | AskMsg::Shrink
+            | AskMsg::KeepInMargin
+            | AskMsg::Float
             | AskMsg::Close
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
@@ -2622,7 +2626,6 @@ impl WindowMsg {
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
             | WindowMsg::FileFilterChanged(..)
-            | WindowMsg::ToggleViewsMenu
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::MaximizedIs(..) => None,

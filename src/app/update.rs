@@ -275,7 +275,7 @@ impl App {
             && self.asking.raised_for.as_ref() != Some(&question)
         {
             self.asking.raised_for = Some(question.clone());
-            if place.is_none() && self.ask_view == AskView::Compact {
+            if place.is_none() && matches!(self.ask_view, AskView::Compact | AskView::Margin) {
                 self.ask_view = AskView::Expanded;
             }
         }

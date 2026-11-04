@@ -468,7 +468,7 @@ fn chat_field(app: &App) -> Element<'_, Message> {
     // The card opens over the field: what voice is doing is said on the
     // card then, and the field under it keeps its plain face — no second
     // set of the same controls hidden beneath the card.
-    let covered = app.ask_view == AskView::Compact;
+    let covered = super::askfloat::ask_is_card(app);
     let face: Element<'_, Message> =
         if let Some(title) = app.voice.confirm.as_ref().filter(|_| !covered) {
             row![
@@ -1154,47 +1154,6 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
             left: view_menu_left(app),
         },
         Backdrop::Clear(Message::Window(WindowMsg::ToggleViewMenu)),
-    )
-}
-
-// ------------------------------------------- the sidebar's other views
-
-/// Width of the menu of the sidebar's other views.
-const VIEWS_MENU_W: f32 = 210.0;
-
-/// The menu behind the sidebar strip's last segment: the views past the
-/// everyday six, the one chosen checked.
-pub(crate) fn views_menu(app: &App) -> Element<'_, Message> {
-    let items: Vec<Element<'_, Message>> = SIDEBAR_TABS
-        .iter()
-        .skip(STRIP_VIEWS)
-        .map(|(_, tab)| {
-            let trailing: Element<'_, Message> = if app.sidebar == *tab {
-                glyph::icon(Glyph::Check, theme::accent(), 14.0)
-            } else {
-                slot()
-            };
-            menu_item(
-                Some(tab_glyph(*tab)),
-                tab_name(*tab).to_string(),
-                trailing,
-                Some(Message::Window(WindowMsg::SidebarTabPicked(*tab))),
-            )
-        })
-        .collect();
-    let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(VIEWS_MENU_W)
-        .padding(MENU_PAD)
-        .style(theme::modal_panel);
-    // Under the strip's last segment, its right edge at the strip's.
-    let left = (app.sidebar_width - 10.0 - VIEWS_MENU_W).max(8.0);
-    modal(
-        panel,
-        Placement::TopLeft {
-            top: body_top(app) + 2.0 + 32.0 + 4.0,
-            left,
-        },
-        Backdrop::Clear(Message::Window(WindowMsg::ToggleViewsMenu)),
     )
 }
 

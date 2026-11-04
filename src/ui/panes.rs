@@ -1035,7 +1035,15 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
         return None;
     }
     let body: Element<'_, Message> = match app.margin_tab {
-        crate::MarginTab::Notes => margin_notes(app),
+        // The conversation, while it is kept here.
+        crate::MarginTab::Ask if super::askfloat::ask_in_margin(app) => {
+            let height = app.window_height
+                - crate::ui::TOOLBAR_H
+                - crate::ui::STATUSBAR_H
+                - crate::ui::sheet::sheet_header_height(app);
+            super::askfloat::ask_margin(app, height)
+        }
+        crate::MarginTab::Notes | crate::MarginTab::Ask => margin_notes(app),
         crate::MarginTab::Calls => margin_calls(app),
         crate::MarginTab::History => margin_history(app),
     };
@@ -1285,12 +1293,64 @@ enum NoteOf<'a> {
     File,
 }
 
-/// How many functions call `name` (the `ordinal`th of its name in `file`),
-/// as the project's call graph has it; `None` before the graph has it.
-fn callers_count(app: &App, file: &std::path::Path, name: &str, ordinal: u32) -> Option<usize> {
+/// How the note on a function counts what leans on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leaning {
+    /// The places in the project that call it: each call site naming it in
+    /// a function the graph has calling it.
+    References(usize),
+    /// The functions that call it, when their call sites are not known
+    /// here (a remote project's graph comes without them).
+    Callers(usize),
+}
+
+impl Leaning {
+    /// What the note says: "21 references", "1 caller".
+    pub(crate) fn label(self) -> String {
+        match self {
+            Leaning::References(1) => "1 reference".to_string(),
+            Leaning::References(n) => format!("{n} references"),
+            Leaning::Callers(1) => "1 caller".to_string(),
+            Leaning::Callers(n) => format!("{n} callers"),
+        }
+    }
+}
+
+/// How much of the project leans on the function `name` (the `ordinal`th
+/// of that name in `file`): the call sites naming it in each function the
+/// graph has calling it, or, where those functions' call sites are not
+/// known, how many such functions there are.
+pub(crate) fn leaning_on(
+    app: &App,
+    file: &std::path::Path,
+    name: &str,
+    ordinal: u32,
+) -> Option<Leaning> {
     let g = &app.proj.project_calls.graph;
-    g.id_of_key(file, name, ordinal)
-        .map(|id| g.callers_of(id).len())
+    let id = g.id_of_key(file, name, ordinal)?;
+    let callers = g.callers_of(id);
+    // A caller by its file and name: call sites say which function they
+    // are in by its name alone, so two callers of one name in one file
+    // would count each other's calls.
+    let callers: std::collections::BTreeSet<(&std::path::Path, &str)> = callers
+        .iter()
+        .map(|&c| {
+            let node = g.node(c);
+            (node.file.as_path(), node.name.as_str())
+        })
+        .collect();
+    let mut sites = 0;
+    for (caller_file, caller) in &callers {
+        let Some(calls) = app.proj.calls_by_file.get(*caller_file) else {
+            return Some(Leaning::Callers(g.callers_of(id).len()));
+        };
+        sites += calls
+            .calls
+            .iter()
+            .filter(|s| s.callee == name && s.caller.as_deref() == Some(*caller))
+            .count();
+    }
+    Some(Leaning::References(sites))
 }
 
 /// When lines `first..=last` (1-based) of the open file last changed, as
@@ -1374,19 +1434,15 @@ fn active_note<'a>(
     // How much of the project leans on it, and when it last changed — each
     // a way into the margin's tab that says more.
     let v = app.active_viewer();
-    let (callers, changed) = match (of, v) {
+    let (leaning, changed) = match (of, v) {
         (NoteOf::Function { sym, ordinal }, Some(v)) => (
-            callers_count(app, &v.abs, &sym.name, ordinal),
+            leaning_on(app, &v.abs, &sym.name, ordinal),
             last_changed(v, sym.line, sym.end_line),
         ),
         (NoteOf::File, Some(v)) => (None, last_changed(v, 1, usize::MAX)),
         _ => (None, None),
     };
-    let calls_label = match callers {
-        Some(1) => "1 caller".to_string(),
-        Some(n) => format!("{n} callers"),
-        None => "Calls".to_string(),
-    };
+    let calls_label = leaning.map_or_else(|| "Calls".to_string(), Leaning::label);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);

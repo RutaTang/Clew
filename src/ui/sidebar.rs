@@ -22,8 +22,9 @@ pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
 ];
 
 /// How many of [`SIDEBAR_TABS`] stand on the strip itself: the reader's
-/// everyday views. The rest are a menu away, behind the strip's last
-/// segment.
+/// everyday views. The rest open from what shows them — tracing a value,
+/// the import graph, a walkthrough, a symbol's docs — and from the command
+/// palette, each under a title of its own.
 pub(crate) const STRIP_VIEWS: usize = 6;
 
 /// A view's icon on its tab.
@@ -62,8 +63,7 @@ pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
 
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     // The views as a segmented row of icons, each naming itself on hover;
-    // the chosen one raised as a chip. The everyday six stand on it; the
-    // rest are behind its last segment, which shows the one chosen there.
+    // the chosen one raised as a chip.
     let segment = |glyph: Glyph, chosen: bool, name: &'static str, msg: Message| {
         tip_at(
             button(
@@ -100,25 +100,47 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
             Message::Window(WindowMsg::SidebarTabPicked(*this)),
         ));
     }
+    let tabs = container(tabs_row).padding(2).style(theme::trough);
+    // A view not on the strip, opened by what shows it, is named over it,
+    // with the way back to the files.
     let elsewhere = SIDEBAR_TABS
         .iter()
         .skip(STRIP_VIEWS)
         .any(|(_, t)| *t == app.sidebar);
-    tabs_row = tabs_row.push(segment(
-        if elsewhere {
-            tab_glyph(app.sidebar)
-        } else {
-            Glyph::More
-        },
-        elsewhere || app.show_views_menu,
-        if elsewhere {
-            tab_name(app.sidebar)
-        } else {
-            "More views"
-        },
-        Message::Window(WindowMsg::ToggleViewsMenu),
-    ));
-    let tabs = container(tabs_row).padding(2).style(theme::trough);
+    let titled: Element<'_, Message> = if elsewhere {
+        container(
+            row![
+                glyph::icon(tab_glyph(app.sidebar), theme::fg_muted(), 14.0),
+                text(tab_name(app.sidebar))
+                    .size(ts::BASE)
+                    .font(crate::fonts::UI_SEMIBOLD)
+                    .color(theme::fg()),
+                space().width(Fill),
+                tip_at(
+                    button(glyph::icon(Glyph::Close, theme::fg_muted(), 13.0))
+                        .style(theme::icon_button(false))
+                        .padding(5)
+                        .on_press(Message::Window(WindowMsg::SidebarTabPicked(
+                            SidebarTab::Files,
+                        ))),
+                    "Back to the files",
+                    None,
+                    tooltip::Position::Bottom,
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: SIDEBAR_GAP,
+            left: 14.0,
+        })
+        .into()
+    } else {
+        slot()
+    };
 
     // The Files view narrows to what its filter matches.
     let filter: Element<'_, Message> =
@@ -175,6 +197,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
             bottom: SIDEBAR_GAP,
             left: 10.0,
         }),
+        titled,
         filter,
         crate::ui::fresh::fresh_for(&app.sidebar, content)
     ])

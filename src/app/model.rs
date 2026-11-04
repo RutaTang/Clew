@@ -189,13 +189,15 @@ impl CitationIndex {
 }
 
 /// The reading panel's views (the margin beside the code): notes on what is
-/// read, the calls around the function the caret is in, and its history.
+/// read, the calls around the function the caret is in, its history — and
+/// the conversation with Clew, while it is kept there ([`AskView::Margin`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MarginTab {
     #[default]
     Notes,
     Calls,
     History,
+    Ask,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -241,6 +243,10 @@ pub enum AskView {
     Compact,
     /// Large and centred, the window dimmed behind it.
     Expanded,
+    /// Kept in the margin: the margin's Ask tab, beside the code. Where the
+    /// margin cannot show (no file open, the panes split, a narrow window),
+    /// a card again.
+    Margin,
 }
 
 impl AskView {
