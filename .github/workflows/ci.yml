@@ -159,7 +159,7 @@ jobs:
         env:
           CLEW_TEST_MICROPHONE: "1"
           PACKAGES: ${{ matrix.packages }}
-        run: cargo test $PACKAGES --locked
+        run: cargo test $PACKAGES --locked --no-fail-fast
 
   # The release ships static musl builds for both Linux architectures; building
   # them here means a change that breaks the musl/cross build fails its PR, not

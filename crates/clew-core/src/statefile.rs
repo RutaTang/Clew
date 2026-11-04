@@ -1474,6 +1474,11 @@ fn lock_file(lock_path: &Path) -> std::io::Result<FileLock> {
 /// held per handle, so two writers in one process exclude each other too.
 /// The same refusals as on Unix: a link (or a junction) planted at the lock
 /// file's name is not opened through, and only a plain file is locked.
+///
+/// Opened for reading and writing (never truncated: nothing is written to
+/// it): `LockFileEx` needs one of them, and a handle opened to append only
+/// had every lock refused — "Access is denied" — so every store refused
+/// every write.
 #[cfg(not(unix))]
 fn lock_file(lock_path: &Path) -> std::io::Result<FileLock> {
     if let Ok(meta) = std::fs::symlink_metadata(lock_path)
@@ -1486,8 +1491,10 @@ fn lock_file(lock_path: &Path) -> std::io::Result<FileLock> {
         }));
     }
     let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
         .create(true)
-        .append(true)
+        .truncate(false)
         .open(lock_path)?;
     if !file.metadata()?.is_file() {
         return Err(std::io::Error::other(

@@ -21361,6 +21361,9 @@ fn a_late_provider_holds_its_port_until_it_answers() {
     let base = late.config.base_url.trim_end_matches("/v1").to_string();
     let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
     let at = ("127.0.0.1", port);
+    // (Windows lets a listener bind a port a connected socket holds: there
+    // the refused connection below is the whole of it.)
+    #[cfg(unix)]
     assert!(!bindable(port), "the port was let go of");
     let refused = std::net::TcpStream::connect(at).expect_err("nothing answers yet");
     assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
@@ -21377,6 +21380,7 @@ fn a_late_provider_holds_its_port_until_it_answers() {
 /// Whether a TCP socket that shares no address — without the
 /// `SO_REUSEADDR` std sets on each listener it binds — can be bound to
 /// `port` on the loopback: whether no socket holds the port.
+#[cfg(unix)]
 fn bindable(port: u16) -> bool {
     let socket =
         socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("a socket");
