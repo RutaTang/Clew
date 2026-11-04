@@ -1135,14 +1135,18 @@ pub fn markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
         size,
         markdown::Style {
             font: iced::Font::default(),
-            inline_code_padding: iced::padding::left(4).right(4),
+            // The chip's padding is drawn over the spaces beside it (it takes
+            // no room of its own), so it is kept narrower than a space.
+            inline_code_padding: iced::padding::left(2).right(2),
             inline_code_highlight: markdown::Highlight {
                 // A faint wash of the foreground: subtle on dark themes, subtle on
                 // light ones, never a hard black box.
                 background: with_alpha(fg(), 0.08).into(),
-                border: iced::border::rounded(4),
+                border: iced::border::rounded(5),
             },
-            inline_code_color: accent(),
+            // Code reads in the text's own colour on its chip, as names in a
+            // sentence do.
+            inline_code_color: fg(),
             inline_code_font: crate::fonts::CODE,
             code_block_font: crate::fonts::CODE,
             link_color: accent(),
@@ -1626,6 +1630,35 @@ pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
             ..Border::default()
         },
         ..button::Style::default()
+    }
+}
+
+/// A round button of the Ask composer, as wide as it is tall: the send
+/// button (`primary`, in the accent) or the microphone (a quiet well).
+pub fn round_button(primary: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme, status| {
+        let base = if primary {
+            primary_button(theme, status)
+        } else {
+            button::Style {
+                background: Some(
+                    wash(match status {
+                        button::Status::Hovered | button::Status::Pressed => 0.13,
+                        _ => 0.08,
+                    })
+                    .into(),
+                ),
+                text_color: fg(),
+                ..button::Style::default()
+            }
+        };
+        button::Style {
+            border: Border {
+                radius: 15.0.into(),
+                ..Border::default()
+            },
+            ..base
+        }
     }
 }
 

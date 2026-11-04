@@ -415,6 +415,8 @@ pub struct AskTurn {
     /// unique for the App's whole lifetime.
     pub stream: u64,
     pub question: String,
+    /// The question was said, not typed: marked "Said" over it.
+    pub spoken: bool,
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.
     pub answer_md: String,

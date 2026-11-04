@@ -460,71 +460,76 @@ fn chat_field(app: &App) -> Element<'_, Message> {
             .padding([2, 8])
             .on_press(msg)
     };
-    let face: Element<'_, Message> = if let Some(title) = &app.voice.confirm {
-        row![
-            text(format!("Run “{title}”?"))
-                .size(ts::BASE)
-                .color(theme::fg())
-                .width(Fill)
-                .wrapping(Wrapping::None),
-            small("Run", Message::Voice(VoiceMsg::Confirm), true),
-            small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
-        ]
-        .spacing(6)
-        .align_y(iced::Center)
-        .into()
-    } else {
-        match app.voice.phase {
-            VoicePhase::Listening { level, .. } => row![
-                text("●").size(ts::SMALL).color(theme::danger()),
-                text("Listening…").size(ts::BASE).color(theme::fg()),
-                container(
-                    progress_bar(0.0..=1.0, level)
-                        .length(56)
-                        .girth(4)
-                        .style(theme::level_meter)
-                )
-                .width(56),
-                space().width(Fill),
-                small("Done", Message::Voice(VoiceMsg::Stop), true),
-            ]
-            .spacing(8)
-            .align_y(iced::Center)
-            .into(),
-            VoicePhase::Transcribing { .. } => row![
-                text("Working out what you said…")
+    // The card opens over the field: what voice is doing is said on the
+    // card then, and the field under it keeps its plain face — no second
+    // set of the same controls hidden beneath the card.
+    let covered = app.ask_view == AskView::Compact;
+    let face: Element<'_, Message> =
+        if let Some(title) = app.voice.confirm.as_ref().filter(|_| !covered) {
+            row![
+                text(format!("Run “{title}”?"))
                     .size(ts::BASE)
-                    .color(theme::fg_muted())
+                    .color(theme::fg())
                     .width(Fill)
                     .wrapping(Wrapping::None),
+                small("Run", Message::Voice(VoiceMsg::Confirm), true),
                 small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
             ]
             .spacing(6)
             .align_y(iced::Center)
-            .into(),
-            VoicePhase::Idle => {
-                let chord = app.keymap.chord(Action::ToggleAsk).caps();
-                button(
-                    row![
-                        glyph::icon(Glyph::Ask, theme::accent(), 15.0),
-                        text("Ask a question, or say what to do")
-                            .size(ts::BASE)
-                            .color(theme::dim())
-                            .width(Fill)
-                            .wrapping(Wrapping::None),
-                        keycap(chord),
-                    ]
-                    .spacing(9)
-                    .align_y(iced::Center),
-                )
-                .style(theme::field_face)
-                .padding([4, 4])
-                .width(Fill)
-                .on_press(Message::Ask(AskMsg::Toggle))
-                .into()
+            .into()
+        } else {
+            match app.voice.phase {
+                VoicePhase::Listening { level, .. } if !covered => row![
+                    text("●").size(ts::SMALL).color(theme::danger()),
+                    text("Listening…").size(ts::BASE).color(theme::fg()),
+                    container(
+                        progress_bar(0.0..=1.0, level)
+                            .length(56)
+                            .girth(4)
+                            .style(theme::level_meter)
+                    )
+                    .width(56),
+                    space().width(Fill),
+                    small("Done", Message::Voice(VoiceMsg::Stop), true),
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+                .into(),
+                VoicePhase::Transcribing { .. } if !covered => row![
+                    text("Working out what you said…")
+                        .size(ts::BASE)
+                        .color(theme::fg_muted())
+                        .width(Fill)
+                        .wrapping(Wrapping::None),
+                    small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
+                ]
+                .spacing(6)
+                .align_y(iced::Center)
+                .into(),
+                _ => {
+                    let chord = app.keymap.chord(Action::ToggleAsk).caps();
+                    button(
+                        row![
+                            glyph::icon(Glyph::Ask, theme::accent(), 15.0),
+                            text("Ask a question, or say what to do")
+                                .size(ts::BASE)
+                                .color(theme::dim())
+                                .width(Fill)
+                                .wrapping(Wrapping::None),
+                            keycap(chord),
+                        ]
+                        .spacing(9)
+                        .align_y(iced::Center),
+                    )
+                    .style(theme::field_face)
+                    .padding([4, 4])
+                    .width(Fill)
+                    .on_press(Message::Ask(AskMsg::Toggle))
+                    .into()
+                }
             }
-        }
-    };
+        };
     let chord = app.keymap.chord(Action::Voice).caps();
     let mic = tip_at(
         button(

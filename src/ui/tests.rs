@@ -2666,6 +2666,27 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
 }
 
+/// A question said rather than typed is marked "Said" over its bubble; a
+/// typed one is not.
+#[test]
+fn a_spoken_question_is_marked_said() {
+    let mut app = reader_app();
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "where is the origin?".into(),
+        spoken: true,
+        ..Default::default()
+    });
+    {
+        let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+        assert!(shows(&mut sim, "where is the origin?"));
+        assert!(shows(&mut sim, "Said"));
+    }
+    app.proj.ask_turns[0].spoken = false;
+    let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+    assert!(!shows(&mut sim, "Said"));
+}
+
 /// A press held on Stop as the answer ends is not one on Ask, let go of
 /// there: Ask keeps a place of its own, Stop there or not.
 #[test]
@@ -2720,7 +2741,11 @@ fn a_press_on_stop_is_not_one_on_ask() {
         cache,
         &mut renderer,
     );
-    let ask = find(&mut ui, &renderer, "Ask");
+    // Ask is the round send button at the composer's end, level with Stop.
+    let ask = iced::Point::new(
+        size.width - super::COMPOSER_PAD.right - super::ROUND_BUTTON / 2.0,
+        stop.y,
+    );
     let mut sent = Vec::new();
     let _ = ui.update(
         &[Event::Mouse(mouse::Event::ButtonReleased(

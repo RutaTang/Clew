@@ -451,16 +451,33 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         }
     }
     for turn in &app.proj.ask_turns {
+        // A question said rather than typed is marked so, over it.
+        let said: Element<'_, Message> = if turn.spoken {
+            row![
+                glyph::icon(Glyph::Mic, theme::dim(), 11.0),
+                text("Said").size(ts::CAPTION).color(theme::dim()),
+            ]
+            .spacing(5)
+            .align_y(iced::Center)
+            .into()
+        } else {
+            slot()
+        };
         convo.push(
             container(
-                container(
-                    text(turn.question.as_str())
-                        .size(ts::BASE)
-                        .color(theme::fg()),
-                )
-                .padding([8, 12])
-                .max_width(420)
-                .style(theme::bubble),
+                column![
+                    said,
+                    container(
+                        text(turn.question.as_str())
+                            .size(ts::BASE)
+                            .color(theme::fg()),
+                    )
+                    .padding([9, 12])
+                    .max_width(420)
+                    .style(theme::bubble),
+                ]
+                .spacing(4)
+                .align_x(iced::alignment::Horizontal::Right),
             )
             .width(Fill)
             .align_x(iced::alignment::Horizontal::Right)
@@ -503,7 +520,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .iter()
                 .map(|s| agent_step_chip(s, root.as_deref()))
                 .collect();
-            convo.push(Column::with_children(chips).spacing(1).into());
+            convo.push(Column::with_children(chips).spacing(2).into());
         }
         // Tool calls waiting for the user's say-so are asked above the
         // conversation, one at a time.
@@ -576,7 +593,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     if app.proj.asking {
         convo.push(text("Thinking…").size(ts::BODY).color(theme::dim()).into());
     }
-    let conversation = scrollable(Column::with_children(convo).spacing(8).width(Fill))
+    let conversation = scrollable(Column::with_children(convo).spacing(14).width(Fill))
         .id(ask_scroll_id())
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
@@ -635,7 +652,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         .color(theme::dim()),
                 );
             }
-            pinned.into()
+            // Its own gap under it, the column having none.
+            container(pinned)
+                .padding(iced::Padding::default().bottom(14))
+                .into()
         }
         None => space().into(),
     };
@@ -690,6 +710,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             "Ask {} about this codebase…",
             crate::app::integrations::acp_label(agent)
         ),
+        // Once there is a conversation, what is typed is a reply — and the
+        // microphone's key is said, as another way to give it.
+        None if !app.proj.ask_turns.is_empty() => format!(
+            "Reply, or press {} to talk",
+            app.keymap.chord(crate::keymap::Action::Voice).caps()
+        ),
         None => "Ask about this codebase…".to_string(),
     };
     let input = text_input(&placeholder, &app.proj.ask_input)
@@ -699,11 +725,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .size(ts::READING)
         .padding(0)
         .style(theme::bare_input);
-    // Match the input's height (size 13 + 7 padding) so the row lines up. The
-    // send button is the panel's primary action, so it gets accent emphasis
-    // (dimmed to a plain style while a request is in flight / disabled).
-    // Any answer still coming in — an agent turn, a server chat stream, a local
-    // retrieval stream — can be stopped from here, not only agent turns.
+    // The send button is the composer's primary action, a round button in
+    // the accent (a quiet one while an answer is coming in, when it does
+    // nothing). Any answer still coming in — an agent turn, a server chat
+    // stream, a local retrieval stream — can be stopped from here, not only
+    // agent turns.
     let streaming = app.ask_stream_active();
     let idle = !streaming;
     let send_tint = if idle {
@@ -711,23 +737,40 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     } else {
         theme::dim()
     };
-    let mut ask_btn = button(
-        row![
-            glyph::icon(Glyph::Send, send_tint, 14.0),
-            text("Ask").size(ts::BASE),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .style(if idle {
-        theme::primary_button
-    } else {
-        theme::toolbar_button
-    })
-    .padding([5, 12]);
+    let round = |glyph: Glyph, tint: iced::Color| {
+        button(
+            container(glyph::icon(glyph, tint, 15.0))
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::Center)
+                .align_y(iced::Center),
+        )
+        .padding(0)
+        .width(Length::Fixed(ROUND_BUTTON))
+        .height(Length::Fixed(ROUND_BUTTON))
+    };
+    let mut ask_btn = round(Glyph::Send, send_tint).style(theme::round_button(idle));
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
+    let ask_btn = super::toolbar::tip_at(ask_btn, "Ask", None, tooltip::Position::Top);
+    // Or say it: the microphone, in the composer beside what is typed.
+    let listening = app.voice.is_listening();
+    let talk = super::toolbar::tip_at(
+        round(
+            Glyph::Mic,
+            if listening {
+                theme::danger()
+            } else {
+                theme::fg()
+            },
+        )
+        .style(theme::round_button(false))
+        .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
+        if listening { "Stop listening" } else { "Talk" },
+        Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
+        tooltip::Position::Top,
+    );
     // The ACP session's own settings (its mode, its model…), when it has any.
     let acp_active = app
         .proj
@@ -818,29 +861,40 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     } else {
         slot()
     };
-    // The composer: the question typed in a well, sent from inside it.
-    let compose_row = container(row![input, stop, ask_btn].spacing(6).align_y(iced::Center))
-        .padding(Padding {
-            top: 4.0,
-            right: 4.0,
-            bottom: 4.0,
-            left: 12.0,
-        })
-        .style(theme::field(!app.proj.ask_input.is_empty()));
+    // The composer, under a rule across the card: the question as it is
+    // typed, Stop while an answer comes in, the microphone and send.
+    let compose_row = row![input, stop, talk, ask_btn]
+        .spacing(8)
+        .align_y(iced::Center);
     compose.push(row![agent, compose_row].align_y(iced::Center).into());
 
-    container(
+    let height = if fit { Length::Shrink } else { Fill };
+    container(column![
+        // No spacing of the column's own: the header and the pinned card
+        // are empty places most of the time, and would each add a gap.
         column![header]
             .push(pinned)
             .push(conversation)
-            .push(Column::with_children(compose))
-            .spacing(8)
-            .padding([8, 12]),
-    )
+            .padding(16)
+            .height(height),
+        hairline(),
+        container(Column::with_children(compose)).padding(COMPOSER_PAD),
+    ])
     .width(Fill)
-    .height(if fit { Length::Shrink } else { Fill })
+    .height(height)
     .into()
 }
+
+/// Side of the composer's round buttons (the microphone, send).
+pub(crate) const ROUND_BUTTON: f32 = 30.0;
+/// Padding around the composer's row: a little more room at its start,
+/// where the question begins.
+pub(crate) const COMPOSER_PAD: Padding = Padding {
+    top: 10.0,
+    right: 10.0,
+    bottom: 10.0,
+    left: 14.0,
+};
 
 /// Most answers of each kind (allowing, declining) an approval card shows
 /// at once.
@@ -1035,6 +1089,9 @@ pub(crate) fn approval_card<'a>(
 
 /// One agent exploration step as a chip: a tool glyph + its one-line title.
 /// Clickable when the step touched code (jumps to the first ref).
+/// Height of one step of an agent's turn.
+const STEP_ROW_H: f32 = 28.0;
+
 fn agent_step_chip<'a>(
     step: &crate::app::model::AgentStep,
     root: Option<&std::path::Path>,
@@ -1071,25 +1128,28 @@ fn agent_step_chip<'a>(
     });
     let clickable = target.is_some();
     let show: Element<'a, Message> = if clickable {
-        text("Show").size(ts::CAPTION).color(theme::accent()).into()
+        text("Show").size(ts::SMALL).color(theme::accent()).into()
     } else {
         space().into()
     };
     let mut chip = button(
         row![
-            glyph::icon(mark, tint, 13.0),
+            glyph::icon(mark, tint, 14.0),
             text(step.title.clone())
-                .size(ts::SMALL)
+                .size(ts::BODY)
                 .color(theme::fg_muted())
-                .width(Fill),
+                .width(Fill)
+                .wrapping(Wrapping::None),
             show,
         ]
-        .spacing(8)
+        .spacing(9)
+        .height(Fill)
         .align_y(iced::Center),
     )
     .style(theme::menu_row)
     .width(Fill)
-    .padding([3, 6]);
+    .height(Length::Fixed(STEP_ROW_H))
+    .padding([0, 8]);
     if let Some((abs, line)) = target {
         chip = chip.on_press(Message::Editor(EditorMsg::OpenAbs {
             abs,

@@ -5677,6 +5677,7 @@ fn project_switch_clears_ask_history_and_pins() {
     app.proj.ask_turns.push(AskTurn {
         stream: 1,
         question: "what does origin do?".into(),
+        spoken: false,
         answer_md: "returns Point".into(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -6710,6 +6711,7 @@ fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
     let turn = |stream: u64, q: &str| AskTurn {
         stream,
         question: q.into(),
+        spoken: false,
         answer_md: String::new(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -12016,6 +12018,7 @@ fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
     app.proj.ask_turns.push(AskTurn {
         stream,
         question: "where is auth?".into(),
+        spoken: false,
         answer_md: String::new(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -12059,6 +12062,7 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
     app.proj.ask_turns.push(AskTurn {
         stream: remote,
         question: "remote?".into(),
+        spoken: false,
         answer_md: "Half an answer".into(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -20488,6 +20492,7 @@ fn fill_project_session(app: &mut App) {
     p.ask_turns.push(AskTurn {
         stream: 20,
         question: "q".into(),
+        spoken: false,
         answer_md: "a".into(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -21163,6 +21168,7 @@ fn a_stopped_agent_turn_never_falls_back_to_a_paid_answer() {
         app.proj.ask_turns.push(AskTurn {
             stream,
             question: "what is Point?".into(),
+            spoken: false,
             answer_md: String::new(),
             answer: Vec::new(),
             sources: Vec::new(),

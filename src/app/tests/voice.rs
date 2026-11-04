@@ -211,6 +211,12 @@ fn a_question_heard_goes_to_ask() {
         app.proj.ask_turns.is_empty(),
         "not sent: the setting says not"
     );
+    // What waits in the input was said, and its turn will say so; typing
+    // in it makes it the reader's own words.
+    assert!(app.proj.ask_spoken, "the input holds what was said");
+    let typed = format!("{} Briefly.", app.proj.ask_input);
+    let _ = app.update(Message::Ask(AskMsg::InputChanged(typed)));
+    assert!(!app.proj.ask_spoken, "typed over, it is typed");
     // Asked at once when the setting says so — here with no model to ask,
     // so the question waits in the input, said why.
     let (mut app, script, _) = voice_app("voice-question-send", "where is the origin defined");

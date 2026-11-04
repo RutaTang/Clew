@@ -752,6 +752,7 @@ impl App {
         }
         input.push_str(&text);
         self.proj.ask_input = input;
+        self.proj.ask_spoken = true;
         if self.voice.prefs.send_questions && !self.ask_stream_active() {
             self.status = format!("Asking “{text}”");
             return self.update(Message::Ask(AskMsg::Submit));

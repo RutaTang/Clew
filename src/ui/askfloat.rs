@@ -21,7 +21,7 @@ use crate::app::model::AskView;
 use crate::app::voice::{HeardOutcome, VoicePhase};
 
 /// The card's size, where the window has room for it.
-pub(crate) const ASK_CARD_W: f32 = 560.0;
+pub(crate) const ASK_CARD_W: f32 = 620.0;
 pub(crate) const ASK_CARD_H: f32 = 560.0;
 /// Least height the card shrinks to in a short window (or over a tall
 /// debugger's panel).
@@ -63,6 +63,13 @@ fn band(app: &App) -> (f32, f32) {
     (top, bottom.max(top))
 }
 
+/// The top of the card: over the chat field, a little above it, so the
+/// conversation opens where it was asked — the card takes the field's
+/// place while it is open.
+fn card_top(app: &App) -> f32 {
+    (chat_field_rect(app).y - FIELD_GAP).max(0.0)
+}
+
 /// The left edge of a panel `width` wide hanging under the chat field:
 /// centred on it, kept inside the window.
 fn under_field(app: &App, width: f32) -> f32 {
@@ -80,6 +87,7 @@ pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
     match app.ask_view {
         AskView::Closed => None,
         AskView::Compact => {
+            let top = card_top(app);
             let height = ASK_CARD_H.min(bottom - top).max(ASK_CARD_MIN_H);
             let width = ASK_CARD_W
                 .min(app.window_width - 2.0 * ASK_MARGIN)
@@ -193,7 +201,7 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
         frame
             .align_y(iced::alignment::Vertical::Top)
             .padding(Padding {
-                top,
+                top: card_top(app),
                 left: place.left,
                 ..Padding::ZERO
             })
@@ -310,35 +318,9 @@ fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Messag
     .into()
 }
 
-/// The microphone button: starts listening, or stops it.
-fn mic_button<'a>(app: &App) -> Element<'a, Message> {
-    let listening = app.voice.is_listening();
-    let chord = app.keymap.chord(crate::keymap::Action::Voice).caps();
-    let tint = if listening {
-        theme::danger()
-    } else {
-        theme::fg_muted()
-    };
-    tooltip(
-        button(glyph::icon(Glyph::Mic, tint, 15.0))
-            .style(theme::toolbar_button)
-            .padding([4, 6])
-            .on_press(Message::Voice(VoiceMsg::Toggle)),
-        text(if listening {
-            format!("Stop listening ({chord})")
-        } else {
-            format!("Talk ({chord})")
-        })
-        .size(ts::CAPTION),
-        tooltip::Position::Bottom,
-    )
-    .style(theme::modal_panel)
-    .padding(6)
-    .into()
-}
+/// Height of the card's header row.
+const ASK_HEADER_H: f32 = 44.0;
 
-/// The card: its header (what it is, voice, size, close), what voice is
-/// doing, and the conversation.
 /// Whether the card fits its height to its conversation, as the card under
 /// the chat field does. The large window keeps its height, and so does a
 /// card asking for a tool call's approval: that card's room is half the
@@ -347,6 +329,8 @@ fn card_fits(app: &App) -> bool {
     app.ask_view == AskView::Compact && app.first_approval().is_none()
 }
 
+/// The card: its header (what it is, what is being read, size, close),
+/// what voice is doing, and the conversation.
 fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let large = app.ask_view == AskView::Expanded;
     let fit = card_fits(app);
@@ -389,7 +373,6 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         );
     }
     header = header
-        .push(mic_button(app))
         .push(if large {
             header_button(
                 Glyph::Shrink,
@@ -405,12 +388,15 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
             Message::Ask(AskMsg::Close),
         ));
     column![
-        container(header).padding(Padding {
-            top: 8.0,
-            right: 8.0,
-            bottom: 2.0,
-            left: 12.0,
-        }),
+        container(header)
+            .height(Length::Fixed(ASK_HEADER_H))
+            .align_y(iced::Center)
+            .padding(Padding {
+                top: 0.0,
+                right: 8.0,
+                bottom: 0.0,
+                left: 16.0,
+            }),
         hairline(),
         voice_strip(app).unwrap_or_else(slot),
         if fit {

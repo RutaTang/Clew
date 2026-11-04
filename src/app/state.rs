@@ -1802,6 +1802,9 @@ pub struct ProjectSession {
     // -- Ask ---------------------------------------------------------------------
     /// "Ask clew" Q&A: input, conversation, state.
     pub ask_input: String,
+    /// What is in the input was said (voice put it there), not typed: the
+    /// turn it becomes is marked so. Typing in the input makes it typed.
+    pub ask_spoken: bool,
     pub ask_turns: Vec<AskTurn>,
     pub asking: bool,
     /// Code selections pinned as context, shown as chips above the input. They
@@ -2037,6 +2040,7 @@ impl Default for ProjectSession {
             searching_semantic: Default::default(),
             semantic_seq: Default::default(),
             ask_input: Default::default(),
+            ask_spoken: false,
             ask_turns: Default::default(),
             asking: Default::default(),
             ask_pins: Default::default(),

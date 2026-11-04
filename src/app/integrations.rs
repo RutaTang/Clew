@@ -929,6 +929,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream,
             question,
+            spoken: std::mem::take(&mut self.proj.ask_spoken),
             streaming: true,
             extras: TurnExtras {
                 agent: Some(label.clone()),

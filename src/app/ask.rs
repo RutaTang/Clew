@@ -620,6 +620,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question,
+            spoken: std::mem::take(&mut self.proj.ask_spoken),
             answer_md: String::new(),
             answer: Vec::new(),
             sources,
@@ -804,6 +805,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question: question.clone(),
+            spoken: std::mem::take(&mut self.proj.ask_spoken),
             answer_md: String::new(),
             answer: Vec::new(),
             sources: Vec::new(),
@@ -1272,10 +1274,12 @@ impl App {
             }
             AskMsg::InputChanged(s) => {
                 self.proj.ask_input = s;
+                self.proj.ask_spoken = false;
                 Task::none()
             }
             AskMsg::Suggested(q) => {
                 self.proj.ask_input = q;
+                self.proj.ask_spoken = false;
                 Task::done(Message::Ask(AskMsg::Submit))
             }
             AskMsg::Submit => self.on_ask_submit(),
