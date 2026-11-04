@@ -10,6 +10,7 @@ mod build_app;
 mod insight;
 mod integrations;
 mod navigation_debug;
+mod palette;
 mod remote_state_refresh;
 mod semantic_space;
 

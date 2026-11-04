@@ -1140,6 +1140,10 @@ pub struct App {
     pub blame_why_seq: u64,
     /// Mints [`crate::app::model::Insight::token`], like `blame_why_seq`.
     pub insight_seq: u64,
+    /// The command palette's list, as last built (see `app::palette`).
+    pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
+    /// The titles of the palette commands run last, most recent first.
+    pub palette_recent: Vec<String>,
     /// Bumped whenever inlay hints are turned off, invalidating every request
     /// still in flight (see [`crate::app::message::LspMsg::InlayHintsLoaded`]).
     pub inlay_gen: u64,

@@ -28,6 +28,8 @@ Unlike an editor or IDE, Clew builds in a range of capabilities made for reading
 
 Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releases/latest). On the welcome screen, click **Open Folder** and open the codebase you want to read. Then click the **⋯** button in the top right to open the menu and choose **Tutorial**, and Clew will walk you through how to use it right inside the project you opened.
 
+Everything Clew does is also a keystroke away: **⌘⇧P** opens the command palette, where you can search for any command — the graphs and maps, the sidebar's tabs and panels, what the right-click menu does at the cursor, the debugger's controls, the theme — and run it with Enter. Typing `>` in the file finder (⌘P) does the same, and **⌘/** lists the shortcuts.
+
 ![Clew welcome screen](assets/welcome.png)
 
 ## Features

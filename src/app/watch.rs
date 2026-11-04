@@ -536,7 +536,10 @@ impl App {
     pub(crate) fn rebuild_symbol_index(&mut self) {
         self.proj.symbol_index_stale = true;
         self.proj.symbol_index_rev += 1;
-        if self.proj.finder.open && self.proj.finder.mode == FinderMode::Symbols {
+        if self.proj.finder.open
+            && self.proj.finder.mode == FinderMode::Symbols
+            && !self.proj.finder.is_commands()
+        {
             let symbols = self.fresh_symbol_index();
             self.proj.finder.refresh_symbols(&symbols);
         }

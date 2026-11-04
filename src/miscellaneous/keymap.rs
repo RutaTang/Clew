@@ -64,10 +64,11 @@ pub enum Action {
     Walkthrough,
     LspServers,
     Shortcuts,
+    CommandPalette,
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 27] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -94,6 +95,7 @@ impl Action {
         Action::Walkthrough,
         Action::LspServers,
         Action::Shortcuts,
+        Action::CommandPalette,
     ];
 
     /// Stable identifier used as the TOML key. Never change these.
@@ -125,6 +127,7 @@ impl Action {
             Action::LspServers => "lsp_servers",
             Action::TraceValue => "trace_value",
             Action::Shortcuts => "shortcuts",
+            Action::CommandPalette => "command_palette",
         }
     }
 
@@ -161,6 +164,7 @@ impl Action {
             Action::Walkthrough => "Walkthrough",
             Action::LspServers => "Language servers",
             Action::Shortcuts => "Keyboard shortcuts",
+            Action::CommandPalette => "Command palette",
         }
     }
 
@@ -198,6 +202,7 @@ impl Action {
             Action::Walkthrough => at(MenuSection::View, "Walkthrough"),
             Action::LspServers => at(MenuSection::View, "Language Servers…"),
             Action::Shortcuts => at(MenuSection::View, "Keyboard Shortcuts…"),
+            Action::CommandPalette => at(MenuSection::View, "Command Palette…"),
         }
     }
 
@@ -232,6 +237,7 @@ impl Action {
             Action::LspServers => Chord::cmd_shift('l'),
             Action::TraceValue => Chord::cmd_shift('v'),
             Action::Shortcuts => Chord::cmd('/'),
+            Action::CommandPalette => Chord::cmd_shift('p'),
         }
     }
 }

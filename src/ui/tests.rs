@@ -6889,3 +6889,27 @@ fn an_empty_ask_shows_questions_not_instructions() {
     let mut sim = sim_elem(super::ask_panel(&app));
     assert!(!shows(&mut sim, "Answers are grounded once"));
 }
+
+/// The palette's rows show each command and its keys; a click sends the
+/// command it shows, by its title.
+#[test]
+fn the_palette_lists_commands_with_their_keys() {
+    let mut app = reader_app();
+    app.proj.finder.open = true;
+    app.proj.finder.query = ">call".into();
+    app.refresh_palette();
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Call Graph"));
+        assert!(shows(&mut sim, "⇧⌘C"));
+    }
+    let sent = click(sim_of(&app), "Call Graph");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Nav(NavMsg::PaletteRun(t)) if t == "Call Graph")),
+        "{sent:?}"
+    );
+    app.proj.finder.query = ">nothing like this".into();
+    app.refresh_palette();
+    assert!(shows(&mut sim_of(&app), "No matching command"));
+}

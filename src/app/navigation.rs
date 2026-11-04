@@ -485,6 +485,10 @@ impl App {
     }
 
     pub(crate) fn refresh_finder(&mut self) {
+        if self.proj.finder.is_commands() {
+            self.refresh_palette();
+            return;
+        }
         match self.proj.finder.mode {
             FinderMode::Files => {
                 if let Some(p) = &self.proj.project {
@@ -512,6 +516,19 @@ impl App {
     }
 
     pub(crate) fn on_finder_confirm(&mut self) -> Task<Message> {
+        if self.proj.finder.is_commands() {
+            let title = self
+                .proj
+                .finder
+                .results
+                .get(self.proj.finder.selected)
+                .and_then(|i| self.palette.get(*i))
+                .map(|c| c.title.clone());
+            return match title {
+                Some(title) => self.run_palette(&title),
+                None => Task::none(),
+            };
+        }
         if let Some(line) = self.proj.finder.goto_line() {
             self.proj.finder.open = false;
             if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
@@ -732,6 +749,8 @@ impl App {
                 self.open_file(abs, line, true)
             }
             NavMsg::FinderConfirm => self.on_finder_confirm(),
+            NavMsg::PaletteOpened => self.on_palette_opened(),
+            NavMsg::PaletteRun(title) => self.run_palette(&title),
             NavMsg::GotoLineRequested => self.on_goto_line_requested(),
             NavMsg::DefinitionResult { seq, result, .. } => {
                 // A superseded request (a newer gd, a project switch bumping

@@ -72,6 +72,7 @@ pub(crate) mod languages;
 mod lsp;
 mod navigation;
 mod overview;
+pub(crate) mod palette;
 mod project;
 mod reading;
 mod remote_state;

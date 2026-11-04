@@ -266,6 +266,7 @@ impl App {
             ))),
             LspServers => self.update(Message::Lsp(LspMsg::TogglePanel)),
             Shortcuts => self.update(Message::Window(WindowMsg::OpenShortcuts)),
+            CommandPalette => self.update(Message::Nav(NavMsg::PaletteOpened)),
         })
     }
 

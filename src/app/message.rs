@@ -582,6 +582,10 @@ pub enum NavMsg {
         line: Option<usize>,
     },
     FinderConfirm,
+    /// Open the command palette: the finder, its query `>`.
+    PaletteOpened,
+    /// Run the palette command with this title (see `app::palette`).
+    PaletteRun(String),
     GotoLineRequested,
     DefinitionResult {
         stamp: Stamp,
@@ -2073,6 +2077,8 @@ impl NavMsg {
             | NavMsg::FinderQueryChanged(..)
             | NavMsg::FinderPick { .. }
             | NavMsg::FinderConfirm
+            | NavMsg::PaletteOpened
+            | NavMsg::PaletteRun(..)
             | NavMsg::GotoLineRequested
             | NavMsg::JumpToCall { .. } => None,
         }

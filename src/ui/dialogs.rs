@@ -189,7 +189,9 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         .padding(10);
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    if let Some(n) = app.proj.finder.goto_line() {
+    if app.proj.finder.is_commands() {
+        finder_command_rows(app, &mut rows);
+    } else if let Some(n) = app.proj.finder.goto_line() {
         rows.push(
             container(
                 text(format!("↵  Go to line {n}"))
@@ -206,7 +208,9 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         }
     }
     if rows.is_empty() {
-        let hint = if app.proj.finder.mode == FinderMode::Symbols && app.proj.indexing {
+        let hint = if app.proj.finder.is_commands() {
+            "No matching command"
+        } else if app.proj.finder.mode == FinderMode::Symbols && app.proj.indexing {
             "Indexing symbols…"
         } else {
             "No matches"
@@ -330,6 +334,35 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
                 abs: entry.abs.clone(),
                 line: None,
             }),
+        ));
+    }
+}
+
+/// The palette's commands, each with its key on the right.
+pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
+    for (pos, &idx) in app.proj.finder.results.iter().enumerate() {
+        let Some(command) = app.palette.get(idx) else {
+            rows.push(stale_finder_row(pos == app.proj.finder.selected));
+            continue;
+        };
+        let keys: Element<'_, Message> = match &command.keys {
+            Some(keys) => text(keys.clone())
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None)
+                .into(),
+            None => slot(),
+        };
+        rows.push(finder_row(
+            row![
+                text(command.title.clone()).size(ts::BASE),
+                space().width(Fill),
+                keys,
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+            pos == app.proj.finder.selected,
+            Message::Nav(NavMsg::PaletteRun(command.title.clone())),
         ));
     }
 }
