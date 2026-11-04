@@ -3355,12 +3355,16 @@ mod scroll_tests {
 
         let expanded = width_of(&none);
         let collapsed = width_of(&one);
-        // The cue needs three columns (one gap plus its two-column box); at
-        // ~7.8px/char that is ~23px, so two columns of growth is proof enough.
+        // The cue needs three columns (one gap plus its two-column box) past
+        // its line; that line is one column shorter than the longest, so the
+        // extent grows by two of them — whatever a column measures where
+        // the test runs (the code face is tracked a little tighter than its
+        // own spacing, and a runner's fallback face may be narrower).
+        let column = super::measure_char_width::<iced::Renderer>(13.0);
         assert!(
-            collapsed > expanded + 2.0 * 7.0,
-            "collapsed cue did not widen the scroll extent: \
-             expanded={expanded}, collapsed={collapsed}"
+            collapsed >= expanded + 2.0 * column - 0.5,
+            "collapsed cue did not widen the scroll extent by two columns of \
+             {column}: expanded={expanded}, collapsed={collapsed}"
         );
     }
 }
