@@ -233,6 +233,47 @@ fn a_question_heard_goes_to_ask() {
     assert_eq!(app.proj.ask_input, "open the call graph");
 }
 
+/// Keep listening: once Clew has answered, the microphone opens again for
+/// what is said next — not after a Stop, not with the switch off, and not
+/// with the conversation put away.
+#[test]
+fn keep_listening_opens_the_microphone_after_an_answer() {
+    use clew_protocol::StreamOutcome;
+    let (mut app, _script, _) = voice_app("voice-keep-listening", "");
+    app.ask_view = AskView::Compact;
+    let turn = |app: &mut App, stream: u64| {
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream,
+            question: "where is it?".into(),
+            streaming: true,
+            ..Default::default()
+        });
+    };
+    // Off: the answer ends, the microphone stays shut.
+    turn(&mut app, 1);
+    let _ = app.on_ask_stream_ended(1, StreamOutcome::Done);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    // On: it opens.
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
+    turn(&mut app, 2);
+    let _ = app.on_ask_stream_ended(2, StreamOutcome::Done);
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { .. }),
+        "{:?}",
+        app.voice.phase
+    );
+    let _ = app.update(Message::Voice(crate::VoiceMsg::Cancel));
+    // A Stop is the reader's: the microphone stays shut.
+    turn(&mut app, 3);
+    let _ = app.on_ask_stream_ended(3, StreamOutcome::Stopped);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    // Put away, the conversation hears nothing.
+    app.ask_view = AskView::Closed;
+    turn(&mut app, 4);
+    let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+}
+
 /// Nothing heard, nothing done; a recognizer that fails says why.
 #[test]
 fn silence_and_failures_do_nothing_but_say_so() {

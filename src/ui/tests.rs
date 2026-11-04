@@ -6913,6 +6913,105 @@ fn a_margin_note_sits_level_with_its_function() {
     );
 }
 
+/// A commit's day reads as a reader says it: the month and day, and the
+/// year when it is not this one.
+#[test]
+fn a_commit_day_reads_as_month_and_day() {
+    let now = 1_793_793_600; // 2026-11-04T12:00Z
+    assert_eq!(super::short_date(now, now), "Nov 4");
+    assert_eq!(super::short_date(1_767_225_600, now), "Jan 1"); // 2026-01-01
+    assert_eq!(super::short_date(1_709_251_199, now), "Feb 29, 2024");
+    assert_eq!(super::short_date(946_598_400, now), "Dec 31, 1999");
+}
+
+/// The note on what the caret is in says when its function last changed,
+/// from the file's blame — the newest commit of its lines, or that one of
+/// them is not committed yet — and how many functions call it.
+#[test]
+fn the_raised_note_says_when_its_function_changed() {
+    use crate::git::{BlameLine, GitInfo};
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node);
+    let blame = |time: i64, uncommitted: bool| BlameLine {
+        commit: "c".into(),
+        author: "a".into(),
+        time,
+        summary: "s".into(),
+        uncommitted,
+    };
+    let set = |app: &mut App, lines: Vec<BlameLine>| {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.symbols = vec![crate::outline::Symbol {
+            name: "origin".into(),
+            kind: "function".into(),
+            line: 3,
+            end_line: 5,
+        }];
+        v.git = Some(std::sync::Arc::new(GitInfo {
+            blame: lines,
+            status: Vec::new(),
+            deleted_at: Default::default(),
+        }));
+    };
+    // Lines 3–5 are `origin`; line 1's newer commit is not its.
+    set(
+        &mut app,
+        vec![
+            blame(1_793_793_600, false),
+            blame(1, false),
+            blame(946_598_400, false),
+            blame(1_709_251_199, false),
+            blame(946_598_400, false),
+        ],
+    );
+    assert!(shows(&mut sim_of(&app), "Feb 29, 2024"));
+    // A line of it not committed: said so.
+    set(
+        &mut app,
+        vec![
+            blame(1_793_793_600, false),
+            blame(1, false),
+            blame(946_598_400, true),
+            blame(1_709_251_199, false),
+            blame(946_598_400, false),
+        ],
+    );
+    assert!(shows(&mut sim_of(&app), "Uncommitted"));
+    // How many functions call it, from the project's call graph.
+    assert!(shows(&mut sim_of(&app), "Calls"), "before the graph has it");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("origin", vec![1, 2], vec![]),
+                    call("a", vec![], vec![0]),
+                    call("b", vec![], vec![0]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    assert!(shows(&mut sim_of(&app), "2 callers"));
+}
+
 /// The margin, with no note to show, says why, centered under a muted icon
 /// rather than as a line of text in a corner.
 #[test]

@@ -1123,7 +1123,7 @@ fn notes_beside_code<'a>(
             notes.push((
                 0.0,
                 ACTIVE_NOTE_H,
-                active_note(app, name, "file".into(), false),
+                active_note(app, name, "file".into(), NoteOf::File),
             ));
         }
         for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
@@ -1157,7 +1157,12 @@ fn notes_beside_code<'a>(
             }
             let meta = format!("{} · line {}", short_kind(&sym.kind), sym.line);
             let note = if is_active {
-                active_note(app, sym.name.clone(), meta, true)
+                active_note(
+                    app,
+                    sym.name.clone(),
+                    meta,
+                    NoteOf::Function { sym, ordinal },
+                )
             } else {
                 let summary = cached
                     .map(|c| crate::app::shown_summary(c).into_owned())
@@ -1252,9 +1257,78 @@ fn plain_note<'a>(
 /// it (as it streams in), and what to do next — its calls, its history,
 /// a question about it, and, for a function, the explanation block by
 /// block, or written afresh.
-fn active_note<'a>(app: &'a App, name: String, meta: String, code: bool) -> Element<'a, Message> {
+/// What a raised note is about: a function of the open file, or the file.
+#[derive(Clone, Copy)]
+enum NoteOf<'a> {
+    Function {
+        sym: &'a crate::outline::Symbol,
+        ordinal: u32,
+    },
+    File,
+}
+
+/// How many functions call `name` (the `ordinal`th of its name in `file`),
+/// as the project's call graph has it; `None` before the graph has it.
+fn callers_count(app: &App, file: &std::path::Path, name: &str, ordinal: u32) -> Option<usize> {
+    let g = &app.proj.project_calls.graph;
+    g.id_of_key(file, name, ordinal)
+        .map(|id| g.callers_of(id).len())
+}
+
+/// When lines `first..=last` (1-based) of the open file last changed, as
+/// its blame has it: the newest of their commits — or `None` with no blame,
+/// and "Uncommitted" (`Some(None)`) when one of them is not committed yet.
+fn last_changed(v: &Viewer, first: usize, last: usize) -> Option<Option<i64>> {
+    let git = v.git.as_ref()?;
+    let lines = git
+        .blame
+        .get(first.saturating_sub(1)..last.min(git.blame.len()))?;
+    if lines.is_empty() {
+        return None;
+    }
+    if lines.iter().any(|b| b.uncommitted) {
+        return Some(None);
+    }
+    Some(lines.iter().map(|b| b.time).max())
+}
+
+/// A commit's day, as a reader says it: "Nov 4", with its year when that
+/// is not this one ("Nov 4, 2024"). In UTC.
+pub(crate) fn short_date(time: i64, now: i64) -> String {
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    fn civil(t: i64) -> (i64, u32, u32) {
+        let z = t.div_euclid(86_400) + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        (y, m, d)
+    }
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (y, m, d) = civil(time);
+    let month = MONTHS[(m - 1) as usize];
+    if y == civil(now).0 {
+        format!("{month} {d}")
+    } else {
+        format!("{month} {d}, {y}")
+    }
+}
+
+fn active_note<'a>(
+    app: &'a App,
+    name: String,
+    meta: String,
+    of: NoteOf<'a>,
+) -> Element<'a, Message> {
     use crate::explain::Node;
-    let action = |glyph: Glyph, label: &'static str, accent: bool, msg: Message| {
+    let code = matches!(of, NoteOf::Function { .. });
+    let action = |glyph: Glyph, label: String, accent: bool, msg: Message| {
         let tint = if accent {
             theme::accent()
         } else {
@@ -1279,22 +1353,46 @@ fn active_note<'a>(app: &'a App, name: String, meta: String, code: bool) -> Elem
         .padding([4, 7])
         .on_press(msg)
     };
+    // How much of the project leans on it, and when it last changed — each
+    // a way into the margin's tab that says more.
+    let v = app.active_viewer();
+    let (callers, changed) = match (of, v) {
+        (NoteOf::Function { sym, ordinal }, Some(v)) => (
+            callers_count(app, &v.abs, &sym.name, ordinal),
+            last_changed(v, sym.line, sym.end_line),
+        ),
+        (NoteOf::File, Some(v)) => (None, last_changed(v, 1, usize::MAX)),
+        _ => (None, None),
+    };
+    let calls_label = match callers {
+        Some(1) => "1 caller".to_string(),
+        Some(n) => format!("{n} callers"),
+        None => "Calls".to_string(),
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let history_label = match changed {
+        Some(Some(time)) => short_date(time, now),
+        Some(None) => "Uncommitted".to_string(),
+        None => "History".to_string(),
+    };
     let mut actions = row![
         action(
             Glyph::CallGraph,
-            "Calls",
+            calls_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
         ),
         action(
             Glyph::TimeTravel,
-            "History",
+            history_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
         ),
         action(
             Glyph::Ask,
-            "Ask",
+            "Ask".into(),
             true,
             Message::Ask(AskMsg::Suggested(format!(
                 "What does `{name}` in {} do, and why is it written this way?",
@@ -1309,14 +1407,14 @@ fn active_note<'a>(app: &'a App, name: String, meta: String, code: bool) -> Elem
         actions = actions.push(if app.proj.explain.showing_detail {
             action(
                 Glyph::List,
-                "Summary",
+                "Summary".into(),
                 false,
                 Message::Explain(ExplainMsg::Show(node.clone())),
             )
         } else {
             action(
                 Glyph::List,
-                "Blocks",
+                "Blocks".into(),
                 false,
                 Message::Explain(ExplainMsg::Blocks(node.clone())),
             )

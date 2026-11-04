@@ -861,9 +861,19 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     } else {
         slot()
     };
+    // A conversation by voice: once Clew has answered, listen again.
+    let keep_listening = iced::widget::toggler(app.voice.keep_listening)
+        .label("Keep listening")
+        .on_toggle(|on| Message::Voice(crate::VoiceMsg::SetKeepListening(on)))
+        .size(16)
+        .text_size(ts::BODY)
+        .spacing(7)
+        .width(Length::Shrink)
+        .style(theme::switch);
     // The composer, under a rule across the card: the question as it is
-    // typed, Stop while an answer comes in, the microphone and send.
-    let compose_row = row![input, stop, talk, ask_btn]
+    // typed, Stop while an answer comes in, Keep listening, the microphone
+    // and send.
+    let compose_row = row![input, stop, keep_listening, talk, ask_btn]
         .spacing(8)
         .align_y(iced::Center);
     compose.push(row![agent, compose_row].align_y(iced::Center).into());

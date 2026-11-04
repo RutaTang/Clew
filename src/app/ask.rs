@@ -984,7 +984,14 @@ impl App {
                 y: f32::MAX,
             },
         );
-        Task::batch([task, to_bottom])
+        // Answered, with Keep listening on: listen for what comes next. A
+        // Stop or a failure leaves the microphone to the reader.
+        let listen = if matches!(outcome, StreamOutcome::Done) {
+            self.resume_listening()
+        } else {
+            Task::none()
+        };
+        Task::batch([task, to_bottom, listen])
     }
 
     /// The agent made a tool call: append its chip to the open turn and keep

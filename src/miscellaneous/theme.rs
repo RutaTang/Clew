@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, container, progress_bar, scrollable, text_input};
+use iced::widget::{button, container, progress_bar, scrollable, text_input, toggler};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -1630,6 +1630,36 @@ pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
             ..Border::default()
         },
         ..button::Style::default()
+    }
+}
+
+/// A switch (Keep listening): the accent when on, a quiet well when off,
+/// its knob white either way.
+pub fn switch(_theme: &Theme, status: toggler::Status) -> toggler::Style {
+    let (on, hovered) = match status {
+        toggler::Status::Active { is_toggled } => (is_toggled, false),
+        toggler::Status::Hovered { is_toggled } => (is_toggled, true),
+        toggler::Status::Disabled { is_toggled } => (is_toggled, false),
+    };
+    let background = if on {
+        if hovered {
+            active().accent_hover
+        } else {
+            accent()
+        }
+    } else {
+        wash(if hovered { 0.24 } else { 0.18 })
+    };
+    toggler::Style {
+        background: background.into(),
+        background_border_width: 0.0,
+        background_border_color: Color::TRANSPARENT,
+        foreground: Color::WHITE.into(),
+        foreground_border_width: 0.0,
+        foreground_border_color: Color::TRANSPARENT,
+        text_color: Some(fg_muted()),
+        border_radius: None,
+        padding_ratio: 0.12,
     }
 }
 

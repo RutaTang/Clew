@@ -330,6 +330,9 @@ pub(crate) struct VoiceState {
     /// The last download's failure, by model id.
     pub download_errors: HashMap<&'static str, String>,
     pub prefs: VoicePrefs,
+    /// Keep listening: once Clew has answered, the microphone opens again
+    /// for what is said next — a conversation by voice, the card open.
+    pub keep_listening: bool,
     /// Where models are kept: under the data directory.
     pub store: Option<Store>,
     pub(crate) open_mic: OpenMic,
@@ -350,6 +353,7 @@ impl VoiceState {
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
             prefs: VoicePrefs::load(),
+            keep_listening: false,
             store: clew_core::lsp::store::data_root().map(|d| Store::new(d.join("voice"))),
             open_mic: open_system_mic,
             transcriber: ENGINE.clone(),
@@ -425,6 +429,8 @@ pub enum VoiceMsg {
     SetLanguage(Option<&'static str>),
     SetRunCommands(bool),
     SetSendQuestions(bool),
+    /// Listen again after each answer, or not.
+    SetKeepListening(bool),
 }
 
 impl VoiceMsg {
@@ -441,6 +447,10 @@ impl App {
     pub(crate) fn update_voice(&mut self, message: VoiceMsg) -> Task<Message> {
         match message {
             VoiceMsg::Toggle => self.on_voice_toggle(),
+            VoiceMsg::SetKeepListening(on) => {
+                self.voice.keep_listening = on;
+                Task::none()
+            }
             VoiceMsg::Stop => self.stop_listening(),
             VoiceMsg::Cancel => {
                 self.cancel_voice();
@@ -551,6 +561,23 @@ impl App {
                 Task::none()
             }
             VoicePhase::Idle => self.start_listening(),
+        }
+    }
+
+    /// After an answer, with Keep listening on: the microphone opens again
+    /// for what is said next — while the conversation is open, nothing is
+    /// heard or waiting for a yes, and there is a model to hear it with
+    /// (this never sends the reader to Settings for one).
+    pub(crate) fn resume_listening(&mut self) -> Task<Message> {
+        let ready = self.voice.keep_listening
+            && self.ask_view != crate::app::model::AskView::Closed
+            && self.voice.phase == VoicePhase::Idle
+            && self.voice.confirm.is_none()
+            && self.voice.installed(self.voice.prefs.model());
+        if ready {
+            self.start_listening()
+        } else {
+            Task::none()
         }
     }
 
