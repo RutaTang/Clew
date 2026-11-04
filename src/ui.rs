@@ -81,6 +81,7 @@ pub(crate) mod ts {
     pub(crate) const SMALL: f32 = ui_size(TextRole::Small);
     pub(crate) const BODY: f32 = ui_size(TextRole::Body);
     pub(crate) const BASE: f32 = ui_size(TextRole::Base);
+    pub(crate) const READING: f32 = ui_size(TextRole::Reading);
     pub(crate) const EMPHASIS: f32 = ui_size(TextRole::Emphasis);
     pub(crate) const SUBTITLE: f32 = ui_size(TextRole::Subtitle);
     pub(crate) const TITLE: f32 = ui_size(TextRole::Title);

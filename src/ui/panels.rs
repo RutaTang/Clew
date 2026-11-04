@@ -696,7 +696,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .id(ask_input_id())
         .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
         .on_submit(Message::Ask(AskMsg::Submit))
-        .size(ts::BASE)
+        .size(ts::READING)
         .padding(0)
         .style(theme::bare_input);
     // Match the input's height (size 13 + 7 padding) so the row lines up. The

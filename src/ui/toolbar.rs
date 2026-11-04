@@ -800,6 +800,10 @@ pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 9] = [
 
 /// The [`TOOLS_MENU_ROWS`] positions a separator stands before.
 pub(crate) const TOOLS_MENU_SEPARATORS: [usize; 2] = [3, 5];
+/// The [`TOOLS_MENU_ROWS`] positions a heading stands over, and what it
+/// says: the group of rows it names.
+pub(crate) const TOOLS_MENU_HEADINGS: [(usize, &str); 2] =
+    [(0, "Understand the project"), (3, "Open")];
 
 impl ToolsRow {
     /// This row's position in [`TOOLS_MENU_ROWS`] (0 = top).
@@ -832,7 +836,9 @@ pub(crate) const TOOLS_MENU_W: f32 = 248.0;
 /// Inner padding of a menu panel.
 const MENU_PAD: f32 = 5.0;
 /// Height of one menu row.
-const MENU_ROW_H: f32 = 30.0;
+const MENU_ROW_H: f32 = 32.0;
+/// Height of a heading over a group of menu rows.
+const MENU_HEADING_H: f32 = 24.0;
 /// Gap between menu rows.
 const MENU_ROW_SPACING: f32 = 1.0;
 /// Height of a separator between groups of rows.
@@ -856,9 +862,11 @@ pub(crate) fn tools_menu_rows_rect(app: &App, first: usize, count: usize) -> ice
     let top = tools_menu_top(app);
     let top_of = |i: usize| {
         let seps = TOOLS_MENU_SEPARATORS.iter().filter(|&&s| s <= i).count() as f32;
+        let heads = TOOLS_MENU_HEADINGS.iter().filter(|&&(h, _)| h <= i).count() as f32;
         top + MENU_PAD
             + i as f32 * (MENU_ROW_H + MENU_ROW_SPACING)
             + seps * (MENU_SEP_H + MENU_ROW_SPACING)
+            + heads * (MENU_HEADING_H + MENU_ROW_SPACING)
     };
     let last = first + count.max(1) - 1;
     let y = top_of(first);
@@ -891,18 +899,32 @@ fn menu_item<'a>(
             space().width(Fill),
             trailing,
         ]
-        .spacing(9)
+        .spacing(10)
         .height(Fill)
         .align_y(iced::Center),
     )
     .style(theme::menu_row)
     .width(Fill)
     .height(Length::Fixed(MENU_ROW_H))
-    .padding([0, 8]);
+    .padding([0, 9]);
     if let Some(msg) = msg {
         b = b.on_press(msg);
     }
     b.into()
+}
+
+/// A heading over a group of menu rows, naming it.
+fn menu_heading<'a>(label: &'a str) -> Element<'a, Message> {
+    container(text(label).size(ts::SMALL).color(theme::dim()))
+        .height(Length::Fixed(MENU_HEADING_H))
+        .align_y(iced::alignment::Vertical::Bottom)
+        .padding(Padding {
+            top: 6.0,
+            right: 9.0,
+            bottom: 4.0,
+            left: 9.0,
+        })
+        .into()
 }
 
 /// A separator between groups of menu rows.
@@ -936,6 +958,9 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     for (i, &r) in TOOLS_MENU_ROWS.iter().enumerate() {
         if TOOLS_MENU_SEPARATORS.contains(&i) {
             items.push(menu_separator());
+        }
+        if let Some(&(_, heading)) = TOOLS_MENU_HEADINGS.iter().find(|&&(h, _)| h == i) {
+            items.push(menu_heading(heading));
         }
         let item = match r {
             // While a pass runs the row cancels it — the bottom-up pass is

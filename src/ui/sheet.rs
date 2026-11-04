@@ -266,7 +266,7 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         line = line.push(
             button(
                 text(name)
-                    .size(ts::SMALL)
+                    .size(ts::BODY)
                     .color(if current {
                         theme::fg()
                     } else {

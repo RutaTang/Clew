@@ -1059,6 +1059,9 @@ pub enum TextRole {
     Body,
     /// Primary list rows, menu items, inputs.
     Base,
+    /// What is read rather than scanned: the prose clew writes (answers,
+    /// explanations), a question being typed, the palette's results.
+    Reading,
     /// Emphasized lines: dialog headlines, the finder input.
     Emphasis,
     /// Sub-headings inside a page (a doc member, "Module map").
@@ -1079,10 +1082,11 @@ pub const MIN_TEXT_SIZE: f32 = 10.0;
 /// The size, in logical pixels, for text of `role` — the UI type scale.
 pub const fn ui_size(role: TextRole) -> f32 {
     match role {
-        TextRole::Caption => MIN_TEXT_SIZE,
-        TextRole::Small => 11.0,
-        TextRole::Body => 12.0,
+        TextRole::Caption => 10.5,
+        TextRole::Small => 11.5,
+        TextRole::Body => 12.5,
         TextRole::Base => 13.0,
+        TextRole::Reading => 13.5,
         TextRole::Emphasis => 14.0,
         TextRole::Subtitle => 15.0,
         TextRole::Title => 17.0,
@@ -1120,7 +1124,7 @@ pub fn markdown_settings() -> iced::widget::markdown::Settings {
 
 /// Size of the prose clew writes in its panels and cards (explanations,
 /// answers, the overview): a notch over the interface's own text.
-pub const PROSE_SIZE: f32 = 13.5;
+pub const PROSE_SIZE: f32 = ui_size(TextRole::Reading);
 /// Size of a markdown file's text, read as a document in the reader.
 pub const DOCUMENT_SIZE: f32 = 16.0;
 

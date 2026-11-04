@@ -214,7 +214,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
                 .id(finder_input_id())
                 .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
                 .on_submit(Message::Nav(NavMsg::FinderConfirm))
-                .size(ts::EMPHASIS)
+                .size(ts::SUBTITLE)
                 .padding(0)
                 .style(theme::bare_input),
             talk,
@@ -387,7 +387,7 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
             row![
                 glyph::icon(Glyph::File, theme::dim(), 15.0),
                 // In the order they are spelled (`highlight::in_order`).
-                text(crate::highlight::in_order(name)).size(ts::BASE),
+                text(crate::highlight::in_order(name)).size(ts::READING),
                 space().width(Fill),
                 text(crate::highlight::in_order(dir))
                     .size(ts::SMALL)
@@ -418,7 +418,7 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
         };
         rows.push(finder_row(
             row![
-                text(command.title.clone()).size(ts::BASE),
+                text(command.title.clone()).size(ts::READING),
                 space().width(Fill),
                 keys,
             ]
@@ -442,7 +442,7 @@ pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Me
                     .size(ts::CAPTION)
                     .color(theme::kind_color(&entry.kind))
                     .width(40),
-                text(crate::highlight::in_order(&entry.name)).size(ts::BASE),
+                text(crate::highlight::in_order(&entry.name)).size(ts::READING),
                 text(format!(
                     "{}:{}",
                     crate::highlight::in_order(&entry.rel),
