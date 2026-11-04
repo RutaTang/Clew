@@ -2650,6 +2650,7 @@ async fn open_project_kills_the_previous_projects_processes() {
 /// that window must buffer and reach the child's stdin once it exists — the
 /// stream starts at byte zero, never mid-way.
 #[tokio::test]
+#[cfg(unix)] // the stand-in server is a shell script
 async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
     let (mut server, mut rx) = server();
     let root = temp_project("spawn-race");

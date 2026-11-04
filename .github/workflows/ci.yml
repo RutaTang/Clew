@@ -154,12 +154,21 @@ jobs:
           CLEW_TEST_MICROPHONE: "1"
           PACKAGES: ${{ matrix.packages }}
         run: scripts/hermetic-test.sh $PACKAGES --locked
+      # Every failure, each said in a few lines (no backtrace), gathered at
+      # the end of the log where it can be read.
       - name: Test (Windows)
         if: runner.os == 'Windows'
         env:
           CLEW_TEST_MICROPHONE: "1"
           PACKAGES: ${{ matrix.packages }}
-        run: cargo test $PACKAGES --locked --no-fail-fast
+          RUST_BACKTRACE: "0"
+        run: |
+          set -o pipefail
+          cargo test $PACKAGES --locked --no-fail-fast 2>&1 | tee test-output.log
+      - name: Failures (Windows)
+        if: failure() && runner.os == 'Windows'
+        run: |
+          grep -E -A6 '^---- .* stdout ----$' test-output.log | grep -vE '^(--)?$|^note: run with' || true
 
   # The release ships static musl builds for both Linux architectures; building
   # them here means a change that breaks the musl/cross build fails its PR, not
