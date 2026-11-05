@@ -73,7 +73,7 @@ release ships no license file; its manifest declares MIT, and `LICENSE` is
 iced's. When iced lets an application choose how wgpu presents, ask for it
 there and delete this copy and the patch entry.
 
-## iced_winit 0.14.0
+## iced_winit 0.14.1
 
 iced 0.14's windowing. winit makes a transparent window on Windows with
 the surface GDI draws to (a redirection surface) and asks Windows to show

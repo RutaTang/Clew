@@ -3309,12 +3309,15 @@ impl Bound {
 
     /// The timeout of the next read or write: what is left of the bound —
     /// or, once nothing is, the timeout itself (ureq would grant a zero
-    /// timeout a second of grace).
+    /// timeout a second of grace). No limit of each read or write of its
+    /// own: ureq sets one only from its `timeout_per_read` and
+    /// `timeout_per_write`, which clew's agents leave unset ([`agent`]).
     fn next(self) -> Result<NextTimeout, ureq::Error> {
         let Some(due) = self.due else {
             return Ok(NextTimeout {
                 after: ureq::unversioned::transport::time::Duration::NotHappening,
                 reason: self.reason,
+                ..NextTimeout::default()
             });
         };
         let left = due.saturating_duration_since(Instant::now());
@@ -3324,6 +3327,7 @@ impl Bound {
         Ok(NextTimeout {
             after: left.into(),
             reason: self.reason,
+            ..NextTimeout::default()
         })
     }
 }
@@ -4068,6 +4072,7 @@ impl Exchange {
         Ok(NextTimeout {
             after: left.into(),
             reason: Timeout::Global,
+            ..timeout
         })
     }
 
@@ -7588,6 +7593,7 @@ mod tests {
         let timeout = NextTimeout {
             after: Duration::from_secs(1).into(),
             reason: Timeout::RecvBody,
+            ..NextTimeout::default()
         };
         assert!(
             !matches!(tcp.await_input(timeout), Ok(true)),
@@ -8522,6 +8528,7 @@ mod tests {
         let timeout = NextTimeout {
             after: Duration::from_millis(70).into(),
             reason: Timeout::SendRequest,
+            ..NextTimeout::default()
         };
         let result = exchange.transmit_output(request.len(), timeout);
         assert!(matches!(result, Err(ureq::Error::Timeout(_))), "{result:?}");

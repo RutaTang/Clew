@@ -15,7 +15,9 @@ libc = "0.2"
 flate2 = "1.1.9"
 lzma-rs = "0.3.0"
 tar = "0.4.46"
-tokei = "12"
+# Language detection only: without its command line (`cli`, on by default
+# from 15).
+tokei = { version = "15", default-features = false }
 toml = "1.1.3"
 # HTTP/1.1 for every request clew-core makes. ureq writes the requests and
 # reads the responses; net.rs makes every connection they travel on — its
@@ -25,7 +27,7 @@ toml = "1.1.3"
 # unseen. No default features: TLS, SOCKS and the proxy decision are net.rs's
 # own, so ureq carries none of its own; gzip, which ureq 2's defaults had on
 # (flate2 is a dependency here anyway).
-ureq = { version = "=3.4.2", default-features = false, features = ["gzip"] }
+ureq = { version = "=3.5.1", default-features = false, features = ["gzip"] }
 # The Basic credentials of an http proxy (net.rs). The build ureq itself uses.
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 # ureq's HTTP/1.1 parser, the build ureq itself uses: net.rs follows an
@@ -50,7 +52,7 @@ rustls = { version = "0.23", default-features = false, features = ["logging", "r
 ring = "0.17"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
-zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+zip = { version = "9.3.0", default-features = false, features = ["deflate"] }
 globset = "0.4.16"
 grep-matcher = "0.1.9"
 grep-regex = "0.1.14"
@@ -62,13 +64,19 @@ sha2 = "0.11.0"
 streaming-iterator = "0.1.9"
 tokio = { version = "1.52.3", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 # Tokenizer: tree-sitter grammars for syntax highlighting + outline tags.
-tree-sitter = "0.26.11"
-tree-sitter-highlight = "0.26.11"
+# Pinned at 0.26.11, the newest release the grammars below parse with as they
+# were made to: from 0.26.12 (which restarts error recovery when a token does
+# not fit while it recovers) tree-sitter-css 0.25, the newest, no longer parses
+# a stylesheet with a `{` inside a string
+# (`highlight::tests::strings_and_comments_are_literal_in_every_language`).
+# tree-sitter-highlight moves with it (0.26.12 asks for tree-sitter 0.26.12).
+tree-sitter = "=0.26.11"
+tree-sitter-highlight = "=0.26.11"
 tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.2"
 tree-sitter-cpp = "0.23.4"
 tree-sitter-css = "0.25.0"
-tree-sitter-dart-orchard = "0.5.0"
+tree-sitter-dart-orchard = "0.7.1"
 tree-sitter-go = "0.25.0"
 tree-sitter-html = "0.23.2"
 tree-sitter-java = "0.23.5"

@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "iced_winit"
-version = "0.14.0"
+version = "0.14.1"
 authors = ["Héctor Ramón Jiménez <hector@hecrj.dev>"]
 build = false
 autolib = false
