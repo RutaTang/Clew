@@ -175,7 +175,8 @@ pub(crate) fn window_settings_for(through_visual: bool) -> iced::window::Setting
         // window surface to carry an alpha channel, for the corners to
         // composite over the desktop. On Windows only a window presented
         // through a visual is composited by its alpha (`app::corners`), and
-        // any other is made opaque.
+        // any other is made opaque: a transparent one is made without the
+        // surface GDI draws to, and shows only what is presented so.
         transparent: !cfg!(target_os = "windows") || through_visual,
         // A close the OS asks for (a window manager, the Accessibility API)
         // comes to the shell as a request, like ⌘W: a window holding edits it

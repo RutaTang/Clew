@@ -134,5 +134,8 @@ cosmic-text = { path = "vendor/cosmic-text" }
 # iced 0.14's GPU renderer, able to present through a DirectComposition visual
 # on Windows (vendor/README.md).
 iced_wgpu = { path = "vendor/iced_wgpu" }
+# iced 0.14's windowing, which makes a transparent window on Windows without
+# a redirection surface (vendor/README.md).
+iced_winit = { path = "vendor/iced_winit" }
 # The Lean 4 grammar, loadable by clew's tree-sitter (vendor/README.md).
 tree-sitter-lean4 = { path = "vendor/tree-sitter-lean4" }

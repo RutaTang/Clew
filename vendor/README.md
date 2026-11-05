@@ -65,9 +65,28 @@ says whether there is a DX12 adapter to draw with (and `WGPU_BACKEND`, if
 set, names DX12). Such a compositor takes premultiplied alpha, which is
 what iced draws and the only alpha a visual's swap chain takes, where iced
 prefers the straight kind. `app::corners` (in Clew) decides it once at
-start. The release ships no license file; its manifest declares MIT, and
-`LICENSE` is iced's. When iced lets an application choose how wgpu
-presents, ask for it there and delete this copy and the patch entry.
+start; the window is made for it by the patched `iced_winit` below. The
+release ships no license file; its manifest declares MIT, and `LICENSE` is
+iced's. When iced lets an application choose how wgpu presents, ask for it
+there and delete this copy and the patch entry.
+
+## iced_winit 0.14.0
+
+iced 0.14's windowing. winit makes a transparent window on Windows with
+the surface GDI draws to (a redirection surface) and asks Windows to show
+it by its alpha; nothing draws to it, and Windows showed it white over the
+pixels a window presenting through a DirectComposition visual (the patched
+`iced_wgpu` above) leaves clear — read off the screen on CI's Windows,
+where the same window made without one showed them clear. The patch
+(`window_attributes` in `src/conversion.rs`) makes every transparent
+window on Windows without one (winit's `with_no_redirection_bitmap`): it
+shows only what is presented through a visual, and Clew makes a window
+transparent there only when it presents so (`app::corners`). Its manifest
+allows the `deprecated` lint, whose warnings (a method of `futures` the
+release calls) were capped while it came from crates.io. The release
+ships no license file; its manifest declares MIT, and `LICENSE` is iced's.
+When iced lets an application ask for this, ask for it there and delete
+this copy and the patch entry.
 
 ## tree-sitter-lean4 0.3.0
 

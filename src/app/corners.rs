@@ -14,9 +14,11 @@
 //! its alpha; a DirectComposition visual's it composites by its alpha. So
 //! where iced's GPU renderer can present through one (DX12), Clew's
 //! windows do (`decide_presentation`), clear wherever Clew leaves them
-//! so, and Windows is asked to round none and to draw no border of its own
-//! round them. Elsewhere Windows 11 rounds the window itself, to its own
-//! radius.
+//! so. Such a window is made transparent, which on Windows also makes it
+//! without the surface GDI draws to (the vendored `iced_winit`), else shown
+//! over its clear pixels; and Windows is asked to round none of its
+//! corners and to draw no border of its own round it. Elsewhere Windows 11
+//! rounds the window itself, to its own radius.
 
 /// Whether Clew's windows present through a DirectComposition visual,
 /// once [`decide_presentation`] has decided it.
@@ -212,15 +214,15 @@ mod tests {
     /// visual, drawn by iced's renderer as Clew draws its frame (filled to
     /// the design's rounded corners), shows on the screen what is under it
     /// at its corners and what it draws everywhere else: Windows neither
-    /// rounds it nor draws a border round it, and composites it by its
-    /// alpha. Read off the screen over a window of a known colour.
+    /// rounds it nor draws a border round it, nor shows a surface of GDI's
+    /// over it (the vendored `iced_winit` makes it without one), and
+    /// composites it by its alpha. Read off the screen over a window of a
+    /// known colour.
     #[test]
     fn a_window_presented_through_a_visual_is_clear_at_its_corners() {
         use iced_winit::winit;
         use winit::platform::pump_events::EventLoopExtPumpEvents as _;
-        use winit::platform::windows::{
-            EventLoopBuilderExtWindows as _, WindowAttributesExtWindows as _,
-        };
+        use winit::platform::windows::EventLoopBuilderExtWindows as _;
 
         let on_ci = std::env::var_os("GITHUB_ACTIONS").is_some();
         if !super::visual_presentation_possible() {
@@ -240,6 +242,7 @@ mod tests {
             CornerPreference::DoNotRound
         );
         settings.size = iced::Size::new(360.0, 240.0);
+        settings.min_size = None;
         settings.position = iced::window::Position::Specific(iced::Point::new(160.0, 140.0));
         settings.level = iced::window::Level::AlwaysOnTop;
         let attributes =
@@ -261,36 +264,15 @@ mod tests {
             }
         };
 
-        // The window as Clew's is made; and should that not show its
-        // corners clear, one without the surface GDI draws to, for the
-        // failure to say which way Windows takes it.
-        let mut said = Vec::new();
-        let mut shown_as_made = false;
-        for (name, attributes) in [
-            ("as iced makes it", attributes.clone()),
-            (
-                "without a redirection surface",
-                attributes.with_no_redirection_bitmap(true),
-            ),
-        ] {
-            maker.asked = Some(attributes);
-            pump(&mut maker, 100);
-            let window = maker.made.take().expect("the window is made");
-            let (shown, report) = show_and_read(&window, &mut |for_ms| pump(&mut maker, for_ms));
-            drop(window);
-            pump(&mut maker, 100);
-            said.push(format!("{name}: {report}"));
-            if said.len() == 1 {
-                shown_as_made = shown;
-                if shown {
-                    break;
-                }
-            }
-        }
+        maker.asked = Some(attributes);
+        pump(&mut maker, 100);
+        let window = maker.made.take().expect("the window is made");
+        let (shown, report) = show_and_read(&window, &mut |for_ms| pump(&mut maker, for_ms));
+        drop(window);
+        pump(&mut maker, 100);
         assert!(
-            shown_as_made,
-            "the window as iced makes Clew's is not shown as drawn, with its corners clear:\n{}",
-            said.join("\n")
+            shown,
+            "the window as iced makes Clew's is not shown as drawn, with its corners clear: {report}"
         );
     }
 
