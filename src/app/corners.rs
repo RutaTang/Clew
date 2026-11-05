@@ -28,8 +28,12 @@ static THROUGH_VISUAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// Decide, before iced makes its renderer, whether Clew's windows present
 /// through a DirectComposition visual, and if so ask iced's GPU renderer
 /// to (the vendored `iced_wgpu`'s patch): where it draws first (iced's
-/// `ICED_BACKEND` names no other) and has a DX12 adapter to draw with.
-/// Their corners are then the design's; otherwise Windows rounds them.
+/// `ICED_BACKEND` names no other) and gets, on DX12, the adapter and the
+/// device it will ask for. Their corners are then the design's; otherwise
+/// Windows rounds them. A window presenting so shows nothing iced draws in
+/// software, so this asks for that adapter and device now, as the renderer
+/// will (`visual_presentation_available`), rather than have iced fall back
+/// to software with the window made for a visual.
 #[cfg(windows)]
 pub fn decide_presentation() {
     THROUGH_VISUAL.get_or_init(|| {
@@ -42,8 +46,8 @@ pub fn decide_presentation() {
 }
 
 /// Whether Clew's windows can present through a visual: iced's GPU
-/// renderer draws first (`ICED_BACKEND` names no other) and has a DX12
-/// adapter to draw with.
+/// renderer draws first (`ICED_BACKEND` names no other) and gets its
+/// adapter and device on DX12.
 #[cfg(windows)]
 fn visual_presentation_possible() -> bool {
     let gpu_first = std::env::var("ICED_BACKEND").map_or(true, |backends| {
@@ -273,6 +277,13 @@ mod tests {
         assert!(
             shown,
             "the window as iced makes Clew's is not shown as drawn, with its corners clear: {report}"
+        );
+        // What was read, written past the harness's capture of a passing
+        // test's output, for CI's log to show it.
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stdout(),
+            "the window's corners are clear on the screen: {report}"
         );
     }
 

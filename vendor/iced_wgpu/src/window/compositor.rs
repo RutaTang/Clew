@@ -58,8 +58,12 @@ pub fn present_through_visual() {
     THROUGH_VISUAL.store(true, std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Whether [`present_through_visual`] can be asked: on Windows, with a DX12
-/// adapter to draw with, and `WGPU_BACKEND`, if set, naming DX12.
+/// Whether [`present_through_visual`] can be asked: on Windows, with
+/// `WGPU_BACKEND`, if set, naming DX12, where a compositor presenting so
+/// gets the adapter and the device it asks for. It asks for them here as
+/// [`Compositor::request`] will, so a compositor that would not get them
+/// (and iced would then draw in software, which a window presenting
+/// through a visual does not show) is not asked to present so.
 pub fn visual_presentation_available() -> bool {
     if !cfg!(target_os = "windows")
         || wgpu::Backends::from_env()
@@ -78,7 +82,67 @@ pub fn visual_presentation_available() -> bool {
             true,
         ));
 
-        !instance.enumerate_adapters(wgpu::Backends::DX12).is_empty()
+        let Ok(adapter) = answer(instance.request_adapter(
+            &wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::from_env()
+                    .unwrap_or(wgpu::PowerPreference::HighPerformance),
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            },
+        )) else {
+            return false;
+        };
+
+        [wgpu::Limits::default(), wgpu::Limits::downlevel_defaults()]
+            .into_iter()
+            .any(|limits| {
+                answer(
+                    adapter.request_device(&device_descriptor(
+                        with_iced_limits(limits),
+                    )),
+                )
+                .is_ok()
+            })
+    }
+}
+
+/// What `request` comes to: wgpu answers a request of a native backend as
+/// it is made.
+#[cfg(not(target_arch = "wasm32"))]
+fn answer<T>(request: impl std::future::Future<Output = T>) -> T {
+    let mut request = std::pin::pin!(request);
+    let mut context =
+        std::task::Context::from_waker(std::task::Waker::noop());
+    loop {
+        if let std::task::Poll::Ready(value) =
+            request.as_mut().poll(&mut context)
+        {
+            return value;
+        }
+        std::thread::yield_now();
+    }
+}
+
+/// `limits` as a compositor asks its device for them.
+fn with_iced_limits(limits: wgpu::Limits) -> wgpu::Limits {
+    wgpu::Limits {
+        max_bind_groups: 2,
+        max_non_sampler_bindings: 2048,
+        ..limits
+    }
+}
+
+/// The device a compositor asks for, with `required_limits`.
+fn device_descriptor(
+    required_limits: wgpu::Limits,
+) -> wgpu::DeviceDescriptor<'static> {
+    wgpu::DeviceDescriptor {
+        label: Some("iced_wgpu::window::compositor device descriptor"),
+        required_features: wgpu::Features::empty(),
+        required_limits,
+        memory_hints: wgpu::MemoryHints::MemoryUsage,
+        trace: wgpu::Trace::Off,
+        experimental_features: wgpu::ExperimentalFeatures::disabled(),
     }
 }
 
@@ -224,27 +288,15 @@ impl Compositor {
         let limits =
             [wgpu::Limits::default(), wgpu::Limits::downlevel_defaults()];
 
-        let limits = limits.into_iter().map(|limits| wgpu::Limits {
-            max_bind_groups: 2,
-            max_non_sampler_bindings: 2048,
-            ..limits
-        });
+        // clew patch: the limits and the device asked for as
+        // `visual_presentation_available` asks for them.
+        let limits = limits.into_iter().map(with_iced_limits);
 
         let mut errors = Vec::new();
 
         for required_limits in limits {
             let result = adapter
-                .request_device(&wgpu::DeviceDescriptor {
-                    label: Some(
-                        "iced_wgpu::window::compositor device descriptor",
-                    ),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: required_limits.clone(),
-                    memory_hints: wgpu::MemoryHints::MemoryUsage,
-                    trace: wgpu::Trace::Off,
-                    experimental_features: wgpu::ExperimentalFeatures::disabled(
-                    ),
-                })
+                .request_device(&device_descriptor(required_limits.clone()))
                 .await;
 
             match result {

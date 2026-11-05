@@ -61,8 +61,11 @@ wgpu's defaults. The patch (`src/window/compositor.rs`) lets Clew ask,
 before the renderer is made: `present_through_visual` has every compositor
 requested after it make its instance for DX12 alone, presenting through a
 visual, where its settings include DX12, and `visual_presentation_available`
-says whether there is a DX12 adapter to draw with (and `WGPU_BACKEND`, if
-set, names DX12). Such a compositor takes premultiplied alpha, which is
+says whether such a compositor gets the adapter and the device it asks for
+(and `WGPU_BACKEND`, if set, names DX12): it asks for them as the
+compositor will, through the same descriptor, for iced not to fall back to
+drawing in software, which a window presenting through a visual does not
+show. Such a compositor takes premultiplied alpha, which is
 what iced draws and the only alpha a visual's swap chain takes, where iced
 prefers the straight kind. `app::corners` (in Clew) decides it once at
 start; the window is made for it by the patched `iced_winit` below. The
