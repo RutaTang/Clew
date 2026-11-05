@@ -164,8 +164,13 @@ pub fn run_guarded<T: Send + 'static>(
 /// with [`RENDER_STACK_BYTES`] and [`RENDER_DEADLINE`]: what an SVG batch
 /// should call per unit.
 pub fn render_guarded(kind: &str, src: &str) -> Guarded<Option<String>> {
+    render_guarded_within(kind, src, RENDER_DEADLINE)
+}
+
+/// [`render_guarded`], given up on after `deadline`.
+fn render_guarded_within(kind: &str, src: &str, deadline: Duration) -> Guarded<Option<String>> {
     let (math, src) = (kind == "math", src.to_string());
-    run_guarded(RENDER_STACK_BYTES, RENDER_DEADLINE, move || {
+    run_guarded(RENDER_STACK_BYTES, deadline, move || {
         if math {
             math_svg(&src)
         } else {
@@ -312,15 +317,17 @@ mod tests {
             run_guarded(RENDER_STACK_BYTES, Duration::from_secs(30), || deep(5_000)),
             Guarded::Done(_)
         ));
-        // The per-unit entry point renders both kinds.
-        assert!(matches!(
-            render_guarded("math", "x^2"),
-            Guarded::Done(Some(_))
-        ));
-        assert!(matches!(
-            render_guarded("mermaid", "flowchart LR\n A --> B"),
-            Guarded::Done(Some(_))
-        ));
+        // The per-unit entry point renders both kinds. Not against the
+        // render deadline: the diagram renderer measures text behind one
+        // lock for the whole process, and its first use loads every system
+        // font — on a Windows runner busy with the rest of the suite that
+        // has taken longer than the deadline, which is no fault of the
+        // dispatch tested here. The deadline is tested above.
+        let patient = Duration::from_secs(600);
+        let math = render_guarded_within("math", "x^2", patient);
+        assert!(matches!(math, Guarded::Done(Some(_))), "{math:?}");
+        let mermaid = render_guarded_within("mermaid", "flowchart LR\n A --> B", patient);
+        assert!(matches!(mermaid, Guarded::Done(Some(_))), "{mermaid:?}");
     }
 
     #[test]

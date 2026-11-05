@@ -36,7 +36,7 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
         parts.push(
             text(shown)
                 .size(ts::BODY)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg())
                 .into(),
         );
@@ -95,35 +95,39 @@ pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
     };
     let goto = |kind: GotoKind| item(kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
 
-    let panel = container(
-        column![
-            goto(GotoKind::Definition),
-            goto(GotoKind::References),
-            goto(GotoKind::Implementation),
-            goto(GotoKind::TypeDefinition),
-            item("View docs", Message::Docs(DocsMsg::ViewFromMenu)),
-            item("Call Hierarchy", Message::Calls(CallsMsg::FromMenu)),
-            item("Trace Value", Message::Flow(crate::FlowMsg::FromMenu)),
-            item("Explain", Message::Explain(ExplainMsg::FromMenu)),
-            item("Add to Ask", Message::Ask(AskMsg::AboutSelection)),
-            item(
-                "Why is this here?",
-                Message::TimeTravel(TimeTravelMsg::WhyIsThisHere)
-            ),
-            item(
-                "Toggle Breakpoint",
-                Message::Debug(DebugMsg::ToggleBreakpointFromMenu)
-            ),
-            item(
-                "Conditional Breakpoint…",
-                Message::Debug(DebugMsg::ConditionalBreakpointFromMenu)
-            ),
-        ]
-        .spacing(1),
-    )
-    .width(MENU_W)
-    .padding(4)
-    .style(theme::modal_panel);
+    let mut items = vec![
+        goto(GotoKind::Definition),
+        goto(GotoKind::References),
+        goto(GotoKind::Implementation),
+        goto(GotoKind::TypeDefinition),
+    ];
+    // The language's own action, for a file whose language has one.
+    if let Some(kind) = menu.insight {
+        items.push(item(kind.label(), Message::Hover(HoverMsg::Insight)));
+    }
+    items.extend([
+        item("View docs", Message::Docs(DocsMsg::ViewFromMenu)),
+        item("Call Hierarchy", Message::Calls(CallsMsg::FromMenu)),
+        item("Trace Value", Message::Flow(crate::FlowMsg::FromMenu)),
+        item("Explain", Message::Explain(ExplainMsg::FromMenu)),
+        item("Add to Ask", Message::Ask(AskMsg::AboutSelection)),
+        item(
+            "Why is this here?",
+            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+        ),
+        item(
+            "Toggle Breakpoint",
+            Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
+        ),
+        item(
+            "Conditional Breakpoint…",
+            Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
+        ),
+    ]);
+    let panel = container(Column::with_children(items.into_iter().map(Element::from)).spacing(1))
+        .width(MENU_W)
+        .padding(4)
+        .style(theme::modal_panel);
 
     // At the click point, opening down-right and flipping up / left at the
     // window edges — from the menu's measured size, not a counted estimate.
@@ -250,7 +254,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
         .map(|line| {
             text(line.as_str())
                 .size(ts::SMALL)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::dim())
                 .wrapping(Wrapping::None)
                 .into()
@@ -365,11 +369,7 @@ pub(crate) fn one_line_desc<'a>(full: &str, max: usize) -> Element<'a, Message> 
 /// Path relative to the project root, for compact display in the overlays.
 pub(crate) fn rel_of(app: &App, path: &std::path::Path) -> String {
     match &app.proj.project {
-        Some(p) => path
-            .strip_prefix(&p.root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .to_string(),
+        Some(p) => clew_core::rel_string(path.strip_prefix(&p.root).unwrap_or(path)),
         None => path.to_string_lossy().to_string(),
     }
 }

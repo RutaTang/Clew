@@ -228,6 +228,82 @@ impl StatsReport {
     }
 }
 
+// -- project maps -------------------------------------------------------------
+
+/// What a C or C++ macro (or a whole line) expands to at a point, read
+/// from the `#define`s in effect there — the file's and its headers'.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MacroExpansion {
+    /// The macro expanded; empty when a whole line was.
+    pub name: String,
+    /// What was expanded, as written.
+    pub invocation: String,
+    /// What the preprocessor makes of it.
+    pub expanded: String,
+    /// Where the macro is defined, relative to the project, with its 1-based
+    /// line; empty (and 0) for one the command line defines, or one in a
+    /// header outside the project.
+    pub file: String,
+    pub line: usize,
+    /// Its `#define`, as written.
+    pub definition: String,
+    /// Whether the expansion was cut short.
+    pub truncated: bool,
+}
+
+/// One of a project's maps (reply to `ProjectMaps`): what a language or a
+/// framework says about how its code fits together — a database's tables and
+/// their foreign keys, a web app's routes and the handlers they reach, an OTP
+/// application's supervision tree — read from its files.
+///
+/// `edges` hold indices into `nodes`, and they arrive from another process:
+/// the receiver checks them ([`ProjectMap::is_well_formed`]) before trusting
+/// them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectMap {
+    /// What the map is (`sql.schema`, `routes`, `erlang.supervision`, …):
+    /// stable, for the client to remember which one was shown.
+    pub id: String,
+    pub title: String,
+    /// One line on how to read it.
+    pub description: String,
+    pub nodes: Vec<MapNode>,
+    pub edges: Vec<MapEdge>,
+}
+
+impl ProjectMap {
+    /// Whether every edge names a node there is.
+    pub fn is_well_formed(&self) -> bool {
+        let n = self.nodes.len();
+        self.edges.iter().all(|e| e.from < n && e.to < n)
+    }
+}
+
+/// A thing on a map — a table, a route, a handler, a process — where it is
+/// defined, and what more there is to say of it (`detail`: a table's
+/// columns, a class's method resolution order, …).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapNode {
+    pub label: String,
+    /// What it is (`table`, `route`, `handler`, `supervisor`, …).
+    pub kind: String,
+    /// Its file, relative to the project root; empty for a node no file
+    /// defines (a route's path, a table only ever referenced).
+    pub file: Rel,
+    /// 1-based line in `file`; 0 when there is none.
+    pub line: usize,
+    pub detail: String,
+}
+
+/// How one node relates to another: an arrow `from` → `to`, saying what it
+/// is (`label`: a foreign key's column, `handles`, `supervises`, …).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MapEdge {
+    pub from: usize,
+    pub to: usize,
+    pub label: String,
+}
+
 // -- the project call graph ---------------------------------------------------
 
 /// The name-based project call graph (reply to `ProjectCalls`), as an

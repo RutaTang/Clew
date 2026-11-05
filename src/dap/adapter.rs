@@ -52,6 +52,18 @@ pub enum Lang {
     Dart,
     /// JavaScript / TypeScript via vscode-js-debug.
     Node,
+    /// Ruby via rdbg (the `debug` gem).
+    Ruby,
+    /// C# and the rest of .NET via netcoredbg.
+    CSharp,
+    /// PHP via Xdebug, through clew-server's own adapter.
+    Php,
+    /// Erlang via OTP's interpreter, through clew-server's own adapter.
+    Erlang,
+    /// Java via JDWP, through clew-server's own adapter.
+    Java,
+    /// Haskell via GHCi's debugger, through clew-server's own adapter.
+    Haskell,
 }
 
 impl Lang {
@@ -60,9 +72,15 @@ impl Lang {
     pub fn detect(type_hint: Option<&str>, program: &Path) -> Option<Lang> {
         if let Some(t) = type_hint {
             return match t.to_ascii_lowercase().as_str() {
-                "rust" | "lldb" | "lldb-dap" | "cpp" | "c" | "codelldb" | "native" => {
+                "rust" | "lldb" | "lldb-dap" | "cpp" | "c" | "codelldb" | "native" | "zig" => {
                     Some(Lang::Native)
                 }
+                "ruby" | "rdbg" => Some(Lang::Ruby),
+                "coreclr" | "netcoredbg" | "csharp" | "cs" | "dotnet" => Some(Lang::CSharp),
+                "php" | "xdebug" => Some(Lang::Php),
+                "erlang" | "erl" => Some(Lang::Erlang),
+                "java" | "jdwp" => Some(Lang::Java),
+                "haskell" | "ghc" | "ghci" | "hs" => Some(Lang::Haskell),
                 "python" | "debugpy" => Some(Lang::Python),
                 "go" | "delve" | "dlv" => Some(Lang::Go),
                 "dart" | "flutter" => Some(Lang::Dart),
@@ -80,6 +98,13 @@ impl Lang {
             Some("dart") => Some(Lang::Dart),
             Some("go") => Some(Lang::Go),
             Some("js" | "mjs" | "cjs" | "ts" | "tsx" | "jsx") => Some(Lang::Node),
+            Some("rb") => Some(Lang::Ruby),
+            Some("php") => Some(Lang::Php),
+            Some("erl") => Some(Lang::Erlang),
+            Some("java") => Some(Lang::Java),
+            Some("hs" | "lhs") => Some(Lang::Haskell),
+            // A .NET assembly: what netcoredbg runs.
+            Some("dll") => Some(Lang::CSharp),
             None => Some(Lang::Native),
             _ => Some(Lang::Native),
         }
@@ -92,6 +117,12 @@ impl Lang {
             Lang::Go => "Go (delve)",
             Lang::Dart => "Dart",
             Lang::Node => "Node (js-debug)",
+            Lang::Ruby => "Ruby (rdbg)",
+            Lang::CSharp => "C# (netcoredbg)",
+            Lang::Php => "PHP (Xdebug)",
+            Lang::Erlang => "Erlang (OTP interpreter)",
+            Lang::Java => "Java (JDWP)",
+            Lang::Haskell => "Haskell (GHCi)",
         }
     }
 
@@ -104,6 +135,12 @@ impl Lang {
             Lang::Go => "go",
             Lang::Dart => "dart",
             Lang::Node => "node",
+            Lang::Ruby => "ruby",
+            Lang::CSharp => "csharp",
+            Lang::Php => "php",
+            Lang::Erlang => "erlang",
+            Lang::Java => "java",
+            Lang::Haskell => "haskell",
         }
     }
 }
@@ -113,17 +150,30 @@ impl Lang {
 /// off the UI thread and off the async executor.
 ///
 /// `root` is the project root, where a Python virtualenv is looked for; `cwd`
-/// is the session's working directory from the launch configuration (see
-/// `clew_core::debugadapter::resolve`).
+/// is the session's working directory from the launch configuration; a
+/// Python program runs under the interpreter `choices` names, when it names
+/// one (see `clew_core::debugadapter::resolve`).
 pub fn resolve(
     lang: Lang,
     program: &Path,
     args: &[String],
     root: &Path,
     cwd: &Path,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<Resolved, String> {
+    let program = program.to_string_lossy();
+    // clew-server serves clew's own adapters (PHP's).
+    let server = crate::backend::server::server_bin_path();
     Ok(
-        match debugadapter::resolve(lang.slug(), &program.to_string_lossy(), args, root, cwd)? {
+        match debugadapter::resolve(
+            lang.slug(),
+            &program,
+            args,
+            root,
+            cwd,
+            choices,
+            server.as_deref(),
+        )? {
             Resolution::Ready(spec) => Resolved::Ready(Adapter {
                 command: spec.command,
                 args: spec.args,
@@ -131,6 +181,7 @@ pub fn resolve(
                 transport: match spec.transport {
                     AdapterTransport::Stdio => Transport::Stdio,
                     AdapterTransport::Tcp => Transport::Tcp,
+                    AdapterTransport::TcpOnStderr => Transport::TcpOnStderr,
                 },
             }),
             Resolution::NeedsInstall(install) => Resolved::NeedsInstall(install),
@@ -163,6 +214,54 @@ mod tests {
             Lang::detect(None, Path::new("target/debug/app")),
             Some(Lang::Native)
         );
+        assert_eq!(
+            Lang::detect(None, Path::new("bin/app.rb")),
+            Some(Lang::Ruby)
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("bin/Debug/net8.0/App.dll")),
+            Some(Lang::CSharp)
+        );
+        for (hint, lang) in [
+            ("rdbg", Lang::Ruby),
+            ("ruby", Lang::Ruby),
+            ("coreclr", Lang::CSharp),
+            ("netcoredbg", Lang::CSharp),
+            ("zig", Lang::Native),
+            ("xdebug", Lang::Php),
+            ("ghci", Lang::Haskell),
+            ("java", Lang::Java),
+            ("erlang", Lang::Erlang),
+        ] {
+            assert_eq!(
+                Lang::detect(Some(hint), Path::new("x")),
+                Some(lang),
+                "{hint}"
+            );
+        }
+        assert_eq!(
+            Lang::detect(None, Path::new("public/index.php")),
+            Some(Lang::Php)
+        );
+        assert_eq!(
+            (Lang::Php.slug(), Lang::Php.label()),
+            ("php", "PHP (Xdebug)")
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("src/shop.erl")),
+            Some(Lang::Erlang)
+        );
+        assert_eq!(
+            Lang::detect(None, Path::new("app/Main.hs")),
+            Some(Lang::Haskell)
+        );
+        assert_eq!(
+            (Lang::Erlang.slug(), Lang::Haskell.slug()),
+            ("erlang", "haskell")
+        );
+        // Each goes to its own adapter, by the slug the resolver matches.
+        assert_eq!((Lang::Ruby.slug(), Lang::CSharp.slug()), ("ruby", "csharp"));
+        assert_eq!(Lang::Ruby.label(), "Ruby (rdbg)");
     }
 
     /// The venv is the PROJECT's, whatever directory the launch configuration
@@ -200,7 +299,15 @@ mod tests {
         let cfg = crate::app::tasks::read_launch_config(&root).unwrap();
         assert_eq!(cfg.cwd, root.join("tools"));
         let lang = Lang::detect(cfg.type_hint.as_deref(), &cfg.program).unwrap();
-        let resolved = resolve(lang, &cfg.program, &cfg.args, &root, &cfg.cwd).unwrap();
+        let resolved = resolve(
+            lang,
+            &cfg.program,
+            &cfg.args,
+            &root,
+            &cfg.cwd,
+            &Default::default(),
+        )
+        .unwrap();
         let Resolved::Ready(adapter) = resolved else {
             panic!("debugpy is in the project's venv, yet an install was asked for");
         };

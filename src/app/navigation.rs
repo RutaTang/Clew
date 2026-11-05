@@ -183,7 +183,9 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = format!("No {lang} server ready (⌘T to search symbols)");
+                self.status = crate::keymap::local_keys(&format!(
+                    "No {lang} server ready (⌘T to search symbols)"
+                ));
                 return Task::none();
             }
         };
@@ -485,6 +487,18 @@ impl App {
     }
 
     pub(crate) fn refresh_finder(&mut self) {
+        if self.proj.finder.is_commands() {
+            self.refresh_palette();
+            return;
+        }
+        if self.proj.finder.is_home() {
+            self.refresh_suggestions();
+            return;
+        }
+        if self.proj.finder.is_bar_search() {
+            self.refresh_bar();
+            return;
+        }
         match self.proj.finder.mode {
             FinderMode::Files => {
                 if let Some(p) = &self.proj.project {
@@ -504,6 +518,7 @@ impl App {
             return Task::none();
         }
         self.proj.finder.open = true;
+        self.proj.finder.bar = false;
         self.proj.finder.mode = mode;
         self.proj.finder.query.clear();
         self.code_focused = false; // the finder input takes focus
@@ -512,6 +527,34 @@ impl App {
     }
 
     pub(crate) fn on_finder_confirm(&mut self) -> Task<Message> {
+        if self.proj.finder.is_commands() {
+            let title = self
+                .proj
+                .finder
+                .results
+                .get(self.proj.finder.selected)
+                .and_then(|i| self.palette.get(*i))
+                .map(|c| c.title.clone());
+            return match title {
+                Some(title) => self.run_palette(&title),
+                None => Task::none(),
+            };
+        }
+        if self.proj.finder.is_home() {
+            return match self.palette_home.get(self.proj.finder.selected).cloned() {
+                Some(suggestion) => self.run_suggestion(suggestion),
+                None => Task::none(),
+            };
+        }
+        if self.proj.finder.is_bar_search() {
+            let Some(&idx) = self.proj.finder.results.get(self.proj.finder.selected) else {
+                return Task::none();
+            };
+            return match self.palette.get(idx).map(|c| c.title.clone()) {
+                Some(title) => self.run_palette(&title),
+                None => self.finder_open_index(idx - self.palette.len()),
+            };
+        }
         if let Some(line) = self.proj.finder.goto_line() {
             self.proj.finder.open = false;
             if let Some(abs) = self.active_viewer().map(|v| v.abs.clone()) {
@@ -536,6 +579,7 @@ impl App {
             return Task::none();
         }
         self.proj.finder.open = true;
+        self.proj.finder.bar = false;
         self.proj.finder.mode = FinderMode::Files;
         self.proj.finder.query = ":".to_string();
         self.refresh_finder();
@@ -732,6 +776,9 @@ impl App {
                 self.open_file(abs, line, true)
             }
             NavMsg::FinderConfirm => self.on_finder_confirm(),
+            NavMsg::PaletteOpened => self.on_palette_opened(),
+            NavMsg::PaletteRun(title) => self.run_palette(&title),
+            NavMsg::PaletteSuggestion(suggestion) => self.run_suggestion(suggestion),
             NavMsg::GotoLineRequested => self.on_goto_line_requested(),
             NavMsg::DefinitionResult { seq, result, .. } => {
                 // A superseded request (a newer gd, a project switch bumping
@@ -781,6 +828,7 @@ impl App {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     /// `call_site_line` falls back to this machine's disk when the caller is
@@ -790,8 +838,8 @@ mod tests {
     /// another file's call sites under this project's name, and an over-cap
     /// file was pulled whole into the iced update loop that serves EVERY
     /// window (a FIFO there froze the entire interface).
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn call_site_line_refuses_a_symlink_out_of_the_project_and_an_over_cap_file() {
         use crate::app::tests::{blank_app, test_dir};
         const SRC: &str = "fn caller() {\n    callee();\n}\n";
@@ -854,6 +902,7 @@ mod tests {
 
 #[cfg(test)]
 mod location_tests {
+    #[cfg(unix)]
     use super::*;
 
     /// The reference preview is read off this machine's disk at whatever path
@@ -866,8 +915,8 @@ mod location_tests {
     /// (the `external_local` allowance `open_file` makes, and the same choice
     /// the server's own reference preview makes in `agent_lsp.rs`) — so this
     /// pins the external preview as WORKING alongside the two refusals.
-    #[test]
     #[cfg(unix)]
+    #[test]
     fn reference_preview_refuses_a_symlink_and_an_over_cap_file_but_keeps_external_sources() {
         use crate::app::tests::{blank_app, run_task, test_dir};
         let dir = test_dir("refpreview-guard");

@@ -218,7 +218,16 @@ impl App {
                             for s in syms.iter().filter(|s| {
                                 matches!(
                                     s.kind.as_str(),
-                                    "function" | "method" | "struct" | "class" | "enum" | "trait"
+                                    "function"
+                                        | "method"
+                                        | "struct"
+                                        | "class"
+                                        | "enum"
+                                        | "trait"
+                                        | "table"
+                                        | "view"
+                                        | "theorem"
+                                        | "inductive"
                                 )
                             }) {
                                 changed_text.push_str(&format!(
@@ -715,7 +724,17 @@ impl App {
                 .filter(|s| {
                     matches!(
                         s.kind.as_str(),
-                        "function" | "method" | "struct" | "enum" | "class" | "trait" | "interface"
+                        "function"
+                            | "method"
+                            | "struct"
+                            | "enum"
+                            | "class"
+                            | "trait"
+                            | "interface"
+                            | "table"
+                            | "view"
+                            | "theorem"
+                            | "inductive"
                     )
                 })
                 .map(|s| s.name.as_str())

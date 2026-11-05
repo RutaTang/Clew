@@ -28,17 +28,17 @@
 //! shared machine the stdio adapters (lldb-dap, debugpy, dart) are the ones
 //! without this exposure.
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use clew_core::dapwire::{await_listening, connect_retry, from_first_frame};
 use clew_core::framing::{self, CallError, EndReason, Failure, FrameError, Handled, Ids};
 use serde_json::{Value, json};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::net::TcpStream;
-use tokio::process::{Child, Command};
+use tokio::io::{AsyncReadExt, BufReader};
+use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::proto::{Breakpoint, DapEvent, EvalContext, Output, Scope, StackFrame, Variable};
@@ -49,6 +49,9 @@ use super::proto::{Breakpoint, DapEvent, EvalContext, Output, Scope, StackFrame,
 pub enum Transport {
     Stdio,
     Tcp,
+    /// A TCP adapter that is the debuggee too (`rdbg`): its port is
+    /// announced on stderr, and what it prints is the program's output.
+    TcpOnStderr,
 }
 
 /// Ceiling for one DAP request. Generous — attaching or launching a big
@@ -72,12 +75,6 @@ const ANNOUNCE_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// How long connecting to an announced (or a child session's) port may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
-
-/// Longest stdout line read while waiting for the announcement, and how many
-/// lines an adapter may print before it: the pipe is the adapter's, so the
-/// wait is bounded in bytes as well as in time.
-const MAX_ANNOUNCE_LINE: usize = 4096;
-const MAX_ANNOUNCE_LINES: usize = 200;
 
 /// A cheap, cloneable handle to the debug adapter; talks to the actor over a
 /// channel so it can be moved into iced `Task`s freely.
@@ -117,7 +114,7 @@ impl DapClient {
         transport: Transport,
         announce: Duration,
     ) -> Result<(DapClient, DapEvents), String> {
-        let mut command = Command::new(adapter);
+        let mut command = clew_core::spawn::tokio_command(adapter);
         command
             .args(args)
             .current_dir(cwd)
@@ -136,6 +133,8 @@ impl DapClient {
             Transport::Stdio => {
                 command.stdin(std::process::Stdio::piped());
                 let mut child = command.spawn().map_err(spawn_failed)?;
+                #[cfg(windows)]
+                clew_core::procgroup::adopt_tokio(&child);
                 let stdin = child.stdin.take().ok_or("no stdin")?;
                 let stdout = child.stdout.take().ok_or("no stdout")?;
                 // Drain stderr: an adapter that logs enough to fill the pipe
@@ -148,6 +147,8 @@ impl DapClient {
             Transport::Tcp => {
                 command.stdin(std::process::Stdio::null());
                 let mut child = command.spawn().map_err(spawn_failed)?;
+                #[cfg(windows)]
+                clew_core::procgroup::adopt_tokio(&child);
                 if let Some(e) = child.stderr.take() {
                     tokio::spawn(drain(e));
                 }
@@ -173,6 +174,42 @@ impl DapClient {
                 };
                 let (read, write) = stream.into_split();
                 Ok(Self::wire(write, read, Some(child), Some(addr)))
+            }
+            Transport::TcpOnStderr => {
+                command.stdin(std::process::Stdio::null());
+                let mut child = command.spawn().map_err(spawn_failed)?;
+                #[cfg(windows)]
+                clew_core::procgroup::adopt_tokio(&child);
+                let stdout = child.stdout.take().ok_or("no stdout")?;
+                let stderr = child.stderr.take().ok_or("no stderr")?;
+                let mut err = BufReader::new(stderr);
+                let addr = match await_listening(&mut err, &mut child, announce).await {
+                    Ok(addr) => addr,
+                    Err(e) => {
+                        framing::reap(child, Duration::ZERO, cfg!(unix)).await;
+                        return Err(e);
+                    }
+                };
+                let stream = match connect_retry(addr, Some(&mut child), CONNECT_TIMEOUT).await {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        framing::reap(child, Duration::ZERO, cfg!(unix)).await;
+                        return Err(e);
+                    }
+                };
+                let (read, write) = stream.into_split();
+                let read = from_first_frame(read);
+                // The program's output is the adapter's: shown in the
+                // console as the program's.
+                let outputs: Vec<(BoxedOutput, &'static str)> =
+                    vec![(Box::new(stdout), "stdout"), (Box::new(err), "stderr")];
+                Ok(Self::wire_forwarding(
+                    write,
+                    read,
+                    Some(child),
+                    Some(addr),
+                    outputs,
+                ))
             }
         }
     }
@@ -214,10 +251,35 @@ impl DapClient {
         R: tokio::io::AsyncRead + Unpin + Send + 'static,
         W: tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
+        Self::wire_forwarding(writer, reader, child, addr, Vec::new())
+    }
+
+    /// [`Self::wire`], with `outputs` — a debuggee's own streams, each with
+    /// its output category — forwarded into the event stream as output.
+    fn wire_forwarding<W, R>(
+        writer: W,
+        reader: R,
+        child: Option<Child>,
+        addr: Option<SocketAddr>,
+        outputs: Vec<(BoxedOutput, &'static str)>,
+    ) -> (DapClient, DapEvents)
+    where
+        R: tokio::io::AsyncRead + Unpin + Send + 'static,
+        W: tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
         let (sink, events) = event_channel();
         let (rpc, mailbox) = framing::mailbox();
         let incoming = framing::spawn_reader(reader);
-        tokio::spawn(run_session(writer, mailbox, incoming, child, sink));
+        // The adapter that runs the program (its output forwarded) is let
+        // finish writing it out.
+        let grace = match outputs.is_empty() {
+            true => Duration::ZERO,
+            false => DEBUGGEE_EXIT_GRACE,
+        };
+        for (stream, category) in outputs {
+            tokio::spawn(forward_output(stream, category, sink.sharing()));
+        }
+        tokio::spawn(run_session(writer, mailbox, incoming, child, sink, grace));
         let client = DapClient {
             rpc,
             addr,
@@ -565,6 +627,16 @@ impl EventSink {
     /// line — can always be queued without taking the queue over the cap.
     const NOTICE_RESERVE: usize = 256;
 
+    /// Another sender into the same stream, under the same budget, counting
+    /// what it drops on its own.
+    fn sharing(&self) -> EventSink {
+        EventSink {
+            tx: self.tx.clone(),
+            pending: self.pending.clone(),
+            dropped: 0,
+        }
+    }
+
     /// Forward one event. `Err(())` means the app dropped the receiver.
     fn send(&mut self, event: DapEvent) -> Result<(), ()> {
         let event = match event {
@@ -777,154 +849,62 @@ impl framing::Protocol for DapWire {
 
 /// The actor for one session, then the adapter's end: killed (with its
 /// process group, so a debuggee it spawned goes too) once the session is
-/// over. `child` is `None` for a proxied adapter and for a child session
-/// sharing its parent's adapter (js-debug).
+/// over — after `grace` to exit by itself. `child` is `None` for a proxied
+/// adapter and for a child session sharing its parent's adapter (js-debug).
 async fn run_session<W>(
     writer: W,
     mailbox: framing::Mailbox,
     incoming: mpsc::UnboundedReceiver<framing::Inbound>,
     child: Option<Child>,
     events: EventSink,
+    grace: Duration,
 ) where
     W: tokio::io::AsyncWrite + Unpin,
 {
     let ended = framing::run(writer, DapWire { events }, mailbox, incoming).await;
     if let Some(child) = child {
-        framing::reap(child, Duration::ZERO, cfg!(unix)).await;
+        framing::reap(child, grace, cfg!(unix)).await;
     }
     ended.release();
 }
 
-/// Read the adapter's stdout until it announces where it listens — delve:
-/// `DAP server listening at: 127.0.0.1:PORT`, js-debug: `Debug server
-/// listening at 127.0.0.1:PORT`. Bounded in time, in line length and in line
-/// count; an adapter that exits first ends the wait at once.
-async fn await_listening<R>(
-    out: &mut R,
-    child: &mut Child,
-    limit: Duration,
-) -> Result<SocketAddr, String>
-where
-    R: AsyncBufRead + Unpin,
-{
-    let deadline = tokio::time::sleep(limit);
-    tokio::pin!(deadline);
-    let mut line = Vec::new();
-    for _ in 0..MAX_ANNOUNCE_LINES {
-        line.clear();
-        let mut limited = (&mut *out).take(MAX_ANNOUNCE_LINE as u64);
-        tokio::select! {
-            read = limited.read_until(b'\n', &mut line) => {
-                if matches!(read, Ok(0) | Err(_)) {
-                    // Output closed: the adapter is going. Say how it went —
-                    // and sweep what it started before it is reaped
-                    // (`framing::wait_sweeping`): an adapter that died on
-                    // its own left its group running.
-                    let status = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        framing::wait_sweeping(child),
-                    )
-                    .await;
-                    return Err(match status {
-                        Ok(Ok(status)) => {
-                            format!("the debug adapter exited ({status}) before it was ready")
-                        }
-                        _ => "the debug adapter closed its output before it was ready".into(),
-                    });
-                }
-                if let Some(addr) = parse_listening(&String::from_utf8_lossy(&line))? {
-                    return Ok(addr);
-                }
-            }
-            status = framing::wait_sweeping(child) => {
-                return Err(match status {
-                    Ok(status) => format!("the debug adapter exited ({status}) before it was ready"),
-                    Err(e) => format!("the debug adapter failed: {e}"),
-                });
-            }
-            () = &mut deadline => {
-                return Err(format!(
-                    "the debug adapter did not report its listening port within {} s",
-                    limit.as_secs()
-                ));
-            }
-        }
-    }
-    Err("the debug adapter printed too much before reporting its port".into())
-}
+/// How long an adapter that is its own debuggee (rdbg) has to exit by
+/// itself once its session is over. It closes the session as the program
+/// ends, and the program has yet to write out what it buffered: killed at
+/// once, the program's last output — all of it, for a short run whose
+/// stdout is a pipe — was lost.
+const DEBUGGEE_EXIT_GRACE: Duration = Duration::from_secs(3);
 
-/// The address in an adapter's "listening at" line, if this is that line.
-/// Only a loopback address is usable: it is the only one clew asked for, and
-/// anything else would put the session on the network.
-fn parse_listening(line: &str) -> Result<Option<SocketAddr>, String> {
-    const MARKER: &str = "listening at";
-    // ASCII lowercasing keeps byte offsets, so `at` indexes `line` too.
-    let Some(at) = line.to_ascii_lowercase().find(MARKER) else {
-        return Ok(None);
-    };
-    // delve writes `listening at: <addr>`, js-debug `listening at <addr>`.
-    // Only a colon FOLLOWED BY WHITESPACE is that separator: the address
-    // itself may start with one (`::1:8123`, node's spelling of IPv6
-    // loopback), and stripping every leading colon turned it into `1:8123`.
-    let rest = line[at + MARKER.len()..].trim_start();
-    let rest = match rest.strip_prefix(':') {
-        Some(after) if after.starts_with(char::is_whitespace) => after.trim_start(),
-        _ => rest,
-    };
-    let token = rest.split_whitespace().next().unwrap_or("");
-    let addr = parse_addr(token)
-        .filter(|a| a.port() != 0)
-        .ok_or_else(|| format!("the debug adapter announced an unusable address {token:?}"))?;
-    if !addr.ip().is_loopback() {
-        return Err(format!(
-            "the debug adapter listens on {addr}, not on loopback — refusing to connect"
-        ));
-    }
-    Ok(Some(addr))
-}
+/// A debuggee's output stream, as [`DapClient::wire_forwarding`] takes it.
+type BoxedOutput = Box<dyn tokio::io::AsyncRead + Unpin + Send>;
 
-/// `127.0.0.1:5`, `[::1]:5`, and the unbracketed `::1:5` and `localhost:5`
-/// node prints.
-fn parse_addr(token: &str) -> Option<SocketAddr> {
-    if let Ok(addr) = token.parse::<SocketAddr>() {
-        return Some(addr);
-    }
-    let (host, port) = token.rsplit_once(':')?;
-    let port = port.parse::<u16>().ok()?;
-    let ip = match host.trim_start_matches('[').trim_end_matches(']') {
-        "localhost" => IpAddr::V4(Ipv4Addr::LOCALHOST),
-        host => host.parse().ok()?,
+/// Forward what `r` (a debuggee's stdout or stderr) prints into `sink` as
+/// `category` output, chunk by chunk as it comes — a prompt with no newline
+/// shows at once — never cutting a character in two. Once the app is gone,
+/// the rest is drained unread, so the program never blocks on a full pipe.
+async fn forward_output(mut r: BoxedOutput, category: &'static str, mut sink: EventSink) {
+    let mut buf = [0u8; 4096];
+    let mut text = clew_core::dapwire::Utf8Carry::default();
+    let send = |sink: &mut EventSink, text: String| {
+        sink.send(DapEvent::Output(Output {
+            category: category.into(),
+            text,
+        }))
     };
-    Some(SocketAddr::new(ip, port))
-}
-
-/// Connect to a TCP adapter's port, retrying briefly. When the adapter is our
-/// child, a child that has exited ends the retries at once: there is nothing
-/// left to connect to, and before, the loop spun out its full budget.
-async fn connect_retry(
-    addr: SocketAddr,
-    mut child: Option<&mut Child>,
-    limit: Duration,
-) -> Result<TcpStream, String> {
-    let deadline = Instant::now() + limit;
     loop {
-        let error = match TcpStream::connect(addr).await {
-            Ok(stream) => return Ok(stream),
-            Err(e) => e,
+        let n = match r.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
         };
-        if let Some(child) = child.as_mut()
-            && let Ok(Some(status)) = framing::try_wait_sweeping(child)
+        if let Some(whole) = text.push(&buf[..n])
+            && send(&mut sink, whole).is_err()
         {
-            return Err(format!(
-                "the debug adapter exited ({status}) before accepting a connection on {addr}"
-            ));
+            drain(r).await;
+            return;
         }
-        if Instant::now() >= deadline {
-            return Err(format!(
-                "could not connect to the debug adapter on {addr}: {error}"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if let Some(rest) = text.finish() {
+        let _ = send(&mut sink, rest);
     }
 }
 
@@ -944,7 +924,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clew_core::dapwire::parse_listening;
     use clew_core::framing::{read_message, write_frame};
+    use std::time::Instant;
+    use tokio::net::TcpStream;
 
     /// A client wired to a scripted adapter over in-memory pipes: `respond`
     /// answers each request `(command, arguments)` with a response `body`. Uses
@@ -1458,6 +1441,596 @@ mod tests {
         );
         assert!(parse_listening("DAP server listening at: 127.0.0.1:0").is_err());
         assert!(parse_listening("Debug server listening at somewhere").is_err());
+        // rdbg's own words, on its stderr.
+        assert_eq!(
+            parse_listening("DEBUGGER: Debugger can attach via TCP/IP (127.0.0.1:38697)\n"),
+            Ok(Some(v4))
+        );
+        assert!(
+            parse_listening("DEBUGGER: Debugger can attach via TCP/IP (10.0.0.5:4000)")
+                .unwrap_err()
+                .contains("not on loopback")
+        );
+        assert_eq!(
+            parse_listening("DEBUGGER: wait for debugger connection..."),
+            Ok(None)
+        );
+    }
+
+    /// An adapter that is its own debuggee (rdbg) is reached at the port it
+    /// names on stderr, and what it prints after — on stdout and stderr — is
+    /// the program's output, a character split across two writes kept whole.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn an_adapter_that_runs_the_program_forwards_its_output() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let script = format!(
+            "echo 'DEBUGGER: Debugger can attach via TCP/IP (127.0.0.1:{port})' >&2; \
+             sleep 0.5; printf 'caf\\303'; sleep 0.2; printf '\\251\\n'; \
+             echo oops >&2; exec sleep 30"
+        );
+        let args = vec!["-c".to_string(), script];
+        let start = tokio::spawn(async move {
+            DapClient::start_with(
+                Path::new("/bin/sh"),
+                &args,
+                Path::new("/"),
+                Transport::TcpOnStderr,
+                Duration::from_secs(10),
+            )
+            .await
+        });
+        let (_socket, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
+            .await
+            .expect("the client connects to the port named on stderr")
+            .unwrap();
+        let (client, mut events) = start.await.unwrap().expect("started");
+        assert_eq!(
+            client.tcp_addr(),
+            Some(SocketAddr::from(([127, 0, 0, 1], port)))
+        );
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(stdout.contains('\n') && stderr.contains("oops")) && Instant::now() < deadline {
+            let Ok(Some(DapEvent::Output(o))) =
+                tokio::time::timeout(Duration::from_secs(10), events.recv()).await
+            else {
+                break;
+            };
+            match o.category.as_str() {
+                "stdout" => stdout.push_str(&o.text),
+                "stderr" => stderr.push_str(&o.text),
+                other => panic!("{other}: {:?}", o.text),
+            }
+        }
+        assert_eq!(stdout, "café\n");
+        assert_eq!(stderr, "oops\n");
+    }
+
+    /// What rdbg writes to a connection before it reads the client's first
+    /// frame — its listing of where the program is held, as text — is passed
+    /// over; the frames after it arrive whole, a line within one included.
+    #[tokio::test]
+    async fn text_ahead_of_the_first_frame_is_passed_over() {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let body = r#"{"seq":1,"type":"event","event":"output","body":{"output":"a\nb"}}"#;
+            let frame = format!("Content-Length: {}\r\n\r\n{body}", body.len());
+            socket
+                .write_all(
+                    format!("out [1, 3] in app.rb\nout =>   1| x = 41\n{frame}{frame}").as_bytes(),
+                )
+                .await
+                .unwrap();
+            socket
+        });
+        let (read, _write) = TcpStream::connect(addr).await.unwrap().into_split();
+        let _socket = server.await.unwrap();
+        let mut frames = BufReader::new(from_first_frame(read));
+        for _ in 0..2 {
+            let frame = read_message(&mut frames).await.unwrap().unwrap();
+            assert_eq!(frame["body"]["output"], "a\nb");
+        }
+    }
+
+    /// A native program under the real lldb-dap — the path Rust's, C's, C++'s
+    /// and Zig's binaries take: held at a breakpoint, its stack and a local
+    /// read, stepped, run on to its end with its output shown. Needs
+    /// `lldb-dap` (or a versioned one) and a C compiler.
+    #[tokio::test]
+    #[ignore = "needs lldb-dap and cc on the PATH; run explicitly"]
+    async fn a_native_program_is_debugged_with_lldb_dap() {
+        let dir = clew_core::testutil::TempDir::new("dap-lldb");
+        let source = dir.join("app.c");
+        std::fs::write(
+            &source,
+            "#include <stdio.h>\n\nint total(int a, int b) {\n    int sum = a + b;\n    return sum * 2;\n}\n\nint main(void) {\n    int t = total(2, 3);\n    printf(\"answer %d\\n\", t);\n    return 0;\n}\n",
+        )
+        .unwrap();
+        let binary = dir.join("app");
+        let built = std::process::Command::new("cc")
+            .args(["-g", "-O0", "-o"])
+            .arg(&binary)
+            .arg(&source)
+            .status()
+            .unwrap();
+        assert!(built.success());
+        let spec = match clew_core::debugadapter::resolve(
+            "native",
+            &binary.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("lldb-dap started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stops: Vec<usize> = Vec::new();
+        let mut configured = false;
+        let mut stepped = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client.set_breakpoints(&source, &[(4, None)]).await.unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stops.push(frames[0].line);
+                    if !stepped {
+                        assert_eq!(frames[0].name, "total");
+                        assert_eq!(frames[1].line, 9, "main, where it called");
+                        let scopes = client.scopes(frames[0].id).await.unwrap();
+                        let locals = client
+                            .variables(scopes[0].variables_reference)
+                            .await
+                            .unwrap();
+                        assert!(
+                            locals.iter().any(|v| v.name == "a" && v.value == "2"),
+                            "{locals:?}"
+                        );
+                        stepped = true;
+                        client.next(thread).await.unwrap();
+                    } else {
+                        client.continue_(thread).await.unwrap();
+                    }
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stops, [4, 5], "held at the breakpoint, then a line on");
+        assert!(output.contains("answer 10"), "{output:?}");
+    }
+
+    /// A Zig program under the real lldb-dap, as Clew debugs Zig: the `.zig`
+    /// file itself launched, Clew building it in Debug through LLVM (whose
+    /// debug information lldb reads, unlike that of Zig's own code
+    /// generator), held at a breakpoint in a function, its stack (the
+    /// caller at its line) and its parameters read, stepped, run on to its
+    /// end with its output shown. A binary of Zig's own code generator is
+    /// launched as it is, with the notice on why no variables show. Needs
+    /// `zig` and `lldb-dap` (or a versioned one) on the PATH.
+    #[tokio::test]
+    #[ignore = "needs zig and lldb-dap on the PATH; run explicitly"]
+    async fn a_zig_program_is_debugged_with_lldb_dap() {
+        let _data = clew_core::testutil::DataDir::new("dap-zig-data");
+        let dir = clew_core::testutil::TempDir::new("dap-zig");
+        let source = dir.join("app.zig");
+        std::fs::write(
+            &source,
+            "const std = @import(\"std\");\n\nfn total(a: i32, b: i32) i32 {\n    const sum = a + b;\n    return sum * 2;\n}\n\npub fn main() void {\n    const t = total(2, 3);\n    std.debug.print(\"answer {d}\\n\", .{t});\n}\n",
+        )
+        .unwrap();
+        let resolve = |program: &str| match clew_core::debugadapter::resolve(
+            "native",
+            program,
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        // Zig's own code generator (its Debug default on x86-64): launched
+        // as it is, with the notice.
+        let own = dir.join("own");
+        let built = std::process::Command::new("zig")
+            .args(["build-exe", "-O", "Debug", "-fno-llvm"])
+            .arg(format!("-femit-bin={}", own.display()))
+            .arg(&source)
+            .current_dir(&dir)
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stderr)
+        );
+        let spec = resolve(&own.to_string_lossy());
+        assert_eq!(spec.launch["program"], own.to_string_lossy().as_ref());
+        assert!(
+            spec.launch[clew_core::debugadapter::NOTICE]
+                .as_str()
+                .is_some_and(|n| n.contains("-fllvm")),
+            "{}",
+            spec.launch
+        );
+        // The source launched: built through LLVM, no notice.
+        let spec = resolve("app.zig");
+        assert!(spec.launch.get(clew_core::debugadapter::NOTICE).is_none());
+        assert!(
+            !dir.join(".zig-cache").exists(),
+            "the build left nothing in the project"
+        );
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("lldb-dap started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stops: Vec<(String, usize)> = Vec::new();
+        let mut configured = false;
+        let mut stepped = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(60), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client.set_breakpoints(&source, &[(4, None)]).await.unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stops.push((frames[0].name.clone(), frames[0].line));
+                    if !stepped {
+                        assert!(frames[0].name.ends_with("total"), "{frames:?}");
+                        let caller = frames
+                            .iter()
+                            .find(|f| f.name.ends_with("main"))
+                            .unwrap_or_else(|| panic!("main in {frames:?}"));
+                        assert_eq!(caller.line, 9, "main, where it called");
+                        let scopes = client.scopes(frames[0].id).await.unwrap();
+                        let locals = client
+                            .variables(scopes[0].variables_reference)
+                            .await
+                            .unwrap();
+                        assert!(
+                            locals.iter().any(|v| v.name == "a" && v.value == "2"),
+                            "{locals:?}"
+                        );
+                        stepped = true;
+                        client.next(thread).await.unwrap();
+                    } else {
+                        client.continue_(thread).await.unwrap();
+                    }
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        let lines: Vec<usize> = stops.iter().map(|(_, line)| *line).collect();
+        assert_eq!(
+            lines,
+            [4, 5],
+            "held at the breakpoint, then a line on: {stops:?}"
+        );
+        assert!(output.contains("answer 10"), "{output:?}");
+    }
+
+    /// A C# program under the real netcoredbg, as Clew debugs .NET: the
+    /// project built by `dotnet build`, its assembly launched, held at a
+    /// breakpoint in a method, its stack (the caller at its line) and its
+    /// parameters read, stepped, run on to its end with its output shown.
+    /// Needs `dotnet` (an SDK) and `netcoredbg` on the PATH.
+    #[tokio::test]
+    #[ignore = "needs dotnet and netcoredbg on the PATH; run explicitly"]
+    async fn a_csharp_program_is_debugged_with_netcoredbg() {
+        let dir = clew_core::testutil::TempDir::new("dap-csharp");
+        std::fs::write(
+            dir.join("App.csproj"),
+            "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+        )
+        .unwrap();
+        let source = dir.join("Program.cs");
+        std::fs::write(
+            &source,
+            "using System;\n\nclass Program\n{\n    static int Total(int a, int b)\n    {\n        int sum = a + b;\n        return sum * 2;\n    }\n\n    static void Main(string[] args)\n    {\n        int t = Total(2, 3);\n        Console.WriteLine($\"answer {t} {args.Length}\");\n    }\n}\n",
+        )
+        .unwrap();
+        let built = std::process::Command::new("dotnet")
+            .args(["build", "-c", "Debug", "--nologo"])
+            .current_dir(&dir)
+            .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+            .env("DOTNET_NOLOGO", "1")
+            .output()
+            .unwrap();
+        assert!(
+            built.status.success(),
+            "{}",
+            String::from_utf8_lossy(&built.stdout)
+        );
+        let assembly = dir.join("bin/Debug/net8.0/App.dll");
+        assert!(assembly.is_file());
+        let spec = match clew_core::debugadapter::resolve(
+            "csharp",
+            &assembly.to_string_lossy(),
+            &["x".into()],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Stdio)
+                .await
+                .expect("netcoredbg started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stops: Vec<usize> = Vec::new();
+        let mut configured = false;
+        let mut stepped = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(90), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    client.set_breakpoints(&source, &[(7, None)]).await.unwrap();
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stops.push(frames[0].line);
+                    if !stepped {
+                        assert!(frames[0].name.contains("Total"), "{frames:?}");
+                        let caller = frames
+                            .iter()
+                            .find(|f| f.name.contains("Main"))
+                            .unwrap_or_else(|| panic!("Main in {frames:?}"));
+                        assert_eq!(caller.line, 13, "Main, where it called");
+                        let scopes = client.scopes(frames[0].id).await.unwrap();
+                        let locals = client
+                            .variables(scopes[0].variables_reference)
+                            .await
+                            .unwrap();
+                        assert!(
+                            locals.iter().any(|v| v.name == "a" && v.value == "2"),
+                            "{locals:?}"
+                        );
+                        stepped = true;
+                        client.next(thread).await.unwrap();
+                    } else {
+                        client.continue_(thread).await.unwrap();
+                    }
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stops, [7, 8], "held at the breakpoint, then a line on");
+        assert!(output.contains("answer 10 1"), "{output:?}");
+    }
+
+    /// Go's real delve, end to end: the program built and held at a
+    /// breakpoint, its stack read, run on to its end with its output shown.
+    /// Needs `go` and `dlv` on the PATH.
+    #[tokio::test]
+    #[ignore = "needs Go and delve on the PATH; run explicitly"]
+    async fn a_go_program_is_debugged_with_delve() {
+        let dir = clew_core::testutil::TempDir::new("dap-delve");
+        std::fs::write(dir.join("go.mod"), "module example.com/shop\n\ngo 1.21\n").unwrap();
+        let program = dir.join("main.go");
+        std::fs::write(
+            &program,
+            "package main\n\nimport \"fmt\"\n\nfunc total(items []int) int {\n\tsum := 0\n\tfor _, i := range items {\n\t\tsum += i\n\t}\n\treturn sum * 2\n}\n\nfunc main() {\n\tt := total([]int{2, 3})\n\tfmt.Println(\"answer\", t)\n}\n",
+        )
+        .unwrap();
+        let spec = match clew_core::debugadapter::resolve(
+            "go",
+            &dir.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::Tcp)
+                .await
+                .expect("delve started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stopped_at = None;
+        let mut configured = false;
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline {
+            let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client
+                        .set_breakpoints(&program, &[(6, None)])
+                        .await
+                        .unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stopped_at = frames.first().map(|f| f.line);
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category != "console" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | Some(DapEvent::Exited { .. }) | None => break,
+                Some(_) => {}
+            }
+        }
+        // Output may trail the end a moment.
+        let settle = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 10") && Instant::now() < settle {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category != "console" => {
+                    output.push_str(&o.text)
+                }
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stopped_at, Some(6), "stopped at the breakpoint");
+        assert!(output.contains("answer 10"), "{output:?}");
+    }
+
+    /// Ruby's real rdbg, end to end: the program waits at its start until
+    /// the session is configured, stops at the breakpoint, and runs on to
+    /// its end with its output shown. Needs `rdbg` (the `debug` gem) on the
+    /// PATH.
+    #[tokio::test]
+    #[ignore = "needs Ruby's rdbg on the PATH; run explicitly"]
+    async fn a_ruby_program_is_debugged_with_rdbg() {
+        let dir = clew_core::testutil::TempDir::new("dap-rdbg");
+        let program = dir.join("app.rb");
+        std::fs::write(&program, "x = 41\nx += 1\nputs \"answer #{x}\"\n").unwrap();
+        let rdbg = clew_core::lsp::store::find_on_path_unresolved("rdbg").expect("rdbg on PATH");
+        let spec = match clew_core::debugadapter::resolve(
+            "ruby",
+            &program.to_string_lossy(),
+            &[],
+            &dir,
+            &dir,
+            &Default::default(),
+            None,
+        ) {
+            Ok(clew_core::debugadapter::Resolution::Ready(spec)) => spec,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(spec.command, rdbg);
+        let (client, mut events) =
+            DapClient::start(&spec.command, &spec.args, &dir, Transport::TcpOnStderr)
+                .await
+                .expect("rdbg started");
+        client.initialize().await.expect("initialized");
+        let launched = client.launch(spec.launch.clone());
+        let mut output = String::new();
+        let mut stopped_at = None;
+        let mut configured = false;
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(20), events.recv())
+                .await
+                .expect("an event in time");
+            match event {
+                Some(DapEvent::Initialized) if !configured => {
+                    configured = true;
+                    let bps = client
+                        .set_breakpoints(&program, &[(2, None)])
+                        .await
+                        .unwrap();
+                    assert!(bps.iter().all(|b| b.verified), "{bps:?}");
+                    client.configuration_done().await.unwrap();
+                }
+                Some(DapEvent::Stopped(stop)) => {
+                    let thread = stop.thread_id.unwrap_or(1);
+                    let frames = client.stack_trace(thread).await.unwrap();
+                    stopped_at = frames.first().map(|f| f.line);
+                    client.continue_(thread).await.unwrap();
+                }
+                Some(DapEvent::Output(o)) if o.category == "stdout" => output.push_str(&o.text),
+                Some(DapEvent::Terminated) | None => break,
+                Some(_) => {}
+            }
+            if output.contains("answer 42") && stopped_at.is_some() {
+                break;
+            }
+        }
+        assert_eq!(launched.await, Ok(()));
+        assert_eq!(stopped_at, Some(2), "stopped at the breakpoint");
+        // The program's output may trail its end: gathered a moment more.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !output.contains("answer 42") && Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv()).await {
+                Ok(Some(DapEvent::Output(o))) if o.category == "stdout" => output.push_str(&o.text),
+                Ok(Some(_)) => {}
+                _ => break,
+            }
+        }
+        assert!(output.contains("answer 42"), "{output:?}");
     }
 
     /// F9: a TCP adapter is reached at the port it announced — not at one
@@ -1696,7 +2269,7 @@ mod tests {
         // reaped yet, as the connect loop finds it.
         let dir = clew_core::testutil::TempDir::new("dap-connect-exit");
         let pidfile = dir.join("helper.pid");
-        let mut child = Command::new("/bin/sh")
+        let mut child = tokio::process::Command::new("/bin/sh")
             .arg("-c")
             .arg("sleep 30 >/dev/null 2>&1 & echo $! > \"$1\"; exit 0")
             .arg("sh")

@@ -80,6 +80,11 @@ use crate::connect::ConnTarget;
 /// (both live in the same `target/<profile>/` dir) and then on `PATH`.
 const SERVER_BIN: &str = "clew-server";
 
+/// clew-server's file name on this system: `clew-server.exe` on Windows.
+fn server_bin_file() -> String {
+    format!("{SERVER_BIN}{}", std::env::consts::EXE_SUFFIX)
+}
+
 /// How many requests may wait for the writer to take them to the server's
 /// stdin. A healthy server drains the queue as fast as it is filled; a full
 /// one means the server (or the link to it) has stopped reading, and the
@@ -368,7 +373,7 @@ pub(crate) fn server_bin_path() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join(SERVER_BIN);
+        let candidate = dir.join(server_bin_file());
         if candidate.is_file() {
             return Some(candidate);
         }
@@ -378,11 +383,28 @@ pub(crate) fn server_bin_path() -> Option<PathBuf> {
 
 /// An OpenSSH tool by absolute path: the first ABSOLUTE `PATH` entry holding
 /// it (so a Homebrew OpenSSH the user prefers is honored), else the system's
-/// `/usr/bin` copy. Never a bare name: that would be resolved against every
-/// `PATH` entry, relative ones included — the current directory, i.e. the
-/// repository clew was launched from.
+/// own copy ([`system_openssh_dir`]). Never a bare name: that would be
+/// resolved against every `PATH` entry, relative ones included — the current
+/// directory, i.e. the repository clew was launched from.
 fn openssh_tool(name: &str) -> PathBuf {
-    clew_core::lsp::store::find_on_path(name).unwrap_or_else(|| Path::new("/usr/bin").join(name))
+    clew_core::lsp::store::find_on_path(name).unwrap_or_else(|| {
+        system_openssh_dir().join(format!("{name}{}", std::env::consts::EXE_SUFFIX))
+    })
+}
+
+/// Where the system keeps its own OpenSSH: `/usr/bin`, or on Windows the
+/// client Windows ships, under `%SystemRoot%\System32\OpenSSH`.
+fn system_openssh_dir() -> PathBuf {
+    #[cfg(windows)]
+    {
+        let windows = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+        windows.join("System32").join("OpenSSH")
+    }
+    #[cfg(not(windows))]
+    PathBuf::from("/usr/bin")
 }
 
 /// What a transport runs and how it paces restarts: the real OpenSSH tools
@@ -415,7 +437,7 @@ impl Launcher {
             local_server: server_bin_path(),
             backoff_base: BACKOFF_BASE,
             healthy_after: HEALTHY_UPTIME,
-            control_dir: Some(control_dir(current_uid())),
+            control_dir: shared_login_dir(),
         }
     }
 
@@ -427,12 +449,24 @@ impl Launcher {
     /// without sharing.
     fn control_args(&self) -> Vec<String> {
         match &self.control_dir {
+            #[cfg(unix)]
             Some(dir) => control_args_in(dir, current_uid()),
-            None => Vec::new(),
+            _ => Vec::new(),
         }
     }
 }
 
+/// Where this user's shared ssh logins keep their sockets; `None` where ssh
+/// shares none — Windows' OpenSSH has no control master, so each call there
+/// logs in on its own.
+fn shared_login_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    return Some(control_dir(current_uid()));
+    #[cfg(not(unix))]
+    None
+}
+
+#[cfg(unix)]
 fn current_uid() -> u32 {
     // SAFETY: getuid(2) cannot fail and touches no memory.
     unsafe { libc::getuid() }
@@ -441,12 +475,14 @@ fn current_uid() -> u32 {
 /// The control sockets' directory for `uid`. Short on purpose: a Unix socket
 /// path is limited to 104 bytes, and ssh appends 17 more to the socket's
 /// name (`%C`, 40 hex digits) while it sets the socket up.
+#[cfg(unix)]
 fn control_dir(uid: u32) -> PathBuf {
     PathBuf::from(format!("/tmp/clew-{uid}"))
 }
 
 /// [`Launcher::control_args`] with the socket directory `dir` (made private
 /// to `uid`).
+#[cfg(unix)]
 fn control_args_in(dir: &Path, uid: u32) -> Vec<String> {
     match private_socket_dir(dir, uid) {
         Some(dir) => vec![
@@ -470,6 +506,7 @@ fn control_args_in(dir: &Path, uid: u32) -> Vec<String> {
 /// account's directory, or one with group/other access. A control socket in
 /// a directory someone else controls would let them sit between clew and the
 /// host.
+#[cfg(unix)]
 fn private_socket_dir(dir: &Path, uid: u32) -> Option<PathBuf> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt};
     match std::fs::DirBuilder::new().mode(0o700).create(dir) {
@@ -543,7 +580,7 @@ impl Ssh {
     /// its command arguments with spaces for the remote shell, so a script
     /// split across argv would be re-parsed there.
     fn command(&self, remote: &str) -> tokio::process::Command {
-        let mut cmd = tokio::process::Command::new(&self.program);
+        let mut cmd = clew_core::spawn::tokio_command(&self.program);
         cmd.args(&self.prefix).args(&self.target).arg(remote);
         cmd
     }
@@ -557,7 +594,7 @@ async fn resolve_settings(
     args: &[String],
     label: &str,
 ) -> Result<crate::connect::SshSettings, String> {
-    let mut cmd = tokio::process::Command::new(program);
+    let mut cmd = clew_core::spawn::tokio_command(program);
     cmd.arg("-G").args(options).args(args);
     let out = run_bounded(
         cmd,
@@ -898,7 +935,7 @@ async fn scan_host_key_with(
     let host = host.to_ascii_lowercase();
     // ssh-keyscan prints the name it scanned, lower-cased, with the port.
     let scanned_as = known_hosts_pattern(&host, Some(port));
-    let mut scan = tokio::process::Command::new(keyscan);
+    let mut scan = clew_core::spawn::tokio_command(keyscan);
     scan.arg("-T").arg("5");
     if port != 22 {
         scan.arg("-p").arg(port.to_string());
@@ -913,7 +950,7 @@ async fn scan_host_key_with(
         let mut fields = scanned.split(' ').skip(1);
         let (key_type, key) = (fields.next()?, fields.next()?);
         let line = format!("{recorded_as} {key_type} {key}");
-        let mut fp = tokio::process::Command::new(keygen);
+        let mut fp = clew_core::spawn::tokio_command(keygen);
         fp.args(["-l", "-f", "-"]);
         let input = format!("{line}\n");
         let Ok(prints) = run_bounded(
@@ -1570,7 +1607,7 @@ fn start_local(server: Option<&Path>) -> Result<Transport, Failure> {
             "No clew-server binary was found beside clew or on PATH; working without it.",
         ));
     };
-    let mut cmd = tokio::process::Command::new(path);
+    let mut cmd = clew_core::spawn::tokio_command(path);
     cmd.arg("--local");
     Transport::spawn(cmd, "clew-server").map_err(|e| {
         Failure::new(
@@ -1892,6 +1929,7 @@ mod tests {
     /// A server's stderr reaches clew's terminal, and what it logs can name
     /// a repository's files: an escape sequence in one is written out, not
     /// handed to the terminal to obey.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_servers_stderr_reaches_the_terminal_without_its_escapes() {
         assert_eq!(printable("a\tb"), "a\tb");
@@ -1909,6 +1947,7 @@ mod tests {
         task.await.unwrap();
         assert_eq!(tail.last(1), "cannot read src/\\u{1b}[2Jevil.rs");
     }
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// Each host-key failure reaches the app as the prompt it can offer: a
@@ -1916,6 +1955,7 @@ mod tests {
     /// itself as the offer to forget it (with the name to forget), anything
     /// else — a changed key on record in the user's own files included — as
     /// a plain failure.
+    #[cfg(unix)]
     #[test]
     fn host_key_failures_reach_the_app_as_the_prompt_they_offer() {
         let changed = Failure {
@@ -1949,6 +1989,7 @@ mod tests {
 
     /// A fresh, empty directory for the calling test (emptied again when
     /// asked for twice), removed when the test ends.
+    #[cfg(unix)]
     fn temp(name: &str) -> PathBuf {
         let dir = crate::app::tests::test_dir(&format!("server-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1962,6 +2003,7 @@ mod tests {
     /// probe find this build; `extra` is spliced in for failure scenarios.
     /// `ssh -G` prints `dir/g.out` (a plain `[example.com]:2222` setup by
     /// default), or fails like ssh when `dir/g.fail` exists.
+    #[cfg(unix)]
     fn fake_ssh(dir: &Path, probe_line: &str, extra: &str) -> PathBuf {
         let script = format!(
             r#"#!/bin/bash
@@ -2006,6 +2048,7 @@ exit 3
     /// fakes run under (a 10 s fingerprint, a 10 s `ssh -G`). Paid here, it is
     /// paid before anything is timed; so is Linux's `ETXTBSY` (see
     /// [`clew_core::testutil::settle_new_executable`]).
+    #[cfg(unix)]
     fn warm_up(path: &Path) {
         clew_core::testutil::settle_new_executable_with(path, &["--clew-warm-up"]);
     }
@@ -2024,6 +2067,7 @@ exit 3
     }
 
     /// Every recorded invocation's argv.
+    #[cfg(unix)]
     fn calls(dir: &Path) -> Vec<Vec<String>> {
         let log = std::fs::read_to_string(dir.join("argv.log")).unwrap_or_default();
         log.split("--END--\n")
@@ -2039,6 +2083,7 @@ exit 3
     /// First contact: probe, detect, stream the verified bytes, re-probe. Every
     /// remote command is ONE argument after the destination, behind `-T` and
     /// `--`, and the upload goes to a temp name unique to this upload.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fresh_host_gets_the_verified_bytes_streamed_to_a_unique_temp_name() {
         let dir = temp("bootstrap");
@@ -2083,6 +2128,7 @@ exit 3
     }
 
     /// An already-deployed build costs one call, and nothing is uploaded.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_deployed_build_is_reused_after_one_probe() {
         let dir = temp("reuse");
@@ -2107,6 +2153,7 @@ exit 3
     }
 
     /// ssh's own failures are named, not collapsed into "could not reach".
+    #[cfg(unix)]
     #[tokio::test]
     async fn ssh_failures_are_classified_from_stderr() {
         for (stderr, kind) in [
@@ -2198,6 +2245,7 @@ exit 3
     /// The finding, end to end: the install step's remote `mkdir` refused
     /// ("Permission denied", exit 1) is a failed DEPLOY that names the
     /// directory problem — it used to read as a refused login.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_remote_permission_denied_is_a_failed_deploy_not_a_refused_login() {
         let dir = temp("remote-denied");
@@ -2222,6 +2270,7 @@ exit 3
 
     /// A deployed binary that does not speak this build's protocol fails the
     /// connect with that named, instead of as a handshake that never ends.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_deploy_that_fails_the_protocol_check_is_named() {
         let dir = temp("mismatch");
@@ -2237,6 +2286,7 @@ exit 3
 
     /// A step that hangs is killed at its timeout rather than hanging the
     /// connection forever.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_hanging_remote_command_times_out() {
         let dir = temp("hang");
@@ -2261,6 +2311,7 @@ exit 3
     /// What a login shell prints before the server starts (a motd, a
     /// `~/.bashrc` echo) is skipped up to the marker; the first line after it
     /// is protocol.
+    #[cfg(unix)]
     #[tokio::test]
     async fn output_before_the_start_marker_is_not_protocol() {
         let dir = temp("marker");
@@ -2309,6 +2360,7 @@ exit 3
     /// Run one of the remote scripts for real, with `/bin/sh` and `home` as
     /// `$HOME` (set on the child only — the test process's environment is
     /// untouched).
+    #[cfg(unix)]
     fn run_remote_script(script: &str, home: &Path, stdin: &[u8]) -> std::process::Output {
         use std::io::Write;
         let mut child = std::process::Command::new("/bin/sh")
@@ -2324,17 +2376,16 @@ exit 3
         child.wait_with_output().unwrap()
     }
 
+    #[cfg(unix)]
     fn set_mtime_days_ago(path: &Path, days: u64) {
         let when = std::time::SystemTime::now() - Duration::from_secs(days * 24 * 60 * 60);
-        std::fs::File::open(path)
-            .unwrap()
-            .set_times(std::fs::FileTimes::new().set_modified(when))
-            .unwrap();
+        clew_core::statefile::set_modified(path, when).unwrap();
     }
 
     /// The probe finds this build, and its sweep removes only other builds'
     /// directories that nobody used for two weeks — never the current one,
     /// never a recently used one, never anything not named like a build.
+    #[cfg(unix)]
     #[test]
     fn the_probe_script_sweeps_only_stale_builds() {
         let home = temp("probe-home");
@@ -2383,6 +2434,7 @@ exit 3
     /// The install script puts exactly the streamed bytes in place, private
     /// to the user, with no temp file left over — and cleans up after itself
     /// when the directory cannot be written.
+    #[cfg(unix)]
     #[test]
     fn the_install_script_renames_a_complete_upload_into_place() {
         let home = temp("install-home");
@@ -2450,6 +2502,7 @@ exit 3
 
     /// The start script prints its marker and then IS the server; without an
     /// installed server it says so on stderr instead of printing the marker.
+    #[cfg(unix)]
     #[test]
     fn the_start_script_prints_the_marker_then_execs_the_server() {
         let home = temp("start-home");
@@ -2479,6 +2532,7 @@ exit 3
     /// started by a clew that was itself launched from an SSH session saw
     /// `SSH_CONNECTION`, took itself for remote and refused the process
     /// spawns local language servers and debug adapters need.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_local_server_is_told_it_is_local() {
         let dir = temp("local-flag");
@@ -2564,6 +2618,7 @@ exit 3
 
     /// Only bytes that hash to the digest they were verified against are
     /// uploaded (either case of hex is the same digest).
+    #[cfg(unix)]
     #[test]
     fn only_bytes_matching_their_verified_digest_are_uploaded() {
         use clew_core::lsp::registry::Sha256;
@@ -2588,17 +2643,21 @@ exit 3
     }
 
     /// An executable script at `dir/name` (a fake OpenSSH tool).
+    #[cfg(unix)]
     fn script(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
         clew_core::testutil::write_script(&path, &format!("D='{}'\n{body}", dir.display()));
         path
     }
 
+    #[cfg(unix)]
     const ED25519_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEd25519KeyForTestsOnly0000";
+    #[cfg(unix)]
     const RSA_KEY: &str = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCtestonly00";
 
     /// A fake `ssh-keyscan` that records its argv and prints a banner, the
     /// keys of `scanned_as` (RSA first, then ED25519) and another host's key.
+    #[cfg(unix)]
     fn fake_keyscan(dir: &Path, scanned_as: &str) -> PathBuf {
         script(
             dir,
@@ -2615,6 +2674,7 @@ exit 3
 
     /// A fake `ssh-keygen -lf -` that records what it was fed and prints the
     /// fingerprint line `answer` gives for that input's key type.
+    #[cfg(unix)]
     fn fake_keygen(dir: &Path, ed25519_answer: &str) -> PathBuf {
         script(
             dir,
@@ -2643,6 +2703,7 @@ exit 3
     }
 
     /// Resolved settings for a direct connection to `hostname:port`.
+    #[cfg(unix)]
     fn direct(hostname: &str, port: u16) -> crate::connect::SshSettings {
         crate::connect::SshSettings {
             hostname: hostname.into(),
@@ -2657,6 +2718,7 @@ exit 3
     /// variable is process-wide, hence the shared lock; `f` is kept short and
     /// synchronous (no process is spawned under it), so the variable is moved
     /// for as little time as possible.
+    #[cfg(unix)]
     fn in_data_dir<T>(data: &Path, f: impl FnOnce() -> T) -> T {
         let _env = crate::app::tests::data_dir_override(data);
         f()
@@ -2664,6 +2726,7 @@ exit 3
 
     /// A private data directory whose path has a space in it, like macOS's
     /// "Application Support".
+    #[cfg(unix)]
     fn data_dir(base: &Path) -> PathBuf {
         let data = base.join("data dir");
         std::fs::create_dir_all(&data).unwrap();
@@ -2675,6 +2738,7 @@ exit 3
     /// is fed nothing else — so the Trust click records the very key whose
     /// fingerprint the reader checked. The scan targets the connection's own
     /// host and port, behind `--`.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_key_offered_for_trust_is_fingerprinted_on_its_own() {
         let dir = temp("keyscan");
@@ -2705,6 +2769,7 @@ exit 3
     /// A fingerprint that does not belong to the key it was asked about (the
     /// wrong type, extra lines) is not shown for it: the next candidate is
     /// tried, and with none left nothing is offered.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_fingerprint_for_another_key_type_is_never_offered() {
         let dir = temp("keyscan-mismatch");
@@ -2732,6 +2797,7 @@ exit 3
     /// `[host]:port`, or the `HostKeyAlias` — for the connection it was
     /// scanned for. Recording it under the typed name, what this replaced, was
     /// never found by ssh, so the same prompt came back after every Trust.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_mapped_host_is_scanned_where_ssh_connects_and_recorded_as_ssh_looks_it_up() {
         let dir = temp("mapped-scan");
@@ -2781,6 +2847,7 @@ exit 3
     /// Behind a jump host (or a proxy command) what answers at the host's
     /// address from here need not be what ssh talks to, so nothing is scanned
     /// — the refusal says why and how to trust the host from a terminal.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_host_behind_a_jump_host_is_never_scanned() {
         let dir = temp("jump");
@@ -2828,6 +2895,7 @@ exit 3
     /// them, not OpenSSH's defaults — with clew's appended, and asks ssh to
     /// write none of them. `ssh -G` sees everything the real calls pass
     /// except those options.
+    #[cfg(unix)]
     #[tokio::test]
     async fn every_ssh_call_appends_clews_known_hosts_to_the_users_own() {
         let dir = temp("kh-list");
@@ -2935,6 +3003,7 @@ exit 3
     /// `ssh-keygen -R <host>` this used to suggest never touches clew's
     /// file). Forgetting removes that host's key and nothing else; nothing is
     /// trusted by it.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_key_changed_against_one_trusted_in_clew_can_be_forgotten() {
         let dir = temp("changed-clew");
@@ -2988,6 +3057,7 @@ exit 3
     /// A key on record in the USER's own known_hosts is theirs to retire:
     /// clew never offers to edit that file, and the command it names points
     /// at the file ssh reported.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_key_changed_against_the_users_own_file_is_left_to_them() {
         let dir = temp("changed-user");
@@ -3020,6 +3090,7 @@ exit 3
     /// marker and ONE frame — the Hello's stand-in — and then exits, a server
     /// that answers and immediately dies. Its `ssh -G` fails, so the path
     /// never consults a data directory (these tests move no environment).
+    #[cfg(unix)]
     fn dying_launcher(dir: &Path, healthy_after: Duration) -> Launcher {
         let program = fake_ssh(dir, &layout().probe_line, "");
         std::fs::write(dir.join("installed"), "").unwrap();
@@ -3038,6 +3109,7 @@ exit 3
     /// [`dying_launcher`], whose server's first frame (after the marker) is a
     /// notification padded with JSON whitespace to exactly `content` bytes,
     /// followed by an ordinary one — and then it exits.
+    #[cfg(unix)]
     fn launcher_with_a_frame_of(dir: &Path, content: usize) -> Launcher {
         let start = r#"
 case "$CMD" in
@@ -3062,6 +3134,7 @@ esac"#
     /// it read. A reader of the transport's own that counted the newline
     /// against the cap (what both ends did before they shared one) drops the
     /// first; one without the cap delivers the second.
+    #[cfg(unix)]
     #[tokio::test]
     async fn the_transport_reads_frames_up_to_the_cap_and_no_further() {
         let cap = clew_protocol::MAX_FRAME_BYTES;
@@ -3086,6 +3159,7 @@ esac"#
     }
 
     /// Every message one transport instance produces, to its end.
+    #[cfg(unix)]
     async fn instance(
         target: &ConnTarget,
         seq: u64,
@@ -3114,6 +3188,7 @@ esac"#
     /// reason. (The app's side is simulated: every `ServerMsg::Disconnected`
     /// is answered with the next instance, `respawn` set, as
     /// `on_server_disconnected` does.)
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_server_that_answers_and_dies_is_given_up_on_after_max_attempts() {
         let dir = temp("dying");
@@ -3160,6 +3235,7 @@ esac"#
     /// The other half: a transport that stayed up past `healthy_after` was a
     /// working connection, so its end starts the count afresh — a laptop that
     /// changed networks after an hour gets the short first delay again.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_transport_that_stayed_up_starts_the_count_afresh() {
         let dir = temp("healthy");
@@ -3189,6 +3265,7 @@ esac"#
     /// way it counts as live until it is reaped, which is what a quit waits
     /// for (`all_servers_reaped`) before exiting the runtime the grace runs on.
     #[tokio::test]
+    #[cfg(unix)]
     async fn a_server_gets_eof_then_its_grace_then_a_kill() {
         let dir = temp("teardown");
         let reaper = Reaper::new();
@@ -3232,6 +3309,7 @@ esac"#
     /// one login for the probe, the deploy, the start and every reconnect —
     /// through a socket in a directory only this user can reach, and never
     /// through one somebody else could.
+    #[cfg(unix)]
     #[test]
     fn every_ssh_call_of_a_connection_shares_one_login() {
         use std::os::unix::fs::MetadataExt;
@@ -3287,6 +3365,7 @@ esac"#
     /// The launcher threads the shared login into EVERY ssh call of a real
     /// start — the settings query, the probe, the start itself — before the
     /// destination.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_start_shares_one_login_across_its_ssh_calls() {
         use std::os::unix::fs::MetadataExt;
@@ -3357,6 +3436,7 @@ esac"#
     }
 
     /// The control socket directory must be this user's alone.
+    #[cfg(unix)]
     #[test]
     fn the_control_socket_directory_must_be_private() {
         use std::os::unix::fs::MetadataExt;
@@ -3392,8 +3472,12 @@ esac"#
         assert!(openssh_tool("ssh").is_absolute());
         assert_eq!(
             openssh_tool("clew-no-such-openssh-tool"),
-            PathBuf::from("/usr/bin/clew-no-such-openssh-tool"),
+            system_openssh_dir().join(format!(
+                "clew-no-such-openssh-tool{}",
+                std::env::consts::EXE_SUFFIX
+            )),
             "an unresolvable tool falls back to the system path, not a bare name"
         );
+        assert!(system_openssh_dir().is_absolute());
     }
 }

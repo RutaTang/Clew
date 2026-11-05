@@ -21,6 +21,35 @@ use core_maths::CoreFloat;
 use unicode_script::{Script, UnicodeScript};
 use unicode_segmentation::UnicodeSegmentation;
 
+/// clew patch: the tracking text is set with where none is asked for, in
+/// em. Clew's design sets all its text 0.048 px tighter than the face's own
+/// spacing (`letter-spacing: -0.003em` at its 16 px root, inherited as a
+/// length), which at the 11.5 to 13.5 px it is read at is -0.004 em; iced
+/// 0.14 has no way to ask for tracking, so it is the shaper's default.
+const DEFAULT_LETTER_SPACING: f32 = -0.004;
+
+/// clew patch: the tracking of the design's titles (`letter-spacing:
+/// -0.01em`), in em.
+const TIGHT_LETTER_SPACING: f32 = -0.01;
+
+/// clew patch: the tracking `attrs` asks for, or by default the one the
+/// stretch it asks for stands for. Clew's faces come in one width, so it
+/// asks for a stretch to choose a tracking (iced 0.14 has no other way to
+/// ask for one), and its faces are matched at their own width whatever the
+/// stretch ([`crate::Attrs::matches`]): semi-expanded is the face's own
+/// spacing, as a browser sets text in a control (a button, an input), where
+/// the design's tracking does not reach; semi-condensed, its titles'.
+fn letter_spacing(attrs: &crate::Attrs) -> f32 {
+    attrs.letter_spacing_opt.map_or(
+        match attrs.stretch {
+            crate::Stretch::SemiExpanded => 0.0,
+            crate::Stretch::SemiCondensed => TIGHT_LETTER_SPACING,
+            _ => DEFAULT_LETTER_SPACING,
+        },
+        |spacing| spacing.0,
+    )
+}
+
 /// The shaping strategy of some text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Shaping {
@@ -211,8 +240,7 @@ fn shape_fallback(
         }
 
         let attrs = attrs_list.get_span(start_glyph);
-        let x_advance = pos.x_advance as f32 / font_scale
-            + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+        let x_advance = pos.x_advance as f32 / font_scale + letter_spacing(&attrs);
         let y_advance = pos.y_advance as f32 / font_scale;
         let x_offset = pos.x_offset as f32 / font_scale;
         let y_offset = pos.y_offset as f32 / font_scale;
@@ -510,8 +538,7 @@ fn shape_skip(
             .char_indices()
             .map(|(chr_idx, codepoint)| {
                 let glyph_id = charmap.map(codepoint);
-                let x_advance = glyph_metrics.advance_width(glyph_id)
-                    + attrs.letter_spacing_opt.map_or(0.0, |spacing| spacing.0);
+                let x_advance = glyph_metrics.advance_width(glyph_id) + letter_spacing(&attrs);
                 let attrs = attrs_list.get_span(start_run + chr_idx);
 
                 ShapeGlyph {

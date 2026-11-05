@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use tokio::process::Command;
 
 use crate::framing::{self, CallError, EndReason, Failure, FrameError, Goodbye, Handled, Ids};
 
@@ -660,7 +659,7 @@ impl LspClient {
         root: &Path,
         init_options: Option<Value>,
     ) -> Result<Self, String> {
-        let mut command = Command::new(exe);
+        let mut command = crate::spawn::tokio_command(exe);
         command
             .args(args)
             .current_dir(root)
@@ -678,6 +677,8 @@ impl LspClient {
         let mut child = command
             .spawn()
             .map_err(|e| format!("failed to launch {}: {e}", exe.display()))?;
+        #[cfg(windows)]
+        crate::procgroup::adopt_tokio(&child);
 
         let stdin = child.stdin.take().ok_or("no stdin")?;
         let stdout = child.stdout.take().ok_or("no stdout")?;
@@ -803,8 +804,14 @@ impl LspClient {
         })
     }
 
-    /// Notify the server a document is open (send full text).
+    /// Notify the server a document is open (send full text). `language_id`
+    /// is clew's key for the language, sent as the LSP identifier the
+    /// language's servers know it by (Lean's is `lean4`).
     pub fn did_open(&self, path: &Path, language_id: &str, version: i64, text: &str) {
+        let language_id = match language_id {
+            "lean" => "lean4",
+            other => other,
+        };
         self.notify(
             "textDocument/didOpen",
             json!({
@@ -887,6 +894,47 @@ impl LspClient {
         });
         let result = self.call("textDocument/hover", params).await?;
         Ok(parse_hover(&result))
+    }
+
+    /// rust-analyzer's `rust-analyzer/expandMacro`: the macro call at a
+    /// 0-based (line, character), expanded — `None` when there is none.
+    pub async fn expand_macro(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<ExpandedMacro>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let result = self.call("rust-analyzer/expandMacro", params).await?;
+        Ok(parse_expanded_macro(&result))
+    }
+
+    /// The Lean server's state at a 0-based (line, character): the tactic
+    /// goals there (`$/lean/plainGoal`), or, outside a tactic block, the
+    /// type the term there is expected to have (`$/lean/plainTermGoal`).
+    /// `None` when it knows neither.
+    pub async fn lean_goal(
+        &self,
+        path: &Path,
+        line: usize,
+        character: usize,
+    ) -> Result<Option<LeanGoal>, String> {
+        let params = json!({
+            "textDocument": { "uri": path_to_uri(path) },
+            "position": { "line": line, "character": character }
+        });
+        let tactic = self.call("$/lean/plainGoal", params.clone()).await?;
+        if let Some(goals) = parse_plain_goal(&tactic) {
+            return Ok(Some(LeanGoal::Tactic(goals)));
+        }
+        let term = self.call("$/lean/plainTermGoal", params).await?;
+        Ok(term
+            .get("goal")
+            .and_then(Value::as_str)
+            .map(|g| LeanGoal::Term(g.to_string())))
     }
 
     /// Request inlay hints for the 0-based line range `[start_line, end_line)`.
@@ -1691,6 +1739,141 @@ fn parse_diag(v: &Value) -> Option<Diag> {
 }
 
 /// Extract plain text from a hover response (MarkupContent | MarkedString[]).
+/// What rust-analyzer expands a macro call to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedMacro {
+    /// The macro's name, as rust-analyzer gives it (`vec!` for a call).
+    pub name: String,
+    /// The expansion, formatted.
+    pub expansion: String,
+}
+
+/// The Lean server's answer at a position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LeanGoal {
+    /// Inside a tactic proof: the goals left, each with its hypotheses —
+    /// none when the proof is done there.
+    Tactic(Vec<String>),
+    /// In a term: the type expected of it, with the context.
+    Term(String),
+}
+
+fn parse_expanded_macro(result: &Value) -> Option<ExpandedMacro> {
+    Some(ExpandedMacro {
+        name: result.get("name")?.as_str()?.to_string(),
+        expansion: result.get("expansion")?.as_str()?.to_string(),
+    })
+}
+
+/// `$/lean/plainGoal`'s goals; `None` for its `null` (no tactic there).
+fn parse_plain_goal(result: &Value) -> Option<Vec<String>> {
+    let goals = result.get("goals")?.as_array()?;
+    Some(
+        goals
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// A hover's markdown read as haskell-language-server writes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HoverParts {
+    /// The declared type: the first code block (`name :: Type`), else the
+    /// first line.
+    pub signature: String,
+    /// The type of the name at this use, when the server gives it (a later
+    /// `_ :: T` block): instantiated, `Int -> IO ()` for `print` given an
+    /// `Int`.
+    pub here: Option<String>,
+    /// The rest: where it is defined, its docs and their examples, less the
+    /// `* * *` separators and the `_ ::` blocks.
+    pub prose: String,
+}
+
+/// [`HoverParts`] of a hover's markdown; `None` for an empty one.
+pub fn hover_parts(markdown: &str) -> Option<HoverParts> {
+    let lines: Vec<&str> = markdown.lines().collect();
+    let fence = |l: &str| l.trim_start().starts_with("```");
+    // Each fenced block: its line span (fences included) and its content.
+    let mut blocks: Vec<(usize, usize, String)> = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        if fence(lines[i]) {
+            let close = (i + 1..lines.len())
+                .find(|k| fence(lines[*k]))
+                .unwrap_or(lines.len());
+            let content = lines[i + 1..close.min(lines.len())]
+                .join("\n")
+                .trim()
+                .to_string();
+            blocks.push((i, close.min(lines.len().saturating_sub(1)), content));
+            i = close + 1;
+        } else {
+            i += 1;
+        }
+    }
+    let mut dropped = vec![false; lines.len()];
+    let mut drop = |from: usize, to: usize| {
+        for d in dropped.iter_mut().take(to + 1).skip(from) {
+            *d = true;
+        }
+    };
+    let signature = match blocks.iter().find(|(_, _, c)| !c.is_empty()) {
+        Some((from, to, c)) => {
+            drop(*from, *to);
+            c.clone()
+        }
+        None => {
+            let at = lines
+                .iter()
+                .position(|l| !l.trim().is_empty() && !fence(l))?;
+            drop(at, at);
+            lines[at].trim().to_string()
+        }
+    };
+    let mut here = None;
+    for (from, to, c) in &blocks {
+        if let Some(t) = c.strip_prefix("_ ::") {
+            here.get_or_insert_with(|| t.trim().to_string());
+            drop(*from, *to);
+        } else if c.is_empty() {
+            drop(*from, *to);
+        }
+    }
+    // The prose: what is left, one blank line at most between paragraphs.
+    let mut prose = String::new();
+    let mut blank = false;
+    for (k, l) in lines.iter().enumerate() {
+        if dropped[k] || l.trim() == "* * *" {
+            continue;
+        }
+        if l.trim().is_empty() {
+            blank = !prose.is_empty();
+            continue;
+        }
+        if blank {
+            prose.push('\n');
+            blank = false;
+        }
+        if !prose.is_empty() {
+            prose.push('\n');
+        }
+        prose.push_str(l.trim_end());
+    }
+    Some(HoverParts {
+        signature,
+        here,
+        prose,
+    })
+}
+
+/// The type a hover's markdown gives first ([`HoverParts::signature`]).
+pub fn signature_of_hover(markdown: &str) -> Option<String> {
+    hover_parts(markdown).map(|p| p.signature)
+}
+
 fn parse_hover(result: &Value) -> Option<String> {
     let contents = result.get("contents")?;
     let text = match contents {
@@ -1784,7 +1967,9 @@ fn parse_inlay_label(label: &Value) -> String {
     }
 }
 
-fn path_to_uri(path: &Path) -> String {
+/// The `file://` URI of `path`, as a language server (or an ACP agent)
+/// reads one: `file:///home/me/a.rs`, `file:///C:/work/a.rs`.
+pub fn path_to_uri(path: &Path) -> String {
     let s = path.to_string_lossy().into_owned();
     // Only Windows spells a separator `\`. On unix it is an ordinary filename
     // character, and rewriting it there turned `back\slash.rs` into a URI
@@ -2328,6 +2513,54 @@ mod tests {
     }
 
     #[test]
+    fn haskell_language_servers_hover_in_parts() {
+        // As haskell-language-server 2.4 answers a hover of `print` applied
+        // to an Int.
+        let print = "```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\n*Defined in \u{2018}System.IO\u{2019}* *(base-4.17.2.0)*\n\n\n\nThe  `print`  function outputs a value of any printable type to the\n standard output device.\n\nFor example:\n```haskell\nmain = print ([(n, 2^n) | n <- [0..19]])\n```\n\n\n* * *\n\n```haskell\n_ :: Int -> IO ()\n```\n* * *\n\n```haskell\n_ :: forall a. Show a => a -> IO ()\n```";
+        let parts = hover_parts(print).unwrap();
+        assert_eq!(parts.signature, "print :: forall a. Show a => a -> IO ()");
+        assert_eq!(parts.here.as_deref(), Some("Int -> IO ()"));
+        assert_eq!(
+            parts.prose,
+            "*Defined in \u{2018}System.IO\u{2019}* *(base-4.17.2.0)*\n\nThe  `print`  function outputs a value of any printable type to the\n standard output device.\n\nFor example:\n```haskell\nmain = print ([(n, 2^n) | n <- [0..19]])\n```"
+        );
+        let own = hover_parts("```haskell\nfoo :: Int -> Int\n```\n\n*Defined at /p/Main.hs:4:1*")
+            .unwrap();
+        assert_eq!(
+            own,
+            HoverParts {
+                signature: "foo :: Int -> Int".into(),
+                here: None,
+                prose: "*Defined at /p/Main.hs:4:1*".into(),
+            }
+        );
+        let plain = hover_parts("x :: Bool\nmore").unwrap();
+        assert_eq!(
+            (plain.signature.as_str(), plain.prose.as_str()),
+            ("x :: Bool", "more")
+        );
+        assert_eq!(hover_parts(" \n"), None);
+    }
+
+    #[test]
+    fn hover_signatures() {
+        let hls = "```haskell\nmapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()\n```\n\n*Defined in \u{2018}Data.Foldable\u{2019}*";
+        assert_eq!(
+            signature_of_hover(hls).as_deref(),
+            Some("mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()")
+        );
+        assert_eq!(
+            signature_of_hover("```\n\n```\nx :: Int\n").as_deref(),
+            Some("x :: Int")
+        );
+        assert_eq!(
+            signature_of_hover("\n  plain text\nmore").as_deref(),
+            Some("plain text")
+        );
+        assert_eq!(signature_of_hover(""), None);
+    }
+
+    #[test]
     fn parse_hover_variants() {
         // MarkupContent
         let v =
@@ -2383,6 +2616,135 @@ mod tests {
         // Should point back to the `origin` definition on line 0.
         assert_eq!(targets[0].line, 0);
         assert!(targets[0].path.ends_with("src/main.rs"));
+    }
+
+    /// `rust-analyzer/expandMacro` against a real rust-analyzer: a
+    /// `macro_rules!` call expands to its body, and a position on no macro
+    /// answers `None`. Ignored by default, like the round trip above.
+    #[tokio::test]
+    #[ignore = "spawns the developer's rust-analyzer; run explicitly"]
+    async fn live_expand_macro_against_rust_analyzer() {
+        let exe = std::path::PathBuf::from(std::env::var("HOME").unwrap())
+            .join(".cargo/bin/rust-analyzer");
+        assert!(exe.exists(), "needs rust-analyzer at {exe:?}");
+        let root = crate::testutil::TempDir::new("ra-expand");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"t\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        let src = "macro_rules! twice {\n    ($e:expr) => { $e * 2 };\n}\n\nfn main() {\n    let x = twice!(3 + 1);\n    let _ = x;\n}\n";
+        let main_rs = root.join("src/main.rs");
+        std::fs::write(&main_rs, src).unwrap();
+        let client = LspClient::start(&exe, &[], &root, None).await.unwrap();
+        client.did_open(&main_rs, "rust", 1, src);
+        // Line 5 (0-based), on `twice` in `twice!(3 + 1)`.
+        let mut expanded = None;
+        for _ in 0..60 {
+            expanded = client.expand_macro(&main_rs, 5, 13).await.ok().flatten();
+            if expanded.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let expanded = expanded.expect("rust-analyzer expanded the call");
+        eprintln!("{expanded:?}");
+        assert_eq!(expanded.name, "twice!");
+        let flat: String = expanded.expansion.split_whitespace().collect();
+        assert_eq!(flat, "(3+1)*2");
+        // `main` is no macro call.
+        assert_eq!(client.expand_macro(&main_rs, 4, 4).await, Ok(None));
+        client.shutdown().await;
+    }
+
+    /// The Lean goals against a real Lean server (`lean --server`, the one
+    /// `CLEW_TEST_LEAN` names): a tactic proof's goal before its tactic, no
+    /// goals once it is done, and outside any tactic block the type a term
+    /// is expected to have. Ignored by default: it needs a Lean toolchain.
+    #[tokio::test]
+    #[ignore = "needs a Lean toolchain (CLEW_TEST_LEAN=path/to/lean); run explicitly"]
+    async fn live_lean_goal_against_the_lean_server() {
+        let exe = std::path::PathBuf::from(
+            std::env::var("CLEW_TEST_LEAN").expect("CLEW_TEST_LEAN names the lean binary"),
+        );
+        let root = crate::testutil::TempDir::new("lean-goal");
+        let src = "theorem add_zero' (n : Nat) : n + 0 = n := by\n  simp\n\ndef double (n : Nat) : Nat := n + n\n";
+        let file = root.join("Goal.lean");
+        std::fs::write(&file, src).unwrap();
+        let client = LspClient::start(&exe, &["--server".into()], &root, None)
+            .await
+            .unwrap();
+        client.did_open(&file, "lean4", 1, src);
+        // Line 1, before `simp`: the theorem's goal, with its hypothesis.
+        let mut goal = None;
+        for _ in 0..60 {
+            goal = client.lean_goal(&file, 1, 2).await.ok().flatten();
+            if goal.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        eprintln!("before simp: {goal:?}");
+        assert_eq!(
+            goal,
+            Some(LeanGoal::Tactic(vec!["n : Nat\n⊢ n + 0 = n".into()]))
+        );
+        // After `simp`: the proof is done there.
+        let done = client.lean_goal(&file, 1, 6).await.unwrap();
+        eprintln!("after simp: {done:?}");
+        assert_eq!(done, Some(LeanGoal::Tactic(Vec::new())));
+        // In `n + n`, a term: no tactic goal, so the type expected of it.
+        let term = client.lean_goal(&file, 3, 30).await.unwrap();
+        eprintln!("in the term: {term:?}");
+        assert_eq!(term, Some(LeanGoal::Term("n : Nat\n⊢ Nat".into())));
+        client.shutdown().await;
+    }
+
+    /// The type at a point against a real haskell-language-server (the one
+    /// `CLEW_TEST_HLS` names, built for the GHC on `PATH`): its hover of a
+    /// name defined here and of one from `base`, and the signature Show Type
+    /// takes from each. Ignored by default: it needs the server.
+    #[tokio::test]
+    #[ignore = "needs haskell-language-server (CLEW_TEST_HLS=path); run explicitly"]
+    async fn live_haskell_type_against_haskell_language_server() {
+        let exe = std::path::PathBuf::from(
+            std::env::var("CLEW_TEST_HLS").expect("CLEW_TEST_HLS names the server"),
+        );
+        let root = crate::testutil::TempDir::new("hls-type");
+        let src = "module Main where\n\nfoo :: Int -> Int\nfoo x = x + 1\n\nmain :: IO ()\nmain = print (foo 1)\n";
+        let file = root.join("Main.hs");
+        std::fs::write(&file, src).unwrap();
+        let client = LspClient::start(&exe, &["--lsp".into()], &root, None)
+            .await
+            .unwrap();
+        client.did_open(&file, "haskell", 1, src);
+        // `foo` in `print (foo 1)`, line 6. The server loads the module
+        // first; until then it has no answer.
+        let mut hover = None;
+        for _ in 0..240 {
+            hover = client.hover(&file, 6, 15).await.ok().flatten();
+            if hover.as_deref().is_some_and(|h| h.contains("::")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        let hover = hover.expect("the server answered the hover");
+        eprintln!("foo: {hover:?}");
+        assert_eq!(
+            signature_of_hover(&hover).as_deref(),
+            Some("foo :: Int -> Int")
+        );
+        // `print`, from base: its type, its class constraint.
+        let print = client.hover(&file, 6, 8).await.unwrap().unwrap();
+        eprintln!("print: {print:?}");
+        let sig = signature_of_hover(&print).unwrap();
+        assert!(sig.starts_with("print :: "), "{sig}");
+        assert!(
+            sig.contains("Show a") && sig.ends_with("a -> IO ()"),
+            "{sig}"
+        );
+        client.shutdown().await;
     }
 }
 
@@ -2953,6 +3315,84 @@ mod session_tests {
         assert_eq!(client.log_tail(2), Err(StatePoisoned));
         let error = client.error().expect("poisoning is reported as an error");
         assert!(error.contains("restart"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn expand_macro_asks_rust_analyzer() {
+        let (client, mut peer, _) = connected().await;
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.expand_macro(Path::new("/proj/a.rs"), 3, 9).await }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "rust-analyzer/expandMacro");
+        assert_eq!(
+            request["params"]["position"],
+            json!({"line": 3, "character": 9})
+        );
+        assert_eq!(
+            request["params"]["textDocument"]["uri"],
+            "file:///proj/a.rs"
+        );
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"name": "vec!", "expansion": "<[_]>::into_vec(Box::new([1, 2]))"}}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(ExpandedMacro {
+                name: "vec!".into(),
+                expansion: "<[_]>::into_vec(Box::new([1, 2]))".into()
+            }))
+        );
+        // No macro there: rust-analyzer says null.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.expand_macro(Path::new("/proj/a.rs"), 0, 0).await }
+        });
+        let request = peer.next().await;
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": null}))
+            .await;
+        assert_eq!(asked.await.unwrap(), Ok(None));
+    }
+
+    #[tokio::test]
+    async fn lean_goal_falls_back_to_the_term_goal() {
+        let (client, mut peer, _) = connected().await;
+        // In a tactic block: its goals.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.lean_goal(Path::new("/proj/A.lean"), 4, 2).await }
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "$/lean/plainGoal");
+        assert_eq!(
+            request["params"]["position"],
+            json!({"line": 4, "character": 2})
+        );
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"rendered": "```lean\nn : Nat\n⊢ n + 0 = n\n```", "goals": ["n : Nat\n⊢ n + 0 = n"]}}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(LeanGoal::Tactic(vec!["n : Nat\n⊢ n + 0 = n".into()])))
+        );
+        // Outside one: plainGoal says null, so the term's expected type.
+        let asked = tokio::spawn({
+            let client = client.clone();
+            async move { client.lean_goal(Path::new("/proj/A.lean"), 1, 20).await }
+        });
+        let request = peer.next().await;
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": null}))
+            .await;
+        let request = peer.next().await;
+        assert_eq!(request["method"], "$/lean/plainTermGoal");
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": {"goal": "⊢ Nat", "range": {}}}))
+            .await;
+        assert_eq!(
+            asked.await.unwrap(),
+            Ok(Some(LeanGoal::Term("⊢ Nat".into())))
+        );
+        // A finished proof: no goals, which is an answer.
+        assert_eq!(parse_plain_goal(&json!({"goals": []})), Some(vec![]));
+        assert_eq!(parse_plain_goal(&Value::Null), None);
     }
 
     /// F7: a malformed `Content-Length` used to parse as 0 and desync the

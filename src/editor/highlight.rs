@@ -34,6 +34,18 @@ pub fn style_color(idx: u8) -> Option<Color> {
         .and_then(|table| table.get(idx as usize).copied().flatten())
 }
 
+/// The code face a style index is set in, where it is not the regular one:
+/// a function where it is defined reads in semibold, as the design sets it.
+pub fn style_font(idx: u8) -> Option<iced::Font> {
+    static DEFINITION: LazyLock<Option<u8>> = LazyLock::new(|| {
+        HIGHLIGHT_NAMES
+            .iter()
+            .position(|n| *n == "function.definition")
+            .and_then(|i| u8::try_from(i).ok())
+    });
+    (Some(idx) == *DEFINITION).then_some(crate::fonts::CODE_SEMIBOLD)
+}
+
 fn build_table(tokens: &TokenColors) -> Vec<Option<Color>> {
     HIGHLIGHT_NAMES
         .iter()
@@ -42,7 +54,15 @@ fn build_table(tokens: &TokenColors) -> Vec<Option<Color>> {
 }
 
 fn capture_color(name: &str, c: &TokenColors) -> Option<Color> {
-    let hex = if name.starts_with("comment") {
+    let hex = if name == "function.definition" {
+        c.definition.unwrap_or(c.function)
+    } else if name == "function.macro" {
+        c.macro_.unwrap_or(c.function)
+    } else if name == "module" {
+        c.module.unwrap_or(c.type_)
+    } else if name.starts_with("attribute") {
+        c.attribute.unwrap_or(c.property)
+    } else if name.starts_with("comment") {
         c.comment
     } else if name.starts_with("keyword") {
         c.keyword
@@ -52,14 +72,11 @@ fn capture_color(name: &str, c: &TokenColors) -> Option<Color> {
         c.string
     } else if name.starts_with("number") || name.starts_with("constant") {
         c.number
-    } else if name.starts_with("function") || name == "constructor" {
+    } else if name.starts_with("function") {
         c.function
-    } else if name.starts_with("type") || name == "module" || name == "label" {
+    } else if name.starts_with("type") || name == "constructor" || name == "label" {
         c.type_
-    } else if name.starts_with("property")
-        || name.starts_with("attribute")
-        || name.starts_with("variable.builtin")
-        || name == "tag"
+    } else if name.starts_with("property") || name.starts_with("variable.builtin") || name == "tag"
     {
         c.property
     } else if name.starts_with("variable.parameter") {

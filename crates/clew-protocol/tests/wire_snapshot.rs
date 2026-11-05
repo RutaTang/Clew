@@ -171,6 +171,8 @@ const COVERED: &[&str] = &[
     "NotebookOutput",
     "Patch",
     "ProviderFailure",
+    "PythonEnvKind",
+    "PythonSource",
     "Refusal",
     "Request",
     "ServerMessage",
@@ -209,6 +211,10 @@ fn request_index(r: &Request) -> usize {
         Request::AgentToolResult { .. } => 26,
         Request::ListDir { .. } => 27,
         Request::BuildDocs => 28,
+        Request::LanguageOptions { .. } => 29,
+        Request::BuildFacts { .. } => 30,
+        Request::ProjectMaps => 31,
+        Request::ExpandMacro { .. } => 32,
     }
 }
 
@@ -246,7 +252,169 @@ fn event_index(e: &Event) -> usize {
         Event::Status { .. } => 29,
         Event::LspResolved { .. } => 30,
         Event::Error { .. } => 31,
+        Event::LanguageOptions { .. } => 32,
+        Event::BuildFacts { .. } => 33,
+        Event::ProjectMaps { .. } => 34,
+        Event::MacroExpansion { .. } => 35,
     }
+}
+
+fn python_env_kind_index(k: &PythonEnvKind) -> usize {
+    match k {
+        PythonEnvKind::Project => 0,
+        PythonEnvKind::Activated => 1,
+        PythonEnvKind::Poetry => 2,
+        PythonEnvKind::Pipenv => 3,
+        PythonEnvKind::Conda => 4,
+        PythonEnvKind::Pyenv => 5,
+        PythonEnvKind::Uv => 6,
+        PythonEnvKind::System => 7,
+    }
+}
+
+fn python_source_index(s: &PythonSource) -> usize {
+    match s {
+        PythonSource::Server => 0,
+        PythonSource::Chosen => 1,
+        PythonSource::LspToml => 2,
+        PythonSource::ProjectVenv => 3,
+        PythonSource::Activated => 4,
+    }
+}
+
+/// The user's choices, one of every kind (the default is the other sample:
+/// none).
+fn choices() -> LanguageChoices {
+    LanguageChoices {
+        python: Some("/p/.venv/bin/python".into()),
+        rust: Some(RustChoices {
+            all_features: false,
+            features: vec!["serde".into(), "cli/color".into()],
+            no_default_features: true,
+            target: Some("wasm32-unknown-unknown".into()),
+        }),
+        go: Some(GoChoices {
+            tags: vec!["integration".into()],
+            goos: Some("windows".into()),
+            goarch: Some("arm64".into()),
+        }),
+        c: Some(CChoices {
+            compile_commands: Some("/p/build".into()),
+            flags: vec!["-DDEBUG".into(), "-Iinclude".into()],
+        }),
+        typescript: Some("/p/node_modules/typescript/lib/tsserver.js".into()),
+        zig: Some("/home/u/.zvm/bin/zig".into()),
+        java: Some("/usr/lib/jvm/temurin-21".into()),
+        php: Some("8.2".into()),
+        csharp: Some("/p/Shop.sln".into()),
+        servers: Some(BTreeMap::from([
+            (
+                "lean".to_string(),
+                ServerChoice {
+                    command: "/home/u/.elan/bin/lake".into(),
+                    args: None,
+                },
+            ),
+            (
+                "python".to_string(),
+                ServerChoice {
+                    command: "pylsp".into(),
+                    args: Some(vec!["--check-parent-process".into()]),
+                },
+            ),
+        ])),
+    }
+}
+
+/// What there is to choose from for a project of every language, and for
+/// one of none.
+fn language_options() -> Vec<LanguageOptions> {
+    let pythons = python_environments();
+    let mut all: Vec<LanguageOptions> = pythons
+        .into_iter()
+        .map(|python| LanguageOptions {
+            python: Some(python),
+            rust: Some(RustOptions {
+                packages: vec![
+                    CargoPackage {
+                        name: "app".into(),
+                        root: true,
+                        features: vec!["serde".into(), "tls".into()],
+                        default: vec!["tls".into()],
+                    },
+                    CargoPackage {
+                        name: "cli".into(),
+                        root: false,
+                        features: vec!["color".into()],
+                        default: vec![],
+                    },
+                ],
+                targets: vec!["wasm32-unknown-unknown".into()],
+                project_sets: vec!["cargo.features".into()],
+            }),
+            go: Some(GoOptions {
+                tags: vec!["e2e".into(), "integration".into()],
+                project_sets: vec![],
+            }),
+            c: Some(COptions {
+                databases: vec!["/p".into(), "/p/build".into()],
+                project_sets: vec!["fallbackFlags".into()],
+            }),
+            toolchains: BTreeMap::from([(
+                "lean".to_string(),
+                vec![ToolchainCandidate {
+                    command: "/home/u/.elan/bin/lake".into(),
+                    name: "elan".into(),
+                    project: true,
+                }],
+            )]),
+        })
+        .collect();
+    all.push(LanguageOptions::default());
+    all
+}
+
+/// A project's interpreters, one of every kind, and what is in effect under
+/// each source.
+fn python_environments() -> Vec<PythonEnvironments> {
+    let kinds = [
+        PythonEnvKind::Project,
+        PythonEnvKind::Activated,
+        PythonEnvKind::Poetry,
+        PythonEnvKind::Pipenv,
+        PythonEnvKind::Conda,
+        PythonEnvKind::Pyenv,
+        PythonEnvKind::Uv,
+        PythonEnvKind::System,
+    ];
+    let candidates: Vec<PythonCandidate> = kinds
+        .iter()
+        .enumerate()
+        .map(|(i, &kind)| PythonCandidate {
+            interpreter: format!("/envs/{i}/bin/python"),
+            kind,
+            name: format!("env{i}"),
+            version: (i % 2 == 0).then(|| "3.12".to_string()),
+        })
+        .collect();
+    [
+        PythonSource::Server,
+        PythonSource::Chosen,
+        PythonSource::LspToml,
+        PythonSource::ProjectVenv,
+        PythonSource::Activated,
+    ]
+    .into_iter()
+    .map(|source| PythonEnvironments {
+        candidates: candidates.clone(),
+        in_effect: PythonInEffect {
+            interpreter: (source != PythonSource::Server).then(|| "/p/.venv/bin/python".into()),
+            source,
+            unusable_choice: (source == PythonSource::ProjectVenv)
+                .then(|| "/gone/bin/python".into()),
+        },
+    })
+    .collect()
 }
 
 fn git_op_index(op: &GitOp) -> usize {
@@ -679,6 +847,16 @@ fn project_symbols(
         }],
         go_module,
         dart_package,
+        manifests: match seq {
+            1 => Patch::Set(Some(SourceManifests {
+                psr4: vec![(
+                    "composer.json".into(),
+                    vec![("App\\".into(), vec!["src/".into()])],
+                )],
+                haskell: vec![("acme.cabal".into(), vec!["lib".into()])],
+            })),
+            _ => Patch::Unchanged,
+        },
         structure,
     }
 }
@@ -772,19 +950,39 @@ fn request_samples() -> Vec<Request> {
         Request::SpawnLsp {
             proc: 1,
             language: "rust".into(),
+            choices: LanguageChoices::default(),
+        },
+        Request::SpawnLsp {
+            proc: 2,
+            language: "lean".into(),
+            choices: choices(),
         },
         Request::SpawnAdapter {
             proc: 1,
             lang: "native".into(),
             program: "/p/bin".into(),
             args: vec![],
+            choices: LanguageChoices::default(),
+        },
+        Request::SpawnAdapter {
+            proc: 2,
+            lang: "python".into(),
+            program: "/p/main.py".into(),
+            args: vec![],
+            choices: choices(),
         },
         Request::LspResolve {
             language: "rust".into(),
+            choices: LanguageChoices::default(),
+        },
+        Request::LspResolve {
+            language: "python".into(),
+            choices: choices(),
         },
         Request::LspInstall {
             language: "rust".into(),
             consent: "c0ffee".into(),
+            choices: choices(),
         },
         Request::LspApprovals {
             root: "/p".into(),
@@ -837,6 +1035,7 @@ fn request_samples() -> Vec<Request> {
                 description: "d".into(),
                 parameters: serde_json::json!({"type": "object", "properties": {}}),
             }],
+            choices: choices(),
         },
         Request::AgentToolResult {
             stream: 1,
@@ -848,6 +1047,25 @@ fn request_samples() -> Vec<Request> {
             path: Some("~".into()),
         },
         Request::BuildDocs,
+        Request::LanguageOptions {
+            languages: vec![],
+            choices: LanguageChoices::default(),
+        },
+        Request::LanguageOptions {
+            languages: vec!["python".into(), "rust".into(), "lean".into()],
+            choices: choices(),
+        },
+        Request::BuildFacts {
+            choices: LanguageChoices::default(),
+        },
+        Request::BuildFacts { choices: choices() },
+        Request::ProjectMaps,
+        Request::ExpandMacro {
+            rel: "src/a.c".into(),
+            line: 41,
+            column: 8,
+            target: target(),
+        },
     ]);
     samples
 }
@@ -1045,6 +1263,106 @@ fn reply_samples() -> Vec<Event> {
             }),
     );
     samples.extend(
+        language_options()
+            .into_iter()
+            .map(|options| Event::LanguageOptions {
+                root: "/p".into(),
+                options,
+            }),
+    );
+    samples.extend([
+        Event::MacroExpansion {
+            rel: "src/a.c".into(),
+            line: 41,
+            column: 8,
+            expansion: None,
+        },
+        Event::MacroExpansion {
+            rel: "src/a.c".into(),
+            line: 41,
+            column: 8,
+            expansion: Some(MacroExpansion {
+                name: "MAX".into(),
+                invocation: "MAX(a, 1)".into(),
+                expanded: "((a) > (1) ? (a) : (1))".into(),
+                file: "include/util.h".into(),
+                line: 3,
+                definition: "#define MAX(a, b) ((a) > (b) ? (a) : (b))".into(),
+                truncated: false,
+            }),
+        },
+        Event::ProjectMaps {
+            root: "/p".into(),
+            maps: Vec::new(),
+        },
+        Event::ProjectMaps {
+            root: "/p".into(),
+            maps: vec![ProjectMap {
+                id: "sql.schema".into(),
+                title: "Database schema".into(),
+                description: "a table per node; an arrow is a foreign key".into(),
+                nodes: vec![
+                    MapNode {
+                        label: "orders".into(),
+                        kind: "table".into(),
+                        file: "db/schema.sql".into(),
+                        line: 7,
+                        detail: "id, user_id, total".into(),
+                    },
+                    MapNode {
+                        label: "users".into(),
+                        kind: "table".into(),
+                        file: String::new(),
+                        line: 0,
+                        detail: String::new(),
+                    },
+                ],
+                edges: vec![MapEdge {
+                    from: 0,
+                    to: 1,
+                    label: "user_id".into(),
+                }],
+            }],
+        },
+        Event::BuildFacts {
+            root: "/p".into(),
+            facts: BuildFacts::default(),
+        },
+        Event::BuildFacts {
+            root: "/p".into(),
+            facts: BuildFacts {
+                rust_target: Some("wasm32-unknown-unknown".into()),
+                crates: vec![
+                    CrateFeatures {
+                        dir: String::new(),
+                        known: true,
+                        declared: vec!["default".into(), "fast".into(), "tls".into()],
+                        on: vec!["default".into(), "tls".into()],
+                        maybe: vec!["fast".into()],
+                    },
+                    CrateFeatures {
+                        dir: "fuzz".into(),
+                        ..Default::default()
+                    },
+                ],
+                goos: Some("windows".into()),
+                goarch: Some("arm64".into()),
+                go_tags: Some(vec!["e2e".into()]),
+                c_defines: Some(vec![
+                    CMacro {
+                        name: "DEBUG".into(),
+                        value: Some(1),
+                    },
+                    CMacro {
+                        name: "NAME".into(),
+                        value: None,
+                    },
+                ]),
+                c_undefines: vec!["NDEBUG".into()],
+            },
+        },
+    ]);
+    samples.extend(
         error_codes()
             .into_iter()
             .map(|code| Event::error(code, "boom")),
@@ -1197,6 +1515,20 @@ fn every_variant_has_a_sample() {
         })
         .collect();
     assert_covers("StreamOutcome", &outcomes, stream_outcome_index);
+    let pythons: Vec<&PythonEnvironments> = events
+        .iter()
+        .filter_map(|e| match e {
+            Event::LanguageOptions { options, .. } => options.python.as_ref(),
+            _ => None,
+        })
+        .collect();
+    let kinds: Vec<PythonEnvKind> = pythons
+        .iter()
+        .flat_map(|p| p.candidates.iter().map(|c| c.kind))
+        .collect();
+    assert_covers("PythonEnvKind", &kinds, python_env_kind_index);
+    let sources: Vec<PythonSource> = pythons.iter().map(|p| p.in_effect.source).collect();
+    assert_covers("PythonSource", &sources, python_source_index);
     let codes: Vec<ErrorCode> = events
         .iter()
         .filter_map(|e| match e {
@@ -1500,24 +1832,150 @@ fn only_the_pinned_fields_may_be_left_out() {
         "Notification.event.AgentStep.refs[].line",
         "Notification.event.ProcessExited.code",
         "Notification.event.ProjectSymbols.files[].symbols[].entry",
+        "Reply.event.BuildFacts.facts.c_defines",
+        "Reply.event.BuildFacts.facts.c_defines[].value",
+        "Reply.event.BuildFacts.facts.go_tags",
+        "Reply.event.BuildFacts.facts.goarch",
+        "Reply.event.BuildFacts.facts.goos",
+        "Reply.event.BuildFacts.facts.rust_target",
         "Reply.event.DirListing.parent",
         "Reply.event.Docs.files[].items[].refs",
         "Reply.event.Error.code.Provider.Status.kind",
         "Reply.event.GitInfo.info",
+        "Reply.event.LanguageOptions.options.c",
+        "Reply.event.LanguageOptions.options.go",
+        "Reply.event.LanguageOptions.options.python",
+        "Reply.event.LanguageOptions.options.python.candidates[].version",
+        "Reply.event.LanguageOptions.options.python.in_effect.interpreter",
+        "Reply.event.LanguageOptions.options.python.in_effect.unusable_choice",
+        "Reply.event.LanguageOptions.options.rust",
         "Reply.event.LspResolved.resolution.Command.init_options",
         "Reply.event.LspResolved.resolution.Ready.init_options",
         "Reply.event.LspResolved.resolution.Ready.withheld",
+        "Reply.event.MacroExpansion.expansion",
         "Reply.event.NotebookContent.cells[].execution_count",
         "Reply.event.Ready.fingerprint",
         "Reply.event.SearchResults.error",
         "Reply.event.StateContent.text",
         "Reply.event.StateEdited.text",
         "Reply.event.Stats.report.skipped",
+        "request.AgentAsk.choices.c",
+        "request.AgentAsk.choices.c.compile_commands",
+        "request.AgentAsk.choices.csharp",
+        "request.AgentAsk.choices.go",
+        "request.AgentAsk.choices.go.goarch",
+        "request.AgentAsk.choices.go.goos",
+        "request.AgentAsk.choices.java",
+        "request.AgentAsk.choices.php",
+        "request.AgentAsk.choices.python",
+        "request.AgentAsk.choices.rust",
+        "request.AgentAsk.choices.rust.target",
+        "request.AgentAsk.choices.servers",
+        "request.AgentAsk.choices.servers.lean.args",
+        "request.AgentAsk.choices.servers.python.args",
+        "request.AgentAsk.choices.typescript",
+        "request.AgentAsk.choices.zig",
+        "request.BuildFacts.choices.c",
+        "request.BuildFacts.choices.c.compile_commands",
+        "request.BuildFacts.choices.csharp",
+        "request.BuildFacts.choices.go",
+        "request.BuildFacts.choices.go.goarch",
+        "request.BuildFacts.choices.go.goos",
+        "request.BuildFacts.choices.java",
+        "request.BuildFacts.choices.php",
+        "request.BuildFacts.choices.python",
+        "request.BuildFacts.choices.rust",
+        "request.BuildFacts.choices.rust.target",
+        "request.BuildFacts.choices.servers",
+        "request.BuildFacts.choices.servers.lean.args",
+        "request.BuildFacts.choices.servers.python.args",
+        "request.BuildFacts.choices.typescript",
+        "request.BuildFacts.choices.zig",
         "request.EditState.merge.edit.Patch.insert",
         "request.Hello.fingerprint",
+        "request.LanguageOptions.choices.c",
+        "request.LanguageOptions.choices.c.compile_commands",
+        "request.LanguageOptions.choices.csharp",
+        "request.LanguageOptions.choices.go",
+        "request.LanguageOptions.choices.go.goarch",
+        "request.LanguageOptions.choices.go.goos",
+        "request.LanguageOptions.choices.java",
+        "request.LanguageOptions.choices.php",
+        "request.LanguageOptions.choices.python",
+        "request.LanguageOptions.choices.rust",
+        "request.LanguageOptions.choices.rust.target",
+        "request.LanguageOptions.choices.servers",
+        "request.LanguageOptions.choices.servers.lean.args",
+        "request.LanguageOptions.choices.servers.python.args",
+        "request.LanguageOptions.choices.typescript",
+        "request.LanguageOptions.choices.zig",
         "request.ListDir.path",
+        "request.LspInstall.choices.c",
+        "request.LspInstall.choices.c.compile_commands",
+        "request.LspInstall.choices.csharp",
+        "request.LspInstall.choices.go",
+        "request.LspInstall.choices.go.goarch",
+        "request.LspInstall.choices.go.goos",
+        "request.LspInstall.choices.java",
+        "request.LspInstall.choices.php",
+        "request.LspInstall.choices.python",
+        "request.LspInstall.choices.rust",
+        "request.LspInstall.choices.rust.target",
+        "request.LspInstall.choices.servers",
+        "request.LspInstall.choices.servers.lean.args",
+        "request.LspInstall.choices.servers.python.args",
+        "request.LspInstall.choices.typescript",
+        "request.LspInstall.choices.zig",
+        "request.LspResolve.choices.c",
+        "request.LspResolve.choices.c.compile_commands",
+        "request.LspResolve.choices.csharp",
+        "request.LspResolve.choices.go",
+        "request.LspResolve.choices.go.goarch",
+        "request.LspResolve.choices.go.goos",
+        "request.LspResolve.choices.java",
+        "request.LspResolve.choices.php",
+        "request.LspResolve.choices.python",
+        "request.LspResolve.choices.rust",
+        "request.LspResolve.choices.rust.target",
+        "request.LspResolve.choices.servers",
+        "request.LspResolve.choices.servers.lean.args",
+        "request.LspResolve.choices.servers.python.args",
+        "request.LspResolve.choices.typescript",
+        "request.LspResolve.choices.zig",
         "request.SetAiConfig.chat",
         "request.SetAiConfig.embed",
+        "request.SpawnAdapter.choices.c",
+        "request.SpawnAdapter.choices.c.compile_commands",
+        "request.SpawnAdapter.choices.csharp",
+        "request.SpawnAdapter.choices.go",
+        "request.SpawnAdapter.choices.go.goarch",
+        "request.SpawnAdapter.choices.go.goos",
+        "request.SpawnAdapter.choices.java",
+        "request.SpawnAdapter.choices.php",
+        "request.SpawnAdapter.choices.python",
+        "request.SpawnAdapter.choices.rust",
+        "request.SpawnAdapter.choices.rust.target",
+        "request.SpawnAdapter.choices.servers",
+        "request.SpawnAdapter.choices.servers.lean.args",
+        "request.SpawnAdapter.choices.servers.python.args",
+        "request.SpawnAdapter.choices.typescript",
+        "request.SpawnAdapter.choices.zig",
+        "request.SpawnLsp.choices.c",
+        "request.SpawnLsp.choices.c.compile_commands",
+        "request.SpawnLsp.choices.csharp",
+        "request.SpawnLsp.choices.go",
+        "request.SpawnLsp.choices.go.goarch",
+        "request.SpawnLsp.choices.go.goos",
+        "request.SpawnLsp.choices.java",
+        "request.SpawnLsp.choices.php",
+        "request.SpawnLsp.choices.python",
+        "request.SpawnLsp.choices.rust",
+        "request.SpawnLsp.choices.rust.target",
+        "request.SpawnLsp.choices.servers",
+        "request.SpawnLsp.choices.servers.lean.args",
+        "request.SpawnLsp.choices.servers.python.args",
+        "request.SpawnLsp.choices.typescript",
+        "request.SpawnLsp.choices.zig",
         "request.SpawnProcess.cwd",
         "request.WriteState.text",
     ];

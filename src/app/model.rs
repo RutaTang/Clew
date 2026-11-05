@@ -188,6 +188,18 @@ impl CitationIndex {
     }
 }
 
+/// The reading panel's views (the margin beside the code): notes on what is
+/// read, the calls around the function the caret is in, its history — and
+/// the conversation with Clew, while it is kept there ([`AskView::Margin`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MarginTab {
+    #[default]
+    Notes,
+    Calls,
+    History,
+    Ask,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SidebarTab {
     Files,
@@ -219,13 +231,29 @@ pub enum WalkMode {
     Walk,
 }
 
-/// The two views that share the collapsible bottom panel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BottomTab {
-    /// "Ask clew" Q&A.
-    Ask,
-    /// The debugger (call stack, variables, output).
-    Debug,
+/// Where the Ask window is. It floats over the code rather than taking a
+/// panel's room from it: put away (a launcher in the corner), a card in the
+/// bottom-right corner, or large and centred over the dimmed window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AskView {
+    /// Put away: only its launcher shows, in the corner.
+    #[default]
+    Closed,
+    /// A card in the bottom-right corner, the code beside it in view.
+    Compact,
+    /// Large and centred, the window dimmed behind it.
+    Expanded,
+    /// Kept in the margin: the margin's Ask tab, beside the code. Where the
+    /// margin cannot show (no file open, the panes split, a narrow window),
+    /// a card again.
+    Margin,
+}
+
+impl AskView {
+    /// Whether the conversation is on screen.
+    pub fn is_open(self) -> bool {
+        self != AskView::Closed
+    }
 }
 
 /// How often the project's files changed over the recent history — the
@@ -289,6 +317,9 @@ pub enum Overlay {
     ProjectCalls,
     /// The whole-project import graph.
     ProjectImports,
+    /// The project's maps: its schema, routes, supervision trees and the
+    /// like (`clew_core::maps`).
+    ProjectMaps,
 }
 
 /// One function's block-detail inputs: its signature, full body, and
@@ -390,6 +421,8 @@ pub struct AskTurn {
     /// unique for the App's whole lifetime.
     pub stream: u64,
     pub question: String,
+    /// The question was said, not typed: marked "Said" over it.
+    pub spoken: bool,
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.
     pub answer_md: String,
@@ -433,12 +466,18 @@ pub enum ApprovalKey {
     Mcp { call: u64 },
     /// The ACP agent's permission request `id`.
     Acp { id: u64 },
+    /// The agent turn's call `call` of a window command that costs
+    /// something (`app::windowtools`).
+    Window { call: u64 },
 }
 
 /// A question to the user before a tool runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Approval {
     pub key: ApprovalKey,
+    /// The mark its card carries, when not its kind's own: what a window
+    /// command does (the debugger's bug for starting it).
+    pub mark: Option<crate::glyph::Glyph>,
     /// Who wants to do what, in a line.
     pub title: String,
     /// The arguments, or what the agent said the call does.
@@ -871,6 +910,78 @@ pub struct ContextMenu {
     pub col: usize,
     pub x: f32,
     pub y: f32,
+    /// The language's own action here, when its file's language has one
+    /// ([`InsightKind::for_lang`]).
+    pub insight: Option<InsightKind>,
+}
+
+/// What a language can say about the code under the cursor that no other
+/// does, asked from the context menu (or `ge`) and shown in a popup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsightKind {
+    /// A macro's expansion: rust-analyzer's for Rust, Clew's own reading
+    /// of the `#define`s in effect for C and C++.
+    ExpandMacro,
+    /// The goals of a Lean proof there, or the type a term is expected to
+    /// have, from the Lean server.
+    GoalState,
+    /// The type of a Haskell name, from haskell-language-server.
+    TypeAtPoint,
+}
+
+impl InsightKind {
+    /// The action a file in `lang_key` has.
+    pub fn for_lang(lang_key: &str) -> Option<InsightKind> {
+        Some(match lang_key {
+            "rust" | "c" | "cpp" => InsightKind::ExpandMacro,
+            "lean" => InsightKind::GoalState,
+            "haskell" => InsightKind::TypeAtPoint,
+            _ => return None,
+        })
+    }
+
+    /// Menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            InsightKind::ExpandMacro => "Expand Macro",
+            InsightKind::GoalState => "Show Goal",
+            InsightKind::TypeAtPoint => "Show Type",
+        }
+    }
+
+    /// What the popup says when the language has nothing to say there.
+    pub fn nothing(self) -> &'static str {
+        match self {
+            InsightKind::ExpandMacro => "No macro here, and nothing on this line expands.",
+            InsightKind::GoalState => {
+                "No goal here: the Lean server knows no proof state or expected type at this point."
+            }
+            InsightKind::TypeAtPoint => "The language server knows no type for this name.",
+        }
+    }
+}
+
+/// The language's answer, ready to show: markdown, and where it points (a
+/// macro's definition, relative to the project, with its 1-based line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InsightAnswer {
+    pub markdown: String,
+    pub defined: Option<(String, usize)>,
+}
+
+/// The popup of a language's answer ([`InsightKind`]).
+#[derive(Debug)]
+pub struct Insight {
+    /// Which request it shows: a late answer to an earlier one is dropped.
+    pub token: u64,
+    pub kind: InsightKind,
+    /// e.g. "Expansion of MAX".
+    pub title: String,
+    /// True until the answer lands.
+    pub loading: bool,
+    pub prepared: Vec<PreparedSeg>,
+    /// Where the answer points, for its Open button.
+    pub defined: Option<(String, usize)>,
 }
 
 impl GotoKind {
@@ -1361,8 +1472,8 @@ pub struct Asking {
     /// since when (`ui::placed`), the latest last.
     pub places: Vec<Placement>,
     /// The approval card last drawn for the first time, whose first report
-    /// decided whether the bottom panel opened to fit it
-    /// (`CARD_PANEL_HEIGHT`).
+    /// decided whether the Ask window opened large to fit it
+    /// (`App::on_placed`).
     pub raised_for: Option<Question>,
     /// When the redraw `App::wake_after` asked for is due, and whether one
     /// is waiting.
@@ -1383,10 +1494,6 @@ pub struct Placement {
     pub place: Option<iced::Rectangle>,
     pub since: std::time::Instant,
 }
-
-/// The bottom panel's height an approval card drawn too low for it opens the
-/// panel to: all of it in view, its answers in reach (`App::on_placed`).
-pub const CARD_PANEL_HEIGHT: f32 = 260.0;
 
 /// Most placements kept: a few questions are drawn at a time.
 pub const MAX_PLACEMENTS: usize = 16;

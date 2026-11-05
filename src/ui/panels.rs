@@ -1,4 +1,5 @@
-//! Bottom panels (debug/ask) and the calls/imports tabs.
+//! The bottom panel (the debugger), the Ask conversation the floating Ask
+//! window holds (`ui::askfloat`), and the calls/imports tabs.
 
 use super::*;
 // Explicit macro imports shadow the glob from `super`, disambiguating
@@ -19,61 +20,48 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
     .into()
 }
 
-/// The collapsible bottom panel: a tab bar (Ask / Debug, like the left sidebar)
-/// with a collapse control, above the selected tab's content.
+/// The collapsible bottom panel: the debugger's, under a title strip with a
+/// collapse control. (Ask floats over the code instead: `ui::askfloat`.)
 pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
-    use crate::BottomTab;
-    let tab = |g: Glyph, label: &'static str, this: BottomTab| {
-        let active = app.bottom_tab == this;
-        let tint = if active {
-            theme::fg_bright()
-        } else {
-            theme::fg_muted()
-        };
-        button(
-            row![glyph::icon(g, tint, 16.0), text(label).size(ts::SMALL)]
-                .spacing(6)
-                .align_y(iced::Center),
-        )
-        .style(theme::tab_button(active))
-        .padding([5, 12])
-        .on_press(Message::Window(WindowMsg::BottomTabPicked(this)))
-    };
+    let title = container(
+        row![
+            glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
+            text("Debug").size(ts::SMALL).color(theme::fg_bright()),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding([5, 12]);
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
     let collapse = button(text("⌄").size(ts::BASE))
         .style(theme::list_row(false))
         .padding([3, 10])
         .on_press(Message::Window(WindowMsg::CollapseBottom));
-    let tabs = row![
-        tab(Glyph::Ask, "Ask", BottomTab::Ask),
-        tab(Glyph::Debug, "Debug", BottomTab::Debug),
-        space().width(Fill),
-        collapse,
-    ]
-    .spacing(2)
-    .align_y(iced::Center)
-    .padding(Padding {
-        top: 2.0,
-        right: 6.0,
-        bottom: 2.0,
-        left: 6.0,
-    });
+    let tabs = row![title, space().width(Fill), collapse,]
+        .spacing(2)
+        .align_y(iced::Center)
+        .padding(Padding {
+            top: 2.0,
+            right: 6.0,
+            bottom: 2.0,
+            left: 6.0,
+        });
 
-    let content: Element<'_, Message> = match app.bottom_tab {
-        BottomTab::Ask => ask_panel(app),
-        BottomTab::Debug if app.debug.session.is_some() => debug_panel(app),
-        BottomTab::Debug => empty_state(
+    let content: Element<'_, Message> = if app.debug.session.is_some() {
+        debug_panel(app)
+    } else {
+        empty_state(
             Glyph::Debug,
             "No debug session",
-            "Press Debug in the toolbar to start one (needs .clew/launch.json).",
+            "Press Debug on the tool strip to start one (needs .clew/launch.json).",
             None,
-        ),
+        )
     };
 
     container(column![tabs, hairline(), content].height(Fill))
         .height(Fill)
-        .style(theme::panel)
+        .style(theme::on_sheet)
         .into()
 }
 
@@ -272,7 +260,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     container(column![header, panels].spacing(6).padding([8, 12]))
         .width(Fill)
         .height(Fill)
-        .style(theme::panel)
+        .style(theme::on_sheet)
         .into()
 }
 
@@ -383,54 +371,82 @@ pub(crate) fn index_cap_note(app: &App) -> Option<&str> {
 /// The "Ask clew" bottom panel: a scrollable multi-turn Q&A over a question box.
 /// Answers are grounded in retrieved code, cite it with jump links, and list
 /// their retrieved sources as clickable chips.
-pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
-    // The tab bar already names the panel and offers collapse, so the only header
-    // control left is "Clear", and only once there's a conversation to clear.
+/// The Ask conversation, filling the floating Ask window (`ui::askfloat`),
+/// which is `height` tall: the pinned approval card, the turns, and the
+/// compose area. The window's header names it and holds Clear.
+pub(crate) fn ask_panel(app: &App, height: f32) -> Element<'_, Message> {
+    ask_panel_in(app, height, false)
+}
+
+/// Room the Ask card keeps, when it fits its height to the conversation,
+/// for what is not the conversation: its header and the voice line under
+/// it, the input row, and the padding and spacing around them.
+const CARD_CHROME: f32 = 180.0;
+/// The gap over a pinned approval card, where the count of those waiting
+/// after it shows.
+const COUNT_SLOT_H: f32 = 14.0;
+/// An approval's buttons: their height, and the gap between what is in it.
+const APPROVE_BUTTON_H: f32 = 30.0;
+const APPROVE_GAP: f32 = 12.0;
+/// Size of what an approval says it does, under its question.
+const APPROVE_DETAIL_SIZE: f32 = 12.0;
+/// Size of the "Said" over a question said rather than typed, and of its
+/// microphone: the design's 11.
+const SAID_SIZE: f32 = 11.0;
+/// Widest the question's bubble grows, of the conversation's text column:
+/// the design's 82%.
+const BUBBLE_SHARE: f32 = 0.82;
+
+/// The width of the conversation's text column: the card's, inside its
+/// 1 px edge, or the margin's while it is kept there; less the 16 either
+/// side.
+fn conversation_width(app: &App) -> f32 {
+    let panel = if crate::ui::askfloat::ask_in_margin(app) {
+        app.right_width
+    } else {
+        crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width) - 2.0
+    };
+    panel - 32.0
+}
+/// Room for each of the composer's optional rows (the pinned code, an ACP
+/// agent's settings) over the input.
+const COMPOSER_ROW_ROOM: f32 = 36.0;
+
+/// [`ask_panel`], fitted to its conversation: as tall as what is in it, up
+/// to a card `height` tall, rather than always that tall — the floating
+/// card, which hangs under the chat field and grows as the conversation
+/// does.
+pub(crate) fn ask_panel_fitted(app: &App, height: f32) -> Element<'_, Message> {
+    ask_panel_in(app, height, true)
+}
+
+fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // Every part of the panel keeps its place in the column, there or not
     // (an empty `space()`, not one of no height, which a column leaves out):
     // iced pairs widget state with widgets by position, and one coming or
     // going handed the conversation's scroll, or the input's focus, to
     // another widget.
-    let header: Element<'_, Message> = if app.proj.ask_turns.is_empty() {
-        space().into()
-    } else {
-        row![
-            space().width(Fill),
-            button(text("Clear").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Ask(AskMsg::Clear)),
-        ]
-        .align_y(iced::Center)
-        .into()
-    };
+    let header: Element<'_, Message> = space().into();
 
     let mut convo: Vec<Element<'_, Message>> = Vec::new();
     if app.proj.ask_turns.is_empty() && !app.proj.asking {
-        convo.push(
-            text(
-                "Ask a question about this codebase. Answers cite the code and jump to it. \
-                  Follow-ups keep the conversation. Select code and right-click → “Add to Ask” \
-                  to attach snippets as context.",
-            )
-            .size(ts::BODY)
-            .color(theme::dim())
-            .into(),
-        );
-        // Agent mode explores the project itself, so it needs no semantic
-        // index — the "build the index first" nudge only applies when Ask
-        // would run in retrieval mode (no server channel to run an agent on).
-        if !app.server.is_up()
+        // An empty conversation shows what to ask, not a paragraph about
+        // asking: the box below says what it is for, and "Add to Ask" is in
+        // the code's own context menu. The one thing worth saying is when
+        // answers would have nothing to stand on — Ask in retrieval mode (no
+        // server to run an agent on) with no index and nothing pinned — and
+        // it is said quietly, as a hint, not as an error.
+        if app.proj.project.is_some()
+            && !app.server.is_up()
             && app.proj.embed_index.entries.is_empty()
             && app.proj.ask_pins.is_empty()
         {
             convo.push(
                 text(
-                    "Run “Explain All” to ground answers in the code — or right-click code → \
-                      “Add to Ask” to ground a single question now.",
+                    "Answers are grounded once “Explain All” has run, or in code you “Add to Ask”.",
                 )
-                .size(ts::SMALL)
-                .color(theme::warn())
+                .size(ts::CAPTION)
+                .color(theme::dim())
                 .into(),
             );
         }
@@ -460,12 +476,60 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
     }
+    // The question's bubble grows to the design's 82% of the column it is
+    // in: the card's, or the margin's.
+    let bubble_max = BUBBLE_SHARE * conversation_width(app);
     for turn in &app.proj.ask_turns {
+        // A question said rather than typed is marked so, over it (with
+        // the design's 4 between them; a typed one has neither).
+        let mut asked = Column::new()
+            .spacing(4)
+            .align_x(iced::alignment::Horizontal::Right);
+        if turn.spoken {
+            asked = asked.push(
+                row![
+                    glyph::icon(Glyph::Mic, theme::dim(), SAID_SIZE),
+                    ts::set_in(
+                        text("Said").color(theme::dim()),
+                        ts::INTER.normal(SAID_SIZE),
+                        ts::INTER,
+                        SAID_SIZE,
+                    ),
+                ]
+                .spacing(5)
+                .align_y(iced::Center),
+            );
+        }
         convo.push(
-            text(format!("❯ {}", turn.question))
-                .size(ts::BASE)
-                .color(theme::accent())
-                .into(),
+            container(
+                asked.push(
+                    container(
+                        text(turn.question.as_str())
+                            .size(ts::BASE)
+                            .line_height(1.5)
+                            .color(theme::fg()),
+                    )
+                    .padding([9, 12])
+                    // As wide as its words up to the design's 82% of the
+                    // text column; a question that runs on to a second
+                    // line takes all of that, its lines ragged inside it,
+                    // as the design sets it.
+                    .width(
+                        if super::sheet::text_width(&turn.question, ts::BASE, crate::fonts::UI)
+                            > bubble_max - 24.0
+                        {
+                            Length::Fixed(bubble_max)
+                        } else {
+                            Length::Shrink
+                        },
+                    )
+                    .max_width(bubble_max)
+                    .style(theme::bubble),
+                ),
+            )
+            .width(Fill)
+            .align_x(iced::alignment::Horizontal::Right)
+            .into(),
         );
         if let Some(agent) = &turn.extras.agent {
             convo.push(
@@ -504,22 +568,10 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .iter()
                 .map(|s| agent_step_chip(s, root.as_deref()))
                 .collect();
-            convo.push(Row::with_children(chips).spacing(4).wrap().into());
+            convo.push(Column::with_children(chips).spacing(2).into());
         }
-        // Tool calls waiting for the user's say-so are asked above the
-        // conversation, one at a time.
-        let waiting = turn.extras.approvals.len();
-        if turn.streaming && waiting > 0 {
-            convo.push(
-                text(match waiting {
-                    1 => "A tool call is waiting for your answer, above".to_string(),
-                    n => format!("{n} tool calls are waiting for your answer, above"),
-                })
-                .size(ts::SMALL)
-                .color(theme::warn())
-                .into(),
-            );
-        }
+        // Tool calls waiting for the user's say-so are asked under the
+        // conversation, one at a time, the card in view there.
         if turn.streaming && !turn.extras.thought.trim().is_empty() {
             let thought = turn.extras.thought.trim();
             let tail: String = {
@@ -540,7 +592,11 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 .into(),
             );
         }
-        if turn.streaming {
+        if turn.streaming && !turn.extras.approvals.is_empty() && !turn.answer.is_empty() {
+            // Paused on a question to the user: what it said so far, drawn
+            // as an answer is (`App::settle_waiting_answers`).
+            convo.extend(super::explain_view::render_answer(app, &turn.answer));
+        } else if turn.streaming {
             // Live answer: "Thinking…" until the first token, then the raw text
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
@@ -561,7 +617,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 );
             }
         } else {
-            convo.extend(render_prepared(app, &turn.answer));
+            convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
         if !turn.sources.is_empty() {
             convo.push(text("Sources").size(ts::CAPTION).color(theme::dim()).into());
@@ -577,17 +633,44 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     if app.proj.asking {
         convo.push(text("Thinking…").size(ts::BODY).color(theme::dim()).into());
     }
-    let conversation = scrollable(Column::with_children(convo).spacing(8).width(Fill))
+    let conversation = scrollable(Column::with_children(convo).spacing(14).width(Fill))
         .id(ask_scroll_id())
         .direction(thin_scroll())
         .style(theme::overlay_scrollbar)
-        .height(Fill);
-    // The tool call waiting for the user's say-so, pinned above the
-    // conversation: drawn in it, a card moved down as its turn grew above
-    // it — a step, a plan entry, each scrolling the panel — its Allow with
-    // it, to under the pointer. Here nothing above it changes while it is
-    // asked. Its Allow is drawn enabled once it has been within reach long
-    // enough to be read (`App::may_allow`); the cards are answered in turn.
+        .height(if fit { Length::Shrink } else { Fill });
+    // Fitted, the conversation is as tall as it is, up to what leaves the
+    // composer its room: laid out before it, it would otherwise take all of
+    // the card's height and push the input out of it.
+    let extra_rows = [!app.proj.ask_pins.is_empty(), app.ask_agent.is_some()]
+        .into_iter()
+        .filter(|&row| row)
+        .count() as f32;
+    // An approval pinned under it: as tall as it is laid out across the
+    // card, and the place for the count over it.
+    let approval_room = match app.first_approval() {
+        Some((_, approval)) if fit => {
+            let width = crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width);
+            let head = (height * 0.5 - 60.0).max(40.0);
+            COUNT_SLOT_H + approval_card_height(approval, width - 32.0, head)
+        }
+        _ => 0.0,
+    };
+    let conversation = container(conversation).max_height(if fit {
+        (height - CARD_CHROME - COMPOSER_ROW_ROOM * extra_rows - approval_room).max(40.0)
+    } else {
+        f32::INFINITY
+    });
+    // Fitted, the card would grow with what arrives above an approval and
+    // move its answers down: while one is asked, the conversation keeps the
+    // height it had, and what arrives scrolls in it.
+    let conversation = super::held::held(conversation, fit && app.first_approval().is_some());
+    // The tool call waiting for the user's say-so, pinned under the
+    // conversation, over the composer: drawn in it, a card moved down as its
+    // turn grew above it — a step, a plan entry, each scrolling the panel —
+    // its Allow with it, to under the pointer. Here the conversation grows
+    // in its own scroll while it is asked, and the card stays put. Its Allow
+    // is drawn enabled once it has been within reach long enough to be read
+    // (`App::may_allow`); the cards are answered in turn.
     let pinned: Element<'_, Message> = match app.first_approval() {
         Some((turn, approval)) => {
             let asked = app.asked(crate::app::model::Question::Approval {
@@ -604,7 +687,7 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 - 1;
             // About half the panel at most, the input kept in view: a card
             // whose arguments run longer scrolls them, above its answers.
-            let head = (app.bottom_height * 0.5 - 60.0).max(40.0);
+            let head = (height * 0.5 - 60.0).max(40.0);
             let page = match &app.asking.answers_page {
                 Some((crate::app::model::Question::Approval { stream, key }, page))
                     if *stream == turn.stream && *key == approval.key =>
@@ -614,17 +697,25 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
                 _ => 0,
             };
             let card = approval_card(turn.stream, approval, asked, head, page);
-            // The count goes below it, out of what scrolls: one more coming
-            // moves nothing of the card.
-            let mut pinned = column![card].spacing(4);
-            if more > 0 {
-                pinned = pinned.push(
-                    text(format!("{more} more waiting after this one"))
-                        .size(ts::CAPTION)
-                        .color(theme::dim()),
-                );
-            }
-            pinned.into()
+            // The count goes over it, out of what scrolls, in a place of its
+            // own that is there with no count to show — the gap over the
+            // card — so one more coming moves nothing of it.
+            let count: Element<'_, Message> = if more > 0 {
+                text(format!("{more} more waiting after this one"))
+                    .size(ts::CAPTION)
+                    .line_height(ts::normal_line(ts::CAPTION))
+                    .color(theme::dim())
+                    .into()
+            } else {
+                space().into()
+            };
+            column![
+                container(count)
+                    .height(Length::Fixed(COUNT_SLOT_H))
+                    .align_y(iced::alignment::Vertical::Center),
+                card
+            ]
+            .into()
         }
         None => space().into(),
     };
@@ -679,31 +770,70 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
             "Ask {} about this codebase…",
             crate::app::integrations::acp_label(agent)
         ),
+        // Once there is a conversation, what is typed is a reply — and the
+        // microphone's key is said, as another way to give it.
+        None if !app.proj.ask_turns.is_empty() => format!(
+            "Reply, or press {} to talk",
+            app.keymap.chord(crate::keymap::Action::Voice).caps()
+        ),
         None => "Ask about this codebase…".to_string(),
     };
-    let input = text_input(&placeholder, &app.proj.ask_input)
-        .id(ask_input_id())
-        .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
-        .on_submit(Message::Ask(AskMsg::Submit))
-        .size(ts::BASE)
-        .padding(7);
-    // Match the input's height (size 13 + 7 padding) so the row lines up. The
-    // send button is the panel's primary action, so it gets accent emphasis
-    // (dimmed to a plain style while a request is in flight / disabled).
-    // Any answer still coming in — an agent turn, a server chat stream, a local
-    // retrieval stream — can be stopped from here, not only agent turns.
+    let input = ts::field_in(
+        text_input(&placeholder, &app.proj.ask_input)
+            .id(ask_input_id())
+            .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
+            .on_submit(Message::Ask(AskMsg::Submit))
+            .style(theme::bare_input),
+        ROUND_BUTTON,
+        ts::INTER,
+        ts::READING,
+    );
+    // The send button is the composer's primary action, a round button in
+    // the accent (a quiet one while an answer is coming in, when it does
+    // nothing). Any answer still coming in — an agent turn, a server chat
+    // stream, a local retrieval stream — can be stopped from here, not only
+    // agent turns.
     let streaming = app.ask_stream_active();
     let idle = !streaming;
-    let mut ask_btn = button(text("Ask").size(ts::BASE))
-        .style(if idle {
-            theme::primary_button
-        } else {
-            theme::toolbar_button
-        })
-        .padding([7, 16]);
+    let send_tint = if idle {
+        crate::theme::active().on_accent
+    } else {
+        theme::dim()
+    };
+    let round = |glyph: Glyph, tint: iced::Color| {
+        button(
+            container(glyph::icon(glyph, tint, 15.0))
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::Center)
+                .align_y(iced::Center),
+        )
+        .padding(0)
+        .width(Length::Fixed(ROUND_BUTTON))
+        .height(Length::Fixed(ROUND_BUTTON))
+    };
+    let mut ask_btn = round(Glyph::Send, send_tint).style(theme::round_button(idle));
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
+    let ask_btn = super::toolbar::tip_at(ask_btn, "Ask", None, tooltip::Position::Top);
+    // Or say it: the microphone, in the composer beside what is typed.
+    let listening = app.voice.is_listening();
+    let talk = super::toolbar::tip_at(
+        round(
+            Glyph::Mic,
+            if listening {
+                theme::danger()
+            } else {
+                theme::fg()
+            },
+        )
+        .style(theme::round_button(false))
+        .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
+        if listening { "Stop listening" } else { "Talk" },
+        Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
+        tooltip::Position::Top,
+    );
     // The ACP session's own settings (its mode, its model…), when it has any.
     let acp_active = app
         .proj
@@ -788,32 +918,90 @@ pub(crate) fn ask_panel(app: &App) -> Element<'_, Message> {
     let stop: Element<'_, Message> = if streaming {
         button(text("Stop").size(ts::BASE))
             .style(theme::toolbar_button)
-            .padding([7, 12])
+            .padding([5, 12])
             .on_press(Message::Ask(AskMsg::Stop))
             .into()
     } else {
         slot()
     };
-    let compose_row = row![input, stop].spacing(6).align_y(iced::Center);
-    compose.push(
-        row![agent, compose_row.push(ask_btn)]
-            .align_y(iced::Center)
-            .into(),
-    );
-
-    container(
-        column![header]
-            .push(pinned)
-            .push(conversation)
-            .push(Column::with_children(compose))
-            .spacing(8)
-            .padding([8, 12]),
+    // A conversation by voice: once Clew has answered, listen again. The
+    // design's switch — a track, its knob in from the end it is at — and
+    // beside it what it does, which turns it as well.
+    let on = app.voice.keep_listening;
+    let turn = Message::Voice(crate::VoiceMsg::SetKeepListening(!on));
+    let knob = container(space().width(SWITCH_KNOB).height(SWITCH_KNOB)).style(theme::switch_knob);
+    let track = button(
+        container(knob)
+            .width(Fill)
+            .height(Fill)
+            .padding((SWITCH_H - SWITCH_KNOB) / 2.0)
+            .align_x(if on {
+                iced::alignment::Horizontal::Right
+            } else {
+                iced::alignment::Horizontal::Left
+            }),
     )
+    .width(Length::Fixed(SWITCH_W))
+    .height(Length::Fixed(SWITCH_H))
+    .padding(0)
+    .style(theme::switch(on))
+    .on_press(turn.clone());
+    let keep_listening = row![
+        track,
+        iced::widget::mouse_area(ts::set_in(
+            text("Keep listening").color(theme::fg_muted()),
+            SWITCH_H,
+            ts::INTER,
+            KEEP_LISTENING_SIZE,
+        ))
+        .on_press(turn)
+        .interaction(iced::mouse::Interaction::Pointer),
+    ]
+    .spacing(KEEP_LISTENING_GAP)
+    .align_y(iced::Center);
+    // The composer, under a rule across the card: the question as it is
+    // typed, Stop while an answer comes in, Keep listening, the microphone
+    // and send.
+    let compose_row = row![input, stop, keep_listening, talk, ask_btn]
+        .spacing(8)
+        .align_y(iced::Center);
+    compose.push(row![agent, compose_row].align_y(iced::Center).into());
+
+    let height = if fit { Length::Shrink } else { Fill };
+    container(column![
+        // No spacing of the column's own: the header and the pinned card
+        // are empty places most of the time, and would each add a gap.
+        column![header]
+            .push(conversation)
+            .push(pinned)
+            .padding(16)
+            .height(height),
+        hairline(),
+        container(Column::with_children(compose)).padding(COMPOSER_PAD),
+    ])
     .width(Fill)
-    .height(Fill)
-    .style(theme::panel)
+    .height(height)
     .into()
 }
+
+/// Side of the composer's round buttons (the microphone, send).
+pub(crate) const ROUND_BUTTON: f32 = 30.0;
+/// Size of the composer's "Keep listening", as the design sets it.
+const KEEP_LISTENING_SIZE: f32 = 12.0;
+/// The design's gap between the switch and what it says.
+const KEEP_LISTENING_GAP: f32 = 7.0;
+/// The design's switch: its track, and the knob in it.
+const SWITCH_W: f32 = 26.0;
+const SWITCH_H: f32 = 16.0;
+const SWITCH_KNOB: f32 = 12.0;
+/// Padding around the composer's row: a little more room at its start,
+/// where the question begins.
+pub(crate) const COMPOSER_PAD: Padding = Padding {
+    top: 10.0,
+    right: 10.0,
+    bottom: 10.0,
+    left: 14.0,
+};
 
 /// Most answers of each kind (allowing, declining) an approval card shows
 /// at once.
@@ -936,14 +1124,26 @@ pub(crate) fn approval_card<'a>(
                 key: approval.key,
                 option: option.id.clone(),
             });
-            let shown = button(text(option.label.clone()).size(ts::SMALL))
-                .style(if option.allows {
-                    theme::primary_button
-                } else {
-                    theme::secondary_button
-                })
-                .padding([3, 10])
-                .on_press_maybe((ready || !option.allows).then_some(answer));
+            // The design's 30 px buttons, the one that allows a little wider.
+            let shown = button(
+                container(text(option.label.clone()).size(ts::BODY).font(
+                    crate::fonts::in_control(if option.allows {
+                        crate::fonts::UI_SEMIBOLD
+                    } else {
+                        crate::fonts::UI_MEDIUM
+                    }),
+                ))
+                .height(Fill)
+                .align_y(iced::Center),
+            )
+            .style(if option.allows {
+                theme::primary_button
+            } else {
+                theme::toolbar_button
+            })
+            .height(Length::Fixed(APPROVE_BUTTON_H))
+            .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
+            .on_press_maybe((ready || !option.allows).then_some(answer));
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
             } else {
@@ -951,17 +1151,34 @@ pub(crate) fn approval_card<'a>(
             }
         })
         .collect();
+    use crate::app::model::ApprovalKey;
+    // What asks: a command of the window's that costs something, a tool of
+    // an MCP server, or the ACP agent itself. A tool's detail is its
+    // arguments, set as code; the others say it in words.
+    let (glyph, code) = match approval.key {
+        ApprovalKey::Window { .. } => (Glyph::Play, false),
+        ApprovalKey::Mcp { .. } => (Glyph::Plug, true),
+        ApprovalKey::Acp { .. } => (Glyph::Ask, true),
+    };
+    let glyph = approval.mark.unwrap_or(glyph);
     let mut asks = column![
-        text(format!("⚠ {}", approval.title))
-            .size(ts::BODY)
-            .color(theme::warn())
+        text(approval.title.clone())
+            .size(ts::BASE)
+            .line_height(ts::normal_line(ts::BASE))
+            .font(crate::fonts::UI_SEMIBOLD)
+            .color(theme::fg())
     ]
-    .spacing(6);
+    .spacing(2);
     if !approval.detail.is_empty() {
         asks = asks.push(
             text(approval.detail.clone())
-                .size(ts::SMALL)
-                .font(iced::Font::MONOSPACE)
+                .size(APPROVE_DETAIL_SIZE)
+                .line_height(ts::normal_line(APPROVE_DETAIL_SIZE))
+                .font(if code {
+                    crate::fonts::CODE
+                } else {
+                    crate::fonts::UI
+                })
                 .color(theme::fg_muted()),
         );
     }
@@ -988,8 +1205,29 @@ pub(crate) fn approval_card<'a>(
                 .into(),
         );
     }
-    let answers =
-        crate::ui::fresh::fresh(page as u64, Row::with_children(buttons).spacing(6).wrap());
+    // A yes and a no sit beside the question; more answers than that, a
+    // row under it.
+    let beside = buttons.len() <= 2;
+    let answers = crate::ui::fresh::fresh(
+        page as u64,
+        Row::with_children(buttons).spacing(APPROVE_GAP).wrap(),
+    );
+    let mark = container(glyph::icon(glyph, theme::accent(), 18.0)).padding([2, 0]);
+    let body: Element<'a, Message> = if beside {
+        row![mark, container(asks).width(Fill), answers]
+            .spacing(12)
+            .align_y(iced::Center)
+            .into()
+    } else {
+        column![
+            row![mark, container(asks).width(Fill)]
+                .spacing(12)
+                .align_y(iced::Center),
+            answers
+        ]
+        .spacing(10)
+        .into()
+    };
     // Fresh for each card: one that comes up where another was answered is
     // not handed a press held on that one's buttons, nor where it was
     // scrolled to (`fresh`).
@@ -998,45 +1236,156 @@ pub(crate) fn approval_card<'a>(
         &asked,
         crate::ui::fresh::fresh_for(
             &(stream, approval.key),
-            container(column![asks, answers].spacing(6))
-                .padding([8, 10])
+            // The design's padding, inside the border drawn over its edge.
+            container(body)
+                .padding(Padding {
+                    top: 13.0,
+                    right: 13.0,
+                    bottom: 13.0,
+                    left: 15.0,
+                })
                 .width(Fill)
-                .style(theme::panel),
+                .style(theme::approve_card),
         ),
     )
 }
 
+/// About how tall [`approval_card`] is laid out `width` wide, its words at
+/// most `head` tall: measured, so that a card fitted to its conversation
+/// gives the conversation over it what is left, and no more. A little over
+/// rather than under: under, the input below it would be cut off.
+fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head: f32) -> f32 {
+    use crate::app::model::ApprovalKey;
+    use crate::ui::sheet::{text_height, text_width};
+    let (shown, pages) = shown_answers(&approval.options, 0);
+    let count = shown.len() + usize::from(pages > 1);
+    let beside = count <= 2;
+    let answers: f32 = shown
+        .iter()
+        .map(|o| {
+            if o.allows {
+                text_width(
+                    &o.label,
+                    ts::BODY,
+                    crate::fonts::in_control(crate::fonts::UI_SEMIBOLD),
+                ) + 24.0
+            } else {
+                text_width(
+                    &o.label,
+                    ts::BODY,
+                    crate::fonts::in_control(crate::fonts::UI_MEDIUM),
+                ) + 20.0
+            }
+        })
+        .sum::<f32>()
+        + APPROVE_GAP * count.saturating_sub(1) as f32;
+    // Its padding, the mark and the gaps beside the words, its answers
+    // when they sit beside them.
+    let words =
+        width - 28.0 - 18.0 - APPROVE_GAP - if beside { answers + APPROVE_GAP } else { 0.0 };
+    let code = !matches!(approval.key, ApprovalKey::Window { .. });
+    let mut asks = text_height(&approval.title, ts::BASE, crate::fonts::UI_SEMIBOLD, words);
+    if !approval.detail.is_empty() {
+        let font = if code {
+            crate::fonts::CODE
+        } else {
+            crate::fonts::UI
+        };
+        asks += 2.0 + text_height(&approval.detail, APPROVE_DETAIL_SIZE, font, words);
+    }
+    let asks = asks.min(head);
+    let button = APPROVE_BUTTON_H;
+    let body = if beside {
+        asks.max(button)
+    } else {
+        asks + 10.0 + button
+    };
+    body + 26.0 + 4.0
+}
+
 /// One agent exploration step as a chip: a tool glyph + its one-line title.
 /// Clickable when the step touched code (jumps to the first ref).
+/// Height of one step of an agent's turn.
+const STEP_ROW_H: f32 = 28.0;
+/// The design's gap between what a step's row holds: its mark, its
+/// words, its code.
+const STEP_GAP: f32 = 9.0;
+/// Size of what a step was done to, as code: the design's 12.
+const STEP_CODE_SIZE: f32 = 12.0;
+
+/// A step's title as the reader takes it in: what was done, in words, then
+/// what it was done to, as code — `read src/lib.rs:1-50` reads "Read
+/// `src/lib.rs:1-50`", and a title in words marks its code with backticks
+/// ("Went to `on_watch_batch`"). A title of another shape is shown as it is.
+fn step_title<'a>(title: &str) -> Element<'a, Message> {
+    // Each centred in the step's row as the design centres it (its words
+    // at 12.5, its code at 12).
+    let word = |s: &str| -> Element<'a, Message> {
+        ts::set_in(
+            text(s.to_string())
+                .color(theme::fg_muted())
+                .wrapping(Wrapping::None),
+            STEP_ROW_H,
+            ts::INTER,
+            ts::BODY,
+        )
+    };
+    let code = |s: &str| -> Element<'a, Message> {
+        ts::set_in(
+            text(s.to_string())
+                .font(crate::fonts::CODE)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+            STEP_ROW_H,
+            ts::MONO,
+            STEP_CODE_SIZE,
+        )
+    };
+    // Words with their code in backticks: every other part is code.
+    if title.matches('`').count() >= 2 {
+        let parts = title
+            .split('`')
+            .enumerate()
+            .filter(|(_, part)| !part.trim().is_empty())
+            .map(|(i, part)| {
+                if i % 2 == 1 {
+                    code(part)
+                } else {
+                    word(part.trim())
+                }
+            });
+        return Row::with_children(parts)
+            .spacing(STEP_GAP)
+            .align_y(iced::Center)
+            .into();
+    }
+    let verb = title.split_once(' ').filter(|(verb, rest)| {
+        !verb.is_empty() && !rest.trim().is_empty() && verb.chars().all(|c| c.is_ascii_lowercase())
+    });
+    match verb {
+        Some((verb, rest)) => {
+            let mut said = verb.to_string();
+            said[..1].make_ascii_uppercase();
+            row![word(&said), code(rest.trim())]
+                .spacing(STEP_GAP)
+                .align_y(iced::Center)
+                .into()
+        }
+        None => word(title),
+    }
+}
+
 fn agent_step_chip<'a>(
     step: &crate::app::model::AgentStep,
     root: Option<&std::path::Path>,
 ) -> Element<'a, Message> {
     use crate::app::model::StepState;
-    let icon = match step.tool.as_str() {
-        "search" | "semantic_find" => "🔍",
-        "read" => "📄",
-        "outline" => "☰",
-        "files" => "🗂",
-        "history" => "🕘",
-        "changes" => "±",
-        "explanations" => "✦",
-        // An MCP server's tool, and the kinds of an ACP agent's.
-        "mcp" => "🔌",
-        "edit" => "✎",
-        "delete" => "🗑",
-        "move" => "↦",
-        "execute" => "▶",
-        "think" => "💭",
-        "fetch" => "🌐",
-        "switch_mode" => "⇄",
-        _ => "⚙",
-    };
-    let state = match step.state {
-        StepState::Done => "",
-        StepState::Running => " …",
-        StepState::Waiting => " ⏸",
-        StepState::Failed => " ✗",
+    // Its state, as the mark that leads it: ticked when done.
+    let (mark, tint) = match step.state {
+        StepState::Done => (Glyph::Check, theme::success()),
+        StepState::Running => (Glyph::More, theme::fg_muted()),
+        StepState::Waiting => (Glyph::Pause, theme::warning()),
+        StepState::Failed => (Glyph::Close, theme::danger()),
     };
     // `join` discards the root for an absolute argument, so a ref that is not
     // a plain in-project rel would make this chip open somewhere else entirely.
@@ -1061,17 +1410,32 @@ fn agent_step_chip<'a>(
             .map(|(rel, line)| (root.join(rel), *line))
     });
     let clickable = target.is_some();
+    let show: Element<'a, Message> = if clickable {
+        ts::set_in(
+            text("Show").color(theme::accent()),
+            STEP_ROW_H,
+            ts::INTER,
+            ts::SMALL,
+        )
+    } else {
+        space().into()
+    };
     let mut chip = button(
-        text(format!("{icon} {}{state}", step.title))
-            .size(ts::CAPTION)
-            .color(if clickable {
-                theme::fg_muted()
-            } else {
-                theme::dim()
-            }),
+        row![
+            glyph::icon(mark, tint, 14.0),
+            container(step_title(&step.title)).width(Fill).clip(true),
+            show,
+        ]
+        .spacing(STEP_GAP)
+        .height(Fill)
+        .align_y(iced::Center),
     )
-    .style(theme::toolbar_button)
-    .padding([1, 6]);
+    .style(theme::menu_row)
+    .width(Fill)
+    .height(Length::Fixed(STEP_ROW_H))
+    // Its mark and words in line with the answer under it, as the design
+    // has them.
+    .padding(0);
     if let Some((abs, line)) = target {
         chip = chip.on_press(Message::Editor(EditorMsg::OpenAbs {
             abs,
@@ -1241,7 +1605,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
             "(line not read)".to_string()
         })
         .size(ts::SMALL)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::CODE)
         .color(if node.classified {
             theme::fg()
         } else {

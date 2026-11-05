@@ -1,0 +1,31 @@
+# clew patch: the release's manifest, cut down to what a build needs. The
+# grammar depends on `tree-sitter-language` (as every other grammar clew uses
+# does) instead of `tree-sitter = "0.25"`, which clew's `tree-sitter` 0.26 cannot
+# share a build with (`links = "tree-sitter"`).
+[package]
+edition = "2021"
+name = "tree-sitter-lean4"
+version = "0.3.0"
+authors = ["Willem Vanhulle <willemvanhulle@protonmail.com>"]
+build = "build.rs"
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Tree-sitter grammar for Lean 4 (generates parser at build time)"
+readme = false
+keywords = ["tree-sitter", "parser", "lean", "lean4"]
+categories = ["parsing", "text-editors"]
+license = "MIT"
+repository = "https://github.com/wvhulle/tree-sitter-lean"
+
+[lib]
+name = "tree_sitter_lean4"
+path = "src/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.0"

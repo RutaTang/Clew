@@ -1301,6 +1301,33 @@ fn edit_ledger_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
     Ok(clew.join("cache").join("edits").join(name))
 }
 
+// ------------------------------------------------------------- timestamps
+
+/// Set the modification time of `path` — a file or a directory — to
+/// `time`.
+///
+/// Windows opens a handle for that only with the right to write a file's
+/// attributes, and a directory only with backup semantics: the read-only
+/// `File::open` that serves on Unix fails there, and a "touch" through it
+/// silently did nothing.
+pub fn set_modified(path: &Path, time: std::time::SystemTime) -> std::io::Result<()> {
+    #[cfg(windows)]
+    let file = {
+        use std::os::windows::fs::OpenOptionsExt;
+        /// `FILE_WRITE_ATTRIBUTES`.
+        const WRITE_ATTRIBUTES: u32 = 0x0100;
+        /// `FILE_FLAG_BACKUP_SEMANTICS`, which a directory's handle needs.
+        const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        std::fs::OpenOptions::new()
+            .access_mode(WRITE_ATTRIBUTES)
+            .custom_flags(BACKUP_SEMANTICS)
+            .open(path)?
+    };
+    #[cfg(not(windows))]
+    let file = std::fs::File::open(path)?;
+    file.set_modified(time)
+}
+
 // ------------------------------------------------------------------ locking
 
 /// An exclusive advisory lock on one state file, held across a
@@ -1311,23 +1338,15 @@ fn edit_ledger_path(path: &Path) -> std::io::Result<std::path::PathBuf> {
 /// would guard a file that no longer exists at the name.
 pub struct FileLock {
     /// `None` when the filesystem cannot lock at all (see [`lock`]).
-    #[cfg(unix)]
     #[allow(dead_code)]
     file: Option<std::fs::File>,
 }
 
 impl FileLock {
     /// Whether an OS lock is actually held (false only on a filesystem
-    /// without `flock` support, or on a non-unix host).
+    /// that cannot lock).
     pub fn is_held(&self) -> bool {
-        #[cfg(unix)]
-        {
-            self.file.is_some()
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
+        self.file.is_some()
     }
 }
 
@@ -1450,12 +1469,45 @@ fn lock_file(lock_path: &Path) -> std::io::Result<FileLock> {
     }
 }
 
-/// No advisory locking here: the cross-process race stays open on non-unix
-/// hosts, exactly as it was. The in-process `Mutex` each store holds is still
-/// what covers the common (two windows, one process) case.
+/// The same lock on Windows, by the standard library's portable file lock
+/// (`LockFileEx`): exclusive, blocking, released when the handle closes —
+/// held per handle, so two writers in one process exclude each other too.
+/// The same refusals as on Unix: a link (or a junction) planted at the lock
+/// file's name is not opened through, and only a plain file is locked.
+///
+/// Opened for reading and writing (never truncated: nothing is written to
+/// it): `LockFileEx` needs one of them, and a handle opened to append only
+/// had every lock refused — "Access is denied" — so every store refused
+/// every write.
 #[cfg(not(unix))]
-fn lock_file(_lock_path: &Path) -> std::io::Result<FileLock> {
-    Ok(FileLock {})
+fn lock_file(lock_path: &Path) -> std::io::Result<FileLock> {
+    if let Ok(meta) = std::fs::symlink_metadata(lock_path)
+        && !meta.is_file()
+    {
+        return Err(std::io::Error::other(if meta.file_type().is_symlink() {
+            "the lock file's name is a symlink — refusing it"
+        } else {
+            "the lock file's name is taken by something that is not a plain file"
+        }));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::other(
+            "the lock file's name is taken by something that is not a plain file",
+        ));
+    }
+    match file.lock() {
+        Ok(()) => Ok(FileLock { file: Some(file) }),
+        // A filesystem that cannot lock (some network shares): unlocked, as
+        // on a Unix one without `flock`.
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => Ok(FileLock { file: None }),
+        Err(e) => Err(e),
+    }
 }
 
 // -------------------------------------------------------------- path checks

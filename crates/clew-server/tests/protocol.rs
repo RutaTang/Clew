@@ -13,9 +13,11 @@
 //! 127.0.0.1 only, every wait has a timeout, and no child outlives its test.
 
 use clew_core::testutil::TempDir;
+#[cfg(unix)]
+use clew_protocol::Refusal;
 use clew_protocol::{
     AiChatConfig, AiChatMsg, ClientMessage, ErrorCode, Event, GitResult, PROTOCOL_VERSION,
-    ProviderFailure, Refusal, Request, ServerMessage, StreamOutcome, TargetSpec,
+    ProviderFailure, Request, ServerMessage, StreamOutcome, TargetSpec,
 };
 use clew_server::{Server, SpawnPolicy};
 use std::io::{Read, Write};
@@ -283,6 +285,7 @@ impl FakeProvider {
     }
 
     /// Block until the first request has arrived.
+    #[cfg(unix)]
     fn await_request(&self) {
         let began = Instant::now();
         while self.requests.load(Ordering::SeqCst) == 0 {
@@ -897,6 +900,114 @@ async fn stats_compute_where_the_project_lives() {
     }
 }
 
+/// `ProjectMaps` reads the project's maps where its files are, with
+/// project-relative paths on the wire, and no empty map among them.
+#[tokio::test]
+async fn project_maps_are_read_where_the_project_lives() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("project-maps");
+    std::fs::create_dir_all(root.join("db")).unwrap();
+    std::fs::write(
+        root.join("db/schema.sql"),
+        "CREATE TABLE users (id int PRIMARY KEY);\nCREATE TABLE posts (id int, user_id int REFERENCES users(id));\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    assert!(server.handle(2, Request::ProjectMaps).await.is_none());
+    match recv_reply(&mut rx, 2).await {
+        Event::ProjectMaps {
+            root: maps_root,
+            maps,
+        } => {
+            assert_eq!(maps_root, root.to_string_lossy());
+            let schema = maps
+                .iter()
+                .find(|m| m.id == "sql.schema")
+                .unwrap_or_else(|| panic!("the schema in {maps:?}"));
+            assert!(schema.is_well_formed());
+            assert!(maps.iter().all(|m| !m.nodes.is_empty()));
+            let posts = schema.nodes.iter().find(|n| n.label == "posts").unwrap();
+            assert_eq!((posts.file.as_str(), posts.line), ("db/schema.sql", 2));
+            assert_eq!(schema.edges.len(), 1);
+        }
+        other => panic!("expected ProjectMaps, got {other:?}"),
+    }
+}
+
+/// `ExpandMacro` expands a C macro where the file and its headers are, with
+/// the defining header relative to the project; a path out of the project
+/// is refused before anything is read.
+#[tokio::test]
+async fn macros_expand_where_the_headers_are() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("expand-macro");
+    std::fs::create_dir_all(root.join("include")).unwrap();
+    std::fs::write(
+        root.join("include/util.h"),
+        "#define MAX(a, b) ((a) > (b) ? (a) : (b))\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("main.c"),
+        "#include \"include/util.h\"\nint m = MAX(1, 2);\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let target = clew_protocol::TargetSpec {
+        label: "Linux x86_64".into(),
+        os: "linux".into(),
+        arch: "x86_64".into(),
+        family: "unix".into(),
+    };
+    let ask = Request::ExpandMacro {
+        rel: "main.c".into(),
+        line: 1,
+        column: 8,
+        target: target.clone(),
+    };
+    assert!(server.handle(2, ask).await.is_none());
+    match recv_reply(&mut rx, 2).await {
+        Event::MacroExpansion {
+            rel,
+            line,
+            column,
+            expansion: Some(e),
+        } => {
+            assert_eq!((rel.as_str(), line, column), ("main.c", 1, 8));
+            assert_eq!(e.name, "MAX");
+            assert_eq!(e.invocation, "MAX(1, 2)");
+            assert_eq!(e.expanded, "((1) > (2) ? (1) : (2))");
+            assert_eq!((e.file.as_str(), e.line), ("include/util.h", 1));
+        }
+        other => panic!("expected an expansion, got {other:?}"),
+    }
+    // Nothing there is a macro: an answer, not an error.
+    let ask = Request::ExpandMacro {
+        rel: "include/util.h".into(),
+        line: 5,
+        column: 0,
+        target: target.clone(),
+    };
+    assert!(server.handle(3, ask).await.is_none());
+    assert!(matches!(
+        recv_reply(&mut rx, 3).await,
+        Event::MacroExpansion {
+            expansion: None,
+            ..
+        }
+    ));
+    let ask = Request::ExpandMacro {
+        rel: "../outside.c".into(),
+        line: 0,
+        column: 0,
+        target,
+    };
+    match server.handle(4, ask).await {
+        Some(Event::Error { .. }) => {}
+        other => panic!("refused at once, got {other:?}"),
+    }
+}
+
 /// `ProjectCalls` builds the name-based call graph where the files live,
 /// with project-relative node paths on the wire.
 #[tokio::test]
@@ -946,11 +1057,11 @@ async fn project_calls_build_where_the_project_lives() {
     }
 }
 
-/// `SpawnAdapter` for a TCP-transport language must refuse with a reason AND
-/// end the proxied stream (ProcessExited), so the client's DAP driver sees
-/// EOF instead of waiting on an adapter that will never exist.
+/// `SpawnAdapter` for a language no host has an adapter for must refuse with
+/// a reason AND end the proxied stream (ProcessExited), so the client's DAP
+/// driver sees EOF instead of waiting on an adapter that will never exist.
 #[tokio::test]
-async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
+async fn spawn_adapter_refuses_what_it_cannot_serve_and_ends_the_stream() {
     let (mut server, mut rx) = server();
     let root = temp_project("adapter-tcp");
     open_project(&mut server, &mut rx, 1, &root).await;
@@ -960,9 +1071,10 @@ async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
                 2,
                 Request::SpawnAdapter {
                     proc: 9,
-                    lang: "go".into(),
-                    program: root.join("main").to_string_lossy().into_owned(),
+                    lang: "cobol".into(),
+                    program: root.join("main.cbl").to_string_lossy().into_owned(),
                     args: vec![],
+                    choices: Default::default(),
                 },
             )
             .await
@@ -983,7 +1095,7 @@ async fn spawn_adapter_refuses_tcp_langs_and_ends_the_stream() {
                 event: Event::Error { message, .. },
                 ..
             } => {
-                assert!(message.contains("TCP"), "{message}");
+                assert!(message.contains("no debug adapter"), "{message}");
                 refused = true;
                 Some(())
             }
@@ -2044,6 +2156,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 Request::SpawnLsp {
                     proc: 7,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2062,6 +2175,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 3,
                 Request::LspResolve {
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2094,6 +2208,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 Request::SpawnLsp {
                     proc: 9,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2122,6 +2237,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
             Request::SpawnLsp {
                 proc: 8,
                 language: "rust".into(),
+                choices: Default::default(),
             },
         )
         .await;
@@ -2147,6 +2263,7 @@ async fn repo_lsp_command_needs_a_pushed_approval() {
                 Request::SpawnLsp {
                     proc: 9,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2170,6 +2287,7 @@ async fn spawn_lsp_for_a_language_without_a_server_is_answered() {
     let spawn = Request::SpawnLsp {
         proc: 11,
         language: "klingon".into(),
+        choices: Default::default(),
     };
     assert!(server.handle(2, spawn).await.is_none());
     let (mut exited, mut reply) = (false, None);
@@ -2216,6 +2334,7 @@ async fn spawn_lsp_never_installs_without_consent() {
                 Request::SpawnLsp {
                     proc: 7,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2236,6 +2355,7 @@ async fn spawn_lsp_never_installs_without_consent() {
                 3,
                 Request::LspResolve {
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2268,6 +2388,7 @@ async fn lsp_install_refuses_an_install_edited_after_the_prompt() {
                 2,
                 Request::LspResolve {
                     language: "go".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2295,6 +2416,7 @@ async fn lsp_install_refuses_an_install_edited_after_the_prompt() {
                 Request::LspInstall {
                     language: "go".into(),
                     consent: shown.clone(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2528,6 +2650,7 @@ async fn open_project_kills_the_previous_projects_processes() {
 /// that window must buffer and reach the child's stdin once it exists — the
 /// stream starts at byte zero, never mid-way.
 #[tokio::test]
+#[cfg(unix)] // the stand-in server is a shell script
 async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
     let (mut server, mut rx) = server();
     let root = temp_project("spawn-race");
@@ -2546,6 +2669,7 @@ async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
                 2,
                 Request::LspResolve {
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -2577,6 +2701,7 @@ async fn input_pipelined_behind_spawn_lsp_reaches_the_child() {
                 Request::SpawnLsp {
                     proc: 11,
                     language: "rust".into(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -3224,6 +3349,7 @@ async fn agent_stop_ends_a_turn_mid_request() {
                     history: Vec::new(),
                     context: String::new(),
                     tools: Vec::new(),
+                    choices: Default::default(),
                 },
             )
             .await
@@ -3415,6 +3541,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
             history: Vec::new(),
             context: String::new(),
             tools: Vec::new(),
+            choices: Default::default(),
         },
     );
     provider.await_request();
@@ -3458,4 +3585,423 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// What the project's build leaves out is read where the project is: its
+/// Cargo packages' features, with the user's choices over them, and the Go
+/// tags they set.
+#[tokio::test]
+async fn build_facts_are_read_where_the_project_is() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("build-facts");
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\n[features]\ndefault = []\nfast = []\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let choices = clew_protocol::LanguageChoices {
+        rust: Some(clew_protocol::RustChoices {
+            features: vec!["fast".into()],
+            ..Default::default()
+        }),
+        go: Some(clew_protocol::GoChoices {
+            tags: vec!["e2e".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(
+        server
+            .handle(2, Request::BuildFacts { choices })
+            .await
+            .is_none()
+    );
+    let facts = match recv_reply(&mut rx, 2).await {
+        Event::BuildFacts { root: at, facts } => {
+            assert_eq!(at, root.to_string_lossy());
+            facts
+        }
+        other => panic!("expected BuildFacts, got {other:?}"),
+    };
+    let app = facts
+        .crates
+        .iter()
+        .find(|c| c.dir.is_empty())
+        .expect("the root crate");
+    assert!(app.known);
+    assert_eq!(app.on, ["default", "fast"]);
+    assert_eq!(facts.go_tags, Some(vec!["e2e".to_string()]));
+}
+
+/// The project's Python interpreters are listed where the project is, with
+/// the one its server is given — and a choice the user made that is gone is
+/// reported, not used.
+#[tokio::test]
+#[cfg(unix)]
+async fn language_options_are_listed_where_the_project_is() {
+    let (mut server, mut rx) = server();
+    let root = temp_project("python-envs");
+    let base = TempDir::new("python-envs-base");
+    std::fs::write(base.join("python3.12"), b"\x7fELF base").unwrap();
+    std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+    std::os::unix::fs::symlink(base.join("python3.12"), root.join(".venv/bin/python")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\n[features]\ndefault = []\nfast = []\n",
+    )
+    .unwrap();
+    open_project(&mut server, &mut rx, 1, &root).await;
+    let gone = "/no/such/env/bin/python".to_string();
+    assert!(
+        server
+            .handle(
+                2,
+                Request::LanguageOptions {
+                    languages: vec!["python".into(), "rust".into()],
+                    choices: clew_protocol::LanguageChoices {
+                        python: Some(gone.clone()),
+                        ..Default::default()
+                    },
+                },
+            )
+            .await
+            .is_none()
+    );
+    let options = match recv_reply(&mut rx, 2).await {
+        Event::LanguageOptions { root: at, options } => {
+            assert_eq!(at, root.to_string_lossy());
+            options
+        }
+        other => panic!("expected LanguageOptions, got {other:?}"),
+    };
+    let environments = options.python.expect("python was asked for");
+    let venv = root.join(".venv/bin/python").to_string_lossy().into_owned();
+    let first = &environments.candidates[0];
+    assert_eq!(
+        (first.kind, first.name.as_str(), first.interpreter.as_str()),
+        (
+            clew_protocol::PythonEnvKind::Project,
+            ".venv",
+            venv.as_str()
+        )
+    );
+    assert_eq!(
+        environments.in_effect.source,
+        clew_protocol::PythonSource::ProjectVenv
+    );
+    assert_eq!(
+        environments.in_effect.interpreter.as_deref(),
+        Some(venv.as_str())
+    );
+    assert_eq!(environments.in_effect.unusable_choice, Some(gone));
+    // The project's Cargo features, read on this host.
+    let rust = options.rust.expect("rust was asked for");
+    assert_eq!(rust.packages[0].name, "app");
+    assert_eq!(rust.packages[0].features, ["fast"]);
+    // A language not asked about is not listed.
+    assert_eq!(options.go, None);
+}
+
+/// A Ruby program on the server's host is debugged through the real binary:
+/// rdbg listens on that host's loopback, and clew-server's `dap-bridge`
+/// serves it over the process channel — frames both ways, the program held
+/// at a breakpoint, run on, its output sent as events. Needs Ruby's rdbg on
+/// the PATH.
+#[test]
+#[ignore = "needs Ruby's rdbg on the PATH; run explicitly"]
+fn a_remote_ruby_program_is_debugged_through_the_bridge() {
+    let root = temp_project("remote-rdbg");
+    let program = root.join("app.rb");
+    std::fs::write(&program, "x = 41\nx += 1\nputs \"answer #{x}\"\n").unwrap();
+    debug_remotely(&root, "ruby", &program, &program, 2, "answer 42");
+}
+
+/// A Go program on the server's host, through the bridge to delve: built,
+/// held at its breakpoint, run on, its output sent. Needs Go and delve on
+/// the PATH, of versions that agree.
+#[test]
+#[ignore = "needs Go and delve on the PATH; run explicitly"]
+fn a_remote_go_program_is_debugged_through_the_bridge() {
+    let root = temp_project("remote-delve");
+    std::fs::write(root.join("go.mod"), "module example.com/shop\n\ngo 1.21\n").unwrap();
+    let main = root.join("main.go");
+    std::fs::write(
+        &main,
+        "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tx := 41\n\tx++\n\tfmt.Println(\"answer\", x)\n}\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "go", &root, &main, 7, "answer 42");
+}
+
+/// clew-server's own adapters, run remotely: the server runs itself as the
+/// adapter (`php-debug`, `erlang-debug`, `haskell-debug`, `java-debug`) on
+/// the host where the program is. Each needs its language's tools.
+#[test]
+#[ignore = "needs php with Xdebug 3; run explicitly"]
+fn a_remote_php_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-php");
+    let program = root.join("app.php");
+    std::fs::write(&program, "<?php\n$x = 41;\n$x++;\necho \"answer $x\\n\";\n").unwrap();
+    debug_remotely(&root, "php", &program, &program, 3, "answer 42");
+}
+
+#[test]
+#[ignore = "needs Erlang/OTP; run explicitly"]
+fn a_remote_erlang_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-erlang");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let program = root.join("src/app.erl");
+    std::fs::write(
+        &program,
+        "-module(app).\n-export([main/1]).\n\nmain(_) ->\n    X = 41,\n    io:format(\"answer ~p~n\", [X + 1]).\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "erlang", &program, &program, 6, "answer 42");
+}
+
+#[test]
+#[ignore = "needs GHC's ghci; run explicitly"]
+fn a_remote_haskell_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-haskell");
+    let program = root.join("Main.hs");
+    std::fs::write(
+        &program,
+        "module Main where\n\nmain :: IO ()\nmain = do\n  let x = 41 + 1 :: Int\n  putStrLn (\"answer \" ++ show x)\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "haskell", &program, &program, 6, "answer 42");
+}
+
+#[test]
+#[ignore = "needs a JDK; run explicitly"]
+fn a_remote_java_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-java");
+    let program = root.join("App.java");
+    std::fs::write(
+        &program,
+        "public class App {\n    public static void main(String[] args) {\n        int x = 41;\n        x++;\n        System.out.println(\"answer \" + x);\n    }\n}\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "java", &program, &program, 4, "answer 42");
+}
+
+#[test]
+#[ignore = "needs node; run explicitly"]
+fn a_remote_node_program_is_debugged_by_clews_own_adapter() {
+    let root = temp_project("remote-node");
+    let program = root.join("app.js");
+    std::fs::write(
+        &program,
+        "let x = 41;\nx++;\nconsole.log(\"answer \" + x);\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "node", &program, &program, 2, "answer 42");
+}
+
+#[test]
+#[ignore = "needs zig and lldb-dap; run explicitly"]
+fn a_remote_zig_program_is_built_and_debugged_on_its_host() {
+    let root = temp_project("remote-zig");
+    let program = root.join("app.zig");
+    std::fs::write(
+        &program,
+        "const std = @import(\"std\");\n\npub fn main() void {\n    var x: i32 = 41;\n    x += 1;\n    std.debug.print(\"answer {d}\\n\", .{x});\n}\n",
+    )
+    .unwrap();
+    debug_remotely(&root, "native", &program, &program, 5, "answer 42");
+}
+
+#[test]
+#[ignore = "needs dotnet and netcoredbg; run explicitly"]
+fn a_remote_csharp_program_is_debugged_with_netcoredbg() {
+    let root = temp_project("remote-csharp");
+    std::fs::write(
+        root.join("App.csproj"),
+        "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <OutputType>Exe</OutputType>\n    <TargetFramework>net8.0</TargetFramework>\n  </PropertyGroup>\n</Project>\n",
+    )
+    .unwrap();
+    let source = root.join("Program.cs");
+    std::fs::write(
+        &source,
+        "using System;\n\nclass Program\n{\n    static void Main()\n    {\n        int x = 41;\n        x++;\n        Console.WriteLine($\"answer {x}\");\n    }\n}\n",
+    )
+    .unwrap();
+    let built = std::process::Command::new("dotnet")
+        .args(["build", "-c", "Debug", "--nologo"])
+        .current_dir(&root)
+        .env("DOTNET_CLI_TELEMETRY_OPTOUT", "1")
+        .env("DOTNET_NOLOGO", "1")
+        .output()
+        .unwrap();
+    assert!(
+        built.status.success(),
+        "{}",
+        String::from_utf8_lossy(&built.stdout)
+    );
+    let assembly = root.join("bin/Debug/net8.0/App.dll");
+    debug_remotely(&root, "csharp", &assembly, &source, 8, "answer 42");
+}
+
+/// Debug `program` (in `lang`) through a real clew-server process: held at
+/// `line` of `source`, its stack read there, run on to its end, `expected`
+/// among its output.
+fn debug_remotely(
+    root: &Path,
+    lang: &str,
+    program: &Path,
+    source: &Path,
+    line: i64,
+    expected: &str,
+) {
+    let mut server = Process::spawn();
+    server.send(
+        1,
+        Request::Hello {
+            protocol: PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+        },
+    );
+    server.wait_for("Ready", |msg| match msg {
+        ServerMessage::Reply {
+            id: 1,
+            event: Event::Ready { .. },
+            ..
+        } => Some(()),
+        _ => None,
+    });
+    server.send(
+        2,
+        Request::OpenProject {
+            root: root.to_string_lossy().into_owned(),
+        },
+    );
+    server.wait_for("the Tree", |msg| match msg {
+        ServerMessage::Reply {
+            id: 2,
+            event: Event::Tree { .. },
+            ..
+        } => Some(()),
+        _ => None,
+    });
+    server.send(
+        3,
+        Request::SpawnAdapter {
+            proc: 5,
+            lang: lang.into(),
+            program: program.to_string_lossy().into_owned(),
+            args: vec![],
+            choices: Default::default(),
+        },
+    );
+    let launch = server.wait_for("AdapterSpawned", |msg| match msg {
+        ServerMessage::Reply {
+            id: 3,
+            event: Event::AdapterSpawned { launch, .. },
+            ..
+        } => Some(launch),
+        ServerMessage::Reply { id: 3, event, .. } => panic!("refused: {event:?}"),
+        _ => None,
+    });
+    let launch: serde_json::Value = serde_json::from_str(&launch).unwrap();
+
+    let mut seq = 0;
+    let mut request = |server: &mut Process, command: &str, arguments: serde_json::Value| {
+        seq += 1;
+        let body = serde_json::json!({
+            "seq": seq, "type": "request", "command": command, "arguments": arguments,
+        })
+        .to_string();
+        let data = format!("Content-Length: {}\r\n\r\n{body}", body.len()).into_bytes();
+        server.send(100 + seq, Request::ProcessInput { proc: 5, data });
+        seq
+    };
+    let mut buffer: Vec<u8> = Vec::new();
+    // The next DAP message from the adapter, out of the process's output.
+    let next = |server: &Process, buffer: &mut Vec<u8>| -> serde_json::Value {
+        loop {
+            if let Some(end) = buffer.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header = String::from_utf8_lossy(&buffer[..end]).to_string();
+                let len: usize = header
+                    .trim()
+                    .strip_prefix("Content-Length:")
+                    .expect("a DAP header")
+                    .trim()
+                    .parse()
+                    .unwrap();
+                if buffer.len() >= end + 4 + len {
+                    let body = buffer[end + 4..end + 4 + len].to_vec();
+                    buffer.drain(..end + 4 + len);
+                    return serde_json::from_slice(&body).unwrap();
+                }
+            }
+            let data = server.wait_for("adapter output", |msg| match msg {
+                ServerMessage::Notification {
+                    event: Event::ProcessOutput { proc: 5, data },
+                    ..
+                } => Some(data),
+                ServerMessage::Notification {
+                    event: Event::ProcessExited { proc: 5, code },
+                    ..
+                } => panic!("the adapter exited ({code:?})"),
+                _ => None,
+            });
+            buffer.extend_from_slice(&data);
+        }
+    };
+
+    request(
+        &mut server,
+        "initialize",
+        serde_json::json!({"adapterID": "clew"}),
+    );
+    request(&mut server, "launch", launch);
+    let (mut configured, mut stopped_at, mut output) = (false, None, String::new());
+    while !(output.contains(expected) && stopped_at.is_some()) {
+        let message = next(&server, &mut buffer);
+        match (message["type"].as_str(), message["event"].as_str()) {
+            (Some("response"), _) if message["success"] == false => {
+                panic!("refused: {message}")
+            }
+            (Some("event"), Some("initialized")) if !configured => {
+                configured = true;
+                let source = serde_json::json!({ "path": source.to_string_lossy() });
+                request(
+                    &mut server,
+                    "setBreakpoints",
+                    serde_json::json!({ "source": source, "breakpoints": [{ "line": line }] }),
+                );
+                request(&mut server, "configurationDone", serde_json::json!({}));
+            }
+            (Some("event"), Some("stopped")) => {
+                let thread = message["body"]["threadId"].as_i64().unwrap_or(1);
+                request(
+                    &mut server,
+                    "stackTrace",
+                    serde_json::json!({ "threadId": thread }),
+                );
+                let frames = loop {
+                    let m = next(&server, &mut buffer);
+                    if m["command"] == "stackTrace" {
+                        break m;
+                    }
+                    if m["event"] == "output" {
+                        output.push_str(m["body"]["output"].as_str().unwrap_or(""));
+                    }
+                };
+                stopped_at = frames["body"]["stackFrames"][0]["line"].as_i64();
+                request(
+                    &mut server,
+                    "continue",
+                    serde_json::json!({ "threadId": thread }),
+                );
+            }
+            (Some("event"), Some("output")) if message["body"]["category"] == "stdout" => {
+                output.push_str(message["body"]["output"].as_str().unwrap_or(""));
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(stopped_at, Some(line), "held at the breakpoint");
+    assert!(output.contains(expected), "{output:?}");
 }

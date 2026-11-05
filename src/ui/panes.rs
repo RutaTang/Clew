@@ -9,7 +9,7 @@ pub(crate) fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> 
     container(inner)
         .width(Fill)
         .height(Fill)
-        .style(theme::editor)
+        .style(theme::on_sheet)
         .into()
 }
 
@@ -49,7 +49,11 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
             "No file open",
-            "Pick a file from the tree, or press ⌘P.",
+            if crate::keymap::MAC_KEYS {
+                "Pick a file from the tree, or press ⌘P."
+            } else {
+                "Pick a file from the tree, or press Ctrl+P."
+            },
             None,
         ))
         .on_press(Message::Editor(EditorMsg::PaneFocused(pane)))
@@ -208,7 +212,7 @@ pub(crate) fn time_travel_banner<'a>(
         text(short)
             .size(ts::BODY)
             .color(theme::accent())
-            .font(Font::MONOSPACE),
+            .font(crate::fonts::CODE),
         text(format!(
             "{}  ·  {}",
             c.author,
@@ -270,7 +274,7 @@ pub(crate) fn time_travel_code<'a>(
         hv.max_cols,
         app.font_size,
         lh,
-        theme::fg(),
+        theme::code_fg(),
         |(line, col)| Message::TimeTravel(TimeTravelMsg::SelectStart { line, col }),
         |(line, col)| Message::TimeTravel(TimeTravelMsg::SelectDrag { line, col }),
         |_, _| Message::Noop,
@@ -281,7 +285,7 @@ pub(crate) fn time_travel_code<'a>(
     .selection(hv.selection_ordered())
     .sticky(sticky)
     .folds(hv.visible_rows(), &hv.fold_header_set, &hv.collapsed)
-    .indent_guides(true)
+    .indent_guides(app.show_indent_guides)
     .git_gutter(hv.git.as_deref());
     // The live pane's scroll id, so the scroll operations aimed at the active
     // pane reach this view too. An id does not carry widget state across the
@@ -372,13 +376,13 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
             chrome_tip(
                 step(Glyph::ArrowLeft, older),
                 "Older commit",
-                Some("⌘←".to_string())
+                Some(crate::keymap::local_keys("⌘←"))
             ),
             sl,
             chrome_tip(
                 step(Glyph::ArrowRight, newer),
                 "Newer commit",
-                Some("⌘→".to_string())
+                Some(crate::keymap::local_keys("⌘→"))
             ),
             text(format!("{} / {}", tt.idx + 1, n))
                 .size(ts::SMALL)
@@ -516,7 +520,7 @@ pub(crate) fn diff_view<'a>(
         };
         let mut cell = container(
             text(run.text.as_str())
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .size(app.font_size)
                 .color(fg)
                 .wrapping(Wrapping::None),
@@ -627,7 +631,7 @@ pub(crate) fn measured_mono_advance(size: f32) -> Option<f32> {
         bounds: iced::Size::INFINITE,
         size: size.into(),
         line_height: text::LineHeight::Absolute(size.into()),
-        font: Font::MONOSPACE,
+        font: crate::fonts::CODE,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,
         shaping: text::Shaping::Basic,
@@ -799,8 +803,9 @@ pub(crate) fn markdown_pane<'a>(
     v: &Viewer,
     items: &'a [iced::widget::markdown::Item],
 ) -> Element<'a, Message> {
-    let doc = iced::widget::markdown::view(items, theme::markdown_settings())
-        .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
+    let doc =
+        iced::widget::markdown::view(items, theme::markdown_settings_at(theme::DOCUMENT_SIZE))
+            .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
     let body = container(doc).padding([16, 28]).max_width(920);
     mouse_area(reader_scroll(
         scrollable(body)
@@ -855,6 +860,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         .filter(|(p, _)| *p == v.abs)
         .map(|(_, line)| *line);
 
+    let frame = app.window_frame;
     // The block cursor shows only on the active pane while the code view has
     // keyboard focus.
     let cursor = if pane == app.proj.active && app.code_focused {
@@ -868,16 +874,18 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         v.max_cols,
         app.font_size,
         app.line_height(),
-        theme::fg(),
+        theme::code_fg(),
         move |(line, col)| Message::Editor(EditorMsg::SelectStart { pane, line, col }),
         move |(line, col)| Message::Editor(EditorMsg::SelectDrag { pane, line, col }),
+        // The pointer is in the window's coordinates; what is placed at it
+        // is inside the window's frame.
         move |(line, col), at| {
             Message::Hover(HoverMsg::ContextMenuOpened {
                 pane,
                 line,
                 col,
-                x: at.x,
-                y: at.y,
+                x: at.x - frame,
+                y: at.y - frame,
             })
         },
     )
@@ -885,6 +893,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .lines_generation(v.lines_generation())
     .selection(v.selection_ordered())
     .cursor(cursor)
+    .reading_line(
+        (pane == app.proj.active)
+            .then_some(v.caret)
+            .flatten()
+            .map(|(line, _)| line),
+    )
     .highlights(app.code_highlights(pane, v))
     .sticky(app.sticky_headers(v))
     .bookmarks(marked)
@@ -894,6 +908,24 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .debug_current(debug_current)
     .inlay_hints(v.inlay_hints(), theme::dim())
     .inactive(v.inactive_lines())
+    // The line that says why the lines under it are left out, with the
+    // reason beside it.
+    .inactive_heads(v.inactive_heads(), move |pred| {
+        use crate::inactive::CfgReason;
+        Some(
+            match crate::inactive::rust_cfg_reason(
+                pred,
+                &app.proj.reading_target,
+                &app.proj.build_facts,
+                Some(&v.rel),
+            )? {
+                CfgReason::Target(target) => {
+                    format!("not built for {}", super::statusbar::target_name(&target))
+                }
+                CfgReason::Features => "not built with these features".to_string(),
+            },
+        )
+    })
     // The summary of those two and the folds, kept current by the viewer's
     // setters — else the view re-derives it, hashing every chip, per build.
     .annotations(v.annotations())
@@ -905,20 +937,22 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
             line,
         })
     })
-    .indent_guides(true)
+    .indent_guides(app.show_indent_guides)
     .git_gutter(v.git.as_deref())
-    .blame(if pane == app.proj.active && app.code_focused {
-        app.blame_annotation(v)
-    } else {
-        None
-    })
+    .blame(
+        if pane == app.proj.active && app.code_focused && app.show_inline_blame {
+            app.blame_annotation(v)
+        } else {
+            None
+        },
+    )
     .on_hover(move |(line, col), at| {
         Message::Hover(HoverMsg::Requested {
             pane,
             line,
             col,
-            x: at.x,
-            y: at.y,
+            x: at.x - frame,
+            y: at.y - frame,
         })
     })
     .on_hover_end(|| Message::Hover(HoverMsg::Cleared));
@@ -935,8 +969,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         code = code.find_matches(&app.proj.find.matches, app.proj.find.current);
     }
 
+    // Scrolling runs on past the last line until it is the first in view, so
+    // a file's end reads as any other part of it: under the line read, with
+    // room after it, as the design shows the end of `lib.rs`.
+    let overscroll = (v.viewport_h - app.line_height()).max(0.0);
     let scroller = reader_scroll(
-        scrollable(code)
+        scrollable(column![code, space().height(overscroll)])
             .id(code_scroll_id(pane))
             .on_scroll(move |viewport| Message::Editor(EditorMsg::Scrolled(pane, viewport)))
             .direction(both_scroll())
@@ -960,8 +998,17 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     } else {
         None
     };
-    column![banner.unwrap_or_else(slot), scroller].into()
+    // The design's breath between the sheet's header and the first line.
+    column![
+        banner.unwrap_or_else(slot),
+        space().height(CODE_TOP_PAD),
+        scroller
+    ]
+    .into()
 }
+
+/// Room above the code's first line.
+const CODE_TOP_PAD: f32 = 6.0;
 
 /// A one-line file summary pinned at the top of the code view.
 pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
@@ -1003,32 +1050,632 @@ pub(crate) fn right_panel_shown(app: &App) -> bool {
         && app.active_viewer().is_some()
 }
 
-/// The right sidebar: a tabbed panel with an Outline tab and an Explain tab
-/// (mirrors the left sidebar's tabs). Hidden on narrow/split windows or with no
-/// file open.
+/// The reading panel — the margin beside the code: notes on what is read
+/// (the note on the function the caret is in, raised as a card, over this
+/// file's symbols with theirs), the calls around that function, and its
+/// history. Hidden on narrow/split windows or with no file open.
 pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
     if !right_panel_shown(app) {
         return None;
     }
-
-    // One cursor-following reading-context panel — no tab-dance. The top follows
-    // the caret: the current function's summary, call-flow and quick actions.
-    // The bottom is the file's outline, an annotated table of contents with the
-    // current symbol highlighted, so "where am I" and "what's around me" sit
-    // together.
-    // Equal split: the explanation (which can stream several blocks) gets as much
-    // room as the outline, rather than being squeezed into the smaller share.
-    let context = container(explain_content(app)).height(iced::Length::FillPortion(1));
-    let outline = column![section_header("OUTLINE"), outline_content(app)]
-        .height(iced::Length::FillPortion(1));
-
+    let body: Element<'_, Message> = match app.margin_tab {
+        // The conversation, while it is kept here.
+        crate::MarginTab::Ask if super::askfloat::ask_in_margin(app) => {
+            let height = app.window_height
+                - crate::ui::TOOLBAR_H
+                - crate::ui::STATUSBAR_H
+                - crate::ui::sheet::sheet_header_height(app);
+            super::askfloat::ask_margin(app, height)
+        }
+        crate::MarginTab::Notes | crate::MarginTab::Ask => margin_notes(app),
+        crate::MarginTab::Calls => margin_calls(app),
+        crate::MarginTab::History => margin_history(app),
+    };
     Some(
-        container(column![context, hairline(), outline])
+        container(body)
             .width(Length::Fixed(app.right_width))
             .height(Fill)
-            .style(theme::panel)
+            .style(theme::on_sheet)
             .into(),
     )
+}
+
+/// Height given to a note beside the code: its name and up to four lines
+/// of what it says. Every note is as tall, so each can be placed level
+/// with its function before it is drawn.
+const NOTE_H: f32 = 104.0;
+/// Height of the note raised as a card: the one on what the caret is in.
+const ACTIVE_NOTE_H: f32 = 193.0;
+/// Room kept between notes that would otherwise overlap.
+const NOTE_GAP: f32 = 8.0;
+/// How far the raised card reaches above its function's first line: the
+/// design's 9, and the pixel of the edge it draws round itself (outside its
+/// box, where iced draws a border inside), so its name is where the
+/// design's is.
+const ACTIVE_NOTE_LIFT: f32 = 10.0;
+/// The raised card's edge: the design draws it as a ring round the card.
+const NOTE_EDGE: f32 = 1.0;
+
+/// The margin's Notes: clew's note on each function of the open file,
+/// level with the function in the code; the note on the one the caret is
+/// in raised as a card, with its calls, its history, and a way to ask
+/// about it. Between functions, the file's own note heads the margin.
+fn margin_notes(app: &App) -> Element<'_, Message> {
+    use crate::explain::Node;
+    let Some(v) = app.active_viewer() else {
+        return slot();
+    };
+    let active = app.proj.explain.view.as_ref();
+    let ordinals = crate::outline::fn_ordinals(&v.symbols);
+    let function_node = |sym: &crate::outline::Symbol, ordinal: u32| Node::Function {
+        file: v.abs.clone(),
+        name: sym.name.clone(),
+        ordinal,
+    };
+    let Some(active) = active else {
+        // Nothing under the caret, and nothing of this file explained: say
+        // how a note comes to be.
+        let any_note = v
+            .symbols
+            .iter()
+            .zip(&ordinals)
+            .any(|(sym, &o)| app.proj.explain.cache.contains_key(&function_node(sym, o)));
+        if !any_note {
+            return compact_empty_state(
+                Glyph::Lightbulb,
+                if crate::keymap::MAC_KEYS {
+                    "Move the cursor into a function, or ⌘-click a file or folder."
+                } else {
+                    "Move the cursor into a function, or Ctrl+click a file or folder."
+                },
+            );
+        }
+        return notes_beside_code(app, v, None, ordinals);
+    };
+    // A folder, or another file, ⌘-clicked: its note, whole, at the top.
+    let elsewhere = match active {
+        Node::Function { file, .. } | Node::File(file) => *file != v.abs,
+        Node::Folder(_) => true,
+    };
+    if elsewhere {
+        return container(
+            container(explain_content(app))
+                .width(Fill)
+                .max_height((app.window_height * 0.6).max(160.0))
+                .style(theme::note_card),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 12.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .into();
+    }
+    notes_beside_code(app, v, Some(active), ordinals)
+}
+
+/// The notes of [`margin_notes`], each level with its function: `active`
+/// is what the caret is in, raised as a card.
+fn notes_beside_code<'a>(
+    app: &'a App,
+    v: &'a Viewer,
+    active: Option<&'a crate::explain::Node>,
+    ordinals: Vec<u32>,
+) -> Element<'a, Message> {
+    use crate::explain::Node;
+    iced::widget::responsive(move |size| {
+        let lh = app.line_height();
+        // The code runs down to the margin's foot; what is above it in the
+        // pane (a banner, the find bar) is the difference in height.
+        let offset = (size.height - v.viewport_h).max(0.0);
+        let y_of =
+            |line1: usize| offset + v.row_of(line1.saturating_sub(1)) as f32 * lh - v.scroll_y;
+        let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
+        if matches!(active, Some(Node::File(_))) {
+            let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
+            notes.push((
+                0.0,
+                ACTIVE_NOTE_H,
+                active_note(app, name, "file".into(), NoteOf::File),
+            ));
+        }
+        for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
+            if !matches!(sym.kind.as_str(), "function" | "method") {
+                continue;
+            }
+            // What the caret is in (in this file, the margin's own).
+            let is_active = matches!(
+                active,
+                Some(Node::Function { name, ordinal: o, .. })
+                    if *name == sym.name && *o == ordinal
+            );
+            let y = y_of(sym.line);
+            let (h, lift) = if is_active {
+                (ACTIVE_NOTE_H, ACTIVE_NOTE_LIFT)
+            } else {
+                (NOTE_H, 0.0)
+            };
+            // Only what is in view is looked up.
+            if y + h < 0.0 || y - lift > size.height {
+                continue;
+            }
+            let node = Node::Function {
+                file: v.abs.clone(),
+                name: sym.name.clone(),
+                ordinal,
+            };
+            let cached = app.proj.explain.cache.get(&node);
+            if !is_active && cached.is_none() {
+                continue;
+            }
+            let meta = format!("{} · line {}", short_kind(&sym.kind), sym.line);
+            let note = if is_active {
+                active_note(
+                    app,
+                    sym.name.clone(),
+                    meta,
+                    NoteOf::Function { sym, ordinal },
+                )
+            } else {
+                let summary = cached
+                    .map(|c| crate::app::shown_summary(c).into_owned())
+                    .unwrap_or_default();
+                plain_note(sym.name.clone(), meta, summary, sym.line)
+            };
+            notes.push(((y - lift).max(0.0), h, note));
+        }
+        notes.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Each note level with its function, or just under the one above
+        // when they would overlap.
+        // `end` is how far down the column has laid out; `floor` the highest
+        // the next note may start, a gap under the one before.
+        let mut col = Column::new();
+        let (mut end, mut floor) = (0.0_f32, 0.0_f32);
+        for (y, h, note) in notes {
+            let top = y.max(floor);
+            col = col.push(space().height(Length::Fixed(top - end)));
+            col = col.push(
+                container(note)
+                    .height(Length::Fixed(h))
+                    .width(Fill)
+                    .clip(true),
+            );
+            end = top + h;
+            floor = end + NOTE_GAP;
+        }
+        // The design's 4 and 12 to a note's box, less the edge the raised
+        // card draws outside its own: a plain note pads that pixel back.
+        container(col)
+            .width(Fill)
+            .height(Fill)
+            .clip(true)
+            .padding(Padding {
+                top: 0.0,
+                right: 12.0 - NOTE_EDGE,
+                bottom: 0.0,
+                left: 4.0 - NOTE_EDGE,
+            })
+            .into()
+    })
+    .into()
+}
+
+/// A note's head: the name it is about (as code, for a function) and what
+/// kind of thing that is, where.
+fn note_head<'a>(name: String, meta: String, code: bool, raised: bool) -> Element<'a, Message> {
+    // Each in its face's own line height, as the design sets the head: the
+    // row as tall as the taller, the two on one baseline.
+    row![
+        text(name)
+            .size(NOTE_NAME_SIZE)
+            .line_height(if code {
+                ts::normal_line_code(NOTE_NAME_SIZE)
+            } else {
+                ts::normal_line(NOTE_NAME_SIZE)
+            })
+            .font(if code {
+                crate::fonts::CODE_SEMIBOLD
+            } else {
+                crate::fonts::UI_SEMIBOLD
+            })
+            .color(if raised {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            })
+            .wrapping(Wrapping::None),
+        space().width(Fill),
+        text(meta)
+            .size(ts::SMALL)
+            .line_height(ts::normal_line(ts::SMALL))
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// A note's name, over what is said of it.
+const NOTE_NAME_SIZE: f32 = 12.0;
+
+/// A note on a function the caret is not in: what clew says of it, a
+/// click away from the function itself.
+fn plain_note<'a>(
+    name: String,
+    meta: String,
+    summary: String,
+    line: usize,
+) -> Element<'a, Message> {
+    button(
+        column![
+            note_head(name, meta, true, false),
+            text(summary)
+                .size(super::explain_view::NOTE_SIZE)
+                .line_height(super::explain_view::NOTE_LINE_HEIGHT)
+                .color(theme::fg_muted()),
+        ]
+        .spacing(6),
+    )
+    .style(theme::menu_row)
+    .width(Fill)
+    .height(Fill)
+    .padding([3.0, 14.0 + NOTE_EDGE])
+    .on_press(Message::Editor(EditorMsg::OutlineJump(line)))
+    .into()
+}
+
+/// The note on what the caret is in, raised as a card: what clew says of
+/// it (as it streams in), and what to do next — its calls, its history,
+/// a question about it, and, for a function, the explanation block by
+/// block, or written afresh.
+/// What a raised note is about: a function of the open file, or the file.
+#[derive(Clone, Copy)]
+enum NoteOf<'a> {
+    Function {
+        sym: &'a crate::outline::Symbol,
+        ordinal: u32,
+    },
+    File,
+}
+
+/// How the note on a function counts what leans on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Leaning {
+    /// The places in the project that call it: each call site naming it in
+    /// a function the graph has calling it.
+    References(usize),
+    /// The functions that call it, when their call sites are not known
+    /// here (a remote project's graph comes without them).
+    Callers(usize),
+}
+
+impl Leaning {
+    /// What the note says: "21 references", "1 caller".
+    pub(crate) fn label(self) -> String {
+        match self {
+            Leaning::References(1) => "1 reference".to_string(),
+            Leaning::References(n) => format!("{n} references"),
+            Leaning::Callers(1) => "1 caller".to_string(),
+            Leaning::Callers(n) => format!("{n} callers"),
+        }
+    }
+}
+
+/// How much of the project leans on the function `name` (the `ordinal`th
+/// of that name in `file`): the call sites naming it in each function the
+/// graph has calling it, or, where those functions' call sites are not
+/// known, how many such functions there are.
+pub(crate) fn leaning_on(
+    app: &App,
+    file: &std::path::Path,
+    name: &str,
+    ordinal: u32,
+) -> Option<Leaning> {
+    let g = &app.proj.project_calls.graph;
+    let id = g.id_of_key(file, name, ordinal)?;
+    let callers = g.callers_of(id);
+    // A caller by its file and name: call sites say which function they
+    // are in by its name alone, so two callers of one name in one file
+    // would count each other's calls.
+    let callers: std::collections::BTreeSet<(&std::path::Path, &str)> = callers
+        .iter()
+        .map(|&c| {
+            let node = g.node(c);
+            (node.file.as_path(), node.name.as_str())
+        })
+        .collect();
+    let mut sites = 0;
+    for (caller_file, caller) in &callers {
+        let Some(calls) = app.proj.calls_by_file.get(*caller_file) else {
+            return Some(Leaning::Callers(g.callers_of(id).len()));
+        };
+        sites += calls
+            .calls
+            .iter()
+            .filter(|s| s.callee == name && s.caller.as_deref() == Some(*caller))
+            .count();
+    }
+    Some(Leaning::References(sites))
+}
+
+/// When lines `first..=last` (1-based) of the open file last changed, as
+/// its blame has it: the newest of their commits — or `None` with no blame,
+/// and "Uncommitted" (`Some(None)`) when one of them is not committed yet.
+fn last_changed(v: &Viewer, first: usize, last: usize) -> Option<Option<i64>> {
+    let git = v.git.as_ref()?;
+    let lines = git
+        .blame
+        .get(first.saturating_sub(1)..last.min(git.blame.len()))?;
+    if lines.is_empty() {
+        return None;
+    }
+    if lines.iter().any(|b| b.uncommitted) {
+        return Some(None);
+    }
+    Some(lines.iter().map(|b| b.time).max())
+}
+
+/// A commit's day, as a reader says it: "Nov 4", with its year when that
+/// is not this one ("Nov 4, 2024"). In UTC.
+pub(crate) fn short_date(time: i64, now: i64) -> String {
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    fn civil(t: i64) -> (i64, u32, u32) {
+        let z = t.div_euclid(86_400) + 719_468;
+        let era = z.div_euclid(146_097);
+        let doe = z.rem_euclid(146_097);
+        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+        let y = yoe + era * 400 + i64::from(m <= 2);
+        (y, m, d)
+    }
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (y, m, d) = civil(time);
+    let month = MONTHS[(m - 1) as usize];
+    if y == civil(now).0 {
+        format!("{month} {d}")
+    } else {
+        format!("{month} {d}, {y}")
+    }
+}
+
+fn active_note<'a>(
+    app: &'a App,
+    name: String,
+    meta: String,
+    of: NoteOf<'a>,
+) -> Element<'a, Message> {
+    let code = matches!(of, NoteOf::Function { .. });
+    let action = |glyph: Glyph, label: String, accent: bool, msg: Message| {
+        let tint = if accent {
+            theme::accent()
+        } else {
+            theme::fg_muted()
+        };
+        // A button lays its content out at its top: the row is given the
+        // button's height to sit in the middle of.
+        button(
+            row![
+                glyph::icon(glyph, tint, 13.0),
+                text(label)
+                    .size(NOTE_ACTION_SIZE)
+                    .font(crate::fonts::in_control(if accent {
+                        crate::fonts::UI_SEMIBOLD
+                    } else {
+                        crate::fonts::UI_MEDIUM
+                    }))
+                    .color(tint),
+            ]
+            .spacing(6)
+            .height(Fill)
+            .align_y(iced::Center),
+        )
+        .style(theme::icon_button(false))
+        .height(NOTE_ACTION_H)
+        .padding([0.0, NOTE_ACTION_PAD_X])
+        .on_press(msg)
+    };
+    // How much of the project leans on it, and when it last changed — each
+    // a way into the margin's tab that says more.
+    let v = app.active_viewer();
+    let (leaning, changed) = match (of, v) {
+        (NoteOf::Function { sym, ordinal }, Some(v)) => (
+            leaning_on(app, &v.abs, &sym.name, ordinal),
+            last_changed(v, sym.line, sym.end_line),
+        ),
+        (NoteOf::File, Some(v)) => (None, last_changed(v, 1, usize::MAX)),
+        _ => (None, None),
+    };
+    let calls_label = leaning.map_or_else(|| "Calls".to_string(), Leaning::label);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    let history_label = match changed {
+        Some(Some(time)) => short_date(time, now),
+        Some(None) => "Uncommitted".to_string(),
+        None => "History".to_string(),
+    };
+    let actions = row![
+        action(
+            Glyph::Network,
+            calls_label,
+            false,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
+        ),
+        action(
+            Glyph::Clock,
+            history_label,
+            false,
+            Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
+        ),
+        action(
+            Glyph::Message,
+            "Ask".into(),
+            true,
+            Message::Ask(AskMsg::Suggested(format!(
+                "What does `{name}` in {} do, and why is it written this way?",
+                app.active_viewer().map_or("", |v| v.rel.as_str())
+            ))),
+        ),
+    ]
+    .spacing(2)
+    .align_y(iced::Center);
+    let said = scrollable(
+        Column::with_children(super::explain_view::render_note(
+            app,
+            &app.proj.explain.prepared,
+        ))
+        .spacing(6)
+        .width(Fill),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill);
+    // The actions run on to a second line when the card is too narrow for
+    // them on one. Their icons line up with the text above: the buttons
+    // reach out into the card's padding by their own.
+    let actions = actions.wrap().vertical_spacing(2);
+    let inset = iced::padding::left(NOTE_ACTION_PAD_X);
+    container(
+        column![
+            container(column![note_head(name, meta, code, true), said].spacing(6))
+                .padding(inset)
+                .height(Fill),
+            actions,
+        ]
+        .spacing(10),
+    )
+    .width(Fill)
+    .height(Fill)
+    // The design's 12 and 14, inside the edge iced draws in the card's box.
+    .padding(Padding {
+        top: 12.0 + NOTE_EDGE,
+        right: 14.0 + NOTE_EDGE,
+        bottom: 12.0 + NOTE_EDGE,
+        left: 14.0 + NOTE_EDGE - NOTE_ACTION_PAD_X,
+    })
+    .style(theme::note_card)
+    .into()
+}
+
+/// A raised note's actions: their text size, height, and the padding either
+/// side of what they say.
+const NOTE_ACTION_SIZE: f32 = 12.0;
+const NOTE_ACTION_H: f32 = 26.0;
+const NOTE_ACTION_PAD_X: f32 = 7.0;
+
+/// The margin's Calls: who calls the function the caret is in, and what it
+/// calls — each a jump — or what to do to see them.
+fn margin_calls(app: &App) -> Element<'_, Message> {
+    let node = app
+        .proj
+        .explain
+        .view
+        .as_ref()
+        .filter(|n| matches!(n, crate::explain::Node::Function { .. }));
+    let Some(node) = node else {
+        return compact_empty_state(
+            Glyph::CallGraph,
+            "Move the cursor into a function to see who calls it and what it calls.",
+        );
+    };
+    let rows = call_flow_rows(app, node);
+    let open = button(
+        row![
+            glyph::icon(Glyph::CallGraph, theme::fg_muted(), 14.0),
+            text("Open the call hierarchy").size(ts::BODY),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .style(theme::menu_row)
+    .width(Fill)
+    .padding([6, 8])
+    .on_press(Message::Window(WindowMsg::SidebarTabPicked(
+        SidebarTab::Calls,
+    )));
+    scrollable(
+        column![Column::with_children(rows).spacing(8).width(Fill), open,]
+            .spacing(10)
+            .padding(Padding {
+                top: 2.0,
+                right: 12.0,
+                bottom: 10.0,
+                left: 12.0,
+            }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
+    .into()
+}
+
+/// The margin's History: the ways into how this code came to be.
+fn margin_history(app: &App) -> Element<'_, Message> {
+    let in_function = matches!(
+        app.proj.explain.view,
+        Some(crate::explain::Node::Function { .. })
+    );
+    let row_of = |glyph: Glyph, title: &'static str, detail: &'static str, msg: Message| {
+        button(
+            row![
+                container(glyph::icon(glyph, theme::fg_muted(), 15.0)).padding([2, 0]),
+                column![
+                    text(title).size(ts::BASE).color(theme::fg()),
+                    text(detail).size(ts::SMALL).color(theme::dim()),
+                ]
+                .spacing(2),
+            ]
+            .spacing(10)
+            .align_y(iced::alignment::Vertical::Top),
+        )
+        .style(theme::menu_row)
+        .width(Fill)
+        .padding([8, 10])
+        .on_press(msg)
+    };
+    let mut rows = Column::new().spacing(2);
+    if in_function {
+        rows = rows.push(row_of(
+            Glyph::TimeTravel,
+            "This function through time",
+            "Scrub its history, commit by commit.",
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
+        ));
+    }
+    rows = rows
+        .push(row_of(
+            Glyph::TimeTravel,
+            "This file through time",
+            "Scrub the whole file back through its commits.",
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
+        ))
+        .push(row_of(
+            Glyph::Info,
+            "Why is this line here?",
+            "The commits that shaped the caret's line, explained.",
+            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+        ))
+        .push(row_of(
+            Glyph::Diff,
+            "Changes since the last commit",
+            "What is new in this file, in the reader.",
+            Message::Editor(EditorMsg::ToggleDiff),
+        ));
+    container(rows)
+        .padding(Padding {
+            top: 2.0,
+            right: 8.0,
+            bottom: 8.0,
+            left: 8.0,
+        })
+        .into()
 }
 
 /// A 1px horizontal divider spanning the panel width.
@@ -1075,13 +1722,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         return space().into();
     };
     if v.symbols.is_empty() {
-        return container(
-            text(empty_outline_note(v.lang_key))
-                .size(ts::SMALL)
-                .color(theme::dim()),
-        )
-        .padding(10)
-        .into();
+        return compact_empty_state(Glyph::List, empty_outline_note(v.lang_key));
     }
     // The symbol the reading cursor is currently inside, to highlight its row.
     let current = match &app.proj.explain.view {

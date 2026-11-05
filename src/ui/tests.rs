@@ -64,6 +64,7 @@ fn reader_app() -> App {
 
 /// A headless renderer, made the way `iced_test`'s simulator makes one.
 fn renderer() -> iced::Renderer {
+    crate::fonts::load();
     iced_test::futures::futures::executor::block_on(
         <iced::Renderer as iced::advanced::renderer::Headless>::new(
             Font::with_name("Fira Sans"),
@@ -222,6 +223,14 @@ fn panels_coming_and_going_never_reset_the_code_scroll() {
             Box::new(|a| a.show_bottom = true),
         ),
         (
+            "opening the Ask card",
+            Box::new(|a| a.ask_view = crate::AskView::Compact),
+        ),
+        (
+            "making Ask large",
+            Box::new(|a| a.ask_view = crate::AskView::Expanded),
+        ),
+        (
             "the update banner appearing",
             Box::new(|a| {
                 a.update.available = Some(crate::AvailableUpdate {
@@ -249,6 +258,7 @@ fn panels_coming_and_going_never_reset_the_code_scroll() {
                 a.show_file_banner = false;
                 a.show_left_sidebar = false;
                 a.show_bottom = false;
+                a.ask_view = crate::AskView::Closed;
                 a.update.available = None;
                 a.show_right_panel = false;
                 a.show_tools_menu = false;
@@ -385,7 +395,8 @@ fn a_minimap_drag_ends_with_its_band() {
     let mut app = reader_app();
     app.show_minimap = true;
     let mut renderer = renderer();
-    let on_band = mouse::Cursor::Available(Point::new(1250.0, 400.0));
+    let band_x = WINDOW.width - super::STRIP_W - super::SHEET_GAP - 28.0;
+    let on_band = mouse::Cursor::Available(Point::new(band_x, 400.0));
     let scrolled = |messages: &[Message]| {
         messages
             .iter()
@@ -404,7 +415,7 @@ fn a_minimap_drag_ends_with_its_band() {
     let (cache, _, _) = turn(&app, cache, &mut renderer, &release, on_band);
     // Back, and the pointer moves over it.
     app.show_minimap = true;
-    let elsewhere = Point::new(1250.0, 500.0);
+    let elsewhere = Point::new(band_x, 500.0);
     let moved = [Event::Mouse(mouse::Event::CursorMoved {
         position: elsewhere,
     })];
@@ -1307,23 +1318,21 @@ fn an_empty_call_graph_says_what_is_happening() {
 /// computed with.
 #[test]
 fn the_tutorial_regions_start_under_what_is_drawn_above_them() {
-    let mut app = blank_app();
+    let mut app = reader_app();
     app.window_width = WINDOW.width;
     app.window_height = WINDOW.height;
     app.show_left_sidebar = true;
     app.show_bottom = false;
-    let first_tab = super::SIDEBAR_TABS[0].0.to_string();
     let check = |app: &App| {
-        let region = super::region_rect(app, crate::app::tutorial::Anchor::Sidebar)
-            .expect("the sidebar is shown");
+        let region = super::region_rect(app, crate::app::tutorial::Anchor::FileTools)
+            .expect("the sheet's header is shown");
         let mut sim = sim_of(app);
-        let wanted = first_tab.clone();
-        let tab = text_at(&mut sim, move |t| t == wanted, 0).expect("the sidebar's tabs");
+        let name = text_at(&mut sim, |t| t == "lib.rs", 0).expect("the sheet's header");
         assert!(
-            tab.y >= region.y && tab.y - region.y <= 10.0,
-            "the region starts at {} but the sidebar's first tab is drawn at {}",
+            name.y >= region.y && name.y - region.y <= super::SHEET_HEADER_ROW_H,
+            "the region starts at {} but the header's name is drawn at {}",
             region.y,
-            tab.y
+            name.y
         );
         let banner = text_at(&mut sim, |t| t.contains("is available"), 0);
         (region, banner)
@@ -1445,68 +1454,88 @@ fn the_overview_map_caption_follows_its_mode() {
     }
 }
 
-/// E2-12: the toolbar geometry the tutorial's spotlight places its holes with
-/// is checked against the DRAWN toolbar — a click at each computed icon
-/// center reaches that icon's own action — not re-derived from the formula it
-/// is computed by.
+/// E2-12: the chrome geometry the tutorial's spotlight places its holes with
+/// is checked against the DRAWN chrome — a click at each computed strip
+/// tool's centre reaches that tool's own action, one at the chat field's
+/// centre opens the conversation — not re-derived from the formula it is
+/// computed by.
 #[test]
-fn the_toolbar_geometry_matches_what_is_drawn() {
-    use super::{CORE_TOOLS, TOOLBAR_H, toolbar_icon_center_x, toolbar_more_center_x};
+fn the_chrome_geometry_matches_what_is_drawn() {
+    use super::{StripTool, strip_tool_center};
+    /// Whether a message is the one a tool sends.
+    type Sends = fn(&Message) -> bool;
     let app = reader_app();
-    let expected: [fn(&Message) -> bool; CORE_TOOLS] = [
-        |m| matches!(m, Message::Overview(crate::OverviewMsg::Show)),
-        |m| matches!(m, Message::Overview(crate::OverviewMsg::ShowStats)),
-        |m| matches!(m, Message::Ask(AskMsg::Toggle)),
-        |m| matches!(m, Message::Debug(DebugMsg::Start)),
-        |m| {
+    let expected: [(StripTool, Sends); 9] = [
+        (StripTool::Overview, |m| {
+            matches!(m, Message::Overview(crate::OverviewMsg::Show))
+        }),
+        (StripTool::Stats, |m| {
+            matches!(m, Message::Overview(crate::OverviewMsg::ShowStats))
+        }),
+        (StripTool::Debug, |m| {
+            matches!(m, Message::Debug(DebugMsg::Start))
+        }),
+        (StripTool::CallGraph, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls))
             )
-        },
-        |m| {
+        }),
+        (StripTool::ImportGraph, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports))
             )
-        },
-        |m| {
+        }),
+        (StripTool::TypeMap, |m| {
             matches!(
                 m,
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes))
             )
-        },
-        |m| matches!(m, Message::Settings(crate::SettingsMsg::Open)),
+        }),
+        (StripTool::ProjectMaps, |m| {
+            matches!(
+                m,
+                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps))
+            )
+        }),
+        (StripTool::More, |m| {
+            matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))
+        }),
+        (StripTool::Settings, |m| {
+            matches!(m, Message::Settings(crate::SettingsMsg::Open))
+        }),
     ];
-    let click_at = |x: f32| {
+    let click_at = |at: Point| {
         let mut sim = sim_of(&app);
-        sim.point_at(Point::new(x, TOOLBAR_H / 2.0));
+        sim.point_at(at);
         let _ = sim.simulate(iced_test::simulator::click());
         sent_by(sim).into_iter().collect::<Vec<_>>()
     };
-    for (i, is_expected) in expected.iter().enumerate() {
-        let sent = click_at(toolbar_icon_center_x(WINDOW.width, i));
+    for (tool, is_expected) in expected {
+        let sent = click_at(strip_tool_center(&app, tool));
         assert!(
             sent.iter().any(is_expected),
-            "icon {i}'s computed center clicked {sent:?}"
+            "{tool:?}'s computed centre clicked {sent:?}"
         );
     }
-    let sent = click_at(toolbar_more_center_x(WINDOW.width));
+    let field = super::chat_field_rect(&app);
+    let sent = click_at(field.center());
     assert!(
         sent.iter()
-            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleToolsMenu))),
-        "the ⋯ button's computed center clicked {sent:?}"
+            .any(|m| matches!(m, Message::Ask(AskMsg::Toggle))),
+        "the chat field's computed centre clicked {sent:?}"
     );
 
     // The ⋯ menu's rows: each computed row rect holds that row's label.
     let mut app = reader_app();
     app.show_tools_menu = true;
     for (row, label) in [
-        (super::ToolsRow::OutlineSummaries, "Outline summaries"),
-        (super::ToolsRow::Minimap, "Minimap"),
         (super::ToolsRow::ExplainAll, "Explain All"),
+        (super::ToolsRow::OpenRemote, "Open Remote…"),
+        (super::ToolsRow::Tutorial, "Tutorial"),
     ] {
-        let rect = super::tools_menu_rows_rect(WINDOW.width, row.index(), 1);
+        let rect = super::tools_menu_rows_rect(&app, row.index(), 1);
         let mut sim = sim_of(&app);
         let at = text_at(&mut sim, move |t| t == label, 0)
             .unwrap_or_else(|| panic!("{label} is not drawn"));
@@ -1515,13 +1544,28 @@ fn the_toolbar_geometry_matches_what_is_drawn() {
             "{label} is drawn at {at:?}, outside its computed row {rect:?}"
         );
     }
+
+    // The View menu: drawn where its spotlight says.
+    let mut app = reader_app();
+    app.show_view_menu = true;
+    let rect = super::region_rect(&app, crate::app::tutorial::Anchor::ViewMenu).unwrap();
+    let mut sim = sim_of(&app);
+    for label in ["Outline summaries", "Minimap"] {
+        let at = text_at(&mut sim, move |t| t == label, 0)
+            .unwrap_or_else(|| panic!("{label} is not drawn"));
+        assert!(
+            rect.contains(at.center()),
+            "{label} is drawn at {at:?}, outside the View menu's {rect:?}"
+        );
+    }
 }
 
 /// E2-9 / E2-12: the tutorial's spotlight frames what the view DRAWS — found
 /// on screen — and never a panel the view has hidden: the right panel is not
 /// drawn for a split, a narrow window, or no file, whatever
-/// `show_right_panel` says, and the divider strips beside the side panels
-/// belong to neither the panel nor the reader.
+/// `show_right_panel` says. The sidebar's divider strip belongs to neither
+/// it nor the reader; the margin's lies over the margin's edge, taking no
+/// room of its own, so the margin starts where the reader ends.
 #[test]
 fn the_spotlight_frames_the_regions_the_view_draws() {
     use super::region_rect;
@@ -1542,24 +1586,29 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
             basis: None,
         },
     );
+    // Nothing explained under the caret: the margin says how to get a note.
+    app.proj.explain.view = None;
+    let margin_hint = |t: &str| t.contains("Move the cursor into a function");
     let mut sim = sim_of(&app);
-    let outline = text_at(&mut sim, |t| t == "OUTLINE", 0).expect("the right panel is drawn");
-    let bottom = region_rect(&app, Anchor::RightBottom).expect("a right-panel hole");
+    let hint = text_at(&mut sim, margin_hint, 0).expect("the margin is drawn");
+    let margin = region_rect(&app, Anchor::RightTop).expect("a margin hole");
     assert!(
-        bottom.contains(outline.center()),
-        "{outline:?} outside {bottom:?}"
+        margin.contains(hint.center()),
+        "{hint:?} outside {margin:?}"
     );
     let code =
         text_at(&mut sim, |t| t.contains("Spotlight heading"), 0).expect("the document is drawn");
     let main = region_rect(&app, Anchor::Main).unwrap();
     assert!(main.contains(code.center()), "{code:?} outside {main:?}");
     let sidebar = region_rect(&app, Anchor::Sidebar).unwrap();
+    // The divider lies over the sidebar's edge, as the design has it: the
+    // sidebar and the reader meet.
     assert_eq!(
         main.x - (sidebar.x + sidebar.width),
-        crate::resize::THICKNESS,
-        "the divider is neither sidebar nor reader"
+        0.0,
+        "the sidebar and the reader meet"
     );
-    assert_eq!(bottom.x - (main.x + main.width), crate::resize::THICKNESS);
+    assert_eq!(margin.x - (main.x + main.width), 0.0);
 
     for (why, hide) in [
         (
@@ -1574,15 +1623,15 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
     ] {
         let mut hidden = reader_app();
         hidden.show_right_panel = true;
+        hidden.proj.explain.view = None;
         hide(&mut hidden);
         let mut sim = sim_of(&hidden);
         assert!(
-            !shows(&mut sim, "OUTLINE"),
+            !shows(&mut sim, "Move the cursor into a function"),
             "{why}: the view hides the panel"
         );
         assert!(
-            region_rect(&hidden, Anchor::RightTop).is_none()
-                && region_rect(&hidden, Anchor::RightBottom).is_none(),
+            region_rect(&hidden, Anchor::RightTop).is_none(),
             "{why}: the spotlight framed a panel that is not drawn"
         );
     }
@@ -1609,6 +1658,7 @@ fn escape_names_the_topmost_overlay() {
         col: 1,
         x: 20.0,
         y: 20.0,
+        insight: None,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -1663,6 +1713,7 @@ fn escape_closes_overlays_one_at_a_time() {
         col: 1,
         x: 20.0,
         y: 20.0,
+        insight: None,
     });
     app.show_tools_menu = true;
     let escape = || {
@@ -1775,6 +1826,7 @@ type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 
 /// The whole window, at the app's test size.
 fn sim_of(app: &App) -> Sim<'_> {
+    crate::fonts::load();
     iced_test::Simulator::with_size(Default::default(), WINDOW, super::view(app))
 }
 
@@ -1826,7 +1878,12 @@ fn click_nth(mut sim: Sim<'_>, label: &str, nth: usize) -> Vec<Message> {
 /// (`ui::placed`): the runtime's own bookkeeping, not a press's message.
 fn sent_by(sim: Sim<'_>) -> Vec<Message> {
     sim.into_messages()
-        .filter(|m| !matches!(m, Message::Placed { .. }))
+        .filter(|m| {
+            !matches!(
+                m,
+                Message::Placed { .. } | Message::Window(WindowMsg::SoftwareRenderer(..))
+            )
+        })
         .collect()
 }
 
@@ -1866,27 +1923,31 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
-/// Every toolbar icon has its one tutorial step, Settings the last icon's
-/// (the type map's icon came in before it); and no text field holds the
-/// keyboard while the tour shows its tab — the SEARCH box did, and took the
-/// → and Enter that step the tour.
+/// Every tool on the strip has its one tutorial step, Settings the last
+/// (the type map's came in before it); and no text field holds the keyboard
+/// while the tour shows its tab — the SEARCH box did, and took the → and
+/// Enter that step the tour.
 #[test]
-fn the_tutorial_points_at_each_icon_and_leaves_no_field_holding_its_keys() {
+fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     use crate::app::tutorial::{Anchor, steps};
+    use crate::ui::StripTool;
     let mut app = reader_app();
     let _ = app.update(Message::Tutorial(TutorialMsg::Start));
     let all = steps(&app);
-    for i in 0..super::CORE_TOOLS {
+    for tool in super::STRIP_TOP.into_iter().chain([StripTool::Settings]) {
         let on: Vec<&str> = all
             .iter()
-            .filter(|s| s.anchor == Anchor::ToolbarIcon(i))
+            .filter(|s| s.anchor == Anchor::Strip(tool))
             .map(|s| s.title.as_str())
             .collect();
-        assert_eq!(on.len(), 1, "icon {i}: {on:?}");
+        assert_eq!(on.len(), 1, "{tool:?}: {on:?}");
     }
     let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
-    assert!(all[at("Settings")].anchor == Anchor::ToolbarIcon(super::CORE_TOOLS - 1));
-    assert!(all[at("The type map")].anchor == Anchor::ToolbarIcon(6));
+    assert!(all[at("Settings")].anchor == Anchor::Strip(StripTool::Settings));
+    assert!(all[at("The type map")].anchor == Anchor::Strip(StripTool::TypeMap));
+    assert!(all.iter().any(|s| s.anchor == Anchor::ChatField));
+    assert!(all.iter().any(|s| s.anchor == Anchor::FileTools));
+    assert!(all.iter().any(|s| s.anchor == Anchor::ViewMenu));
     let search = at("Search the project");
 
     // The search box holds the keys as the step before is left.
@@ -2592,6 +2653,7 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
     let approval = crate::app::model::Approval {
         key: crate::app::model::ApprovalKey::Mcp { call: 3 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -2614,6 +2676,27 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Deny").as_slice(),
         [Message::Ask(AskMsg::Approve { stream: 9, option, .. })] if option == "deny"
     ));
+}
+
+/// A question said rather than typed is marked "Said" over its bubble; a
+/// typed one is not.
+#[test]
+fn a_spoken_question_is_marked_said() {
+    let mut app = reader_app();
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "where is the origin?".into(),
+        spoken: true,
+        ..Default::default()
+    });
+    {
+        let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+        assert!(shows(&mut sim, "where is the origin?"));
+        assert!(shows(&mut sim, "Said"));
+    }
+    app.proj.ask_turns[0].spoken = false;
+    let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+    assert!(!shows(&mut sim, "Said"));
 }
 
 /// A press held on Stop as the answer ends is not one on Ask, let go of
@@ -2645,7 +2728,7 @@ fn a_press_on_stop_is_not_one_on_ask() {
         }
     };
     let mut ui = UserInterface::build(
-        super::panels::ask_panel(&app),
+        super::panels::ask_panel(&app, size.height),
         size,
         Cache::default(),
         &mut renderer,
@@ -2664,8 +2747,17 @@ fn a_press_on_stop_is_not_one_on_ask() {
     let cache = ui.into_cache();
     // The answer ends while it is held; let go of over Ask.
     app.proj.asking = false;
-    let mut ui = UserInterface::build(super::panels::ask_panel(&app), size, cache, &mut renderer);
-    let ask = find(&mut ui, &renderer, "Ask");
+    let mut ui = UserInterface::build(
+        super::panels::ask_panel(&app, size.height),
+        size,
+        cache,
+        &mut renderer,
+    );
+    // Ask is the round send button at the composer's end, level with Stop.
+    let ask = iced::Point::new(
+        size.width - super::COMPOSER_PAD.right - super::ROUND_BUTTON / 2.0,
+        stop.y,
+    );
     let mut sent = Vec::new();
     let _ = ui.update(
         &[Event::Mouse(mouse::Event::ButtonReleased(
@@ -2772,13 +2864,33 @@ fn ask_panel_turn(
     app: &App,
     cache: Cache,
     renderer: &mut iced::Renderer,
+    events: (&[Event], mouse::Cursor),
+    label: &str,
+) -> (Cache, Option<Rectangle>, Option<Id>) {
+    panel_turn(
+        super::panels::ask_panel,
+        app,
+        cache,
+        renderer,
+        events,
+        label,
+    )
+}
+
+/// [`ask_panel_turn`] with the panel `panel` builds — the large window's,
+/// or the card's fitted to its conversation.
+fn panel_turn(
+    panel: for<'a> fn(&'a App, f32) -> Element<'a, Message>,
+    app: &App,
+    cache: Cache,
+    renderer: &mut iced::Renderer,
     (events, cursor): (&[Event], mouse::Cursor),
     label: &str,
 ) -> (Cache, Option<Rectangle>, Option<Id>) {
     use iced::advanced::widget::operation::scrollable::{AbsoluteOffset, scroll_to};
     use iced_test::selector::{Candidate, Selector};
     let size = Size::new(800.0, app.bottom_height);
-    let mut ui = UserInterface::build(super::panels::ask_panel(app), size, cache, renderer);
+    let mut ui = UserInterface::build(panel(app, size.height), size, cache, renderer);
     let mut messages = Vec::new();
     let _ = ui.update(
         events,
@@ -2821,11 +2933,11 @@ fn ask_panel_turn(
 fn an_approval_card_stays_put_while_its_turn_grows() {
     use crate::app::model::{AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState};
     let mut app = reader_app();
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     // Arguments longer than the card shows: they scroll.
     let card = |call| Approval {
         key: ApprovalKey::Mcp { call },
+        mark: None,
         title: format!("run {call}"),
         detail: (0..30).map(|i| format!("arg {i}\n")).collect(),
         options: vec![ApprovalOption {
@@ -2844,7 +2956,7 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     let mut renderer = renderer();
     let mut cache = {
         let mut ui = UserInterface::build(
-            super::panels::ask_panel(&app),
+            super::panels::ask_panel(&app, app.bottom_height),
             Size::new(800.0, app.bottom_height),
             Cache::default(),
             &mut renderer,
@@ -2875,15 +2987,15 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     let _ = turn(&app, still, "Allow once");
 
     app.proj.ask_turns[0].extras.approvals.push(card(1));
-    let title = turn(&app, still, "⚠ run 1").expect("the card shows from its top");
+    let title = turn(&app, still, "run 1").expect("the card shows from its top");
     let allow = turn(&app, still, "Allow once").expect("its answers show");
-    assert_eq!(turn(&app, still, "⚠ run 1"), Some(title));
+    assert_eq!(turn(&app, still, "run 1"), Some(title));
 
     // More cards, steps, plan entries and answer: the card stays put.
     app.proj.ask_turns[0].extras.approvals.push(card(2));
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
     assert!(turn(&app, still, "1 more waiting after this one").is_some());
-    assert_eq!(turn(&app, still, "⚠ run 2"), None, "one card at a time");
+    assert_eq!(turn(&app, still, "run 2"), None, "one card at a time");
     let grown = &mut app.proj.ask_turns[0];
     for i in 0..40 {
         grown.steps.push(AgentStep {
@@ -2899,17 +3011,17 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     }
     grown.answer_md.push_str(&"more ".repeat(400));
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
-    assert_eq!(turn(&app, still, "⚠ run 1"), Some(title));
+    assert_eq!(turn(&app, still, "run 1"), Some(title));
 
     // Its arguments read to their end: the answers stay where they were.
     let over_title = mouse::Cursor::Available(title.center());
     let _ = turn(&app, (&wheel_by(0.0, 2000.0), over_title), "Allow once");
-    assert_eq!(turn(&app, still, "⚠ run 1"), None, "scrolled out of view");
+    assert_eq!(turn(&app, still, "run 1"), None, "scrolled out of view");
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
 
     // The next card, when the first is answered, from its own top.
     app.proj.ask_turns[0].extras.approvals.remove(0);
-    let next = turn(&app, still, "⚠ run 2").expect("the next card from its top");
+    let next = turn(&app, still, "run 2").expect("the next card from its top");
     assert_eq!(next.position(), title.position());
     assert_eq!(turn(&app, still, "Allow once"), Some(allow));
 
@@ -2946,14 +3058,82 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
     app.acp_agents.clear();
     let _ = turn(&app, still, "Allow once");
     app.proj.ask_turns[0].extras.approvals.clear();
-    assert_eq!(turn(&app, still, "⚠ run 2"), None);
+    assert_eq!(turn(&app, still, "run 2"), None);
     app.proj.ask_turns.clear();
     let _ = turn(&app, still, "Allow once");
 }
 
+/// The card fitted to its conversation holds the conversation's height
+/// while an approval is asked: steps and words arriving over it, and more
+/// cards coming after it, move none of its answers — though fitted, the
+/// card grows with what it holds.
+#[test]
+fn a_fitted_cards_approval_stays_put_while_its_turn_grows() {
+    use crate::app::model::{AgentStep, Approval, ApprovalKey, ApprovalOption, AskTurn, StepState};
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    app.bottom_height = 560.0;
+    let card = |call| Approval {
+        key: ApprovalKey::Mcp { call },
+        mark: None,
+        title: format!("run {call}"),
+        detail: "x".into(),
+        options: vec![ApprovalOption {
+            id: "once".into(),
+            label: "Allow once".into(),
+            allows: true,
+        }],
+    };
+    app.proj.ask_turns.push(AskTurn {
+        stream: 9,
+        question: "why?".into(),
+        streaming: true,
+        answer_md: "so far".into(),
+        ..AskTurn::default()
+    });
+    let mut renderer = renderer();
+    let mut cache = Cache::default();
+    let still: (&[Event], mouse::Cursor) = (&[], mouse::Cursor::Unavailable);
+    let mut turn = |app: &App, label: &str| {
+        let (next, found, _) = panel_turn(
+            super::panels::ask_panel_fitted,
+            app,
+            std::mem::take(&mut cache),
+            &mut renderer,
+            still,
+            label,
+        );
+        cache = next;
+        found
+    };
+    app.proj.ask_turns[0].extras.approvals.push(card(1));
+    let _ = turn(&app, "Allow once");
+    let allow = turn(&app, "Allow once").expect("its answers show");
+
+    // Steps and words arrive over it; one more card comes after it.
+    let grown = &mut app.proj.ask_turns[0];
+    for i in 0..30 {
+        grown.steps.push(AgentStep {
+            tool: "read".into(),
+            title: format!("read src/{i}.rs"),
+            refs: Vec::new(),
+            state: StepState::Done,
+        });
+    }
+    grown.answer_md.push_str(&" more".repeat(300));
+    assert_eq!(turn(&app, "Allow once"), Some(allow));
+    app.proj.ask_turns[0].extras.approvals.push(card(2));
+    assert_eq!(turn(&app, "Allow once"), Some(allow));
+    assert!(turn(&app, "1 more waiting after this one").is_some());
+
+    // Answered, the card lets the conversation grow again.
+    app.proj.ask_turns[0].extras.approvals.clear();
+    assert_eq!(turn(&app, "Allow once"), None);
+}
+
 /// A question's Allow counts once its answers have been in view for the
-/// delay, where they are now (`ui::placed`): the panel resized under them
-/// moves them, and a panel too low for them hides them — each waits again.
+/// delay, where they are now (`ui::placed`): the Ask card moved under them
+/// moves them, and a card too low for them hides them — each waits again.
 /// And a hover's peek over the window counts as over the card.
 #[test]
 fn a_question_moved_or_out_of_view_waits_again() {
@@ -2961,8 +3141,10 @@ fn a_question_moved_or_out_of_view_waits_again() {
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
+    app.ask_view = crate::AskView::Compact;
+    // The debugger's panel under the card, low: its height squeezes it.
     app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.bottom_height = 100.0;
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -2970,6 +3152,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
         extras: TurnExtras {
             approvals: vec![Approval {
                 key: ApprovalKey::Mcp { call: 1 },
+                mark: None,
                 title: "run it".into(),
                 detail: "a: 1".into(),
                 options: vec![ApprovalOption {
@@ -3032,8 +3215,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
     assert!(app.may_allow(&card));
 
-    // The panel taller: its top, and the card, move.
-    app.bottom_height += 120.0;
+    // The sidebar put away: the chat field moves, and with it the Ask card
+    // hanging from it and the approval card in it.
+    app.show_left_sidebar = !app.show_left_sidebar;
     let _ = app.update(Message::Noop);
     let moved = frame(&mut app);
     assert!(
@@ -3044,8 +3228,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     read(&mut app);
     assert!(app.may_allow(&card));
 
-    // A panel too low for the card: not all of it in view, however long.
-    app.bottom_height = 100.0;
+    // An Ask card too low for the approval card (the debugger's panel tall
+    // under it): not all of it in view, however long.
+    app.bottom_height = SQUEEZING;
     assert_eq!(frame(&mut app), [None]);
     read(&mut app);
     assert!(!app.may_allow(&card), "out of view");
@@ -3285,6 +3470,7 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     );
     let approval = Approval {
         key: ApprovalKey::Mcp { call: 1 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options,
@@ -3314,14 +3500,15 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     assert!(text_at(&mut sim, |t| t == "Allow 3", 0).is_some());
     assert!(text_at(&mut sim, |t| t == "Allow 0", 0).is_none());
 
-    // In a panel too low for it: drawn, and found squeezed, it opens the
-    // panel to where it fits, and is answered there once read.
+    // In an Ask card too low for it — the debugger's panel tall under it —
+    // drawn, and found squeezed, it opens the Ask window large, where it
+    // fits, and is answered there once read.
     let mut app = reader_app();
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
+    app.ask_view = crate::AskView::Compact;
     app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
-    app.bottom_height = 120.0;
+    app.bottom_height = SQUEEZING;
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -3370,11 +3557,11 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
         }
     };
     let _ = app.update(Message::Noop);
-    assert_eq!(frame(&mut app), [None], "squeezed at 120");
-    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert_eq!(frame(&mut app), [None], "squeezed in the card");
+    assert_eq!(app.ask_view, crate::AskView::Expanded);
     assert!(
         matches!(frame(&mut app).as_slice(), [Some(_)]),
-        "in view at the height it opened to"
+        "in view, large"
     );
     read(&mut app);
     assert!(app.may_allow(&card(1)), "answerable there");
@@ -3398,38 +3585,43 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
     read(&mut app);
     assert!(app.may_allow(&card(1)), "read on its page");
 
-    // Made lower by the user, it stays so.
-    app.bottom_height = 120.0;
+    // Made small again by the user, it stays so.
+    let _ = app.update(Message::Ask(AskMsg::Shrink));
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, 120.0);
-    // Another card, squeezed when first drawn: opened for, once — and on
-    // its own first page, not the one the last was turned to.
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    // Another card, squeezed when first drawn: made large for, once — and
+    // on its own first page, not the one the last was turned to.
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 2 };
     let _ = app.update(Message::Noop);
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, crate::app::model::CARD_PANEL_HEIGHT);
+    assert_eq!(app.ask_view, crate::AskView::Expanded);
     assert!(text_at(&mut sim_of(&app), |t| t == "Allow 0", 0).is_some());
     // One that fits when first drawn moves nothing — nor does the user's
-    // own drag squeezing it after.
-    app.bottom_height = 340.0;
+    // own drag of the debugger's panel squeezing it after.
+    let _ = app.update(Message::Ask(AskMsg::Shrink));
+    app.bottom_height = 120.0;
     app.proj.ask_turns[0].extras.approvals[0].key = ApprovalKey::Mcp { call: 3 };
     let _ = app.update(Message::Noop);
     assert!(matches!(frame(&mut app).as_slice(), [Some(_)]));
-    assert_eq!(app.bottom_height, 340.0);
-    app.bottom_height = 120.0;
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    app.bottom_height = SQUEEZING;
     assert_eq!(frame(&mut app), [None], "squeezed by the user");
-    assert_eq!(app.bottom_height, 120.0, "and left so");
+    assert_eq!(app.ask_view, crate::AskView::Compact, "and left so");
     // Reported again from nothing (the window moved): still left so.
     let _ = app.update(Message::Window(crate::WindowMsg::Moved));
     assert!(app.asking.places.is_empty());
     assert_eq!(frame(&mut app), [None]);
-    assert_eq!(app.bottom_height, 120.0);
+    assert_eq!(app.ask_view, crate::AskView::Compact);
     let _ = card;
 }
 
+/// A debugger's panel tall enough that the Ask card above it is too low
+/// for an approval card's answers.
+const SQUEEZING: f32 = 660.0;
+
 /// A page of answers taller than the first — its labels running over more
-/// rows — in a bottom panel the first page fitted: drawn, and found
-/// squeezed, it opens the panel to where it fits, as a card come up does.
+/// rows — in an Ask card the first page fitted: drawn, and found squeezed,
+/// it opens the Ask window large, as a card come up does.
 #[test]
 fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, TurnExtras};
@@ -3442,12 +3634,13 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
         option(format!("yes{i}"), label, true)
     }));
     options.push(option("no".into(), "Deny".into(), false));
-    // At `height`: where the card was placed on its first page, then on
-    // its second, and the panel's height after.
-    let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, f32) {
+    // With the debugger's panel `height` tall under the Ask card: where the
+    // card was placed on its first page, then on its second, and the Ask
+    // window's size after.
+    let at = |height: f32| -> (Option<Rectangle>, Option<Rectangle>, crate::AskView) {
         let mut app = reader_app();
+        app.ask_view = crate::AskView::Compact;
         app.show_bottom = true;
-        app.bottom_tab = crate::BottomTab::Ask;
         app.bottom_height = height;
         app.proj.ask_turns.push(AskTurn {
             stream: 9,
@@ -3456,6 +3649,7 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
             extras: TurnExtras {
                 approvals: vec![Approval {
                     key: ApprovalKey::Mcp { call: 1 },
+                    mark: None,
                     title: "run it".into(),
                     detail: String::new(),
                     options: options.clone(),
@@ -3499,17 +3693,17 @@ fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
             page: 1,
         }));
         let second = frame(&mut app).expect("placed anew");
-        (first, second, app.bottom_height)
+        (first, second, app.ask_view)
     };
-    let height = (100..240)
+    let height = (300..680)
         .step_by(5)
         .map(|h| h as f32)
         .find(|&h| {
             let (first, second, _) = at(h);
             first.is_some() && second.is_none()
         })
-        .expect("precondition: a panel the first page fits and the second does not");
-    assert_eq!(at(height).2, crate::app::model::CARD_PANEL_HEIGHT);
+        .expect("precondition: a card the first page fits and the second does not");
+    assert_eq!(at(height).2, crate::AskView::Expanded);
 }
 
 /// The redraw that enables an Allow once its delay is over comes once for
@@ -3573,8 +3767,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.arm_on_enter = true;
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     app.proj.ask_turns.push(AskTurn {
         stream: 9,
         question: "why?".into(),
@@ -3582,6 +3775,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
         extras: TurnExtras {
             approvals: vec![Approval {
                 key: ApprovalKey::Mcp { call: 1 },
+                mark: None,
                 title: "run it".into(),
                 detail: String::new(),
                 options: vec![ApprovalOption {
@@ -3882,10 +4076,10 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
     let delay = std::time::Duration::from_secs(5);
     app.asking.delay = delay;
     app.arm_on_enter = true;
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     let approval = |call: u64| Approval {
         key: ApprovalKey::Mcp { call },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![ApprovalOption {
@@ -4089,6 +4283,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
 
     let approval = Approval {
         key: ApprovalKey::Acp { id: 4 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -4248,6 +4443,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     );
     let approval = crate::app::model::Approval {
         key: crate::app::model::ApprovalKey::Acp { id: 4 },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -4729,8 +4925,8 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     // The stub reports an error on line 2 of the open file, so what a
     // poisoned snapshot must NOT show is shown by a healthy one.
     let diagnostic = format!(
-        r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"file://{}","diagnostics":[{{"range":{{"start":{{"line":1,"character":3}},"end":{{"line":1,"character":9}}}},"severity":1,"message":"boom"}}]}}}}"#,
-        root.join("src/lib.rs").display()
+        r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{}","diagnostics":[{{"range":{{"start":{{"line":1,"character":3}},"end":{{"line":1,"character":9}}}},"severity":1,"message":"boom"}}]}}}}"#,
+        crate::lsp::client::path_to_uri(&root.join("src/lib.rs"))
     );
     let client = stub_lsp_client_saying(&root, vec![diagnostic]).await;
     for _ in 0..200 {
@@ -4749,7 +4945,8 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         matches!(app.proj.link.lsp_snapshots.get("rust"), Some(Ok(_))),
         "the update took no snapshot"
     );
-    assert!(shows(&mut sim_of(&app), "LSP ready"));
+    // The server at work is named.
+    assert!(shows(&mut sim_of(&app), "rust-analyzer ready"));
     let underlined = |app: &App| {
         app.code_highlights(0, app.proj.panes[0].as_ref().unwrap())
             .iter()
@@ -4764,7 +4961,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         .link
         .lsp_snapshots
         .insert("rust".into(), Err(crate::lsp::client::StatePoisoned));
-    assert!(shows(&mut sim_of(&app), "LSP ⚠ state unreadable"));
+    assert!(shows(&mut sim_of(&app), "rust-analyzer ⚠ state unreadable"));
     assert!(
         !underlined(&app),
         "nothing is read past a poisoned snapshot"
@@ -5129,6 +5326,103 @@ fn the_overlays_list_the_most_changed_files_and_the_entry_points() {
     );
 }
 
+/// The Maps overlay's list: the map's counts and its line on how to read
+/// it, its nodes by kind with their detail and their arrows, each opening
+/// where it is defined; nothing yet says so, a failed read says why; the
+/// picker names each map with its size; a node defined nowhere opens
+/// nothing from the graph.
+#[test]
+fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(&mut sim, "No maps for this project."));
+    drop(sim);
+    app.proj.maps_error = Some("the host refused".into());
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(
+        &mut sim,
+        "Couldn't read the project's maps: the host refused"
+    ));
+    drop(sim);
+    app.proj.maps_error = None;
+    let node =
+        |label: &str, kind: &str, file: &str, line: usize, detail: &str| clew_protocol::MapNode {
+            label: label.into(),
+            kind: kind.into(),
+            file: file.into(),
+            line,
+            detail: detail.into(),
+        };
+    app.proj.maps = Arc::new(vec![
+        clew_protocol::ProjectMap {
+            id: "sql.schema".into(),
+            title: "Database schema".into(),
+            description: "an arrow is a foreign key".into(),
+            nodes: vec![
+                node(
+                    "orders",
+                    "table",
+                    "db/schema.sql",
+                    7,
+                    "id int\nuser_id int → users",
+                ),
+                node("users", "table", "db/schema.sql", 1, "id int"),
+            ],
+            edges: vec![clew_protocol::MapEdge {
+                from: 0,
+                to: 1,
+                label: "user_id".into(),
+            }],
+        },
+        clew_protocol::ProjectMap {
+            id: "routes".into(),
+            title: "Routes".into(),
+            description: "a route to its handler".into(),
+            nodes: vec![node("GET /users", "route", "", 0, "")],
+            edges: Vec::new(),
+        },
+    ]);
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(&mut sim, "Database schema · 2 nodes · 1 arrows"));
+    assert!(shows(&mut sim, "an arrow is a foreign key"));
+    assert!(shows(&mut sim, "TABLE"));
+    assert!(shows(&mut sim, "db/schema.sql:7"));
+    assert!(shows(&mut sim, "user_id int → users"));
+    assert!(shows(&mut sim, "→ users (user_id)"));
+    drop(sim);
+    app.proj.maps_selected = Some("routes".into());
+    let mut sim = sim_elem(super::project_maps_body(&app));
+    assert!(shows(&mut sim, "Routes · 1 nodes · 0 arrows"));
+    assert!(shows(&mut sim, "GET /users"));
+    drop(sim);
+    assert!(super::map_picker(&app).is_some());
+    let choice = super::MapChoice {
+        id: "routes".into(),
+        title: "Routes".into(),
+        nodes: 1,
+    };
+    assert_eq!(choice.to_string(), "Routes (1)");
+    // From the graph: a node opens where it is defined; one defined nowhere,
+    // nothing.
+    let layout = crate::app::project_map_layout(&app.proj.maps[0], &root);
+    let canvas =
+        super::GraphCanvas::new(&layout, 1, crate::Overlay::ProjectMaps, true, true, false);
+    let orders = layout
+        .nodes
+        .iter()
+        .position(|n| n.label == "orders")
+        .unwrap();
+    assert!(matches!(
+        canvas.open_message(orders),
+        Some(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 7 })) if abs == root.join("db/schema.sql")
+    ));
+    let layout = crate::app::project_map_layout(&app.proj.maps[1], &root);
+    let canvas =
+        super::GraphCanvas::new(&layout, 1, crate::Overlay::ProjectMaps, true, true, false);
+    assert!(canvas.open_message(0).is_none());
+}
+
 /// The type map's list: the counts, the most referenced types, the base
 /// types and the most dependent ones, each row opening its definition;
 /// an empty map says so, or that the index is being built.
@@ -5360,6 +5654,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         col: 0,
         x: 10.0,
         y: 10.0,
+        insight: None,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -5500,8 +5795,7 @@ fn rows_send_the_identity_of_what_they_show() {
         code: "let x = 1;".into(),
     };
     app.proj.ask_pins = vec![pin.clone()];
-    app.show_bottom = true;
-    app.bottom_tab = crate::BottomTab::Ask;
+    app.ask_view = crate::AskView::Compact;
     let sent = click(sim_of(&app), "📎 src/lib.rs · L4");
     assert!(
         matches!(sent.as_slice(), [Message::Ask(AskMsg::PinGoto(k))] if *k == pin.key()),
@@ -6156,4 +6450,1246 @@ fn the_graph_legend_says_how_to_read_the_graph_shown() {
             && imports.contains("gold ring = import cycle"),
         "{imports}"
     );
+}
+
+/// The settings' Python interpreter: what is in effect and who named it, the
+/// interpreters found to pick from, the one picked marked — and a "Use" on
+/// another picks it. A choice that cannot be used says so.
+#[test]
+fn the_languages_section_shows_the_interpreter_in_effect_and_picks_another() {
+    use clew_protocol::{
+        PythonCandidate, PythonEnvKind, PythonEnvironments, PythonInEffect, PythonSource,
+    };
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["python".into()];
+    let venv = "/p/.venv/bin/python".to_string();
+    let poetry = "/cache/pypoetry/virtualenvs/app-AbCd-py3.12/bin/python".to_string();
+    app.proj.lang_options = Some(Ok(clew_protocol::LanguageOptions {
+        python: Some(PythonEnvironments {
+            candidates: vec![
+                PythonCandidate {
+                    interpreter: venv.clone(),
+                    kind: PythonEnvKind::Project,
+                    name: ".venv".into(),
+                    version: Some("3.12.1".into()),
+                },
+                PythonCandidate {
+                    interpreter: poetry.clone(),
+                    kind: PythonEnvKind::Poetry,
+                    name: "app-AbCd-py3.12".into(),
+                    version: None,
+                },
+            ],
+            in_effect: PythonInEffect {
+                interpreter: Some(venv.clone()),
+                source: PythonSource::ProjectVenv,
+                unusable_choice: Some("/gone/bin/python".into()),
+            },
+        }),
+        ..Default::default()
+    }));
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(sim.find("Python interpreter").is_ok());
+    assert!(
+        sim.find(
+            "Found in the project — run through its base Python, its packages read, as it \
+             came with the project"
+        )
+        .is_ok()
+    );
+    assert!(sim.find("Project · .venv · Python 3.12.1").is_ok());
+    assert!(sim.find("Poetry · app-AbCd-py3.12").is_ok());
+    assert!(sim.find(poetry.as_str()).is_ok());
+    assert!(sim.find("in use").is_ok(), "Automatic is the one in use");
+    assert!(
+        sim.find(
+            "Your choice /gone/bin/python cannot be used: it is gone, or it is a program of \
+             the repository's own. The one above is used until you pick another."
+        )
+        .is_ok()
+    );
+    // The first "Use" is the project's venv: Automatic is in use.
+    let _ = sim.click("Use");
+    let picked: Vec<_> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::ChoosePython(p)) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(picked, [Some(venv)]);
+}
+
+/// The settings' build choices, language by language: what is in effect
+/// first — and what the project's lsp.toml also sets — then what there is
+/// to pick, each pick making the choice it names.
+#[test]
+fn the_languages_section_offers_each_languages_build_choices() {
+    use clew_protocol::{
+        COptions, CargoPackage, GoChoices, GoOptions, LanguageChoices, LanguageOptions,
+        RustChoices, RustOptions, ToolchainCandidate,
+    };
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["c".into(), "go".into(), "lean".into(), "rust".into()];
+    app.proj.file_languages = vec!["lua".into()];
+    app.proj.lang_choices = LanguageChoices {
+        rust: Some(RustChoices {
+            features: vec!["cli/color".into()],
+            ..Default::default()
+        }),
+        go: Some(GoChoices {
+            tags: vec!["e2e".into()],
+            goos: Some("windows".into()),
+            goarch: None,
+        }),
+        ..Default::default()
+    };
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        rust: Some(RustOptions {
+            packages: vec![
+                CargoPackage {
+                    name: "app".into(),
+                    root: true,
+                    features: vec!["serde".into(), "tls".into()],
+                    default: vec!["tls".into()],
+                },
+                CargoPackage {
+                    name: "cli".into(),
+                    root: false,
+                    features: vec!["color".into()],
+                    default: vec![],
+                },
+            ],
+            targets: vec!["thumbv7em-none-eabihf".into()],
+            project_sets: vec!["cargo.features".into()],
+        }),
+        go: Some(GoOptions {
+            tags: vec!["integration".into()],
+            project_sets: vec![],
+        }),
+        c: Some(COptions {
+            databases: vec!["/p/build".into()],
+            project_sets: vec![],
+        }),
+        toolchains: [(
+            "lean".to_string(),
+            vec![ToolchainCandidate {
+                command: "/h/.elan/bin/lake".into(),
+                name: "elan".into(),
+                project: true,
+            }],
+        )]
+        .into(),
+        python: None,
+    }));
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    for shown in [
+        "Rust: features and target",
+        "Features cli/color, and the defaults",
+        "Checked for the host's own target",
+        "The project's .clew/lsp.toml sets cargo.features — a choice here wins where both say.",
+        "tls (default)",
+        "Go: build tags and platform",
+        "Build tags e2e",
+        "Read for windows/the host's architecture",
+        "C and C++: compilation",
+        "Compilation database: the one clangd finds beside the sources or in build/",
+        "/p/build",
+        "Lean: toolchain",
+        "The lake found on the PATH",
+        "elan — the project's",
+        "Server programs",
+    ] {
+        assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    let _ = sim.click("serde");
+    let _ = sim.click("integration");
+    let chosen: Vec<LanguageChoices> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chosen.len(), 2, "{chosen:?}");
+    assert_eq!(
+        chosen[0].rust.as_ref().unwrap().features,
+        ["cli/color", "serde"]
+    );
+    assert_eq!(chosen[1].go.as_ref().unwrap().tags, ["e2e", "integration"]);
+    assert_eq!(
+        chosen[1].go.as_ref().unwrap().goos.as_deref(),
+        Some("windows")
+    );
+}
+
+/// The TypeScript the TypeScript and JavaScript server runs, and the zig
+/// zls uses: clew's own and the PATH's by default, the ones found to pick
+/// from — the project's own TypeScript named as running its code, and said
+/// so again once it is the one chosen.
+#[test]
+fn the_languages_section_picks_a_typescript_and_a_zig() {
+    use clew_protocol::{LanguageChoices, LanguageOptions, ToolchainCandidate};
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["typescript".into(), "zig".into()];
+    let projects = "/p/node_modules/typescript/lib/tsserver.js".to_string();
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        toolchains: [
+            (
+                "typescript".to_string(),
+                vec![ToolchainCandidate {
+                    command: projects.clone(),
+                    name: "The project's TypeScript 5.4.5 — runs the project's own code".into(),
+                    project: true,
+                }],
+            ),
+            (
+                "zig".to_string(),
+                vec![ToolchainCandidate {
+                    command: "/h/.zvm/0.13.0/zig".into(),
+                    name: "zvm · Zig 0.13.0".into(),
+                    project: true,
+                }],
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    }));
+    let warning = "This is the project's own TypeScript: the server runs its code — choose it \
+                   for a project you trust.";
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    for shown in [
+        "TypeScript and JavaScript: TypeScript version",
+        "clew's own TypeScript 5, installed with the server",
+        "The project's TypeScript 5.4.5 — runs the project's own code",
+        "Zig: compiler",
+        "zvm · Zig 0.13.0",
+    ] {
+        assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    assert!(sim.find(warning).is_err(), "not said before it is chosen");
+    // The first "Use" is the project's TypeScript (both Automatics are in use).
+    let _ = sim.click("Use");
+    let chosen: Vec<LanguageChoices> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chosen.len(), 1);
+    assert_eq!(chosen[0].typescript.as_deref(), Some(projects.as_str()));
+
+    app.proj.lang_choices = chosen[0].clone();
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(sim.find(warning).is_ok(), "said once it is the one chosen");
+}
+
+/// Java's JDK, PHP's version and C#'s solution are picked from the ones
+/// found, the server's own pick by default; the Ruby whose Ruby LSP runs,
+/// Erlang's ELP and Haskell's language server from the programs found.
+#[test]
+fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
+    use clew_protocol::{LanguageChoices, LanguageOptions, ToolchainCandidate};
+    let mut app = reader_app();
+    app.proj.project_languages = ["java", "php", "csharp", "ruby", "erlang", "haskell"]
+        .map(String::from)
+        .to_vec();
+    let one = |command: &str, name: &str| {
+        vec![ToolchainCandidate {
+            command: command.into(),
+            name: name.into(),
+            project: false,
+        }]
+    };
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        toolchains: [
+            ("java".to_string(), one("/usr/lib/jvm/java-21", "JDK 21")),
+            (
+                "php".to_string(),
+                one("8.2", "PHP 8.2 — composer.json's floor"),
+            ),
+            ("csharp".to_string(), one("/p/src/App.sln", "src/App.sln")),
+            (
+                "ruby".to_string(),
+                one(
+                    "/h/.rbenv/versions/3.3.0/bin/ruby-lsp",
+                    "rbenv · Ruby 3.3.0",
+                ),
+            ),
+            (
+                "erlang".to_string(),
+                one("/opt/elp/bin/elp", "elp in /opt/elp/bin"),
+            ),
+            (
+                "haskell".to_string(),
+                one("/h/.ghcup/bin/haskell-language-server-wrapper", "ghcup"),
+            ),
+        ]
+        .into(),
+        ..Default::default()
+    }));
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    for shown in [
+        "Java: JDK",
+        "JDK 21",
+        "PHP: version",
+        "PHP 8.2 — composer.json's floor",
+        "C#: solution",
+        "src/App.sln",
+        "Ruby: the Ruby whose Ruby LSP runs",
+        "rbenv · Ruby 3.3.0",
+        "The ruby-lsp found on the PATH",
+        "Erlang: language platform",
+        "The elp found on the PATH",
+        "Haskell: language server",
+        "The haskell-language-server-wrapper found on the PATH",
+    ] {
+        assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
+    }
+    let _ = sim.click("Use");
+    let chosen: Vec<LanguageChoices> = sim
+        .into_messages()
+        .filter_map(|m| match m {
+            Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chosen.len(), 1);
+    // The first "Use" is the Ruby's: its programs come before the paths.
+    let ruby = chosen[0].servers.as_ref().and_then(|s| s.get("ruby"));
+    assert_eq!(
+        ruby.map(|r| (r.command.as_str(), r.args.is_none())),
+        Some(("/h/.rbenv/versions/3.3.0/bin/ruby-lsp", true)),
+        "a program found keeps its server's arguments"
+    );
+    // Each one's "Use" chooses its own.
+    type Pick = (
+        &'static str,
+        fn(&LanguageChoices) -> Option<String>,
+        &'static str,
+    );
+    let picks: [Pick; 5] = [
+        ("java", |c| c.java.clone(), "/usr/lib/jvm/java-21"),
+        ("php", |c| c.php.clone(), "8.2"),
+        ("csharp", |c| c.csharp.clone(), "/p/src/App.sln"),
+        (
+            "erlang",
+            |c| Some(c.servers.as_ref()?.get("erlang")?.command.clone()),
+            "/opt/elp/bin/elp",
+        ),
+        (
+            "haskell",
+            |c| Some(c.servers.as_ref()?.get("haskell")?.command.clone()),
+            "/h/.ghcup/bin/haskell-language-server-wrapper",
+        ),
+    ];
+    for (language, get, want) in picks {
+        app.proj.project_languages = vec![language.to_string()];
+        let mut sim = sim_elem(super::connect::languages_section(&app));
+        let _ = sim.click("Use");
+        let chosen: Vec<LanguageChoices> = sim
+            .into_messages()
+            .filter_map(|m| match m {
+                Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(chosen.len(), 1, "{language}");
+        assert_eq!(get(&chosen[0]).as_deref(), Some(want), "{language}");
+    }
+    app.proj.project_languages = ["java", "php", "csharp", "ruby", "erlang", "haskell"]
+        .map(String::from)
+        .to_vec();
+
+    app.proj.lang_choices = LanguageChoices {
+        php: Some("8.2".into()),
+        servers: Some(
+            [(
+                "erlang".to_string(),
+                clew_protocol::ServerChoice {
+                    command: "/opt/elp/bin/elp".into(),
+                    args: None,
+                },
+            )]
+            .into(),
+        ),
+        ..Default::default()
+    };
+    let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(
+        sim.find("The elp found on the PATH").is_err(),
+        "the chosen ELP replaces the PATH's"
+    );
+}
+
+/// The status bar's target picker is there for a file whose dimming the
+/// platform decides — Rust's, Go's, Haskell's — and not for one whose does
+/// not (C#'s, Erlang's: their files' own symbols decide).
+#[test]
+fn the_target_picker_shows_for_languages_the_platform_dims() {
+    let mut app = reader_app();
+    let label = format!(
+        "Reading for {}",
+        super::statusbar::target_name(&app.proj.reading_target)
+    );
+    for (lang, shown) in [
+        ("rust", true),
+        ("go", true),
+        ("zig", true),
+        ("haskell", true),
+        ("csharp", false),
+        ("erlang", false),
+        ("python", false),
+    ] {
+        app.proj.panes[0].as_mut().unwrap().lang_key = Some(lang);
+        let mut sim = sim_elem(super::statusbar::statusbar(&app));
+        assert_eq!(sim.find(label.as_str()).is_ok(), shown, "{lang}");
+    }
+}
+
+/// A file whose language has its own action gets it in the context menu,
+/// under the go-tos; one whose language has none does not.
+#[test]
+fn the_context_menu_offers_the_languages_own_action() {
+    let mut app = reader_app();
+    let menu = |insight| crate::ContextMenu {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+        insight,
+    };
+    app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
+    assert!(shows(&mut sim_of(&app), "Expand Macro"));
+    let sent = click(sim_of(&app), "Expand Macro");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::Insight))),
+        "{sent:?}"
+    );
+    app.proj.context_menu = Some(menu(Some(crate::InsightKind::GoalState)));
+    assert!(shows(&mut sim_of(&app), "Show Goal"));
+    app.proj.context_menu = Some(menu(None));
+    assert!(shows(&mut sim_of(&app), "Go to Definition"));
+    for absent in ["Expand Macro", "Show Goal", "Show Type"] {
+        assert!(!shows(&mut sim_of(&app), absent), "{absent}");
+    }
+}
+
+/// The popup waits with "Asking…", then shows the answer; Open Definition
+/// is there only when the answer points somewhere, and Escape closes it.
+#[test]
+fn the_insight_popup_shows_the_answer_and_where_it_points() {
+    let mut app = reader_app();
+    app.proj.insight = Some(crate::Insight {
+        token: 1,
+        kind: crate::InsightKind::ExpandMacro,
+        title: "Expansion of MAX".into(),
+        loading: true,
+        prepared: Vec::new(),
+        defined: None,
+    });
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Expansion of MAX"));
+        assert!(shows(&mut sim, "Asking…"));
+    }
+    assert!(!shows(&mut sim_of(&app), "Open Definition"));
+    assert!(matches!(
+        super::escape_message(&app),
+        Some(Message::Hover(HoverMsg::InsightClose))
+    ));
+    let answer = crate::app::insight::c_answer(clew_protocol::MacroExpansion {
+        name: "MAX".into(),
+        invocation: "MAX(1, 2)".into(),
+        expanded: "((1) > (2) ? (1) : (2))".into(),
+        file: "include/util.h".into(),
+        line: 1,
+        definition: "#define MAX(a, b) ((a) > (b) ? (a) : (b))".into(),
+        truncated: false,
+    });
+    let (prepared, _) = app.prepare_segments(&answer.markdown);
+    // The answer's code blocks, highlighted as the editor highlights C:
+    // each block's lines, spans joined.
+    let blocks: Vec<String> = prepared
+        .iter()
+        .filter_map(|seg| match seg {
+            crate::PreparedSeg::Code(lines) => Some(
+                lines
+                    .iter()
+                    .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect::<String>())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        blocks,
+        [
+            "MAX(1, 2)",
+            "((1) > (2) ? (1) : (2))",
+            "#define MAX(a, b) ((a) > (b) ? (a) : (b))"
+        ]
+    );
+    if let Some(open) = app.proj.insight.as_mut() {
+        open.loading = false;
+        open.prepared = prepared;
+        open.defined = answer.defined;
+    }
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "Asking…"));
+    }
+    let sent = click(sim_of(&app), "Open Definition");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::InsightOpenDefinition))),
+        "{sent:?}"
+    );
+    let sent = click(sim_of(&app), "Close");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::InsightClose))),
+        "{sent:?}"
+    );
+}
+
+/// The margin's notes sit level with the functions they are about: a
+/// note's name is drawn on its function's first line, and moves with the
+/// code as it scrolls.
+#[test]
+fn a_margin_note_sits_level_with_its_function() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.explain.view = None;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.cache.insert(
+        crate::explain::Node::Function {
+            file: abs,
+            name: "origin".into(),
+            ordinal: 0,
+        },
+        crate::explain::Cached {
+            summary: "Makes the point at zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: None,
+            basis: None,
+        },
+    );
+    // `origin` runs from the file's third line to its fifth.
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    let lh = app.line_height();
+    let line_top = |app: &App| {
+        let v = app.active_viewer().unwrap();
+        super::body_top(app) + super::sheet_header_height(app) + 1.0 + v.row_of(2) as f32 * lh
+            - v.scroll_y
+    };
+    let note_y = |app: &App| {
+        let mut sim = sim_of(app);
+        assert!(
+            shows(&mut sim, "Makes the point at zero."),
+            "the note says it"
+        );
+        text_at(&mut sim, |t| t == "origin", 0)
+            .expect("the note's name")
+            .y
+    };
+    let y = note_y(&app);
+    assert!(
+        (y - line_top(&app)).abs() < lh,
+        "{y} level with {}",
+        line_top(&app)
+    );
+    // Scrolled a line, the note goes with its function.
+    app.proj.panes[0].as_mut().unwrap().scroll_y = lh;
+    let scrolled = note_y(&app);
+    assert!(
+        (scrolled - (y - lh)).abs() < 1.0,
+        "{scrolled} moved a line from {y}"
+    );
+}
+
+/// A commit's day reads as a reader says it: the month and day, and the
+/// year when it is not this one.
+#[test]
+fn a_commit_day_reads_as_month_and_day() {
+    let now = 1_793_793_600; // 2026-11-04T12:00Z
+    assert_eq!(super::short_date(now, now), "Nov 4");
+    assert_eq!(super::short_date(1_767_225_600, now), "Jan 1"); // 2026-01-01
+    assert_eq!(super::short_date(1_709_251_199, now), "Feb 29, 2024");
+    assert_eq!(super::short_date(946_598_400, now), "Dec 31, 1999");
+}
+
+/// The note on what the caret is in says when its function last changed,
+/// from the file's blame — the newest commit of its lines, or that one of
+/// them is not committed yet — and how many functions call it.
+#[test]
+fn the_raised_note_says_when_its_function_changed() {
+    use crate::git::{BlameLine, GitInfo};
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.explain.view = Some(node);
+    let blame = |time: i64, uncommitted: bool| BlameLine {
+        commit: "c".into(),
+        author: "a".into(),
+        time,
+        summary: "s".into(),
+        uncommitted,
+    };
+    let set = |app: &mut App, lines: Vec<BlameLine>| {
+        let v = app.proj.panes[0].as_mut().unwrap();
+        v.symbols = vec![crate::outline::Symbol {
+            name: "origin".into(),
+            kind: "function".into(),
+            line: 3,
+            end_line: 5,
+        }];
+        v.git = Some(std::sync::Arc::new(GitInfo {
+            blame: lines,
+            status: Vec::new(),
+            deleted_at: Default::default(),
+        }));
+    };
+    // Lines 3–5 are `origin`; line 1's newer commit is not its.
+    set(
+        &mut app,
+        vec![
+            blame(1_793_793_600, false),
+            blame(1, false),
+            blame(946_598_400, false),
+            blame(1_709_251_199, false),
+            blame(946_598_400, false),
+        ],
+    );
+    assert!(shows(&mut sim_of(&app), "Feb 29, 2024"));
+    // A line of it not committed: said so.
+    set(
+        &mut app,
+        vec![
+            blame(1_793_793_600, false),
+            blame(1, false),
+            blame(946_598_400, true),
+            blame(1_709_251_199, false),
+            blame(946_598_400, false),
+        ],
+    );
+    assert!(shows(&mut sim_of(&app), "Uncommitted"));
+    // How many functions call it, from the project's call graph.
+    assert!(shows(&mut sim_of(&app), "Calls"), "before the graph has it");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 1,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("origin", vec![1, 2], vec![]),
+                    call("a", vec![], vec![0]),
+                    call("b", vec![], vec![0]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    // Their call sites unknown (a remote project's graph comes without
+    // them): the functions that call it.
+    assert!(shows(&mut sim_of(&app), "2 callers"));
+    // Known: each place that calls it — `a` twice, `b` once — and not a
+    // call of another name.
+    let site = |caller: &str, callee: &str, line| crate::projectcalls::CallSite {
+        caller: Some(caller.into()),
+        callee: callee.into(),
+        method: false,
+        line,
+    };
+    let lib = root.join("src/lib.rs");
+    app.proj.calls_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::new(
+            lib,
+            crate::highlight::Lang::Rust,
+            vec![
+                site("a", "origin", 7),
+                site("a", "origin", 8),
+                site("b", "origin", 11),
+                site("b", "other", 12),
+            ],
+            &[],
+        )),
+    );
+    assert!(shows(&mut sim_of(&app), "3 references"));
+}
+
+/// The margin, with no note to show, says why, centered under a muted icon
+/// rather than as a line of text in a corner.
+#[test]
+fn the_right_panels_empty_sections_are_centered_notes() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.proj.explain.view = None;
+    let mut sim = sim_of(&app);
+    let hint = text_at(
+        &mut sim,
+        |t| t.contains("Move the cursor into a function"),
+        0,
+    )
+    .expect("the explain hint");
+    // Centered in the margin, well in from its left edge.
+    let panel_left = WINDOW.width - super::STRIP_W - super::SHEET_GAP - app.right_width;
+    let center = hint.x + hint.width / 2.0;
+    let panel_center = panel_left + app.right_width / 2.0;
+    assert!(
+        (center - panel_center).abs() < 12.0,
+        "{hint:?} centered in the panel"
+    );
+}
+
+/// An empty Ask shows what to ask, not a paragraph about asking; the hint
+/// that answers have nothing to stand on yet is a quiet line, and only for
+/// a project open with no server to run the agent, no index, nothing pinned.
+#[test]
+fn an_empty_ask_shows_questions_not_instructions() {
+    let mut app = reader_app();
+    {
+        let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+        assert!(!shows(&mut sim, "Ask a question about this codebase"));
+        assert!(!shows(&mut sim, "Run “Explain All”"));
+        assert!(shows(&mut sim, "Answers are grounded once"));
+    }
+    app.proj.project = None;
+    let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+    assert!(!shows(&mut sim, "Answers are grounded once"));
+}
+
+/// The palette's rows show each command and its keys, a cap per key; a
+/// click sends the command it shows, by its title.
+#[test]
+fn the_palette_lists_commands_with_their_keys() {
+    let mut app = reader_app();
+    app.proj.finder.open = true;
+    app.proj.finder.query = ">call".into();
+    app.refresh_palette();
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Call Graph"));
+        // Its keys, a cap each.
+        let keys = super::split_caps(&crate::keymap::local_keys("⇧⌘C"));
+        assert!(keys.len() > 1, "{keys:?}");
+        for key in keys {
+            assert!(shows(&mut sim, &key), "the {key} cap");
+        }
+    }
+    let sent = click(sim_of(&app), "Call Graph");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Nav(NavMsg::PaletteRun(t)) if t == "Call Graph")),
+        "{sent:?}"
+    );
+    app.proj.finder.query = ">nothing like this".into();
+    app.refresh_palette();
+    assert!(shows(&mut sim_of(&app), "No matching command"));
+}
+
+/// The floating Ask, on screen: the launcher opens the card; the card's
+/// conversation is there; kept in the margin it is the margin's, cleared
+/// there, and taken out a card again; the large window's dimmed rest
+/// makes it a card again when clicked; and the card leaves the code beside
+/// it to the reader's clicks.
+#[test]
+fn the_floating_ask_is_driven_from_the_screen() {
+    let mut app = reader_app();
+    // Put away: the chat field in the top bar opens it.
+    assert!(matches!(
+        click(sim_of(&app), "Ask a question, or say what to do").as_slice(),
+        [Message::Ask(AskMsg::Toggle)]
+    ));
+    // A card under the field, with a conversation in it.
+    app.ask_view = crate::AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 1,
+        question: "where is the origin?".into(),
+        ..Default::default()
+    });
+    {
+        let mut sim = sim_of(&app);
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 0)
+            .expect("the conversation is on the card");
+        let place = super::ask_place(&app).unwrap();
+        let field = super::chat_field_rect(&app);
+        assert!(
+            question.x >= place.left && question.x < place.left + place.width,
+            "on the card: {question:?} in {place:?}"
+        );
+        assert!(
+            question.y > field.y + field.height && question.y < WINDOW.height / 2.0,
+            "hanging under the field: {question:?}"
+        );
+    }
+    assert!(
+        !shows(&mut sim_of(&app), "Clear"),
+        "the card's header is what it is, the margin, and put away"
+    );
+    // Kept in the margin: no card; the conversation in the margin, under a
+    // tab of its own, clearing it there; taken out, a card again.
+    let _ = app.update(Message::Ask(AskMsg::KeepInMargin));
+    assert_eq!(app.ask_view, crate::AskView::Margin);
+    assert!(
+        super::ask_place(&app).is_none(),
+        "no card while in the margin"
+    );
+    {
+        let mut sim = sim_of(&app);
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 0)
+            .expect("the conversation is in the margin");
+        let margin_left = WINDOW.width - super::STRIP_W - super::SHEET_GAP - app.right_width;
+        assert!(
+            question.x >= margin_left && question.x < WINDOW.width - super::STRIP_W,
+            "in the margin: {question:?}, from {margin_left}"
+        );
+        assert!(shows(&mut sim, "Ask"), "its tab over the margin");
+    }
+    assert!(matches!(
+        click(sim_of(&app), "Clear").as_slice(),
+        [Message::Ask(AskMsg::Clear)]
+    ));
+    // Its tab is one of the margin's: the notes, and back.
+    let _ = app.update(Message::Window(crate::WindowMsg::MarginTabPicked(
+        crate::MarginTab::Notes,
+    )));
+    assert!(text_at(&mut sim_of(&app), |t| t == "where is the origin?", 0).is_none());
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert_eq!(app.margin_tab, crate::MarginTab::Ask, "opening it shows it");
+    // Where the margin cannot show, the card stands in for it.
+    app.proj.split = true;
+    assert!(
+        super::ask_place(&app).is_some(),
+        "a card while the panes split"
+    );
+    app.proj.split = false;
+    let _ = app.update(Message::Ask(AskMsg::Float));
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    assert_eq!(app.margin_tab, crate::MarginTab::Notes);
+    // The code beside the card takes its own clicks.
+    let mut sim = sim_of(&app);
+    let beside = super::ask_place(&app).unwrap().left - 60.0;
+    sim.point_at(iced::Point::new(beside, 300.0));
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent = sent_by(sim);
+    assert!(
+        !sent.iter().any(|m| matches!(m, Message::Ask(_))),
+        "{sent:?}"
+    );
+    // Large: centred, and a click on the dimmed rest makes it a card.
+    app.ask_view = crate::AskView::Expanded;
+    {
+        let mut sim = sim_of(&app);
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 0).unwrap();
+        let place = super::ask_place(&app).unwrap();
+        // The card is centred; the question, a bubble, sits at its right.
+        let left = (WINDOW.width - place.width) / 2.0;
+        assert!(
+            (place.left - left).abs() < 1.0,
+            "centred: {place:?}, from {left}"
+        );
+        assert!(
+            question.x > left + place.width / 2.0
+                && question.x + question.width < left + place.width,
+            "the question at the card's right: {question:?} in {place:?}"
+        );
+    }
+    let mut sim = sim_of(&app);
+    sim.point_at(iced::Point::new(20.0, 400.0));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(matches!(
+        sent_by(sim).as_slice(),
+        [Message::Ask(AskMsg::Shrink)]
+    ));
+}
+
+/// What voice is doing shows where the user looks: on the launcher while
+/// Ask is put away, on the card while it is open — with a way to stop, and
+/// for a command that asks first, a way to say yes.
+#[test]
+fn voice_shows_what_it_is_doing() {
+    use crate::app::voice::{Heard, HeardOutcome, VoicePhase};
+    let mut app = reader_app();
+    app.voice.phase = VoicePhase::Listening {
+        since: std::time::Instant::now(),
+        level: 0.5,
+    };
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Listening"));
+    }
+    // The field's microphone, lit while it listens, stops it.
+    let field = super::toolbar::chat_field_rect(&app);
+    let mut sim = sim_of(&app);
+    sim.point_at(Point::new(
+        field.x + field.width - 17.0,
+        field.y + field.height / 2.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
+    // (Its tooltip opens too, under the pointer.)
+    let voice: Vec<Message> = sent_by(sim)
+        .into_iter()
+        .filter(|m| matches!(m, Message::Voice(_)))
+        .collect();
+    assert!(matches!(
+        voice.as_slice(),
+        [Message::Voice(crate::VoiceMsg::Toggle)]
+    ));
+    app.ask_view = crate::AskView::Compact;
+    assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");
+    app.voice.phase = VoicePhase::Transcribing { token: 1 };
+    assert!(shows(&mut sim_of(&app), "Working out what you said"));
+    assert!(matches!(
+        click(sim_of(&app), "Cancel").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Cancel)]
+    ));
+    app.voice.phase = VoicePhase::Idle;
+    app.voice.confirm = Some("Explain All".into());
+    assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));
+    assert!(matches!(
+        click(sim_of(&app), "Run").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Confirm)]
+    ));
+    // Idle: what was last heard, and what came of it.
+    app.voice.confirm = None;
+    app.voice.heard = Some(Heard {
+        text: "open the call graph".into(),
+        outcome: HeardOutcome::Ran("Call Graph".into()),
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "“open the call graph”"));
+    assert!(shows(&mut sim, "→ Call Graph"));
+}
+
+/// The settings' Voice section: every model with its size, downloaded
+/// only on the user's word; one downloading shows how far it got; one
+/// downloaded can be removed; a multilingual one asks the language.
+#[test]
+fn the_voice_settings_offer_each_model_and_its_size() {
+    let mut app = reader_app();
+    let dir = crate::app::tests::test_dir("ui-voice-settings");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    app.voice.prefs = crate::app::voice::VoicePrefs::default();
+    {
+        let mut sim = sim_elem(super::voice_section(&app));
+        for model in clew_voice::models::MODELS {
+            assert!(shows(&mut sim, model.name), "{}", model.name);
+        }
+        assert!(shows(&mut sim, "nothing you say leaves it"));
+        assert!(
+            shows(&mut sim, "Language"),
+            "Echo's Small hears any language"
+        );
+        assert!(
+            shows(&mut sim, "Download (190 MB)"),
+            "its size, before anything"
+        );
+    }
+    app.voice.prefs.model = "base.en".into();
+    assert!(
+        !shows(&mut sim_elem(super::voice_section(&app)), "Language"),
+        "base.en hears English only"
+    );
+    assert!(matches!(
+        click(sim_elem(super::voice_section(&app)), "Download (148 MB)").as_slice(),
+        [Message::Voice(crate::VoiceMsg::Download("base.en"))]
+    ));
+    assert!(matches!(
+        click(
+            sim_elem(super::voice_section(&app)),
+            "Medium (Large v3 Turbo)"
+        )
+        .as_slice(),
+        [Message::Voice(crate::VoiceMsg::PickModel(
+            "large-v3-turbo-q5_0"
+        ))]
+    ));
+    // Downloaded: Remove. A multilingual one picked: its language.
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(app.voice.prefs.model()), b"x").unwrap();
+    app.voice.prefs.model = "small-q5_1".into();
+    {
+        let mut sim = sim_elem(super::voice_section(&app));
+        assert!(shows(&mut sim, "Downloaded"));
+        assert!(shows(&mut sim, "Language"));
+    }
+    assert!(matches!(
+        click(sim_elem(super::voice_section(&app)), "Remove").as_slice(),
+        [Message::Voice(crate::VoiceMsg::RemoveModel("base.en"))]
+    ));
+    let _ = std::fs::remove_dir_all(store.dir());
+}
+
+/// The borderless window resizes from its edges and corners on Linux and
+/// Windows: a press on one starts the system's resize toward it. Inside the
+/// band nothing changes — a press there reaches what is drawn. (macOS keeps
+/// the system's own frame, and no grip.)
+#[test]
+fn the_window_resizes_from_its_edges_and_corners() {
+    let app = reader_app();
+    let pressed_at = |at: Point| {
+        let mut sim = sim_of(&app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    let resized = |sent: &[Message]| {
+        sent.iter().find_map(|m| match m {
+            Message::Window(crate::WindowMsg::ResizeDragged(edge)) => Some(format!("{edge:?}")),
+            _ => None,
+        })
+    };
+    let (w, h) = (WINDOW.width, WINDOW.height);
+    for (at, edge) in [
+        (Point::new(1.0, h / 2.0), "West"),
+        (Point::new(w - 1.0, h / 2.0), "East"),
+        (Point::new(w / 2.0, 1.0), "North"),
+        (Point::new(w / 2.0, h - 1.0), "South"),
+        (Point::new(1.0, 1.0), "NorthWest"),
+        (Point::new(w - 1.0, 1.0), "NorthEast"),
+        (Point::new(1.0, h - 1.0), "SouthWest"),
+        (Point::new(w - 1.0, h - 1.0), "SouthEast"),
+    ] {
+        let sent = pressed_at(at);
+        let expected = (!cfg!(target_os = "macos")).then(|| edge.to_string());
+        assert_eq!(resized(&sent), expected, "{at:?}: {sent:?}");
+    }
+    for inside in [Point::new(w / 2.0, h / 2.0), Point::new(12.0, h / 2.0)] {
+        assert_eq!(resized(&pressed_at(inside)), None, "{inside:?}");
+    }
+}
+
+/// The sidebar's strip holds its six everyday views and nothing else; a
+/// view opened by what shows it (a value traced, the import graph, a
+/// walkthrough, a symbol's docs) is named over it, with the way back to
+/// the files.
+#[test]
+fn a_view_off_the_strip_is_named_over_it() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    assert_eq!(super::sidebar::STRIP_VIEWS, 6);
+    assert!(!shows(&mut sim_of(&app), "Value flow"));
+    for (tab, name) in [
+        (crate::SidebarTab::Flow, "Value flow"),
+        (crate::SidebarTab::Imports, "Imports"),
+        (crate::SidebarTab::Walk, "Walkthroughs"),
+        (crate::SidebarTab::Docs, "API docs"),
+        (crate::SidebarTab::Notes, "Reading notes"),
+    ] {
+        app.sidebar = tab;
+        assert!(shows(&mut sim_of(&app), name), "{name} is named");
+    }
+    app.sidebar = crate::SidebarTab::Marks;
+    assert!(
+        !shows(&mut sim_of(&app), "Marks"),
+        "a view on the strip needs no title"
+    );
+}
+
+/// The raised note's actions are the three the design gives it — what
+/// leans on it, when it changed, and Ask — and a function's explanation in
+/// blocks is the View menu's (and the palette's): checked while shown,
+/// inert with no function explained, and taken back to the summary there.
+#[test]
+fn blocks_are_the_view_menus_not_the_notes() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    let node = crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    };
+    app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+        name: "origin".into(),
+        kind: "function".into(),
+        line: 3,
+        end_line: 5,
+    }];
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "Makes the point at zero.".into(),
+            prompt_hash: crate::incremental::content_hash(b"t"),
+            detail: Some("**Block 1.** Builds the point.".into()),
+            basis: None,
+        },
+    );
+    app.proj.explain.view = Some(node);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Ask"), "the note's Ask");
+        assert!(!shows(&mut sim, "Blocks"), "no Blocks on the note");
+    }
+    // The View menu: its row, enabled.
+    app.show_view_menu = true;
+    let sent = click(sim_of(&app), "Explanation in blocks");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Explain(crate::ExplainMsg::ToggleBlocks))),
+        "{sent:?}"
+    );
+    app.show_view_menu = false;
+    // Toggled: the cached blocks, then the summary again.
+    let _ = app.update(Message::Explain(crate::ExplainMsg::ToggleBlocks));
+    assert!(app.proj.explain.showing_detail, "shown in blocks");
+    assert!(
+        app.palette_commands()
+            .iter()
+            .any(|c| c.title == "Explain: Summary"),
+        "and the palette offers the way back"
+    );
+    let _ = app.update(Message::Explain(crate::ExplainMsg::ToggleBlocks));
+    assert!(!app.proj.explain.showing_detail, "the summary again");
+    // No function explained: the row is inert.
+    app.proj.explain.view = None;
+    app.show_view_menu = true;
+    let sent = click(sim_of(&app), "Explanation in blocks");
+    assert!(
+        !sent.iter().any(|m| matches!(m, Message::Explain(_))),
+        "{sent:?}"
+    );
+}
+
+/// On Linux and Windows the window is borderless and Clew draws the design's
+/// 1 px border round it, the room inside it what everything is laid out in;
+/// maximized, there is no frame, and restored, it is back. macOS keeps the
+/// system's frame.
+#[test]
+fn the_window_is_framed_as_designed_unless_maximized() {
+    let mut app = reader_app();
+    let size = iced::Size::new(1216.0, 910.0);
+    let _ = app.on_window_resized(size);
+    let frame = if cfg!(target_os = "macos") { 0.0 } else { 1.0 };
+    assert_eq!(app.window_frame, frame);
+    assert_eq!(app.window_width, size.width - 2.0 * frame);
+    assert_eq!(app.window_height, size.height - 2.0 * frame);
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(true)));
+    assert_eq!(app.window_frame, 0.0);
+    assert_eq!(app.window_width, size.width);
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(false)));
+    assert_eq!(app.window_frame, frame);
+    assert_eq!(app.window_width, size.width - 2.0 * frame);
+}
+
+/// The design rounds the window's corners (12) on every system. On Linux
+/// and Windows, where Clew draws the window whole, it rounds them where
+/// they can be left clear — the window system composites the window, and
+/// iced draws it on the GPU — while the window does not fill the screen;
+/// macOS rounds the window itself.
+#[test]
+fn the_window_rounds_its_corners_where_they_can_be_left_clear() {
+    let mut app = reader_app();
+    let _ = app.on_window_resized(iced::Size::new(1216.0, 912.0));
+    let round = if cfg!(target_os = "macos") { 0.0 } else { 12.0 };
+    let _ = app.update(Message::Window(WindowMsg::Composited(true)));
+    assert_eq!(app.window_radius, round);
+    // Filling the screen, square and unframed.
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(true)));
+    assert_eq!(app.window_radius, 0.0);
+    let _ = app.update(Message::Window(WindowMsg::MaximizedIs(false)));
+    assert_eq!(app.window_radius, round);
+    let _ = app.update(Message::Window(WindowMsg::ModeIs(window::Mode::Fullscreen)));
+    assert_eq!((app.window_radius, app.window_frame), (0.0, 0.0));
+    let _ = app.update(Message::Window(WindowMsg::ModeIs(window::Mode::Windowed)));
+    assert_eq!(app.window_radius, round);
+    // Drawn in software, whose surface has no alpha: square.
+    let _ = app.update(Message::Window(WindowMsg::SoftwareRenderer(true)));
+    assert_eq!(app.window_radius, 0.0);
+    let _ = app.update(Message::Window(WindowMsg::SoftwareRenderer(false)));
+    assert_eq!(app.window_radius, round);
+    // Not composited (X with no compositing manager, Windows presenting
+    // to the window directly): square.
+    let _ = app.update(Message::Window(WindowMsg::Composited(false)));
+    assert_eq!(app.window_radius, 0.0);
+}
+
+/// Rounded, the window's corners are clear and what is inside them is not
+/// — whatever is over the window: every layer reaching a corner (the
+/// chrome, the status bar, a dialog's veil, the tutorial's) rounds its
+/// own as the window's are.
+#[test]
+fn every_layer_leaves_the_rounded_corners_clear() {
+    let size = iced::Size::new(640.0, 420.0);
+    let pixels = |app: &App| {
+        use iced::advanced::renderer::Headless as _;
+        let mut renderer = renderer();
+        let mut ui =
+            UserInterface::build(crate::ui::view(app), size, Cache::default(), &mut renderer);
+        let _ = ui.update(
+            &[Event::Window(window::Event::RedrawRequested(
+                std::time::Instant::now(),
+            ))],
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut Vec::new(),
+        );
+        let theme = crate::theme::app_theme();
+        ui.draw(
+            &mut renderer,
+            &theme,
+            &iced::advanced::renderer::Style {
+                text_color: iced::Color::BLACK,
+            },
+            mouse::Cursor::Unavailable,
+        );
+        let physical = iced::Size::new(size.width as u32, size.height as u32);
+        renderer.screenshot(physical, 1.0, iced::Color::TRANSPARENT)
+    };
+    let alpha = |rgba: &[u8], x: u32, y: u32| rgba[((y * size.width as u32 + x) * 4 + 3) as usize];
+    let (w, h) = (size.width as u32, size.height as u32);
+    for what in ["the window", "a dialog", "the tutorial"] {
+        let mut app = reader_app();
+        let _ = app.on_window_resized(size);
+        app.window_frame = 1.0;
+        app.window_radius = crate::ui::WINDOW_RADIUS;
+        match what {
+            "a dialog" => app.show_shortcuts = true,
+            "the tutorial" => app.tutorial = Some(0),
+            _ => {}
+        }
+        let rgba = pixels(&app);
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            assert_eq!(alpha(&rgba, x, y), 0, "{what}: corner ({x}, {y})");
+        }
+        // Just off each corner, outside its arc; and inside it.
+        for (x, y) in [(2, 2), (w - 3, 2), (2, h - 3), (w - 3, h - 3)] {
+            assert_eq!(alpha(&rgba, x, y), 0, "{what}: off the arc at ({x}, {y})");
+        }
+        // Inside the arcs; and the frame's edge, opaque over the desktop.
+        for (x, y) in [(6, 6), (w - 7, 6), (6, h - 7), (w - 7, h - 7)] {
+            assert_eq!(alpha(&rgba, x, y), 255, "{what}: inside at ({x}, {y})");
+        }
+        for (x, y) in [(w / 2, 0), (0, h / 2), (w / 2, h - 1), (w - 1, h / 2)] {
+            assert_eq!(alpha(&rgba, x, y), 255, "{what}: the edge at ({x}, {y})");
+        }
+    }
 }

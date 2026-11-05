@@ -256,6 +256,19 @@ impl Located {
     pub fn is_bodyless_callable(&self) -> bool {
         is_callable(&self.symbol.kind) && self.body.is_none()
     }
+
+    /// This, found in a piece of a file, where it sits in the whole file:
+    /// the piece starting `bytes` and `lines` into it.
+    fn moved(mut self, bytes: usize, lines: usize) -> Located {
+        self.symbol.line += lines;
+        self.symbol.end_line += lines;
+        self.declaration = (self.declaration.0 + bytes, self.declaration.1 + bytes);
+        self.signature_end += bytes;
+        self.decl_line += lines;
+        self.body = self.body.map(|(first, last)| (first + lines, last + lines));
+        self.owner.scope = (self.owner.scope.0 + bytes, self.owner.scope.1 + bytes);
+        self
+    }
 }
 
 /// Extract definition symbols from `source`. Returns an empty list when the
@@ -279,6 +292,9 @@ pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>,
     // Compile (or fetch) the query before parsing, so a language without an
     // outline costs nothing.
     crate::highlight::tags_query(lang)?;
+    if lang == Lang::Lean {
+        return Ok(lean_located(source));
+    }
     let Some(tree) = crate::highlight::parse(source, lang) else {
         return Ok(Vec::new());
     };
@@ -286,8 +302,157 @@ pub fn try_extract_located(source: &str, lang_key: &str) -> Result<Vec<Located>,
 }
 
 /// The outline of an already-parsed file. `tree` must be `source` parsed with
-/// `lang`'s grammar.
+/// `lang`'s grammar. A Lean file's is read one command at a time instead
+/// (see [`crate::lean`]), the tree aside.
 pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
+    match lang {
+        Lang::Lean => lean_located(source),
+        Lang::Erlang | Lang::Haskell => {
+            merge_clauses(located_in_tree(tree, source, lang), source, lang)
+        }
+        _ => located_in_tree(tree, source, lang),
+    }
+}
+
+/// A function written as several clauses (Erlang) or equations (Haskell) —
+/// each a definition of its own to the grammar — as ONE item: the first's
+/// name and line, running to the last's end. An Erlang function is its name
+/// AND its arity: `price/1` and `price/2` side by side are two.
+fn merge_clauses(items: Vec<Located>, source: &str, lang: Lang) -> Vec<Located> {
+    let arity = |item: &Located| match lang {
+        Lang::Erlang => clause_arity(source, item),
+        _ => None,
+    };
+    let mut out: Vec<Located> = Vec::with_capacity(items.len());
+    for item in items {
+        if let Some(prev) = out.last_mut()
+            && prev.symbol.kind == "function"
+            && item.symbol.kind == "function"
+            && prev.symbol.name == item.symbol.name
+            && arity(prev) == arity(&item)
+        {
+            prev.symbol.end_line = prev.symbol.end_line.max(item.symbol.end_line);
+            prev.declaration.1 = prev.declaration.1.max(item.declaration.1);
+            prev.body = match (prev.body, item.body) {
+                (Some((first, _)), Some((_, last))) => Some((first, last)),
+                (body, None) | (None, body) => body,
+            };
+            continue;
+        }
+        out.push(item);
+    }
+    out
+}
+
+/// How many arguments an Erlang clause's head takes — top-level commas of
+/// its first parenthesized list (`price(A, B)`: 2).
+fn clause_arity(source: &str, item: &Located) -> Option<usize> {
+    let text = source.get(item.declaration.0..item.declaration.1)?;
+    let head = text.split("->").next()?;
+    let open = head.find('(')?;
+    let mut depth = 0usize;
+    let mut args = 0usize;
+    let mut empty = true;
+    for c in head[open..].chars() {
+        match c {
+            '(' | '[' | '{' => {
+                depth += 1;
+                if depth == 1 {
+                    continue;
+                }
+            }
+            ')' | ']' | '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    break;
+                }
+            }
+            ',' if depth == 1 => args += 1,
+            c if !c.is_whitespace() => {}
+            _ => continue,
+        }
+        if depth >= 1 {
+            empty = false;
+        }
+    }
+    Some(if empty { 0 } else { args + 1 })
+}
+
+/// A Lean file's outline: each command parsed on its own
+/// ([`crate::lean::commands`]), so a command the grammar cannot read costs
+/// that command's declarations and no other's, and its positions moved to
+/// where the command sits in the file.
+fn lean_located(source: &str) -> Vec<Located> {
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&Lang::Lean.grammar()).is_err() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut lines_before = 0;
+    let mut counted_to = 0;
+    for range in crate::lean::commands(source) {
+        lines_before += source[counted_to..range.start].matches('\n').count();
+        counted_to = range.start;
+        let original = &source[range.clone()];
+        let command = crate::lean::readable(original);
+        let Some(tree) = parser.parse(command.as_bytes(), None) else {
+            continue;
+        };
+        let mut found = located_in_tree(&tree, &command, Lang::Lean);
+        // What the command's first line declares, read from its text: the
+        // grammar half-reads many a declaration (`instance A.b` names `b`
+        // alone; a `↦` it does not know loses the whole), and an outline
+        // that misses one at the start of a line misleads.
+        if let Some(head) = crate::lean::head(original) {
+            let line = original[..head.keyword].matches('\n').count() + 1;
+            let name = &original[head.name.clone()];
+            let main = found.iter_mut().find(|l| {
+                l.symbol.line == line && !matches!(l.symbol.kind.as_str(), "field" | "constructor")
+            });
+            match main {
+                Some(l) if l.symbol.name != name && name.ends_with(l.symbol.name.as_str()) => {
+                    l.symbol.name = name.to_string();
+                }
+                Some(_) => {}
+                None => found.insert(0, lean_head_located(original, &head, line)),
+            }
+        }
+        out.extend(
+            found
+                .into_iter()
+                .map(|l| l.moved(range.start, lines_before)),
+        );
+    }
+    out
+}
+
+/// The outline entry of a Lean declaration the grammar could not read, from
+/// what its text says ([`crate::lean::head`]); `line` is its keyword's.
+fn lean_head_located(command: &str, head: &crate::lean::Head, line: usize) -> Located {
+    let end = command.trim_end().len();
+    let last = (command[..end].matches('\n').count() + 1).max(line);
+    Located {
+        symbol: Symbol {
+            name: command[head.name.clone()].to_string(),
+            kind: head.kind.to_string(),
+            line,
+            end_line: last,
+        },
+        declaration: (0, end),
+        signature_end: head.signature_end,
+        cpp_public: None,
+        decl_line: 1,
+        body: (head.kind != "axiom").then_some((line, last)),
+        container: None,
+        owner: Owner {
+            scope: (0, command.len()),
+            member_of: None,
+        },
+    }
+}
+
+/// The outline of `tree`, `source` parsed with `lang`'s grammar whole.
+fn located_in_tree(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
     let Ok(query) = crate::highlight::tags_query(lang) else {
         return Vec::new();
     };
@@ -321,6 +486,11 @@ pub fn located_in(tree: &Tree, source: &str, lang: Lang) -> Vec<Located> {
         }
         let (Some(kind), Some(name), Some(def)) = (kind, name, def) else {
             continue;
+        };
+        let name = match lang {
+            Lang::Lean => lean_name(def, source).unwrap_or(name),
+            Lang::Sql => crate::apidoc::unquote_sql(name),
+            _ => name,
         };
         let line = def.start_position().row + 1;
         let (decl_line, body) = shape_of(def, lang);
@@ -456,10 +626,73 @@ fn declaration_bytes(def: Node, lang: Lang, source: &str) -> ((usize, usize), us
         // statement or a token in a comment, literal or inner scope.
         top = export;
     }
+    if lang == Lang::Lean {
+        return lean_declaration_bytes(declaration, end);
+    }
+    // A table's signature is its name, not its columns (they are its
+    // members); a view's, not its query; a function's, not its body.
+    let signature_end = match lang {
+        Lang::Sql => {
+            let mut cursor = declaration.walk();
+            declaration
+                .named_children(&mut cursor)
+                .find(|c| {
+                    matches!(
+                        c.kind(),
+                        "column_definitions" | "create_query" | "function_body"
+                    )
+                })
+                .map_or(signature_end, |c| c.start_byte())
+        }
+        _ => signature_end,
+    };
     (
         (top.start_byte(), end),
         signature_end,
         top.start_position().row + 1,
+    )
+}
+
+/// The keywords that may come before a Lean declaration's own (`private`,
+/// `noncomputable`, …): tokens of their own in the tree, outside its node.
+const LEAN_MODIFIERS: &[&str] = &[
+    "noncomputable",
+    "partial",
+    "protected",
+    "private",
+    "public",
+    "meta",
+    "unsafe",
+    "scoped",
+    "local",
+];
+
+/// [`declaration_bytes`] of a Lean declaration ending at byte `end`. It
+/// starts at its attributes (`@[simp]`), which wrap it in a `declaration`
+/// node, or at the modifiers before it, so its doc is looked for above them
+/// and its visibility read from them. Its signature ends where its value or
+/// its fields begin (`:=`, `where`, a match alternative): the statement of a
+/// theorem, not its proof.
+fn lean_declaration_bytes(def: Node, end: usize) -> ((usize, usize), usize, usize) {
+    let mut first = def;
+    if let Some(wrapper) = def.parent().filter(|p| p.kind() == "declaration") {
+        first = wrapper;
+    }
+    while let Some(modifier) = first
+        .prev_sibling()
+        .filter(|n| !n.is_named() && LEAN_MODIFIERS.contains(&n.kind()))
+    {
+        first = modifier;
+    }
+    let mut cursor = def.walk();
+    let signature_end = def
+        .children(&mut cursor)
+        .find(|c| matches!(c.kind(), ":=" | "where" | "match_arm"))
+        .map_or(def.end_byte(), |c| c.start_byte());
+    (
+        (first.start_byte(), end),
+        signature_end,
+        first.start_position().row + 1,
     )
 }
 
@@ -522,6 +755,10 @@ fn member_access(mut def: Node, access: &HashMap<usize, bool>) -> Option<bool> {
 /// A TypeScript class field whose value is a function (`handler = () => {…}`)
 /// is a method in all but syntax — report it as one, so it is a call-graph
 /// node and an explainable function rather than a data member.
+///
+/// Lean writes several kinds of declaration with one node: a `definition` is
+/// a `def` or an `abbrev`, a `theorem` or a `lemma`, or an `instance`, and a
+/// `structure` is a `structure` or a `class`. Its keyword says which.
 fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
     let function_valued = || {
         def.child_by_field_name("value")
@@ -529,8 +766,29 @@ fn refine_kind<'a>(def: Node, kind: &'a str, lang: Lang) -> &'a str {
     };
     match lang {
         Lang::TypeScript | Lang::Tsx if kind == "field" && function_valued() => "method",
+        Lang::Lean => {
+            let keyword = def
+                .child_by_field_name("kind")
+                .or_else(|| def.child(0))
+                .map_or("", |k| k.kind());
+            match (def.kind(), keyword) {
+                ("definition", "theorem" | "lemma") => "theorem",
+                ("definition", "instance") => "instance",
+                ("structure", "class") => "class",
+                _ => kind,
+            }
+        }
         _ => kind,
     }
+}
+
+/// A Lean declaration's whole name: `Group.toMonoid` is several `name` nodes
+/// (`Group`, `.`, `toMonoid`), each of which the outline query matches.
+fn lean_name<'a>(def: Node, source: &'a str) -> Option<&'a str> {
+    let mut cursor = def.walk();
+    let parts: Vec<Node> = def.children_by_field_name("name", &mut cursor).collect();
+    let (first, last) = (parts.first()?, parts.last()?);
+    source.get(first.start_byte()..last.end_byte())
 }
 
 /// `(decl_line, body)` for a definition node (see [`Located`]).
@@ -609,8 +867,16 @@ fn shape_of(def: Node, lang: Lang) -> (usize, Option<(usize, usize)>) {
             "method_declaration" if def.child_by_field_name("body").is_none() => (first(def), None),
             _ => (first(def), whole),
         },
-        Lang::Rust | Lang::Python | Lang::JavaScript => (first(def), whole),
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
+        // Interface and abstract methods have no body.
+        Lang::CSharp | Lang::Php => match def.kind() {
+            "method_declaration" if def.child_by_field_name("body").is_none() => (first(def), None),
+            _ => (first(def), whole),
+        },
+        Lang::Rust | Lang::Python | Lang::JavaScript | Lang::Sql | Lang::Lean => {
+            (first(def), whole)
+        }
+        Lang::Ruby | Lang::Erlang | Lang::Haskell | Lang::Zig => (first(def), whole),
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => {
             (first(def), whole)
         }
     }
@@ -758,7 +1024,14 @@ fn container_of(def: Node, lang: Lang) -> Option<Container> {
         | Lang::Toml
         | Lang::Html
         | Lang::Css
-        | Lang::Zig => None,
+        | Lang::Zig
+        | Lang::Sql
+        | Lang::Lean
+        | Lang::Php
+        | Lang::Ruby
+        | Lang::CSharp
+        | Lang::Erlang
+        | Lang::Haskell => None,
     }
 }
 
@@ -1204,6 +1477,10 @@ struct Marks {
     kind: Option<EntryKind>,
 }
 
+/// Most lines of attributes (or of a docblock) read above a declaration for
+/// what marks it.
+const MAX_ATTRIBUTE_RUN: usize = 32;
+
 impl Marks {
     /// These, and `test` and `kind` too.
     fn and(self, test: bool, kind: Option<EntryKind>) -> Marks {
@@ -1313,8 +1590,85 @@ impl<'a> EntryPoints<'a> {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
-            | Lang::Zig => Marks::default(),
+            | Lang::Sql
+            | Lang::Lean
+            | Lang::Haskell => Marks::default(),
+            // PHPUnit: `testX` methods (and `@test`-annotated ones, read off
+            // the docblock above).
+            Lang::Php => Marks {
+                test: name.starts_with("test") || self.docblock_says(line1, "@test"),
+                kind: None,
+            },
+            // Minitest's `test_x`; RSpec's examples are blocks, not methods.
+            Lang::Ruby => Marks {
+                test: name.starts_with("test_"),
+                kind: None,
+            },
+            // EUnit: `x_test()` and `x_test_()` generators.
+            Lang::Erlang => Marks {
+                test: name.ends_with("_test") || name.ends_with("_test_"),
+                kind: None,
+            },
+            // A `test "name" { … }` block is a test by its keyword.
+            Lang::Zig => Marks {
+                test: false,
+                kind: None,
+            },
+            Lang::CSharp => self.csharp_marks(line1, name),
         }
+    }
+
+    /// Whether the `/** … */` docblock right above the declaration at
+    /// 1-based `line1` holds `tag` (PHPUnit's `@test`).
+    fn docblock_says(&self, line1: usize, tag: &str) -> bool {
+        let Some(start) = line1.checked_sub(1) else {
+            return false;
+        };
+        (start.saturating_sub(MAX_ATTRIBUTE_RUN)..start)
+            .rev()
+            .map(|i| self.lines.get(i).map(|l| l.trim()).unwrap_or_default())
+            .take_while(|l| l.starts_with('*') || l.starts_with("/**") || l.starts_with("#["))
+            .any(|l| l.split_whitespace().any(|w| w == tag))
+    }
+
+    /// What marks the C# method `name` at 1-based `line1`: its test
+    /// framework's attribute (`[Test]`, `[Fact]`, `[Theory]`,
+    /// `[TestMethod]`, `[TestCase(…)]`) on the lines of attributes right
+    /// above it, or before its name on its own line; an ASP.NET route
+    /// (`[HttpGet]`, `[Route(…)]`) marks a route.
+    fn csharp_marks(&self, line1: usize, name: &str) -> Marks {
+        let Some(start) = line1.checked_sub(1).filter(|&i| i < self.lines.len()) else {
+            return Marks::default();
+        };
+        let own = self.lines[start]
+            .find(name)
+            .map(|at| &self.lines[start][..at])
+            .unwrap_or_default();
+        let mut attributes: Vec<&str> = vec![own];
+        for i in (start.saturating_sub(MAX_ATTRIBUTE_RUN)..start).rev() {
+            let t = self.lines[i].trim();
+            if t.starts_with('[') && t.ends_with(']') {
+                attributes.push(t);
+            } else {
+                break;
+            }
+        }
+        let mut marks = Marks::default();
+        for text in attributes {
+            for attr in text.split(['[', ']', ',']).map(str::trim) {
+                let head = attr.split(['(', ' ']).next().unwrap_or_default();
+                let head = head.strip_suffix("Attribute").unwrap_or(head);
+                match head {
+                    "Test" | "TestCase" | "TestCaseSource" | "Fact" | "Theory" | "TestMethod"
+                    | "DataTestMethod" => marks.test = true,
+                    "HttpGet" | "HttpPost" | "HttpPut" | "HttpDelete" | "HttpPatch" | "Route" => {
+                        marks.kind = Some(EntryKind::Route)
+                    }
+                    _ => {}
+                }
+            }
+        }
+        marks
     }
 
     /// What marks the Rust function `name` at 1-based `line1`: the
@@ -1680,16 +2034,27 @@ impl<'a> EntryPoints<'a> {
                     mark(EntryKind::Handler);
                 }
             }
+            Lang::CSharp => {
+                if name == "Main" {
+                    mark(EntryKind::Main);
+                }
+            }
             Lang::Dart
             | Lang::C
             | Lang::Cpp
             | Lang::Zig
+            | Lang::Php
+            | Lang::Ruby
+            | Lang::Erlang
+            | Lang::Haskell
             | Lang::Json
             | Lang::Bash
             | Lang::Yaml
             | Lang::Toml
             | Lang::Html
-            | Lang::Css => {}
+            | Lang::Css
+            | Lang::Sql
+            | Lang::Lean => {}
         }
         found
     }
@@ -3838,6 +4203,139 @@ fn build_inner() -> B { B }
         assert_eq!(try_extract_located("", "rust"), Ok(Vec::new()));
     }
 
+    /// A SQL file's outline: its tables (unquoted) with their columns, views,
+    /// functions, triggers and types, each by the name its `CREATE` gives —
+    /// never the table a trigger is `ON`, nor what a function returns.
+    #[test]
+    fn a_sql_outline_lists_the_objects_a_schema_creates() {
+        let src = "CREATE TABLE IF NOT EXISTS \"Users\" (\n  id int PRIMARY KEY,\n  email text\n);\n\
+                   CREATE VIEW active AS SELECT * FROM \"Users\";\n\
+                   CREATE MATERIALIZED VIEW totals AS SELECT 1;\n\
+                   CREATE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;\n\
+                   CREATE TRIGGER touched BEFORE UPDATE ON \"Users\" FOR EACH ROW EXECUTE PROCEDURE touch();\n\
+                   CREATE TYPE mood AS ENUM ('sad', 'ok');\n";
+        let items = extract_located(src, "sql");
+        let got: Vec<(&str, &str)> = items
+            .iter()
+            .map(|l| (l.symbol.name.as_str(), l.symbol.kind.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Users", "table"),
+                ("id", "field"),
+                ("email", "field"),
+                ("active", "view"),
+                ("totals", "view"),
+                ("touch", "function"),
+                ("touched", "trigger"),
+                ("mood", "type"),
+            ],
+            "{items:#?}"
+        );
+        let users = &items[0];
+        assert_eq!((users.symbol.line, users.symbol.end_line), (1, 4));
+        assert_eq!(
+            &src[users.declaration.0..users.signature_end].trim_end(),
+            &"CREATE TABLE IF NOT EXISTS \"Users\"",
+            "a table's signature is its name, not its columns"
+        );
+    }
+
+    /// A Lean outline: a dotted name read whole, the kind of a `definition`
+    /// from its keyword, and the declaration starting at its attributes and
+    /// modifiers (where its doc sits above).
+    #[test]
+    fn a_lean_outline_reads_whole_names_and_kinds_from_keywords() {
+        let src = "namespace Geo\n\
+                   def Point.norm (p : Nat) : Nat := p\n\
+                   @[simp] theorem norm_zero : Point.norm 0 = 0 := rfl\n\
+                   lemma helper : True := trivial\n\
+                   private def hidden := 1\n\
+                   instance instInhabited : Inhabited Nat := ⟨0⟩\n\
+                   structure Point where\n  x : Nat\n  y : Nat\n\
+                   class Shape (α : Type) where\n  area : α → Nat\n\
+                   inductive Color where\n  | red\n  | green\n\
+                   axiom choice : True\n\
+                   end Geo\n";
+        let items = extract_located(src, "lean");
+        let got: Vec<(&str, &str)> = items
+            .iter()
+            .map(|l| (l.symbol.name.as_str(), l.symbol.kind.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("Geo", "module"),
+                ("Point.norm", "function"),
+                ("norm_zero", "theorem"),
+                ("helper", "theorem"),
+                ("hidden", "function"),
+                ("instInhabited", "instance"),
+                ("Point", "struct"),
+                ("x", "field"),
+                ("y", "field"),
+                ("Shape", "class"),
+                ("area", "field"),
+                ("Color", "inductive"),
+                ("red", "constructor"),
+                ("green", "constructor"),
+                ("choice", "axiom"),
+            ],
+            "{items:#?}"
+        );
+        let find = |name: &str| items.iter().find(|l| l.symbol.name == name).unwrap();
+        let signature = |l: &Located| src[l.declaration.0..l.signature_end].trim_end().to_string();
+        assert_eq!(
+            signature(find("norm_zero")),
+            "@[simp] theorem norm_zero : Point.norm 0 = 0"
+        );
+        assert_eq!(signature(find("hidden")), "private def hidden");
+        assert_eq!(signature(find("Point")), "structure Point");
+    }
+
+    /// Mathlib's way of writing Lean: a command the grammar does not know
+    /// (`assert_not_exists`), attributes with arguments, an instance's
+    /// priority, notation. Read as one tree, the first swallowed the file and
+    /// it had no outline; each command is read on its own, and every one of
+    /// these is found, where it is.
+    #[test]
+    fn a_lean_command_the_grammar_cannot_read_costs_only_itself() {
+        let src = "module\n\npublic import Mathlib.Order.Basic\n\n\
+                   assert_not_exists MonoidWithZero DenselyOrdered\n\n\
+                   variable {G : Type*} [Group G]\n\n\
+                   @[to_additive (attr := simp)]\ntheorem inv_mul_cancel (a : G) : a⁻¹ * a = 1 :=\n  Group.inv_mul_cancel a\n\n\
+                   @[to_additive, inherit_doc Foo.bar]\n\
+                   instance (priority := 100) Group.toCancelMonoid : CancelMonoid G where\n  mul_right_cancel := fun a b c h ↦ by\n    simp\n\n\
+                   theorem last : True := trivial\n";
+        let items = extract_located(src, "lean");
+        let got: Vec<(&str, &str, usize, usize)> = items
+            .iter()
+            .map(|l| {
+                (
+                    l.symbol.name.as_str(),
+                    l.symbol.kind.as_str(),
+                    l.symbol.line,
+                    l.decl_line,
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("inv_mul_cancel", "theorem", 10, 9),
+                ("Group.toCancelMonoid", "instance", 14, 13),
+                ("last", "theorem", 18, 18),
+            ],
+            "{items:#?}"
+        );
+        let last = items.last().unwrap();
+        assert_eq!(
+            &src[last.declaration.0..last.declaration.1],
+            "theorem last : True := trivial"
+        );
+    }
+
     #[test]
     fn junit_annotations_mark_java_tests() {
         let src = "class T {\n  @Test\n  void checks() {}\n  @ParameterizedTest @ValueSource(ints = {1})\n  void many(int x) {}\n  void helper() {}\n}\n";
@@ -3847,5 +4345,162 @@ fn build_inner() -> B { B }
         assert!(is_test_fn(&lines, line("checks"), "checks", "java"));
         assert!(is_test_fn(&lines, line("many"), "many", "java"));
         assert!(!is_test_fn(&lines, line("helper"), "helper", "java"));
+    }
+}
+
+/// The outlines of the languages clew reads with grammars of their own —
+/// PHP, Ruby, C#, Erlang, Haskell and Zig — over one sample file each.
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+
+    fn outline(source: &str, lang: &str) -> Vec<(String, String, usize, usize)> {
+        extract(source, lang)
+            .into_iter()
+            .map(|s| (s.kind, s.name, s.line, s.end_line))
+            .collect()
+    }
+
+    fn has(items: &[(String, String, usize, usize)], kind: &str, name: &str, line: usize) -> bool {
+        items
+            .iter()
+            .any(|(k, n, l, _)| k == kind && n == name && *l == line)
+    }
+
+    /// Each kind of declaration under its own kind: PHP's methods are
+    /// methods, its traits traits, its enums and cases there; C#'s
+    /// namespaces, properties, structs, enums and records too.
+    #[test]
+    fn php_and_csharp_declarations_are_outlined_by_kind() {
+        let php = outline(include_str!("../tests/fixtures/langs/a.php"), "php");
+        for (kind, name, line) in [
+            ("module", "App\\Models", 2),
+            ("class", "Item", 9),
+            ("field", "cost", 11),
+            ("method", "price", 14),
+            ("method", "name", 19),
+            ("interface", "Priced", 22),
+            ("trait", "HasName", 23),
+            ("enum", "Kind", 24),
+            ("constant", "A", 24),
+            ("function", "helper", 26),
+        ] {
+            assert!(has(&php, kind, name, line), "php {kind} {name}: {php:?}");
+        }
+        let cs = outline(include_str!("../tests/fixtures/langs/a.cs"), "csharp");
+        for (kind, name, line) in [
+            ("module", "Shop.Models", 3),
+            ("class", "Item", 6),
+            ("property", "Cost", 8),
+            ("method", "Price", 13),
+            ("method", "Helper", 19),
+            ("interface", "IPriced", 22),
+            ("enum", "Kind", 23),
+            ("class", "Money", 24),
+            ("struct", "Point", 25),
+        ] {
+            assert!(has(&cs, kind, name, line), "csharp {kind} {name}: {cs:?}");
+        }
+    }
+
+    /// Ruby's modules, classes and methods (`def self.x` among them), and
+    /// Zig's containers, their fields and methods, free functions and tests.
+    #[test]
+    fn ruby_and_zig_declarations_are_outlined() {
+        let rb = outline(include_str!("../tests/fixtures/langs/a.rb"), "ruby");
+        for (kind, name, line) in [
+            ("module", "Shop", 5),
+            ("class", "Item", 7),
+            ("method", "price", 11),
+            ("method", "build", 15),
+        ] {
+            assert!(has(&rb, kind, name, line), "ruby {kind} {name}: {rb:?}");
+        }
+        let zig = outline(include_str!("../tests/fixtures/langs/a.zig"), "zig");
+        for (kind, name, line) in [
+            ("struct", "Item", 6),
+            ("field", "cost", 9),
+            ("method", "price", 12),
+            ("enum", "Kind", 17),
+            ("union", "U", 18),
+            ("function", "total", 21),
+            ("test", "total", 27),
+        ] {
+            assert!(has(&zig, kind, name, line), "zig {kind} {name}: {zig:?}");
+        }
+        assert!(
+            !has(&zig, "function", "price", 12),
+            "a method is not also a function"
+        );
+    }
+
+    /// A function written as several clauses (Erlang) or equations (Haskell)
+    /// is ONE item, running to its last — but Erlang's same name at another
+    /// arity is another function.
+    #[test]
+    fn a_functions_clauses_are_one_item() {
+        let erl = outline(include_str!("../tests/fixtures/langs/a.erl"), "erlang");
+        let prices: Vec<_> = erl.iter().filter(|(_, n, _, _)| n == "price").collect();
+        assert_eq!(prices.len(), 1, "{erl:?}");
+        assert_eq!((prices[0].2, prices[0].3), (14, 15));
+        for (kind, name, line) in [
+            ("module", "shop", 2),
+            ("struct", "item", 6),
+            ("type", "money", 7),
+            ("macro", "TAX", 8),
+            ("function", "total", 17),
+        ] {
+            assert!(has(&erl, kind, name, line), "erlang {kind} {name}: {erl:?}");
+        }
+        let arities = outline("f(A) -> A.\nf(A, B) -> A + B.\nf(A, _) -> A.\n", "erlang");
+        let fs: Vec<(usize, usize)> = arities
+            .iter()
+            .filter(|(_, n, _, _)| n == "f")
+            .map(|(_, _, l, e)| (*l, *e))
+            .collect();
+        assert_eq!(fs, [(1, 1), (2, 3)], "f/1 and f/2: {arities:?}");
+
+        let hs = outline(
+            &format!(
+                "{}fact :: Int -> Int\nfact 0 = 1\nfact n = n * fact (n - 1)\n",
+                include_str!("../tests/fixtures/langs/a.hs")
+            ),
+            "haskell",
+        );
+        for (kind, name, line) in [
+            ("type", "Item", 9),
+            ("constructor", "Item", 9),
+            ("field", "cost", 9),
+            ("type", "Money", 11),
+            ("type", "Name", 13),
+            ("class", "Priced", 16),
+            ("method", "priceOf", 17),
+            ("function", "price", 24),
+        ] {
+            assert!(has(&hs, kind, name, line), "haskell {kind} {name}: {hs:?}");
+        }
+        let facts: Vec<_> = hs.iter().filter(|(_, n, _, _)| n == "fact").collect();
+        assert_eq!(facts.len(), 1, "{hs:?}");
+        assert_eq!((facts[0].2, facts[0].3), (26, 27));
+    }
+
+    /// Tests by each language's convention: PHPUnit's `test*` and `@test`,
+    /// Minitest's `test_*`, EUnit's `*_test`, C#'s test attributes.
+    #[test]
+    fn tests_are_told_apart_by_each_languages_convention() {
+        let php = "<?php\nclass T {\n  public function testA() {}\n  /** @test */\n  public function b() {}\n  public function c() {}\n}\n";
+        let lines: Vec<&str> = php.lines().collect();
+        assert!(is_test_fn(&lines, 3, "testA", "php"));
+        assert!(is_test_fn(&lines, 5, "b", "php"));
+        assert!(!is_test_fn(&lines, 6, "c", "php"));
+        let cs = "class T {\n  [Fact]\n  public void A() {}\n  [Theory, InlineData(1)]\n  public void B(int x) {}\n  public void C() {}\n}\n";
+        let lines: Vec<&str> = cs.lines().collect();
+        assert!(is_test_fn(&lines, 3, "A", "csharp"));
+        assert!(is_test_fn(&lines, 5, "B", "csharp"));
+        assert!(!is_test_fn(&lines, 6, "C", "csharp"));
+        let none: Vec<&str> = Vec::new();
+        assert!(is_test_fn(&none, 1, "test_price", "ruby"));
+        assert!(is_test_fn(&none, 1, "price_test", "erlang"));
+        assert!(!is_test_fn(&none, 1, "price", "erlang"));
     }
 }

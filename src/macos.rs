@@ -11,3 +11,6 @@ pub mod terminate;
 pub mod window;
 
 pub use window::{configure_frameless, minimize_key_window};
+
+/// The window's corner radius, as the design draws the window (12 px).
+pub const WINDOW_RADIUS: f64 = 12.0;

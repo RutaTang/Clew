@@ -531,6 +531,90 @@ pub static SERVERS: &[ServerSpec] = &[
         source: Source::Toolchain { binary: "dart" },
     },
     ServerSpec {
+        name: "lean",
+        version: "toolchain",
+        languages: &["lean"],
+        args: &["serve"],
+        runs_project_code: Some(
+            "its lakefile, and the macros, tactics and #eval commands of the files it checks",
+        ),
+        // Lean's server is `lake serve`, from the toolchain elan installs: it
+        // checks each file with the project's own Lean and dependencies, which
+        // no build of clew's could match.
+        source: Source::Toolchain { binary: "lake" },
+    },
+    ServerSpec {
+        name: "jdtls",
+        version: "toolchain",
+        languages: &["java"],
+        args: &[],
+        runs_project_code: Some(
+            "its Gradle or Maven build — the build scripts it runs to import the project",
+        ),
+        // Eclipse JDT LS, through the `jdtls` launcher its distribution
+        // ships (Homebrew, the Linux packages, the release archive's
+        // `bin/`): it needs a JDK of the user's to run on.
+        source: Source::Toolchain { binary: "jdtls" },
+    },
+    ServerSpec {
+        name: "intelephense",
+        version: "latest",
+        languages: &["php"],
+        args: &["--stdio"],
+        runs_project_code: None,
+        source: Source::Install {
+            tool: "npm",
+            kind: Installer::Npm {
+                packages: &["intelephense"],
+            },
+            binary: "node_modules/.bin/intelephense",
+        },
+    },
+    ServerSpec {
+        name: "ruby-lsp",
+        version: "toolchain",
+        languages: &["ruby"],
+        args: &[],
+        runs_project_code: Some("its Gemfile, which Bundler runs, and the gems it loads"),
+        // Shopify's Ruby LSP, a gem: run from the Ruby it was installed in.
+        source: Source::Toolchain { binary: "ruby-lsp" },
+    },
+    ServerSpec {
+        name: "csharp-ls",
+        version: "toolchain",
+        languages: &["csharp"],
+        args: &[],
+        runs_project_code: Some(
+            "its MSBuild project files, which it evaluates and builds — their tasks and targets",
+        ),
+        // A `dotnet tool` (`dotnet tool install --global csharp-ls`).
+        source: Source::Toolchain {
+            binary: "csharp-ls",
+        },
+    },
+    ServerSpec {
+        name: "elp",
+        version: "toolchain",
+        languages: &["erlang"],
+        args: &["server"],
+        runs_project_code: Some("its rebar3 build — rebar.config and the plugins it names"),
+        // The Erlang Language Platform, from its release binary.
+        source: Source::Toolchain { binary: "elp" },
+    },
+    ServerSpec {
+        name: "haskell-language-server",
+        version: "toolchain",
+        languages: &["haskell"],
+        args: &["--lsp"],
+        runs_project_code: Some(
+            "its Cabal or Stack build — Setup.hs, Template Haskell and the preprocessors it names",
+        ),
+        // ghcup's wrapper, which picks the server built for the project's GHC.
+        source: Source::Toolchain {
+            binary: "haskell-language-server-wrapper",
+        },
+    },
+    ServerSpec {
         name: "pyright",
         version: "latest",
         languages: &["python"],
@@ -1010,6 +1094,21 @@ mod tests {
                 _ => panic!("{lang} should be an npm install"),
             }
         }
+    }
+
+    /// Lean's server is the toolchain's `lake serve`, and it runs the
+    /// project's code: it starts only once the user has let it.
+    #[test]
+    fn lean_uses_the_toolchains_lake_serve() {
+        let lean = default_for_language("lean").unwrap();
+        assert_eq!(lean.name, "lean");
+        assert_eq!(lean.args, ["serve"]);
+        assert!(lean.runs_project_code.is_some());
+        assert!(matches!(
+            lean.provision(lean.version, Platform::MacArm64),
+            Some(Provision::Toolchain { binary: "lake" })
+        ));
+        assert!(default_for_language("sql").is_none());
     }
 
     #[test]

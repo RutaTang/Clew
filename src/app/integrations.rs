@@ -409,8 +409,7 @@ impl App {
         let token = self.mint_request_id();
         self.proj.inflight.ask_gather = Some(token);
         self.proj.asking = true;
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
+        self.reveal_ask();
         self.status = format!(
             "Reaching {} MCP server{}…",
             servers.len(),
@@ -507,6 +506,10 @@ impl App {
         tool: String,
         args: serde_json::Value,
     ) -> Task<Message> {
+        // The window's own tools run here, without an MCP server.
+        if crate::app::windowtools::is_window_tool(&tool) {
+            return self.on_window_tool(stream, call, tool, args);
+        }
         // A call of a turn the user stopped (it crossed the Cancel on its way)
         // is not run, nor asked about.
         let target = self
@@ -551,6 +554,7 @@ impl App {
         if ask {
             turn.extras.approvals.push(Approval {
                 key: ApprovalKey::Mcp { call },
+                mark: None,
                 title: format!(
                     "The MCP server `{}` wants to run {}",
                     target.server.name,
@@ -584,7 +588,7 @@ impl App {
                     deadline: call_deadline(),
                 },
             );
-            return self.ask_to_bottom();
+            return Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()]);
         }
         let run = self.run_mcp_call(stream, call, target, args, call_deadline());
         Task::batch([run, self.ask_to_bottom()])
@@ -669,7 +673,7 @@ impl App {
         Task::none()
     }
 
-    fn set_step_state(&mut self, stream: u64, id: &str, state: StepState) {
+    pub(crate) fn set_step_state(&mut self, stream: u64, id: &str, state: StepState) {
         if let Some(turn) = self.proj.ask_turns.iter_mut().find(|t| t.stream == stream)
             && let Some(&index) = turn.extras.step_ids.get(id)
             && let Some(step) = turn.steps.get_mut(index)
@@ -708,6 +712,9 @@ impl App {
             turn.extras.approvals.retain(|a| a.key != key);
         }
         match key {
+            ApprovalKey::Window { call } => {
+                self.on_window_command_answered(stream, call, allows == Some(true))
+            }
             ApprovalKey::Mcp { call } => {
                 let Some(PendingCall {
                     mut target,
@@ -786,6 +793,10 @@ impl App {
         self.proj.link.agent_tools.remove(&stream);
         self.proj.link.mcp_pending.retain(|(s, _), _| *s != stream);
         self.proj
+            .link
+            .window_pending
+            .retain(|(s, _), _| *s != stream);
+        self.proj
             .inflight
             .mcp_calls
             .retain(|(s, _), _| *s != stream);
@@ -805,7 +816,7 @@ impl App {
             .flat_map(|t| &t.extras.approvals)
             .filter_map(|a| match a.key {
                 ApprovalKey::Acp { id } => Some(id),
-                ApprovalKey::Mcp { .. } => None,
+                ApprovalKey::Mcp { .. } | ApprovalKey::Window { .. } => None,
             })
             .collect();
         if let Some(link) = self.proj.acp.as_mut() {
@@ -827,6 +838,7 @@ impl App {
             .mcp_pending
             .keys()
             .chain(self.proj.inflight.mcp_calls.keys())
+            .chain(self.proj.link.window_pending.keys())
             .map(|(s, _)| *s)
             .collect();
         for stream in streams {
@@ -918,6 +930,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream,
             question,
+            spoken: std::mem::take(&mut self.proj.ask_spoken),
             streaming: true,
             extras: TurnExtras {
                 agent: Some(label.clone()),
@@ -925,8 +938,7 @@ impl App {
             },
             ..AskTurn::default()
         });
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
+        self.reveal_ask();
         let link = self
             .proj
             .acp
@@ -1506,6 +1518,7 @@ impl App {
                 );
                 turn.extras.approvals.push(Approval {
                     key: ApprovalKey::Acp { id: request.id },
+                    mark: None,
                     title: format!("{label} asks to {what}"),
                     detail: detail.trim().to_string(),
                     options,
@@ -1514,7 +1527,7 @@ impl App {
                     link.declines.insert(request.id, added);
                 }
                 self.status = format!("{label} waits for your answer in the Ask panel");
-                self.ask_to_bottom()
+                Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()])
             }
             _ => Task::none(),
         }

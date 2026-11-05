@@ -978,23 +978,9 @@ fn socks5_session(
 /// Close `conn` with a reset instead of a FIN (`SO_LINGER` of zero): the
 /// peer that drops a connection abruptly.
 pub fn abort(conn: std::net::TcpStream) {
-    use std::os::fd::AsRawFd;
-    let linger = libc::linger {
-        l_onoff: 1,
-        l_linger: 0,
-    };
-    // SAFETY: a valid socket descriptor, and an option value of the size
-    // passed.
-    let rc = unsafe {
-        libc::setsockopt(
-            conn.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_LINGER,
-            (&raw const linger).cast(),
-            std::mem::size_of::<libc::linger>() as libc::socklen_t,
-        )
-    };
-    assert_eq!(rc, 0, "SO_LINGER: {}", std::io::Error::last_os_error());
+    socket2::SockRef::from(&conn)
+        .set_linger(Some(std::time::Duration::ZERO))
+        .unwrap_or_else(|e| panic!("SO_LINGER: {e}"));
     drop(conn);
 }
 

@@ -901,6 +901,7 @@ mod tests {
     /// I7: the checked load reports a library it refuses — a symlink planted
     /// at its name, bytes that are not a library — instead of reading it as
     /// an empty one; a missing library is simply empty.
+    #[cfg(unix)]
     #[test]
     fn the_checked_load_reports_a_refused_library() {
         let root = clew_core::testutil::TempDir::new("walk-checked");

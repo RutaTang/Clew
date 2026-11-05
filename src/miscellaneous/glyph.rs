@@ -22,6 +22,12 @@ pub enum Glyph {
     ImportGraph,
     /// The type map: a base type over two derived ones.
     TypeMap,
+    /// The project's maps: a table linked to two others.
+    ProjectMaps,
+    TextLines,
+    ListOrdered,
+    Plug,
+    Help,
     Settings,
     // More menu
     Note,
@@ -32,6 +38,8 @@ pub enum Glyph {
     Compass,
     Skim,
     Folder,
+    /// A folder, open: one to open.
+    FolderOpen,
     Diff,
     TimeTravel,
     Servers,
@@ -40,6 +48,8 @@ pub enum Glyph {
     // Chrome: nav + panel toggles
     ArrowLeft,
     ArrowRight,
+    /// Back along the trail.
+    ChevronLeft,
     PanelLeft,
     PanelRight,
     // Small UI actions / indicators
@@ -59,6 +69,55 @@ pub enum Glyph {
     Play,
     Book,
     Export,
+    // Voice and the Ask window
+    Mic,
+    Expand,
+    Shrink,
+    // The window's chrome
+    /// The app menu of Windows and Linux (three bars).
+    Menu,
+    /// More (three dots).
+    More,
+    /// Narrow a list down (three bars, each shorter).
+    Filter,
+    /// Search the text of the files: lines of text under a lens.
+    TextSearch,
+    /// Find by meaning: a lens inside a frame's four corners.
+    FindMeaning,
+    /// The reading trail: two stops joined by a winding path.
+    Route,
+    /// A value's flow: a path that bends back on itself to an arrow.
+    Flow,
+    /// What the reader shows (the View menu).
+    Eye,
+    ChevronRight,
+    /// Kept on this computer.
+    Lock,
+    /// Send what was typed (an arrow up).
+    Send,
+    Check,
+    /// A file: a page with its corner folded.
+    File,
+    /// A pair of braces: a symbol, in the command bar.
+    Braces,
+    /// What leans on a function: one box over the boxes under it.
+    Network,
+    /// When something was: a clock face.
+    Clock,
+    /// A speech bubble: ask Clew, in the command bar.
+    Message,
+}
+
+/// The window buttons Clew draws on Windows and Linux. Their own family:
+/// hairline geometry on a 10-unit grid, the way those systems draw them,
+/// not the chrome's rounded strokes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowGlyph {
+    Minimize,
+    Maximize,
+    /// Maximized: two overlapping frames, "make it a window again".
+    Restore,
+    Close,
 }
 
 /// The inner SVG for a glyph — original geometry, 24×24, stroked (a few filled
@@ -68,38 +127,62 @@ fn body(g: Glyph) -> &'static str {
     use Glyph::*;
     match g {
         Overview => {
-            "<path d='M12 6.2 C9.5 5.1 5.8 4.9 3.6 5.5 V18.4 C5.8 17.8 9.5 18 12 19.2'/>\
-             <path d='M12 6.2 C14.5 5.1 18.2 4.9 20.4 5.5 V18.4 C18.2 17.8 14.5 18 12 19.2'/>\
-             <path d='M12 6.2 V19.2'/>"
+            "<path d='M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z'/>\
+             <path d='M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z'/>"
         }
         Stats => {
-            "<path d='M3.8 19 H20.2'/><path d='M7 19 V10'/><path d='M12 19 V4'/><path d='M17 19 V7.5'/>"
+            "<path d='M3 3v18h18'/><path d='M18 17V9'/>\
+             <path d='M13 17V5'/><path d='M8 17v-3'/>"
         }
         Ask => {
             "<path d='M6.5 5 H17.5 A2.5 2.5 0 0 1 20 7.5 V13.5 A2.5 2.5 0 0 1 17.5 16 H10 L6 19.5 V16 A2.5 2.5 0 0 1 3.5 13.5 V7.5 A2.5 2.5 0 0 1 6.5 5 Z'/>"
         }
         Debug => {
-            "<path d='M6.9 11.4 C6.9 8.2 9.1 6.3 12 6.3 C14.9 6.3 17.1 8.2 17.1 11.4 V14.6 C17.1 17.8 14.9 19.3 12 19.3 C9.1 19.3 6.9 17.8 6.9 14.6 Z'/>\
-             <path d='M12 6.6 V19'/>\
-             <path d='M9.5 6.5 L7.9 4.6'/><path d='M14.5 6.5 L16.1 4.6'/>\
-             <path d='M6.9 11.2 L2.9 9.9'/><path d='M6.9 15.1 L2.9 16.5'/><path d='M17.1 11.2 L21.1 9.9'/><path d='M17.1 15.1 L21.1 16.5'/>"
+            "<path d='m8 2 1.88 1.88'/><path d='M14.12 3.88 16 2'/>\
+             <path d='M9 7.13v-1a3.003 3.003 0 1 1 6 0v1'/>\
+             <path d='M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v3c0 3.3-2.7 6-6 6'/>\
+             <path d='M12 20v-9'/><path d='M6.53 9C4.6 8.8 3 7.1 3 5'/><path d='M6 13H2'/>\
+             <path d='M3 21c0-2.1 1.7-3.9 3.8-4'/><path d='M20.97 5c0 2.1-1.6 3.8-3.5 4'/>\
+             <path d='M22 13h-4'/><path d='M17.2 17c2.1.1 3.8 1.9 3.8 4'/>"
         }
         CallGraph => {
             "<path d='M12 8.65 L7.3 15.25'/><path d='M12 8.65 L16.7 15.25'/>\
              <circle cx='12' cy='7.25' r='2.2'/><circle cx='6.5' cy='16.75' r='2.2'/><circle cx='17.5' cy='16.75' r='2.2'/>"
         }
+        // What a file brings in: an arrow down into a tray.
         ImportGraph => {
-            "<rect x='4.5' y='5' width='6' height='6' rx='1.4'/><rect x='13.5' y='13' width='6' height='6' rx='1.4'/>\
-             <path d='M11 11 L13 13'/>"
+            "<path d='M12 3v12'/><path d='m8 11 4 4 4-4'/>\
+             <path d='M8 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-4'/>"
         }
         TypeMap => {
-            "<rect x='9' y='3.5' width='6' height='5' rx='1.3'/><rect x='3.5' y='15.5' width='6' height='5' rx='1.3'/>\
-             <rect x='14.5' y='15.5' width='6' height='5' rx='1.3'/>\
-             <path d='M12 8.5 V12'/><path d='M6.5 15.5 V12 H17.5 V15.5'/>"
+            "<path d='M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z'/>\
+             <rect x='3' y='14' width='7' height='7' rx='1'/><circle cx='17.5' cy='17.5' r='3.5'/>"
+        }
+        // A folded map.
+        ProjectMaps => {
+            "<polygon points='3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21'/>\
+             <line x1='9' x2='9' y1='3' y2='18'/><line x1='15' x2='15' y1='6' y2='21'/>"
+        }
+        // Lines of text, the last short: what clew writes of the code.
+        TextLines => "<path d='M17 6.1H3'/><path d='M21 12.1H3'/><path d='M15.1 18H3'/>",
+        // A numbered list: the stops of a walkthrough.
+        ListOrdered => {
+            "<path d='M10 12h11'/><path d='M10 18h11'/><path d='M10 6h11'/><path d='M4 10h2'/>\
+             <path d='M4 6h1v4'/><path d='M6 18H4c0-1 2-2 2-3s-1-1.5-2-1'/>"
+        }
+        // A plug: what a language server is to clew.
+        Plug => {
+            "<path d='M12 22v-5'/><path d='M9 8V2'/><path d='M15 8V2'/>\
+             <path d='M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8Z'/>"
+        }
+        // A question in a circle: help, the tutorial.
+        Help => {
+            "<circle cx='12' cy='12' r='10'/><path d='M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3'/>\
+             <path d='M12 17h.01'/>"
         }
         Settings => {
-            "<path d='M4 7.2 H12.5'/><path d='M16.4 7.2 H20'/><circle cx='14.9' cy='7.2' r='2.3'/>\
-             <path d='M4 16.8 H7.1'/><path d='M11 16.8 H20'/><circle cx='9.5' cy='16.8' r='2.3'/>"
+            "<path d='M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z'/>\
+             <circle cx='12' cy='12' r='3'/>"
         }
         Note => {
             "<rect x='5' y='3.5' width='14' height='17' rx='2'/>\
@@ -121,45 +204,49 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M12 4 C12.6 10 14 11.4 20 12 C14 12.6 12.6 14 12 20 C11.4 14 10 12.6 4 12 C10 11.4 11.4 10 12 4 Z'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",
-        Skim => "<path d='M4 7.5 L12 12 L20 7.5'/><path d='M4 13 L12 17.5 L20 13'/>",
+        // Folded together: the bodies skimmed over.
+        Skim => "<path d='m7 20 5-5 5 5'/><path d='m7 4 5 5 5-5'/>",
         Folder => {
-            "<path d='M3.5 6.5 A1.5 1.5 0 0 1 5 5 H9 L11 7 H19 A1.5 1.5 0 0 1 20.5 8.5 V17 A1.5 1.5 0 0 1 19 18.5 H5 A1.5 1.5 0 0 1 3.5 17 Z'/>"
+            "<path d='M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z'/>"
         }
+        FolderOpen => {
+            "<path d='m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2'/>"
+        }
+        // Two versions, compared.
         Diff => {
-            "<rect x='4' y='4' width='16' height='16' rx='2.5'/>\
-             <path d='M8 8 V11.5'/><path d='M6.25 9.75 H9.75'/><path d='M14.5 14 H18'/>"
+            "<circle cx='18' cy='18' r='3'/><circle cx='6' cy='6' r='3'/>\
+             <path d='M13 6h3a2 2 0 0 1 2 2v7'/><path d='M11 18H8a2 2 0 0 1-2-2V9'/>"
         }
-        TimeTravel => "<circle cx='12' cy='12' r='8'/><path d='M12 7.5 V12 L15 13.8'/>",
+        // A clock turned back.
+        TimeTravel => {
+            "<path d='M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8'/>\
+             <path d='M3 3v5h5'/><path d='M12 7v5l4 2'/>"
+        }
         Servers => {
-            "<rect x='3.5' y='4.5' width='17' height='6' rx='1.5'/>\
-             <rect x='3.5' y='13.5' width='17' height='6' rx='1.5'/>\
-             <circle cx='7' cy='7.5' r='0.85' fill='STROKE' stroke='none'/>\
-             <circle cx='7' cy='16.5' r='0.85' fill='STROKE' stroke='none'/>"
+            "<rect width='20' height='8' x='2' y='2' rx='2'/><rect width='20' height='8' x='2' y='14' rx='2'/>\
+             <path d='M6 6h.01'/><path d='M6 18h.01'/>"
         }
         Remote => {
             "<circle cx='12' cy='12' r='8'/><path d='M4 12 H20'/>\
              <path d='M12 4 C8.6 6 8.6 18 12 20 C15.4 18 15.4 6 12 4'/>"
         }
         Shortcuts => {
-            "<rect x='3' y='6' width='18' height='12' rx='2.2'/>\
-             <path d='M6.5 10.2 H8'/><path d='M11.2 10.2 H12.8'/><path d='M16 10.2 H17.5'/>\
-             <path d='M8 14 H16'/>"
+            "<path d='M10 8h.01'/><path d='M12 12h.01'/><path d='M14 8h.01'/><path d='M16 12h.01'/>\
+             <path d='M18 8h.01'/><path d='M6 8h.01'/><path d='M7 16h10'/><path d='M8 12h.01'/>\
+             <rect width='20' height='16' x='2' y='4' rx='2'/>"
         }
         ArrowLeft => "<path d='M11 5.5 L4.5 12 L11 18.5'/><path d='M5 12 H19.5'/>",
         ArrowRight => "<path d='M13 5.5 L19.5 12 L13 18.5'/><path d='M19 12 H4.5'/>",
-        PanelLeft => "<rect x='3.5' y='4' width='17' height='16' rx='2.2'/><path d='M9.5 4 V20'/>",
-        PanelRight => {
-            "<rect x='3.5' y='4' width='17' height='16' rx='2.2'/><path d='M14.5 4 V20'/>"
-        }
+        PanelLeft => "<rect width='18' height='18' x='3' y='3' rx='2'/><path d='M9 3v18'/>",
+        PanelRight => "<rect width='18' height='18' x='3' y='3' rx='2'/><path d='M15 3v18'/>",
         Edit => "<path d='M15.5 5 L19 8.5 L8.5 19 L4.5 20 L5.5 16 Z'/><path d='M13.5 7 L17 10.5'/>",
         Close => "<path d='M6 6 L18 18'/><path d='M18 6 L6 18'/>",
-        ChevronDown => "<path d='M5 9 L12 15.5 L19 9'/>",
+        ChevronDown => "<path d='m6 9 6 6 6-6'/>",
         CheckCircle => "<circle cx='12' cy='12' r='8'/><path d='M8.2 12 L11 14.8 L15.8 9.4'/>",
         Circle => "<circle cx='12' cy='12' r='8'/>",
-        Search => "<circle cx='10.5' cy='10.5' r='6'/><path d='M15 15 L19.5 19.5'/>",
-        Bookmark => {
-            "<path d='M6.5 4 H17.5 A1 1 0 0 1 18.5 5 V20 L12 15.5 L5.5 20 V5 A1 1 0 0 1 6.5 4 Z'/>"
-        }
+        // The design's own magnifier.
+        Search => "<circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/>",
+        Bookmark => "<path d='m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z'/>",
         List => {
             "<circle cx='5.5' cy='7' r='1' fill='STROKE' stroke='none'/><path d='M9 7 H19'/>\
              <circle cx='5.5' cy='12' r='1' fill='STROKE' stroke='none'/><path d='M9 12 H19'/>\
@@ -184,16 +271,100 @@ fn body(g: Glyph) -> &'static str {
              <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
         }
         Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
-        Book => {
-            "<path d='M5 5.5 A2 2 0 0 1 7 3.5 H19 V17 H7 A2 2 0 0 0 5 19 Z'/>\
-             <path d='M7 17 A2 2 0 0 0 5 19 A2 2 0 0 0 7 21 H19 V17'/>\
-             <path d='M9.5 8 H15'/><path d='M9.5 11 H13.5'/>"
-        }
+        Book => "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>",
         Export => {
-            "<path d='M12 14.5 V4'/><path d='M8.2 7.8 L12 4 L15.8 7.8'/>\
-             <path d='M5 13.5 V18.5 A1.5 1.5 0 0 0 6.5 20 H17.5 A1.5 1.5 0 0 0 19 18.5 V13.5'/>"
+            "<path d='M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8'/>\
+             <polyline points='16 6 12 2 8 6'/><line x1='12' x2='12' y1='2' y2='15'/>"
         }
+        // A microphone on its stand.
+        Mic => {
+            "<rect x='9' y='3' width='6' height='11.5' rx='3'/>\
+             <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21'/>\
+             <path d='M8.5 21 H15.5'/>"
+        }
+        // Two corners pulled outward: make larger.
+        Expand => {
+            "<path d='M14 4 H20 V10'/><path d='M20 4 L13.5 10.5'/>\
+             <path d='M10 20 H4 V14'/><path d='M4 20 L10.5 13.5'/>"
+        }
+        // Two corners pushed inward: make smaller.
+        Shrink => {
+            "<path d='M20 10 H14 V4'/><path d='M14 10 L20.5 3.5'/>\
+             <path d='M4 14 H10 V20'/><path d='M10 14 L3.5 20.5'/>"
+        }
+        Menu => "<path d='M4.5 7 H19.5'/><path d='M4.5 12 H19.5'/><path d='M4.5 17 H19.5'/>",
+        More => {
+            "<circle cx='12' cy='12' r='1'/><circle cx='19' cy='12' r='1'/>\
+             <circle cx='5' cy='12' r='1'/>"
+        }
+        Filter => "<path d='M4 7 H20'/><path d='M7 12 H17'/><path d='M10 17 H14'/>",
+        TextSearch => {
+            "<path d='M21 6H3'/><path d='M10 12H3'/><path d='M10 18H3'/>\
+             <circle cx='17' cy='15' r='3'/><path d='m21 19-1.9-1.9'/>"
+        }
+        FindMeaning => {
+            "<path d='M3 7V5a2 2 0 0 1 2-2h2'/><path d='M17 3h2a2 2 0 0 1 2 2v2'/>\
+             <path d='M21 17v2a2 2 0 0 1-2 2h-2'/><path d='M7 21H5a2 2 0 0 1-2-2v-2'/>\
+             <circle cx='12' cy='12' r='3'/><path d='m16 16-1.9-1.9'/>"
+        }
+        Route => {
+            "<circle cx='6' cy='19' r='3'/><circle cx='18' cy='5' r='3'/>\
+             <path d='M9 19h8.5a3.5 3.5 0 0 0 0-7h-11a3.5 3.5 0 0 1 0-7H15'/>"
+        }
+        Flow => {
+            "<path d='M4 7 H14.5 A3 3 0 0 1 14.5 13 H9.5 A3 3 0 0 0 9.5 19 H19.5'/>\
+             <path d='M16.5 16 L19.5 19 L16.5 22'/>"
+        }
+        Eye => {
+            "<path d='M2.8 12 C5 7.6 8.2 5.5 12 5.5 C15.8 5.5 19 7.6 21.2 12 C19 16.4 15.8 18.5 12 18.5 C8.2 18.5 5 16.4 2.8 12 Z'/>\
+             <circle cx='12' cy='12' r='2.8'/>"
+        }
+        ChevronRight => "<path d='m9 18 6-6-6-6'/>",
+        ChevronLeft => "<path d='m15 18-6-6 6-6'/>",
+        Lock => {
+            "<rect x='5' y='10.5' width='14' height='9.5' rx='2'/>\
+             <path d='M8.5 10.5 V8 A3.5 3.5 0 0 1 15.5 8 V10.5'/>"
+        }
+        Send => "<path d='M12 19.5 V5'/><path d='M6 11 L12 5 L18 11'/>",
+        Check => "<path d='M5 12.5 L10 17.5 L19.5 7'/>",
+        File => {
+            "<path d='M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z'/>\
+             <path d='M14 2v4a2 2 0 0 0 2 2h4'/>"
+        }
+        Braces => {
+            "<path d='M8 3H7a2 2 0 0 0-2 2v5a2 2 0 0 1-2 2 2 2 0 0 1 2 2v5c0 1.1.9 2 2 2h1'/>\
+             <path d='M16 21h1a2 2 0 0 0 2-2v-5c0-1.1.9-2 2-2a2 2 0 0 1-2-2V5a2 2 0 0 0-2-2h-1'/>"
+        }
+        Message => "<path d='M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z'/>",
+        Network => {
+            "<rect x='16' y='16' width='6' height='6' rx='1'/><rect x='2' y='16' width='6' height='6' rx='1'/>\
+             <rect x='9' y='2' width='6' height='6' rx='1'/>\
+             <path d='M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3'/><path d='M12 12V8'/>"
+        }
+        Clock => "<circle cx='12' cy='12' r='10'/><path d='M12 6v6l4 2'/>",
     }
+}
+
+/// A window button's glyph, stroked in `color` at `size` logical px.
+pub fn window_icon<'a, M: 'a>(glyph: WindowGlyph, color: Color, size: f32) -> Element<'a, M> {
+    let body = match glyph {
+        WindowGlyph::Minimize => "<path d='M0.5 5 H9.5'/>",
+        WindowGlyph::Maximize => "<rect x='0.5' y='0.5' width='9' height='9' rx='1.2'/>",
+        WindowGlyph::Restore => {
+            "<rect x='0.5' y='2.5' width='7' height='7' rx='1'/>\
+             <path d='M2.5 2.5 V1.5 A1 1 0 0 1 3.5 0.5 H8.5 A1 1 0 0 1 9.5 1.5 V6.5 A1 1 0 0 1 8.5 7.5 H7.5'/>"
+        }
+        WindowGlyph::Close => "<path d='M0.5 0.5 L9.5 9.5'/><path d='M9.5 0.5 L0.5 9.5'/>",
+    };
+    let doc = format!(
+        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10' fill='none' stroke='{}' \
+         stroke-width='1' stroke-linecap='round' stroke-linejoin='round'>{body}</svg>",
+        hex(color),
+    );
+    svg(svg::Handle::from_memory(doc.into_bytes()))
+        .width(size)
+        .height(size)
+        .into()
 }
 
 /// `iced::Color` → `#rrggbb`.

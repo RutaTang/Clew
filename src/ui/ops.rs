@@ -83,9 +83,10 @@ pub(crate) fn reveal_operation(target: Id, top: f32, bottom: f32) -> impl Operat
 
 /// Keep the finder's selected row in view (arrow keys move the selection past
 /// the visible rows). Rows have a fixed height, so row `i` spans
-/// `i * FINDER_ROW_H ..` in the list's content.
-pub(crate) fn reveal_finder_selection(selected: usize) -> Task<Message> {
-    let top = selected as f32 * FINDER_ROW_H;
+/// `i * FINDER_ROW_H ..` in the list's content, plus a [`FINDER_HEAD_H`] for
+/// each of the `headings` over it (the command bar's suggestions have them).
+pub(crate) fn reveal_finder_selection(selected: usize, headings: usize) -> Task<Message> {
+    let top = selected as f32 * FINDER_ROW_H + headings as f32 * FINDER_HEAD_H;
     reveal(finder_list_id(), top, top + FINDER_ROW_H)
 }
 

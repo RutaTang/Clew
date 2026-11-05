@@ -208,7 +208,10 @@ fn extract_zip(bytes: &[u8], dest: &Path, budget: Budget) -> Result<(), String> 
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| format!("bad zip: {e}"))?;
         ex.entry()?;
-        let name = entry.name().to_string();
+        let name = entry
+            .name()
+            .map_err(|e| format!("bad zip: {e}"))?
+            .to_string();
         let rel = match entry_name(&name)? {
             Name::Path(rel) => rel,
             Name::Root if entry.is_dir() => continue,

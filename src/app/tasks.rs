@@ -32,6 +32,8 @@ pub(crate) struct ResolverInputs {
 pub(crate) struct RemoteResolution {
     /// go.mod's module and pubspec.yaml's package name.
     pub meta: (Option<String>, Option<String>),
+    /// What its package manifests say of where its sources are.
+    pub manifests: clew_protocol::SourceManifests,
     /// tsconfig/jsconfig path maps, once fetched: the window's, shared.
     pub ts_configs: Option<Arc<imports::TsConfigs>>,
 }
@@ -45,7 +47,8 @@ impl ResolverInputs {
             return imports::Resolver::new(&self.root, &files);
         };
         let (go_module, dart_package) = remote.meta.clone();
-        let resolver = imports::Resolver::with_meta(&self.root, &files, go_module, dart_package);
+        let resolver = imports::Resolver::with_meta(&self.root, &files, go_module, dart_package)
+            .with_manifests(&remote.manifests);
         match &remote.ts_configs {
             Some(configs) => resolver.with_ts_configs(configs.clone()),
             None => resolver,
@@ -507,7 +510,7 @@ async fn refine_pass(
             let mut rels: Vec<String> = query_defs
                 .iter()
                 .filter_map(|d| d.file.strip_prefix(&root).ok())
-                .map(|r| r.to_string_lossy().into_owned())
+                .map(clew_core::rel_string)
                 .collect();
             rels.sort();
             rels.dedup();
@@ -3237,6 +3240,7 @@ mod tests {
         // project, as a host says of it — which is not a file that could not
         // be read.
         let size = std::fs::metadata(&big).unwrap().len();
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut refused = HashMap::from([(big.clone(), explain::Unexplainable::TooLarge(size))]);
         #[cfg(unix)]
         refused.insert(

@@ -14,10 +14,158 @@ pub(crate) fn render_prepared<'a>(
     app: &'a App,
     segments: &'a [crate::PreparedSeg],
 ) -> Vec<Element<'a, Message>> {
+    render_segments(app, segments, None)
+}
+
+/// [`render_prepared`] in a margin note's type: the design's 13 px, its
+/// lines set 1.55 apart.
+pub(crate) fn render_note<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+) -> Vec<Element<'a, Message>> {
+    render_segments(
+        app,
+        segments,
+        Some(Prose {
+            size: NOTE_SIZE,
+            line_height: NOTE_LINE_HEIGHT,
+        }),
+    )
+}
+
+/// [`render_prepared`] in an answer's type: the design's 13.5 px, its lines
+/// set 1.6 apart.
+pub(crate) fn render_answer<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+) -> Vec<Element<'a, Message>> {
+    render_segments(
+        app,
+        segments,
+        Some(Prose {
+            size: theme::PROSE_SIZE,
+            line_height: 1.6,
+        }),
+    )
+}
+
+/// A margin note's text size.
+pub(crate) const NOTE_SIZE: f32 = 13.0;
+/// A margin note's line height, relative to its size.
+pub(crate) const NOTE_LINE_HEIGHT: f32 = 1.55;
+/// Code inside prose, as the design sets it: a size of its own, under the
+/// words around it.
+const PROSE_CODE_SIZE: f32 = 12.0;
+
+/// Room either side of code in prose, inside its chip: the design's 5 px,
+/// as an en space (half the size it is set at).
+const PROSE_CODE_ROOM: f32 = 10.0;
+
+/// The room itself: an en space, joined to the code by a word joiner. The
+/// design's chip is one box, its padding laid out with its code and broken
+/// before or after, never inside; a bare space at a line's end hangs past
+/// it, uncounted (cosmic-text's way with trailing white space), so the
+/// line took up to 5 px more than the design's and wrapped a word later.
+const PROSE_CODE_ROOM_TEXT: &str = "\u{2002}\u{2060}";
+
+/// The design's padding of a chip of code in prose, above and below it.
+const PROSE_CODE_PAD_Y: f32 = 1.0;
+
+/// How far inside its line a chip of code in prose (`size`, lines `line`
+/// tall) is drawn, at its top and at its bottom. The design's renderer
+/// draws an inline code's background around the code face's ascent and
+/// descent from the line's baseline (each rounded, as it takes them, and
+/// the leading over the line's text floored), its padding out; a span's
+/// background here spans its line.
+fn chip_inset(size: f32, line: f32) -> (f32, f32) {
+    let (ascent, descent) = ts::INTER.rounded(size);
+    let baseline = ((line - (ascent + descent)) / 2.0).floor() + ascent;
+    let (code_ascent, code_descent) = ts::MONO.rounded(PROSE_CODE_SIZE);
+    (
+        baseline - code_ascent - PROSE_CODE_PAD_Y,
+        line - (baseline + code_descent + PROSE_CODE_PAD_Y),
+    )
+}
+
+/// How the markdown widget sets prose of a type of its own (a note, an
+/// answer): its paragraphs at their size and line height, the code in them
+/// at [`PROSE_CODE_SIZE`] on a chip with room of its own either side (a
+/// span's padding is drawn, not laid out, so the room is an en space);
+/// everything else as in any explanation.
+#[derive(Clone, Copy)]
+struct Prose {
+    size: f32,
+    line_height: f32,
+}
+
+impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
+    fn on_link_click(url: iced::widget::markdown::Uri) -> Message {
+        Message::Content(ContentMsg::OpenLink(url))
+    }
+
+    fn paragraph(
+        &self,
+        settings: iced::widget::markdown::Settings,
+        text: &iced::widget::markdown::Text,
+    ) -> Element<'a, Message> {
+        use iced::widget::text::{LineHeight, Span};
+        // Every span its line height in pixels: a line takes its height from
+        // the spans that state one, so code (sized apart) would otherwise
+        // set the lines it is on closer than the rest.
+        // In the design's renderer's unit of layout, a 64th of a pixel,
+        // rounded down: line after line, a paragraph's lines fall where
+        // the design's do.
+        let line_px = (self.size * self.line_height * 64.0).floor() / 64.0;
+        let line = LineHeight::Absolute(line_px.into());
+        let (inset_top, inset_bottom) = chip_inset(self.size, line_px);
+        let room = || {
+            Span::new(PROSE_CODE_ROOM_TEXT)
+                .size(PROSE_CODE_ROOM)
+                .line_height(line)
+        };
+        let mut spans = Vec::new();
+        for span in text.spans(settings.style).iter().cloned() {
+            if span.font == Some(settings.style.inline_code_font) {
+                spans.push(room());
+                spans.push(
+                    span.size(PROSE_CODE_SIZE)
+                        .line_height(line)
+                        .padding(iced::Padding {
+                            top: -inset_top,
+                            bottom: -inset_bottom,
+                            left: PROSE_CODE_ROOM / 2.0,
+                            right: PROSE_CODE_ROOM / 2.0,
+                        }),
+                );
+                spans.push(room());
+            } else {
+                spans.push(span.line_height(line));
+            }
+        }
+        iced::widget::rich_text(spans)
+            .size(settings.text_size)
+            .line_height(line)
+            .on_link_click(Self::on_link_click)
+            .into()
+    }
+}
+
+fn render_segments<'a>(
+    app: &'a App,
+    segments: &'a [crate::PreparedSeg],
+    prose: Option<Prose>,
+) -> Vec<Element<'a, Message>> {
     use crate::{PreparedInline, PreparedSeg};
     let mut out: Vec<Element<'_, Message>> = Vec::new();
     for seg in segments {
         match seg {
+            PreparedSeg::Markdown(items) if let Some(prose) = prose => {
+                out.push(iced::widget::markdown::view_with(
+                    items,
+                    theme::markdown_settings_at(prose.size),
+                    &prose,
+                ))
+            }
             PreparedSeg::Markdown(items) => out.push(
                 iced::widget::markdown::view(items, theme::markdown_settings())
                     .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string()))),
@@ -62,7 +210,7 @@ pub(crate) fn render_prepared<'a>(
                                 // while the render is on its way, and what
                                 // stays when the renderer rejects it.
                                 None => text(tex.as_str())
-                                    .font(Font::MONOSPACE)
+                                    .font(crate::fonts::CODE)
                                     .size(ts::SMALL)
                                     .color(if app.proj.explain.svg_failed.contains_key(key) {
                                         theme::warning()
@@ -95,15 +243,15 @@ pub(crate) fn code_block<'a>(lines: &'a [crate::highlight::HlLine]) -> Element<'
         .map(|l| {
             if l.spans.is_empty() {
                 // Keep blank lines from collapsing to zero height.
-                return text(" ").font(Font::MONOSPACE).size(ts::BODY).into();
+                return text(" ").font(crate::fonts::CODE).size(ts::BODY).into();
             }
             let spans: Vec<iced::widget::text::Span<'_, Message>> = l
                 .spans
                 .iter()
                 .map(|(t, style)| {
                     iced::widget::span(t.as_str())
-                        .color(style.and_then(style_color).unwrap_or(theme::fg()))
-                        .font(Font::MONOSPACE)
+                        .color(style.and_then(style_color).unwrap_or(theme::code_fg()))
+                        .font(crate::fonts::CODE)
                         .size(ts::BODY)
                 })
                 .collect();
@@ -137,7 +285,7 @@ pub(crate) fn svg_widget<'a>(sv: &crate::ExplainSvg) -> Element<'a, Message> {
 /// says so above the source.
 pub(crate) fn source_block<'a>(source: &'a str, what: &str, failed: bool) -> Element<'a, Message> {
     let code = text(source)
-        .font(Font::MONOSPACE)
+        .font(crate::fonts::CODE)
         .size(ts::SMALL)
         .color(theme::dim());
     let body: Element<'a, Message> = if failed {
@@ -418,18 +566,28 @@ fn reached_from_rows<'a>(
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.proj.explain.view.as_ref() else {
-        return container(
-            text("Move the cursor into a function, or Cmd+click a file/folder.")
-                .size(ts::SMALL)
-                .color(theme::dim()),
-        )
-        .padding(10)
-        .into();
+        return compact_empty_state(
+            Glyph::Lightbulb,
+            if crate::keymap::MAC_KEYS {
+                "Move the cursor into a function, or ⌘-click a file or folder."
+            } else {
+                "Move the cursor into a function, or Ctrl+click a file or folder."
+            },
+        );
     };
-    let title = match node {
-        Node::Folder(p) => format!("📁 {}", rel_of(app, p)),
-        Node::File(p) => rel_of(app, p),
-        Node::Function { file, name, .. } => format!("{name} · {}", rel_of(app, file)),
+    // The note's head: what it is about, in the face it is written in (a
+    // function's name as code), and what kind of thing that is.
+    let (title, meta, code) = match node {
+        Node::Folder(p) => (rel_of(app, p), "folder".to_string(), false),
+        Node::File(p) => (rel_of(app, p), "file".to_string(), false),
+        Node::Function { file, name, .. } => (
+            name.clone(),
+            match file.file_name() {
+                Some(f) => format!("fn · {}", f.to_string_lossy()),
+                None => "fn".to_string(),
+            },
+            true,
+        ),
     };
 
     // Call-flow navigation first (callers/callees), then the explanation prose.
@@ -508,11 +666,31 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     };
     container(
         column![
-            container(text(title).size(ts::BASE).color(theme::fg())).padding(Padding {
-                top: 10.0,
-                right: 12.0,
+            container(
+                row![
+                    text(title)
+                        .size(if code { ts::BODY } else { ts::BASE })
+                        .font(if code {
+                            crate::fonts::CODE_BOLD
+                        } else {
+                            crate::fonts::UI_SEMIBOLD
+                        })
+                        .color(theme::fg_bright())
+                        .wrapping(Wrapping::None),
+                    space().width(Fill),
+                    text(meta)
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(8)
+                .align_y(iced::Center)
+            )
+            .padding(Padding {
+                top: 12.0,
+                right: 14.0,
                 bottom: 0.0,
-                left: 12.0,
+                left: 14.0,
             }),
             // left 4 so the button's own inner padding lands its text at ~12,
             // aligned with the title above (not indented past it).
@@ -535,12 +713,11 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
                 )
                 .direction(thin_scroll())
                 .style(theme::overlay_scrollbar)
-                .height(iced::Length::Fill),
+                .height(iced::Length::Shrink),
             ),
         ]
         .spacing(8),
     )
-    .height(Fill)
     .into()
 }
 
@@ -650,7 +827,7 @@ pub(crate) fn lsp_consent_modal(
                 })
                 .size(ts::BODY)
                 .color(theme::accent())
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .wrapping(Wrapping::None),
             )
             .padding(8)
@@ -738,7 +915,7 @@ pub(crate) fn lsp_command_modal(
                 text(line)
                     .size(ts::BODY)
                     .color(theme::warn())
-                    .font(Font::MONOSPACE),
+                    .font(crate::fonts::CODE),
             )
             .padding(8)
             .width(Fill)
@@ -759,7 +936,7 @@ pub(crate) fn lsp_command_modal(
                     text(options)
                         .size(ts::BODY)
                         .color(theme::warn())
-                        .font(Font::MONOSPACE),
+                        .font(crate::fonts::CODE),
                 )
                 .height(Length::Fixed(160.0)),
             )
@@ -861,7 +1038,7 @@ pub(crate) fn consent_modal(
                 text(format!("{}/.clew", root.display()))
                     .size(ts::BODY)
                     .color(theme::accent())
-                    .font(Font::MONOSPACE)
+                    .font(crate::fonts::CODE)
                     .wrapping(Wrapping::Glyph),
             )
             .padding(8)

@@ -6,11 +6,17 @@ use crate::*;
 use iced::keyboard;
 
 mod ask_space;
+mod askfloat;
+#[cfg(unix)]
 mod build_app;
+mod insight;
 mod integrations;
 mod navigation_debug;
+mod palette;
 mod remote_state_refresh;
 mod semantic_space;
+mod voice;
+mod windowtools;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_flow_call_with_turbofish_arguments_follows_the_correct_parameter() {
@@ -349,15 +355,26 @@ fn the_app_tests_run_against_an_isolated_data_directory() {
         isolated_data_dir(),
         "the tests are not pointed at the isolated data directory"
     );
-    // `data_root()`'s fallback is always somewhere under `$HOME` (on macOS
-    // `Library/Application Support/clew`), and the isolated directory lives in
-    // the temp dir, so this catches the fallback being taken at all.
-    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
-    assert!(
-        !root.starts_with(&home),
-        "the tests write inside the developer's home: {}",
-        root.display()
-    );
+    // `data_root()`'s fallback is the platform's own data directory (on
+    // macOS `~/Library/Application Support/clew`, on Windows
+    // `%APPDATA%\clew`), and the isolated directory lives in the temp dir, so
+    // this catches the fallback being taken at all.
+    if let Some(fallback) = clew_core::lsp::store::default_data_root() {
+        assert!(
+            !root.starts_with(&fallback),
+            "the tests write into the developer's data directory: {}",
+            root.display()
+        );
+    }
+    #[cfg(unix)]
+    {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME is set"));
+        assert!(
+            !root.starts_with(&home),
+            "the tests write inside the developer's home: {}",
+            root.display()
+        );
+    }
 }
 
 /// A test that points `CLEW_DATA_DIR` somewhere of its own must hand the
@@ -481,10 +498,26 @@ fn writes_clipboard(task: Task<Message>) -> bool {
 /// Complete the project-state load the way its blocking job would — the same
 /// `LoadedProjectState::read` — so a test sees the stored trail, bookmarks,
 /// notes and caches as soon as the project is open.
+/// The user's choices for the open project's languages, read as the open's
+/// task would and handed in at once — which language servers wait for.
+fn load_choices_synchronously(app: &mut App) {
+    let Some(root) = app.proj.project.as_ref().map(|p| p.root.clone()) else {
+        return;
+    };
+    if app.proj.inflight.choices_loading {
+        let choices = clew_core::lsp::choices::load(app.connection.approval_host(), &root);
+        let _ = app.update(Message::Languages(LanguagesMsg::ChoicesLoaded {
+            stamp: app.stamp(),
+            choices,
+        }));
+    }
+}
+
 fn load_state_synchronously(app: &mut App) {
     let Some(root) = app.proj.project.as_ref().map(|p| p.root.clone()) else {
         return;
     };
+    load_choices_synchronously(app);
     if !app.proj.inflight.state_loading {
         return;
     }
@@ -2905,11 +2938,11 @@ fn search_flow_message_wiring() {
 fn font_size_rescales_scroll() {
     let mut app = scanned_app("font");
     open_synchronously(&mut app, "src/lib.rs", None);
-    app.proj.panes[0].as_mut().unwrap().scroll_y = 40.0; // line 2 at 20px
+    app.proj.panes[0].as_mut().unwrap().scroll_y = 48.0; // line 2 at 24px
     let _ = app.update(Message::Editor(EditorMsg::FontSizeDelta(2.0)));
     assert_eq!(app.font_size, 15.0);
     let v = app.active_viewer().unwrap();
-    assert!((v.scroll_y - 44.0).abs() < 0.01, "{}", v.scroll_y); // 2 * 22px
+    assert!((v.scroll_y - 52.0).abs() < 0.01, "{}", v.scroll_y); // 2 * 26px
     let _ = app.update(Message::Editor(EditorMsg::FontSizeReset));
     assert_eq!(app.font_size, DEFAULT_FONT_SIZE);
 }
@@ -3289,7 +3322,8 @@ fn fake_installed_rust_analyzer(data: &Path) {
         .join("rust-analyzer")
         .join(lsp::registry::by_name("rust-analyzer").unwrap().version);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
+    let program = format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX);
+    std::fs::write(dir.join(program), b"#!/bin/sh\nexit 0\n").unwrap();
 }
 
 /// Record that rust-analyzer may build `root`, as the user's Allow on a first
@@ -3635,7 +3669,10 @@ fn a_remote_install_in_progress_says_so_and_offers_nothing_to_ask() {
     let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
     let mut install = None;
     while let Ok(sent) = rx.try_recv() {
-        if let clew_protocol::Request::LspInstall { language, consent } = &sent.request {
+        if let clew_protocol::Request::LspInstall {
+            language, consent, ..
+        } = &sent.request
+        {
             assert_eq!((language.as_str(), consent.as_str()), ("rust", "digest"));
             install = Some(sent.id);
         }
@@ -4020,7 +4057,7 @@ async fn a_remote_options_only_config_is_approvable_from_the_client() {
     );
     assert!(
         sent.iter().any(
-            |r| matches!(r, clew_protocol::Request::LspResolve { language } if language == "rust")
+            |r| matches!(r, clew_protocol::Request::LspResolve { language, .. } if language == "rust")
         ),
         "the allow must re-ask the host, not start from the modal's copy: {sent:?}"
     );
@@ -4939,6 +4976,7 @@ fn reconnect_applies_the_new_servers_snapshot_and_file_list() {
             }],
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         });
     };
@@ -5639,6 +5677,7 @@ fn project_switch_clears_ask_history_and_pins() {
     app.proj.ask_turns.push(AskTurn {
         stream: 1,
         question: "what does origin do?".into(),
+        spoken: false,
         answer_md: "returns Point".into(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -5743,6 +5782,7 @@ fn remote_project_never_touches_local_state_or_files() {
         }],
         go_module: clew_protocol::Patch::Set(None),
         dart_package: clew_protocol::Patch::Set(None),
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Set(None),
     });
     settle_imports(&mut app, snapshot);
@@ -6006,6 +6046,7 @@ fn remote_symbol_update_advances_the_registry_and_ages_the_caches() {
             }],
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         });
     };
@@ -6670,6 +6711,7 @@ fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
     let turn = |stream: u64, q: &str| AskTurn {
         stream,
         question: q.into(),
+        spoken: false,
         answer_md: String::new(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -7637,6 +7679,7 @@ fn remote_app(
             tracked_ignored: Vec::new(),
         },
     );
+    load_choices_synchronously(&mut app);
     (app, root, rx)
 }
 
@@ -10733,6 +10776,7 @@ fn a_remote_edit_off_the_docs_tab_rebuilds_the_index_when_the_tab_returns() {
             }],
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         });
     };
@@ -11132,6 +11176,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         col: 4,
         x: 10.0,
         y: 10.0,
+        insight: None,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -11973,6 +12018,7 @@ fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
     app.proj.ask_turns.push(AskTurn {
         stream,
         question: "where is auth?".into(),
+        spoken: false,
         answer_md: String::new(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -12016,6 +12062,7 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
     app.proj.ask_turns.push(AskTurn {
         stream: remote,
         question: "remote?".into(),
+        spoken: false,
         answer_md: "Half an answer".into(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -13613,6 +13660,176 @@ fn settle_graphs(app: &mut App, task: Task<Message>) -> usize {
             )
     });
     builds.get()
+}
+
+/// Run `task` and land the project maps and the layouts it computes: the
+/// maps read on the way, counted.
+fn settle_maps(app: &mut App, task: Task<Message>) -> usize {
+    let reads = std::cell::Cell::new(0);
+    drive(app, task, |m| {
+        let read = matches!(m, Message::Graph(GraphMsg::MapsBuilt { .. }));
+        reads.set(reads.get() + usize::from(read));
+        read || matches!(m, Message::Graph(GraphMsg::GraphLaidOut { .. }))
+    });
+    reads.get()
+}
+
+/// The Maps overlay reads a local project's maps when it opens, lays out
+/// the first, keeps the one chosen across a rebuild, and reads them again
+/// only once a file changed.
+#[test]
+fn the_maps_overlay_reads_a_local_projects_maps_when_they_are_stale() {
+    let root = clew_core::testutil::TempDir::new("app-maps");
+    std::fs::create_dir_all(root.join("db")).unwrap();
+    std::fs::write(
+        root.join("db/schema.sql"),
+        "CREATE TABLE users (id int PRIMARY KEY);\nCREATE TABLE posts (id int, user_id int REFERENCES users(id));\nCREATE VIEW recent AS SELECT * FROM posts;\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    assert_eq!(settle_maps(&mut app, opened), 1);
+    let ids: Vec<&str> = app.proj.maps.iter().map(|m| m.id.as_str()).collect();
+    assert_eq!(ids, ["sql.schema", "sql.lineage"]);
+    assert_eq!(app.selected_map_index(), Some(0));
+    let layout = app.proj.graph_layout.as_ref().expect("the schema laid out");
+    assert_eq!(layout.nodes.len(), app.proj.maps[0].nodes.len());
+    assert!(
+        layout
+            .nodes
+            .iter()
+            .any(|n| n.file == root.join("db/schema.sql"))
+    );
+    // Another map chosen: laid out, and kept across a rebuild.
+    let chosen = app.update(Message::Graph(GraphMsg::SelectMap("sql.lineage".into())));
+    settle_maps(&mut app, chosen);
+    assert_eq!(app.selected_map_index(), Some(1));
+    let layout = app.proj.graph_layout.as_ref().unwrap();
+    assert_eq!(layout.nodes.len(), app.proj.maps[1].nodes.len());
+    // Opened again with nothing changed: not read again.
+    let _ = app.update(Message::Graph(GraphMsg::CloseOverlay));
+    let reopened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    assert_eq!(settle_maps(&mut app, reopened), 0, "nothing changed");
+    // A file changed: read again on the next open; the choice holds.
+    let _ = app.update(Message::Graph(GraphMsg::CloseOverlay));
+    let changed = rewritten(
+        &app,
+        &root,
+        "db/schema.sql",
+        "CREATE TABLE users (id int PRIMARY KEY, email text);\nCREATE VIEW recent AS SELECT * FROM users;\n",
+    );
+    let _ = app.update(changed);
+    let reopened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+    assert_eq!(settle_maps(&mut app, reopened), 1, "stale: read again");
+    assert_eq!(
+        app.proj.maps[app.selected_map_index().unwrap()].id,
+        "sql.lineage"
+    );
+    let schema = &app.proj.maps[0];
+    assert_eq!(
+        schema
+            .nodes
+            .iter()
+            .find(|n| n.label == "users")
+            .unwrap()
+            .detail,
+        "id int · primary key\nemail text"
+    );
+}
+
+/// A remote project's maps are read on its host; a map whose arrows name
+/// nodes that are not there is refused, said, and replaces nothing.
+#[test]
+fn a_remote_projects_maps_are_read_on_its_host_and_checked() {
+    let (mut app, root, mut rx) = remote_app("remote-maps");
+    let good = clew_protocol::ProjectMap {
+        id: "routes".into(),
+        title: "Routes".into(),
+        description: "a route to its handler".into(),
+        nodes: vec![
+            clew_protocol::MapNode {
+                label: "GET /".into(),
+                kind: "route".into(),
+                ..Default::default()
+            },
+            clew_protocol::MapNode {
+                label: "index".into(),
+                kind: "handler".into(),
+                file: "app.py".into(),
+                line: 3,
+                detail: String::new(),
+            },
+        ],
+        edges: vec![clew_protocol::MapEdge {
+            from: 0,
+            to: 1,
+            label: "handled by".into(),
+        }],
+    };
+    let mut bad = good.clone();
+    bad.edges[0].to = 9;
+    for (answer, expect_ok) in [(vec![good.clone()], true), (vec![bad], false)] {
+        app.proj.maps_rev = None;
+        let pending = app.server.ai_pending.clone();
+        let root_s = root.to_string_lossy().into_owned();
+        let opened = app.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps)));
+        let running = std::thread::spawn(move || run_task(opened));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut asked = 0;
+        while !running.is_finished() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the read never finished"
+            );
+            while let Ok(msg) = rx.try_recv() {
+                let reply = match msg.request {
+                    clew_protocol::Request::ProjectMaps => {
+                        asked += 1;
+                        clew_protocol::Event::ProjectMaps {
+                            root: root_s.clone(),
+                            maps: answer.clone(),
+                        }
+                    }
+                    clew_protocol::Request::Git { .. } => clew_protocol::Event::GitResult {
+                        root: root_s.clone(),
+                        result: clew_protocol::GitResult::Churn(Vec::new()),
+                    },
+                    _ => continue,
+                };
+                if let Some(tx) = crate::app::rpc::lock_replies(&pending).remove(&msg.id) {
+                    let _ = tx.send(reply);
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(asked, 1);
+        for msg in running.join().unwrap() {
+            if matches!(msg, Message::Graph(GraphMsg::MapsBuilt { .. })) {
+                let _ = app.update(msg);
+            }
+        }
+        let _ = app.update(Message::Graph(GraphMsg::CloseOverlay));
+        if expect_ok {
+            assert_eq!(app.proj.maps.as_slice(), std::slice::from_ref(&good));
+            assert!(app.proj.maps_error.is_none());
+        } else {
+            assert_eq!(
+                app.proj.maps.as_slice(),
+                std::slice::from_ref(&good),
+                "the bad answer replaced nothing"
+            );
+            assert!(
+                app.proj
+                    .maps_error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("Routes")),
+                "{:?}",
+                app.proj.maps_error
+            );
+        }
+    }
 }
 
 /// Run `task` and land the map layouts it computes.
@@ -16207,6 +16424,7 @@ fn a_remote_edit_that_moves_the_import_scope_asks_for_the_open_map_once() {
             files,
             go_module: clew_protocol::Patch::Unchanged,
             dart_package: clew_protocol::Patch::Unchanged,
+            manifests: Default::default(),
             structure: clew_protocol::Patch::Unchanged,
         })
     };
@@ -16598,6 +16816,7 @@ fn a_remote_refinement_the_first_snapshot_hands_back_says_so() {
         }],
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Unchanged,
     });
     let _ = serve_empty_project_calls(&app, published, &mut rx);
@@ -18569,10 +18788,6 @@ fn every_tools_menu_row_dismisses_the_menu() {
     use crate::ui::{TOOLS_MENU_ROWS, ToolsRow};
     let emits = |row: ToolsRow| -> Vec<Message> {
         match row {
-            ToolsRow::OutlineSummaries => vec![Message::Window(WindowMsg::ToggleInlineSummaries)],
-            ToolsRow::FileSummary => vec![Message::Window(WindowMsg::ToggleFileBanner)],
-            ToolsRow::InlayHints => vec![Message::Lsp(LspMsg::ToggleInlayHints)],
-            ToolsRow::Minimap => vec![Message::Window(WindowMsg::ToggleMinimap)],
             ToolsRow::Tutorial => vec![Message::Tutorial(TutorialMsg::Start)],
             ToolsRow::OpenFolder => vec![Message::Project(ProjectMsg::OpenFolderPressed)],
             ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
@@ -18585,11 +18800,6 @@ fn every_tools_menu_row_dismisses_the_menu() {
                 SidebarTab::Walk,
             ))],
             ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
-            ToolsRow::Skim => vec![Message::Editor(EditorMsg::SkimFile)],
-            ToolsRow::Diff => vec![Message::Editor(EditorMsg::ToggleDiff)],
-            ToolsRow::TimeTravel => {
-                vec![Message::TimeTravel(TimeTravelMsg::Start { symbol: false })]
-            }
             ToolsRow::ExportNotes => vec![Message::Export(ExportMsg::Start)],
             ToolsRow::LspServers => vec![Message::Lsp(LspMsg::TogglePanel)],
             ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
@@ -18605,8 +18815,25 @@ fn every_tools_menu_row_dismisses_the_menu() {
     }
     let mut app = blank_app();
     app.show_tools_menu = true;
-    let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
+    let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
+    // The View menu's rows close it too; and the menus open one at a time.
+    app.show_shortcuts = false;
+    app.show_view_menu = true;
+    let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
+    assert!(!app.show_view_menu, "picking a View row left the menu open");
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewMenu));
+    let _ = app.update(Message::Window(WindowMsg::ToggleToolsMenu));
+    assert!(app.show_tools_menu && !app.show_view_menu);
+    let _ = app.update(Message::Window(WindowMsg::ToggleAppMenu));
+    assert!(app.show_app_menu && !app.show_tools_menu);
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::ZoomIn,
+    )));
+    assert!(
+        !app.show_app_menu,
+        "running an action from the app menu left it open"
+    );
     app.show_tools_menu = true;
     let _ = app.update(Message::Noop);
     assert!(
@@ -18902,6 +19129,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         col: 0,
         x: 0.0,
         y: 0.0,
+        insight: None,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -19442,7 +19670,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Server(ServerMsg::ResendNotReady {
             stamp: s(),
             id: 1,
-            request: clew_protocol::Request::BuildDocs,
+            request: Box::new(clew_protocol::Request::BuildDocs),
             attempt: 1,
         }),
         Message::Project(ProjectMsg::ScanDone {
@@ -19488,6 +19716,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             path: root.join("notes.md"),
             waited: 1,
         }),
+        Message::Export(ExportMsg::Picked {
+            stamp: s(),
+            path: Some(root.join("stale-notes.md")),
+        }),
         Message::Editor(EditorMsg::FileLoaded {
             stamp: s(),
             req: 1,
@@ -19505,6 +19737,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             docs: HashMap::new(),
             inactive: HashSet::new(),
             target: inactive::Target::host(),
+            facts: Default::default(),
         }),
         Message::Watch(WatchMsg::StructureBuilt {
             stamp: s(),
@@ -19567,6 +19800,33 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             generation: 0,
             result: Err("stale".into()),
         }),
+        Message::Languages(LanguagesMsg::ChoicesLoaded {
+            stamp: s(),
+            choices: clew_protocol::LanguageChoices {
+                python: Some("/stale/bin/python".into()),
+                ..Default::default()
+            },
+        }),
+        Message::Languages(LanguagesMsg::Listed {
+            stamp: s(),
+            result: Err("stale".into()),
+        }),
+        Message::Languages(LanguagesMsg::Browsed {
+            stamp: s(),
+            field: LangField::PythonPath,
+            path: Some(root.join("stale-python")),
+        }),
+        Message::Languages(LanguagesMsg::Saved {
+            stamp: s(),
+            result: Err("stale".into()),
+        }),
+        Message::Languages(LanguagesMsg::FactsLoaded {
+            stamp: s(),
+            result: Ok(clew_protocol::BuildFacts {
+                go_tags: Some(vec!["stale".into()]),
+                ..Default::default()
+            }),
+        }),
         Message::Lsp(LspMsg::PanelListed {
             stamp: s(),
             seq: app.server_panel_seq,
@@ -19600,6 +19860,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             line: 0,
             col: 0,
             text: Some("stale".into()),
+        }),
+        Message::Hover(HoverMsg::InsightAnswered {
+            stamp: s(),
+            token: app.insight_seq,
+            result: Err("stale".into()),
         }),
         Message::Nav(NavMsg::DefinitionResult {
             stamp: s(),
@@ -19649,6 +19914,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Graph(GraphMsg::ProjectCallsBuilt {
             stamp: s(),
             graph: Err("stale".into()),
+        }),
+        Message::Graph(GraphMsg::MapsBuilt {
+            stamp: s(),
+            rev: 0,
+            maps: Err("stale".into()),
         }),
         Message::Graph(GraphMsg::ChurnLoaded {
             stamp: s(),
@@ -19995,6 +20265,14 @@ fn a_stale_stamp_on_every_stamped_message_is_dropped_by_the_one_check() {
         if line.trim() == "stamp: Stamp," {
             declared.extend(variant.clone());
         }
+        // A variant rustfmt keeps on one line: `Name { stamp: Stamp, .. },`.
+        if let Some((name, fields)) = line.strip_prefix("    ").and_then(|l| l.split_once(" { "))
+            && name.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+            && name.chars().all(char::is_alphanumeric)
+            && fields.split([',', '}']).any(|f| f.trim() == "stamp: Stamp")
+        {
+            declared.extend(feature.as_ref().map(|f| format!("{f}::{name}")));
+        }
     }
     declared.remove("Debug::AdapterInstalled");
     assert!(declared.len() > 50, "the stamped variants were not found");
@@ -20119,6 +20397,7 @@ fn fill_project_session(app: &mut App) {
         col: 4,
         x: 1.0,
         y: 1.0,
+        insight: None,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -20213,6 +20492,7 @@ fn fill_project_session(app: &mut App) {
     p.ask_turns.push(AskTurn {
         stream: 20,
         question: "q".into(),
+        spoken: false,
         answer_md: "a".into(),
         answer: Vec::new(),
         sources: Vec::new(),
@@ -20888,6 +21168,7 @@ fn a_stopped_agent_turn_never_falls_back_to_a_paid_answer() {
         app.proj.ask_turns.push(AskTurn {
             stream,
             question: "what is Point?".into(),
+            spoken: false,
             answer_md: String::new(),
             answer: Vec::new(),
             sources: Vec::new(),
@@ -21094,9 +21375,15 @@ fn a_late_provider_holds_its_port_until_it_answers() {
     let base = late.config.base_url.trim_end_matches("/v1").to_string();
     let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
     let at = ("127.0.0.1", port);
-    assert!(!bindable(port), "the port was let go of");
-    let refused = std::net::TcpStream::connect(at).expect_err("nothing answers yet");
-    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    // Not yet. (Windows lets a listener bind a port a connected socket
+    // holds, and tries a refused connect again for a second or so — past the
+    // provider's start: there only the answer below shows.)
+    #[cfg(unix)]
+    {
+        assert!(!bindable(port), "the port was let go of");
+        let refused = std::net::TcpStream::connect(at).expect_err("nothing answers yet");
+        assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
     let began = std::time::Instant::now();
     while std::net::TcpStream::connect(at).is_err() {
         assert!(
@@ -21110,38 +21397,12 @@ fn a_late_provider_holds_its_port_until_it_answers() {
 /// Whether a TCP socket that shares no address — without the
 /// `SO_REUSEADDR` std sets on each listener it binds — can be bound to
 /// `port` on the loopback: whether no socket holds the port.
+#[cfg(unix)]
 fn bindable(port: u16) -> bool {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let len = std::mem::size_of::<libc::sockaddr_in>() as libc::socklen_t;
-    // SAFETY: `socket` returns a descriptor nothing else owns (or -1,
-    // checked), which the `OwnedFd` then closes.
-    let raw = unsafe { libc::socket(libc::AF_INET, libc::SOCK_STREAM, 0) };
-    assert!(raw >= 0, "socket: {}", std::io::Error::last_os_error());
-    let socket = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
-    // SAFETY: an all-zero `sockaddr_in` is a valid value of it.
-    let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "freebsd",
-        target_os = "openbsd",
-        target_os = "netbsd"
-    ))]
-    {
-        addr.sin_len = len as u8;
-    }
-    addr.sin_family = libc::AF_INET as libc::sa_family_t;
-    addr.sin_port = port.to_be();
-    addr.sin_addr.s_addr = u32::from(std::net::Ipv4Addr::LOCALHOST).to_be();
-    // SAFETY: `addr` is a `sockaddr_in` of `len` bytes.
-    let bound = unsafe {
-        libc::bind(
-            socket.as_raw_fd(),
-            (&raw const addr).cast::<libc::sockaddr>(),
-            len,
-        )
-    };
-    bound == 0
+    let socket =
+        socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::STREAM, None).expect("a socket");
+    let at = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    socket.bind(&at.into()).is_ok()
 }
 
 /// The messages that carry an explain pass: what starts one, and its end.
@@ -26173,17 +26434,15 @@ fn a_jump_to_another_file_in_the_other_pane_leaves_a_start_loading() {
     // It lands, superseding that open for good, and shows on the left. What
     // the reader's jump said since stays: the history clears only its own
     // "Loading history…".
-    assert_eq!(app.status, "other.txt");
+    let said = app.status.clone();
+    assert!(!said.contains("history"), "{said}");
     let _ = app.update(lib_history(&app, asked));
     assert_eq!(
         app.proj.time_travel.as_ref().map(|t| &t.abs),
         Some(&lib),
         "the history was dropped as it landed"
     );
-    assert_eq!(
-        app.status, "other.txt",
-        "the landing wiped what the jump said"
-    );
+    assert_eq!(app.status, said, "the landing wiped what the jump said");
     assert_eq!(app.proj.link.superseded_open, None);
     assert_eq!(app.proj.link.pane_pending[0], None);
     let _ = app.update(Message::Editor(EditorMsg::PaneFocused(0)));
@@ -26503,8 +26762,11 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
             O::Why(_) => "why",
+            O::Insight(_) => "insight",
             O::ToolsMenu => "tools menu",
             O::TargetMenu => "target menu",
+            O::AppMenu => "app menu",
+            O::ViewMenu => "view menu",
             O::Graph(_) => "graph",
             O::ServerPanel => "server panel",
             O::Finder => "finder",
@@ -26524,8 +26786,11 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
         app.proj.blame_why = None;
+        app.proj.insight = None;
         app.show_tools_menu = false;
         app.show_target_menu = false;
+        app.show_app_menu = false;
+        app.show_view_menu = false;
         app.proj.overlay = None;
         app.server_panel = false;
         app.proj.finder.open = false;
@@ -26588,8 +26853,20 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 prepared: Vec::new(),
             })
         }),
+        Box::new(|a| {
+            a.proj.insight = Some(Insight {
+                token: 1,
+                kind: InsightKind::ExpandMacro,
+                title: "Expansion of MAX".into(),
+                loading: true,
+                prepared: Vec::new(),
+                defined: None,
+            })
+        }),
         Box::new(|a| a.show_tools_menu = true),
         Box::new(|a| a.show_target_menu = true),
+        Box::new(|a| a.show_app_menu = true),
+        Box::new(|a| a.show_view_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
         Box::new(|a| a.server_panel = true),
         Box::new(|a| a.proj.finder.open = true),
@@ -26600,6 +26877,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 col: 0,
                 x: 10.0,
                 y: 10.0,
+                insight: None,
             })
         }),
     ];
@@ -26623,7 +26901,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (17, 17),
+        (20, 20),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -28119,9 +28397,15 @@ fn every_write_of_a_panes_annotations_keeps_its_summary_current() {
     open_synchronously(&mut app, "src/cfg.rs", None);
     let dimmed = |app: &App| app.active_viewer().unwrap().inactive_lines().clone();
     let before = dimmed(&app);
+    // The other family than the host's.
     let mut other = inactive::Target::host();
-    other.os = "windows".into();
-    other.family = "windows".into();
+    if other.family == "windows" {
+        other.os = "linux".into();
+        other.family = "unix".into();
+    } else {
+        other.os = "windows".into();
+        other.family = "windows".into();
+    }
     let _ = app.update(Message::Reading(ReadingMsg::TargetSelected(other)));
     assert_ne!(dimmed(&app), before, "the target switch changed no dimming");
     assert!(
@@ -28699,6 +28983,7 @@ fn a_deleted_remote_tsconfig_is_dropped_before_the_one_job_that_resolves() {
         }],
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Unchanged,
     });
     settle_imports(&mut app, published);
@@ -28966,6 +29251,7 @@ fn a_remote_publication_without_files_leaves_the_call_graph_current() {
         files: Vec::new(),
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Set(None),
     });
     let _ = serve_empty_project_calls(&app, published, &mut rx);
@@ -29007,6 +29293,7 @@ fn a_remote_refined_call_graph_gives_way_to_the_next_change() {
         }],
         go_module: clew_protocol::Patch::Unchanged,
         dart_package: clew_protocol::Patch::Unchanged,
+        manifests: Default::default(),
         structure: clew_protocol::Patch::Unchanged,
     });
     assert!(
@@ -29416,14 +29703,14 @@ fn a_failed_appearance_write_is_reported() {
     );
 }
 
-/// B14/B16: a file opens with its path in the status line, and an empty
-/// outline says WHY it is empty: a language without an outline is not a file
-/// without symbols.
+/// B14/B16: a file opens with nothing in the status line (the sheet's
+/// header names it), and an empty outline says WHY it is empty: a language
+/// without an outline is not a file without symbols.
 #[test]
 fn an_empty_outline_says_why() {
     assert_eq!(
         crate::app::editor::open_status("src/lib.rs", Some("rust")),
-        "src/lib.rs"
+        ""
     );
     assert_eq!(
         crate::ui::empty_outline_note(Some("rust")),
@@ -30145,7 +30432,7 @@ async fn following_a_value_reads_a_wrapped_signature_from_disk() {
         "pub(crate) fn save_markdown(\n    window: Option<u32>,\n    file_name: String,\n) -> String {\n    file_name\n}\n\nfn start() {\n        let file_name = String::new();\n        save_markdown(None, file_name);\n}\n",
     )
     .unwrap();
-    let uri = format!("file://{}", shop.display());
+    let uri = lsp::client::path_to_uri(&shop);
     let at = |line: u64, character: u64| {
         serde_json::json!({
             "uri": uri,
@@ -30508,7 +30795,7 @@ async fn trace_call_in_fixture(
     let file = root.join("src/shop.rs");
     std::fs::write(&file, source).unwrap();
     open_synchronously(&mut app, "src/shop.rs", None);
-    let uri = format!("file://{}", file.display());
+    let uri = lsp::client::path_to_uri(&file);
     let script = NavScript::leak(
         serde_json::json!([{
             "uri": uri,
@@ -30712,4 +30999,516 @@ fn public_cpp_members_remain_visible_after_comment_braces() {
         let entries = &app.proj.docs.page.as_ref().unwrap().entries;
         assert!(entries.iter().any(|entry| entry.name == "shown"));
     }
+}
+
+/// A remote project's language servers wait for the user's choices for it —
+/// read when it opens — and carry them to the host, which hands them to the
+/// server it resolves: started before, the Python server would have had the
+/// interpreter detection found, not the one the user picked.
+#[tokio::test]
+async fn a_remote_language_server_waits_for_the_projects_choices_and_carries_them() {
+    let root = fixture_project("choices-wait-remote");
+    let mut app = blank_app();
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let mut rx = attach_server(&mut app);
+    app.scanning = true;
+    app.pending_scan_root = Some(root.clone());
+    let _ = app.handle_server_reply(
+        1,
+        clew_protocol::Event::Tree {
+            root: root.to_string_lossy().into_owned(),
+            seq: 1,
+            tree: clew_protocol::DirNode {
+                dirs: Vec::new(),
+                files: Vec::new(),
+            },
+            files: vec!["main.py".into()],
+            truncated: false,
+            tracked_ignored: Vec::new(),
+        },
+    );
+    assert!(
+        app.proj.inflight.choices_loading,
+        "the open reads the choices"
+    );
+    while rx.try_recv().is_ok() {}
+    let _ = app.ensure_lsp("python");
+    let resolves = |rx: &mut tokio::sync::mpsc::Receiver<clew_protocol::ClientMessage>| {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|m| match m.request {
+                clew_protocol::Request::LspResolve { language, choices } => {
+                    Some((language, choices))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(
+        resolves(&mut rx).is_empty(),
+        "nothing resolves before the choices"
+    );
+
+    let chosen = clew_protocol::LanguageChoices {
+        python: Some("/home/me/.venvs/app/bin/python".into()),
+        ..Default::default()
+    };
+    let _ = app.update(Message::Languages(LanguagesMsg::ChoicesLoaded {
+        stamp: app.stamp(),
+        choices: chosen.clone(),
+    }));
+    assert_eq!(resolves(&mut rx), [("python".to_string(), chosen)]);
+}
+
+/// Picking an interpreter in Settings saves it for the project on its host —
+/// in clew's data directory, not the project — and restarts the running
+/// Python server so it takes it: the host is asked again, with the choice.
+#[tokio::test]
+async fn choosing_an_interpreter_saves_it_and_restarts_the_python_server() {
+    let data = test_dir("choose-python-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, root, mut rx) = remote_app("choose-python");
+    app.proj
+        .link
+        .lsp
+        .insert("python".into(), LspSlot::AwaitingConsent);
+    while rx.try_recv().is_ok() {}
+
+    let path = "/srv/envs/app/bin/python".to_string();
+    let task = app.update(Message::Languages(LanguagesMsg::ChoosePython(Some(
+        path.clone(),
+    ))));
+    let chosen = clew_protocol::LanguageChoices {
+        python: Some(path.clone()),
+        ..Default::default()
+    };
+    assert_eq!(app.proj.lang_choices, chosen);
+    let sent: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+        .map(|m| m.request)
+        .collect();
+    assert!(
+        sent.iter().any(|r| matches!(
+            r,
+            clew_protocol::Request::LspResolve { language, choices }
+                if language == "python" && *choices == chosen
+        )),
+        "the Python server is resolved again, with the choice: {sent:?}"
+    );
+    let messages = run_task(task);
+    assert!(
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Languages(LanguagesMsg::Saved { result: Ok(()), .. })
+        )),
+        "{messages:?}"
+    );
+    assert_eq!(
+        clew_core::lsp::choices::load(Some("user@host"), &root),
+        chosen,
+        "kept for the project on its host"
+    );
+    assert!(!root.join(".clew/languages.toml").exists());
+
+    // Back to automatic: the record holds nothing for the project.
+    let task = app.update(Message::Languages(LanguagesMsg::ChoosePython(None)));
+    let _ = run_task(task);
+    assert_eq!(
+        clew_core::lsp::choices::load(Some("user@host"), &root),
+        Default::default()
+    );
+}
+
+/// What the project's build leaves out is read with the project's choices
+/// and dims the open files as it lands: code behind a Cargo feature the
+/// package builds without is dimmed, and choosing the feature brings it
+/// back — the facts read afresh, every open file dimmed again.
+#[test]
+fn the_build_facts_dim_what_the_build_leaves_out() {
+    let data = test_dir("build-facts-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = test_dir("build-facts");
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"app\"\n[features]\ndefault = [\"tls\"]\ntls = []\nfast = []\n",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "#[cfg(feature = \"fast\")]\nfn fast() {}\n#[cfg(feature = \"tls\")]\nfn tls() {}\n",
+    )
+    .unwrap();
+    let root = root.canonicalize().unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let dimmed = |app: &App| {
+        let mut lines: Vec<usize> = app
+            .active_viewer()
+            .unwrap()
+            .inactive_lines()
+            .iter()
+            .copied()
+            .collect();
+        lines.sort();
+        lines
+    };
+    assert!(dimmed(&app).is_empty(), "nothing known of the build yet");
+
+    let land = |app: &mut App, task: Task<Message>| {
+        for message in run_task(task) {
+            if matches!(
+                message,
+                Message::Languages(LanguagesMsg::FactsLoaded { .. })
+            ) {
+                let _ = app.update(message);
+            }
+        }
+    };
+    let task = app.refresh_build_facts();
+    land(&mut app, task);
+    assert_eq!(dimmed(&app), [0, 1], "`fast` is not among the defaults");
+
+    let task = app.update(Message::Languages(LanguagesMsg::Choose(Box::new(
+        clew_protocol::LanguageChoices {
+            rust: Some(clew_protocol::RustChoices {
+                features: vec!["fast".into()],
+                no_default_features: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ))));
+    land(&mut app, task);
+    assert_eq!(dimmed(&app), [2, 3], "`fast` chosen, the defaults left off");
+}
+
+/// A program of the user's own, standing in for a language's server.
+#[cfg(unix)]
+fn server_program(
+    language: &str,
+    command: &Path,
+    args: Option<Vec<String>>,
+) -> clew_protocol::LanguageChoices {
+    clew_protocol::LanguageChoices {
+        servers: Some(
+            [(
+                language.to_string(),
+                clew_protocol::ServerChoice {
+                    command: command.to_string_lossy().into_owned(),
+                    args,
+                },
+            )]
+            .into(),
+        ),
+        ..Default::default()
+    }
+}
+
+/// A server program the user chose is what a local start spawns, with the
+/// arguments they gave — and one standing in for a server that builds the
+/// project still asks for the leave to build it before anything runs.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_chosen_server_program_is_what_a_local_start_spawns() {
+    use std::os::unix::fs::PermissionsExt;
+    let mut app = scanned_app("chosen-program-local");
+    let tools = test_dir("chosen-program-tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let program = tools.join("my-server");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    app.proj.lang_choices = server_program("go", &program, Some(vec!["-rpc.trace".into()]));
+    let mut rx = attach_server(&mut app);
+    let start = drive_start(app.ensure_lsp("go"));
+    let proc = app.server.lsp_procs["go"];
+    let asked = asked_until_spawned(&mut rx, proc).await;
+    match asked.last() {
+        Some(clew_protocol::Request::SpawnProcess { cmd, args, .. }) => {
+            assert_eq!(cmd, &program.to_string_lossy());
+            assert_eq!(args, &["-rpc.trace".to_string()]);
+        }
+        other => panic!("expected the spawn, got {other:?}"),
+    }
+    start.abort();
+
+    // In place of rust-analyzer, which builds the project: asked first.
+    app.proj.lang_choices = server_program("rust", &program, None);
+    let _ = app.ensure_lsp("rust");
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::AwaitingConsent)
+    ));
+    assert!(matches!(
+        app.proj.pending_lsp_consent.front().map(|c| &c.provision),
+        Some(crate::LspProvision::Build { .. })
+    ));
+    assert!(
+        !app.server.lsp_procs.contains_key("rust"),
+        "nothing spawned"
+    );
+}
+
+/// A Rust choice restarts Rust's server alone — asked of the host again
+/// with the choices — and the host's spawn carries them, where they decide
+/// what runs.
+#[tokio::test]
+async fn a_build_choice_restarts_only_its_server_and_rides_the_spawn() {
+    let data = test_dir("choose-rust-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, _root, mut rx) = remote_app("choose-rust");
+    for language in ["rust", "python"] {
+        app.proj
+            .link
+            .lsp
+            .insert(language.into(), LspSlot::AwaitingConsent);
+    }
+    while rx.try_recv().is_ok() {}
+    let chosen = clew_protocol::LanguageChoices {
+        rust: Some(clew_protocol::RustChoices {
+            features: vec!["fast".into()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let _ = app.update(Message::Languages(LanguagesMsg::Choose(Box::new(
+        chosen.clone(),
+    ))));
+    assert_eq!(app.proj.lang_choices, chosen);
+    let resolved: Vec<(String, clew_protocol::LanguageChoices)> =
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .filter_map(|m| match m.request {
+                clew_protocol::Request::LspResolve { language, choices } => {
+                    Some((language, choices))
+                }
+                _ => None,
+            })
+            .collect();
+    assert_eq!(resolved, [("rust".to_string(), chosen.clone())]);
+
+    let start = drive_start(app.start_lsp_with("rust", PathBuf::new()));
+    let proc = app.server.lsp_procs["rust"];
+    let spawned = loop {
+        let request = tokio::time::timeout(std::time::Duration::from_secs(60), rx.recv())
+            .await
+            .expect("the spawn within a minute")
+            .expect("the channel is open")
+            .request;
+        if let clew_protocol::Request::SpawnLsp {
+            proc: p, choices, ..
+        } = request
+            && p == proc
+        {
+            break choices;
+        }
+    };
+    assert_eq!(spawned, chosen);
+    start.abort();
+}
+
+/// What is typed in the section's fields becomes the choice it names — a
+/// build tag that is none, or a program for no language, refused with a
+/// reason — and a program already chosen comes back to be edited.
+#[tokio::test]
+async fn typed_language_fields_make_their_choices() {
+    let data = test_dir("typed-choices-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, _root, _rx) = remote_app("typed-choices");
+    let typed = |app: &mut App, field: LangField, text: &str| {
+        let _ = app.update(Message::Languages(LanguagesMsg::Draft(field, text.into())));
+        let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(field)));
+    };
+
+    typed(&mut app, LangField::GoTag, "integration, e2e");
+    typed(&mut app, LangField::GoTag, "e2e");
+    let go = app.proj.lang_choices.go.clone().unwrap();
+    assert_eq!(go.tags, ["integration", "e2e"]);
+    assert!(
+        app.proj.lang_drafts.go_tag.is_empty(),
+        "a used field empties"
+    );
+    typed(&mut app, LangField::GoTag, "a-b");
+    assert!(app.status.contains("is not a build tag"), "{}", app.status);
+    assert_eq!(app.proj.lang_choices.go.as_ref(), Some(&go));
+    assert_eq!(app.proj.lang_drafts.go_tag, "a-b", "kept, to be fixed");
+
+    typed(&mut app, LangField::CFlags, r#"-DNAME="a b" -Iinclude"#);
+    typed(&mut app, LangField::CDatabase, "/srv/p/build");
+    let c = app.proj.lang_choices.c.clone().unwrap();
+    assert_eq!(c.flags, ["-DNAME=a b", "-Iinclude"]);
+    assert_eq!(c.compile_commands.as_deref(), Some("/srv/p/build"));
+
+    typed(
+        &mut app,
+        LangField::TypeScriptPath,
+        "/srv/ts/lib/tsserver.js",
+    );
+    typed(&mut app, LangField::ZigPath, "zig");
+    assert_eq!(
+        app.proj.lang_choices.typescript.as_deref(),
+        Some("/srv/ts/lib/tsserver.js")
+    );
+    assert_eq!(app.proj.lang_choices.zig.as_deref(), Some("zig"));
+
+    typed(&mut app, LangField::JavaHome, "/usr/lib/jvm/java-21");
+    typed(&mut app, LangField::PhpVersion, "8.1");
+    typed(&mut app, LangField::CSharpSolution, "src/App.sln");
+    let choices = &app.proj.lang_choices;
+    assert_eq!(choices.java.as_deref(), Some("/usr/lib/jvm/java-21"));
+    assert_eq!(choices.php.as_deref(), Some("8.1"));
+    assert_eq!(choices.csharp.as_deref(), Some("src/App.sln"));
+    typed(&mut app, LangField::PhpVersion, "");
+    assert_eq!(
+        app.proj.lang_choices.php.as_deref(),
+        Some("8.1"),
+        "an empty field chooses nothing"
+    );
+
+    typed(&mut app, LangField::RustTarget, "wasm32-unknown-unknown");
+    assert_eq!(
+        app.proj
+            .lang_choices
+            .rust
+            .as_ref()
+            .and_then(|r| r.target.as_deref()),
+        Some("wasm32-unknown-unknown")
+    );
+
+    // A program needs its language.
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        LangField::ServerCommand,
+        "/opt/lua-ls".into(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(
+        LangField::ServerCommand,
+    )));
+    assert!(app.status.contains("Pick the language"), "{}", app.status);
+    assert_eq!(app.proj.lang_choices.servers, None);
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "lua".into(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        LangField::ServerCommand,
+        "/opt/lua-ls".into(),
+    )));
+    typed(&mut app, LangField::ServerArgs, "--stdio \"--log x\"");
+    let chosen = &app.proj.lang_choices.servers.as_ref().unwrap()["lua"];
+    assert_eq!(chosen.command, "/opt/lua-ls");
+    assert_eq!(
+        chosen.args.as_deref(),
+        Some(&["--stdio".to_string(), "--log x".to_string()][..])
+    );
+    // Picked again, it comes back to edit.
+    let _ = app.update(Message::Languages(LanguagesMsg::ServerLanguage(
+        "lua".into(),
+    )));
+    assert_eq!(app.proj.lang_drafts.server_command, "/opt/lua-ls");
+    assert_eq!(app.proj.lang_drafts.server_args, "--stdio \"--log x\"");
+    // Used with no program, it is no program.
+    let _ = app.update(Message::Languages(LanguagesMsg::Draft(
+        LangField::ServerCommand,
+        String::new(),
+    )));
+    let _ = app.update(Message::Languages(LanguagesMsg::UseDraft(
+        LangField::ServerCommand,
+    )));
+    assert_eq!(app.proj.lang_choices.servers, None);
+}
+
+/// A remote project's PHP classes resolve by the PSR-4 map its host read of
+/// `composer.json` (sent with the snapshot); a later publication restating
+/// the same map re-resolves nothing, one that changes it re-resolves.
+#[test]
+fn a_remote_projects_php_classes_resolve_by_the_hosts_composer_map() {
+    let (mut app, root, mut rx) = remote_app("remote-psr4");
+    let root_s = root.to_string_lossy().into_owned();
+    let files = [
+        "app/Http/Controller.php",
+        "app/Models/User.php",
+        "composer.json",
+    ];
+    let spliced = app.handle_server_event(clew_protocol::Event::Tree {
+        root: root_s.clone(),
+        seq: 2,
+        tree: clew_protocol::DirNode {
+            dirs: Vec::new(),
+            files: Vec::new(),
+        },
+        files: files.iter().map(|f| f.to_string()).collect(),
+        truncated: false,
+        tracked_ignored: Vec::new(),
+    });
+    drive(&mut app, spliced, |m| {
+        matches!(m, Message::Graph(GraphMsg::ImportGraphUpdated { .. }))
+    });
+    let _ = &mut rx;
+    let map = |prefix: &str, dir: &str| clew_protocol::SourceManifests {
+        psr4: vec![(
+            "composer.json".into(),
+            vec![(prefix.into(), vec![dir.into()])],
+        )],
+        haskell: Vec::new(),
+    };
+    let publish = |app: &mut App, seq: u64, manifests: clew_protocol::Patch<_>| {
+        let published = app.handle_server_event(clew_protocol::Event::ProjectSymbols {
+            root: root_s.clone(),
+            seq,
+            full: false,
+            files: vec![clew_protocol::FileSymbols {
+                rel: "app/Http/Controller.php".into(),
+                symbols: Vec::new(),
+                imports: vec![clew_protocol::WireImport {
+                    module: "App\\Models\\User".into(),
+                    line: 3,
+                    is_mod: false,
+                }],
+            }],
+            go_module: clew_protocol::Patch::Unchanged,
+            dart_package: clew_protocol::Patch::Unchanged,
+            manifests,
+            structure: clew_protocol::Patch::Unchanged,
+        });
+        settle_imports(app, published);
+    };
+    publish(
+        &mut app,
+        1,
+        clew_protocol::Patch::Set(Some(map("App\\", "app/"))),
+    );
+    let target = |app: &App| {
+        app.proj
+            .import_graph
+            .imports(&root.join("app/Http/Controller.php"))[0]
+            .target
+            .clone()
+    };
+    assert_eq!(
+        target(&app),
+        imports::Target::Internal(root.join("app/Models/User.php"))
+    );
+    assert_eq!(app.proj.remote_manifests, map("App\\", "app/"));
+    // The map moved: the class now names no file of the project's.
+    publish(
+        &mut app,
+        2,
+        clew_protocol::Patch::Set(Some(map("App\\", "src/"))),
+    );
+    assert_eq!(
+        target(&app),
+        imports::Target::Unresolved("App\\Models\\User".into())
+    );
+    // Gone altogether: a path from the root again.
+    publish(&mut app, 3, clew_protocol::Patch::Set(None));
+    assert_eq!(app.proj.remote_manifests, Default::default());
 }

@@ -265,8 +265,11 @@ const MAX_SWEPT_ENTRIES: usize = 512;
 /// other's staged bundle mid-swap.
 ///
 /// Mode 0700 on the leaf, so whatever lands inside is unreachable to other
-/// accounts whatever the modes on the data root above it happen to be.
+/// accounts whatever the modes on the data root above it happen to be. (On
+/// Windows the leaf takes the data root's own access list: the user's
+/// profile, which other accounts cannot read.)
 pub fn create_private_dir(parent: &Path, prefix: &str) -> Result<PathBuf, String> {
+    #[cfg(unix)]
     use std::os::unix::fs::DirBuilderExt;
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -275,7 +278,11 @@ pub fn create_private_dir(parent: &Path, prefix: &str) -> Result<PathBuf, String
     for _ in 0..64 {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = parent.join(format!("{prefix}-{pid}-{n}"));
-        match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        #[cfg_attr(not(unix), allow(unused_mut))]
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        builder.mode(0o700);
+        match builder.create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("could not prepare the update: {e}")),
@@ -669,12 +676,14 @@ mod tests {
     use super::testing::{download_dirs, eventually, stalling_host};
     use super::*;
     use crate::app::tests::{EnvVars, data_dir_override, test_dir};
+    #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
 
     /// Every update directory — a download's and an install's alike — is its
     /// own, private to this user, and an entry that already exists is stepped
     /// over rather than adopted: neither a second window nor a pre-planted
     /// directory can be the one clew writes an update into.
+    #[cfg(unix)]
     #[test]
     fn each_update_directory_is_fresh_private_and_never_adopted() {
         let parent = test_dir("privdir");
@@ -768,9 +777,7 @@ mod tests {
     /// to be shown looking past a directory's own timestamp.
     fn age(path: &Path, by: Duration) {
         let when = SystemTime::now() - by;
-        let f = std::fs::File::open(path).unwrap();
-        f.set_times(std::fs::FileTimes::new().set_modified(when))
-            .unwrap();
+        clew_core::statefile::set_modified(path, when).unwrap();
     }
 
     /// A clew that dies mid-download (quit, crash, log-out) never reaches

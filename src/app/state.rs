@@ -57,8 +57,13 @@ pub struct InFlight {
     /// so the load leaves them alone.
     pub state_touched: HashSet<&'static str>,
     /// Languages whose language server was asked for before `lsp.toml` had
-    /// loaded; started once it has, against the project's real config.
+    /// loaded, or before the user's choices for the project had; started
+    /// once both have, against the project's real config.
     pub deferred_lsp: Vec<String>,
+    /// The user's choices for the project's languages are being read
+    /// (`App::load_language_choices`): no language server starts before
+    /// they are known, as the one started would not have them.
+    pub choices_loading: bool,
     /// A question waiting for its MCP servers' tools before its agent turn
     /// starts: the token minted for it (`AskMsg::McpGathered::token`). Stop
     /// and Ask Clear drop it, and the gathered tools then start nothing.
@@ -922,6 +927,8 @@ pub struct App {
     pub trust: clew_core::trust::Trust,
     pub scanning: bool,
     pub sidebar: SidebarTab,
+    /// The reading panel's view.
+    pub margin_tab: MarginTab,
     /// Monotone counter minting call-tree identities. Each tree (and each
     /// `CallsMsg::Prepared` request) gets the next value; results carry it
     /// back, so children fetched for a tree that has since been replaced (a
@@ -1047,10 +1054,12 @@ pub struct App {
     pub lsp_gen: std::collections::HashMap<String, u64>,
     /// Whether an embedding endpoint is configured.
     pub embed_available: bool,
-    /// The collapsible bottom panel: whether it's shown, and which of its two
-    /// tabs (Ask / Debug) is active.
+    /// Whether the collapsible bottom panel — the debugger's — is shown.
     pub show_bottom: bool,
-    pub bottom_tab: BottomTab,
+    /// Where the floating Ask window is.
+    pub ask_view: AskView,
+    /// Voice: listening, the words heard, the speech models.
+    pub(crate) voice: crate::app::voice::VoiceState,
     /// The debugger (DAP): the active session plus breakpoints and watches that
     /// persist across sessions (see [`DebugState`]).
     pub debug: DebugState,
@@ -1074,6 +1083,12 @@ pub struct App {
     pub tutorial: Option<usize>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
+    /// The app menu of Windows and Linux (the ☰ in the top bar) is open.
+    pub show_app_menu: bool,
+    /// The reader's View menu (View ▾ among the file tools) is open.
+    pub show_view_menu: bool,
+    /// What the Files view is narrowed to; empty shows the whole tree.
+    pub file_filter: String,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
     /// Whether the "Keyboard Shortcuts" modal is open.
@@ -1090,6 +1105,13 @@ pub struct App {
     pub show_inlay_hints: bool,
     /// Show the code minimap on the right edge of the editor.
     pub show_minimap: bool,
+    /// The caret line's blame past its end (the View menu's "Inline
+    /// blame"). Off as the design has it: when a function last changed is
+    /// the margin's note, and History's.
+    pub show_inline_blame: bool,
+    /// Lines down the code's indentation (the View menu's "Indent guides").
+    /// Off as the design has it.
+    pub show_indent_guides: bool,
     /// The LLM settings modal: whether it's open and its draft fields (see
     /// [`SettingsDraft`]).
     pub settings: SettingsDraft,
@@ -1133,6 +1155,15 @@ pub struct App {
     /// Mints [`BlameWhy::token`]. Monotonic for the window's lifetime, so a
     /// token can never be reused by a later request.
     pub blame_why_seq: u64,
+    /// Mints [`crate::app::model::Insight::token`], like `blame_why_seq`.
+    pub insight_seq: u64,
+    /// The command palette's list, as last built (see `app::palette`).
+    pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
+    /// The titles of the palette commands run last, most recent first.
+    pub palette_recent: Vec<String>,
+    /// The command bar's suggestions, as last built: what it offers with
+    /// nothing typed (see `app::palette`).
+    pub(crate) palette_home: Vec<crate::app::palette::Suggestion>,
     /// Bumped whenever inlay hints are turned off, invalidating every request
     /// still in flight (see [`crate::app::message::LspMsg::InlayHintsLoaded`]).
     pub inlay_gen: u64,
@@ -1172,6 +1203,31 @@ pub struct App {
     pub window_height: f32,
     /// Whether the window is in fullscreen (toggled by the green control).
     pub fullscreen: bool,
+    /// The window fills the screen's work area (Windows and Linux, whose
+    /// maximize button then shows "restore").
+    pub maximized: bool,
+    /// The window's size as the system gives it; [`Self::window_width`] and
+    /// [`Self::window_height`] are what is inside its frame.
+    pub window_outer: iced::Size,
+    /// The width of the frame Clew draws round its borderless window (the
+    /// design's 1 px border), `0` where there is none: on macOS, whose
+    /// window keeps the system's, and while the window fills the screen.
+    pub window_frame: f32,
+    /// The radius Clew rounds its window's corners to (the design's 12),
+    /// `0` where it leaves them square: on macOS, which rounds the window
+    /// itself; and on Linux and Windows while the window fills the screen,
+    /// or where its corners cannot be left clear (see [`Self::composited`]
+    /// and [`Self::software_renderer`]; Windows 11 rounds such a window).
+    pub window_radius: f32,
+    /// Whether the window system composites the window over the desktop,
+    /// so a corner left clear shows what is under it: always on Wayland;
+    /// on X while a compositing manager runs; on Windows when the window
+    /// presents through a visual (`app::corners`).
+    pub composited: bool,
+    /// Whether iced draws the window with its software renderer, whose
+    /// surface has no alpha to leave a corner clear with (Wayland's), or
+    /// does not present through a visual (Windows').
+    pub software_renderer: bool,
     /// Whether the window has keyboard focus. The custom traffic-light controls
     /// grey out when it doesn't, like native macOS.
     pub window_focused: bool,
@@ -1466,6 +1522,9 @@ pub struct ProjectSession {
     pub derived_dir: Option<PathBuf>,
     /// Languages actually present in the project that clew can serve.
     pub project_languages: Vec<String>,
+    /// Every language present in the project, served or not — the ones a
+    /// server program of the user's can be chosen for.
+    pub file_languages: Vec<String>,
     /// Whole-project content-hash oracle: the authority on what changed, so the
     /// watcher's noisy events collapse to real byte changes.
     pub registry: incremental::Registry,
@@ -1559,6 +1618,18 @@ pub struct ProjectSession {
     /// The `(docs generation, structure revision)` `type_graph` was built
     /// from; another pair means it is stale.
     pub type_graph_key: Option<(u64, u64)>,
+    /// The project's maps (`clew_core::maps`): its schema, routes,
+    /// supervision trees — read from its files, here or on its host.
+    pub maps: Arc<Vec<clew_protocol::ProjectMap>>,
+    /// The file registry's revision the maps were read at; another means
+    /// they are stale. `None` before the first read.
+    pub maps_rev: Option<u64>,
+    /// A read of the maps is in flight.
+    pub maps_building: bool,
+    /// Why the last read failed, shown in the overlay.
+    pub maps_error: Option<String>,
+    /// The id of the map shown (`ProjectMap::id`), kept across rebuilds.
+    pub maps_selected: Option<String>,
     /// The Imports overlay's counts and rankings, computed by the import job
     /// (off the UI thread) whenever the graph's structure changed.
     pub(crate) import_ranks: crate::ui::ImportRanks,
@@ -1567,6 +1638,10 @@ pub struct ProjectSession {
     /// read those files off the local disk. `None` until a full snapshot
     /// arrives.
     pub remote_import_meta: Option<(Option<String>, Option<String>)>,
+    /// What a remote project's package manifests say of where its sources
+    /// are (`composer.json`'s PSR-4 maps, Haskell's source directories), from
+    /// the server's project snapshot, for the same reason.
+    pub remote_manifests: clew_protocol::SourceManifests,
     /// A remote project's tsconfig/jsconfig path mappings, fetched from the
     /// host (`imports::load_remote_ts_configs`) — a remote resolver cannot
     /// read them off the local disk. Shared with every import job's
@@ -1617,6 +1692,9 @@ pub struct ProjectSession {
     pub git_latest: HashMap<PathBuf, u64>,
     /// The "Why is this here?" popup, when open.
     pub blame_why: Option<BlameWhy>,
+    /// The language's answer about the code under the cursor (a macro's
+    /// expansion, a Lean goal, a Haskell type), when open.
+    pub insight: Option<Insight>,
     /// The active git time-travel session, if any.
     pub time_travel: Option<TimeTravel>,
     /// Numbers the time-travel requests — each start (`time_start`), each
@@ -1754,6 +1832,9 @@ pub struct ProjectSession {
     // -- Ask ---------------------------------------------------------------------
     /// "Ask clew" Q&A: input, conversation, state.
     pub ask_input: String,
+    /// What is in the input was said (voice put it there), not typed: the
+    /// turn it becomes is marked so. Typing in the input makes it typed.
+    pub ask_spoken: bool,
     pub ask_turns: Vec<AskTurn>,
     pub asking: bool,
     /// Code selections pinned as context, shown as chips above the input. They
@@ -1766,6 +1847,24 @@ pub struct ProjectSession {
     // -- Language servers: configuration and consent (the running servers are in `link`) ----
     /// Per-project LSP config from `.clew/lsp.toml`.
     pub lsp_config: lsp::config::ProjectLspConfig,
+    /// What the user chose for this project's languages in Settings — its
+    /// Python interpreter, Rust features and target, Go tags and platform,
+    /// C/C++ compilation, server programs — kept in clew's own data
+    /// directory (`lsp::choices`), and sent with every language server and
+    /// debugger set up for it.
+    pub lang_choices: clew_protocol::LanguageChoices,
+    /// What there is to choose from for the project's languages, as last
+    /// listed for the Settings view (`None` until listed, `Err` when the
+    /// listing failed).
+    pub lang_options: Option<Result<clew_protocol::LanguageOptions, String>>,
+    /// What is typed into the Settings view's language fields.
+    pub lang_drafts: LanguageDrafts,
+    /// What the project's build leaves out with those choices — its Cargo
+    /// features, Go tags, C macros — read where the project is
+    /// (`App::refresh_build_facts`), for the dimming of code the build does
+    /// not compile. Replaced whole, so a highlight pass can tell whether it
+    /// ran against the current one (`Arc::ptr_eq`).
+    pub build_facts: Arc<clew_protocol::BuildFacts>,
     /// Per-language `init_options` a remote clew-server sent with
     /// `LspResolved` — the LSP handshake runs client-side even for a remote
     /// server, but the options belong to the host that owns the lsp.toml.
@@ -1874,6 +1973,7 @@ impl Default for ProjectSession {
             project: None,
             derived_dir: Default::default(),
             project_languages: Default::default(),
+            file_languages: Default::default(),
             registry: Default::default(),
             symbol_index: Default::default(),
             symbol_index_stale: Default::default(),
@@ -1899,8 +1999,14 @@ impl Default for ProjectSession {
             churn_loading: false,
             type_graph: Default::default(),
             type_graph_key: None,
+            maps: Arc::default(),
+            maps_rev: None,
+            maps_building: false,
+            maps_error: None,
+            maps_selected: None,
             import_ranks: Default::default(),
             remote_import_meta: Default::default(),
+            remote_manifests: Default::default(),
             remote_ts_configs: Default::default(),
             remote_ts_configs_gen: Default::default(),
             remote_ts_configs_retry: None,
@@ -1919,6 +2025,7 @@ impl Default for ProjectSession {
             diff_pending: Default::default(),
             git_latest: Default::default(),
             blame_why: Default::default(),
+            insight: Default::default(),
             time_travel: Default::default(),
             time_gen: Default::default(),
             time_start: Default::default(),
@@ -1963,11 +2070,16 @@ impl Default for ProjectSession {
             searching_semantic: Default::default(),
             semantic_seq: Default::default(),
             ask_input: Default::default(),
+            ask_spoken: false,
             ask_turns: Default::default(),
             asking: Default::default(),
             ask_pins: Default::default(),
             acp: Default::default(),
             lsp_config: Default::default(),
+            lang_choices: Default::default(),
+            lang_options: Default::default(),
+            lang_drafts: Default::default(),
+            build_facts: Default::default(),
             remote_lsp_init: Default::default(),
             pending_lsp_consent: Default::default(),
             tracked_ignored: Default::default(),
@@ -2126,6 +2238,9 @@ pub struct ProjectLink {
     pub agent_tools: HashMap<u64, Arc<crate::app::integrations::ToolMap>>,
     /// MCP tool calls waiting for the user's approval, by `(stream, call)`.
     pub mcp_pending: HashMap<(u64, u64), crate::app::integrations::PendingCall>,
+    /// Window commands the agent asked to run, waiting for the user's
+    /// approval, by `(stream, call)` (`app::windowtools`).
+    pub window_pending: HashMap<(u64, u64), crate::app::windowtools::PendingCommand>,
     /// Stream id of the in-flight server-side `ChatStream`, if any. Abandoning
     /// the answer (project switch, Ask Clear) must tell the SERVER to stop:
     /// dropping the client-side pump leaves the provider call running on the
@@ -2214,3 +2329,61 @@ pub struct TimeStart {
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+
+/// What is typed into the Settings view's language fields, until used.
+#[derive(Debug, Default, Clone)]
+pub struct LanguageDrafts {
+    pub python_path: String,
+    pub rust_target: String,
+    pub go_tag: String,
+    pub c_database: String,
+    pub c_flags: String,
+    pub typescript_path: String,
+    pub zig_path: String,
+    pub java_home: String,
+    pub php_version: String,
+    pub csharp_solution: String,
+    /// The language a server program is being chosen for; `None` until
+    /// one is picked.
+    pub server_language: Option<String>,
+    pub server_command: String,
+    pub server_args: String,
+}
+
+impl LanguageDrafts {
+    /// The text of `field`.
+    pub fn field(&self, field: crate::LangField) -> &str {
+        match field {
+            crate::LangField::PythonPath => &self.python_path,
+            crate::LangField::RustTarget => &self.rust_target,
+            crate::LangField::GoTag => &self.go_tag,
+            crate::LangField::CDatabase => &self.c_database,
+            crate::LangField::CFlags => &self.c_flags,
+            crate::LangField::TypeScriptPath => &self.typescript_path,
+            crate::LangField::ZigPath => &self.zig_path,
+            crate::LangField::JavaHome => &self.java_home,
+            crate::LangField::PhpVersion => &self.php_version,
+            crate::LangField::CSharpSolution => &self.csharp_solution,
+            crate::LangField::ServerCommand => &self.server_command,
+            crate::LangField::ServerArgs => &self.server_args,
+        }
+    }
+
+    /// The text of `field`, to change.
+    pub fn field_mut(&mut self, field: crate::LangField) -> &mut String {
+        match field {
+            crate::LangField::PythonPath => &mut self.python_path,
+            crate::LangField::RustTarget => &mut self.rust_target,
+            crate::LangField::GoTag => &mut self.go_tag,
+            crate::LangField::CDatabase => &mut self.c_database,
+            crate::LangField::CFlags => &mut self.c_flags,
+            crate::LangField::TypeScriptPath => &mut self.typescript_path,
+            crate::LangField::ZigPath => &mut self.zig_path,
+            crate::LangField::JavaHome => &mut self.java_home,
+            crate::LangField::PhpVersion => &mut self.php_version,
+            crate::LangField::CSharpSolution => &mut self.csharp_solution,
+            crate::LangField::ServerCommand => &mut self.server_command,
+            crate::LangField::ServerArgs => &mut self.server_args,
+        }
+    }
+}

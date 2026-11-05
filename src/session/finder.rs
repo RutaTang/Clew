@@ -1,5 +1,6 @@
-//! Fuzzy finder state and matching: files (Cmd+P), project symbols (Cmd+T)
-//! and `:N` go-to-line.
+//! Fuzzy finder state and matching: files (Cmd+P), project symbols (Cmd+T),
+//! `:N` go-to-line, commands (a query starting with `>`), and the command
+//! bar (Cmd+Shift+P), which runs a command or opens a file.
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -8,6 +9,9 @@ use crate::fs_scan::FileEntry;
 use crate::index::SymbolEntry;
 
 pub const MAX_RESULTS: usize = 60;
+
+/// Most commands the command bar lists above the files a query matches.
+pub const BAR_COMMANDS: usize = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FinderMode {
@@ -23,6 +27,9 @@ pub struct Finder {
     pub query: String,
     pub results: Vec<usize>, // indices into the mode's backing list
     pub selected: usize,
+    /// Opened as the command bar (Cmd+Shift+P): with nothing typed it
+    /// suggests what to do; a query matches commands, then files.
+    pub bar: bool,
 }
 
 impl Finder {
@@ -32,14 +39,86 @@ impl Finder {
         (n > 0).then_some(n)
     }
 
+    /// Whether the query asks for commands: it starts with `>`, as in the
+    /// palette Cmd+Shift+P opens (deleting the `>` gives the files back).
+    pub fn is_commands(&self) -> bool {
+        self.query.trim_start().starts_with('>')
+    }
+
+    /// The command bar with nothing typed: its suggestions show.
+    pub fn is_home(&self) -> bool {
+        self.bar && self.query.trim().is_empty()
+    }
+
+    /// The command bar with a query that is neither `>` commands nor a
+    /// `:N` line: the commands it matches, then the files.
+    pub fn is_bar_search(&self) -> bool {
+        self.bar && !self.is_home() && !self.is_commands() && !self.query.trim().starts_with(':')
+    }
+
+    /// The query less its `>`.
+    pub fn command_query(&self) -> &str {
+        self.query.trim_start().trim_start_matches('>').trim()
+    }
+
     pub fn refresh_files(&mut self, files: &[FileEntry]) {
         self.selected = 0;
-        self.results = rank(&self.query, files.iter().map(|f| f.rel.as_str()));
+        self.results = rank(
+            &self.query,
+            files.iter().map(|f| f.rel.as_str()),
+            MAX_RESULTS,
+            true,
+        );
     }
 
     pub fn refresh_symbols(&mut self, symbols: &[SymbolEntry]) {
         self.selected = 0;
-        self.results = rank(&self.query, symbols.iter().map(|s| s.name.as_str()));
+        self.results = rank(
+            &self.query,
+            symbols.iter().map(|s| s.name.as_str()),
+            MAX_RESULTS,
+            true,
+        );
+    }
+
+    /// Rank the commands titled `titles` against the query: every match,
+    /// best first. With nothing typed, the ones in `recent` (titles, most
+    /// recent first) lead, then the rest in their own order.
+    pub fn refresh_commands(&mut self, titles: &[&str], recent: &[String]) {
+        self.selected = 0;
+        let query = self.command_query();
+        if !query.is_empty() {
+            self.results = rank(query, titles.iter().copied(), usize::MAX, false);
+            return;
+        }
+        let mut order: Vec<usize> = recent
+            .iter()
+            .filter_map(|r| titles.iter().position(|t| t == r))
+            .collect();
+        let rest: Vec<usize> = (0..titles.len()).filter(|i| !order.contains(i)).collect();
+        order.extend(rest);
+        self.results = order;
+    }
+
+    /// Rank for the command bar: the best few of the commands titled
+    /// `titles`, then the files. A result at or past `titles.len()` is the
+    /// file at that index less `titles.len()`.
+    pub fn refresh_bar(&mut self, titles: &[&str], files: &[FileEntry]) {
+        self.selected = 0;
+        let query = self.query.trim();
+        let mut results = rank(query, titles.iter().copied(), BAR_COMMANDS, false);
+        let n = titles.len();
+        results.extend(
+            rank(
+                query,
+                files.iter().map(|f| f.rel.as_str()),
+                MAX_RESULTS,
+                true,
+            )
+            .into_iter()
+            .map(|i| i + n),
+        );
+        self.results = results;
     }
 
     pub fn move_selection(&mut self, delta: i32) {
@@ -52,19 +131,26 @@ impl Finder {
     }
 }
 
-/// Rank `items` against `query`; empty query lists the first entries as-is.
-/// Higher score first, shorter item wins ties.
-fn rank<'a>(query: &str, items: impl Iterator<Item = &'a str>) -> Vec<usize> {
+/// Rank `items` against `query`, at most `limit` of them; empty query lists
+/// the first entries as-is. Higher score first, shorter item wins ties.
+/// `paths` scores the way a path is matched (separators weigh more).
+fn rank<'a>(
+    query: &str,
+    items: impl Iterator<Item = &'a str>,
+    limit: usize,
+    paths: bool,
+) -> Vec<usize> {
     let query = query.trim();
     if query.is_empty() || query.starts_with(':') {
-        return items
-            .take(MAX_RESULTS)
-            .enumerate()
-            .map(|(i, _)| i)
-            .collect();
+        return items.take(limit).enumerate().map(|(i, _)| i).collect();
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let config = if paths {
+        Config::DEFAULT.match_paths()
+    } else {
+        Config::DEFAULT
+    };
+    let mut matcher = Matcher::new(config);
     let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
     let mut buf = Vec::new();
     let mut scored: Vec<(u32, usize, usize)> = items
@@ -77,7 +163,7 @@ fn rank<'a>(query: &str, items: impl Iterator<Item = &'a str>) -> Vec<usize> {
         })
         .collect();
     scored.sort_unstable_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    scored.truncate(MAX_RESULTS);
+    scored.truncate(limit);
     scored.into_iter().map(|(_, _, i)| i).collect()
 }
 
@@ -103,7 +189,7 @@ mod tests {
     #[test]
     fn ranking_prefers_better_and_shorter_matches() {
         let items = ["src/main.rs", "src/domain/remains.rs", "main.rs"];
-        let ranked = rank("mainrs", items.iter().copied());
+        let ranked = rank("mainrs", items.iter().copied(), MAX_RESULTS, true);
         assert_eq!(ranked[0], 2, "shortest strong match first: {ranked:?}");
         assert!(ranked.contains(&0));
     }
@@ -111,6 +197,96 @@ mod tests {
     #[test]
     fn empty_query_lists_head() {
         let items = ["a", "b", "c"];
-        assert_eq!(rank("", items.iter().copied()), vec![0, 1, 2]);
+        assert_eq!(
+            rank("", items.iter().copied(), MAX_RESULTS, true),
+            vec![0, 1, 2]
+        );
+    }
+
+    #[test]
+    fn a_query_starting_with_a_chevron_asks_for_commands() {
+        let mut f = Finder {
+            query: ">".into(),
+            ..Default::default()
+        };
+        assert!(f.is_commands());
+        assert_eq!(f.command_query(), "");
+        f.query = "  > call gr".into();
+        assert!(f.is_commands());
+        assert_eq!(f.command_query(), "call gr");
+        f.query = "src/a>b".into();
+        assert!(!f.is_commands());
+    }
+
+    #[test]
+    fn commands_rank_every_match_and_lead_with_the_recent_ones() {
+        let titles = [
+            "Call Graph",
+            "Import Graph",
+            "Go to File…",
+            "Settings",
+            "Debug: Stop",
+        ];
+        let mut f = Finder {
+            query: ">".into(),
+            ..Default::default()
+        };
+        // Nothing typed: the recent ones first, most recent first, then the
+        // rest in order; a recent title no longer listed is skipped.
+        f.refresh_commands(
+            &titles,
+            &["Settings".into(), "Gone".into(), "Import Graph".into()],
+        );
+        assert_eq!(f.results, [3, 1, 0, 2, 4]);
+        // Typed: only the matches, best first, and none cut off.
+        f.query = "> graph".into();
+        f.refresh_commands(&titles, &[]);
+        assert_eq!(f.results.len(), 2);
+        assert!(f.results.contains(&0) && f.results.contains(&1));
+        f.query = ">stop".into();
+        f.refresh_commands(&titles, &[]);
+        assert_eq!(f.results, [4]);
+        let many: Vec<String> = (0..100).map(|i| format!("Command {i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        f.query = ">command".into();
+        f.refresh_commands(&many, &[]);
+        assert_eq!(f.results.len(), 100, "commands are not capped");
+    }
+
+    #[test]
+    fn the_command_bar_matches_commands_then_files() {
+        let titles = ["Call Graph", "Settings", "Stats"];
+        let files: Vec<FileEntry> = ["src/lib.rs", "src/settings.rs", "README.md"]
+            .iter()
+            .map(|rel| FileEntry {
+                abs: rel.into(),
+                rel: rel.to_string(),
+            })
+            .collect();
+        let mut f = Finder {
+            bar: true,
+            ..Default::default()
+        };
+        assert!(f.is_home() && !f.is_bar_search() && !f.is_commands());
+        f.query = "settings".into();
+        assert!(f.is_bar_search() && !f.is_home());
+        f.refresh_bar(&titles, &files);
+        // The command first, then the file, its index past the titles.
+        assert_eq!(f.results, [1, 3 + 1]);
+        // `>` still asks for commands alone, `:N` for a line.
+        f.query = ">set".into();
+        assert!(f.is_commands() && !f.is_bar_search());
+        f.query = ":12".into();
+        assert!(!f.is_bar_search() && f.goto_line() == Some(12));
+        // At most a few commands lead, however many match.
+        let many: Vec<String> = (0..20).map(|i| format!("Settings {i}")).collect();
+        let many: Vec<&str> = many.iter().map(String::as_str).collect();
+        f.query = "settings".into();
+        f.refresh_bar(&many, &files);
+        assert_eq!(
+            f.results.iter().filter(|&&i| i < many.len()).count(),
+            BAR_COMMANDS
+        );
+        assert_eq!(f.results.last(), Some(&(20 + 1)));
     }
 }

@@ -40,18 +40,43 @@ use iced::{Color, Element, Event, Font, Length, Point, Rectangle, Size};
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::analyze::{MAX_WORD_CHARS, ident_range, line_window, word_range_at};
-use crate::highlight::{HlLine, style_color};
+use crate::highlight::{HlLine, style_color, style_font};
 use crate::theme;
+use crate::ui::ts;
 use crate::viewer::{InlayHints, display_cols};
 
-/// Gutter width in characters: `{:>5}` line number + two spaces.
-const GUTTER_CHARS: usize = 7;
-/// Column (within the gutter) where the fold arrow is drawn; the two trailing
-/// gutter spaces double as its click target.
-const FOLD_ARROW_COL: usize = 5;
+/// Room between the line numbers and the code at 13 px, as the design has
+/// it (48 px of number, then 20); it scales with the code's size.
+const CODE_GAP: f32 = 20.0;
+
+/// Width of the gutter: the line number right-aligned in the first
+/// [`NUMBER_COLS`], then room before the code that holds the fold arrow.
+fn gutter_width(char_width: f32, font_size: f32) -> f32 {
+    number_width(char_width, font_size) + CODE_GAP * font_size / 13.0
+}
+
+/// Width of the column the line number is right-aligned in: the design's
+/// 48 at 13 px code, and never too narrow for [`NUMBER_COLS`] digits of the
+/// code's own.
+fn number_width(char_width: f32, font_size: f32) -> f32 {
+    (NUMBER_W * font_size / 13.0).max(NUMBER_COLS as f32 * char_width)
+}
+
+/// The design's line-number column, at 13 px code.
+const NUMBER_W: f32 = 48.0;
+
+/// Columns the line number is right-aligned in.
+const NUMBER_COLS: usize = 6;
+/// Column (within the gutter) where the fold arrow is drawn; the columns
+/// after the number double as its click target.
+const FOLD_ARROW_COL: usize = 7;
+/// The line numbers' size, as a share of the code's: 11.5 px to 13.
+const NUMBER_SCALE: f32 = 11.5 / 13.0;
+/// How much of its colour code the build leaves out keeps.
+const INACTIVE_ALPHA: f32 = 0.38;
 const OVERSCAN: usize = 8;
 /// Minimap band width, and the smallest file (in rows) worth showing one for.
-const MINIMAP_WIDTH: f32 = 68.0;
+const MINIMAP_WIDTH: f32 = 56.0;
 const MINIMAP_MIN_ROWS: usize = 40;
 /// Display columns a full-width minimap bar represents.
 const MINIMAP_FULL_COLS: f32 = 100.0;
@@ -681,6 +706,10 @@ pub struct CodeView<'a, Message> {
     selection: Option<((usize, usize), (usize, usize))>,
     /// Block cursor position (0-based line, col) — drawn only when `Some`.
     cursor: Option<(usize, usize)>,
+    /// The line read: washed with the accent, its number bright, whether or
+    /// not the code has the keyboard (the block [`Self::cursor`] shows only
+    /// while it does).
+    reading_line: Option<usize>,
     /// Extra span highlights (occurrences / brackets / diagnostics), sorted by
     /// line so each drawn row finds its own with a binary search instead of a
     /// scan of the whole list.
@@ -710,6 +739,9 @@ pub struct CodeView<'a, Message> {
     inlay_color: Color,
     /// 0-based lines gated off by an inactive `#[cfg]`, drawn dimmed.
     inactive: Option<&'a HashSet<usize>>,
+    /// Of those, the lines that say why (their `cfg` predicate), drawn
+    /// undimmed, and what tells the reason in words for the chip beside them.
+    inactive_heads: Option<InactiveHeads<'a>>,
     /// The [`Annotations`] summary: handed in precomputed
     /// ([`CodeView::annotations`]), else computed at most once per view build
     /// — `draw` needs it for both paragraph caches on every frame.
@@ -771,6 +803,7 @@ impl<'a, Message> CodeView<'a, Message> {
             default_color,
             selection: None,
             cursor: None,
+            reading_line: None,
             highlights: Vec::new(),
             find: None,
             sticky: Vec::new(),
@@ -782,6 +815,7 @@ impl<'a, Message> CodeView<'a, Message> {
             inlay_hints: None,
             inlay_color: default_color,
             inactive: None,
+            inactive_heads: None,
             annotations: OnceCell::new(),
             visible: None,
             fold_headers: None,
@@ -889,6 +923,17 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
+    /// The line read (0-based), marked whether or not the code is focused.
+    pub fn reading_line(mut self, line: Option<usize>) -> Self {
+        self.reading_line = line;
+        self
+    }
+
+    /// The line marked as read: the one given, else the block cursor's.
+    fn read_line(&self) -> Option<usize> {
+        self.reading_line.or(self.cursor.map(|(line, _)| line))
+    }
+
     pub fn highlights(mut self, mut highlights: Vec<Hl>) -> Self {
         // Stable: spans on one line keep the caller's paint order.
         highlights.sort_by_key(|h| h.line);
@@ -979,6 +1024,27 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
+    /// Of the inactive lines, the ones that say why — line → its `cfg`
+    /// predicate — drawn undimmed, with `note` (the predicate → the reason
+    /// in words, "not built for Windows") in a chip past the line's end.
+    pub fn inactive_heads(
+        mut self,
+        heads: &'a std::collections::BTreeMap<usize, String>,
+        note: impl Fn(&str) -> Option<String> + 'a,
+    ) -> Self {
+        self.inactive_heads = Some(InactiveHeads {
+            heads,
+            note: Box::new(note),
+        });
+        self
+    }
+
+    /// The reason the inactive `line` gives, when it heads a dimmed run.
+    fn inactive_note(&self, line: usize) -> Option<String> {
+        let heads = self.inactive_heads.as_ref()?;
+        (heads.note)(heads.heads.get(&line)?)
+    }
+
     /// Every span highlight on 0-based `line`: the caller's highlights, then
     /// the find matches. Both lists are ordered by line, so a binary search
     /// finds the row's run — a frame costs O(rows · log n), not O(rows · n).
@@ -1018,6 +1084,15 @@ impl<'a, Message> CodeView<'a, Message> {
 
     fn is_inactive(&self, line: usize) -> bool {
         self.inactive.is_some_and(|s| s.contains(&line))
+    }
+
+    /// Whether `line` is dimmed: inactive, and not the one that says why.
+    fn is_dimmed(&self, line: usize) -> bool {
+        self.is_inactive(line)
+            && !self
+                .inactive_heads
+                .as_ref()
+                .is_some_and(|h| h.heads.contains_key(&line))
     }
 
     /// Number of displayed rows (folded-away lines excluded).
@@ -1162,12 +1237,15 @@ impl<'a, Message> CodeView<'a, Message> {
     /// shaped prefix.
     fn line_spans(&self, i: usize) -> (Vec<Span<'_, (), Font>>, bool) {
         let src = &self.lines[i].spans;
-        let dim_line = self.is_inactive(i);
+        let dim_line = self.is_dimmed(i);
         let color_of = |style: &Option<u8>| {
             let c = style.and_then(style_color).unwrap_or(self.default_color);
             // Fade inactive-`cfg` code toward the background so live code stands out.
             if dim_line {
-                Color { a: c.a * 0.38, ..c }
+                Color {
+                    a: c.a * INACTIVE_ALPHA,
+                    ..c
+                }
             } else {
                 c
             }
@@ -1181,6 +1259,7 @@ impl<'a, Message> CodeView<'a, Message> {
         let mut elided = false;
         for (fragment, style) in src {
             let color = color_of(style);
+            let font = style.and_then(style_font);
             let mut flen = fragment.chars().count();
             let mut fragment = fragment.as_str();
             if col + flen > MAX_SHAPED_COLS {
@@ -1207,17 +1286,17 @@ impl<'a, Message> CodeView<'a, Message> {
                 let within = *hcol - col;
                 if within > cut {
                     let sub: String = fragment.chars().skip(cut).take(within - cut).collect();
-                    out.push(Span::new(sub).color(color));
+                    out.push(Span::new(sub).color(color).font_maybe(font));
                 }
                 out.push(Span::new(label.as_str()).color(self.inlay_color));
                 cut = within;
                 hi += 1;
             }
             if cut == 0 {
-                out.push(Span::new(fragment).color(color));
+                out.push(Span::new(fragment).color(color).font_maybe(font));
             } else if cut < flen {
                 let sub: String = fragment.chars().skip(cut).collect();
-                out.push(Span::new(sub).color(color));
+                out.push(Span::new(sub).color(color).font_maybe(font));
             }
             col += flen;
             if elided {
@@ -1391,8 +1470,10 @@ impl<'a, Message> CodeView<'a, Message> {
             content: spans,
             bounds: Size::new(LINE_LAYOUT_WIDTH, self.line_height),
             size: self.font_size.into(),
-            line_height: text::LineHeight::Absolute(self.line_height.into()),
-            font: Font::MONOSPACE,
+            // Laid out so its baseline lands on a whole pixel, and drawn
+            // where the design sets it (`ts::baseline_top`).
+            line_height: text::LineHeight::Absolute(ts::MONO.normal(self.font_size).into()),
+            font: crate::fonts::CODE,
             align_x: text::Alignment::Left,
             align_y: iced::alignment::Vertical::Top,
             shaping: text::Shaping::Advanced,
@@ -1484,6 +1565,10 @@ struct State<P> {
     minimap_drag: bool,
     cache: RefCell<LineCache<P>>,
     sticky_cache: RefCell<StickyCache<P>>,
+    /// The words of the chips past lines' ends, by what they say, shaped
+    /// once. Kept here: a renderer may hold a paragraph only weakly until it
+    /// draws, so one shaped inside `draw` and dropped there was never drawn.
+    chips: RefCell<HashMap<String, P>>,
     /// Right edge (px, from the text origin) of the widest line DRAWN so far —
     /// the shaped paragraph's real width plus anything painted past its end —
     /// for the content described by `measured_key`. The column estimate in
@@ -1508,6 +1593,7 @@ impl<P> Default for State<P> {
             minimap_drag: false,
             cache: RefCell::new(LineCache::default()),
             sticky_cache: RefCell::new(StickyCache::default()),
+            chips: RefCell::new(HashMap::new()),
             measured: Cell::new(0.0),
             measured_key: Cell::new((0, 0, 0, 0, 0)),
             laid_out: Cell::new(0.0),
@@ -1573,7 +1659,7 @@ where
         let estimate = self.visual_max_cols(cw) as f32 * cw;
         let text_width = estimate.max(state.measured_for(self.extent_key()));
         state.laid_out.set(text_width);
-        let width = GUTTER_CHARS as f32 * cw + text_width + cw;
+        let width = gutter_width(cw, self.font_size) + text_width + cw;
         layout::Node::new(Size::new(width, self.total_height().max(self.line_height)))
     }
 
@@ -1676,7 +1762,7 @@ where
                     return;
                 };
                 let arrow_x0 = FOLD_ARROW_COL as f32 * state.char_width;
-                let gutter_px = GUTTER_CHARS as f32 * state.char_width;
+                let gutter_px = gutter_width(state.char_width, self.font_size);
                 // A click in the line-number gutter margin (left of the fold
                 // arrow) toggles a breakpoint on that line — the conventional
                 // editor gesture, so users don't have to reach the context menu.
@@ -1793,7 +1879,7 @@ where
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
         match cursor.position_in(layout.bounds()) {
             // Cmd/Ctrl over the code text is "click to go to definition".
-            Some(p) if state.cmd_held && p.x > GUTTER_CHARS as f32 * state.char_width => {
+            Some(p) if state.cmd_held && p.x > gutter_width(state.char_width, self.font_size) => {
                 mouse::Interaction::Pointer
             }
             Some(_) => mouse::Interaction::Text,
@@ -1814,7 +1900,9 @@ where
         let state = tree.state.downcast_ref::<State<Renderer::Paragraph>>();
         let bounds = layout.bounds();
         let lh = self.line_height;
-        let gutter_px = GUTTER_CHARS as f32 * state.char_width;
+        let gutter_px = gutter_width(state.char_width, self.font_size);
+        // The line numbers' column, right-aligned to its edge.
+        let number_w = number_width(state.char_width, self.font_size);
 
         // Visible row range relative to the content top (rows, not source
         // lines — collapsed folds compress the vertical space).
@@ -1893,6 +1981,10 @@ where
                 continue;
             };
             let y = bounds.y + row as f32 * lh;
+            // Where the line's code and its number are set, so each sits
+            // on the design's baseline (`ts::baseline_top`).
+            let code_y = ts::baseline_top(y, lh, ts::MONO, self.font_size);
+            let number_y = ts::baseline_top(y, lh, ts::MONO, self.font_size * NUMBER_SCALE);
             let shaped = cache.paragraphs.get(row - cache.first);
             let cw = state.char_width;
             let cols_x = |c0: usize, c1: Option<usize>| self.cols_x(i, shaped, cw, c0, c1);
@@ -1914,8 +2006,9 @@ where
                     },
                     theme::with_alpha(theme::warning(), 0.16),
                 );
-            } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
-                // Current line: a whisper-faint full-width wash for orientation.
+            } else if self.read_line() == Some(i) {
+                // Current line: a faint full-width wash of the accent — the
+                // accent marks only where the reader is.
                 let width = (viewport.x + viewport.width - bounds.x).max(bounds.width);
                 renderer.fill_quad(
                     renderer::Quad {
@@ -1927,7 +2020,7 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::fg(), 0.04),
+                    theme::with_alpha(theme::accent(), if theme::is_light() { 0.07 } else { 0.08 }),
                 );
             }
             // Debug: a breakpoint dot at the left of the gutter — red normally,
@@ -2106,26 +2199,37 @@ where
                 theme::danger()
             } else if self.bookmarks.contains(&(i + 1)) {
                 theme::accent()
-            } else if self.cursor.is_some_and(|(cl, _)| cl == i) {
+            } else if self.read_line() == Some(i) {
                 theme::fg()
             } else {
                 theme::dim()
             };
+            // A line the build leaves out fades whole, its number with it.
+            let gutter_color = if self.is_dimmed(i) {
+                Color {
+                    a: gutter_color.a * INACTIVE_ALPHA,
+                    ..gutter_color
+                }
+            } else {
+                gutter_color
+            };
             renderer.fill_text(
                 text::Text {
-                    content: format!("{:>5}", i + 1),
-                    bounds: Size::new(gutter_px, lh),
-                    size: self.font_size.into(),
-                    line_height: text::LineHeight::Absolute(lh.into()),
-                    font: Font::MONOSPACE,
-                    align_x: text::Alignment::Left,
+                    content: (i + 1).to_string(),
+                    bounds: Size::new(number_w, lh),
+                    size: (self.font_size * NUMBER_SCALE).into(),
+                    line_height: text::LineHeight::Absolute(
+                        ts::MONO.normal(self.font_size * NUMBER_SCALE).into(),
+                    ),
+                    font: crate::fonts::CODE,
+                    align_x: text::Alignment::Right,
                     align_y: iced::alignment::Vertical::Top,
                     shaping: text::Shaping::Basic,
                     wrapping: text::Wrapping::None,
                 },
-                Point::new(bounds.x, y),
+                Point::new(bounds.x + number_w, number_y),
                 gutter_color,
-                *viewport,
+                text_box(bounds.x, y, number_w, lh),
             );
 
             // Fold arrow: collapsed headers always show ▸; expanded headers
@@ -2138,20 +2242,27 @@ where
                             content: if collapsed { "▸" } else { "▾" }.to_string(),
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.normal(self.font_size).into(),
+                            ),
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Advanced,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(bounds.x + FOLD_ARROW_COL as f32 * state.char_width, y),
+                        Point::new(bounds.x + FOLD_ARROW_COL as f32 * state.char_width, code_y),
                         if collapsed {
                             theme::accent()
                         } else {
                             theme::dim()
                         },
-                        *viewport,
+                        text_box(
+                            bounds.x + FOLD_ARROW_COL as f32 * state.char_width,
+                            y,
+                            2.0 * state.char_width,
+                            lh,
+                        ),
                     );
                 }
             }
@@ -2162,7 +2273,7 @@ where
                 let text_w = paragraph.min_bounds().width;
                 renderer.fill_paragraph(
                     paragraph,
-                    Point::new(text_x0, y),
+                    Point::new(text_x0, code_y),
                     style.text_color,
                     *viewport,
                 );
@@ -2176,18 +2287,74 @@ where
                             content: "…".to_string(),
                             bounds: Size::new(2.0 * cw, lh),
                             size: self.font_size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.normal(self.font_size).into(),
+                            ),
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Basic,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(text_x0 + text_w + 0.5 * cw, y),
+                        Point::new(text_x0 + text_w + 0.5 * cw, code_y),
                         theme::dim(),
-                        *viewport,
+                        text_box(text_x0 + text_w + 0.5 * cw, y, 2.0 * cw, lh),
                     );
                     right = right.max(text_w + ELISION_MARKER_COLS * cw);
+                }
+                // Why the build leaves the lines under it out, in a chip
+                // past the line's end ("not built for Windows").
+                if let Some(note) = self.inactive_note(i) {
+                    // 11 px words, 12 px past the line's end, at 13 px code.
+                    let scale = self.font_size / 13.0;
+                    let size = (11.0 * scale).max(crate::theme::MIN_TEXT_SIZE);
+                    let mut chips = state.chips.borrow_mut();
+                    // Shaped for this size and line height; a zoom shapes
+                    // them anew.
+                    let key = format!("{size}/{lh}/{note}");
+                    // A few reasons at a few sizes; zooming on and on would
+                    // keep every size it passed through.
+                    if chips.len() >= MAX_CHIPS && !chips.contains_key(&key) {
+                        chips.clear();
+                    }
+                    let label = chips.entry(key).or_insert_with(|| {
+                        Renderer::Paragraph::with_text(Text {
+                            content: note.as_str(),
+                            bounds: Size::new(CHIP_MAX_W, lh),
+                            size: size.into(),
+                            line_height: text::LineHeight::Absolute(ts::INTER.normal(size).into()),
+                            font: crate::fonts::UI_MEDIUM,
+                            align_x: text::Alignment::Left,
+                            align_y: iced::alignment::Vertical::Top,
+                            shaping: text::Shaping::Basic,
+                            wrapping: text::Wrapping::None,
+                        })
+                    });
+                    let x = text_x0 + text_w + 12.0 * scale;
+                    let width = label.min_bounds().width + 2.0 * CHIP_PAD_X;
+                    // The design's chip: its words' `normal` line and a
+                    // pixel above and below.
+                    let height = (ts::INTER.normal(size) + 2.0).min(lh);
+                    renderer.fill_quad(
+                        renderer::Quad {
+                            bounds: Rectangle {
+                                x,
+                                y: y + (lh - height) / 2.0,
+                                width,
+                                height,
+                            },
+                            border: iced::border::rounded(5.0),
+                            ..renderer::Quad::default()
+                        },
+                        theme::selected(),
+                    );
+                    renderer.fill_paragraph(
+                        label,
+                        Point::new(x + CHIP_PAD_X, ts::baseline_top(y, lh, ts::INTER, size)),
+                        theme::fg_muted(),
+                        text_box(x, y, width, lh),
+                    );
+                    right = right.max(x - text_x0 + width);
                 }
                 // Collapsed cue: a dim ⋯ after the header line's end.
                 if self.is_collapsed(i) {
@@ -2198,16 +2365,18 @@ where
                             content: "⋯".to_string(),
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.normal(self.font_size).into(),
+                            ),
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: text::Shaping::Advanced,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(end_x, y),
+                        Point::new(end_x, code_y),
                         theme::dim(),
-                        *viewport,
+                        text_box(end_x, y, 2.0 * state.char_width, lh),
                     );
                 }
                 // The end-of-line blame annotation must stop before the
@@ -2239,16 +2408,26 @@ where
                             content: annotation.clone(),
                             bounds: Size::new(f32::MAX, lh),
                             size: annotation_size(self.font_size).into(),
-                            line_height: text::LineHeight::Absolute(lh.into()),
-                            font: Font::MONOSPACE,
+                            line_height: text::LineHeight::Absolute(
+                                ts::MONO.normal(annotation_size(self.font_size)).into(),
+                            ),
+                            font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
                             shaping: ANNOTATION_SHAPING,
                             wrapping: text::Wrapping::None,
                         },
-                        Point::new(end_x, y),
+                        Point::new(
+                            end_x,
+                            ts::baseline_top(y, lh, ts::MONO, annotation_size(self.font_size)),
+                        ),
                         theme::with_alpha(theme::dim(), 0.9),
-                        anno_clip,
+                        // Its row, as far across as the code area goes.
+                        Rectangle {
+                            y,
+                            height: lh,
+                            ..anno_clip
+                        },
                     );
                 }
                 state.record_extent(extent_key, right);
@@ -2339,26 +2518,29 @@ where
             let sc = state.sticky_cache.borrow();
             for (k, &line) in self.sticky.iter().enumerate() {
                 let y = viewport.y + k as f32 * lh;
+                let number_y = ts::baseline_top(y, lh, ts::MONO, self.font_size * NUMBER_SCALE);
                 renderer.fill_text(
                     text::Text {
-                        content: format!("{:>5}", line + 1),
-                        bounds: Size::new(gutter_px, lh),
-                        size: self.font_size.into(),
-                        line_height: text::LineHeight::Absolute(lh.into()),
-                        font: Font::MONOSPACE,
-                        align_x: text::Alignment::Left,
+                        content: (line + 1).to_string(),
+                        bounds: Size::new(number_w, lh),
+                        size: (self.font_size * NUMBER_SCALE).into(),
+                        line_height: text::LineHeight::Absolute(
+                            ts::MONO.normal(self.font_size * NUMBER_SCALE).into(),
+                        ),
+                        font: crate::fonts::CODE,
+                        align_x: text::Alignment::Right,
                         align_y: iced::alignment::Vertical::Top,
                         shaping: text::Shaping::Basic,
                         wrapping: text::Wrapping::None,
                     },
-                    Point::new(bounds.x, y),
+                    Point::new(bounds.x + number_w, number_y),
                     theme::dim(),
-                    *viewport,
+                    text_box(bounds.x, y, number_w, lh),
                 );
                 if let Some(shaped) = sc.paragraphs.get(k) {
                     renderer.fill_paragraph(
                         &shaped.paragraph,
-                        Point::new(text_x0, y),
+                        Point::new(text_x0, ts::baseline_top(y, lh, ts::MONO, self.font_size)),
                         self.default_color,
                         *viewport,
                     );
@@ -2380,29 +2562,74 @@ where
         }
 
         // Minimap: a compressed overview pinned to the right of the viewport,
-        // one sampled bar per pixel row, shaped by indentation and line length,
-        // with a translucent box marking the visible range.
+        // one sampled bar per few pixel rows, shaped by indentation and line
+        // length, with a soft rounded box marking the visible range. It is
+        // drawn on the code's own background, light, so it reads as a quiet
+        // map of the file rather than a grey block beside it.
+        // A layer of its own, over the code: within one, iced draws every
+        // quad before any text, so a long line ran across the minimap.
         if let Some(band) = self.minimap_band(viewport) {
+            renderer.with_layer(band, |renderer| {
+                self.draw_minimap(renderer, band, bounds, viewport, lh)
+            });
+        }
+    }
+}
+
+/// The room either side of the words in a chip past a line's end, and the
+/// widest its words are laid out.
+const CHIP_PAD_X: f32 = 7.0;
+const CHIP_MAX_W: f32 = 600.0;
+/// Most chip words kept shaped at once.
+const MAX_CHIPS: usize = 32;
+
+/// What tells an inactive line's reason in words, from its `cfg` predicate.
+type NoteOf<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
+
+/// The inactive lines that say why ([`CodeView::inactive_heads`]).
+struct InactiveHeads<'a> {
+    heads: &'a std::collections::BTreeMap<usize, String>,
+    note: NoteOf<'a>,
+}
+
+/// The box a text the code view draws is clipped to: its own, `width`
+/// across and a row `lh` tall from `(x, y)`. Never the whole viewport: the
+/// software renderer masks a text to its layer only when the box it is
+/// given leaves the layer, so the numbers of rows above the viewport, each
+/// given the viewport, were drawn over the header above the code.
+fn text_box(x: f32, y: f32, width: f32, lh: f32) -> Rectangle {
+    Rectangle {
+        x,
+        y,
+        width,
+        height: lh,
+    }
+}
+
+impl<Message> CodeView<'_, Message> {
+    /// The minimap over `band`: the code view laid out over `bounds`, seen
+    /// through `viewport`, rows `lh` tall.
+    fn draw_minimap<R: renderer::Renderer>(
+        &self,
+        renderer: &mut R,
+        band: Rectangle,
+        bounds: Rectangle,
+        viewport: &Rectangle,
+        lh: f32,
+    ) {
+        {
             let total = self.row_count().max(1);
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: band,
                     ..renderer::Quad::default()
                 },
-                theme::with_alpha(theme::bg_panel(), 0.85),
-            );
-            renderer.fill_quad(
-                renderer::Quad {
-                    bounds: Rectangle { width: 1.0, ..band },
-                    ..renderer::Quad::default()
-                },
-                theme::border(),
+                theme::bg(),
             );
 
             let max_bar = band.width - 6.0;
             let row_px = band.height / total as f32;
-            let step = (1.0 / row_px).ceil().max(1.0) as usize;
-            let bar_h = row_px.max(1.0);
+            let layout = minimap_rows(row_px);
             let mut row = 0;
             while row < total {
                 let line = self.line_at_row(row).unwrap_or(0);
@@ -2422,14 +2649,14 @@ where
                                 x,
                                 y,
                                 width: w,
-                                height: bar_h,
+                                height: layout.bar_h,
                             },
                             ..renderer::Quad::default()
                         },
-                        theme::with_alpha(self.line_minimap_color(line), 0.55),
+                        theme::with_alpha(self.line_minimap_color(line), 0.4),
                     );
                 }
-                row += step;
+                row += layout.step;
             }
 
             // Visible-range indicator.
@@ -2440,16 +2667,39 @@ where
             renderer.fill_quad(
                 renderer::Quad {
                     bounds: Rectangle {
-                        x: band.x,
+                        x: band.x + 1.0,
                         y: iy,
-                        width: band.width,
+                        width: band.width - 2.0,
                         height: ih,
+                    },
+                    border: iced::Border {
+                        radius: 3.0.into(),
+                        ..iced::Border::default()
                     },
                     ..renderer::Quad::default()
                 },
-                theme::with_alpha(theme::accent(), 0.16),
+                theme::with_alpha(theme::fg(), 0.07),
             );
         }
+    }
+}
+
+/// How the minimap samples a file whose rows are `row_px` pixels tall in it:
+/// every `step`-th row, each bar `bar_h` tall. Bars sit at least 2px apart
+/// with a gap between them, so a long file reads as lines rather than a
+/// solid block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MinimapRows {
+    step: usize,
+    bar_h: f32,
+}
+
+fn minimap_rows(row_px: f32) -> MinimapRows {
+    let step = (2.0 / row_px.max(f32::MIN_POSITIVE)).ceil().max(1.0) as usize;
+    let pitch = row_px * step as f32;
+    MinimapRows {
+        step,
+        bar_h: (pitch * 0.6).max(1.0),
     }
 }
 
@@ -2537,7 +2787,7 @@ impl<Message> CodeView<'_, Message> {
             .line_at_row(row)
             .or_else(|| self.line_at_row(self.row_count().saturating_sub(1)))
             .unwrap_or(self.lines.len().saturating_sub(1));
-        let gutter_px = GUTTER_CHARS as f32 * state.char_width;
+        let gutter_px = gutter_width(state.char_width, self.font_size);
         let text_x = point.x - gutter_px;
         if text_x <= 0.0 || self.lines.get(line).is_none() {
             return (line, 0);
@@ -2664,7 +2914,7 @@ where
         bounds: Size::INFINITE,
         size: font_size.into(),
         line_height: text::LineHeight::Absolute(font_size.into()),
-        font: Font::MONOSPACE,
+        font: crate::fonts::CODE,
         align_x: text::Alignment::Left,
         align_y: iced::alignment::Vertical::Top,
         shaping: text::Shaping::Basic,
@@ -2682,6 +2932,27 @@ impl<'a, Message: 'a> From<CodeView<'a, Message>> for Element<'a, Message> {
 
 #[cfg(test)]
 mod tests {
+
+    /// The minimap draws bars at least 2px apart with a gap between them —
+    /// a long file used to fill the band solid — and a short file's rows
+    /// each get their own bar.
+    #[test]
+    fn minimap_bars_keep_a_gap_between_them() {
+        // A long file: half a pixel a row; every fourth row, 1.2px bars.
+        let dense = super::minimap_rows(0.5);
+        assert_eq!(dense.step, 4);
+        assert!((dense.bar_h - 1.2).abs() < 1e-4, "{dense:?}");
+        // 1.75px a row (400 lines in 700px): every other row.
+        let medium = super::minimap_rows(1.75);
+        assert_eq!(medium.step, 2);
+        assert!(medium.bar_h < 1.75 * 2.0 - 1.0, "a gap: {medium:?}");
+        // A short file: each row its own bar, with a gap below it.
+        let sparse = super::minimap_rows(6.0);
+        assert_eq!(sparse.step, 1);
+        assert!(sparse.bar_h < 6.0, "{sparse:?}");
+        // Never thinner than a pixel.
+        assert!(super::minimap_rows(0.01).bar_h >= 1.0);
+    }
     use super::{ColMap, ident_range};
 
     fn chars(s: &str) -> Vec<char> {
@@ -3119,12 +3390,16 @@ mod scroll_tests {
 
         let expanded = width_of(&none);
         let collapsed = width_of(&one);
-        // The cue needs three columns (one gap plus its two-column box); at
-        // ~7.8px/char that is ~23px, so two columns of growth is proof enough.
+        // The cue needs three columns (one gap plus its two-column box) past
+        // its line; that line is one column shorter than the longest, so the
+        // extent grows by two of them — whatever a column measures where
+        // the test runs (the code face is tracked a little tighter than its
+        // own spacing, and a runner's fallback face may be narrower).
+        let column = super::measure_char_width::<iced::Renderer>(13.0);
         assert!(
-            collapsed > expanded + 2.0 * 7.0,
-            "collapsed cue did not widen the scroll extent: \
-             expanded={expanded}, collapsed={collapsed}"
+            collapsed >= expanded + 2.0 * column - 0.5,
+            "collapsed cue did not widen the scroll extent by two columns of \
+             {column}: expanded={expanded}, collapsed={collapsed}"
         );
     }
 }
@@ -3135,7 +3410,7 @@ mod scroll_tests {
 /// glyph's display column (not its byte offset, not the next column).
 #[cfg(test)]
 mod hit_tests {
-    use super::{CodeView, GUTTER_CHARS, Rounding, measure_char_width};
+    use super::{CodeView, Rounding, gutter_width, measure_char_width};
     use crate::highlight::plain_lines;
     use iced::advanced::text::Paragraph as _;
     use iced::{Event, Point, mouse};
@@ -3171,7 +3446,7 @@ mod hit_tests {
     }
 
     fn gutter() -> f32 {
-        GUTTER_CHARS as f32 * measure_char_width::<iced::Renderer>(FONT)
+        gutter_width(measure_char_width::<iced::Renderer>(FONT), FONT)
     }
 
     /// A line holding a paragraph separator other than CR/LF, with text of
@@ -3193,7 +3468,7 @@ mod hit_tests {
                 bounds: iced::Size::new(400.0, 40.0),
                 size: iced::Pixels(FONT),
                 line_height: iced::advanced::text::LineHeight::default(),
-                font: iced::Font::MONOSPACE,
+                font: crate::fonts::CODE,
                 align_x: iced::advanced::text::Alignment::Default,
                 align_y: iced::alignment::Vertical::Top,
                 shaping: iced::advanced::text::Shaping::Advanced,
@@ -3525,7 +3800,7 @@ mod hit_tests {
 /// count: wide glyphs (E1-3) and pathologically long lines (E1-5).
 #[cfg(test)]
 mod extent_tests {
-    use super::{CodeView, GUTTER_CHARS, MAX_SHAPED_COLS, Rounding, measure_char_width};
+    use super::{CodeView, MAX_SHAPED_COLS, Rounding, gutter_width, measure_char_width};
     use crate::highlight::plain_lines;
     use iced::advanced::text::Paragraph as _;
     use iced::widget::scrollable::{self, Direction, Scrollbar};
@@ -3613,7 +3888,7 @@ mod extent_tests {
             })
             .last()
             .unwrap_or(0.0);
-        let needed = GUTTER_CHARS as f32 * cw + cjk_width;
+        let needed = gutter_width(cw, 13.0) + cjk_width;
         assert!(
             content >= needed,
             "content width {content} does not reach the end of the CJK line ({needed})"
@@ -3736,6 +4011,8 @@ mod font_tests {
     #[derive(Default)]
     struct Recorder {
         texts: Vec<(String, iced::advanced::text::Shaping)>,
+        /// Each text's content, where it is drawn, and the box it is clipped to.
+        boxes: Vec<(String, iced::Point, iced::Rectangle)>,
     }
 
     impl iced::advanced::Renderer for Recorder {
@@ -3793,11 +4070,80 @@ mod font_tests {
         fn fill_text(
             &mut self,
             text: iced::advanced::text::Text<String, Self::Font>,
-            _: iced::Point,
+            at: iced::Point,
             _: iced::Color,
-            _: iced::Rectangle,
+            clip: iced::Rectangle,
         ) {
+            self.boxes.push((text.content.clone(), at, clip));
             self.texts.push((text.content, text.shaping));
+        }
+    }
+
+    /// Every text the code view draws itself (a line's number, a fold
+    /// arrow, the blame) is clipped to its own row. The software renderer
+    /// masks a text to its layer only when the box it is given leaves the
+    /// layer: given the whole viewport, the numbers of the rows drawn above
+    /// it showed over the header above the code.
+    #[test]
+    fn each_text_is_clipped_to_its_own_row() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        let source: String = (1..=300).map(|n| format!("let x{n} = {n};\n")).collect();
+        let lines = crate::highlight::plain_lines(&source);
+        let lh = 20.0;
+        let mut view = crate::codeview::CodeView::new(
+            &lines,
+            300,
+            13.0,
+            lh,
+            iced::Color::WHITE,
+            |_| (),
+            |_| (),
+            |_, _| (),
+        )
+        .blame(Some((125, "someone, 3 days ago".to_string())));
+        let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+        let mut tree = Tree::new(&*widget);
+        let mut renderer = Recorder::default();
+        let node = widget.layout(
+            &mut tree,
+            &renderer,
+            &iced::advanced::layout::Limits::new(
+                iced::Size::ZERO,
+                iced::Size::new(800.0, f32::INFINITY),
+            ),
+        );
+        // Scrolled a hundred and twenty rows down, a part-row in.
+        let viewport = iced::Rectangle::new(
+            iced::Point::new(0.0, 120.0 * lh + 7.0),
+            iced::Size::new(800.0, 400.0),
+        );
+        widget.draw(
+            &tree,
+            &mut renderer,
+            &iced::Theme::Dark,
+            &iced::advanced::renderer::Style::default(),
+            iced::advanced::Layout::new(&node),
+            iced::mouse::Cursor::Unavailable,
+            &viewport,
+        );
+        assert!(
+            renderer.boxes.iter().any(|(text, ..)| text.trim() == "121"),
+            "the part-shown row's number is drawn"
+        );
+        assert!(
+            renderer
+                .boxes
+                .iter()
+                .any(|(text, ..)| text.contains("someone"))
+        );
+        // Each drawn within its row (set where its baseline falls in it,
+        // `ui::ts::baseline_top`), and clipped to that row.
+        for (text, at, clip) in &renderer.boxes {
+            assert!(
+                clip.height == lh && (0.0..lh).contains(&(at.y - clip.y)),
+                "{text:?} at {at:?} is clipped to {clip:?}, not its row"
+            );
         }
     }
 

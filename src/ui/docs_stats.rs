@@ -133,13 +133,28 @@ pub(crate) fn module_label(rel: &str) -> String {
         Some("ts") | Some("tsx") => "ts",
         Some("js") | Some("jsx") => "js",
         Some("dart") => "dart",
+        Some("lean") => "lean",
+        Some("java") => "java",
+        Some("cs") => "csharp",
+        Some("hs") => "haskell",
+        Some("erl") | Some("hrl") => "erlang",
         _ => "",
     };
     let no_ext = rel.rsplit_once('.').map(|(a, _)| a).unwrap_or(rel);
     let mut segs: Vec<&str> = no_ext.split('/').filter(|s| !s.is_empty()).collect();
-    // Drop a conventional source root.
-    if segs.len() > 1 && matches!(segs.first().copied(), Some("src") | Some("lib")) {
+    // Drop a conventional source root — Maven's and Gradle's
+    // `src/main/java` whole.
+    if lang == "java" && segs.len() > 3 && segs[..3] == ["src", "main", "java"] {
+        segs.drain(..3);
+    } else if segs.len() > 1 && matches!(segs.first().copied(), Some("src") | Some("lib")) {
         segs.remove(0);
+    }
+    // An Erlang module is its file, whatever the folder.
+    if lang == "erlang" {
+        return segs
+            .last()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "(root)".into());
     }
     // A file that names its parent module collapses to the directory.
     let is_dir_file = (lang == "rust"
@@ -161,7 +176,7 @@ pub(crate) fn module_label(rel: &str) -> String {
     }
     let sep = match lang {
         "rust" => "::",
-        "python" => ".",
+        "python" | "lean" | "java" | "csharp" | "haskell" => ".",
         _ => "/",
     };
     segs.join(sep)
@@ -177,6 +192,9 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
         "trait" | "interface" => "trait",
         "class" => "class",
         "constant" | "const" => "const",
+        "theorem" => "thm",
+        "instance" => "inst",
+        "inductive" => "ind",
         "module" | "mod" | "namespace" => "mod",
         "type" | "typealias" | "type_alias" | clew_core::apidoc::ASSOCIATED_TYPE => "type",
         "impl" => "impl",
@@ -309,7 +327,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                             text(kind_badge(&item.kind))
                                 .size(ts::CAPTION)
                                 .color(theme::accent())
-                                .font(Font::MONOSPACE)
+                                .font(crate::fonts::CODE)
                                 .width(42),
                             text(item.name.clone())
                                 .size(ts::BASE)
@@ -415,7 +433,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             text(kind_badge(&e.kind))
                 .size(ts::SMALL)
                 .color(theme::accent())
-                .font(Font::MONOSPACE),
+                .font(crate::fonts::CODE),
             text(e.name.clone()).size(title_size).color(theme::fg()),
         ]
         .spacing(8)
@@ -424,7 +442,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         let signature = container(
             text(e.signature.clone())
                 .size(ts::BODY)
-                .font(Font::MONOSPACE)
+                .font(crate::fonts::CODE)
                 .color(theme::fg_muted()),
         )
         .padding([6, 10])
@@ -955,7 +973,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                 text(term.badge.clone())
                     .size(ts::SMALL)
                     .color(theme::accent())
-                    .font(Font::MONOSPACE),
+                    .font(crate::fonts::CODE),
                 space().width(Fill),
                 text(term.location())
                     .size(ts::CAPTION)

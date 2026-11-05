@@ -484,7 +484,7 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     };
     // The opener not starting is a failure to report, not a no-op: the click
     // otherwise looks broken with no explanation.
-    let mut open = std::process::Command::new(opener);
+    let mut open = clew_core::spawn::command(opener);
     open.arg(url).stdin(std::process::Stdio::null());
     spawn_reaped(open)
         .map(|_| ())
@@ -533,6 +533,7 @@ mod tests {
 
     /// A19: a program started for a link click is reaped once it exits, not
     /// left a zombie: its pid stops naming a process at all.
+    #[cfg(unix)]
     #[test]
     fn a_started_opener_is_reaped_when_it_exits() {
         let pid = spawn_reaped(std::process::Command::new("/usr/bin/true")).unwrap();

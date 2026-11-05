@@ -520,7 +520,7 @@ fn git_program() -> Option<PathBuf> {
 /// ([`installed_version`] says so first) is no program at all: its spawn
 /// fails, never a bare name looked up.
 fn base_command(root: &Path) -> Command {
-    let mut cmd = Command::new(git_program().unwrap_or_default());
+    let mut cmd = crate::spawn::command(git_program().unwrap_or_default());
     cmd.env("PATH", crate::linerpc::child_path());
     cmd.arg("-C")
         .arg(root)
@@ -576,6 +576,10 @@ fn execute(mut cmd: Command, timeout: Duration, cap: Cap) -> Result<Finished, Gi
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| GitError::Spawn(e.to_string()))?;
+    // Windows' process group: a job object, ended — with whatever git left
+    // in it — when this returns.
+    #[cfg(windows)]
+    let _job = crate::procgroup::adopt_scoped(&child);
     let stderr = child.stderr.take().map(read_tail);
     let Some(stdout) = child.stdout.take() else {
         kill(&mut child);
@@ -729,6 +733,8 @@ fn kill(child: &mut std::process::Child) {
         }
         crate::procgroup::kill(child.id());
     }
+    #[cfg(windows)]
+    crate::procgroup::kill(child.id());
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -742,7 +748,7 @@ fn installed_version() -> Result<(u32, u32, u32), GitError> {
     }
     let git = git_program()
         .ok_or_else(|| GitError::Spawn("git is not installed (not found on PATH)".into()))?;
-    let mut cmd = Command::new(git);
+    let mut cmd = crate::spawn::command(git);
     cmd.arg("--version")
         .env("PATH", crate::linerpc::child_path())
         .env("LC_ALL", "C")
@@ -1147,6 +1153,9 @@ impl Scratch {
                 .map_or(0, |d| d.subsec_nanos());
             let n = NEXT.fetch_add(1, Ordering::Relaxed);
             let path = base.join(format!("clew-lfs-{}-{n}-{nanos}", std::process::id()));
+            // (Only Unix has a mode to set; on Windows the new directory
+            // takes the temp dir's own, per-user, permissions.)
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut builder = std::fs::DirBuilder::new();
             #[cfg(unix)]
             std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -3058,7 +3067,7 @@ fn git_name(root: &Path, rel: &str) -> String {
         .and_then(|abs| {
             abs.strip_prefix(&canonical_root)
                 .ok()
-                .map(|where_it_is| where_it_is.to_string_lossy().into_owned())
+                .map(crate::rel_string)
         })
         .filter(|where_it_is| !where_it_is.is_empty())
         .unwrap_or_else(|| rel.to_string())

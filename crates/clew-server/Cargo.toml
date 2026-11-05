@@ -8,9 +8,13 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
+# DBGp (Xdebug's debugging protocol, `php-debug`) carries values in base64.
+base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 clew-core = { path = "../clew-core" }
 clew-protocol = { path = "../clew-protocol" }
 notify-debouncer-full = "0.7.0"
+# Reads DBGp's XML replies (`php-debug`): small, read-only, no dependencies.
+roxmltree = "0.21.2"
 serde_json = "1.0.150"
 tokio = { version = "1.52.3", features = ["fs", "io-std", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 # Parses `.clew/*.toml` state before a wholesale write may replace it.

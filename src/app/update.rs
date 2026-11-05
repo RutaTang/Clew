@@ -120,7 +120,9 @@ impl App {
             // from under a pointer resting on an Allow — and its delay
             // starts when the peek goes. The cards are answered in turn, so
             // the next one coming up where the last was answered waits too.
-            None => (self.show_bottom && self.bottom_tab == BottomTab::Ask)
+            None => self
+                .ask_view
+                .is_open()
                 .then(|| self.first_approval())
                 .flatten()
                 .map(|(turn, approval)| Question::Approval {
@@ -265,17 +267,16 @@ impl App {
         {
             return Task::none();
         }
-        // An approval card first drawn in a bottom panel too low to show
-        // all of it — its answers out of reach — opens the panel to where
-        // it fits. Its first report only: a card that fit, squeezed by the
-        // user's own drag, and one the user makes lower once opened, stay.
+        // An approval card first drawn in an Ask card too low to show all
+        // of it — its answers out of reach, in a short window — opens the
+        // Ask window large, where it fits. Its first report only: one the
+        // user makes small again once opened stays small.
         if matches!(question, crate::app::model::Question::Approval { .. })
             && self.asking.raised_for.as_ref() != Some(&question)
         {
             self.asking.raised_for = Some(question.clone());
-            if place.is_none() && self.bottom_height < crate::app::model::CARD_PANEL_HEIGHT {
-                self.bottom_height = crate::app::model::CARD_PANEL_HEIGHT;
-                self.clamp_panel_sizes();
+            if place.is_none() && matches!(self.ask_view, AskView::Compact | AskView::Margin) {
+                self.ask_view = AskView::Expanded;
             }
         }
         let places = &mut self.asking.places;
@@ -343,6 +344,13 @@ impl App {
         if self.show_tools_menu && crate::app::tutorial::closes_tools_menu(&message) {
             self.show_tools_menu = false;
         }
+        // So does a pick from the app menu, or from the View menu.
+        if self.show_app_menu && crate::ui::closes_app_menu(&message) {
+            self.show_app_menu = false;
+        }
+        if self.show_view_menu && crate::ui::closes_view_menu(&message) {
+            self.show_view_menu = false;
+        }
         match message {
             Message::Server(message) => self.update_server(message),
             Message::Connect(message) => self.update_connect(message),
@@ -362,6 +370,7 @@ impl App {
             Message::Semantic(message) => self.update_semantic(message),
             Message::Ask(message) => self.update_ask(message),
             Message::Integrations(message) => self.update_integrations(message),
+            Message::Languages(message) => self.update_languages(message),
             Message::TimeTravel(message) => self.update_time_travel(message),
             Message::Debug(message) => self.update_debug(message),
             Message::Lsp(message) => self.update_lsp(message),
@@ -372,6 +381,7 @@ impl App {
             Message::Updater(message) => self.update_updater(message),
             Message::Window(message) => self.update_window(message),
             Message::Tutorial(message) => self.update_tutorial(message),
+            Message::Voice(message) => self.update_voice(message),
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),

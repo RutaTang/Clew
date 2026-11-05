@@ -95,13 +95,18 @@ impl App {
             lsp_gen: std::collections::HashMap::new(),
             embed_available: embed::Config::available(),
             show_bottom: false,
-            bottom_tab: BottomTab::Ask,
+            ask_view: AskView::Closed,
+            voice: crate::app::voice::VoiceState::new(),
             debug: DebugState::default(),
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
             llm_config_cache: None,
             show_tools_menu: false,
             show_target_menu: false,
+            show_app_menu: false,
+            margin_tab: MarginTab::default(),
+            show_view_menu: false,
+            file_filter: String::new(),
             keymap: keymap::Keymap::load(),
             show_shortcuts: false,
             rebinding: None,
@@ -109,7 +114,9 @@ impl App {
             show_inline_summaries: true,
             show_file_banner: true,
             show_inlay_hints: true,
-            show_minimap: true,
+            show_minimap: false,
+            show_inline_blame: false,
+            show_indent_guides: false,
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -130,6 +137,10 @@ impl App {
             show_right_panel: true,
             lsp_doc_rev: 1,
             blame_why_seq: 0,
+            insight_seq: 0,
+            palette: Vec::new(),
+            palette_recent: Vec::new(),
+            palette_home: Vec::new(),
             inlay_gen: 0,
             server_panel: false,
             installed_servers: Vec::new(),
@@ -147,11 +158,19 @@ impl App {
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,
+            maximized: false,
+            window_outer: iced::Size::ZERO,
+            window_frame: 0.0,
+            window_radius: 0.0,
+            composited: composited_from_start(),
+            software_renderer: false,
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
-            sidebar_width: 280.0,
-            right_width: 400.0,
+            // The design's sidebar, as it is laid out: its six views take
+            // 234 between its 10s.
+            sidebar_width: 254.0,
+            right_width: 272.0,
             bottom_height: 340.0,
             font_size: DEFAULT_FONT_SIZE,
             #[cfg(test)]
@@ -227,6 +246,14 @@ impl App {
                 iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick),
             );
         }
+        // The level meter and the pause that ends listening, read only while
+        // the microphone is open.
+        if self.voice.is_listening() {
+            subs.push(
+                iced::time::every(crate::app::voice::LISTEN_TICK)
+                    .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
+            );
+        }
         // No per-frame clock for the graph maps: the canvas requests its own
         // redraws (`canvas::Action::request_redraw`) while its simulation
         // moves and stops when it settles. The `window::frames()`
@@ -262,8 +289,10 @@ impl App {
         self.bottom_height = self.bottom_height.clamp(100.0, (h * 0.75).max(160.0));
     }
 
+    /// The code's line height: airy, as the design sets code — 24 for the
+    /// default 13.
     pub fn line_height(&self) -> f32 {
-        self.font_size + 7.0
+        self.font_size + 11.0
     }
 
     pub fn active_viewer(&self) -> Option<&Viewer> {
@@ -275,8 +304,8 @@ impl App {
     }
 
     pub(crate) fn on_window_resized(&mut self, size: Size) -> Task<Message> {
-        self.window_width = size.width;
-        self.window_height = size.height;
+        self.window_outer = size;
+        self.reframe();
         // Keep panel sizes sane against the new window bounds.
         self.clamp_panel_sizes();
         // Keep the materialized window generous enough for the new
@@ -289,23 +318,50 @@ impl App {
         // cheap). Leaving native fullscreen also lands here, where AppKit has
         // rebuilt and re-shown the title bar.
         #[cfg(target_os = "macos")]
-        macos::configure_frameless(10.0);
+        macos::configure_frameless(macos::WINDOW_RADIUS);
         // And so does entering or leaving it by the window's own means: the
         // controls show what the window is in.
+        // A window maximized by the system's own means (a double click on
+        // the bar, a snap) is a resize too: its button shows "restore".
         match self.main_window {
-            Some(id) => iced::window::mode(id).map(|mode| Message::Window(WindowMsg::ModeIs(mode))),
+            Some(id) => Task::batch([
+                iced::window::mode(id).map(|mode| Message::Window(WindowMsg::ModeIs(mode))),
+                iced::window::is_maximized(id)
+                    .map(|now| Message::Window(WindowMsg::MaximizedIs(now))),
+            ]),
             None => Task::none(),
         }
+    }
+
+    /// The frame round the window, its corners, and the room inside it,
+    /// from the window's size and whether it fills the screen. Before the
+    /// system has said the window's size there is nothing to frame.
+    pub(crate) fn reframe(&mut self) {
+        if self.window_outer == Size::ZERO {
+            return;
+        }
+        let full = self.maximized || self.fullscreen;
+        self.window_frame = crate::ui::window_frame_for(full);
+        self.window_radius =
+            crate::ui::window_radius_for(full, self.composited && !self.software_renderer);
+        self.window_width = self.window_outer.width - 2.0 * self.window_frame;
+        self.window_height = self.window_outer.height - 2.0 * self.window_frame;
+    }
+
+    /// Close every menu of the chrome: they open one at a time.
+    pub(crate) fn close_menus(&mut self) {
+        self.show_tools_menu = false;
+        self.show_target_menu = false;
+        self.show_app_menu = false;
+        self.show_view_menu = false;
     }
 
     pub(crate) fn on_sidebar_tab_picked(&mut self, tab: SidebarTab) -> Task<Message> {
         self.sidebar = tab;
         self.show_left_sidebar = true; // reveal it for external triggers
-        self.show_tools_menu = false; // close the More menu if it opened this
-        // Always scroll the picked tab into view — the strip scrolls horizontally
-        // and a tab off the right edge would otherwise look unselected.
-        let reveal = ui::reveal_sidebar_tab(tab);
-        let action = match tab {
+        // Close the menu that opened this, if one did.
+        self.show_tools_menu = false;
+        match tab {
             // The search input takes keyboard focus — except while the
             // tutorial shows the tab, whose keys step the tour.
             SidebarTab::Search if self.tutorial.is_none() => {
@@ -347,8 +403,7 @@ impl App {
                 Task::none()
             }
             _ => Task::none(),
-        };
-        Task::batch([reveal, action])
+        }
     }
 
     pub(crate) fn on_tick(&mut self) -> Task<Message> {
@@ -435,6 +490,11 @@ impl App {
                 Some(id) => iced::window::drag(id),
                 None => Task::none(),
             },
+            // The system resizes it from here, as from a frame of its own.
+            WindowMsg::ResizeDragged(direction) => match self.main_window {
+                Some(id) => iced::window::drag_resize(id, direction),
+                None => Task::none(),
+            },
             WindowMsg::FocusChanged(focused) => {
                 self.window_focused = focused;
                 // The window coming to the front: the question in it is
@@ -453,6 +513,9 @@ impl App {
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.
                     self.invalidate_llm_config();
+                    // A compositing manager may have come or gone meanwhile
+                    // (a desktop's switch for games, say).
+                    return self.ask_composited();
                 }
                 Task::none()
             }
@@ -498,6 +561,20 @@ impl App {
             },
             WindowMsg::ModeIs(mode) => {
                 self.fullscreen = mode == iced::window::Mode::Fullscreen;
+                // Filling the screen, the window has no frame or rounded
+                // corners; a window again, it has them again.
+                self.reframe();
+                self.clamp_panel_sizes();
+                Task::none()
+            }
+            WindowMsg::Composited(now) => {
+                self.composited = now;
+                self.reframe();
+                Task::none()
+            }
+            WindowMsg::SoftwareRenderer(now) => {
+                self.software_renderer = now;
+                self.reframe();
                 Task::none()
             }
             WindowMsg::Resized(size) => self.on_window_resized(size),
@@ -516,7 +593,9 @@ impl App {
                 Task::none()
             }
             WindowMsg::ResizeRight(x) => {
-                self.right_width = self.window_width - x;
+                // The margin reaches from the pointer to the sheet's right
+                // edge (its border inside the gap before the tool strip).
+                self.right_width = crate::ui::margin_width_at(self.window_width, x);
                 self.clamp_panel_sizes();
                 Task::none()
             }
@@ -525,9 +604,8 @@ impl App {
                 self.clamp_panel_sizes();
                 Task::none()
             }
-            WindowMsg::BottomTabPicked(tab) => {
+            WindowMsg::ShowDebugPanel => {
                 self.show_bottom = true;
-                self.bottom_tab = tab;
                 Task::none()
             }
             WindowMsg::CollapseBottom => {
@@ -535,13 +613,54 @@ impl App {
                 Task::none()
             }
             WindowMsg::ToggleToolsMenu => {
-                self.show_tools_menu = !self.show_tools_menu;
-                self.show_target_menu = false;
+                let open = !self.show_tools_menu;
+                self.close_menus();
+                self.show_tools_menu = open;
                 Task::none()
             }
             WindowMsg::ToggleTargetMenu => {
-                self.show_target_menu = !self.show_target_menu;
-                self.show_tools_menu = false;
+                let open = !self.show_target_menu;
+                self.close_menus();
+                self.show_target_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleAppMenu => {
+                let open = !self.show_app_menu;
+                self.close_menus();
+                self.show_app_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleViewMenu => {
+                let open = !self.show_view_menu;
+                self.close_menus();
+                self.show_view_menu = open;
+                Task::none()
+            }
+            WindowMsg::FileFilterChanged(filter) => {
+                self.file_filter = filter;
+                Task::none()
+            }
+            // Asked first, then set: what the button shows next is what was
+            // asked for, not a read that may race the change.
+            WindowMsg::ToggleMaximize => match self.main_window {
+                Some(id) => iced::window::is_maximized(id).then(move |was| {
+                    Task::batch([
+                        iced::window::maximize(id, !was),
+                        Task::done(Message::Window(WindowMsg::MaximizedIs(!was))),
+                    ])
+                }),
+                None => Task::none(),
+            },
+            WindowMsg::MarginTabPicked(tab) => {
+                self.margin_tab = tab;
+                self.show_right_panel = true;
+                Task::none()
+            }
+            WindowMsg::MaximizedIs(now) => {
+                self.maximized = now;
+                // Maximized, the window has no frame; restored, it has again.
+                self.reframe();
+                self.clamp_panel_sizes();
                 Task::none()
             }
             WindowMsg::OpenShortcuts => {
@@ -597,6 +716,14 @@ impl App {
                 self.show_minimap = !self.show_minimap;
                 Task::none()
             }
+            WindowMsg::ToggleInlineBlame => {
+                self.show_inline_blame = !self.show_inline_blame;
+                Task::none()
+            }
+            WindowMsg::ToggleIndentGuides => {
+                self.show_indent_guides = !self.show_indent_guides;
+                Task::none()
+            }
         }
     }
 }
@@ -607,6 +734,56 @@ impl App {
 /// noted at start ([`note_window_system`]), or read now.
 fn window_unplaced() -> bool {
     *UNPLACED.get_or_init(wayland_named)
+}
+
+/// Whether the window system composites Clew's windows over the desktop
+/// before anything is asked: Wayland always does, and Windows does a window
+/// presented through a visual (`app::corners`). X is asked once the window
+/// is up ([`App::ask_composited`]).
+fn composited_from_start() -> bool {
+    window_unplaced() || crate::app::corners::through_visual()
+}
+
+impl App {
+    /// Have Windows draw no border of its own round this window, which
+    /// presents through a visual and leaves its corners clear
+    /// (`app::corners`). Nothing to do elsewhere.
+    pub(crate) fn leave_edges_clear(&self) -> Task<Message> {
+        #[cfg(windows)]
+        if let Some(id) = self.main_window
+            && crate::app::corners::through_visual()
+        {
+            return iced::window::raw_id::<Message>(id).then(|window| {
+                crate::app::corners::leave_edges_clear(window);
+                Task::none()
+            });
+        }
+        Task::none()
+    }
+
+    /// Ask whether X composites this window (`app::corners`), for its
+    /// corners: where they can be left clear, they are rounded. Nothing to
+    /// ask on Wayland, which always composites, nor off Linux.
+    pub(crate) fn ask_composited(&self) -> Task<Message> {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Some(id) = self.main_window
+            && !window_unplaced()
+        {
+            return iced::window::raw_id::<Message>(id).then(|window| {
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            crate::app::corners::x11_composited(window)
+                        })
+                        .await
+                        .unwrap_or(false)
+                    },
+                    |now| Message::Window(WindowMsg::Composited(now)),
+                )
+            });
+        }
+        Task::none()
+    }
 }
 
 /// What [`window_unplaced`] says, once noted.

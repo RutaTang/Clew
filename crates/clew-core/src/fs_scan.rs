@@ -109,8 +109,8 @@ pub fn in_walked_folder(rel: &Path, folders: &HashSet<String>) -> bool {
     let parent = rel.parent().unwrap_or(Path::new(""));
     parent.as_os_str().is_empty()
         || parent.components().count() >= MAX_TREE_DEPTH
-        || parent.to_str().is_some_and(|p| folders.contains(p))
-        || rel.to_str().is_some_and(|r| folders.contains(r))
+        || folders.contains(&crate::rel_string(parent))
+        || folders.contains(&crate::rel_string(rel))
 }
 
 /// Directories a code reader should never scan: clew/git internals, and the
@@ -394,6 +394,13 @@ pub fn scan_with_report(root: PathBuf) -> (ScanResult, ScanReport) {
             Vec::new()
         }
     };
+    // The walked files by their names in one case (`already_spelled`).
+    #[cfg(not(unix))]
+    let lowered: std::collections::HashMap<String, usize> = files
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.rel.to_lowercase(), i))
+        .collect();
     for (rel, is_tracked) in visible_clew
         .map(|rel| (rel, false))
         .chain(tracked.into_iter().map(|rel| (rel, true)))
@@ -414,6 +421,10 @@ pub fn scan_with_report(root: PathBuf) -> (ScanResult, ScanReport) {
         }
         #[cfg(not(unix))]
         let _ = meta;
+        #[cfg(not(unix))]
+        if already_spelled(&abs, &rel, &lowered, &files) {
+            continue;
+        }
         let comps: Vec<&str> = rel.split('/').collect();
         seen += 1;
         tmp.insert(&comps, false);
@@ -497,6 +508,22 @@ fn already_listed(
     // device) against the walked file itself.
     std::fs::symlink_metadata(&files[i].abs)
         .is_ok_and(|walked| walked.dev() == meta.dev() && walked.ino() == meta.ino())
+}
+
+/// [`already_listed`] where a file has no inode to know it by (Windows): a
+/// walked file whose name differs from `rel` in case alone — NTFS, as most
+/// Windows volumes, takes `Src/main.rs` for `src/main.rs` — and is the same
+/// file as `abs`, by what the system says of the two.
+#[cfg(not(unix))]
+fn already_spelled(
+    abs: &Path,
+    rel: &str,
+    lowered: &std::collections::HashMap<String, usize>,
+    files: &[FileEntry],
+) -> bool {
+    lowered
+        .get(&rel.to_lowercase())
+        .is_some_and(|&i| same_file::is_same_file(&files[i].abs, abs).unwrap_or(false))
 }
 
 /// Whether `path` is a regular file that really lives inside `root`.

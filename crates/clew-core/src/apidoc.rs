@@ -6,9 +6,10 @@
 //! No build, no language doc tool, no webview: every language clew already
 //! parses. The client enriches a selected entry via LSP hover.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use clew_protocol::DocItem;
+use tree_sitter::{Node, Tree};
 
 use crate::highlight::Lang;
 use crate::outline::Container;
@@ -40,9 +41,9 @@ pub const MAX_DOC_DEPTH: usize = 32;
 
 /// A file's own doc comment, its comment markers stripped: Rust's leading
 /// `//!` lines, a Python module's docstring, Go's package comment (the
-/// comment block right above `package`). Empty for the other languages,
-/// whose file-top comments are licence headers as often as docs, and for a
-/// file without one.
+/// comment block right above `package`), Lean's `/-! … -/` module doc. Empty
+/// for the other languages, whose file-top comments are licence headers as
+/// often as docs, and for a file without one.
 pub fn module_doc(source: &str, lang_key: &str) -> String {
     let lines = source.lines().map(|l| l.trim_end_matches('\r'));
     match lang_key {
@@ -110,8 +111,118 @@ pub fn module_doc(source: &str, lang_key: &str) -> String {
             doc.reverse();
             doc.join("\n").trim().to_string()
         }
+        "lean" => lean_module_doc(lines),
+        // Zig's `//!` lines, at the top of the file.
+        "zig" => {
+            let doc: Vec<&str> = lines
+                .map(str::trim_start)
+                .skip_while(|t| t.is_empty())
+                .take_while(|t| t.starts_with("//!"))
+                .map(|t| {
+                    let rest = &t[3..];
+                    rest.strip_prefix(' ').unwrap_or(rest)
+                })
+                .collect();
+            doc.join("\n").trim().to_string()
+        }
+        // The `%%` comment run before `-module(…)` — EDoc's overview — its
+        // `@doc` tag unwrapped.
+        "erlang" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(module) = all
+                .iter()
+                .position(|l| l.trim_start().starts_with("-module("))
+            else {
+                return String::new();
+            };
+            let mut doc: Vec<&str> = all[..module]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .take_while(|l| l.starts_with('%'))
+                .map(|l| l.trim_start_matches('%').trim_start())
+                .collect();
+            doc.reverse();
+            let doc = doc.join("\n");
+            doc.trim()
+                .strip_prefix("@doc")
+                .unwrap_or(doc.trim())
+                .trim()
+                .to_string()
+        }
+        // The Haddock (`-- |`) before `module … where`.
+        "haskell" => {
+            let all: Vec<&str> = lines.collect();
+            let Some(module) = all
+                .iter()
+                .position(|l| l.trim_start().starts_with("module "))
+            else {
+                return String::new();
+            };
+            let mut doc: Vec<&str> = all[..module]
+                .iter()
+                .rev()
+                .map(|l| l.trim_start())
+                .take_while(|l| l.starts_with("--"))
+                .map(|l| l[2..].trim_start())
+                .collect();
+            doc.reverse();
+            let doc = doc.join("\n");
+            match doc.trim().strip_prefix('|') {
+                Some(doc) => doc.trim().to_string(),
+                None => String::new(),
+            }
+        }
         _ => String::new(),
     }
+}
+
+/// Lean's module doc: the first `/-! … -/` block of the file's header —
+/// below the copyright (a plain `/- … -/`), the imports, `set_option`s and
+/// `public section`s, as Mathlib and the standard library write it. Past
+/// the first declaration, a `/-!` block heads a section, not the module.
+fn lean_module_doc<'a>(lines: impl Iterator<Item = &'a str>) -> String {
+    let mut doc: Vec<&str> = Vec::new();
+    // `Some(is_doc)` inside a block comment.
+    let mut block: Option<bool> = None;
+    for line in lines {
+        let t = line.trim();
+        if let Some(is_doc) = block {
+            let (text, closed) = match t.find("-/") {
+                Some(end) => (&t[..end], true),
+                None => (t, false),
+            };
+            if is_doc {
+                doc.push(text);
+            }
+            if closed {
+                if is_doc {
+                    break;
+                }
+                block = None;
+            }
+            continue;
+        }
+        if let Some(rest) = t.strip_prefix("/-!") {
+            match rest.find("-/") {
+                Some(end) => {
+                    doc.push(&rest[..end]);
+                    break;
+                }
+                None => {
+                    doc.push(rest);
+                    block = Some(true);
+                }
+            }
+        } else if let Some(rest) = t.strip_prefix("/-") {
+            if !rest.contains("-/") {
+                block = Some(false);
+            }
+        } else if crate::lean::declares(t) {
+            break;
+        }
+    }
+    doc.join("\n").trim().to_string()
 }
 
 /// Build the documented API of one file: top-level items, with members nested
@@ -121,7 +232,16 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
     let Some(lang) = Lang::for_source(lang_key, source) else {
         return Vec::new();
     };
-    let mut located = crate::outline::extract_located(source, lang.key());
+    // A SQL file's tree is read twice, for its outline and its foreign keys:
+    // parsed once.
+    let sql_tree = match lang {
+        Lang::Sql => crate::highlight::parse(source, lang),
+        _ => None,
+    };
+    let mut located = match &sql_tree {
+        Some(tree) => crate::outline::located_in(tree, source, lang),
+        None => crate::outline::extract_located(source, lang.key()),
+    };
     if located.is_empty() {
         return Vec::new();
     }
@@ -216,6 +336,13 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         }
     }
 
+    // A SQL table's references are its foreign keys, wherever in the file
+    // they are declared, not the words of its body.
+    let sql_refs = sql_tree
+        .as_ref()
+        .map(|tree| sql_references(tree, source))
+        .unwrap_or_default();
+
     // Visibility needs the nesting, so it is decided here rather than with the
     // rest of each record: in the C-family languages a top-level declaration
     // and a class member follow OPPOSITE defaults, and judging both by the
@@ -268,7 +395,12 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
             .filter_map(|&c| built[c].take())
             .collect();
         let r = &raws[i];
-        let refs = if kind_takes_members(&r.kind) && r.kind != "module" {
+        let refs = if lang == Lang::Sql {
+            match r.kind.as_str() {
+                "table" | "view" => sql_refs.get(&r.name).cloned().unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        } else if kind_takes_members(&r.kind) && r.kind != "module" {
             let spans: Vec<(usize, usize)> = children[i]
                 .iter()
                 .map(|&c| located[c].body.unwrap_or((raws[c].line, raws[c].end_line)))
@@ -300,6 +432,112 @@ pub fn build_file(source: &str, lang_key: &str) -> Vec<DocItem> {
         });
     }
     roots.iter().filter_map(|&i| built[i].take()).collect()
+}
+
+/// Most syntax nodes [`sql_references`] visits: a schema dump of tens of
+/// thousands of statements is a few million nodes, and a file past that is
+/// not a schema anyone reads.
+const MAX_SQL_NODES: usize = 4_000_000;
+
+/// What each table and view of a SQL file names, for the type map, by the
+/// table or view's name: a table, the tables its foreign keys reference —
+/// in its own `CREATE TABLE` and in the file's `ALTER TABLE … ADD …
+/// REFERENCES` (pg_dump writes every foreign key that way); a view, the
+/// tables and views it selects from. In order of first sighting, without
+/// repeats, capped at [`MAX_TYPE_REFS`].
+fn sql_references(tree: &Tree, source: &str) -> HashMap<String, Vec<String>> {
+    /// A node, with what the walk knows of where it sits — carried, as
+    /// tree-sitter finds a node's parent and siblings by walking down from
+    /// the root, at a cost of the depth per call.
+    struct At<'t> {
+        node: Node<'t>,
+        /// The statement it is in, and the table or view that statement is
+        /// for: the first object it names.
+        owner: Option<(&'static str, Node<'t>)>,
+        /// Its parent's kind.
+        parent: &'static str,
+        /// The kind of the named node before it, under the same parent.
+        before: &'static str,
+    }
+    let mut refs: HashMap<String, Vec<String>> = HashMap::new();
+    let text = |n: Node| source.get(n.byte_range()).unwrap_or_default();
+    let name_of = |reference: Node| {
+        reference
+            .child_by_field_name("name")
+            .map(|n| unquote_sql(text(n)).to_string())
+    };
+    // An explicit stack: the nesting is the file's.
+    let mut stack = vec![At {
+        node: tree.root_node(),
+        owner: None,
+        parent: "",
+        before: "",
+    }];
+    let mut visited = 0;
+    while let Some(at) = stack.pop() {
+        visited += 1;
+        if visited > MAX_SQL_NODES {
+            break;
+        }
+        let node = at.node;
+        if node.kind() == "object_reference" {
+            let foreign_key = at.before == "keyword_references";
+            let selected = at.parent == "relation";
+            if (foreign_key || selected)
+                && let Some((statement, owner)) = at.owner
+                && owner != node
+                && (foreign_key == matches!(statement, "create_table" | "alter_table"))
+                && let (Some(owner), Some(target)) = (name_of(owner), name_of(node))
+                && owner != target
+            {
+                let list = refs.entry(owner).or_default();
+                if list.len() < MAX_TYPE_REFS && !list.contains(&target) {
+                    list.push(target);
+                }
+            }
+            continue;
+        }
+        let owner = match node.kind() {
+            kind
+            @ ("create_table" | "alter_table" | "create_view" | "create_materialized_view") => {
+                let mut cursor = node.walk();
+                node.named_children(&mut cursor)
+                    .find(|c| c.kind() == "object_reference")
+                    .map(|named| (kind, named))
+            }
+            _ => at.owner,
+        };
+        let mut cursor = node.walk();
+        let mut before = "";
+        let mut children = Vec::new();
+        for child in node.children(&mut cursor) {
+            children.push(At {
+                node: child,
+                owner,
+                parent: node.kind(),
+                before,
+            });
+            if child.is_named() {
+                before = child.kind();
+            }
+        }
+        // Last child first onto the stack, so the walk is in source order.
+        stack.extend(children.into_iter().rev());
+    }
+    refs
+}
+
+/// A SQL identifier without the quotes that let it hold any character:
+/// `"Users"`, `` `orders` ``, `[Order Details]`.
+pub(crate) fn unquote_sql(name: &str) -> &str {
+    let quoted = |open: char, close: char| {
+        name.len() >= 2 && name.starts_with(open) && name.ends_with(close)
+    };
+    if quoted('"', '"') || quoted('`', '`') || quoted('[', ']') {
+        &name[1..name.len() - 1]
+    } else {
+        name
+    }
 }
 
 /// Identifiers a type names at most (see [`type_refs`]).
@@ -624,7 +862,16 @@ fn signature_from(lines: &[&str], from: usize, through: usize) -> String {
 fn kind_takes_members(kind: &str) -> bool {
     matches!(
         kind,
-        "class" | "interface" | "enum" | "struct" | "trait" | "module" | "type" | "union"
+        "class"
+            | "interface"
+            | "enum"
+            | "struct"
+            | "trait"
+            | "module"
+            | "type"
+            | "union"
+            | "table"
+            | "inductive"
     )
 }
 
@@ -1009,11 +1256,33 @@ fn is_public(decl: &str, name: &str, lang: Lang, is_member: bool) -> bool {
         // here — their access comes from their type's sections, decided in
         // `build_file`.
         Lang::C | Lang::Cpp => !modifiers(without_template_clause(d)).any(|w| w == "static"),
+        // `private` before the declaration's name; `protected` only asks
+        // for the name to be written in full.
+        Lang::Lean => !before_name(d, name)
+            .split_whitespace()
+            .any(|w| w == "private"),
+        // A schema has no private tables.
+        Lang::Sql => true,
+        // PHP members say so; a free function or class is public.
+        Lang::Php => !modifiers(d).any(|w| w == "private" || w == "protected"),
+        // C#'s members are private unless they say otherwise; a type without
+        // a modifier is internal — its assembly's API.
+        Lang::CSharp => {
+            modifiers(d).any(|w| matches!(w, "public" | "protected" | "internal"))
+                || (!is_member && !modifiers(d).any(|w| w == "private"))
+        }
+        // Zig's `pub`.
+        Lang::Zig => d.starts_with("pub ") || d.starts_with("pub\t"),
+        // A leading underscore is Ruby's own marker of a private helper; the
+        // `private` sections a class opens are decided in `build_file`'s
+        // caller as they are for C++.
+        Lang::Ruby => !name.starts_with('_'),
+        // The export list says (a module without one exports everything):
+        // not seen from one declaration, so every one counts.
+        Lang::Erlang | Lang::Haskell => true,
         // No outline, so no items to judge; the benefit of the doubt keeps a
         // Docs view from coming up empty if one ever appears.
-        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css | Lang::Zig => {
-            true
-        }
+        Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => true,
     }
 }
 
@@ -1039,6 +1308,112 @@ fn modifiers(decl: &str) -> impl Iterator<Item = &str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A module's own doc in Zig (`//!`), Erlang (EDoc above `-module`) and
+    /// Haskell (Haddock above `module … where`).
+    #[test]
+    fn module_docs_of_zig_erlang_and_haskell() {
+        for (file, lang) in [("a.zig", "zig"), ("a.erl", "erlang"), ("a.hs", "haskell")] {
+            let source = match file {
+                "a.zig" => include_str!("../tests/fixtures/langs/a.zig"),
+                "a.erl" => include_str!("../tests/fixtures/langs/a.erl"),
+                _ => include_str!("../tests/fixtures/langs/a.hs"),
+            };
+            assert_eq!(module_doc(source, lang), "A shop.", "{lang}");
+        }
+        assert_eq!(
+            module_doc(
+                "module M where
+",
+                "haskell"
+            ),
+            ""
+        );
+        assert_eq!(
+            module_doc(
+                "% plain
+-module(m).
+",
+                "erlang"
+            ),
+            "plain"
+        );
+    }
+
+    /// A SQL table's `refs` are the tables its foreign keys reference — in a
+    /// column, in a table constraint, and in the file's `ALTER TABLE`s — and
+    /// a view's the tables it selects from; quotes are no part of a name.
+    /// Columns are a table's members; every object is public; a table's
+    /// signature is its `CREATE`, not its columns.
+    #[test]
+    fn a_sql_tables_refs_are_its_foreign_keys_wherever_declared() {
+        let src = "CREATE TABLE \"users\" (id int PRIMARY KEY);\n\
+                   CREATE TABLE stores (id int PRIMARY KEY);\n\
+                   CREATE TABLE orders (\n  id int,\n  user_id int REFERENCES users(id),\n  store_id int,\n  \
+                   CONSTRAINT fk_store FOREIGN KEY (store_id) REFERENCES stores (id)\n);\n\
+                   CREATE TABLE payments (id int, order_id int);\n\
+                   ALTER TABLE ONLY payments ADD CONSTRAINT payments_order_fkey FOREIGN KEY (order_id) REFERENCES orders(id);\n\
+                   CREATE VIEW order_users AS SELECT * FROM orders o JOIN \"users\" u ON o.user_id = u.id;\n";
+        let items = build_file(src, "sql");
+        let find = |name: &str| items.iter().find(|i| i.name == name).expect(name);
+        assert_eq!(find("orders").refs, ["users", "stores"], "{items:#?}");
+        assert_eq!(find("payments").refs, ["orders"]);
+        assert!(find("users").refs.is_empty());
+        assert_eq!(find("order_users").refs, ["orders", "users"]);
+        assert_eq!(find("orders").signature, "CREATE TABLE orders");
+        let columns: Vec<(&str, &str)> = find("orders")
+            .children
+            .iter()
+            .map(|c| (c.name.as_str(), c.kind.as_str()))
+            .collect();
+        assert_eq!(
+            columns,
+            [("id", "field"), ("user_id", "field"), ("store_id", "field")]
+        );
+        assert!(items.iter().all(|i| i.public));
+    }
+
+    /// Lean: public unless `private`; a structure's fields are its members;
+    /// a declaration's signature is its statement, attributes and modifiers
+    /// included, without its proof.
+    #[test]
+    fn lean_declarations_are_public_unless_private() {
+        let src = "/-- Doubles. -/\n@[simp] def double (n : Nat) : Nat := 2 * n\n\
+                   private def secret := 1\nprotected theorem pos : 0 < 1 := by decide\n\
+                   structure Point where\n  x : Nat\n";
+        let items = build_file(src, "lean");
+        let find = |name: &str| items.iter().find(|i| i.name == name).expect(name);
+        assert!(find("double").public);
+        assert!(!find("secret").public);
+        assert!(find("pos").public);
+        assert_eq!(find("double").doc, "Doubles.");
+        assert_eq!(
+            find("double").signature,
+            "@[simp] def double (n : Nat) : Nat"
+        );
+        assert_eq!(find("pos").signature, "protected theorem pos : 0 < 1");
+        assert_eq!(find("Point").children.len(), 1);
+    }
+
+    /// A Lean file's module doc is its first `/-! … -/` block, below the
+    /// copyright header and the imports; one under a declaration heads a
+    /// section.
+    #[test]
+    fn a_lean_module_doc_is_the_header_bang_block() {
+        let src = "/-\nCopyright (c) 2024. All rights reserved.\n-/\nimport Mathlib.Order.Basic\n\n\
+                   /-!\n# Orders\n\nBasic facts.\n-/\n\ntheorem t : True := trivial\n";
+        assert_eq!(module_doc(src, "lean"), "# Orders\n\nBasic facts.");
+        assert_eq!(
+            module_doc("/-! One line. -/\ndef x := 1\n", "lean"),
+            "One line."
+        );
+        assert_eq!(module_doc("def x := 1\n/-! A section. -/\n", "lean"), "");
+        // The module system's header: `public import`, a public section, an
+        // option, before the doc.
+        let header = "module\n\nprelude\npublic import Init.Core\n\n@[expose] public section\n\
+                      set_option autoImplicit false\n\n/-!\n# Hash maps\n-/\n\n@[simp] theorem t : True := trivial\n";
+        assert_eq!(module_doc(header, "lean"), "# Hash maps");
+    }
 
     /// A type's `refs`: its declaration's names, its own members' (fields,
     /// variants) with the methods' bodies cut out, and its methods'

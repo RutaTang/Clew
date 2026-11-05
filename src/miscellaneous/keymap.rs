@@ -57,16 +57,19 @@ pub enum Action {
     CallGraph,
     ImportGraph,
     TypeGraph,
+    ProjectMaps,
     ExplainAll,
     ToggleDiff,
     TimeTravel,
     Walkthrough,
     LspServers,
     Shortcuts,
+    CommandPalette,
+    Voice,
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 28] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -86,12 +89,15 @@ impl Action {
         Action::CallGraph,
         Action::ImportGraph,
         Action::TypeGraph,
+        Action::ProjectMaps,
         Action::ExplainAll,
         Action::ToggleDiff,
         Action::TimeTravel,
         Action::Walkthrough,
         Action::LspServers,
         Action::Shortcuts,
+        Action::CommandPalette,
+        Action::Voice,
     ];
 
     /// Stable identifier used as the TOML key. Never change these.
@@ -114,6 +120,7 @@ impl Action {
             Action::StartDebug => "start_debug",
             Action::CallGraph => "call_graph",
             Action::TypeGraph => "type_graph",
+            Action::ProjectMaps => "project_maps",
             Action::ImportGraph => "import_graph",
             Action::ExplainAll => "explain_all",
             Action::ToggleDiff => "toggle_diff",
@@ -122,6 +129,8 @@ impl Action {
             Action::LspServers => "lsp_servers",
             Action::TraceValue => "trace_value",
             Action::Shortcuts => "shortcuts",
+            Action::CommandPalette => "command_palette",
+            Action::Voice => "voice",
         }
     }
 
@@ -151,12 +160,15 @@ impl Action {
             Action::CallGraph => "Project call graph",
             Action::ImportGraph => "Project import graph",
             Action::TypeGraph => "Project type map",
+            Action::ProjectMaps => "Project maps (schema, routes, …)",
             Action::ExplainAll => "Explain All",
             Action::ToggleDiff => "Diff vs HEAD",
             Action::TimeTravel => "Time Travel",
             Action::Walkthrough => "Walkthrough",
             Action::LspServers => "Language servers",
             Action::Shortcuts => "Keyboard shortcuts",
+            Action::CommandPalette => "Command palette",
+            Action::Voice => "Talk (voice)",
         }
     }
 
@@ -187,12 +199,15 @@ impl Action {
             Action::CallGraph => at(MenuSection::View, "Call Graph"),
             Action::ImportGraph => at(MenuSection::View, "Import Graph"),
             Action::TypeGraph => at(MenuSection::View, "Type Map"),
+            Action::ProjectMaps => at(MenuSection::View, "Project Maps"),
             Action::ExplainAll => at(MenuSection::View, "Explain All"),
             Action::ToggleDiff => at(MenuSection::View, "Diff vs HEAD"),
             Action::TimeTravel => at(MenuSection::View, "Time Travel"),
             Action::Walkthrough => at(MenuSection::View, "Walkthrough"),
             Action::LspServers => at(MenuSection::View, "Language Servers…"),
             Action::Shortcuts => at(MenuSection::View, "Keyboard Shortcuts…"),
+            Action::CommandPalette => at(MenuSection::View, "Command Palette…"),
+            Action::Voice => at(MenuSection::View, "Talk"),
         }
     }
 
@@ -219,6 +234,7 @@ impl Action {
             Action::CallGraph => Chord::cmd_shift('c'),
             Action::ImportGraph => Chord::cmd_shift('i'),
             Action::TypeGraph => Chord::cmd_shift('t'),
+            Action::ProjectMaps => Chord::cmd_shift('m'),
             Action::ExplainAll => Chord::cmd_shift('e'),
             Action::ToggleDiff => Chord::cmd_shift('g'),
             Action::TimeTravel => Chord::cmd_shift('h'),
@@ -226,8 +242,61 @@ impl Action {
             Action::LspServers => Chord::cmd_shift('l'),
             Action::TraceValue => Chord::cmd_shift('v'),
             Action::Shortcuts => Chord::cmd('/'),
+            Action::CommandPalette => Chord::cmd_shift('p'),
+            // "Speak". Pressed again — or a pause once something was said —
+            // it stops listening.
+            Action::Voice => Chord::cmd_shift('s'),
         }
     }
+}
+
+/// Whether shortcuts are spelled the Mac's way (`⇧⌘P`) rather than in words
+/// (`Ctrl+Shift+P`, Windows and Linux).
+pub const MAC_KEYS: bool = cfg!(target_os = "macos");
+
+/// `text` with every shortcut in it written the Mac's way (`⌘P`, `⇧⌘F`,
+/// `⌥←`) spelled the way this platform spells shortcuts: unchanged on macOS,
+/// `Ctrl+P`, `Ctrl+Shift+F`, `Alt+←` on Windows and Linux — the same words,
+/// in the same order, as [`Chord::caps`]. The modifiers are read off a run
+/// of the symbols, the key is the character after it.
+pub fn local_keys(text: &str) -> String {
+    if MAC_KEYS {
+        return text.to_string();
+    }
+    let modifier = |c: &char| matches!(c, '⌘' | '⌃' | '⌥' | '⇧');
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if !modifier(&c) {
+            out.push(c);
+            continue;
+        }
+        let (mut ctrl, mut alt, mut shift) = (false, false, false);
+        let mut at = Some(c);
+        while let Some(m) = at {
+            match m {
+                '⌥' => alt = true,
+                '⇧' => shift = true,
+                _ => ctrl = true,
+            }
+            at = chars.next_if(modifier);
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if ctrl {
+            parts.push("Ctrl".into());
+        }
+        if alt {
+            parts.push("Alt".into());
+        }
+        if shift {
+            parts.push("Shift".into());
+        }
+        if let Some(key) = chars.next_if(|k| !k.is_whitespace()) {
+            parts.push(key.to_uppercase().collect());
+        }
+        out.push_str(&parts.join("+"));
+    }
+    out
 }
 
 /// A top-level menu that holds keymap actions, in menu-bar order.
@@ -484,6 +553,22 @@ impl Chord {
 
     /// Pretty key-cap string for the UI, e.g. `⌘⇧F` or `⌥←`.
     pub fn caps(self) -> String {
+        // Windows and Linux spell a shortcut in words, ⌘ being Ctrl there
+        // (`Modifiers::command`).
+        if !MAC_KEYS {
+            let mut parts: Vec<String> = Vec::new();
+            if self.cmd || self.ctrl {
+                parts.push("Ctrl".into());
+            }
+            if self.alt {
+                parts.push("Alt".into());
+            }
+            if self.shift {
+                parts.push("Shift".into());
+            }
+            parts.push(self.key.cap());
+            return parts.join("+");
+        }
         let mut s = String::new();
         if self.ctrl {
             s.push('⌃');
@@ -713,6 +798,26 @@ impl Keymap {
 mod tests {
     use super::*;
 
+    /// A shortcut is spelled the platform's way, the same in prose as on
+    /// a key cap: symbols on macOS, words elsewhere, Ctrl first.
+    #[test]
+    fn shortcuts_are_spelled_the_platforms_way() {
+        let chord = Chord::cmd_shift('p');
+        if MAC_KEYS {
+            assert_eq!(chord.caps(), "⇧⌘P");
+            assert_eq!(local_keys("press ⌘P"), "press ⌘P");
+        } else {
+            assert_eq!(chord.caps(), "Ctrl+Shift+P");
+            assert_eq!(local_keys("⇧⌘P"), chord.caps());
+            assert_eq!(
+                local_keys("Press ⌘D to mark it."),
+                "Press Ctrl+D to mark it."
+            );
+            assert_eq!(local_keys("⌥← and ⌘→"), "Alt+← and Ctrl+→");
+            assert_eq!(local_keys("⌘\\ splits"), "Ctrl+\\ splits");
+        }
+    }
+
     #[test]
     fn chord_roundtrips_through_config() {
         for action in Action::ALL {
@@ -844,7 +949,7 @@ mod tests {
         let mut km = Keymap::defaults();
         let table: toml::Table = toml::from_str(
             "goto_line = \"cmd+q\"\nopen_symbol = \"cmd+p\"\nzoom_in = \"j\"\n\
-             toggle_split = \"cmd+shift+s\"\nnot_an_action = \"cmd+k\"\n",
+             toggle_split = \"cmd+shift+k\"\nnot_an_action = \"cmd+k\"\n",
         )
         .unwrap();
         km.apply_overrides(&table);
@@ -855,7 +960,7 @@ mod tests {
         );
         assert_eq!(km.chord(Action::ZoomIn), Action::ZoomIn.default_chord());
         // A clean override still applies.
-        assert_eq!(km.chord(Action::ToggleSplit), Chord::cmd_shift('s'));
+        assert_eq!(km.chord(Action::ToggleSplit), Chord::cmd_shift('k'));
     }
 
     /// Only ⌘-chords outside the text-editing set may become key equivalents.

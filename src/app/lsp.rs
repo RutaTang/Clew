@@ -164,6 +164,21 @@ impl App {
             None => {}
         }
 
+        // The user's choices for the project (its Python interpreter) are
+        // still being read: a server started now would not have them.
+        if self.proj.inflight.choices_loading {
+            if !self
+                .proj
+                .inflight
+                .deferred_lsp
+                .iter()
+                .any(|l| l == language)
+            {
+                self.proj.inflight.deferred_lsp.push(language.to_string());
+            }
+            return Task::none();
+        }
+
         // Remote project: everything about the server (its lsp.toml, its
         // binaries, its command approvals) lives on the remote host. Ask the
         // server what it would run; the LspResolved reply either starts it
@@ -174,6 +189,7 @@ impl App {
             if self.server.is_up() {
                 let request = clew_protocol::Request::LspResolve {
                     language: language.to_string(),
+                    choices: self.proj.lang_choices.clone(),
                 };
                 if self.send_to_server(request).is_some() {
                     self.proj
@@ -203,7 +219,7 @@ impl App {
             }
             return Task::none();
         }
-        let Some(server) = self.proj.lsp_config.resolve(language) else {
+        let Some(server) = self.effective_server(language) else {
             self.proj.link.lsp.insert(
                 language.to_string(),
                 LspSlot::Unsupported("no server for this language".into()),
@@ -306,12 +322,12 @@ impl App {
                     } else {
                         None
                     };
-                    Ok(LspStagedCommand {
+                    Ok(Box::new(LspStagedCommand {
                         fingerprint,
                         source,
                         exec_path,
                         server,
-                    })
+                    }))
                 })
                 .await
                 .unwrap_or_else(|e| Err(format!("staging the command failed: {e}")))
@@ -337,7 +353,7 @@ impl App {
         language: String,
         generation: u64,
         root: PathBuf,
-        result: Result<LspStagedCommand, String>,
+        result: Result<Box<LspStagedCommand>, String>,
     ) -> Task<Message> {
         // (The project and the transport were checked in `dispatch`.)
         if self.lsp_gen.get(&language) != Some(&generation) {
@@ -354,7 +370,7 @@ impl App {
                 return Task::none();
             }
         };
-        if self.proj.lsp_config.resolve(&language).as_ref() != Some(&staged.server) {
+        if self.effective_server(&language).as_ref() != Some(&staged.server) {
             self.proj.link.lsp.remove(&language);
             return self.ensure_lsp(&language);
         }
@@ -541,7 +557,7 @@ impl App {
         let (args, init) = if self.connection.is_remote() {
             (Vec::new(), self.proj.remote_lsp_init.get(language).cloned())
         } else {
-            let Some(server) = self.proj.lsp_config.resolve(language) else {
+            let Some(server) = self.effective_server(language) else {
                 return Task::none();
             };
             // A server that builds the project runs the repository's own code
@@ -585,7 +601,14 @@ impl App {
             // venv for Python) under any explicit lsp.toml init_options
             // (explicit wins), over the settings clew pins for its own
             // binary — which, when they cannot be pinned, keep it stopped.
-            let init = match langenv::merge(language, &server, &exe, &root, explicit) {
+            let init = match langenv::merge(
+                language,
+                &server,
+                &exe,
+                &root,
+                explicit,
+                &self.proj.lang_choices,
+            ) {
                 Ok(init) => init,
                 Err(e) => {
                     self.proj
@@ -636,6 +659,7 @@ impl App {
                 clew_protocol::Request::SpawnLsp {
                     proc,
                     language: lang.clone(),
+                    choices: self.proj.lang_choices.clone(),
                 }
             } else {
                 clew_protocol::Request::SpawnProcess {
@@ -798,6 +822,7 @@ impl App {
                     let sent = self.send_to_server(clew_protocol::Request::LspInstall {
                         language: c.language.clone(),
                         consent,
+                        choices: self.proj.lang_choices.clone(),
                     });
                     if let Some(id) = sent {
                         self.proj.link.remote_installs.insert(c.language, id);
@@ -1266,7 +1291,7 @@ impl App {
         let resolved: Vec<(String, Option<lsp::config::EffectiveServer>)> = languages
             .into_iter()
             .map(|language| {
-                let server = self.proj.lsp_config.resolve(&language);
+                let server = self.effective_server(&language);
                 (language, server)
             })
             .collect();

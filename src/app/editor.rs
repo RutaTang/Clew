@@ -13,9 +13,11 @@ use crate::*;
 /// why the text shows uncolored, instead of leaving that to look like a file
 /// without syntax.
 pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
+    // The sheet's header names the file: the status line says something
+    // only when there is something to say about it.
     match lang_key.and_then(highlight::highlight_error) {
         Some(e) => format!("{rel} — shown without highlighting: {e}"),
-        None => rel.to_string(),
+        None => String::new(),
     }
 }
 
@@ -38,17 +40,22 @@ impl App {
         if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
             anchor.superseded = true;
         }
-        // A Go package (an import names its directory: the Imports tab's
-        // row, the map's) opens at its first file: a directory is no file.
-        let abs = match abs.extension() {
-            None => self.proj.import_graph.package_file(&abs).unwrap_or(abs),
-            Some(_) => abs,
-        };
+        // A package (a Go or Java import names its directory, a C# `using`
+        // its namespace: the Imports tab's row, the map's) opens at its first
+        // file: neither is a file. Looked up whatever the name: a namespace's
+        // node (`namespace Acme.Core`) reads as though it had an extension.
+        let abs = self.proj.import_graph.package_file(&abs).unwrap_or(abs);
         // Opening a file leaves the overview / stats / docs page for the code, and
         // ends any time-travel session (which would otherwise stay active-but-hidden
         // and keep capturing Esc/←/→ for a file that's no longer shown).
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        // The large Ask window steps aside to a card for the code it opens
+        // (a citation clicked, a file the agent opened): the code is what
+        // the reader goes there to see.
+        if self.ask_view == AskView::Expanded {
+            self.ask_view = AskView::Compact;
+        }
         self.proj.glossary.showing = false;
         self.proj.docs.page = None;
         self.proj.time_travel = None;
@@ -421,9 +428,13 @@ impl App {
         lang_key: Option<&'static str>,
     ) -> Task<Message> {
         let hl_abs = abs.clone();
+        let inactive_abs = abs.clone();
         let hl_source = source.clone();
         let target = self.proj.reading_target.clone();
         let hl_target = target.clone();
+        let facts = self.proj.build_facts.clone();
+        let hl_facts = facts.clone();
+        let root = self.proj.project.as_ref().map(|p| p.root.clone());
         // Stamped from the bytes being highlighted, so a result that arrives
         // after a newer pass can be recognized as stale and dropped.
         let hl_hash = incremental::content_hash(source.as_bytes());
@@ -438,9 +449,19 @@ impl App {
                     let (symbols, docs) = lang_key
                         .map(|key| docs::outline_and_peek(&hl_source, key))
                         .unwrap_or_default();
-                    // Inactive `#[cfg]` lines for the reading target (dimmed).
+                    // The lines the build leaves out for the reading target
+                    // (dimmed).
                     let inactive = lang_key
-                        .map(|key| inactive::inactive_lines(&hl_source, key, &target))
+                        .map(|key| {
+                            crate::app::languages::inactive_of(
+                                &hl_source,
+                                key,
+                                &inactive_abs,
+                                root.as_deref(),
+                                &target,
+                                &facts,
+                            )
+                        })
                         .unwrap_or_default();
                     (lines, symbols, docs, inactive)
                 })
@@ -457,6 +478,7 @@ impl App {
                     docs,
                     inactive,
                     target: hl_target.clone(),
+                    facts: hl_facts.clone(),
                 })
             },
         );
@@ -543,6 +565,7 @@ impl App {
         docs: HashMap<usize, String>,
         inactive: HashSet<usize>,
         target: inactive::Target,
+        facts: Arc<clew_protocol::BuildFacts>,
     ) -> Task<Message> {
         let lines = Arc::new(lines);
         // Lines, symbols and docs follow from the bytes alone, so the hash
@@ -552,7 +575,8 @@ impl App {
         // target has moved on, keep what the pane already has —
         // `on_target_selected` recomputed it for every open pane at the moment
         // of the change, so it is current by construction.
-        let dimming_is_current = target == self.proj.reading_target;
+        let dimming_is_current =
+            target == self.proj.reading_target && Arc::ptr_eq(&facts, &self.proj.build_facts);
         for slot in &mut self.proj.panes {
             // Applied only to a pane still showing the exact bytes this pass
             // ran over. Two passes for one file can be in flight and finish
@@ -616,10 +640,11 @@ impl App {
         // As in `apply_file_refresh`: the reading target is the client's, and
         // this pane did not exist when `on_target_selected` last refreshed the
         // open ones, so it has no later chance to be corrected.
-        v.set_inactive_lines(match lang_key {
-            Some(lang) => inactive::inactive_lines(&source, lang, &self.proj.reading_target),
+        let dimmed = match lang_key {
+            Some(lang) => self.inactive_for(&source, lang, &abs),
             None => inactive.into_iter().collect(),
-        });
+        };
+        v.set_inactive_lines(dimmed);
         v.highlighted = true;
         if let Some(h) = old_viewport {
             v.viewport_h = h;
@@ -796,7 +821,7 @@ impl App {
         let source = Arc::new(projection);
         let lines = highlight::plain_lines(&source);
         if !refresh {
-            self.status = rel.clone();
+            self.status.clear();
         }
         // The pane's document is being replaced: any hover in flight is
         // about the file that was there.
@@ -920,7 +945,7 @@ impl App {
         // this read started, and a target the user picked meanwhile would
         // otherwise be undone by the reply.
         let inactive: HashSet<usize> = match highlight::detect(&abs) {
-            Some(lang) => inactive::inactive_lines(&source, lang, &self.proj.reading_target),
+            Some(lang) => self.inactive_for(&source, lang, &abs),
             None => inactive.into_iter().collect(),
         };
         let mut on_screen = false;
@@ -1654,8 +1679,9 @@ impl App {
                 docs,
                 inactive,
                 target,
+                facts,
                 ..
-            } => self.on_highlighted(abs, src_hash, lines, symbols, docs, inactive, target),
+            } => self.on_highlighted(abs, src_hash, lines, symbols, docs, inactive, target, facts),
             EditorMsg::GitInfoLoaded { abs, req, info, .. } => {
                 self.on_git_info_loaded(abs, req, info)
             }

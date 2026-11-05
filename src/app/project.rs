@@ -26,10 +26,19 @@ pub(crate) fn scan_status(files: usize, truncated: bool, report: &fs_scan::ScanR
 /// again whenever the file list is: set once, at open, a language whose
 /// first file came later had no row, and one whose last file went kept it.
 fn served_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
+    file_languages(files)
+        .into_iter()
+        .filter(|l| lsp::registry::default_for_language(l).is_some())
+        .collect()
+}
+
+/// Every language among `files`, sorted — served by clew or not: the ones
+/// a server program of the user's can be chosen for
+/// (`ProjectSession::file_languages`).
+fn file_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
     let mut langs: Vec<String> = files
         .iter()
         .filter_map(|f| highlight::detect(&f.abs))
-        .filter(|l| lsp::registry::default_for_language(l).is_some())
         .map(|l| l.to_string())
         .collect();
     langs.sort();
@@ -349,6 +358,7 @@ impl App {
         // saved Settings).
         self.invalidate_llm_config();
         self.proj.project_languages = served_languages(&result.files);
+        self.proj.file_languages = file_languages(&result.files);
         let files = Arc::new(result.files);
         self.proj.project = Some(Project {
             root: result.root,
@@ -379,6 +389,9 @@ impl App {
         // empty placeholders, and nothing writes one of them back over its
         // file (see `InFlight::state_loading`).
         let state_task = self.load_project_state(local_state, store.clone());
+        // The user's choices for its languages, which its language servers
+        // wait for (`ensure_lsp`).
+        let choices_task = self.load_language_choices();
 
         // Build the project-wide symbol index in the background, warm-starting
         // from the persistent cache (only files changed while clew was closed
@@ -445,7 +458,14 @@ impl App {
         // No auto-explain on startup: warm-start from the persisted cache and
         // show what's there. Explanations (re)generate only on an explicit
         // request (whole project / one function) or when a file's hash changes.
-        Task::batch([stop_old, state_task, index_task, open_task, panel_task])
+        Task::batch([
+            stop_old,
+            state_task,
+            choices_task,
+            index_task,
+            open_task,
+            panel_task,
+        ])
     }
 
     /// Forget everything anchored to the open project: its panes, editors and
@@ -669,14 +689,8 @@ impl App {
                     let target = target.unwrap_or_else(inactive::Target::host);
                     if target != self.proj.reading_target {
                         self.proj.reading_target = target;
-                        // Re-evaluate the cfg dimming of anything already open.
-                        let t = self.proj.reading_target.clone();
-                        for v in self.proj.panes.iter_mut().flatten() {
-                            if let Some(lang) = v.lang_key {
-                                let src = v.source.clone();
-                                v.set_inactive_lines(inactive::inactive_lines(&src, lang, &t));
-                            }
-                        }
+                        // Re-evaluate the dimming of anything already open.
+                        self.redim_open_panes();
                     }
                 }
                 Err(e) => problems.push(format!("reading.toml {e}")),
@@ -779,6 +793,7 @@ impl App {
             p.files = Arc::new(result.files);
             p.truncated = result.truncated;
             self.proj.project_languages = served_languages(&p.files);
+            self.proj.file_languages = file_languages(&p.files);
         }
         self.proj.tracked_ignored = report.tracked_ignored.iter().cloned().collect();
         self.refresh_finder();
@@ -861,6 +876,7 @@ impl App {
         );
         let configs_changed = configs(&project.files) != configs_before;
         self.proj.project_languages = served_languages(&project.files);
+        self.proj.file_languages = file_languages(&project.files);
         // Marked in the tree, as a local rescan marks them.
         self.proj.tracked_ignored = tracked_ignored.into_iter().collect();
         self.refresh_finder();

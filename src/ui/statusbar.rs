@@ -17,6 +17,13 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
         "macro" => "macro",
         "constant" => "const",
         "type" => "type",
+        "table" => "table",
+        "view" => "view",
+        "trigger" => "trig",
+        "theorem" => "thm",
+        "instance" => "inst",
+        "inductive" => "ind",
+        "axiom" => "axiom",
         // Notebook outline entries: code cells and markdown headings.
         "cell" => "cell",
         "section" => "§",
@@ -28,126 +35,159 @@ pub(crate) fn short_kind(kind: &str) -> &'static str {
 
 /// Height of the status bar. Fixed, so the tutorial can carve the body region
 /// out of the window and the target drop-up can sit right above it.
-pub(crate) const STATUSBAR_H: f32 = 27.0;
+pub(crate) const STATUSBAR_H: f32 = 32.0;
 
-pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
-    // In time travel, report the revision being viewed — not the live document's
-    // stats (its line count / a caret line that may not exist in this revision).
-    // Only while the session is on screen: off it, the document that is.
-    let right = if let Some(tt) = time_travel_on_screen(app) {
-        let short: String = tt
-            .commits
-            .get(tt.idx)
-            .map(|c| c.sha.chars().take(8).collect())
-            .unwrap_or_default();
-        let scope = match &tt.scope {
-            TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
-            TimeScope::File => String::new(),
-        };
-        let lines = tt
-            .viewer
-            .as_ref()
-            .map(|v| format!("  ·  {} lines", v.lines.len()))
-            .unwrap_or_default();
-        format!(
-            "Time Travel  ·  {short}  ·  {}/{}{}{}",
-            tt.idx + 1,
-            tt.commits.len(),
-            scope,
-            lines
-        )
+/// Between the status bar's items.
+const STATUS_GAP: f32 = 18.0;
+/// Height of the target picker at the bar's end.
+const PICKER_H: f32 = 22.0;
+
+/// One quiet item of the status bar.
+fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
+    text(s).size(ts::SMALL).color(theme::fg_muted())
+}
+
+/// Whether the project is current: scanned and indexed, or what it is
+/// doing to be. `None` with no project open.
+fn sync_state(app: &App) -> Option<&'static str> {
+    app.proj.project.as_ref()?;
+    Some(if app.scanning {
+        "Scanning…"
+    } else if app.proj.indexing {
+        "Indexing…"
     } else {
-        match app.active_viewer() {
-            Some(v) => {
-                let lang = v
-                    .lang_key
-                    .and_then(crate::highlight::lang_name)
-                    .unwrap_or("Plain text");
-                // 1-based line/column of the last click, when there is one.
-                let pos = v
-                    .caret
-                    .map(|(l, c)| format!("Ln {}, Col {}  ·  ", l + 1, c + 1))
-                    .unwrap_or_default();
-                // Language-server status for this file's language, when
-                // relevant — from the snapshot this update took (so a state
-                // clew cannot read shows as a problem, not as "ready").
-                let lsp = v
-                    .lang_key
-                    .and_then(|k| app.lsp_status(k))
-                    .map(|status| format!("  ·  LSP {status}"))
-                    .unwrap_or_default();
-                // Diagnostic counts for this file, from the same snapshot.
-                let diags = v
-                    .lang_key
-                    .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
-                        Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
-                        _ => None,
-                    })
-                    .map(|ds| {
-                        let errs = ds.iter().filter(|d| d.severity == 1).count();
-                        let warns = ds.iter().filter(|d| d.severity == 2).count();
-                        if errs + warns == 0 {
-                            String::new()
-                        } else {
-                            format!("  ·  ✘ {errs}  ⚠ {warns}")
-                        }
-                    })
-                    .unwrap_or_default();
-                format!(
-                    "{}{}  ·  {} lines{}{}",
-                    pos,
-                    lang,
-                    v.lines.len(),
-                    diags,
-                    lsp
-                )
-            }
-            None => String::new(),
+        "Up to date"
+    })
+}
+
+/// `n` with its thousands set apart, as a reader writes it: 1,858.
+pub(crate) fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
         }
-    };
+        out.push(c);
+    }
+    out
+}
 
-    // Where code is read from — the one place local vs remote shows. Click it to
-    // manage connections / switch hosts.
-    let (conn_glyph, conn_color) = if app.connection.is_remote() {
-        (Glyph::Remote, theme::accent())
-    } else {
-        (Glyph::Circle, theme::dim())
+/// The platform a file's branches are read for, as the reader says it: its
+/// system's name ("Windows"), and its architecture only where that is not
+/// the system's usual one ("Windows (arm64)"). The machine's own is its
+/// system's name. A target of no known system is called by its label.
+pub(crate) fn target_name(target: &crate::inactive::Target) -> String {
+    let system = match target.os.as_str() {
+        "linux" => "Linux",
+        "macos" => "macOS",
+        "windows" => "Windows",
+        "freebsd" => "FreeBSD",
+        _ => return target.label.clone(),
     };
+    let usual = if target.os == "macos" {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    if target.label.starts_with("Host") || target.arch == usual || target.arch.is_empty() {
+        return system.to_string();
+    }
+    let arch = match target.arch.as_str() {
+        "aarch64" => "arm64",
+        arch => arch,
+    };
+    format!("{system} ({arch})")
+}
+
+/// The status bar: one quiet line along the window's foot. On the left,
+/// where the code is read from and what Clew is doing; on the right, the
+/// open file — its language and language server, its problems, the caret,
+/// and which platform its `#[cfg]`-style branches are read for.
+pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
+    // Where code is read from — the one place local vs remote shows. Click
+    // it to manage connections / switch hosts.
+    let remote = app.connection.is_remote();
+    let dot =
+        container(space().width(6).height(6)).style(move |_: &iced::Theme| container::Style {
+            background: Some(
+                if remote {
+                    theme::accent()
+                } else {
+                    theme::success()
+                }
+                .into(),
+            ),
+            border: iced::border::rounded(3),
+            ..container::Style::default()
+        });
     let conn_indicator = tooltip(
         button(
             row![
-                glyph::icon(conn_glyph, conn_color, 12.0),
-                text(app.connection.label())
-                    .size(ts::SMALL)
-                    .color(if app.connection.is_remote() {
-                        theme::accent()
-                    } else {
-                        theme::fg_muted()
-                    }),
+                dot,
+                text(match sync_state(app) {
+                    Some(state) => format!("{} · {state}", app.connection.label()),
+                    None => app.connection.label().to_string(),
+                })
+                .size(ts::SMALL)
+                .color(if remote {
+                    theme::accent()
+                } else {
+                    theme::fg_muted()
+                }),
             ]
-            .spacing(4)
+            .spacing(7)
             .align_y(iced::Center),
         )
-        .style(theme::toolbar_button)
+        .style(theme::icon_button(false))
         .padding([2, 8])
         .on_press(Message::Connect(ConnectMsg::Open)),
+        // The design's tooltip bubble.
         container(
             text("Connect to a remote host")
                 .size(ts::SMALL)
-                .color(theme::fg()),
+                .color(theme::tip_text()),
         )
         .padding([3, 7])
-        .style(theme::modal_panel),
+        .style(theme::tip),
         tooltip::Position::Top,
     );
 
-    let mut bar = row![conn_indicator, text(&app.status).size(ts::SMALL)]
-        .spacing(12)
-        .align_y(iced::Center);
+    // What is open, in counts — unless Clew has something to say.
+    let said: Element<'_, Message> = if !app.status.is_empty() {
+        status_text(&app.status).into()
+    } else if let Some(project) = app.proj.project.as_ref() {
+        let files = project.files.len();
+        let symbols = app.proj.symbol_index.len();
+        let mut counts = format!(
+            "{} file{}",
+            thousands(files),
+            if files == 1 { "" } else { "s" }
+        );
+        if symbols > 0 {
+            counts.push_str(&format!(
+                " · {} symbol{}",
+                thousands(symbols),
+                if symbols == 1 { "" } else { "s" }
+            ));
+        }
+        status_text(counts).into()
+    } else {
+        slot()
+    };
+    // The design's gap after where the code is read from, less the padding
+    // of the button that says it — a row of its own, since the bar's own
+    // spacing (the design's gap between everything else) is one for all.
+    let mut bar = row![
+        row![conn_indicator, said]
+            .spacing(STATUS_GAP - 8.0)
+            .align_y(iced::Center)
+    ]
+    .align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
-    // pass is slow, so show how far along it is (the status text alone is easy to
-    // miss / read as stuck). It is the one place the pass's progress shows: the
-    // refresh chip stays out of the way meanwhile (see `refresh_chip`).
+    // pass is slow, so show how far along it is (the status text alone is easy
+    // to miss / read as stuck). It is the one place the pass's progress shows:
+    // the refresh chip stays out of the way meanwhile (see `refresh_chip`).
     if app.proj.explain.running {
         let label = match app.proj.explain.progress {
             Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
@@ -183,7 +223,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // be stopped without hunting through menus.
         chip = chip.push(
             button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
-                .style(theme::toolbar_button)
+                .style(theme::icon_button(false))
                 .padding([1, 4])
                 .on_press(Message::Explain(ExplainMsg::Cancel)),
         );
@@ -193,34 +233,148 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }
-    bar = bar.push(text(right).size(ts::SMALL));
-    // For Rust files, a small target control that drives the `#[cfg]` dimming
-    // (read another platform's branches as the live ones). A plain button + our
-    // own dropdown, so the label and chevron sit tight together — placed last so
+
+    // In time travel, report the revision being viewed — not the live
+    // document's (its line count / a caret line that may not exist in this
+    // revision). Only while the session is on screen: off it, the document
+    // that is.
+    if let Some(tt) = time_travel_on_screen(app) {
+        let short: String = tt
+            .commits
+            .get(tt.idx)
+            .map(|c| c.sha.chars().take(8).collect())
+            .unwrap_or_default();
+        let scope = match &tt.scope {
+            TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
+            TimeScope::File => String::new(),
+        };
+        let lines = tt
+            .viewer
+            .as_ref()
+            .map(|v| format!("  ·  {} lines", v.lines.len()))
+            .unwrap_or_default();
+        bar = bar.push(status_text(format!(
+            "Time Travel  ·  {short}  ·  {}/{}{}{}",
+            tt.idx + 1,
+            tt.commits.len(),
+            scope,
+            lines
+        )));
+    } else if let Some(v) = app.active_viewer() {
+        let lang = v
+            .lang_key
+            .and_then(crate::highlight::lang_name)
+            .unwrap_or("Plain text");
+        // Language-server status for this file's language, when relevant —
+        // from the snapshot this update took (so a state clew cannot read
+        // shows as a problem, not as "ready").
+        // A server at work is named ("rust-analyzer ready"); one that is
+        // not says why in words of its own.
+        let lsp = v
+            .lang_key
+            .and_then(|k| {
+                let status = app.lsp_status(k)?;
+                let at_work = matches!(
+                    app.proj.link.lsp.get(k),
+                    Some(crate::LspSlot::Ready(_) | crate::LspSlot::Starting)
+                );
+                Some(
+                    match crate::lsp::registry::default_for_language(k).filter(|_| at_work) {
+                        Some(server) => format!(" · {} {status}", server.name),
+                        None => format!(" · {status}"),
+                    },
+                )
+            })
+            .unwrap_or_default();
+        bar = bar.push(status_text(format!("{lang}{lsp}")));
+        // Diagnostic counts for this file, from the same snapshot.
+        let diags = v
+            .lang_key
+            .and_then(|k| match app.proj.link.lsp_snapshots.get(k) {
+                Some(Ok(snapshot)) => Some(snapshot.diagnostics(&v.abs)),
+                _ => None,
+            })
+            .map(|ds| {
+                let errs = ds.iter().filter(|d| d.severity == 1).count();
+                let warns = ds.iter().filter(|d| d.severity == 2).count();
+                (errs, warns)
+            });
+        if let Some((errs, warns)) = diags
+            && errs + warns > 0
+        {
+            bar = bar.push(
+                row![
+                    text(format!("✘ {errs}"))
+                        .size(ts::SMALL)
+                        .color(if errs > 0 {
+                            theme::danger()
+                        } else {
+                            theme::fg_muted()
+                        }),
+                    text(format!("⚠ {warns}"))
+                        .size(ts::SMALL)
+                        .color(if warns > 0 {
+                            theme::warning()
+                        } else {
+                            theme::fg_muted()
+                        }),
+                ]
+                .spacing(8),
+            );
+        }
+        // 1-based line/column of the last click, when there is one.
+        if let Some((l, c)) = v.caret {
+            bar = bar.push(status_text(format!("Line {}, Column {}", l + 1, c + 1)));
+        }
+    }
+    // For a file whose dimming depends on the platform (Rust's `#[cfg]`, Go's
+    // build constraints, C's `#if`, …), a small target control: read another
+    // platform's branches as the live ones. A plain button + our own
+    // dropdown, so the label and chevron sit tight together — placed last so
     // the popup anchored to the bottom-right lines up under it.
-    if app.active_viewer().and_then(|v| v.lang_key) == Some("rust") {
+    if app
+        .active_viewer()
+        .and_then(|v| v.lang_key)
+        .is_some_and(crate::inactive::reads_target)
+    {
+        // The design's button: 22 high, 6 either side of what it says.
         let picker = button(
             row![
-                text(app.proj.reading_target.to_string())
-                    .size(ts::SMALL)
-                    .color(theme::fg_muted()),
-                glyph::icon(Glyph::ChevronDown, theme::dim(), 12.0),
+                ts::set_in(
+                    text(format!(
+                        "Reading for {}",
+                        target_name(&app.proj.reading_target)
+                    ))
+                    .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
+                    .color(theme::fg()),
+                    PICKER_H,
+                    ts::INTER,
+                    ts::SMALL,
+                ),
+                glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
             ]
-            .spacing(4)
+            .spacing(5)
             .align_y(iced::Center),
         )
-        .style(theme::toolbar_button)
-        .padding([1, 6])
+        .style(theme::icon_button(app.show_target_menu))
+        .padding([0, 6])
         .on_press(Message::Window(WindowMsg::ToggleTargetMenu));
         bar = bar.push(picker);
     }
 
-    container(bar.padding([0, 10]))
-        .width(Fill)
-        .height(Length::Fixed(STATUSBAR_H))
-        .align_y(iced::Center)
-        .style(theme::statusbar)
-        .into()
+    // The design's 20 px in from the left and 14 from the right, less the
+    // padding of the buttons at either end.
+    container(bar.spacing(STATUS_GAP).padding(Padding {
+        top: 0.0,
+        right: 8.0,
+        bottom: 0.0,
+        left: 12.0,
+    }))
+    .width(Fill)
+    .height(Length::Fixed(STATUSBAR_H))
+    .align_y(iced::Center)
+    .style(theme::statusbar)
+    .into()
 }
 
 /// A freshness indicator for the auto-refreshed understanding: shows whether a
@@ -255,10 +409,30 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         ("↻ Up to date".to_string(), theme::dim(), true)
     };
     let mut b = button(text(label).size(ts::SMALL).color(color))
-        .style(theme::toolbar_button)
-        .padding([1, 8]);
+        .style(theme::icon_button(false))
+        .padding([2, 8]);
     if enabled {
         b = b.on_press(Message::Explain(ExplainMsg::RefreshAll));
     }
     Some(b.into())
+}
+
+#[cfg(test)]
+mod target_name_tests {
+    use super::target_name;
+    use crate::inactive::Target;
+
+    /// A target reads as its system, its architecture said only where it
+    /// is not that system's usual one; the machine's own as its system.
+    #[test]
+    fn a_target_is_named_by_its_system() {
+        let named = |label: &str| target_name(&Target::from_label(label));
+        assert_eq!(named("Windows (x86_64)"), "Windows");
+        assert_eq!(named("Windows (arm64)"), "Windows (arm64)");
+        assert_eq!(named("Linux (x86_64)"), "Linux");
+        assert_eq!(named("macOS (arm64)"), "macOS");
+        assert_eq!(named("macOS (x86_64)"), "macOS (x86_64)");
+        let host = Target::host();
+        assert!(!target_name(&host).contains('('), "{}", target_name(&host));
+    }
 }

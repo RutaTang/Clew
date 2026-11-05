@@ -778,14 +778,8 @@ impl App {
             "reading.toml" => {
                 if let Ok(target) = reading::try_target_from_text(text) {
                     self.proj.reading_target = target.unwrap_or_else(inactive::Target::host);
-                    // Re-evaluate the cfg dimming for anything open.
-                    let t = self.proj.reading_target.clone();
-                    for v in self.proj.panes.iter_mut().flatten() {
-                        if let Some(lang) = v.lang_key {
-                            let src = v.source.clone();
-                            v.set_inactive_lines(inactive::inactive_lines(&src, lang, &t));
-                        }
-                    }
+                    // Re-evaluate the dimming for anything open.
+                    self.redim_open_panes();
                 }
             }
             _ if rel == walkthrough::LIBRARY_REL => {

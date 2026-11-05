@@ -273,17 +273,21 @@ pub(crate) type SpawnRefusal = (ErrorCode, String);
 /// approval gate for repo-specified commands (blocking — it hashes the
 /// executable). `Err((code, message))` is the `Error` the client is told why
 /// with.
+///
+/// `choices` are the user's: a server program they chose for `language`
+/// runs instead ([`ProjectLspConfig::resolve_with`](clew_core::lsp::config::ProjectLspConfig::resolve_with)).
 pub(crate) fn resolve_spawn_exe(
     approvals: &SharedApprovals,
     root: &Path,
     language: &str,
+    choices: &clew_protocol::LanguageChoices,
 ) -> Result<(PathBuf, Vec<String>), SpawnRefusal> {
     // A config that fails to load is an ERROR, not "use defaults": the
     // default could resolve (and run) a different server than the one
     // the project configured, silently.
     let config =
         clew_core::lsp::config::ProjectLspConfig::load(root).map_err(|e| (ErrorCode::Failed, e))?;
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return Err((
             ErrorCode::Refused,
             format!("no {language} language server is configured for this project"),
@@ -353,11 +357,16 @@ pub(crate) fn resolve_spawn_exe(
 /// the client can SHOW them and record an approval against them. Nothing
 /// runs on that copy — an allow re-enters here, and the options that reach
 /// `initialize` are the ones re-read and re-fingerprinted on this host.
+///
+/// The project's environment is detected here, on the host it is on — its
+/// Python virtualenv — beneath the approved options, and the user's
+/// `choices` go over both (`langenv::merge`).
 pub(crate) fn resolve_lsp(
     out: &UnboundedSender<ServerMessage>,
     approvals: &SharedApprovals,
     root: &Path,
     language: &str,
+    choices: &clew_protocol::LanguageChoices,
 ) -> clew_protocol::LspResolution {
     use clew_core::lsp::store::Located;
     use clew_protocol::LspResolution;
@@ -366,7 +375,7 @@ pub(crate) fn resolve_lsp(
         Ok(config) => config,
         Err(message) => return LspResolution::Unsupported { message },
     };
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return LspResolution::Unsupported {
             message: format!("no language server is configured for {language}"),
         };
@@ -458,9 +467,10 @@ pub(crate) fn resolve_lsp(
                     })
                 });
             // clew's own settings beneath the approved ones (see
-            // `langenv::pinned`): the client runs the handshake, so they
-            // reach `initialize` only by riding here.
-            match clew_core::lsp::langenv::with_pinned(&server, &exe, allowed) {
+            // `langenv::pinned`), the project's environment between them,
+            // and the user's choices over all: the client runs the
+            // handshake, so they reach `initialize` only by riding here.
+            match clew_core::lsp::langenv::merge(language, &server, &exe, root, allowed, choices) {
                 Ok(init_options) => LspResolution::Ready {
                     init_options,
                     withheld,
@@ -498,6 +508,8 @@ pub(crate) fn resolve_lsp(
 /// the toolchain command with everything it started — once the connection
 /// leaves the project (or closes); it would otherwise run on for up to the
 /// toolchain's deadline for a project nobody has open.
+///
+/// `choices` are the user's, for the resolution the install ends with.
 pub(crate) fn install_lsp(
     out: &UnboundedSender<ServerMessage>,
     approvals: &SharedApprovals,
@@ -505,6 +517,7 @@ pub(crate) fn install_lsp(
     language: &str,
     consent: &str,
     stop: &std::sync::atomic::AtomicBool,
+    choices: &clew_protocol::LanguageChoices,
 ) -> clew_protocol::LspResolution {
     use clew_core::lsp::store::Located;
     use clew_protocol::LspResolution;
@@ -514,7 +527,7 @@ pub(crate) fn install_lsp(
         Ok(config) => config,
         Err(message) => return LspResolution::Unsupported { message },
     };
-    let Some(server) = config.resolve(language) else {
+    let Some(server) = config.resolve_with(language, choices) else {
         return LspResolution::Unsupported {
             message: format!("no language server is configured for {language}"),
         };
@@ -569,7 +582,7 @@ pub(crate) fn install_lsp(
         Located::Unsupported(message) => Err(message),
     };
     match installed {
-        Ok(()) => resolve_lsp(out, approvals, root, language),
+        Ok(()) => resolve_lsp(out, approvals, root, language, choices),
         Err(e) => LspResolution::Unsupported {
             message: format!("install {language} server: {e}"),
         },
@@ -582,7 +595,9 @@ mod tests {
         SharedApprovals, approved_init_options, install_lsp, install_offer, resolve_lsp,
         resolve_spawn_exe,
     };
-    use crate::test_support::{Scratch, alive, fake_slow_go, in_child, run_in_child, started_pid};
+    use crate::test_support::{Scratch, in_child, run_in_child};
+    #[cfg(unix)]
+    use crate::test_support::{alive, fake_slow_go, started_pid};
     use clew_protocol::{ErrorCode, Event, LspResolution, ServerMessage};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -640,7 +655,7 @@ mod tests {
         });
         assert!(approved);
     }
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     /// The data directory a child-side test was given (see `run_in_child`,
@@ -672,6 +687,142 @@ mod tests {
     /// gate then accepts. If they drifted, approving would record a value the
     /// gate does not recognise and the modal would come straight back, with no
     /// way out but closing the project.
+    /// A remote project's Python server is handed the project's environment,
+    /// detected on the host it is on — before, a remote project's server got
+    /// none — and the interpreter the user chose instead, when they chose
+    /// one.
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_python_resolve_carries_the_environment_and_the_choice() {
+        with_fresh_data_dir("lsp_gate::tests::child_python_environment_and_choice");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "runs in a child process, from a_remote_python_resolve_carries_the_environment_and_the_choice"]
+    fn child_python_environment_and_choice() {
+        if !in_child() {
+            return;
+        }
+        let data = data_dir();
+        // A store-installed pyright.
+        let bin = data.join("servers/pyright/latest/node_modules/.bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("pyright-langserver"), b"#!/bin/sh\nexit 0\n").unwrap();
+        // A project whose `.venv` links the base interpreter, outside it.
+        let base = data.join("base/bin");
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::write(base.join("python3.12"), b"\x7fELF base").unwrap();
+        let root = data.join("proj");
+        std::fs::create_dir_all(root.join(".venv/bin")).unwrap();
+        std::os::unix::fs::symlink(base.join("python3.12"), root.join(".venv/bin/python")).unwrap();
+        let site = root.join(".venv/lib/python3.12/site-packages");
+        std::fs::create_dir_all(&site).unwrap();
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let options = |choices: &clew_protocol::LanguageChoices| match resolve_lsp(
+            &out, &approvals, &root, "python", choices,
+        ) {
+            LspResolution::Ready {
+                init_options: Some(options),
+                ..
+            } => options,
+            other => panic!("expected Ready with options, got {other:?}"),
+        };
+
+        let detected = options(&Default::default());
+        let real_base = std::fs::canonicalize(base.join("python3.12")).unwrap();
+        assert_eq!(
+            detected["python"]["pythonPath"],
+            real_base.to_str().unwrap()
+        );
+        assert_eq!(
+            detected["python"]["analysis"]["extraPaths"][0],
+            site.to_str().unwrap()
+        );
+
+        let mine = data.join("mine/bin");
+        std::fs::create_dir_all(&mine).unwrap();
+        std::fs::write(mine.join("python"), b"\x7fELF mine").unwrap();
+        let mine = mine.join("python").to_string_lossy().into_owned();
+        let chosen = options(&clew_protocol::LanguageChoices {
+            python: Some(mine.clone()),
+            ..Default::default()
+        });
+        assert_eq!(chosen["python"]["pythonPath"], mine.as_str());
+        assert!(chosen["python"].get("analysis").is_none(), "{chosen}");
+    }
+
+    /// A server program the user chose is what a remote spawn runs — in
+    /// place of clew's, with nothing installed first — and choosing one is
+    /// no way around the leave a server that builds the project needs.
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_spawn_runs_the_chosen_server_program() {
+        with_fresh_data_dir("lsp_gate::tests::child_chosen_server_program");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[ignore = "runs in a child process, from a_remote_spawn_runs_the_chosen_server_program"]
+    fn child_chosen_server_program() {
+        use std::os::unix::fs::PermissionsExt;
+        if !in_child() {
+            return;
+        }
+        let data = data_dir();
+        let program = data.join("tools/bin/my-server");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let root = data.join("proj");
+        std::fs::create_dir_all(&root).unwrap();
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let choose = |language: &str| clew_protocol::LanguageChoices {
+            servers: Some(
+                [(
+                    language.to_string(),
+                    clew_protocol::ServerChoice {
+                        command: program.to_string_lossy().into_owned(),
+                        args: Some(vec!["serve".into()]),
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        };
+
+        // gopls is not installed on this host: without a choice it must be
+        // installed first, with one the chosen program runs.
+        assert!(matches!(
+            resolve_lsp(&out, &approvals, &root, "go", &Default::default()),
+            LspResolution::NeedsInstall { .. }
+        ));
+        assert!(matches!(
+            resolve_lsp(&out, &approvals, &root, "go", &choose("go")),
+            LspResolution::Ready { .. }
+        ));
+        let (exe, args) = resolve_spawn_exe(&approvals, &root, "go", &choose("go")).unwrap();
+        assert_eq!((exe, args), (program.clone(), vec!["serve".to_string()]));
+
+        // A chosen rust-analyzer still builds the project: it needs the leave.
+        assert!(matches!(
+            resolve_lsp(&out, &approvals, &root, "rust", &choose("rust")),
+            LspResolution::NeedsBuildTrust { .. }
+        ));
+        let (code, message) =
+            resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap_err();
+        assert_eq!(code, ErrorCode::Refused);
+        assert!(message.contains("not been allowed to build"), "{message}");
+        approvals.lock().unwrap().insert(
+            clew_core::trust::build_key("rust-analyzer"),
+            clew_core::trust::build_fingerprint("rust-analyzer"),
+        );
+        let (exe, _) = resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap();
+        assert_eq!(exe, program);
+    }
+
     #[test]
     fn a_remote_resolve_withholds_init_options_until_they_are_approved() {
         with_fresh_data_dir("lsp_gate::tests::child_withholds_init_options_until_approved");
@@ -690,7 +841,8 @@ mod tests {
             .version;
         let store = data.join("servers").join("rust-analyzer").join(version);
         std::fs::create_dir_all(&store).unwrap();
-        std::fs::write(store.join("rust-analyzer"), b"#!/bin/sh\nexit 0\n").unwrap();
+        let program = format!("rust-analyzer{}", std::env::consts::EXE_SUFFIX);
+        std::fs::write(store.join(program), b"#!/bin/sh\nexit 0\n").unwrap();
 
         let root = data.join("proj");
         std::fs::create_dir_all(root.join(".clew")).unwrap();
@@ -707,14 +859,15 @@ mod tests {
         // rust-analyzer builds the project, running its code: before anything
         // about its options, it needs leave to build THIS project — asked for
         // in the resolve, and refused at the spawn.
-        match resolve_lsp(&out, &approvals, &root, "rust") {
+        match resolve_lsp(&out, &approvals, &root, "rust", &Default::default()) {
             LspResolution::NeedsBuildTrust { server, runs } => {
                 assert_eq!(server, "rust-analyzer");
                 assert!(runs.contains("build scripts"), "{runs}");
             }
             other => panic!("expected NeedsBuildTrust, got {other:?}"),
         }
-        let (code, message) = resolve_spawn_exe(&approvals, &root, "rust").unwrap_err();
+        let (code, message) =
+            resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
         // The leave as the client pushes it…
@@ -723,20 +876,20 @@ mod tests {
             clew_core::trust::build_fingerprint("rust-analyzer"),
         );
         approvals.lock().unwrap().insert(key.clone(), leave);
-        assert!(resolve_spawn_exe(&approvals, &root, "rust").is_ok());
+        assert!(resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).is_ok());
         approvals.lock().unwrap().remove(&key);
         // …or as this host's own trust store records it (client and server on
         // one machine, and the MCP server's pool). Kept for the rest.
         clew_core::trust::Trust::load()
             .update(|t| t.trust_build(None, &root, "rust-analyzer"))
             .unwrap();
-        assert!(resolve_spawn_exe(&approvals, &root, "rust").is_ok());
+        assert!(resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).is_ok());
         // Leave for one project is not leave for another.
         let other = data.join("other");
         std::fs::create_dir_all(&other).unwrap();
-        assert!(resolve_spawn_exe(&approvals, &other, "rust").is_err());
+        assert!(resolve_spawn_exe(&approvals, &other, "rust", &Default::default()).is_err());
 
-        let resolution = resolve_lsp(&out, &approvals, &root, "rust");
+        let resolution = resolve_lsp(&out, &approvals, &root, "rust", &Default::default());
         let offered = match resolution {
             LspResolution::Ready {
                 init_options,
@@ -787,7 +940,7 @@ mod tests {
             .lock()
             .unwrap()
             .insert("rust".into(), offered.fingerprint.clone());
-        match resolve_lsp(&out, &approvals, &root, "rust") {
+        match resolve_lsp(&out, &approvals, &root, "rust", &Default::default()) {
             LspResolution::Ready {
                 init_options,
                 withheld,
@@ -811,7 +964,7 @@ mod tests {
             "[rust.init_options]\n\"rust-analyzer.procMacro.server\" = \"./payload\"\n",
         )
         .unwrap();
-        match resolve_lsp(&out, &approvals, &root, "rust") {
+        match resolve_lsp(&out, &approvals, &root, "rust", &Default::default()) {
             LspResolution::Ready {
                 init_options,
                 withheld,
@@ -834,7 +987,7 @@ mod tests {
         // A config with no options at all is untouched by the gate: it is
         // not withheld, so it must not raise a prompt either.
         std::fs::write(root.join(".clew/lsp.toml"), "[rust]\nenabled = true\n").unwrap();
-        let quiet = resolve_lsp(&out, &approvals, &root, "rust");
+        let quiet = resolve_lsp(&out, &approvals, &root, "rust", &Default::default());
         assert!(matches!(
             quiet,
             LspResolution::Ready {
@@ -874,6 +1027,7 @@ mod tests {
             args: Vec::new(),
             command: None,
             init_options: None,
+            chosen: None,
         }
     }
 
@@ -961,7 +1115,13 @@ mod tests {
         // project pins — so an edited pin changes what would run, which is
         // exactly the case to refuse. (Resolving needs no `go` on PATH; only
         // an install would, and none may happen here.)
-        let shown = consent_of(resolve_lsp(&out, &approvals, &root, "go"));
+        let shown = consent_of(resolve_lsp(
+            &out,
+            &approvals,
+            &root,
+            "go",
+            &Default::default(),
+        ));
 
         // While the prompt sat open, the repository pinned another version.
         std::fs::write(
@@ -970,7 +1130,15 @@ mod tests {
         )
         .unwrap();
         while rx.try_recv().is_ok() {}
-        match install_lsp(&out, &approvals, &root, "go", &shown, &stop) {
+        match install_lsp(
+            &out,
+            &approvals,
+            &root,
+            "go",
+            &shown,
+            &stop,
+            &Default::default(),
+        ) {
             LspResolution::NeedsInstall {
                 version, consent, ..
             } => {
@@ -987,7 +1155,15 @@ mod tests {
 
         // A consent that is not a digest at all is refused the same way.
         std::fs::remove_file(root.join(".clew/lsp.toml")).unwrap();
-        match install_lsp(&out, &approvals, &root, "go", "not-a-digest", &stop) {
+        match install_lsp(
+            &out,
+            &approvals,
+            &root,
+            "go",
+            "not-a-digest",
+            &stop,
+            &Default::default(),
+        ) {
             LspResolution::NeedsInstall { consent, .. } => {
                 assert_eq!(consent, shown, "the current offer comes back");
             }
@@ -1003,6 +1179,7 @@ mod tests {
     /// project, or closing — together with the toolchain command it started,
     /// instead of running on (up to the toolchain's deadline) for a project
     /// nobody has open. The `go` on PATH here only says it started and waits.
+    #[cfg(unix)]
     #[test]
     fn an_install_stops_when_its_flag_is_set() {
         let data = Scratch::new("lsp-gate-install-stop");
@@ -1014,6 +1191,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "runs in a child process, from an_install_stops_when_its_flag_is_set"]
     fn child_install_stops_when_its_flag_is_set() {
@@ -1026,14 +1204,29 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
         let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
-        let consent = consent_of(resolve_lsp(&out, &approvals, &root, "go"));
+        let consent = consent_of(resolve_lsp(
+            &out,
+            &approvals,
+            &root,
+            "go",
+            &Default::default(),
+        ));
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
-        let install =
-            std::thread::spawn(move || install_lsp(&out, &approvals, &root, "go", &consent, &flag));
+        let install = std::thread::spawn(move || {
+            install_lsp(
+                &out,
+                &approvals,
+                &root,
+                "go",
+                &consent,
+                &flag,
+                &Default::default(),
+            )
+        });
         let pid = started_pid(&bin);
         let stopped = std::time::Instant::now();
-        stop.store(true, Ordering::Relaxed);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
         let resolution = install.join().unwrap();
         assert!(
             stopped.elapsed() < std::time::Duration::from_secs(5),

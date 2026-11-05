@@ -323,7 +323,7 @@ pub(crate) async fn spawn_registered(
     generation: u64,
     path: Option<std::ffi::OsString>,
 ) -> Spawned {
-    let mut command = tokio::process::Command::new(&cmd);
+    let mut command = clew_core::spawn::tokio_command(&cmd);
     // The `PATH` the process gets, when the caller sets one (see
     // `clean_path`).
     if let Some(path) = path {
@@ -344,6 +344,9 @@ pub(crate) async fn spawn_registered(
         command.current_dir(dir);
     }
     let spawned = command.spawn().and_then(|mut child| {
+        // Windows' process group: a job object, which the reap ends.
+        #[cfg(windows)]
+        clew_core::procgroup::adopt_tokio(&child);
         match (child.stdin.take(), child.stdout.take(), child.stderr.take()) {
             (Some(stdin), Some(stdout), Some(stderr)) => Ok((child, stdin, stdout, stderr)),
             _ => Err(std::io::Error::other("stdio pipes missing")),
@@ -525,15 +528,18 @@ pub(crate) async fn spawn_registered(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::path::Path;
 
     /// A fresh directory, unique per process and per call, removed on drop.
+    #[cfg(unix)]
     fn scratch(tag: &str) -> crate::test_support::Scratch {
         crate::test_support::Scratch::new(&format!("server-proc-{tag}"))
     }
 
     /// Whether `pid` is gone within a few seconds. Probed through the shell's
     /// `kill -0`, by absolute path.
+    #[cfg(unix)]
     async fn gone(pid: u32) -> bool {
         for _ in 0..300 {
             let alive = tokio::process::Command::new("/bin/sh")
@@ -733,6 +739,7 @@ mod tests {
         assert_eq!(exits, 1);
     }
 
+    #[cfg(unix)]
     async fn wait_for_pid(path: &Path) -> u32 {
         for _ in 0..500 {
             if let Some(pid) = std::fs::read_to_string(path)

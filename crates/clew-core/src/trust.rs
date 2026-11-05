@@ -765,9 +765,7 @@ fn stage_bytes(
     match verify_staged(&dest, content) {
         Ok(true) => {
             // Mark it used, so the sweep keeps what is actually running.
-            if let Ok(f) = std::fs::File::open(&dest) {
-                let _ = f.set_modified(std::time::SystemTime::now());
-            }
+            let _ = crate::statefile::set_modified(&dest, std::time::SystemTime::now());
             return Ok(dest);
         }
         Ok(false) => {

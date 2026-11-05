@@ -50,6 +50,8 @@ pub(crate) mod tasks;
 pub(crate) mod message;
 pub(crate) mod state;
 
+pub(crate) mod corners;
+
 mod ask;
 mod calls;
 mod connect;
@@ -62,12 +64,17 @@ pub(crate) mod export;
 pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
+#[cfg(test)]
+pub(crate) use graph::project_map_layout;
 mod hover;
+pub(crate) mod insight;
 pub(crate) mod integrations;
 mod keys;
+pub(crate) mod languages;
 mod lsp;
 mod navigation;
 mod overview;
+pub(crate) mod palette;
 mod project;
 mod reading;
 mod remote_state;
@@ -80,8 +87,10 @@ mod timetravel;
 pub(crate) mod tutorial;
 mod update;
 mod updater;
+pub(crate) mod voice;
 mod walkthrough;
 mod watch;
+pub(crate) mod windowtools;
 
 // The edits a closing window would lose, which the shell asks the user about
 // before it lets the window go (`crate::shell`).

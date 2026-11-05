@@ -951,6 +951,7 @@ impl App {
                 files,
                 go_module,
                 dart_package,
+                manifests,
                 structure,
             } => {
                 // The server-extracted index data. Applied only for REMOTE
@@ -999,6 +1000,15 @@ impl App {
                 }
                 if meta_changed {
                     self.proj.remote_import_meta = Some((go, dart));
+                }
+                // Recomputed whenever a PHP or Haskell file moved, so only a
+                // change re-resolves the project.
+                if let clew_protocol::Patch::Set(manifests) = manifests {
+                    let manifests = manifests.unwrap_or_default();
+                    if manifests != self.proj.remote_manifests {
+                        self.proj.remote_manifests = manifests;
+                        meta_changed = true;
+                    }
                 }
                 if let clew_protocol::Patch::Set(index) = structure {
                     // `None`: recomputed, and the project has none.
@@ -1249,6 +1259,14 @@ impl App {
                     // pieces it cannot publish (the registry bump, the
                     // explanation refresh) are driven from there.
                     task = self.on_files_changed(rels.iter().map(|rel| root.join(rel)).collect());
+                }
+                // A manifest the build reads changed: what it leaves out may
+                // have too.
+                if rels
+                    .iter()
+                    .any(|rel| crate::app::languages::is_build_manifest(rel))
+                {
+                    task = Task::batch([task, self.refresh_build_facts()]);
                 }
             }
             Event::Tree {
@@ -1903,7 +1921,7 @@ impl App {
                             Message::Server(ServerMsg::ResendNotReady {
                                 stamp: stamp.clone(),
                                 id,
-                                request: request.clone(),
+                                request: Box::new(request.clone()),
                                 attempt,
                             })
                         },
@@ -2067,7 +2085,7 @@ impl App {
                 request,
                 attempt,
                 ..
-            } => self.on_resend_not_ready(id, request, attempt),
+            } => self.on_resend_not_ready(id, *request, attempt),
             // (An event queued by a transport this window has already left was
             // dropped in `dispatch`, like the lifecycle messages.)
             ServerMsg::Event { msg, .. } => match msg {

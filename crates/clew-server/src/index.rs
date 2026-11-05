@@ -29,6 +29,7 @@ pub(crate) struct SymbolPayload {
     pub(crate) files: Vec<clew_protocol::FileSymbols>,
     pub(crate) go_module: clew_protocol::Patch<String>,
     pub(crate) dart_package: clew_protocol::Patch<String>,
+    pub(crate) manifests: clew_protocol::Patch<clew_protocol::SourceManifests>,
     pub(crate) structure: clew_protocol::Patch<StructureIndex>,
 }
 
@@ -74,6 +75,7 @@ pub(crate) fn publish_project_symbols<F>(
                 files: payload.files,
                 go_module: payload.go_module,
                 dart_package: payload.dart_package,
+                manifests: payload.manifests,
                 structure: payload.structure,
             },
         },
@@ -87,8 +89,21 @@ pub(crate) fn full_symbol_payload(root: &Path, files: &[FileEntry]) -> SymbolPay
         files: build_project_symbols(root, files),
         go_module: Patch::Set(clew_core::imports::read_go_module(root)),
         dart_package: Patch::Set(clew_core::imports::read_dart_package(root)),
+        manifests: manifests_patch(root, files),
         structure: structure_patch(root, files),
     }
+}
+
+/// What the project's package manifests say of where its sources are, as a
+/// `ProjectSymbols` patch: always `Set`, with `None` meaning they say
+/// nothing (never "not recomputed").
+pub(crate) fn manifests_patch(
+    root: &Path,
+    files: &[FileEntry],
+) -> Patch<clew_protocol::SourceManifests> {
+    let rels: Vec<&str> = files.iter().map(|f| f.rel.as_str()).collect();
+    let manifests = clew_core::imports::source_manifests(root, &rels);
+    Patch::Set((!manifests.is_empty()).then_some(manifests))
 }
 
 /// The type/trait structure index as a `ProjectSymbols` patch: always `Set`,
@@ -255,12 +270,8 @@ pub(crate) fn build_project_calls_graph(
             )
         })
         .collect();
-    clew_core::projectcalls::ProjectCallGraph::build_from_calls(defs, &calls, &scope).to_wire(|p| {
-        p.strip_prefix(root)
-            .unwrap_or(p)
-            .to_string_lossy()
-            .into_owned()
-    })
+    clew_core::projectcalls::ProjectCallGraph::build_from_calls(defs, &calls, &scope)
+        .to_wire(|p| clew_core::rel_string(p.strip_prefix(root).unwrap_or(p)))
 }
 
 /// Build the project's API documentation index: for every file with a

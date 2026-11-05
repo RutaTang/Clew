@@ -97,7 +97,6 @@ use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
-use std::os::fd::AsRawFd;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
@@ -1553,10 +1552,13 @@ fn show(target: &SocksAddr, port: u16) -> String {
 }
 
 /// A socket whose every read and write must end by `deadline`: a proxy's
-/// handshake, which a proxy that stalls must not outlast.
+/// handshake, which a proxy that stalls must not outlast — nor an abandon of
+/// the request (`line`) once made.
 struct Timed<'a> {
     stream: &'a TcpStream,
     deadline: Instant,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    line: Option<&'a Line>,
 }
 
 impl Timed<'_> {
@@ -1572,6 +1574,10 @@ impl Timed<'_> {
 
 impl Read for Timed<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        #[cfg(windows)]
+        await_readable(self.stream, Some(self.left()?), || {
+            self.line.is_some_and(Line::is_closed)
+        })?;
         self.stream.set_read_timeout(Some(self.left()?))?;
         let mut stream = self.stream;
         stream.read(buf)
@@ -1839,6 +1845,43 @@ impl std::error::Error for Abandoned {}
 
 fn abandoned() -> io::Error {
     io::Error::other(Abandoned)
+}
+
+/// Wait, on Windows, for `stream` to have something to read — input, its
+/// end, an error — before a read that would block on it. A thread blocked in
+/// `recv` there is not woken by another thread's `shutdown`, which is how an
+/// abandon ends a wait everywhere else ([`Line::close`]): the request went on
+/// waiting for a provider nobody would read, and the provider was never told
+/// to stop. So the wait is made here, a [`TICK`] at a time, with `abandoned`
+/// asked between; for `wait` at most (`None`: for as long as it takes).
+/// `Ok` once there is something to read; else the abandon ([`abandoned`]) or
+/// a timeout.
+#[cfg(windows)]
+fn await_readable(
+    stream: &TcpStream,
+    wait: Option<Duration>,
+    abandoned: impl Fn() -> bool,
+) -> io::Result<()> {
+    let began = Instant::now();
+    loop {
+        if abandoned() {
+            return Err(self::abandoned());
+        }
+        let tick = match wait {
+            Some(wait) => {
+                let left = wait.saturating_sub(began.elapsed());
+                if left.is_zero() {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+                }
+                left.min(TICK)
+            }
+            None => TICK,
+        };
+        let millis = i32::try_from(tick.as_millis()).unwrap_or(i32::MAX).max(1);
+        if sockets::readable(stream, millis)? {
+            return Ok(());
+        }
+    }
 }
 
 /// Whether `e` is an abandon's ([`abandoned`]).
@@ -2461,36 +2504,23 @@ fn connect_with(
         } else {
             deadline
         };
-        let mut polled: Vec<libc::pollfd> = attempts
-            .iter()
-            .map(|attempt| libc::pollfd {
-                fd: attempt.socket.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            })
-            .collect();
         // At least a millisecond: a wait of none returns at once, and spins.
         let millis = wake
             .saturating_duration_since(now)
             .min(TICK)
             .as_millis()
-            .max(1) as libc::c_int;
-        // SAFETY: `polled` holds one valid `pollfd` per attempt, for a socket
-        // `attempts` keeps open throughout, and is as long as it says.
-        let ready =
-            unsafe { libc::poll(polled.as_mut_ptr(), polled.len() as libc::nfds_t, millis) };
-        if ready < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() != io::ErrorKind::Interrupted {
-                return Err(e);
-            }
-            continue;
-        }
+            .max(1) as i32;
+        let sockets: Vec<&socket2::Socket> = attempts.iter().map(|a| &a.socket).collect();
+        let polled = match sockets::settled(&sockets, millis) {
+            Ok(polled) => polled,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
         // The attempts that ended, the last first, so the rest keep their
         // places: the first that connected wins, and one that failed makes
         // way for the next address.
         for at in (0..attempts.len()).rev() {
-            if polled[at].revents == 0 {
+            if !polled[at] {
                 continue;
             }
             let attempt = attempts.swap_remove(at);
@@ -2570,10 +2600,9 @@ fn telling(e: &io::Error) -> u8 {
         | io::ErrorKind::NetworkDown
         | io::ErrorKind::AddrNotAvailable
         | io::ErrorKind::PermissionDenied => 2,
-        _ if matches!(
-            e.raw_os_error(),
-            Some(libc::EAFNOSUPPORT | libc::EPFNOSUPPORT | libc::EPROTONOSUPPORT)
-        ) =>
+        _ if e
+            .raw_os_error()
+            .is_some_and(|code| sockets::NO_SUCH_FAMILY.contains(&code)) =>
         {
             2
         }
@@ -2596,8 +2625,10 @@ fn start_attempt(
     match socket.connect(&addr.into()) {
         Ok(()) => {}
         // Under way; an interrupted connect goes on without its caller too.
+        // (Windows says a connect under way would block.)
         Err(e)
-            if e.raw_os_error() == Some(libc::EINPROGRESS)
+            if e.raw_os_error() == Some(sockets::IN_PROGRESS)
+                || e.kind() == io::ErrorKind::WouldBlock
                 || e.kind() == io::ErrorKind::Interrupted => {}
         Err(e) => return Err(e),
     }
@@ -2760,7 +2791,11 @@ impl Socks {
         // A name that does not resolve is the target's failure, not the
         // proxy's.
         let address = self.address(&target.host, target.port, &resolve)?;
-        let mut io = Timed { stream, deadline };
+        let mut io = Timed {
+            stream,
+            deadline,
+            line,
+        };
         self.handshake(&mut io, &address, target.port).map_err(|e| {
             if line.is_some_and(Line::is_closed) {
                 return abandoned().into();
@@ -2930,6 +2965,14 @@ impl Transport for Tcp {
         if self.buffers.input_append_buf().is_empty() {
             return Err(unending_line(&self.buffers));
         }
+        #[cfg(windows)]
+        if let Err(e) = await_readable(&self.stream, wait, || self.abandoned()) {
+            return Err(if is_abandon(&e) {
+                e.into()
+            } else {
+                self.failed(e, timeout, idle, true)
+            });
+        }
         let read = loop {
             match self.stream.read(self.buffers.input_append_buf()) {
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -2952,17 +2995,147 @@ impl Transport for Tcp {
         if self.abandoned() {
             return false;
         }
+        sockets::nothing_waiting(&self.stream)
+    }
+}
+
+/// The socket calls the standard library has no way to make: waiting on
+/// several connects at once, and looking at what is waiting on a connection
+/// without waiting for it — `poll` and `recv` on Unix, their Winsock
+/// counterparts on Windows.
+mod sockets {
+    use std::io;
+    use std::net::TcpStream;
+
+    /// The error of a non-blocking connect that is under way.
+    #[cfg(unix)]
+    pub(super) const IN_PROGRESS: i32 = libc::EINPROGRESS;
+    #[cfg(windows)]
+    pub(super) const IN_PROGRESS: i32 = windows_sys::Win32::Networking::WinSock::WSAEINPROGRESS;
+
+    /// The errors of an address family (or protocol) this machine has none
+    /// of: IPv6 on a host without it.
+    #[cfg(unix)]
+    pub(super) const NO_SUCH_FAMILY: [i32; 3] = [
+        libc::EAFNOSUPPORT,
+        libc::EPFNOSUPPORT,
+        libc::EPROTONOSUPPORT,
+    ];
+    #[cfg(windows)]
+    pub(super) const NO_SUCH_FAMILY: [i32; 3] = {
+        use windows_sys::Win32::Networking::WinSock::{
+            WSAEAFNOSUPPORT, WSAEPFNOSUPPORT, WSAEPROTONOSUPPORT,
+        };
+        [WSAEAFNOSUPPORT, WSAEPFNOSUPPORT, WSAEPROTONOSUPPORT]
+    };
+
+    /// Which of `sockets`, each connecting without blocking, have settled —
+    /// connected, or failed — waiting up to `millis` for one to.
+    #[cfg(unix)]
+    pub(super) fn settled(sockets: &[&socket2::Socket], millis: i32) -> io::Result<Vec<bool>> {
+        use std::os::fd::AsRawFd;
+        let mut polled: Vec<libc::pollfd> = sockets
+            .iter()
+            .map(|socket| libc::pollfd {
+                fd: socket.as_raw_fd(),
+                events: libc::POLLOUT,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `polled` holds one valid `pollfd` per socket, each held
+        // open by the caller throughout, and is as long as it says.
+        let ready = unsafe {
+            libc::poll(
+                polled.as_mut_ptr(),
+                polled.len() as libc::nfds_t,
+                millis as libc::c_int,
+            )
+        };
+        if ready < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(polled.iter().map(|p| p.revents != 0).collect())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn settled(sockets: &[&socket2::Socket], millis: i32) -> io::Result<Vec<bool>> {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            POLLWRNORM, SOCKET_ERROR, WSAGetLastError, WSAPOLLFD, WSAPoll,
+        };
+        let mut polled: Vec<WSAPOLLFD> = sockets
+            .iter()
+            .map(|socket| WSAPOLLFD {
+                fd: socket.as_raw_socket() as usize,
+                events: POLLWRNORM,
+                revents: 0,
+            })
+            .collect();
+        // SAFETY: `polled` holds one valid `WSAPOLLFD` per socket, each held
+        // open by the caller throughout, and is as long as it says. A
+        // connect that fails reports POLLERR / POLLHUP in `revents`.
+        let ready = unsafe { WSAPoll(polled.as_mut_ptr(), polled.len() as u32, millis) };
+        if ready == SOCKET_ERROR {
+            // SAFETY: no arguments; reads this thread's last Winsock error.
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+        Ok(polled.iter().map(|p| p.revents != 0).collect())
+    }
+
+    /// Whether `stream` has something to read — input, its end, an error —
+    /// waiting up to `millis` for it.
+    #[cfg(windows)]
+    pub(super) fn readable(stream: &TcpStream, millis: i32) -> io::Result<bool> {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            POLLRDNORM, SOCKET_ERROR, WSAGetLastError, WSAPOLLFD, WSAPoll,
+        };
+        let mut polled = [WSAPOLLFD {
+            fd: stream.as_raw_socket() as usize,
+            events: POLLRDNORM,
+            revents: 0,
+        }];
+        // SAFETY: one valid `WSAPOLLFD` for a socket the caller holds open,
+        // and the length it has. The end of the connection and its errors
+        // report as POLLHUP / POLLERR, which a read then meets.
+        let ready = unsafe { WSAPoll(polled.as_mut_ptr(), 1, millis) };
+        if ready == SOCKET_ERROR {
+            // SAFETY: no arguments; reads this thread's last Winsock error.
+            return Err(io::Error::from_raw_os_error(unsafe { WSAGetLastError() }));
+        }
+        Ok(polled[0].revents != 0)
+    }
+
+    /// Whether nothing is waiting to be read on `stream` and it is still
+    /// open: a one-byte peek that does not wait, and finds nothing yet.
+    #[cfg(unix)]
+    pub(super) fn nothing_waiting(stream: &TcpStream) -> bool {
+        use std::os::fd::AsRawFd;
         let mut probe = [0u8; 1];
-        // SAFETY: a socket this transport owns, and a one-byte buffer.
+        // SAFETY: a socket the caller owns, and a one-byte buffer.
         let peeked = unsafe {
             libc::recv(
-                self.stream.as_raw_fd(),
+                stream.as_raw_fd(),
                 probe.as_mut_ptr().cast(),
                 probe.len(),
                 libc::MSG_PEEK | libc::MSG_DONTWAIT,
             )
         };
         peeked < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    }
+
+    /// (Winsock has no flag for a peek that does not wait: the socket is
+    /// made non-blocking for it, and blocking again after — a socket that
+    /// cannot be is not used again.)
+    #[cfg(windows)]
+    pub(super) fn nothing_waiting(stream: &TcpStream) -> bool {
+        if stream.set_nonblocking(true).is_err() {
+            return false;
+        }
+        let mut probe = [0u8; 1];
+        let peeked = stream.peek(&mut probe);
+        stream.set_nonblocking(false).is_ok()
+            && matches!(peeked, Err(e) if e.kind() == io::ErrorKind::WouldBlock)
     }
 }
 
@@ -3136,12 +3309,15 @@ impl Bound {
 
     /// The timeout of the next read or write: what is left of the bound —
     /// or, once nothing is, the timeout itself (ureq would grant a zero
-    /// timeout a second of grace).
+    /// timeout a second of grace). No limit of each read or write of its
+    /// own: ureq sets one only from its `timeout_per_read` and
+    /// `timeout_per_write`, which clew's agents leave unset ([`agent`]).
     fn next(self) -> Result<NextTimeout, ureq::Error> {
         let Some(due) = self.due else {
             return Ok(NextTimeout {
                 after: ureq::unversioned::transport::time::Duration::NotHappening,
                 reason: self.reason,
+                ..NextTimeout::default()
             });
         };
         let left = due.saturating_duration_since(Instant::now());
@@ -3151,6 +3327,7 @@ impl Bound {
         Ok(NextTimeout {
             after: left.into(),
             reason: self.reason,
+            ..NextTimeout::default()
         })
     }
 }
@@ -3895,6 +4072,7 @@ impl Exchange {
         Ok(NextTimeout {
             after: left.into(),
             reason: Timeout::Global,
+            ..timeout
         })
     }
 
@@ -4193,10 +4371,17 @@ pub(crate) fn describe_io(e: &io::Error) -> String {
     if let Some(e) = inner.and_then(|inner| inner.downcast_ref::<ureq::Error>()) {
         return describe(e);
     }
-    if e.kind() == io::ErrorKind::UnexpectedEof {
-        return "the connection closed before the whole response arrived".into();
+    // The connection ending, in the same words on every system: Windows
+    // says a reset as "an existing connection was forcibly closed by the
+    // remote host", which names neither the reset nor who did it plainly.
+    match e.kind() {
+        io::ErrorKind::UnexpectedEof => {
+            "the connection closed before the whole response arrived".into()
+        }
+        io::ErrorKind::ConnectionReset => "the server reset the connection".into(),
+        io::ErrorKind::ConnectionAborted => "the connection was aborted".into(),
+        _ => e.to_string(),
     }
-    e.to_string()
 }
 
 /// Send one request — `send` is a ureq `call` or `send` — with a panic
@@ -4776,6 +4961,25 @@ mod tests {
     /// The setting of the proxy [`via`] decides on for `url`.
     fn proxy_for(url: &str, sources: &ProxySources<'_>) -> Option<String> {
         via(url, sources).map(|via| via.spec)
+    }
+
+    /// A connection the server ends is said the same way on every system —
+    /// Windows words a reset "an existing connection was forcibly closed by
+    /// the remote host", which says neither "reset" nor much at all.
+    #[test]
+    fn a_reset_or_aborted_connection_is_said_the_same_everywhere() {
+        let reset = describe_io(&io::Error::from(io::ErrorKind::ConnectionReset));
+        assert_eq!(reset, "the server reset the connection");
+        let os_reset = describe_io(&io::Error::from_raw_os_error(if cfg!(windows) {
+            10054
+        } else {
+            104
+        }));
+        if cfg!(any(windows, target_os = "linux")) {
+            assert_eq!(os_reset, reset, "the OS's own reset");
+        }
+        let aborted = describe_io(&io::Error::from(io::ErrorKind::ConnectionAborted));
+        assert_eq!(aborted, "the connection was aborted");
     }
 
     #[test]
@@ -6982,13 +7186,7 @@ mod tests {
             let probe = Socket::new(Domain::IPV4, Type::STREAM, None).unwrap();
             probe.set_nonblocking(true).unwrap();
             let _ = probe.connect(&addr.into());
-            let mut polled = libc::pollfd {
-                fd: probe.as_raw_fd(),
-                events: libc::POLLOUT,
-                revents: 0,
-            };
-            // SAFETY: one valid `pollfd`, for a socket held open meanwhile.
-            let unanswered = unsafe { libc::poll(&mut polled, 1, 300) } == 0;
+            let unanswered = !sockets::settled(&[&probe], 300).unwrap()[0];
             if !unanswered && probe.take_error().ok().flatten().is_some() {
                 eprintln!("no black hole: this system refuses a connect to a full queue");
                 return None;
@@ -7119,7 +7317,10 @@ mod tests {
                 open_socket(addr)
             }
         };
-        let refused = io::Error::from(io::ErrorKind::ConnectionRefused).to_string();
+        // The system's own words for a refused connection.
+        let refused = std::net::TcpStream::connect(closed)
+            .expect_err("nothing listens there")
+            .to_string();
         let lost = io::Error::from_raw_os_error(libc::ENETUNREACH).to_string();
         for addrs in [[closed, v6], [v6, closed]] {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -7392,6 +7593,7 @@ mod tests {
         let timeout = NextTimeout {
             after: Duration::from_secs(1).into(),
             reason: Timeout::RecvBody,
+            ..NextTimeout::default()
         };
         assert!(
             !matches!(tcp.await_input(timeout), Ok(true)),
@@ -8326,6 +8528,7 @@ mod tests {
         let timeout = NextTimeout {
             after: Duration::from_millis(70).into(),
             reason: Timeout::SendRequest,
+            ..NextTimeout::default()
         };
         let result = exchange.transmit_output(request.len(), timeout);
         assert!(matches!(result, Err(ureq::Error::Timeout(_))), "{result:?}");

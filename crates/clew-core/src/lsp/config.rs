@@ -2,12 +2,15 @@
 //! the effective server to use for a language.
 //!
 //! Precedence: the built-in [`registry`] defaults, overridden by the project's
-//! `lsp.toml`. The file is committable so a team shares one reproducible LSP
-//! setup.
+//! `lsp.toml`, overridden by the user's own choice of a server program
+//! ([`ProjectLspConfig::resolve_with`]). The file is committable so a team
+//! shares one reproducible LSP setup; the choice is kept outside the project
+//! ([`crate::lsp::choices`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use clew_protocol::LanguageChoices;
 use serde::Deserialize;
 
 use super::registry;
@@ -24,13 +27,13 @@ use super::registry;
 /// [rust.init_options]
 /// "rust-analyzer.check.command" = "clippy"
 /// ```
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(transparent)]
 pub struct ProjectLspConfig {
     languages: HashMap<String, LangOverride>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LangOverride {
     /// Checked as it is parsed (see [`registry::is_plain_name`]): it picks a
@@ -179,7 +182,70 @@ impl ProjectLspConfig {
             args,
             command,
             init_options,
+            chosen: None,
         })
+    }
+
+    /// [`Self::resolve`] with the user's `choices` over it: a server program
+    /// they chose for `language` ([`LanguageChoices::servers`]) runs instead
+    /// of clew's, and instead of a `command` the project's `lsp.toml` names —
+    /// what the user runs on their machine is theirs to say, not the
+    /// repository's. It runs with the arguments they gave, or, when they gave
+    /// none, with the ones clew's own server of the language takes (choosing
+    /// where Lean's `lake` is keeps `serve`).
+    ///
+    /// The server keeps its name — rust-analyzer run from another binary is
+    /// still rust-analyzer — so a server that builds the project still needs
+    /// the user's leave to build it ([`EffectiveServer::runs_project_code`]).
+    /// A program for a language clew has no server of, or one the project's
+    /// `lsp.toml` turned off, is named after its file.
+    pub fn resolve_with(
+        &self,
+        language: &str,
+        choices: &LanguageChoices,
+    ) -> Option<EffectiveServer> {
+        let resolved = self.resolve(language);
+        let Some(choice) = choices
+            .servers
+            .as_ref()
+            .and_then(|servers| servers.get(language))
+            .filter(|choice| !choice.command.trim().is_empty())
+        else {
+            return resolved;
+        };
+        let mut server = resolved.unwrap_or_else(|| EffectiveServer {
+            language: language.to_string(),
+            server_name: program_name(&choice.command),
+            version: "chosen".into(),
+            args: Vec::new(),
+            command: None,
+            init_options: None,
+            chosen: None,
+        });
+        server.command = None;
+        if let Some(args) = &choice.args {
+            server.args = args.clone();
+        }
+        server.chosen = Some(choice.command.trim().to_string());
+        Some(server)
+    }
+}
+
+/// The name a chosen server program goes by: its file name without an
+/// extension, kept to the characters a server name may have.
+fn program_name(command: &str) -> String {
+    let file = Path::new(command.trim())
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let name: String = file
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+'))
+        .take(registry::MAX_NAME_LEN)
+        .collect();
+    match name.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() => name,
+        _ => "server".into(),
     }
 }
 
@@ -193,6 +259,12 @@ pub struct EffectiveServer {
     /// When set, run this binary directly and skip the managed store.
     pub command: Option<PathBuf>,
     pub init_options: Option<serde_json::Value>,
+    /// The program the user chose to run as this server
+    /// ([`ProjectLspConfig::resolve_with`]), as they gave it: a path on this
+    /// host, or a name to look up on its `PATH` ([`crate::lsp::store::locate`]).
+    /// Their own choice, kept outside the project, so it runs as found — no
+    /// approval asked, none of clew's store involved.
+    pub chosen: Option<String>,
 }
 
 impl EffectiveServer {
@@ -467,5 +539,78 @@ mod tests {
         );
         std::fs::write(d.join(".clew/lsp.toml"), at_cap + &filler).unwrap();
         assert!(ProjectLspConfig::load(&d).is_err());
+    }
+
+    fn choosing(language: &str, command: &str, args: Option<&[&str]>) -> LanguageChoices {
+        LanguageChoices {
+            servers: Some(
+                [(
+                    language.to_string(),
+                    clew_protocol::ServerChoice {
+                        command: command.into(),
+                        args: args.map(|a| a.iter().map(|s| s.to_string()).collect()),
+                    },
+                )]
+                .into(),
+            ),
+            ..Default::default()
+        }
+    }
+
+    /// A server program the user chose runs in place of clew's and of the
+    /// project's own `command`, keeping the server's name — and so its need
+    /// to be let build the project — and its arguments unless they gave some.
+    #[test]
+    fn a_chosen_server_program_replaces_the_server_and_keeps_its_name() {
+        let config = parse(
+            r#"
+[lean]
+command = "./tools/lake"
+
+[rust.init_options]
+check = { command = "clippy" }
+"#,
+        );
+        let lean = config
+            .resolve_with("lean", &choosing("lean", "/home/u/.elan/bin/lake", None))
+            .unwrap();
+        assert_eq!(lean.chosen.as_deref(), Some("/home/u/.elan/bin/lake"));
+        assert_eq!(lean.command, None, "the project's command is superseded");
+        assert_eq!(lean.server_name, "lean");
+        assert_eq!(
+            lean.args,
+            ["serve"],
+            "the toolchain's own arguments are kept"
+        );
+        assert!(
+            lean.runs_project_code().is_some(),
+            "it still builds the project"
+        );
+
+        let rust = config
+            .resolve_with("rust", &choosing("rust", "/opt/ra", Some(&["--log", "x"])))
+            .unwrap();
+        assert_eq!(rust.args, ["--log", "x"]);
+        assert_eq!(rust.server_name, "rust-analyzer");
+        assert!(
+            rust.init_options.is_some(),
+            "the project's options still stand"
+        );
+
+        // Nothing chosen for the language: the project's resolution as is.
+        assert_eq!(
+            config.resolve_with("lean", &choosing("rust", "/opt/ra", None)),
+            config.resolve("lean")
+        );
+        // A language clew has no server for gets one named after the file.
+        let lua = ProjectLspConfig::default()
+            .resolve_with(
+                "lua",
+                &choosing("lua", "/usr/bin/lua-language-server.exe", Some(&[])),
+            )
+            .unwrap();
+        assert_eq!(lua.server_name, "lua-language-server");
+        assert!(lua.args.is_empty());
+        assert_eq!(lua.runs_project_code(), None);
     }
 }

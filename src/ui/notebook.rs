@@ -126,7 +126,7 @@ fn cell_view<'a>(
             parts.push(
                 text(badge)
                     .size(ts::CAPTION)
-                    .font(Font::MONOSPACE)
+                    .font(crate::fonts::CODE)
                     .color(theme::dim())
                     .into(),
             );
@@ -193,7 +193,7 @@ fn output_view(output: &crate::NbOutput) -> Element<'_, Message> {
                 .into_iter()
                 .map(|line| {
                     if line.is_empty() {
-                        return text(" ").font(Font::MONOSPACE).size(ts::SMALL).into();
+                        return text(" ").font(crate::fonts::CODE).size(ts::SMALL).into();
                     }
                     let spans: Vec<iced::widget::text::Span<'_, Message>> = line
                         .into_iter()
@@ -204,7 +204,7 @@ fn output_view(output: &crate::NbOutput) -> Element<'_, Message> {
                                     None if *stderr => theme::warn(),
                                     None => theme::fg(),
                                 })
-                                .font(Font::MONOSPACE)
+                                .font(crate::fonts::CODE)
                                 .size(ts::SMALL)
                         })
                         .collect();

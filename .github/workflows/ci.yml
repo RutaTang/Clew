@@ -1,10 +1,12 @@
 name: CI
 
-# Build + test on every push and PR. The GUI client (`clew`) has macOS-only
-# dependencies (objc2/AppKit), so the full workspace is built on macOS; the
-# headless backend (`clew-server` + `clew-core` + `clew-protocol`) is the piece
-# deployed to remote hosts over SSH, so it is also built and tested on Linux,
-# and cross-built for the static musl targets the release ships.
+# Build + test on every push and PR. Clew's window — the editor, the floating
+# Ask, voice, every tool — is the same program on macOS, Linux and Windows, so
+# the whole workspace is built, linted and tested on each: macOS in its own
+# job, Linux and Windows in `desktop`. The headless backend (`clew-server` +
+# `clew-core` + `clew-protocol`) is the piece deployed to remote hosts over
+# SSH, so it is also built and tested on Linux on its own (no audio stack, as
+# on a server), and cross-built for the static musl targets the release ships.
 #
 # Supply chain: every action is pinned to a full commit SHA (the tag is in the
 # trailing comment), checkouts do not persist the token, and the workflow token
@@ -69,8 +71,8 @@ jobs:
           INSTALLED: ${{ steps.toolchain.outputs.name }}
         run: scripts/check-toolchain.sh "$INSTALLED"
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      # Only the backend crates — the `clew` GUI package is never selected, so its
-      # macOS-only dependencies are not resolved for the Linux build.
+      # Only the backend crates, as a remote host runs them: no window, no
+      # audio stack (the `desktop` job builds and tests those on Linux).
       - name: Build (server + core + protocol)
         run: cargo build -p clew-server --all-targets --locked
       # The lint job runs on macOS, where code that only macOS uses (the
@@ -81,6 +83,92 @@ jobs:
         run: cargo clippy -p clew-server -p clew-core -p clew-protocol --all-targets --locked -- -D warnings
       - name: Test (server + core + protocol)
         run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
+
+  # The desktop app on Linux and Windows, where it must work as it does on
+  # macOS: the window and every feature in it — voice through each system's
+  # own audio stack (ALSA, WASAPI; Core Audio is the macOS job's) and
+  # whisper.cpp compiled by each platform's C++ toolchain, the floating Ask,
+  # language servers, the debugger, the terminal. The microphone test opens
+  # the runner's default input for real (it has none, and must say so in
+  # words, not crash).
+  #
+  # Linux: the client and voice crates (the backend crates are the
+  # `linux-server` job's), hermetic like every Unix test run. Windows: the
+  # whole workspace — nothing else runs it there. (`hermetic-test.sh` moves
+  # HOME and TMPDIR, which Windows programs do not read.)
+  desktop:
+    name: Build & test · ${{ matrix.os }} · desktop app
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: Linux
+            runner: ubuntu-latest
+            packages: -p clew -p clew-voice
+          - os: Windows
+            runner: windows-latest
+            packages: --workspace
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - id: toolchain
+        uses: dtolnay/rust-toolchain@46817827a5bfabe028bf34e1cce71fd40e2ff697 # 1.95.0
+        with:
+          components: clippy
+      - name: Toolchain pins agree
+        env:
+          INSTALLED: ${{ steps.toolchain.outputs.name }}
+        run: scripts/check-toolchain.sh "$INSTALLED"
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: desktop
+      # cpal reads ALSA's headers on Linux; Windows needs nothing beyond the
+      # runner's MSVC and CMake.
+      - name: Install ALSA headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # The rendering tests measure real glyphs: a monospace face and a CJK
+      # one, as a Linux desktop has (a bare runner may have neither).
+      - name: Install fonts
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y fonts-dejavu-core fonts-noto-cjk
+      - name: Build (all targets)
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: cargo build $PACKAGES --all-targets --locked
+      # Code only one system uses is dead on the others, and only a build
+      # for those can say so: denied here as in the lint job.
+      - name: Clippy (deny warnings)
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: cargo clippy $PACKAGES --all-targets --locked -- -D warnings
+      - name: Test (Linux, hermetic)
+        if: runner.os == 'Linux'
+        env:
+          CLEW_TEST_MICROPHONE: "1"
+          PACKAGES: ${{ matrix.packages }}
+        run: scripts/hermetic-test.sh $PACKAGES --locked
+      # Every failure, each said in a few lines (no backtrace), gathered at
+      # the end of the log where it can be read.
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        env:
+          CLEW_TEST_MICROPHONE: "1"
+          PACKAGES: ${{ matrix.packages }}
+          RUST_BACKTRACE: "0"
+        run: |
+          set -o pipefail
+          cargo test $PACKAGES --locked --no-fail-fast 2>&1 | tee test-output.log
+      - name: Failures (Windows)
+        if: failure() && runner.os == 'Windows'
+        run: |
+          grep -E -A6 '^---- .* stdout ----$' test-output.log | grep -vE '^(--)?$|^note: run with' || true
 
   # The release ships static musl builds for both Linux architectures; building
   # them here means a change that breaks the musl/cross build fails its PR, not

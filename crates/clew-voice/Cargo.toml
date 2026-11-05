@@ -1,0 +1,18 @@
+[package]
+name = "clew-voice"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+
+[dependencies]
+cpal = "0.18.2"
+sha1 = "0.11"
+sha2 = "0.11"
+whisper-rs = "0.16.0"
+
+# whisper.cpp on the GPU where every machine has one: Metal on macOS (Apple
+# Silicon and recent Intel Macs alike; the shader library is embedded, so no
+# Metal compiler is needed to build). Elsewhere it runs on the CPU, which
+# the models Clew offers first need no more than a moment of.
+[target.'cfg(target_os = "macos")'.dependencies]
+whisper-rs = { version = "0.16.0", features = ["metal"] }

@@ -62,8 +62,8 @@ pub(crate) fn run_in_child(name: &str, env: &[(&str, &Path)]) {
 
 /// Put a `go` in `bin` that records its pid in `bin/started`, then waits
 /// for a minute (by absolute path: `bin` is the whole PATH).
+#[cfg(unix)]
 pub(crate) fn fake_slow_go(bin: &Path) {
-    #[cfg(unix)]
     clew_core::testutil::write_script(
         &bin.join("go"),
         "echo $$ > \"${0%/*}/started.tmp\"\n\
@@ -73,6 +73,7 @@ pub(crate) fn fake_slow_go(bin: &Path) {
 }
 
 /// The pid [`fake_slow_go`] recorded, once it has (within ten seconds).
+#[cfg(unix)]
 pub(crate) fn started_pid(bin: &Path) -> u32 {
     let began = std::time::Instant::now();
     loop {
@@ -88,6 +89,7 @@ pub(crate) fn started_pid(bin: &Path) -> u32 {
 }
 
 /// Whether process `pid` still exists (a shell builtin: PATH may be bare).
+#[cfg(unix)]
 pub(crate) fn alive(pid: u32) -> bool {
     std::process::Command::new("/bin/sh")
         .args(["-c", "kill -0 \"$1\" 2>/dev/null", "sh", &pid.to_string()])

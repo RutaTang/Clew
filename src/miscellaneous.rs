@@ -1,5 +1,6 @@
 //! miscellaneous modules (grouped for navigation; paths preserved via crate-root re-exports).
 
+pub mod fonts;
 pub mod glyph;
 pub mod icons;
 pub mod keymap;

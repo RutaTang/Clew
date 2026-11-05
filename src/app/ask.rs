@@ -166,16 +166,102 @@ impl App {
                 .is_some_and(|l| l.turn.is_some() || l.pending.is_some())
     }
 
+    /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, its input
+    /// focused — or, open in either size, put it away.
     pub(crate) fn on_toggle_ask(&mut self) -> Task<Message> {
-        // Toolbar "Ask": open the bottom panel on the Ask tab, or collapse
-        // it if Ask is already the shown tab.
-        if self.show_bottom && self.bottom_tab == BottomTab::Ask {
-            self.show_bottom = false;
-        } else {
-            self.show_bottom = true;
-            self.bottom_tab = BottomTab::Ask;
+        if self.ask_view.is_open() {
+            self.close_ask();
+            return Task::none();
         }
-        Task::none()
+        self.on_open_ask()
+    }
+
+    /// Open the Ask window (a card, unless it is open already in either
+    /// size) and give its input the keyboard.
+    pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
+        self.reveal_ask();
+        // Kept in the margin: its tab, where the input is.
+        if self.ask_view == AskView::Margin {
+            self.margin_tab = crate::MarginTab::Ask;
+        }
+        self.code_focused = false;
+        operation::focus(ui::ask_input_id())
+    }
+
+    /// A turn waiting for the user to answer one of its approvals says
+    /// nothing more until they do: what it has said so far is drawn as a
+    /// finished answer is (code as code, links as links) rather than as the
+    /// raw text a streaming answer shows.
+    pub(crate) fn settle_waiting_answers(&mut self) -> Task<Message> {
+        let waiting: Vec<(usize, String)> = self
+            .proj
+            .ask_turns
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
+                t.streaming && !t.extras.approvals.is_empty() && !t.answer_md.trim().is_empty()
+            })
+            .map(|(i, t)| (i, t.answer_md.clone()))
+            .collect();
+        let mut tasks = Vec::new();
+        for (i, md) in waiting {
+            let (prepared, task) = self.prepare_segments(&md);
+            self.proj.ask_turns[i].answer = prepared;
+            tasks.push(task);
+        }
+        Task::batch(tasks)
+    }
+
+    /// Bring the conversation on screen without taking the keyboard: a card
+    /// when it was put away, as it is when already open.
+    pub(crate) fn reveal_ask(&mut self) {
+        if !self.ask_view.is_open() {
+            self.ask_view = AskView::Compact;
+        }
+    }
+
+    /// Put the Ask window away, the keyboard back with the code; kept in
+    /// the margin, the margin shows its notes again.
+    pub(crate) fn close_ask(&mut self) {
+        self.ask_view = AskView::Closed;
+        if self.margin_tab == crate::MarginTab::Ask {
+            self.margin_tab = crate::MarginTab::Notes;
+        }
+        self.code_focused = true;
+    }
+
+    /// Esc's step down for the Ask window: large to a card, a card (or the
+    /// conversation in the margin) put away. `false` when it is put away
+    /// already, for Esc to do what else it does.
+    pub(crate) fn step_ask_down(&mut self) -> bool {
+        match self.ask_view {
+            AskView::Expanded => self.ask_view = AskView::Compact,
+            AskView::Compact | AskView::Margin => self.close_ask(),
+            AskView::Closed => return false,
+        }
+        true
+    }
+
+    /// Keep the conversation in the margin, its tab chosen, the margin shown
+    /// and the input given the keyboard.
+    pub(crate) fn keep_ask_in_margin(&mut self) -> Task<Message> {
+        self.ask_view = AskView::Margin;
+        self.margin_tab = crate::MarginTab::Ask;
+        self.show_right_panel = true;
+        self.code_focused = false;
+        operation::focus(ui::ask_input_id())
+    }
+
+    /// Take the conversation out of the margin: a card over the code again.
+    pub(crate) fn float_ask(&mut self) -> Task<Message> {
+        if self.ask_view == AskView::Margin {
+            self.ask_view = AskView::Compact;
+        }
+        if self.margin_tab == crate::MarginTab::Ask {
+            self.margin_tab = crate::MarginTab::Notes;
+        }
+        self.code_focused = false;
+        operation::focus(ui::ask_input_id())
     }
 
     pub(crate) fn on_ask_submit(&mut self) -> Task<Message> {
@@ -247,8 +333,7 @@ impl App {
         if self.proj.ask_input.trim() == question.trim() {
             self.proj.ask_input.clear();
         }
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
+        self.reveal_ask();
         self.proj.asking = true;
         let stamp = self.stamp();
         // The stream id is minted now, at submit: it is the identity the
@@ -423,7 +508,7 @@ impl App {
                 })
                 .collect();
             let mut added = 0usize;
-            let packages = self.proj.import_graph.go_packages();
+            let packages = self.proj.import_graph.packages();
             for f in seeds {
                 if added >= 4 {
                     break;
@@ -590,6 +675,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question,
+            spoken: std::mem::take(&mut self.proj.ask_spoken),
             answer_md: String::new(),
             answer: Vec::new(),
             sources,
@@ -740,6 +826,10 @@ impl App {
         if !self.server.is_up() {
             return Task::none();
         }
+        // The window's own tools beside the MCP servers': the agent can open
+        // what it finds and run the window's commands (`app::windowtools`).
+        let mut tools = tools;
+        tools.extend(crate::app::windowtools::window_tools());
         // Client-side grounding the server can't see: the paused debugger state
         // and any pinned selections travel verbatim.
         let mut context = String::new();
@@ -770,6 +860,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question: question.clone(),
+            spoken: std::mem::take(&mut self.proj.ask_spoken),
             answer_md: String::new(),
             answer: Vec::new(),
             sources: Vec::new(),
@@ -778,8 +869,7 @@ impl App {
             extras: Default::default(),
         });
         self.proj.asking = false;
-        self.show_bottom = true;
-        self.bottom_tab = BottomTab::Ask;
+        self.reveal_ask();
 
         self.proj.link.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
@@ -795,6 +885,8 @@ impl App {
                 history,
                 context,
                 tools,
+                // The agent's language servers are set up as the editor's.
+                choices: self.proj.lang_choices.clone(),
             },
         });
         // Not handed over: no `AgentDone` will ever come for it, so the turn
@@ -947,7 +1039,14 @@ impl App {
                 y: f32::MAX,
             },
         );
-        Task::batch([task, to_bottom])
+        // Answered, with Keep listening on: listen for what comes next. A
+        // Stop or a failure leaves the microphone to the reader.
+        let listen = if matches!(outcome, StreamOutcome::Done) {
+            self.resume_listening()
+        } else {
+            Task::none()
+        };
+        Task::batch([task, to_bottom, listen])
     }
 
     /// The agent made a tool call: append its chip to the open turn and keep
@@ -1106,8 +1205,7 @@ impl App {
                 if !dup {
                     self.proj.ask_pins.push(pin);
                 }
-                self.show_bottom = true;
-                self.bottom_tab = BottomTab::Ask;
+                self.reveal_ask();
                 self.code_focused = false; // the Ask input takes focus
                 self.status = "Added selection to Ask — ask your question".into();
                 operation::focus(ui::ask_input_id())
@@ -1220,12 +1318,32 @@ impl App {
     pub(crate) fn update_ask(&mut self, message: AskMsg) -> Task<Message> {
         match message {
             AskMsg::Toggle => self.on_toggle_ask(),
+            AskMsg::Open => self.on_open_ask(),
+            AskMsg::Expand => {
+                self.ask_view = AskView::Expanded;
+                self.code_focused = false;
+                operation::focus(ui::ask_input_id())
+            }
+            AskMsg::Shrink => {
+                if self.ask_view == AskView::Expanded {
+                    self.ask_view = AskView::Compact;
+                }
+                Task::none()
+            }
+            AskMsg::KeepInMargin => self.keep_ask_in_margin(),
+            AskMsg::Float => self.float_ask(),
+            AskMsg::Close => {
+                self.close_ask();
+                Task::none()
+            }
             AskMsg::InputChanged(s) => {
                 self.proj.ask_input = s;
+                self.proj.ask_spoken = false;
                 Task::none()
             }
             AskMsg::Suggested(q) => {
                 self.proj.ask_input = q;
+                self.proj.ask_spoken = false;
                 Task::done(Message::Ask(AskMsg::Submit))
             }
             AskMsg::Submit => self.on_ask_submit(),

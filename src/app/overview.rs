@@ -129,7 +129,7 @@ impl App {
             .filter(|s| {
                 matches!(
                     s.kind.as_str(),
-                    "struct" | "enum" | "class" | "trait" | "interface"
+                    "struct" | "enum" | "class" | "trait" | "interface" | "table" | "inductive"
                 )
             })
             .collect();

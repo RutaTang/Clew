@@ -132,9 +132,17 @@ impl<'b> Iterator for LayoutRunIter<'b> {
                 self.total_height += line_height;
 
                 let line_top = self.line_top - self.buffer.scroll.vertical;
-                let glyph_height = layout_line.max_ascent + layout_line.max_descent;
-                let centering_offset = (line_height - glyph_height) / 2.0;
-                let line_y = line_top + centering_offset + layout_line.max_ascent;
+                // clew patch: the baseline where a browser sets it in the
+                // line box — the face's ascent and descent each rounded to
+                // a whole pixel, the leading above them floored to one —
+                // and, the line box falling at a part of a pixel in a
+                // paragraph, rounded to a whole one; not exactly centred,
+                // a part of a pixel off from the design's text in every
+                // line, each by a different part.
+                let ascent = layout_line.max_ascent.round();
+                let descent = layout_line.max_descent.round();
+                let leading = ((line_height - (ascent + descent)) / 2.0).floor();
+                let line_y = (line_top + leading + ascent).round();
                 if let Some(height) = self.buffer.height_opt {
                     if line_y - layout_line.max_ascent > height {
                         return None;

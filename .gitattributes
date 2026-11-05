@@ -1,0 +1,5 @@
+# Text files are checked out with LF line endings on every system, Windows
+# included (where Git's default would turn them to CRLF): the tests compare
+# against committed snapshots and fixtures byte for byte, and `include_str!`
+# embeds what is checked out. Binary files are detected and left alone.
+* text=auto eol=lf

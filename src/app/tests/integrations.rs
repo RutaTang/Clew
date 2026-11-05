@@ -92,6 +92,9 @@ fn tool_result(
 fn an_mcp_call_waits_for_approval_then_its_result_goes_to_the_turn() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut app = scanned_app("mcp-approve");
+    // The project's language choices go with the turn: its language
+    // servers are set up as the editor's are.
+    app.proj.lang_choices.python = Some("/envs/app/bin/python".into());
     let mut rx = attach_server(&mut app);
     let _pump = app.start_agent_turn(
         "why?".into(),
@@ -99,12 +102,13 @@ fn an_mcp_call_waits_for_approval_then_its_result_goes_to_the_turn() {
         shout_tools(&rt, mcp::Approve::Ask),
     );
     let stream = app.proj.link.agent_stream.expect("an agent turn is open");
-    let asked = std::iter::from_fn(|| rx.try_recv().ok())
+    let (asked, choices) = std::iter::from_fn(|| rx.try_recv().ok())
         .find_map(|m| match m.request {
-            clew_protocol::Request::AgentAsk { tools, .. } => Some(tools),
+            clew_protocol::Request::AgentAsk { tools, choices, .. } => Some((tools, choices)),
             _ => None,
         })
         .expect("the turn was asked");
+    assert_eq!(choices, app.proj.lang_choices);
     assert_eq!(
         asked[0].name, "mcp__shout__shout",
         "the turn offers the tool"
@@ -362,8 +366,7 @@ fn running_turn(app: &mut App, agent: Arc<acp::Agent>) -> u64 {
     link.turn = Some(stream);
     app.proj.acp = Some(link);
     // On screen, as a question asked opens it.
-    app.show_bottom = true;
-    app.bottom_tab = BottomTab::Ask;
+    app.ask_view = AskView::Compact;
     stream
 }
 
@@ -1020,6 +1023,7 @@ fn ending_an_agent_mid_turn_closes_the_turn_and_old_cards_answer_nothing() {
         .approvals
         .push(crate::app::model::Approval {
             key: ApprovalKey::Acp { id: 1 },
+            mark: None,
             title: "edit".into(),
             detail: String::new(),
             options: Vec::new(),
@@ -1238,6 +1242,8 @@ fn an_acp_agent_is_asked_only_about_a_local_project_it_knows() {
 
 #[test]
 fn the_settings_add_and_remove_servers_and_agents() {
+    // A program on PATH everywhere.
+    let shell = if cfg!(windows) { "cmd" } else { "sh" };
     let data = test_dir("integrations-settings");
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
@@ -1250,7 +1256,7 @@ fn the_settings_add_and_remove_servers_and_agents() {
     send(&mut app, IntegrationsMsg::McpName("gh".into()));
     send(
         &mut app,
-        IntegrationsMsg::McpTarget("sh -c 'exit 0' \"two words\"".into()),
+        IntegrationsMsg::McpTarget(format!("{shell} -c 'exit 0' \"two words\"")),
     );
     send(&mut app, IntegrationsMsg::McpExtra("TOKEN=abc".into()));
     send(&mut app, IntegrationsMsg::McpAdd);
@@ -1288,7 +1294,10 @@ fn the_settings_add_and_remove_servers_and_agents() {
     // Agents: a preset, then a custom one; the Ask panel's picker follows.
     send(&mut app, IntegrationsMsg::AcpPreset(0));
     send(&mut app, IntegrationsMsg::AcpName("mine".into()));
-    send(&mut app, IntegrationsMsg::AcpCommand("sh --acp".into()));
+    send(
+        &mut app,
+        IntegrationsMsg::AcpCommand(format!("{shell} --acp")),
+    );
     send(&mut app, IntegrationsMsg::AcpAdd);
     assert_eq!(
         app.acp_agents.len(),
@@ -1307,7 +1316,7 @@ fn the_settings_add_and_remove_servers_and_agents() {
 
     // A form that cannot be saved says why.
     send(&mut app, IntegrationsMsg::McpName("bad name".into()));
-    send(&mut app, IntegrationsMsg::McpTarget("sh".into()));
+    send(&mut app, IntegrationsMsg::McpTarget(shell.into()));
     send(&mut app, IntegrationsMsg::McpAdd);
     assert!(
         app.settings
@@ -1376,6 +1385,7 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
     let stream = app.mint_request_id();
     let card = |id| Approval {
         key: ApprovalKey::Acp { id },
+        mark: None,
         title: "run it".into(),
         detail: String::new(),
         options: vec![
@@ -1429,15 +1439,14 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
             delay,
         );
     }
-    // The panel hidden: out of reach, however long.
-    app.show_bottom = false;
+    // The Ask window put away: out of reach, however long.
+    app.ask_view = AskView::Closed;
     let _ = app.update(Message::Noop);
     read(&mut app);
     answer(&mut app, 1, "ok");
     assert_eq!(left(&app).len(), 3, "allowed out of sight");
     // Shown: within reach from then.
-    app.show_bottom = true;
-    app.bottom_tab = BottomTab::Ask;
+    app.ask_view = AskView::Compact;
     let _ = app.update(Message::Noop);
     answer(&mut app, 1, "ok");
     assert_eq!(left(&app).len(), 3, "allowed unread");
@@ -1473,6 +1482,7 @@ fn an_ended_turn_leaves_no_card_to_answer() {
         extras: TurnExtras {
             approvals: vec![Approval {
                 key: ApprovalKey::Mcp { call: 1 },
+                mark: None,
                 title: "run it".into(),
                 detail: String::new(),
                 options: vec![ApprovalOption {
@@ -1485,8 +1495,7 @@ fn an_ended_turn_leaves_no_card_to_answer() {
         },
         ..AskTurn::default()
     });
-    app.show_bottom = true;
-    app.bottom_tab = BottomTab::Ask;
+    app.ask_view = AskView::Compact;
     assert!(app.question_on_screen().is_some());
     let _ = app.on_ask_stream_ended(
         stream,

@@ -40,6 +40,12 @@ impl App {
             self.pending_z = false;
             return self.update(msg);
         }
+        // The large Ask window is over everything but the overlays: Esc
+        // makes it a card first, before it reaches what is under it.
+        if matches!(key.as_ref(), Key::Named(Named::Escape)) && self.ask_view == AskView::Expanded {
+            self.step_ask_down();
+            return Task::none();
+        }
         // While the shortcuts panel is open (and not capturing), swallow every
         // key so nothing acts behind the modal. (Esc never gets here: the
         // panel is an overlay, so `escape_message` above closed it.)
@@ -105,6 +111,17 @@ impl App {
             return task;
         }
 
+        // Settings: ⌘, — the menu bar's on macOS, where AppKit takes it before
+        // this handler; Ctrl+, on Windows and Linux, which have no menu bar
+        // to own it.
+        if cmd
+            && !modifiers.shift()
+            && !modifiers.alt()
+            && matches!(key.as_ref(), Key::Character(","))
+        {
+            return self.update(Message::Settings(SettingsMsg::Open));
+        }
+
         // While time-travelling, swallow any remaining (non-command) keys so
         // plain reading motions don't act on the live file hidden behind the view.
         if time_travel.is_some() {
@@ -120,14 +137,24 @@ impl App {
                     1
                 })))
             }
-            // Only what is NOT an overlay is left for Esc here — the find bar,
-            // then the selection. Every overlay (the context menu and the
+            // Only what is NOT an overlay is left for Esc here — listening,
+            // the find bar, the selection, then the Ask card: each press puts
+            // away the nearest. Every overlay (the context menu and the
             // finder included) was dismissed through `escape_message` above.
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
                 self.pending_z = false;
+                if self.voice.is_busy() {
+                    return self.update(Message::Voice(VoiceMsg::Cancel));
+                }
                 if self.proj.find.open {
                     return self.update(Message::Editor(EditorMsg::FindClosed));
+                }
+                let marked = self
+                    .active_viewer()
+                    .is_some_and(|v| v.selection.is_some() || v.target_line.is_some());
+                if !marked && self.step_ask_down() {
+                    return Task::none();
                 }
                 if let Some(v) = self.active_viewer_mut() {
                     v.selection = None;
@@ -146,7 +173,7 @@ impl App {
             {
                 Task::none()
             }
-            // Two-key `g` prefix: gg / gd / gr / gi / gy / gc.
+            // Two-key `g` prefix: gg / gd / gr / gi / gy / gc / ge.
             _ if self.pending_g => {
                 self.pending_g = false;
                 match key.as_ref() {
@@ -156,6 +183,7 @@ impl App {
                     Key::Character("i") => self.goto_at_cursor(GotoKind::Implementation),
                     Key::Character("y") => self.goto_at_cursor(GotoKind::TypeDefinition),
                     Key::Character("c") => self.update(Message::Calls(CallsMsg::Requested)),
+                    Key::Character("e") => self.insight_at_cursor(),
                     _ => Task::none(),
                 }
             }
@@ -211,7 +239,10 @@ impl App {
             _ => return None,
         };
         self.proj.finder.move_selection(delta);
-        Some(ui::reveal_finder_selection(self.proj.finder.selected))
+        Some(ui::reveal_finder_selection(
+            self.proj.finder.selected,
+            self.headings_over_selection(),
+        ))
     }
 
     /// Run a rebindable command action. Returns `None` when the action declines
@@ -245,6 +276,7 @@ impl App {
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),
             TypeGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectTypes))),
+            ProjectMaps => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps))),
             ImportGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(
                 Overlay::ProjectImports,
             ))),
@@ -264,6 +296,8 @@ impl App {
             ))),
             LspServers => self.update(Message::Lsp(LspMsg::TogglePanel)),
             Shortcuts => self.update(Message::Window(WindowMsg::OpenShortcuts)),
+            CommandPalette => self.update(Message::Nav(NavMsg::PaletteOpened)),
+            Voice => self.update(Message::Voice(VoiceMsg::Toggle)),
         })
     }
 
@@ -314,7 +348,11 @@ impl App {
     /// command chord or another action holds it.
     fn capture_chord(&mut self, action: keymap::Action, chord: keymap::Chord) -> Task<Message> {
         if !chord.is_command() {
-            self.keymap_notice = Some("Shortcut must include ⌘, ⌥, or ⌃".into());
+            self.keymap_notice = Some(if keymap::MAC_KEYS {
+                "Shortcut must include ⌘, ⌥, or ⌃".into()
+            } else {
+                "Shortcut must include Ctrl or Alt".into()
+            });
             return Task::none();
         }
         if let Some(other) = self.keymap.conflict(&chord, action) {

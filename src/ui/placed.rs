@@ -332,17 +332,33 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Placed<'_> {
     }
 }
 
+/// What the app has of what [`watch_overlays`] reports, and the window's
+/// corners it draws `content` with.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Known {
+    /// Whether a widget draws an overlay of its own.
+    pub(crate) overlay_open: bool,
+    /// Whether iced's software renderer draws the window.
+    pub(crate) software_renderer: bool,
+    /// The radius of the window's corners inside its frame, for what
+    /// reaches them to round its own to (`theme::window_corners`).
+    pub(crate) corners: f32,
+}
+
 /// `content` — the whole window — reporting the window's focus and its
-/// moves as they come, ahead of the events after them; and, as
+/// moves as they come, ahead of the events after them; as
 /// `Message::OverlayOpen`, whether a widget in it draws an overlay of its
 /// own now (a picker's menu, a tooltip, …) whenever that is not what the
-/// app has (`known`). iced
+/// app has (`known`); and which of iced's renderers draws the window, when
+/// that is not what the app has either (`WindowMsg::SoftwareRenderer`):
+/// the software one leaves no corner clear. iced
 /// draws such an overlay over everything, so it may hide any question:
 /// read from what is drawn, frame by frame, it cannot be left standing by
 /// a picker taken away with its menu open, nor dropped by one picker's
-/// close while another opens.
+/// close while another opens. `content` is drawn with the window's
+/// corners as `known` says (`theme::with_window_corners`).
 pub(crate) fn watch_overlays<'a>(
-    known: bool,
+    known: Known,
     content: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     Element::new(Overlays {
@@ -353,7 +369,7 @@ pub(crate) fn watch_overlays<'a>(
 
 /// See [`watch_overlays`].
 struct Overlays<'a> {
-    known: bool,
+    known: Known,
     content: Element<'a, Message>,
 }
 
@@ -365,6 +381,8 @@ struct Seen {
     open: bool,
     /// What it reported in this view.
     reported: Option<bool>,
+    /// Whether it reported the renderer in this view.
+    renderer_told: bool,
 }
 
 impl Widget<Message, iced::Theme, iced::Renderer> for Overlays<'_> {
@@ -389,7 +407,9 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Overlays<'_> {
     }
 
     fn diff(&self, tree: &mut Tree) {
-        tree.state.downcast_mut::<Seen>().reported = None;
+        let seen = tree.state.downcast_mut::<Seen>();
+        seen.reported = None;
+        seen.renderer_told = false;
         tree.diff_children(std::slice::from_ref(&self.content));
     }
 
@@ -414,15 +434,17 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Overlays<'_> {
         cursor: mouse::Cursor,
         viewport: &Rectangle,
     ) {
-        self.content.as_widget().draw(
-            &tree.children[0],
-            renderer,
-            theme,
-            style,
-            layout,
-            cursor,
-            viewport,
-        );
+        crate::theme::with_window_corners(self.known.corners, || {
+            self.content.as_widget().draw(
+                &tree.children[0],
+                renderer,
+                theme,
+                style,
+                layout,
+                cursor,
+                viewport,
+            );
+        });
     }
 
     fn operate(
@@ -468,9 +490,18 @@ impl Widget<Message, iced::Theme, iced::Renderer> for Overlays<'_> {
         }
         // Said ahead of what the event does, as `placed` says where it is.
         let seen = tree.state.downcast_mut::<Seen>();
-        if seen.open != self.known && seen.reported != Some(seen.open) {
+        if seen.open != self.known.overlay_open && seen.reported != Some(seen.open) {
             seen.reported = Some(seen.open);
             shell.publish(Message::OverlayOpen(seen.open));
+        }
+        // The renderer the window is drawn with (iced falls back to its
+        // software one where it finds no GPU to draw with).
+        let software = matches!(renderer, iced::Renderer::Secondary(_));
+        if software != self.known.software_renderer && !seen.renderer_told {
+            seen.renderer_told = true;
+            shell.publish(Message::Window(crate::WindowMsg::SoftwareRenderer(
+                software,
+            )));
         }
         self.content.as_widget_mut().update(
             &mut tree.children[0],
@@ -606,7 +637,15 @@ mod tests {
 
         // So with the window's overlays: a release that is the first event
         // after a menu went is told after it went.
+        // Told the renderer it has: what it would say of that is not what
+        // this is about.
+        let software = matches!(renderer, iced::Renderer::Secondary(_));
         let view = |known: bool| -> iced::Element<'static, Message> {
+            let known = super::Known {
+                overlay_open: known,
+                software_renderer: software,
+                corners: 0.0,
+            };
             watch_overlays(known, button("Allow").height(60).on_press(Message::Noop))
         };
         sent.clear();

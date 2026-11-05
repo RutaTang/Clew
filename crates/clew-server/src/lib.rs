@@ -44,11 +44,18 @@
 pub mod acp;
 pub mod agent;
 pub mod agent_lsp;
+pub mod dapbridge;
+mod dapout;
+pub mod erlangdebug;
 mod files;
 mod gitops;
+pub mod haskelldebug;
 mod index;
+pub mod javadebug;
 mod lsp_gate;
 pub mod mcp;
+pub mod nodedebug;
+pub mod phpdebug;
 mod process;
 mod state;
 mod transport;
@@ -935,6 +942,61 @@ impl Server {
                 });
                 None
             }
+            // What there is to choose from for the project's languages,
+            // looked for on this host — where they are: its Python
+            // interpreters and the one its server is given with the user's
+            // choices, its Cargo features, its Go build tags, its compile
+            // databases, its toolchains. Reads files only: nothing is run.
+            // Off the loop, replies itself.
+            Request::LanguageOptions { languages, choices } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                spawn_reply(&self.out, id, "listing the language options", move || {
+                    // Unreadable, it names nothing a choice would win over.
+                    let config = clew_core::lsp::config::ProjectLspConfig::load(&root).ok();
+                    Event::LanguageOptions {
+                        root: root.to_string_lossy().into_owned(),
+                        options: clew_core::lsp::langopts::language_options(
+                            &root,
+                            &languages,
+                            &choices,
+                            config.as_ref(),
+                        ),
+                    }
+                });
+                None
+            }
+            // What the project's build leaves out with the user's choices —
+            // its Cargo features, Go tags, C macros — read on this host,
+            // where its manifests are, for the client's reading aid. Reads
+            // files only. Off the loop, replies itself.
+            Request::BuildFacts { choices } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
+                spawn_reply(&self.out, id, "reading the build facts", move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return not_ready();
+                    };
+                    let crates =
+                        clew_core::buildfacts::crate_dirs(files.iter().map(|f| f.rel.as_str()));
+                    let config = clew_core::lsp::config::ProjectLspConfig::load(&root).ok();
+                    Event::BuildFacts {
+                        root: root.to_string_lossy().into_owned(),
+                        facts: clew_core::buildfacts::read(
+                            &root,
+                            &crates,
+                            &choices,
+                            config.as_ref(),
+                        ),
+                    }
+                });
+                None
+            }
             // The name-based project call graph, built where the files live.
             // The client supplies its resolved import scope (rel-based); the
             // reply's node paths are project-relative too. CPU-bound: off
@@ -952,6 +1014,55 @@ impl Server {
                     Event::ProjectCalls {
                         root: root.to_string_lossy().into_owned(),
                         graph: build_project_calls_graph(&root, &files, &scope),
+                    }
+                });
+                None
+            }
+            // The project's maps — its schema, routes, supervision trees —
+            // read where the files are. Off the loop: every file is read.
+            Request::ProjectMaps => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                let files_slot = self.files.clone();
+                spawn_reply(&self.out, id, "reading the project's maps", move || {
+                    let Some(files) = Self::wait_for_files_blocking(&files_slot, &root) else {
+                        return not_ready();
+                    };
+                    Event::ProjectMaps {
+                        root: root.to_string_lossy().into_owned(),
+                        maps: clew_core::maps::build(&root, &files),
+                    }
+                });
+                None
+            }
+            // What a C/C++ macro expands to, read where the headers are.
+            // Confined to the project like ReadFile — the headers too — and
+            // off the loop: a header chain is read.
+            Request::ExpandMacro {
+                rel,
+                line,
+                column,
+                target,
+            } => {
+                let root = match self.root_or_refuse() {
+                    Ok(root) => root,
+                    Err(refusal) => return Some(*refusal),
+                };
+                if let Err(e) = clew_core::confine::check_lexical(&rel) {
+                    return Some(files::confine_refusal(&rel, &e));
+                }
+                let target: inactive::Target = target.into();
+                spawn_reply(&self.out, id, "expanding the macro", move || {
+                    match clew_core::cmacro::expand_in_project(&root, &rel, line, column, &target) {
+                        Ok(expansion) => Event::MacroExpansion {
+                            rel,
+                            line,
+                            column,
+                            expansion,
+                        },
+                        Err(e) => failed(e),
                     }
                 });
                 None
@@ -1188,6 +1299,7 @@ impl Server {
                 lang,
                 program,
                 args,
+                choices,
             } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
@@ -1201,11 +1313,16 @@ impl Server {
                     let resolve_root = root.clone();
                     let resolve_lang = lang.clone();
                     let resolved = tokio::task::spawn_blocking(move || {
+                        // An adapter that listens on TCP runs behind this
+                        // binary's own `dap-bridge`.
+                        let bridge = std::env::current_exe().ok();
                         clew_core::debugadapter::resolve_stdio(
                             &resolve_lang,
                             &program,
                             &args,
                             &resolve_root,
+                            &choices,
+                            bridge.as_deref(),
                         )
                     })
                     .await
@@ -1277,7 +1394,11 @@ impl Server {
             // hashes the executable's bytes, and even the bounded worst case
             // must not stall the serial request loop (a queued ProcessKill
             // has to stay reachable).
-            Request::SpawnLsp { proc, language } => {
+            Request::SpawnLsp {
+                proc,
+                language,
+                choices,
+            } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -1295,7 +1416,7 @@ impl Server {
                     let gate_root = root.clone();
                     let gate_lang = language.clone();
                     let resolved = tokio::task::spawn_blocking(move || {
-                        lsp_gate::resolve_spawn_exe(&approvals, &gate_root, &gate_lang)
+                        lsp_gate::resolve_spawn_exe(&approvals, &gate_root, &gate_lang, &choices)
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -1347,7 +1468,7 @@ impl Server {
             // line (and fingerprint) before granting an approval — or raise
             // the install-consent prompt, or give up, each explicitly. Off
             // the loop: resolving fingerprints the command's bytes.
-            Request::LspResolve { language } => {
+            Request::LspResolve { language, choices } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -1357,7 +1478,7 @@ impl Server {
                 tokio::spawn(async move {
                     let (lang, r, o) = (language.clone(), root.clone(), out.clone());
                     let resolution = tokio::task::spawn_blocking(move || {
-                        lsp_gate::resolve_lsp(&o, &approvals, &r, &lang)
+                        lsp_gate::resolve_lsp(&o, &approvals, &r, &lang, &choices)
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -1385,7 +1506,11 @@ impl Server {
             // The consent is for the install the user was SHOWN, whose digest
             // the request carries back; `install_lsp` runs nothing else. It
             // stops when the connection leaves the project.
-            Request::LspInstall { language, consent } => {
+            Request::LspInstall {
+                language,
+                consent,
+                choices,
+            } => {
                 let root = match self.root_or_refuse() {
                     Ok(root) => root,
                     Err(refusal) => return Some(*refusal),
@@ -1396,7 +1521,7 @@ impl Server {
                 tokio::spawn(async move {
                     let (lang, r, o) = (language.clone(), root.clone(), out.clone());
                     let outcome = tokio::task::spawn_blocking(move || {
-                        lsp_gate::install_lsp(&o, &approvals, &r, &lang, &consent, &stop)
+                        lsp_gate::install_lsp(&o, &approvals, &r, &lang, &consent, &stop, &choices)
                     })
                     .await;
                     let resolution = match outcome {
@@ -1716,6 +1841,7 @@ impl Server {
                 history,
                 context,
                 tools,
+                choices,
             } => {
                 let fail = |out: &UnboundedSender<ServerMessage>, msg: &str| {
                     let _ = out.send(ServerMessage::Notification {
@@ -1743,14 +1869,16 @@ impl Server {
                 let budget = self.out_budget.clone();
                 let embed_cfg = self.ai_embed.clone();
                 // Language-server pool for the semantic tools: reuse across
-                // turns, rebuild when a different project is opened.
+                // turns, rebuild when a different project is opened or the
+                // user's choices for its languages changed. The pool left
+                // behind stops its servers once the turns holding it end.
                 let lsp = match &self.agent_lsp {
-                    Some(pool) if pool.root() == root => pool.clone(),
+                    Some(pool) if pool.serves(&root, &choices) => pool.clone(),
                     _ => {
-                        let pool = Arc::new(agent_lsp::LspPool::new(
-                            root.clone(),
-                            self.lsp_approvals.clone(),
-                        ));
+                        let pool = Arc::new(
+                            agent_lsp::LspPool::new(root.clone(), self.lsp_approvals.clone())
+                                .with_choices(choices),
+                        );
                         self.agent_lsp = Some(pool.clone());
                         pool
                     }
@@ -2221,6 +2349,7 @@ mod tests {
     /// and when the connection closes: `LspInstall` hands the install the
     /// connection's stop flag, which both set. (In a child process: it needs
     /// a data dir, and a `go` of its own on PATH that only waits.)
+    #[cfg(unix)]
     #[test]
     fn an_install_stops_when_the_connection_leaves_the_project_or_closes() {
         use crate::test_support::{Scratch, fake_slow_go, run_in_child};
@@ -2233,6 +2362,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     #[ignore = "runs in a child process, from an_install_stops_when_the_connection_leaves_the_project_or_closes"]
     fn child_install_stops_on_leave_and_close() {
@@ -2281,6 +2411,7 @@ mod tests {
             assert!(matches!(reply(&mut rx, 1), Event::Tree { .. }));
             let resolve = Request::LspResolve {
                 language: "go".into(),
+                choices: Default::default(),
             };
             rt.block_on(server.handle(2, resolve));
             let consent = match reply(&mut rx, 2) {
@@ -2293,6 +2424,7 @@ mod tests {
             let install = Request::LspInstall {
                 language: "go".into(),
                 consent,
+                choices: Default::default(),
             };
             rt.block_on(server.handle(3, install));
             let pid = started_pid(&bin);
@@ -2967,11 +3099,15 @@ mod tests {
         let scratch = crate::test_support::Scratch::new("sources-unreadable");
         let root = scratch.canonicalize().unwrap();
         // A name no file system takes, in a directory that is there: its
-        // lookup fails, whatever the permissions.
+        // lookup fails, whatever the permissions. (Windows may say of it
+        // only that it is not found: that half is Unix's.)
         std::fs::create_dir_all(root.join("src")).unwrap();
-        let long = format!("src/{}.rs", "n".repeat(300));
-        let lookup = std::fs::symlink_metadata(root.join(&long)).expect_err("no such name");
-        assert_eq!(settled_as(&root, &long), format!("unreadable: {lookup}"));
+        #[cfg(unix)]
+        {
+            let long = format!("src/{}.rs", "n".repeat(300));
+            let lookup = std::fs::symlink_metadata(root.join(&long)).expect_err("no such name");
+            assert_eq!(settled_as(&root, &long), format!("unreadable: {lookup}"));
+        }
         let gone = root.join("gone");
         let why = settled_as(&gone, "src/lib.rs");
         assert!(

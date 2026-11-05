@@ -1332,8 +1332,20 @@ pub async fn reap(child: tokio::process::Child, grace: Duration, own_group: bool
     #[cfg(not(unix))]
     let _ = own_group;
     let mut child = child;
+    // Windows: the child's job object (`procgroup::adopt`) stands for its
+    // group — ended once the leader has exited, or to end it.
+    #[cfg(windows)]
+    let pid = child.id();
     if !grace.is_zero() && tokio::time::timeout(grace, child.wait()).await.is_ok() {
+        #[cfg(windows)]
+        if let Some(pid) = pid {
+            crate::procgroup::kill(pid);
+        }
         return; // exited by itself
+    }
+    #[cfg(windows)]
+    if let Some(pid) = pid {
+        crate::procgroup::kill(pid);
     }
     let _ = child.kill().await;
 }
@@ -1368,7 +1380,16 @@ pub fn try_wait_sweeping(
             LeaderState::Unknown => {}
         }
     }
-    child.try_wait()
+    // Windows: what the leader left in its job object goes with it. (Its
+    // pid is asked first: tokio forgets it once the child is reaped.)
+    #[cfg(windows)]
+    let pid = child.id();
+    let status = child.try_wait()?;
+    #[cfg(windows)]
+    if let (Some(_), Some(pid)) = (status, pid) {
+        crate::procgroup::kill(pid);
+    }
+    Ok(status)
 }
 
 /// [`try_wait_sweeping`], waiting for the exit (polled with a backoff; the

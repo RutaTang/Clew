@@ -348,7 +348,7 @@ pub(crate) fn on_watch_batch(
             if changes_set && in_walked_folder(rel, &mut walked, files, cb_root) {
                 structural = true;
             }
-            rels.push(rel.to_string_lossy().into_owned());
+            rels.push(clew_core::rel_string(rel));
         }
     }
     // A create/delete — or an edit to the ignore rules — changes the
@@ -528,6 +528,25 @@ pub(crate) fn on_watch_batch(
                 true => clew_protocol::Patch::Set(clew_core::imports::read_dart_package(cb_root)),
                 false => clew_protocol::Patch::Unchanged,
             };
+            // What the package manifests say is recomputed when one of
+            // them moved, or a file of their languages (whose presence
+            // decides whether they are read at all).
+            let manifests = if rels
+                .iter()
+                .any(|r| clew_core::imports::bears_on_manifests(r))
+            {
+                let all = files
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .as_ref()
+                    .map(|p| p.files.clone());
+                match all {
+                    Some(all) => crate::index::manifests_patch(cb_root, &all),
+                    None => clew_protocol::Patch::Unchanged,
+                }
+            } else {
+                clew_protocol::Patch::Unchanged
+            };
             // The structure index is whole-project (a trait's
             // implementors live anywhere), so it is rebuilt rather
             // than patched. Only for batches that can affect it, on
@@ -554,6 +573,7 @@ pub(crate) fn on_watch_batch(
                 files: files_out,
                 go_module,
                 dart_package,
+                manifests,
                 structure,
             })
         });
@@ -642,7 +662,7 @@ fn listed_below_the_top(
             .map(|p| p.files.iter().map(|f| f.rel.clone()).collect())
             .unwrap_or_default()
     });
-    rel.to_str().is_some_and(|r| listed.contains(r))
+    listed.contains(&clew_core::rel_string(rel))
 }
 
 /// Whether a create, remove or rename at `rel` can change the file set: it

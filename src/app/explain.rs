@@ -614,10 +614,10 @@ impl App {
     /// `path` as the status line names a file: relative to the project.
     fn shown_path(&self, path: &Path) -> String {
         let root = self.proj.project.as_ref().map(|p| p.root.as_path());
-        root.and_then(|root| path.strip_prefix(root).ok())
-            .unwrap_or(path)
-            .display()
-            .to_string()
+        clew_core::rel_string(
+            root.and_then(|root| path.strip_prefix(root).ok())
+                .unwrap_or(path),
+        )
     }
 
     pub(crate) fn request_auto_refresh(&mut self) -> Task<Message> {
@@ -808,7 +808,7 @@ impl App {
         }
         if !self.proj.explain.cache.contains_key(&node) {
             self.status =
-                "Nothing to re-explain yet — run Explain in the toolbar to explain the project first.".into();
+                "Nothing to re-explain yet — run Explain All from the ⋯ menu to explain the project first.".into();
             return Task::none();
         }
         // A second pass is refused while one runs (`start_explain_pass`):
@@ -871,11 +871,7 @@ impl App {
         let remote_rel = (!self.local_project_state())
             .then(|| self.proj.project.as_ref().map(|p| p.root.clone()))
             .flatten()
-            .and_then(|root| {
-                file.strip_prefix(&root)
-                    .ok()
-                    .map(|r| r.to_string_lossy().into_owned())
-            });
+            .and_then(|root| file.strip_prefix(&root).ok().map(clew_core::rel_string));
         // The local gather reads this disk, so it needs the project root to
         // confine that read to.
         let root = self.proj.project.as_ref().map(|p| p.root.clone());
@@ -1128,7 +1124,7 @@ pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
             c.summary
         ),
         Some(c) => c.summary.clone(),
-        None => "Not explained yet — press Explain in the toolbar.".to_string(),
+        None => "Not explained yet — run Explain All from the ⋯ menu.".to_string(),
     }
 }
 
@@ -1191,6 +1187,17 @@ impl App {
             }
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),
             ExplainMsg::Blocks(node) => self.on_explain_blocks(node),
+            ExplainMsg::ToggleBlocks => match self.proj.explain.view.clone() {
+                Some(node @ explain::Node::Function { .. }) => {
+                    if self.proj.explain.showing_detail {
+                        self.show_right_panel = true;
+                        self.show_explanation(node)
+                    } else {
+                        self.on_explain_blocks(node)
+                    }
+                }
+                _ => Task::none(),
+            },
             ExplainMsg::BlocksExplained { node, detail, .. } => {
                 self.on_blocks_explained(node, detail)
             }

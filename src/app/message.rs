@@ -60,6 +60,10 @@ pub enum Message {
     /// The settings' MCP servers and ACP agents. Handled in `app::integrations`
     /// (`App::update_integrations`).
     Integrations(IntegrationsMsg),
+    /// The settings' languages of the open project: what its servers are
+    /// given, and the Python interpreter the user picks. Handled in
+    /// `app::languages` (`App::update_languages`).
+    Languages(LanguagesMsg),
     /// Git history in the reader: time travel and "Why is this here?". Handled in
     /// `app::timetravel` (`App::update_time_travel`).
     TimeTravel(TimeTravelMsg),
@@ -87,6 +91,9 @@ pub enum Message {
     Window(WindowMsg),
     /// The guided tour. Handled in `app::tutorial` (`App::update_tutorial`).
     Tutorial(TutorialMsg),
+    /// Talking to the window: listening, the words heard, the speech
+    /// models. Handled in `app::voice` (`App::update_voice`).
+    Voice(crate::VoiceMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -163,7 +170,7 @@ pub enum ServerMsg {
     ResendNotReady {
         stamp: Stamp,
         id: u64,
-        request: clew_protocol::Request,
+        request: Box<clew_protocol::Request>,
         attempt: u32,
     },
     /// The server transport died mid-session (process exit, SSH drop). All
@@ -386,6 +393,9 @@ pub enum EditorMsg {
         /// cannot vouch for it: the user may have picked another target while
         /// this pass ran, and the same source then has a different answer.
         target: inactive::Target,
+        /// The build facts `inactive` was evaluated against, for the same
+        /// reason (`ProjectSession::build_facts`).
+        facts: Arc<clew_protocol::BuildFacts>,
     },
     /// Per-line git blame + change status finished loading for `abs`.
     GitInfoLoaded {
@@ -518,6 +528,22 @@ pub enum HoverMsg {
     Cleared,
     /// The cursor entered (true) or left (false) the hover tooltip itself.
     Pin(bool),
+    /// The context menu's language action ([`crate::ContextMenu::insight`]),
+    /// at the menu's position.
+    Insight,
+    /// The same at the caret (`ge`).
+    InsightAtCursor,
+    /// The language's answer: `None` when it had nothing to say there.
+    InsightAnswered {
+        stamp: Stamp,
+        /// Which request it answers ([`crate::app::model::Insight::token`]).
+        token: u64,
+        result: Result<Option<crate::app::model::InsightAnswer>, String>,
+    },
+    /// Close the insight popup.
+    InsightClose,
+    /// Open where the insight points (a macro's definition).
+    InsightOpenDefinition,
     Answered {
         stamp: Stamp,
         /// `ProjectSession::hover_gen` at request time — the peek this text was fetched
@@ -559,6 +585,12 @@ pub enum NavMsg {
         line: Option<usize>,
     },
     FinderConfirm,
+    /// Open the command bar: the finder, its suggestions showing.
+    PaletteOpened,
+    /// Run the palette command with this title (see `app::palette`).
+    PaletteRun(String),
+    /// Do what one of the command bar's suggestions offers.
+    PaletteSuggestion(crate::app::palette::Suggestion),
     GotoLineRequested,
     DefinitionResult {
         stamp: Stamp,
@@ -760,6 +792,15 @@ pub enum GraphMsg {
         stamp: Stamp,
         graph: Result<projectcalls::ProjectCallGraph, String>,
     },
+    /// The project's maps were read — here, or on its host — at the file
+    /// registry's revision `rev`, or why they could not be.
+    MapsBuilt {
+        stamp: Stamp,
+        rev: u64,
+        maps: Result<Vec<clew_protocol::ProjectMap>, String>,
+    },
+    /// Show the map with this id in the Maps overlay.
+    SelectMap(String),
     /// A map's layout, computed off the UI thread (see
     /// `App::refresh_graph_layout`) for `overlay` — or why it could not be.
     /// Applied only while it is the one requested last (`seq`,
@@ -858,6 +899,9 @@ pub enum ExplainMsg {
     ReexplainNode,
     /// Show (or generate on demand) a function's block-by-block walkthrough.
     Blocks(explain::Node),
+    /// The function explained now, block by block — or, so shown, its
+    /// summary again (the View menu's "Explanation in blocks").
+    ToggleBlocks,
     /// The block walkthrough for `node` finished (or failed).
     BlocksExplained {
         stamp: Stamp,
@@ -1015,8 +1059,21 @@ pub enum SemanticMsg {
 /// The Ask panel: questions, answers streaming in, pinned selections.
 #[derive(Debug, Clone)]
 pub enum AskMsg {
-    /// Toolbar "Ask": open the bottom panel on the Ask tab, or collapse it.
+    /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, or put it away.
     Toggle,
+    /// Open the Ask window (as a card, when it is put away) with its input
+    /// focused.
+    Open,
+    /// Make the card large and centred.
+    Expand,
+    /// Make the large window a card in the corner again.
+    Shrink,
+    /// Keep the conversation in the margin, as a tab of its own.
+    KeepInMargin,
+    /// Take it out of the margin: a card over the code again.
+    Float,
+    /// Put the Ask window away.
+    Close,
     /// The Ask input box text changed.
     InputChanged(String),
     /// Submit the current question.
@@ -1238,6 +1295,104 @@ impl IntegrationsMsg {
             | IntegrationsMsg::AcpPreset(..)
             | IntegrationsMsg::AcpRemove(..)
             | IntegrationsMsg::AcpShareMcp(..) => None,
+        }
+    }
+}
+
+/// The settings' languages of the open project. A choice is saved at once,
+/// for this project on this machine (`clew_core::lsp::choices`).
+#[derive(Debug, Clone)]
+pub enum LanguagesMsg {
+    /// The project's choices, read when it opened.
+    ChoicesLoaded {
+        stamp: Stamp,
+        choices: clew_protocol::LanguageChoices,
+    },
+    /// Look again at what there is to choose from.
+    Refresh,
+    /// The listing landed.
+    Listed {
+        stamp: Stamp,
+        result: Result<clew_protocol::LanguageOptions, String>,
+    },
+    /// Use this Python interpreter — `None`: let clew find one.
+    ChoosePython(Option<String>),
+    /// Make these the project's choices: a pick in the view (a feature, a
+    /// tag, a compilation database, a toolchain, a reset).
+    Choose(Box<clew_protocol::LanguageChoices>),
+    /// A typed field changed.
+    Draft(LangField, String),
+    /// Use what is typed in the field.
+    UseDraft(LangField),
+    /// The language a server program is being chosen for.
+    ServerLanguage(String),
+    /// Pick a file (or, for a compilation database, a folder) for the field
+    /// in a dialog — a project on this machine.
+    Browse(LangField),
+    /// The dialog closed.
+    Browsed {
+        stamp: Stamp,
+        field: LangField,
+        path: Option<PathBuf>,
+    },
+    /// A choice was saved, or could not be.
+    Saved {
+        stamp: Stamp,
+        result: Result<(), String>,
+    },
+    /// What the project's build leaves out was read.
+    FactsLoaded {
+        stamp: Stamp,
+        result: Result<clew_protocol::BuildFacts, String>,
+    },
+}
+
+/// A typed field of the settings' languages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LangField {
+    /// A Python interpreter's path.
+    PythonPath,
+    /// A Rust target triple.
+    RustTarget,
+    /// A Go build tag to add.
+    GoTag,
+    /// A folder holding a `compile_commands.json`.
+    CDatabase,
+    /// Flags for C/C++ files no compilation database covers.
+    CFlags,
+    /// A TypeScript's `tsserver.js` (or its folder).
+    TypeScriptPath,
+    /// A `zig` compiler.
+    ZigPath,
+    /// A JDK's home folder.
+    JavaHome,
+    /// A PHP version.
+    PhpVersion,
+    /// A C# solution file.
+    CSharpSolution,
+    /// A language server program.
+    ServerCommand,
+    /// Its arguments.
+    ServerArgs,
+}
+
+impl LanguagesMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            LanguagesMsg::ChoicesLoaded { stamp, .. }
+            | LanguagesMsg::Listed { stamp, .. }
+            | LanguagesMsg::Browsed { stamp, .. }
+            | LanguagesMsg::Saved { stamp, .. }
+            | LanguagesMsg::FactsLoaded { stamp, .. } => Some(Origin::Stamped(stamp)),
+            LanguagesMsg::Refresh
+            | LanguagesMsg::ChoosePython(..)
+            | LanguagesMsg::Choose(..)
+            | LanguagesMsg::Draft(..)
+            | LanguagesMsg::UseDraft(..)
+            | LanguagesMsg::ServerLanguage(..)
+            | LanguagesMsg::Browse(..) => None,
         }
     }
 }
@@ -1547,7 +1702,7 @@ pub enum LspMsg {
         stamp: Stamp,
         language: String,
         generation: u64,
-        result: Result<LspStagedCommand, String>,
+        result: Result<Box<LspStagedCommand>, String>,
     },
     /// The Language Servers panel's background listing finished: the store's
     /// installed servers (with their on-disk sizes) and, per language, where
@@ -1685,6 +1840,9 @@ pub enum WindowMsg {
     Moved,
     /// Start dragging the whole window (from the custom title-bar region).
     TitleBarDragged,
+    /// Start resizing the window from one of its edges or corners: the
+    /// borderless window's own grips (`ui::resize_grips`).
+    ResizeDragged(iced::window::Direction),
     /// The window gained or lost focus (greys out the custom controls).
     FocusChanged(bool),
     /// The pointer entered or left the traffic-light cluster (shows the icons).
@@ -1702,8 +1860,8 @@ pub enum WindowMsg {
     ResizeSidebar(f32),
     ResizeRight(f32),
     ResizeBottom(f32),
-    /// Switch the bottom panel's tab (Ask / Debug), opening it if collapsed.
-    BottomTabPicked(BottomTab),
+    /// Open the bottom panel: the debugger's.
+    ShowDebugPanel,
     /// Collapse the bottom panel.
     CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
@@ -1725,6 +1883,28 @@ pub enum WindowMsg {
     ToggleFileBanner,
     /// Toggle the code minimap.
     ToggleMinimap,
+    /// Toggle the caret line's blame, past its end.
+    ToggleInlineBlame,
+    /// Toggle the lines down the code's indentation.
+    ToggleIndentGuides,
+    /// Open / close the app menu of Windows and Linux (the top bar's ☰).
+    ToggleAppMenu,
+    /// Open / close the reader's View menu (the file tools' View ▾).
+    ToggleViewMenu,
+    /// The Files view's filter changed.
+    FileFilterChanged(String),
+    /// Maximize the window, or make it a window again (Windows and Linux).
+    ToggleMaximize,
+    /// The reading panel's view picked.
+    MarginTabPicked(MarginTab),
+    /// Whether the window is maximized now, for its button to show.
+    MaximizedIs(bool),
+    /// Whether the window system composites the window over the desktop
+    /// now, for its corners (`app::corners`).
+    Composited(bool),
+    /// Whether iced draws the window with its software renderer, as the
+    /// window's own view finds it drawn (`ui::placed::watch_overlays`).
+    SoftwareRenderer(bool),
 }
 
 /// The guided tour.
@@ -1765,6 +1945,7 @@ impl Message {
             Message::Semantic(m) => m.origin(),
             Message::Ask(m) => m.origin(),
             Message::Integrations(m) => m.origin(),
+            Message::Languages(m) => m.origin(),
             Message::TimeTravel(m) => m.origin(),
             Message::Debug(m) => m.origin(),
             Message::Lsp(m) => m.origin(),
@@ -1775,6 +1956,7 @@ impl Message {
             Message::Updater(m) => m.origin(),
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
+            Message::Voice(m) => m.origin(),
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }
@@ -1904,15 +2086,19 @@ impl HoverMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            HoverMsg::Dwell { stamp, .. } | HoverMsg::Answered { stamp, .. } => {
-                Some(Origin::Stamped(stamp))
-            }
+            HoverMsg::Dwell { stamp, .. }
+            | HoverMsg::Answered { stamp, .. }
+            | HoverMsg::InsightAnswered { stamp, .. } => Some(Origin::Stamped(stamp)),
             HoverMsg::ContextMenuOpened { .. }
             | HoverMsg::ContextMenuClosed
             | HoverMsg::ContextGoto(..)
             | HoverMsg::Requested { .. }
             | HoverMsg::Cleared
-            | HoverMsg::Pin(..) => None,
+            | HoverMsg::Pin(..)
+            | HoverMsg::Insight
+            | HoverMsg::InsightAtCursor
+            | HoverMsg::InsightClose
+            | HoverMsg::InsightOpenDefinition => None,
         }
     }
 }
@@ -1936,6 +2122,9 @@ impl NavMsg {
             | NavMsg::FinderQueryChanged(..)
             | NavMsg::FinderPick { .. }
             | NavMsg::FinderConfirm
+            | NavMsg::PaletteOpened
+            | NavMsg::PaletteRun(..)
+            | NavMsg::PaletteSuggestion(..)
             | NavMsg::GotoLineRequested
             | NavMsg::JumpToCall { .. } => None,
         }
@@ -1996,6 +2185,7 @@ impl GraphMsg {
             GraphMsg::RemoteTsConfigsLoaded { stamp, .. }
             | GraphMsg::ImportGraphUpdated { stamp, .. }
             | GraphMsg::ProjectCallsBuilt { stamp, .. }
+            | GraphMsg::MapsBuilt { stamp, .. }
             | GraphMsg::ChurnLoaded { stamp, .. }
             | GraphMsg::GraphLaidOut { stamp, .. }
             | GraphMsg::RefineWaitOver { stamp, .. }
@@ -2012,6 +2202,7 @@ impl GraphMsg {
             | GraphMsg::Toggle3D
             | GraphMsg::ToggleSpin
             | GraphMsg::ToggleHeat
+            | GraphMsg::SelectMap(..)
             | GraphMsg::RefineProjectCalls => None,
         }
     }
@@ -2033,6 +2224,7 @@ impl ExplainMsg {
             | ExplainMsg::RefreshAll
             | ExplainMsg::Show(..)
             | ExplainMsg::ReexplainNode
+            | ExplainMsg::ToggleBlocks
             | ExplainMsg::Blocks(..) => None,
         }
     }
@@ -2184,6 +2376,12 @@ impl AskMsg {
             | AskMsg::AcpOptionSet { stamp, .. }
             | AskMsg::AcpCancelOverdue { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
+            | AskMsg::Open
+            | AskMsg::Expand
+            | AskMsg::Shrink
+            | AskMsg::KeepInMargin
+            | AskMsg::Float
+            | AskMsg::Close
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
             | AskMsg::Suggested(..)
@@ -2417,6 +2615,7 @@ impl WindowMsg {
             | WindowMsg::Resized(..)
             | WindowMsg::Moved
             | WindowMsg::TitleBarDragged
+            | WindowMsg::ResizeDragged(..)
             | WindowMsg::FocusChanged(..)
             | WindowMsg::ControlsHover(..)
             | WindowMsg::Close
@@ -2426,7 +2625,7 @@ impl WindowMsg {
             | WindowMsg::ResizeSidebar(..)
             | WindowMsg::ResizeRight(..)
             | WindowMsg::ResizeBottom(..)
-            | WindowMsg::BottomTabPicked(..)
+            | WindowMsg::ShowDebugPanel
             | WindowMsg::CollapseBottom
             | WindowMsg::ToggleToolsMenu
             | WindowMsg::ToggleTargetMenu
@@ -2437,7 +2636,17 @@ impl WindowMsg {
             | WindowMsg::RebindResetAll
             | WindowMsg::ToggleInlineSummaries
             | WindowMsg::ToggleFileBanner
-            | WindowMsg::ToggleMinimap => None,
+            | WindowMsg::ToggleMinimap
+            | WindowMsg::ToggleInlineBlame
+            | WindowMsg::ToggleIndentGuides
+            | WindowMsg::ToggleAppMenu
+            | WindowMsg::ToggleViewMenu
+            | WindowMsg::FileFilterChanged(..)
+            | WindowMsg::ToggleMaximize
+            | WindowMsg::MarginTabPicked(..)
+            | WindowMsg::MaximizedIs(..)
+            | WindowMsg::Composited(..)
+            | WindowMsg::SoftwareRenderer(..) => None,
         }
     }
 }

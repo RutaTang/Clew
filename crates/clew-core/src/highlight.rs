@@ -52,6 +52,9 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "variable",
     "variable.builtin",
     "variable.parameter",
+    // Appended, so the indices above — the style ids on the wire — stay.
+    "function.definition",
+    "function.macro",
 ];
 
 /// The styles that mark literal text — strings, comments and escapes — where
@@ -118,6 +121,13 @@ languages! {
     Html => "html",
     Css => "css",
     Zig => "zig",
+    Sql => "sql",
+    Lean => "lean",
+    Php => "php",
+    Ruby => "ruby",
+    CSharp => "csharp",
+    Erlang => "erlang",
+    Haskell => "haskell",
 }
 
 /// How many languages there are; sizes the per-language caches below.
@@ -181,6 +191,13 @@ impl Lang {
             Lang::Html => "HTML",
             Lang::Css => "CSS",
             Lang::Zig => "Zig",
+            Lang::Sql => "SQL",
+            Lang::Lean => "Lean",
+            Lang::Php => "PHP",
+            Lang::Ruby => "Ruby",
+            Lang::CSharp => "C#",
+            Lang::Erlang => "Erlang",
+            Lang::Haskell => "Haskell",
         }
     }
 
@@ -205,6 +222,32 @@ impl Lang {
             Lang::Html => &["html", "htm"],
             Lang::Css => &["css"],
             Lang::Zig => &["zig"],
+            Lang::Sql => &["sql", "pgsql"],
+            Lang::Lean => &["lean"],
+            Lang::Php => &["php", "phtml", "php8", "php7"],
+            Lang::Ruby => &["rb", "rake", "gemspec", "ru", "rbi"],
+            Lang::CSharp => &["cs", "csx"],
+            Lang::Erlang => &["erl", "hrl", "escript", "app.src"],
+            Lang::Haskell => &["hs", "hs-boot"],
+        }
+    }
+
+    /// Whole file names (no extension to go by) that select this language.
+    pub const fn file_names(self) -> &'static [&'static str] {
+        match self {
+            Lang::Ruby => &[
+                "Gemfile",
+                "Rakefile",
+                "Guardfile",
+                "Podfile",
+                "Vagrantfile",
+                "Fastfile",
+                "Brewfile",
+                "Capfile",
+                "Dangerfile",
+            ],
+            Lang::Erlang => &["rebar.config", "sys.config"],
+            _ => &[],
         }
     }
 
@@ -229,6 +272,22 @@ impl Lang {
             Lang::Html => &[],
             Lang::Css => &[],
             Lang::Zig => &[],
+            Lang::Sql => &[
+                "postgresql",
+                "postgres",
+                "pgsql",
+                "plpgsql",
+                "mysql",
+                "sqlite",
+                "tsql",
+                "plsql",
+            ],
+            Lang::Lean => &["lean4"],
+            Lang::Php => &[],
+            Lang::Ruby => &["rb"],
+            Lang::CSharp => &["cs", "c#", "c-sharp"],
+            Lang::Erlang => &["erl"],
+            Lang::Haskell => &["hs"],
         }
     }
 
@@ -253,6 +312,13 @@ impl Lang {
             Lang::Html => tree_sitter_html::LANGUAGE.into(),
             Lang::Css => tree_sitter_css::LANGUAGE.into(),
             Lang::Zig => tree_sitter_zig::LANGUAGE.into(),
+            Lang::Sql => tree_sitter_sequel::LANGUAGE.into(),
+            Lang::Lean => tree_sitter_lean4::LANGUAGE.into(),
+            Lang::Php => tree_sitter_php::LANGUAGE_PHP.into(),
+            Lang::Ruby => tree_sitter_ruby::LANGUAGE.into(),
+            Lang::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
+            Lang::Erlang => tree_sitter_erlang::LANGUAGE.into(),
+            Lang::Haskell => tree_sitter_haskell::LANGUAGE.into(),
         }
     }
 
@@ -272,7 +338,7 @@ impl Lang {
         use tree_sitter_javascript as js;
         use tree_sitter_typescript as ts;
         match self {
-            Lang::Rust => &[tree_sitter_rust::HIGHLIGHTS_QUERY],
+            Lang::Rust => &[tree_sitter_rust::HIGHLIGHTS_QUERY, RUST_REFINEMENTS],
             Lang::Python => &[tree_sitter_python::HIGHLIGHTS_QUERY],
             Lang::JavaScript => &[js::HIGHLIGHT_QUERY, js::JSX_HIGHLIGHT_QUERY],
             Lang::TypeScript => &[js::HIGHLIGHT_QUERY, ts::HIGHLIGHTS_QUERY],
@@ -297,6 +363,44 @@ impl Lang {
             Lang::Html => &[tree_sitter_html::HIGHLIGHTS_QUERY],
             Lang::Css => &[tree_sitter_css::HIGHLIGHTS_QUERY],
             Lang::Zig => &[tree_sitter_zig::HIGHLIGHTS_QUERY],
+            Lang::Sql => &[
+                tree_sitter_sequel::HIGHLIGHTS_QUERY,
+                SQL_HIGHLIGHT_OVERRIDES,
+            ],
+            Lang::Lean => &[tree_sitter_lean4::HIGHLIGHTS_QUERY],
+            Lang::Php => &[tree_sitter_php::HIGHLIGHTS_QUERY],
+            Lang::Ruby => &[tree_sitter_ruby::HIGHLIGHTS_QUERY],
+            Lang::CSharp => &[tree_sitter_c_sharp::HIGHLIGHTS_QUERY],
+            Lang::Erlang => &[tree_sitter_erlang::HIGHLIGHTS_QUERY],
+            Lang::Haskell => &[tree_sitter_haskell::HIGHLIGHTS_QUERY],
+        }
+    }
+
+    /// Capture names of this language's highlight query that are not clew's,
+    /// and the style each stands for (see [`SQL_CAPTURE_NAMES`]).
+    fn capture_names(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Lang::Sql => SQL_CAPTURE_NAMES,
+            Lang::Haskell => HASKELL_CAPTURE_NAMES,
+            Lang::Php | Lang::Ruby | Lang::CSharp | Lang::Erlang => &[],
+            Lang::Rust
+            | Lang::Python
+            | Lang::JavaScript
+            | Lang::TypeScript
+            | Lang::Tsx
+            | Lang::Go
+            | Lang::Dart
+            | Lang::C
+            | Lang::Cpp
+            | Lang::Java
+            | Lang::Json
+            | Lang::Bash
+            | Lang::Yaml
+            | Lang::Toml
+            | Lang::Html
+            | Lang::Css
+            | Lang::Zig
+            | Lang::Lean => &[],
         }
     }
 
@@ -317,13 +421,15 @@ impl Lang {
             Lang::C => &[tree_sitter_c::TAGS_QUERY],
             Lang::Cpp => &[tree_sitter_cpp::TAGS_QUERY],
             Lang::Java => &[tree_sitter_java::TAGS_QUERY, JAVA_EXTRA_TAGS],
-            Lang::Json
-            | Lang::Bash
-            | Lang::Yaml
-            | Lang::Toml
-            | Lang::Html
-            | Lang::Css
-            | Lang::Zig => &[],
+            Lang::Sql => &[SQL_TAGS],
+            Lang::Lean => &[LEAN_TAGS],
+            Lang::Php => &[PHP_TAGS],
+            Lang::Ruby => &[tree_sitter_ruby::TAGS_QUERY],
+            Lang::CSharp => &[CSHARP_TAGS],
+            Lang::Erlang => &[ERLANG_TAGS],
+            Lang::Haskell => &[HASKELL_TAGS],
+            Lang::Zig => &[ZIG_TAGS],
+            Lang::Json | Lang::Bash | Lang::Yaml | Lang::Toml | Lang::Html | Lang::Css => &[],
         }
     }
 
@@ -342,7 +448,14 @@ impl Lang {
             | Lang::Toml
             | Lang::Html
             | Lang::Css
-            | Lang::Zig => Family::Alone(self),
+            | Lang::Zig
+            | Lang::Sql
+            | Lang::Lean
+            | Lang::Php
+            | Lang::Ruby
+            | Lang::CSharp
+            | Lang::Erlang
+            | Lang::Haskell => Family::Alone(self),
         }
     }
 
@@ -368,6 +481,230 @@ impl Lang {
 /// bracket in `'{'` into the bracket matcher as code. Appended last so it wins
 /// (see [`Lang::highlight_parts`]).
 const C_LITERAL_OVERRIDES: &str = "\n(char_literal) @string\n";
+
+/// tree-sitter-sequel's number patterns are written for Neovim's Lua matcher
+/// (`%d`), which tree-sitter's regex reads as a literal `%d`: no literal ever
+/// matched them, and every number was drawn as a string. Appended last so it
+/// wins (see [`Lang::highlight_parts`]).
+const SQL_HIGHLIGHT_OVERRIDES: &str = r#"
+((literal) @number
+  (#match? @number "^[-+]?[0-9]+$"))
+((literal) @number
+  (#match? @number "^[-+]?[0-9]*\\.[0-9]+$"))
+"#;
+
+/// The capture names of tree-sitter-sequel's highlight query that are not
+/// clew's, and the style each stands for (empty: none). A capture
+/// tree-sitter-highlight does not know is not merely unstyled — the LAST
+/// capture on a node wins, so the query's `(comment) @comment @spell` left
+/// every comment uncoloured.
+/// What Clew's palette tells apart in Rust and the grammar's query does not:
+/// a function where it is defined (not where it is called), the module path
+/// before a name (`std::path::` in `std::path::Path`), a macro, and an
+/// attribute as one whole — its brackets and arguments in its own colour.
+///
+/// Attribute arguments nest (`cfg(all(unix, not(windows)))`); a query cannot
+/// say "anywhere inside", so the depths are spelled out, four deep.
+const RUST_REFINEMENTS: &str = r##"
+(function_item name: (identifier) @function.definition)
+(function_signature_item name: (identifier) @function.definition)
+
+(macro_invocation macro: (identifier) @function.macro "!" @function.macro)
+
+((scoped_identifier path: (identifier) @module . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+((scoped_type_identifier path: (identifier) @module . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+((scoped_identifier path: (scoped_identifier name: (identifier) @module) . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+((scoped_type_identifier path: (scoped_identifier name: (identifier) @module) . "::" @module.separator)
+ (#match? @module "^[a-z_]"))
+
+(attribute_item ["#" "[" "]"] @attribute)
+(inner_attribute_item ["#" "!" "[" "]"] @attribute)
+(attribute (identifier) @attribute)
+(attribute (token_tree ["(" ")" "[" "]" "," "="] @attribute))
+(attribute (token_tree (identifier) @attribute))
+(attribute (token_tree (token_tree ["(" ")" "[" "]" "," "="] @attribute)))
+(attribute (token_tree (token_tree (identifier) @attribute)))
+(attribute (token_tree (token_tree (token_tree ["(" ")" "[" "]" "," "="] @attribute))))
+(attribute (token_tree (token_tree (token_tree (identifier) @attribute))))
+(attribute (token_tree (token_tree (token_tree (token_tree ["(" ")" "[" "]" "," "="] @attribute)))))
+(attribute (token_tree (token_tree (token_tree (token_tree (identifier) @attribute)))))
+"##;
+
+const SQL_CAPTURE_NAMES: &[(&str, &str)] = &[
+    ("boolean", "constant.builtin"),
+    ("conditional", "keyword"),
+    ("field", "property"),
+    ("float", "number"),
+    ("parameter", "variable.parameter"),
+    ("spell", ""),
+    ("storageclass", "keyword"),
+    ("type.qualifier", "keyword"),
+];
+
+/// The capture names of tree-sitter-haskell's highlight query that are not
+/// clew's (see [`SQL_CAPTURE_NAMES`]): its `@spell` follows `@comment` on
+/// comments, which would leave them unstyled.
+const HASKELL_CAPTURE_NAMES: &[(&str, &str)] = &[
+    ("boolean", "constant.builtin"),
+    ("character", "string"),
+    ("spell", ""),
+];
+
+/// `query` with each capture renamed as `names` says (`(from, to)`; an empty
+/// `to` drops the capture). Only whole capture names are renamed: `@field`
+/// is not the start of `@fields`, and an `@` inside a string literal (`"@"`)
+/// names no capture.
+fn rename_captures(query: &str, names: &[(&str, &str)]) -> String {
+    let name_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-');
+    let mut out = String::with_capacity(query.len());
+    let mut rest = query;
+    while let Some(at) = rest.find('@') {
+        out.push_str(&rest[..at]);
+        let after = &rest[at + 1..];
+        let len = after.find(|c| !name_char(c)).unwrap_or(after.len());
+        let name = &after[..len];
+        match names.iter().find(|(from, _)| *from == name) {
+            Some((_, "")) => {}
+            Some((_, to)) => {
+                out.push('@');
+                out.push_str(to);
+            }
+            None => {
+                out.push('@');
+                out.push_str(name);
+            }
+        }
+        rest = &after[len..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The SQL outline: tables and their columns, views, functions, triggers and
+/// types. Each `CREATE` names its object right after its keyword (or after
+/// `IF NOT EXISTS`); the anchor keeps a trigger's `ON table` and a function's
+/// `RETURNS SETOF table` from naming it too.
+const SQL_TAGS: &str = r#"
+(create_table
+  [(keyword_table) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.table
+(column_definition name: (identifier) @name) @definition.field
+(create_view
+  [(keyword_view) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.view
+(create_materialized_view
+  [(keyword_view) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.view
+(create_function
+  [(keyword_function) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.function
+(create_trigger
+  [(keyword_trigger) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.trigger
+(create_type
+  [(keyword_type) (keyword_exists)] .
+  (object_reference name: (identifier) @name)) @definition.type
+"#;
+
+/// The Lean outline. A dotted name (`Group.toMonoid`) is several `name`
+/// nodes; the outline reads it whole (`outline::located_in`), and the kind of
+/// a `definition` — `def`, `theorem`, an `instance` — from its keyword
+/// (`outline::refine_kind`).
+const LEAN_TAGS: &str = r#"
+(definition name: (identifier) @name) @definition.function
+(constant name: (identifier) @name) @definition.constant
+(opaque name: (identifier) @name) @definition.function
+(axiom name: (identifier) @name) @definition.axiom
+(structure name: (identifier) @name) @definition.struct
+(structure_field name: (identifier) @name) @definition.field
+(inductive name: (identifier) @name) @definition.inductive
+(class_inductive name: (identifier) @name) @definition.class
+(constructor name: (identifier) @name) @definition.constructor
+(namespace name: (identifier) @name) @definition.module
+"#;
+
+/// The PHP outline. The crate's own query calls a method a function, a trait
+/// an interface, and has no enums.
+const PHP_TAGS: &str = r#"
+(namespace_definition name: (namespace_name) @name) @definition.module
+(class_declaration name: (name) @name) @definition.class
+(interface_declaration name: (name) @name) @definition.interface
+(trait_declaration name: (name) @name) @definition.trait
+(enum_declaration name: (name) @name) @definition.enum
+(enum_case name: (name) @name) @definition.constant
+(method_declaration name: (name) @name) @definition.method
+(function_definition name: (name) @name) @definition.function
+(property_declaration (property_element name: (variable_name (name) @name))) @definition.field
+"#;
+
+/// The C# outline. The crate's own query has classes, interfaces and methods
+/// only: no namespaces, structs, enums, records, properties or fields.
+const CSHARP_TAGS: &str = r#"
+(namespace_declaration name: (_) @name) @definition.module
+(file_scoped_namespace_declaration name: (_) @name) @definition.module
+(class_declaration name: (identifier) @name) @definition.class
+(record_declaration name: (identifier) @name) @definition.class
+(interface_declaration name: (identifier) @name) @definition.interface
+(struct_declaration name: (identifier) @name) @definition.struct
+(enum_declaration name: (identifier) @name) @definition.enum
+(enum_member_declaration name: (identifier) @name) @definition.constant
+(delegate_declaration name: (identifier) @name) @definition.type
+(method_declaration name: (identifier) @name) @definition.method
+(constructor_declaration name: (identifier) @name) @definition.method
+(local_function_statement name: (identifier) @name) @definition.function
+(property_declaration name: (identifier) @name) @definition.property
+(field_declaration (variable_declaration (variable_declarator name: (identifier) @name))) @definition.field
+"#;
+
+/// The Erlang outline: the module, its functions (one per clause — the
+/// outline merges a function's clauses, see `outline::merge_clauses`),
+/// records and their fields, types and macros.
+const ERLANG_TAGS: &str = r#"
+(module_attribute name: (atom) @name) @definition.module
+(fun_decl clause: (function_clause name: (atom) @name)) @definition.function
+(record_decl name: (atom) @name) @definition.struct
+(record_field name: (atom) @name) @definition.field
+(type_alias name: (type_name name: (atom) @name)) @definition.type
+(opaque name: (type_name name: (atom) @name)) @definition.type
+(pp_define lhs: (macro_lhs name: (_) @name)) @definition.macro
+"#;
+
+/// The Haskell outline: functions and bindings (one per equation — merged,
+/// see `outline::merge_clauses`), data types and their constructors and
+/// fields, newtypes, type synonyms, classes and their methods.
+const HASKELL_TAGS: &str = r#"
+(declarations (function name: (variable) @name) @definition.function)
+(declarations (bind name: (variable) @name) @definition.function)
+(data_type name: (name) @name) @definition.type
+(newtype name: (name) @name) @definition.type
+(type_synonym name: (name) @name) @definition.type
+(type_family name: (name) @name) @definition.type
+(data_constructor constructor: (record name: (constructor) @name)) @definition.constructor
+(data_constructor constructor: (prefix name: (constructor) @name)) @definition.constructor
+(field name: (field_name (variable) @name)) @definition.field
+(class name: (name) @name) @definition.class
+(class_declarations (signature name: (variable) @name) @definition.method)
+"#;
+
+/// The Zig outline: containers bound to a name (structs, enums, unions,
+/// opaques), their fields and the functions in them (methods), free
+/// functions, and tests. Methods come first, so a function is one or the
+/// other (as in [`RUST_TAGS`]).
+const ZIG_TAGS: &str = r#"
+(variable_declaration (identifier) @name (struct_declaration)) @definition.struct
+(variable_declaration (identifier) @name (enum_declaration)) @definition.enum
+(variable_declaration (identifier) @name (union_declaration)) @definition.union
+(variable_declaration (identifier) @name (opaque_declaration)) @definition.type
+(container_field name: (identifier) @name) @definition.field
+(struct_declaration (function_declaration name: (identifier) @name) @definition.method)
+(enum_declaration (function_declaration name: (identifier) @name) @definition.method)
+(union_declaration (function_declaration name: (identifier) @name) @definition.method)
+(function_declaration name: (identifier) @name) @definition.function
+(test_declaration (string (string_content) @name)) @definition.test
+"#;
 
 /// Source-oriented tags query for TypeScript/TSX — captures the symbols in real
 /// `.ts` source (classes, functions, methods, type aliases, enums, interfaces,
@@ -699,6 +1036,19 @@ pub(crate) fn without_string_literals(line: &str, quotes: &[char]) -> String {
 
 /// Detect the language key from a file path (by extension).
 pub fn detect(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_str()?;
+    if let Some(lang) = Lang::ALL.iter().find(|l| l.file_names().contains(&name)) {
+        return Some(lang.key());
+    }
+    // A two-part extension (`.app.src`) before the plain one.
+    let lower = name.to_ascii_lowercase();
+    if let Some(lang) = Lang::ALL.iter().find(|l| {
+        l.extensions()
+            .iter()
+            .any(|e| e.contains('.') && lower.ends_with(&format!(".{e}")))
+    }) {
+        return Some(lang.key());
+    }
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Lang::ALL
         .iter()
@@ -843,7 +1193,7 @@ fn config_for(lang: Lang) -> Option<&'static HighlightConfiguration> {
         [const { OnceLock::new() }; LANG_COUNT];
     CONFIGS[lang as usize]
         .get_or_init(|| {
-            let query = lang.highlight_parts().concat();
+            let query = rename_captures(&lang.highlight_parts().concat(), lang.capture_names());
             HighlightConfiguration::new(lang.grammar(), lang.name(), &query, "", "")
                 .map(|mut config| {
                     config.configure(HIGHLIGHT_NAMES);
@@ -963,11 +1313,25 @@ pub fn plain_lines(source: &str) -> Vec<HlLine> {
 /// A `"c"` source written in C++ is highlighted as C++ (see
 /// [`Lang::for_source`]).
 pub fn highlight_lines(source: &str, lang_key: Option<&'static str>) -> Vec<HlLine> {
-    lang_key
-        .and_then(|key| Lang::for_source(key, source))
-        .and_then(config_for)
-        .and_then(|config| highlight_with(source, config))
-        .unwrap_or_else(|| plain_lines(source))
+    let Some(lang) = lang_key.and_then(|key| Lang::for_source(key, source)) else {
+        return plain_lines(source);
+    };
+    let Some(config) = config_for(lang) else {
+        return plain_lines(source);
+    };
+    match lang {
+        // One command at a time (see `crate::lean`): a command the grammar
+        // cannot read would otherwise draw every line after it as one
+        // expression.
+        Lang::Lean => crate::lean::commands(source)
+            .into_iter()
+            .flat_map(|range| {
+                let command = &source[range];
+                highlight_with(command, config).unwrap_or_else(|| plain_lines(command))
+            })
+            .collect(),
+        _ => highlight_with(source, config).unwrap_or_else(|| plain_lines(source)),
+    }
 }
 
 fn highlight_with(source: &str, config: &HighlightConfiguration) -> Option<Vec<HlLine>> {
@@ -1020,6 +1384,55 @@ pub fn style_is_literal(idx: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What a Rust span is called, by its text, on the line it is on.
+    fn rust_kinds(src: &str) -> Vec<Vec<(String, &'static str)>> {
+        highlight_lines(src, Some("rust"))
+            .into_iter()
+            .map(|l| {
+                l.spans
+                    .into_iter()
+                    .filter(|(t, _)| !t.trim().is_empty())
+                    .map(|(t, s)| (t, s.map_or("-", |i| HIGHLIGHT_NAMES[i as usize])))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Rust's spans tell apart what Clew's palette colours apart: a function
+    /// where it is defined from one called, the module path before a name,
+    /// a macro, and an attribute as one whole, brackets and all.
+    #[test]
+    fn rust_spans_tell_apart_what_the_palette_does() {
+        let lines = rust_kinds(
+            "#[cfg(not(windows))]\n\
+             pub fn rel_string(rel: &std::path::Path) -> String {\n\
+             \x20   if cfg!(windows) { std::env::var_os(v) } else { PathBuf::from(x) }\n\
+             }\n",
+        );
+        let kind = |line: usize, text: &str| {
+            lines[line]
+                .iter()
+                .filter(|(t, _)| t.trim() == text)
+                .map(|(_, k)| *k)
+                .collect::<Vec<_>>()
+        };
+        assert!(
+            lines[0].iter().all(|(_, k)| *k == "attribute"),
+            "{:?}",
+            lines[0]
+        );
+        assert_eq!(kind(1, "rel_string"), ["function.definition"]);
+        assert_eq!(kind(1, "std"), ["module"]);
+        assert_eq!(kind(1, "path"), ["module"]);
+        assert_eq!(kind(1, "::"), ["module", "module"]);
+        assert_eq!(kind(1, "Path"), ["type"]);
+        assert_eq!(kind(2, "cfg"), ["function.macro"]);
+        assert_eq!(kind(2, "!"), ["function.macro"]);
+        assert_eq!(kind(2, "var_os"), ["function"]);
+        // A type's `::` is not a module's.
+        assert_eq!(kind(2, "::"), ["module", "module", "punctuation.delimiter"]);
+    }
 
     const RUST_SRC: &str = "/// Doc comment.\npub fn add(a: i32, b: i32) -> i32 {\n\tlet s = \"x\\n\";\n    a + b\n}\n\nstruct Point {\n    x: f64,\n}\n";
 
@@ -1134,6 +1547,41 @@ mod tests {
             .map(|(_, s)| *s)
     }
 
+    /// The languages with grammars of their own are highlighted through and
+    /// through: their keywords, functions, types, comments and strings each
+    /// take a style of clew's.
+    #[test]
+    fn the_newer_languages_are_highlighted_through_and_through() {
+        for (lang, source) in [
+            ("php", include_str!("../tests/fixtures/langs/a.php")),
+            ("ruby", include_str!("../tests/fixtures/langs/a.rb")),
+            ("csharp", include_str!("../tests/fixtures/langs/a.cs")),
+            ("erlang", include_str!("../tests/fixtures/langs/a.erl")),
+            ("haskell", include_str!("../tests/fixtures/langs/a.hs")),
+            ("zig", include_str!("../tests/fixtures/langs/a.zig")),
+        ] {
+            let lines = highlight_lines(source, static_key(lang));
+            let styles: std::collections::BTreeSet<&str> = lines
+                .iter()
+                .flat_map(|l| &l.spans)
+                .filter_map(|(_, s)| *s)
+                .map(|s| {
+                    HIGHLIGHT_NAMES[s as usize]
+                        .split('.')
+                        .next()
+                        .unwrap_or_default()
+                })
+                .collect();
+            for wanted in ["keyword", "comment", "string", "function"] {
+                assert!(styles.contains(wanted), "{lang}: no {wanted} in {styles:?}");
+            }
+            assert!(
+                styles.contains("type") || styles.contains("constructor"),
+                "{lang}: no type in {styles:?}"
+            );
+        }
+    }
+
     /// Every language that has strings and comments must style BOTH as
     /// literal text — and the bracket inside each must read as literal, which
     /// is what the bracket matcher and occurrence highlighter ask. TypeScript,
@@ -1215,6 +1663,26 @@ mod tests {
                 Some("s{"),
                 Some("// c{"),
             ),
+            ("sql", "SELECT 's{'; -- c{\n", Some("s{"), Some("-- c{")),
+            // tree-sitter-lean 0.3.0 reads every `{` in a string as an
+            // interpolation, `s!` or not, so `"s{"` does not parse; a `(` in
+            // one is the bracket this checks.
+            ("lean", "def s := \"s(\" -- c(\n", Some("s("), Some("-- c(")),
+            (
+                "php",
+                "<?php $s = \"s{\"; // c{\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
+            ("ruby", "s = \"s{\" # c{\n", Some("s{"), Some("# c{")),
+            (
+                "csharp",
+                "class A { string s = \"s{\"; // c{\n}\n",
+                Some("s{"),
+                Some("// c{"),
+            ),
+            ("erlang", "s() -> \"s{\". % c{\n", Some("s{"), Some("% c{")),
+            ("haskell", "s = \"s{\" -- c{\n", Some("s{"), Some("-- c{")),
         ];
         assert_eq!(cases.len(), Lang::ALL.len(), "a language is missing here");
         for (key, src, string, comment) in cases {
@@ -1427,6 +1895,140 @@ public:
             assert_eq!(style_is_literal(i as u8), literal, "{name}");
         }
         assert!(!style_is_literal(u8::MAX));
+    }
+
+    /// The style index of a highlight name.
+    fn style(name: &str) -> u8 {
+        HIGHLIGHT_NAMES.iter().position(|n| *n == name).unwrap() as u8
+    }
+
+    /// SQL and Lean files are known by their extensions, and code fences by
+    /// the tags models write for them.
+    #[test]
+    fn sql_and_lean_are_detected_by_path_and_fence() {
+        assert_eq!(detect(Path::new("db/schema.sql")), Some("sql"));
+        assert_eq!(detect(Path::new("init.PGSQL")), Some("sql"));
+        assert_eq!(detect(Path::new("Mathlib/Order/Basic.lean")), Some("lean"));
+        for tag in ["sql", "postgresql", "mysql", "sqlite", "plpgsql"] {
+            assert_eq!(lang_for_fence(tag), Some("sql"), "{tag}");
+        }
+        assert_eq!(lang_for_fence("lean4"), Some("lean"));
+        assert_eq!(lang_name("sql"), Some("SQL"));
+        assert_eq!(lang_name("lean"), Some("Lean"));
+    }
+
+    /// Only whole capture names are renamed, an empty name drops the capture,
+    /// and an `@` in a string literal is left alone.
+    #[test]
+    fn captures_are_renamed_by_their_whole_name() {
+        let names = [("field", "property"), ("spell", ""), ("float", "number")];
+        assert_eq!(
+            rename_captures(
+                "(a) @field (b) @fields \"@\" (c) @comment @spell (d) @float)",
+                &names
+            ),
+            "(a) @property (b) @fields \"@\" (c) @comment  (d) @number)"
+        );
+    }
+
+    /// tree-sitter-sequel's query, as clew loads it: a comment is a comment
+    /// (its `@spell` capture, last, left it unstyled), numbers are numbers
+    /// (its patterns for them never matched), booleans constants.
+    #[test]
+    fn sql_comments_numbers_and_booleans_are_styled() {
+        let lines = highlight_lines(
+            "-- totals\nSELECT 42, 2.5, 'x', TRUE FROM t WHERE a = 1;\n",
+            Some("sql"),
+        );
+        assert_eq!(
+            style_of(&lines, "-- totals"),
+            Some(Some(style("comment"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "42"),
+            Some(Some(style("number"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "2.5"),
+            Some(Some(style("number"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "'x'"),
+            Some(Some(style("string"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "TRUE"),
+            Some(Some(style("constant.builtin"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "SELECT"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+    }
+
+    /// Lean's declarations: their keyword, their name, a type, a comment.
+    #[test]
+    fn lean_keywords_and_names_are_styled() {
+        let lines = highlight_lines(
+            "-- note\ntheorem two : 1 + 1 = 2 := rfl\nstructure Point where\n  x : Nat\n",
+            Some("lean"),
+        );
+        assert_eq!(
+            style_of(&lines, "-- note"),
+            Some(Some(style("comment"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "theorem"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "two"),
+            Some(Some(style("function"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "Point"),
+            Some(Some(style("type"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "2"),
+            Some(Some(style("number"))),
+            "{lines:?}"
+        );
+    }
+
+    /// Lean is highlighted a command at a time: a command the grammar does
+    /// not know draws the lines after it as what they are, not as one
+    /// expression. Every line is there, once.
+    #[test]
+    fn a_lean_command_the_grammar_cannot_read_does_not_spread() {
+        let src = "assert_not_exists Field\n\ntheorem t : True := trivial\n-- done\n";
+        let lines = highlight_lines(src, Some("lean"));
+        assert_eq!(lines.len(), src.lines().count());
+        assert_eq!(
+            style_of(&lines, "theorem"),
+            Some(Some(style("keyword"))),
+            "{lines:?}"
+        );
+        assert_eq!(
+            style_of(&lines, "-- done"),
+            Some(Some(style("comment"))),
+            "{lines:?}"
+        );
+        let text: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|(t, _)| t.as_str()).collect())
+            .collect();
+        assert_eq!(text, src.lines().collect::<Vec<_>>());
     }
 
     #[test]

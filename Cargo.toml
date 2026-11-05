@@ -1,16 +1,18 @@
 # The clew workspace: the `clew` GUI client (this package), `clew-core` (the
 # backend logic both binaries share), `clew-protocol` (the client <-> server wire
-# contract) and `clew-server` (the headless backend the client runs as a local
-# child or deploys over SSH).
+# contract), `clew-server` (the headless backend the client runs as a local
+# child or deploys over SSH) and `clew-voice` (listening and offline speech
+# recognition, free of anything platform-bound: built and tested on Linux,
+# macOS and Windows alike).
 [workspace]
-members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server"]
+members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server", "crates/clew-voice"]
 # Third-party crates carried with a fix of clew's (see vendor/README.md): built
 # as dependencies, not linted, formatted or tested as clew's own.
 exclude = ["vendor"]
 
 [package]
 name = "clew"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"
@@ -18,6 +20,8 @@ rust-version = "1.95"
 [dependencies]
 clew-core = { path = "crates/clew-core" }
 clew-protocol = { path = "crates/clew-protocol" }
+# Voice: the microphone, and whisper.cpp's speech recognition on this machine.
+clew-voice = { path = "crates/clew-voice" }
 # `access(2)` / `getuid(2)` for the self-update and SSH control-socket checks.
 libc = "0.2"
 # NB: no "highlighter" feature. clew highlights code with its own tree-sitter
@@ -26,7 +30,13 @@ libc = "0.2"
 # renders the text invisibly on the dark block background (godoc/reST example
 # blocks showed as empty black boxes). Without it, iced falls back to plain,
 # visible monospace text.
-iced = { version = "0.14", features = ["advanced", "canvas", "image", "markdown", "svg", "tokio"] }
+# `advanced-shaping`: text is shaped as the design's renderer shapes it,
+# kerned (iced's default shapes ASCII text unkerned, which set a line of
+# the interface's words up to a few pixels longer than the design's).
+iced = { version = "0.14", features = ["advanced", "advanced-shaping", "canvas", "image", "markdown", "svg", "tokio"] }
+# For `task::effect`: a widget operation sent with no answer awaited, as
+# iced's own `snap_to` is (iced re-exports neither).
+iced_runtime = "0.14.0"
 # Rasterizes graph node labels to textures so they move smoothly when the 3D
 # map spins (canvas `fill_text` snaps to the pixel grid, which shakes at the slow
 # idle-spin speed); see `src/ui/graph_labels.rs`.
@@ -53,6 +63,20 @@ unicode-width = "0.2"
 # Native AppKit access (macOS only), all of it under src/macos/: the menu bar,
 # the frameless look of clew's titled windows (hidden title bar, rounded
 # corners) and the live system-appearance observer.
+# Whether X composites Clew's window, so it can round its corners
+# (src/app/corners.rs): the version winit already brings in.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+x11rb = "0.13"
+
+# iced's GPU renderer, asked on Windows to present through a DirectComposition
+# visual, so the window's clear corners show the desktop (src/app/corners.rs):
+# the version iced brings in, patched (vendor/README.md).
+[target.'cfg(windows)'.dependencies]
+iced_wgpu = { version = "0.14", default-features = false }
+# Asking Windows to draw no border round such a window: the version the
+# build already carries.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
@@ -80,6 +104,25 @@ objc2-foundation = { version = "0.3", features = [
 
 [dev-dependencies]
 iced_test = "0.14"
+socket2 = "0.6"
+
+# A borderless window of winit's kind, asked of Windows' compositor to be
+# rounded, and one made as iced makes Clew's, drawn by iced's renderer and
+# read back from the screen (src/app/corners.rs); and the processes and
+# windows of a Clew started by a test (tests/relaunch.rs): the versions the
+# build already carries.
+[target.'cfg(windows)'.dev-dependencies]
+iced_winit = "0.14"
+windows-sys = { version = "0.61", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [[bin]]
 name = "clew"
@@ -91,3 +134,11 @@ path = "src/main.rs"
 # patched copy shapes such a line in one direction (vendor/README.md).
 [patch.crates-io]
 cosmic-text = { path = "vendor/cosmic-text" }
+# iced 0.14's GPU renderer, able to present through a DirectComposition visual
+# on Windows (vendor/README.md).
+iced_wgpu = { path = "vendor/iced_wgpu" }
+# iced 0.14's windowing, which makes a transparent window on Windows without
+# a redirection surface (vendor/README.md).
+iced_winit = { path = "vendor/iced_winit" }
+# The Lean 4 grammar, loadable by clew's tree-sitter (vendor/README.md).
+tree-sitter-lean4 = { path = "vendor/tree-sitter-lean4" }

@@ -107,7 +107,12 @@ async fn a_turn_streams_its_updates_and_serves_the_agents_requests() {
         fake.send(json!({"jsonrpc": "2.0", "id": 100, "method": "fs/read_text_file", "params": {"sessionId": "s1", "path": a, "line": 2, "limit": 1}})).await;
         let read = fake.recv().await;
         assert_eq!(read["result"]["content"], "two\n");
-        fake.send(json!({"jsonrpc": "2.0", "id": 101, "method": "fs/read_text_file", "params": {"sessionId": "s1", "path": "/etc/hostname"}})).await;
+        let outside = if cfg!(windows) {
+            r"C:\Windows\win.ini"
+        } else {
+            "/etc/hostname"
+        };
+        fake.send(json!({"jsonrpc": "2.0", "id": 101, "method": "fs/read_text_file", "params": {"sessionId": "s1", "path": outside}})).await;
         let refused = fake.recv().await;
         assert!(
             refused["error"]["message"]

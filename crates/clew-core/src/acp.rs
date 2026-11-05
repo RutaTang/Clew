@@ -803,7 +803,7 @@ pub fn text_block(text: &str) -> Value {
 /// A file of the project as a content block: its contents embedded when
 /// the agent takes them, else a link to it.
 pub fn file_block(info: &AgentInfo, path: &Path, text: Option<&str>) -> Value {
-    let uri = format!("file://{}", path.to_string_lossy());
+    let uri = crate::lsp::client::path_to_uri(path);
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())

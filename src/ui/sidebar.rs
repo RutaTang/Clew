@@ -21,48 +21,163 @@ pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
     ("DOCS", SidebarTab::Docs),
 ];
 
-/// A Task that scrolls the tab strip so `tab` is visible. The strip scrolls
-/// horizontally and the active tab can otherwise sit off-screen to the right
-/// (so it reads as "no tab selected"); this keeps the selection in view whenever
-/// a tab is picked — including when the tour switches tabs for the user.
-pub(crate) fn reveal_sidebar_tab(tab: SidebarTab) -> iced::Task<Message> {
-    let n = SIDEBAR_TABS.len();
-    let idx = SIDEBAR_TABS
-        .iter()
-        .position(|(_, t)| *t == tab)
-        .unwrap_or(0);
-    let x = if n > 1 {
-        idx as f32 / (n - 1) as f32
-    } else {
-        0.0
-    };
-    iced::widget::operation::snap_to(
-        sidebar_tabs_scroll_id(),
-        iced::widget::scrollable::RelativeOffset { x, y: 0.0 },
-    )
+/// How many of [`SIDEBAR_TABS`] stand on the strip itself: the reader's
+/// everyday views. The rest open from what shows them — tracing a value,
+/// the import graph, a walkthrough, a symbol's docs — and from the command
+/// palette, each under a title of its own.
+pub(crate) const STRIP_VIEWS: usize = 6;
+
+/// A view's icon on its tab.
+pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
+    match tab {
+        SidebarTab::Files => Glyph::Folder,
+        SidebarTab::Search => Glyph::TextSearch,
+        SidebarTab::Semantic => Glyph::FindMeaning,
+        SidebarTab::Marks => Glyph::Bookmark,
+        SidebarTab::Trail => Glyph::Route,
+        SidebarTab::Calls => Glyph::Network,
+        SidebarTab::Flow => Glyph::Flow,
+        SidebarTab::Imports => Glyph::ImportGraph,
+        SidebarTab::Walk => Glyph::Compass,
+        SidebarTab::Notes => Glyph::Note,
+        SidebarTab::Docs => Glyph::Book,
+    }
+}
+
+/// A view's name, as its tab's tooltip says it.
+pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
+    match tab {
+        SidebarTab::Files => "Files",
+        SidebarTab::Search => "Search text",
+        SidebarTab::Semantic => "Find by meaning",
+        SidebarTab::Marks => "Marks",
+        SidebarTab::Trail => "Reading trail",
+        SidebarTab::Calls => "Calls",
+        SidebarTab::Flow => "Value flow",
+        SidebarTab::Imports => "Imports",
+        SidebarTab::Walk => "Walkthroughs",
+        SidebarTab::Notes => "Reading notes",
+        SidebarTab::Docs => "API docs",
+    }
 }
 
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
-    let tab = |label: &'static str, this: SidebarTab| {
-        button(text(label).size(ts::SMALL))
-            .style(theme::tab_button(app.sidebar == this))
-            .padding([5, 7])
-            .on_press(Message::Window(WindowMsg::SidebarTabPicked(this)))
+    // The views as a segmented row of icons, each naming itself on hover;
+    // the chosen one raised as a chip.
+    let segment = |glyph: Glyph, chosen: bool, name: &'static str, msg: Message| {
+        tip_at(
+            button(
+                container(glyph::icon(
+                    glyph,
+                    if chosen {
+                        theme::fg_bright()
+                    } else {
+                        theme::fg_muted()
+                    },
+                    15.0,
+                ))
+                .width(Fill)
+                .height(Fill)
+                .align_x(iced::Center)
+                .align_y(iced::Center),
+            )
+            .style(theme::segment(chosen))
+            .padding(0)
+            .width(Fill)
+            .height(Length::Fixed(28.0))
+            .on_press(msg),
+            name,
+            None,
+            tooltip::Position::Bottom,
+        )
     };
-    // The tabs rarely all fit a narrow sidebar, so they keep their natural width
-    // and scroll horizontally (no visible bar — trackpad/wheel, or widen the
-    // sidebar). Picking a tab scrolls it into view via `reveal_sidebar_tab`.
-    let tabs_row = SIDEBAR_TABS
+    let mut tabs_row = Row::new().spacing(2);
+    for (_, this) in SIDEBAR_TABS.iter().take(STRIP_VIEWS) {
+        tabs_row = tabs_row.push(segment(
+            tab_glyph(*this),
+            app.sidebar == *this,
+            tab_name(*this),
+            Message::Window(WindowMsg::SidebarTabPicked(*this)),
+        ));
+    }
+    let tabs = container(tabs_row).padding(2).style(theme::trough);
+    // A view not on the strip, opened by what shows it, is named over it,
+    // with the way back to the files.
+    let elsewhere = SIDEBAR_TABS
         .iter()
-        .fold(Row::new().spacing(1), |r, (label, this)| {
-            r.push(tab(label, *this))
-        });
-    let tabs = scrollable(tabs_row)
-        .id(sidebar_tabs_scroll_id())
-        .direction(Direction::Horizontal(
-            Scrollbar::new().width(0.0).scroller_width(0.0),
-        ))
-        .width(Fill);
+        .skip(STRIP_VIEWS)
+        .any(|(_, t)| *t == app.sidebar);
+    let titled: Element<'_, Message> = if elsewhere {
+        container(
+            row![
+                glyph::icon(tab_glyph(app.sidebar), theme::fg_muted(), 14.0),
+                text(tab_name(app.sidebar))
+                    .size(ts::BASE)
+                    .font(crate::fonts::UI_SEMIBOLD)
+                    .color(theme::fg()),
+                space().width(Fill),
+                tip_at(
+                    button(glyph::icon(Glyph::Close, theme::fg_muted(), 13.0))
+                        .style(theme::icon_button(false))
+                        .padding(5)
+                        .on_press(Message::Window(WindowMsg::SidebarTabPicked(
+                            SidebarTab::Files,
+                        ))),
+                    "Back to the files",
+                    None,
+                    tooltip::Position::Bottom,
+                ),
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 8.0,
+            bottom: SIDEBAR_GAP,
+            left: 14.0,
+        })
+        .into()
+    } else {
+        slot()
+    };
+
+    // The Files view narrows to what its filter matches.
+    let filter: Element<'_, Message> =
+        if app.sidebar == SidebarTab::Files && app.proj.project.is_some() {
+            container(
+                container(
+                    row![
+                        glyph::icon(Glyph::Filter, theme::dim(), 13.0),
+                        ts::field_in(
+                            text_input("Filter files", &app.file_filter)
+                                .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
+                                .style(theme::bare_input),
+                            FILTER_H - 2.0,
+                            ts::INTER,
+                            ts::BODY,
+                        ),
+                    ]
+                    .spacing(8)
+                    .height(Fill)
+                    .align_y(iced::Center),
+                )
+                .height(Length::Fixed(FILTER_H))
+                // The design's 10 inside its 1 px border, which here takes
+                // no room of its own.
+                .padding([1, 11])
+                .style(theme::field(!app.file_filter.is_empty())),
+            )
+            .padding(Padding {
+                top: 0.0,
+                right: 10.0,
+                bottom: SIDEBAR_GAP,
+                left: 10.0,
+            })
+            .into()
+        } else {
+            slot()
+        };
 
     let content: Element<'_, Message> = match app.sidebar {
         SidebarTab::Files => files_tab(app),
@@ -81,12 +196,19 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     // Each tab's own widgets: tabs of one shape (a list in a scrollable)
     // were handed each other's scroll offset as one replaced another.
     container(column![
-        tabs,
+        container(tabs).padding(Padding {
+            top: 2.0,
+            right: 10.0,
+            bottom: SIDEBAR_GAP,
+            left: 10.0,
+        }),
+        titled,
+        filter,
         crate::ui::fresh::fresh_for(&app.sidebar, content)
     ])
     .width(Length::Fixed(app.sidebar_width))
     .height(Fill)
-    .style(theme::panel)
+    .style(theme::chrome)
     .into()
 }
 
@@ -146,12 +268,17 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     };
 
     let narration_block = walk_narration(app, wt);
+    // The divider says where the pointer is in the window; the narration
+    // is inside its frame.
+    let frame = app.window_frame;
     column![
         header,
         review,
         hairline(),
         list,
-        crate::resize::Divider::horizontal(|v| Message::Walk(WalkMsg::ResizeNarration(v))),
+        crate::resize::Divider::horizontal(move |v| {
+            Message::Walk(WalkMsg::ResizeNarration(v - frame))
+        }),
         narration_block,
     ]
     .height(Fill)
@@ -519,13 +646,105 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    append_tree_rows(&mut rows, &project.tree, "", 0, app);
-    scrollable(Column::with_children(rows).width(Fill))
-        .direction(thin_scroll())
-        .style(theme::overlay_scrollbar)
-        .height(Fill)
-        .into()
+    let filter = app.file_filter.trim();
+    if filter.is_empty() {
+        append_tree_rows(&mut rows, &project.tree, "", 0, app);
+    } else {
+        filtered_file_rows(&mut rows, project, filter, app);
+        if rows.is_empty() {
+            return empty_state(
+                Glyph::Filter,
+                "No matching files",
+                "Nothing in this project is named like that.",
+                None,
+            );
+        }
+    }
+    scrollable(
+        container(
+            Column::with_children(rows)
+                .spacing(TREE_ROW_GAP)
+                .width(Fill),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 10.0,
+            bottom: 12.0,
+            left: 10.0,
+        }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
+    .into()
 }
+
+/// Most files the filter lists: a filter as short as one letter matches
+/// most of a large project, and the list is for picking, not browsing.
+const FILTER_LIMIT: usize = 400;
+
+/// The Files view narrowed by its filter: every file whose path holds it
+/// (any case), as its name with its folder beside it.
+fn filtered_file_rows<'a>(
+    rows: &mut Vec<Element<'a, Message>>,
+    project: &'a crate::Project,
+    filter: &str,
+    app: &'a App,
+) {
+    let needle = filter.to_lowercase();
+    for f in project
+        .files
+        .iter()
+        .filter(|f| f.rel.to_lowercase().contains(&needle))
+        .take(FILTER_LIMIT)
+    {
+        let (folder, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
+        let is_current = app.active_viewer().is_some_and(|v| v.rel == f.rel);
+        rows.push(
+            button(
+                row![
+                    quiet_icon(Glyph::File, theme::dim()),
+                    text(crate::highlight::in_order(name))
+                        .size(ts::BASE)
+                        .color(if is_current {
+                            theme::fg_bright()
+                        } else {
+                            theme::fg()
+                        })
+                        .wrapping(Wrapping::None),
+                    text(crate::highlight::in_order(folder))
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::None),
+                ]
+                .spacing(6)
+                .align_y(iced::Center),
+            )
+            .style(theme::list_row(is_current))
+            .width(Fill)
+            .padding([4, 8])
+            .on_press(Message::Editor(EditorMsg::OpenRel {
+                rel: f.rel.clone(),
+                line: None,
+            }))
+            .into(),
+        );
+    }
+}
+
+/// A tree row's icon: the chrome's own line glyph in one quiet ink, in the
+/// tree's fixed icon column.
+fn quiet_icon(glyph: Glyph, color: iced::Color) -> Element<'static, Message> {
+    container(glyph::icon(glyph, color, 14.0)).width(14).into()
+}
+
+/// Height of a row of the file tree, and the gap between rows.
+const TREE_ROW_H: f32 = 28.0;
+const TREE_ROW_GAP: f32 = 1.0;
+/// Height of the Files view's filter field.
+const FILTER_H: f32 = 30.0;
+/// The room between the sidebar's views, its filter and its list.
+const SIDEBAR_GAP: f32 = 12.0;
 
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
@@ -538,33 +757,48 @@ pub(crate) fn append_tree_rows<'a>(
     depth: u16,
     app: &'a App,
 ) {
-    let indent = 10.0 + depth as f32 * 14.0;
+    let indent = 6.0 + depth as f32 * 14.0;
     let pad = Padding {
-        top: 2.0,
-        right: 6.0,
-        bottom: 2.0,
+        top: 0.0,
+        right: 8.0,
+        bottom: 0.0,
         left: indent,
     };
 
     for (name, child) in &node.dirs {
         let rel = join_rel(prefix, name);
         let expanded = app.proj.expanded.contains(&rel);
-        let arrow = if expanded { "▾" } else { "▸" };
-        let (glyph, color) = crate::icons::folder_icon(expanded);
         let content = row![
-            text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
-            tree_icon(glyph, color),
+            container(glyph::icon(
+                if expanded {
+                    Glyph::ChevronDown
+                } else {
+                    Glyph::ChevronRight
+                },
+                theme::dim(),
+                10.0,
+            ))
+            .width(12)
+            .align_x(iced::Center),
+            quiet_icon(Glyph::Folder, theme::fg_muted()),
             // A name in the order it is spelled (`highlight::in_order`).
-            text(crate::highlight::in_order(name))
-                .size(ts::BASE)
-                .wrapping(Wrapping::None),
+            ts::set_in(
+                text(crate::highlight::in_order(name))
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::None),
+                TREE_ROW_H,
+                ts::INTER,
+                ts::BASE,
+            ),
         ]
-        .spacing(3)
+        .spacing(6)
+        .height(Fill)
         .align_y(iced::Center);
         rows.push(
             button(content)
                 .style(theme::list_row(false))
                 .width(Fill)
+                .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
                 .on_press(Message::Project(ProjectMsg::ToggleDir(rel.clone())))
                 .into(),
@@ -577,7 +811,6 @@ pub(crate) fn append_tree_rows<'a>(
     for name in &node.files {
         let rel = join_rel(prefix, name);
         let is_current = app.active_viewer().is_some_and(|v| v.rel == rel);
-        let (glyph, color) = crate::icons::file_icon(name);
         // A file git tracks although the ignore rules would hide it: listed
         // (what the repository contains is never invisible), and said so.
         let mark: Element<'_, Message> = if app.proj.tracked_ignored.contains(&rel) {
@@ -590,19 +823,42 @@ pub(crate) fn append_tree_rows<'a>(
             space().width(0).into()
         };
         let content = row![
-            space().width(10), // align names under the folders' arrow column
-            tree_icon(glyph, color),
-            text(crate::highlight::in_order(name))
-                .size(ts::BASE)
-                .wrapping(Wrapping::None),
+            space().width(12), // align names under the folders' chevron column
+            quiet_icon(
+                Glyph::File,
+                if is_current {
+                    theme::fg()
+                } else {
+                    theme::dim()
+                }
+            ),
+            ts::set_in(
+                text(crate::highlight::in_order(name))
+                    .font(if is_current {
+                        crate::fonts::UI_MEDIUM
+                    } else {
+                        crate::fonts::UI
+                    })
+                    .color(if is_current {
+                        theme::fg()
+                    } else {
+                        theme::fg_muted()
+                    })
+                    .wrapping(Wrapping::None),
+                TREE_ROW_H,
+                ts::INTER,
+                ts::BASE,
+            ),
             mark,
         ]
-        .spacing(3)
+        .spacing(6)
+        .height(Fill)
         .align_y(iced::Center);
         rows.push(
             button(content)
                 .style(theme::list_row(is_current))
                 .width(Fill)
+                .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
                 .on_press(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
                 .into(),
@@ -663,6 +919,24 @@ pub(crate) fn empty_state<'a>(
     center(col).padding(20).into()
 }
 
+/// [`empty_state`] for a small region — a panel section — where a title and
+/// a 42px icon would crowd it: a small muted icon over one centered line.
+pub(crate) fn compact_empty_state<'a>(g: Glyph, note: impl Into<String>) -> Element<'a, Message> {
+    let col = column![
+        glyph::icon(g, theme::empty_state_icon(), 22.0),
+        container(
+            text(note.into())
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .align_x(iced::Center)
+        )
+        .max_width(240),
+    ]
+    .spacing(8)
+    .align_x(iced::Center);
+    center(col).padding(16).into()
+}
+
 pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -713,7 +987,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 ..button::Style::default()
             }
         };
-        button(text(label).size(ts::BODY).font(Font::MONOSPACE))
+        button(text(label).size(ts::BODY).font(crate::fonts::CODE))
             .style(style)
             .padding([2, 7])
             .on_press(Message::Nav(NavMsg::SearchToggle(opt)))
@@ -960,7 +1234,11 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         return empty_state(
             Glyph::Bookmark,
             "No bookmarks yet",
-            "Press ⌘D to mark the current line.",
+            if crate::keymap::MAC_KEYS {
+                "Press ⌘D to mark the current line."
+            } else {
+                "Press Ctrl+D to mark the current line."
+            },
             None,
         );
     }
@@ -1071,12 +1349,43 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 /// The NOTES tab: every reading note grouped by file, with progress. Each note
 /// jumps to its symbol's live line; a note whose symbol has vanished is flagged
 /// "detached" (it opens the file top) rather than pointing at the wrong code.
+/// The Reading notes view: the outline of the open file — where a symbol
+/// is marked understood or given a note — over every note in the project.
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
+    if app.active_viewer().is_none() {
+        return notes_list(app);
+    }
+    let label = |s: &'static str| {
+        container(
+            text(s)
+                .size(ts::SMALL)
+                .font(crate::fonts::UI_SEMIBOLD)
+                .color(theme::dim()),
+        )
+        .padding(Padding {
+            top: 8.0,
+            right: 14.0,
+            bottom: 2.0,
+            left: 14.0,
+        })
+    };
+    column![
+        label("In this file"),
+        container(outline_content(app)).height(Length::FillPortion(1)),
+        hairline(),
+        label("All notes"),
+        container(notes_list(app)).height(Length::FillPortion(1)),
+    ]
+    .into()
+}
+
+/// Every reading note in the project, file by file.
+fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
         return empty_state(
             Glyph::Note,
             "No reading notes yet",
-            "In the OUTLINE, click ○ to mark a symbol understood, or ✎ to add a note.",
+            "In this file's outline, click ○ to mark a symbol understood, or ✎ to add a note.",
             None,
         );
     }

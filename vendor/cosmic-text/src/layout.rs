@@ -81,7 +81,10 @@ impl LayoutGlyph {
             self.font_size * scale,
             (
                 (self.x + x_offset).mul_add(scale, offset.0),
-                math::truncf((self.y - y_offset).mul_add(scale, offset.1)), // Hinting in Y axis
+                // clew patch: rounded, not truncated, as a browser places
+                // a line: text at a part of a pixel landed a device pixel
+                // above the design's (its baseline is added rounded).
+                math::roundf((self.y - y_offset).mul_add(scale, offset.1)), // Hinting in Y axis
             ),
             self.font_weight,
             self.cache_key_flags,

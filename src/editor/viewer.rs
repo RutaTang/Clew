@@ -155,6 +155,10 @@ pub struct Viewer {
     /// Private like `inlay_hints`: read through [`Viewer::inactive_lines`],
     /// replaced through [`Viewer::set_inactive_lines`].
     inactive_lines: HashSet<usize>,
+    /// Of the inactive lines, those that say why: a Rust `#[cfg(...)]`
+    /// alone on the line that heads a dimmed run, with its predicate. Drawn
+    /// undimmed, the reason beside them. Kept with `inactive_lines`.
+    inactive_heads: std::collections::BTreeMap<usize, String>,
     pub highlighted: bool,
     pub scroll_y: f32,
     /// Horizontal scroll offset, so pointer positions the code view reports
@@ -264,6 +268,7 @@ impl Viewer {
             docs: HashMap::new(),
             inlay_hints: HashMap::new(),
             inactive_lines: HashSet::new(),
+            inactive_heads: Default::default(),
             highlighted: false,
             scroll_y: 0.0,
             scroll_x: 0.0,
@@ -337,8 +342,26 @@ impl Viewer {
     /// Replace the inactive (`cfg`-dimmed) lines and refresh
     /// [`Viewer::annotations`].
     pub fn set_inactive_lines(&mut self, lines: HashSet<usize>) {
+        self.inactive_heads = if self.lang_key == Some("rust") && !lines.is_empty() {
+            self.source
+                .lines()
+                .enumerate()
+                .filter(|(i, _)| lines.contains(i) && (*i == 0 || !lines.contains(&(i - 1))))
+                .filter_map(|(i, text)| {
+                    crate::inactive::cfg_predicate(text).map(|pred| (i, pred.to_string()))
+                })
+                .collect()
+        } else {
+            Default::default()
+        };
         self.inactive_lines = lines;
         self.refresh_annotations();
+    }
+
+    /// The inactive lines that say why ([`Viewer::inactive_heads`]): line →
+    /// the `cfg` predicate on it.
+    pub fn inactive_heads(&self) -> &std::collections::BTreeMap<usize, String> {
+        &self.inactive_heads
     }
 
     fn refresh_annotations(&mut self) {
@@ -1090,6 +1113,42 @@ mod tests {
         assert_eq!(Utf16.units_in(prefix), 4);
         assert_eq!(Utf8.units_in(prefix), 8);
         assert_eq!(usize::from(Col(6)), 6);
+    }
+
+    /// Of the dimmed lines, the `#[cfg(...)]` that heads each dimmed run is
+    /// the one that says why: kept with its predicate, to be drawn undimmed
+    /// with the reason beside it. One inside a run (gated already by an
+    /// outer one) does not head it, and other languages have none.
+    #[test]
+    fn the_cfg_heading_a_dimmed_run_says_why() {
+        let src = "#[cfg(windows)]\nmod win {\n    #[cfg(test)]\n    fn t() {}\n}\n#[cfg(unix)]\nfn u() {}\n";
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/a.rs"),
+            "a.rs".into(),
+            Some("rust"),
+            Arc::new(src.to_string()),
+            plain_lines(src),
+        );
+        v.set_inactive_lines(HashSet::from([0, 1, 2, 3, 4]));
+        assert_eq!(
+            v.inactive_heads().iter().collect::<Vec<_>>(),
+            [(&0, &"windows".to_string())]
+        );
+        assert!(
+            v.inactive_lines().contains(&0),
+            "still among the inactive lines"
+        );
+        v.set_inactive_lines(HashSet::new());
+        assert!(v.inactive_heads().is_empty());
+        let mut c = Viewer::new(
+            PathBuf::from("/tmp/a.c"),
+            "a.c".into(),
+            Some("c"),
+            Arc::new(src.to_string()),
+            plain_lines(src),
+        );
+        c.set_inactive_lines(HashSet::from([0, 1]));
+        assert!(c.inactive_heads().is_empty());
     }
 
     /// The code view's annotation summary is kept on the viewer and refreshed

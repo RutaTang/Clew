@@ -7,21 +7,24 @@ use iced::widget::{
     Column, Row, button, center, column, container, mouse_area, opaque, pick_list, progress_bar,
     row, scrollable, slider, space, stack, text, text_input, tooltip,
 };
-use iced::{Element, Fill, Font, Length, Padding, Task};
+use iced::{Element, Fill, Length, Padding, Task};
 
 use crate::app::model::Question;
 use crate::codeview::CodeView;
 use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
-use crate::glyph::{self, Glyph};
+use crate::glyph::{self, Glyph, WindowGlyph};
 use crate::viewer::Viewer;
-use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
+use crate::{App, AskView, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
     GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
     SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
 };
 mod anchored;
+// A line of text on the design's baseline wherever it lands (`ts::set_in`).
+mod baseline;
+mod corner_safe;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
@@ -36,6 +39,8 @@ pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
 mod fresh;
+// A height held while what is under it is asked about.
+mod held;
 pub(crate) mod placed;
 mod reader_scroll;
 pub(crate) use reader_scroll::*;
@@ -47,6 +52,8 @@ mod sidebar;
 pub(crate) use sidebar::*;
 mod toolbar;
 pub(crate) use toolbar::*;
+mod sheet;
+pub(crate) use sheet::*;
 mod explain_view;
 pub(crate) use explain_view::*;
 mod connect;
@@ -63,6 +70,10 @@ mod overlays;
 pub(crate) use overlays::*;
 mod updater;
 pub(crate) use updater::*;
+mod askfloat;
+pub(crate) use askfloat::*;
+mod voice;
+pub(crate) use voice::*;
 #[cfg(test)]
 mod tests;
 
@@ -75,12 +86,148 @@ pub(crate) mod ts {
     pub(crate) const SMALL: f32 = ui_size(TextRole::Small);
     pub(crate) const BODY: f32 = ui_size(TextRole::Body);
     pub(crate) const BASE: f32 = ui_size(TextRole::Base);
+    pub(crate) const READING: f32 = ui_size(TextRole::Reading);
     pub(crate) const EMPHASIS: f32 = ui_size(TextRole::Emphasis);
     pub(crate) const SUBTITLE: f32 = ui_size(TextRole::Subtitle);
     pub(crate) const TITLE: f32 = ui_size(TextRole::Title);
     pub(crate) const HEADING: f32 = ui_size(TextRole::Heading);
     pub(crate) const DISPLAY: f32 = ui_size(TextRole::Display);
     pub(crate) const HERO: f32 = ui_size(TextRole::Hero);
+    /// A face's ascent and descent, in em.
+    #[derive(Clone, Copy)]
+    pub(crate) struct Face {
+        ascent: f32,
+        descent: f32,
+    }
+
+    /// Inter, the interface's face (1984 and 494 of 2048 units).
+    pub(crate) const INTER: Face = Face {
+        ascent: 0.968_75,
+        descent: 0.241_211,
+    };
+    /// JetBrains Mono, the code's (1020 and 300 of 1000).
+    pub(crate) const MONO: Face = Face {
+        ascent: 1.02,
+        descent: 0.3,
+    };
+
+    impl Face {
+        /// Its ascent and descent at `size`, each rounded to a whole
+        /// pixel, as the design's renderer takes them (at every scale).
+        pub(crate) fn rounded(self, size: f32) -> (f32, f32) {
+            ((self.ascent * size).round(), (self.descent * size).round())
+        }
+
+        /// Its `line-height: normal` at `size`: the two rounded together.
+        pub(crate) fn normal(self, size: f32) -> f32 {
+            let (ascent, descent) = self.rounded(size);
+            ascent + descent
+        }
+    }
+
+    /// The design's `line-height: normal` for Inter at `size`: the face's
+    /// rounded ascent and descent (see [`Face`]). For text stacked in a box
+    /// its lines size: iced's default of 1.3 sets each such line a pixel
+    /// or so off the design.
+    pub(crate) fn normal_line(size: f32) -> iced::widget::text::LineHeight {
+        normal_of(INTER, size)
+    }
+
+    /// [`normal_line`] for JetBrains Mono.
+    pub(crate) fn normal_line_code(size: f32) -> iced::widget::text::LineHeight {
+        normal_of(MONO, size)
+    }
+
+    fn normal_of(face: Face, size: f32) -> iced::widget::text::LineHeight {
+        iced::widget::text::LineHeight::Absolute(face.normal(size).into())
+    }
+
+    /// Where to draw a line of `face` at `size`, laid out
+    /// [`Face::normal`] tall (its baseline then its rounded ascent down, as
+    /// the vendored text engine sets a line), for its text to sit where
+    /// the design's renderer paints it in a line `line` tall from `top`: a
+    /// `normal` box centred in the line, its baseline that box's rounded
+    /// ascent down, then snapped to a whole pixel.
+    pub(crate) fn baseline_top(top: f32, line: f32, face: Face, size: f32) -> f32 {
+        let (ascent, descent) = face.rounded(size);
+        (top + (line - (ascent + descent)) / 2.0 + ascent).round() - ascent
+    }
+
+    /// Where to draw a line of `face` at `size`, laid out
+    /// [`Face::normal`] tall, whose own line box is `own` tall (the
+    /// design's `line-height`) and centred in a box `height` tall from
+    /// `top`: the design's renderer puts that line box on a whole pixel,
+    /// and the text in it a whole number of pixels down, the leading over
+    /// it floored. With a `normal` line box, as [`baseline_top`].
+    pub(crate) fn line_top(top: f32, height: f32, own: f32, face: Face, size: f32) -> f32 {
+        (top + (height - own) / 2.0).round() + ((own - face.normal(size)) / 2.0).floor()
+    }
+
+    /// `content`, a line of `face` at `size`, set in a box `height` tall as
+    /// the design centres a line in one (a button, a row of the chrome, a
+    /// menu's): its baseline where the design's renderer paints it, by
+    /// [`baseline_top`], wherever the box lands (`ui::baseline`). Left to
+    /// centre itself, a text widget lands up to a pixel higher.
+    pub(crate) fn set_in<'a, M: 'a>(
+        content: iced::widget::Text<'a>,
+        height: f32,
+        face: Face,
+        size: f32,
+    ) -> iced::Element<'a, M> {
+        set_in_line(content, height, face.normal(size), face, size)
+    }
+
+    /// [`set_in`], for a line the design gives a `line-height` of its own:
+    /// its line box `own` tall ([`line_top`]).
+    pub(crate) fn set_in_line<'a, M: 'a>(
+        content: iced::widget::Text<'a>,
+        height: f32,
+        own: f32,
+        face: Face,
+        size: f32,
+    ) -> iced::Element<'a, M> {
+        let line = iced::widget::text::LineHeight::Absolute(face.normal(size).into());
+        let laid = iced::widget::container(content.size(size).line_height(line))
+            .height(iced::Length::Fixed(height))
+            .padding(iced::Padding {
+                top: line_top(0.0, height, own, face, size),
+                ..iced::Padding::ZERO
+            });
+        super::baseline::Snapped::new(laid.into(), height, own, face, size).into()
+    }
+
+    /// The room a browser leaves either side of what is typed into an
+    /// input — its own padding, which the design's inputs keep.
+    pub(crate) const FIELD_INSET: f32 = 2.0;
+
+    /// `field`, one line of the interface's face at `size` (`face`'s
+    /// metrics), set in a box `height` tall as the design's renderer sets an
+    /// input in one: what is typed [`FIELD_INSET`] in from either side, in
+    /// the face's own spacing (`fonts::in_control`), its baseline as
+    /// [`set_in`]'s.
+    pub(crate) fn field_in<'a, M: Clone + 'a>(
+        field: iced::widget::TextInput<'a, M>,
+        height: f32,
+        face: Face,
+        size: f32,
+    ) -> iced::Element<'a, M> {
+        let line = iced::widget::text::LineHeight::Absolute(face.normal(size).into());
+        let laid = iced::widget::container(
+            field
+                .font(crate::fonts::in_control(crate::fonts::UI))
+                .size(size)
+                .line_height(line)
+                .padding(0),
+        )
+        .height(iced::Length::Fixed(height))
+        .padding(iced::Padding {
+            top: baseline_top(0.0, height, face, size),
+            right: FIELD_INSET,
+            bottom: 0.0,
+            left: FIELD_INSET,
+        });
+        super::baseline::Snapped::new(laid.into(), height, face.normal(size), face, size).into()
+    }
 }
 
 pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
@@ -122,12 +269,6 @@ pub fn outline_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("outline-list")
 }
 
-/// The sidebar's horizontally-scrolling tab strip, so the active tab can be
-/// scrolled into view when it sits off-screen.
-pub fn sidebar_tabs_scroll_id() -> iced::widget::Id {
-    iced::widget::Id::new("sidebar-tabs")
-}
-
 pub fn bp_condition_input_id() -> iced::widget::Id {
     iced::widget::Id::new("bp-condition-input")
 }
@@ -160,8 +301,11 @@ pub(crate) enum ActiveOverlay<'a> {
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
     Why(&'a crate::BlameWhy),
+    Insight(&'a crate::Insight),
     ToolsMenu,
     TargetMenu,
+    AppMenu,
+    ViewMenu,
     Graph(crate::Overlay),
     ServerPanel,
     Finder,
@@ -198,10 +342,16 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::ReadingNote(edit)
     } else if let Some(bw) = &app.proj.blame_why {
         O::Why(bw)
+    } else if let Some(insight) = &app.proj.insight {
+        O::Insight(insight)
     } else if app.show_tools_menu {
         O::ToolsMenu
     } else if app.show_target_menu {
         O::TargetMenu
+    } else if app.show_app_menu {
+        O::AppMenu
+    } else if app.show_view_menu {
+        O::ViewMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
     } else if app.server_panel {
@@ -240,8 +390,11 @@ impl<'a> ActiveOverlay<'a> {
             Self::Connect => "connect",
             Self::Shortcuts => "shortcuts",
             Self::Why(_) => "why",
+            Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
             Self::TargetMenu => "target-menu",
+            Self::AppMenu => "app-menu",
+            Self::ViewMenu => "view-menu",
             Self::Graph(_) => "graph",
             Self::ServerPanel => "server-panel",
             Self::ContextMenu(_) => "context-menu",
@@ -288,8 +441,11 @@ impl<'a> ActiveOverlay<'a> {
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
             Self::Why(bw) => why_modal(app, bw),
+            Self::Insight(insight) => insight_modal(app, insight),
             Self::ToolsMenu => tools_menu(app),
             Self::TargetMenu => target_menu(app),
+            Self::AppMenu => app_menu(app),
+            Self::ViewMenu => view_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::ServerPanel => server_panel_modal(app),
             Self::Finder => finder_modal(app),
@@ -314,8 +470,11 @@ impl<'a> ActiveOverlay<'a> {
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),
             Self::Why(_) => Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
+            Self::Insight(_) => Message::Hover(HoverMsg::InsightClose),
             Self::ToolsMenu => Message::Window(WindowMsg::ToggleToolsMenu),
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
+            Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
+            Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
             Self::ServerPanel => Message::Lsp(LspMsg::TogglePanel),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
@@ -344,54 +503,154 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// deeper), its scrollable was rebuilt at offset 0 and reported that offset,
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
+    // The divider says where the pointer is in the window; the sidebar is
+    // inside its frame.
+    let frame = app.window_frame;
+    // Its divider lies over the sidebar's right padding, where nothing is
+    // drawn, as the design's sidebar runs on to the sheet; the sidebar's
+    // edge follows the divider's middle.
     let left: Element<'_, Message> = if app.show_left_sidebar {
-        row![
+        let half = crate::resize::THICKNESS / 2.0;
+        stack![
             sidebar(app),
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeSidebar(v))),
+            container(
+                crate::resize::Divider::vertical(move |v| {
+                    Message::Window(WindowMsg::ResizeSidebar(v - frame + half))
+                })
+                .panel(crate::resize::Panel::Before),
+            )
+            .width(Length::Fixed(app.sidebar_width))
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         ]
         .into()
     } else {
         slot()
     };
-    // Right sidebar: the cursor-following reading-context panel.
-    let right: Element<'_, Message> = match right_panel(app) {
-        Some(panel) => row![
-            crate::resize::Divider::vertical(|v| Message::Window(WindowMsg::ResizeRight(v))),
-            panel
-        ]
-        .into(),
-        None => slot(),
-    };
-    let main = row![left, pane_area(app), right].height(Fill);
-    // A bottom panel docks under the code, keeping it visible above. "Ask clew"
-    // surfaces over the debugger when opened, so you can ask about the live state
-    // while paused (the answer is grounded in the current stack + variables). Its
-    // height is user-draggable via the divider between it and the code.
-    let bottom: Element<'_, Message> = if app.show_bottom {
-        column![
-            crate::resize::Divider::horizontal(|v| Message::Window(WindowMsg::ResizeBottom(v))),
-            container(bottom_panel(app)).height(Length::Fixed(app.bottom_height)),
-        ]
-        .into()
-    } else {
-        slot()
-    };
-    let body = column![main, bottom].height(Fill);
+    // The sidebar on the chrome, the code's sheet raised beside it, and the
+    // tool strip down the right edge.
+    let main = row![left, sheet(app), tool_strip(app)].height(Fill);
     // A slim "update available" / download-progress banner sits between the
     // toolbar and the content, reading as an extension of the toolbar chrome.
     let banner = update_banner(app).unwrap_or_else(slot);
-    let base = column![toolbar(app), banner, body, statusbar(app)];
+    let base = container(column![toolbar(app), banner, main, statusbar(app)])
+        .width(Fill)
+        .height(Fill)
+        .style(theme::chrome);
 
-    // The overlay layer (at most one overlay) and, above everything, the
-    // tutorial — whose callout stays on top while it drives the UI underneath.
+    // The floating Ask window (or its launcher) over the window; over it,
+    // the overlay layer (at most one overlay), so the palette or a menu
+    // opens above Ask too; and, above everything, the tutorial — whose
+    // callout stays on top while it drives the UI underneath.
+    let ask = ask_layer(app);
     let overlay = active_overlay(app).map_or_else(slot, |o| o.view(app));
     let tutorial = if app.tutorial.is_some() {
         tutorial_overlay(app)
     } else {
         slot()
     };
-    // Whether a widget's own overlay is drawn over it all (`watch_overlays`).
-    placed::watch_overlays(app.overlay_open, stack![base, overlay, tutorial])
+    // Inside the frame Clew draws round its borderless window (none on macOS
+    // or maximized: padding 0, the same tree), every layer, so all of them
+    // share one origin; the resize grips at the window's very edge.
+    let framed = container(stack![base, ask, overlay, tutorial])
+        .padding(app.window_frame)
+        .style(theme::window_frame(app.window_radius));
+    // Whether a widget's own overlay is drawn over it all, and which
+    // renderer draws the window (`watch_overlays`); inside the frame, every
+    // layer reaching the window's corners rounds its own as they are.
+    let inner = (app.window_radius - app.window_frame).max(0.0);
+    placed::watch_overlays(
+        placed::Known {
+            overlay_open: app.overlay_open,
+            software_renderer: app.software_renderer,
+            corners: inner,
+        },
+        stack![framed, resize_grips()],
+    )
+}
+
+/// The width of the frame drawn round the window: the design's 1 px border
+/// on Linux and Windows, whose window is borderless; none on macOS, whose
+/// window keeps the system's frame, nor on a window filling the screen.
+pub(crate) fn window_frame_for(full: bool) -> f32 {
+    if cfg!(target_os = "macos") || full {
+        0.0
+    } else {
+        WINDOW_BORDER
+    }
+}
+
+/// The design's window border.
+const WINDOW_BORDER: f32 = 1.0;
+
+/// The radius Clew rounds its window's corners to: the design's 12 on
+/// Linux and Windows, where Clew draws the window whole, while the window
+/// does not fill the screen and its corners can be left clear (`clear`:
+/// the window system composites it, and the renderer leaves them so; see
+/// `app::corners`). None elsewhere: macOS rounds the window itself
+/// (`macos::WINDOW_RADIUS`), and so does Windows 11 a window whose corners
+/// cannot be left clear (`window_settings`).
+pub(crate) fn window_radius_for(full: bool, clear: bool) -> f32 {
+    if !cfg!(target_os = "macos") && clear && !full {
+        WINDOW_RADIUS
+    } else {
+        0.0
+    }
+}
+
+/// The design's window corner.
+pub(crate) const WINDOW_RADIUS: f32 = 12.0;
+
+/// How wide the band along each edge is where a drag resizes the window.
+const GRIP: f32 = 4.0;
+
+/// The window's edges and corners, where a drag resizes it. On Linux and
+/// Windows the window is borderless — clew draws its own controls — and a
+/// borderless window has no frame of the system's to be resized by: these
+/// thin bands, over everything, are that frame. Between them is empty space,
+/// which takes no event and shows no cursor, so everything under it works as
+/// before. On macOS the window keeps the system's frame (`window_settings`).
+fn resize_grips<'a>() -> Element<'a, Message> {
+    if cfg!(target_os = "macos") {
+        return slot();
+    }
+    use iced::mouse::Interaction as Cursor;
+    use iced::window::Direction as Edge;
+    let grip =
+        |edge: Edge, cursor: Cursor, width: Length, height: Length| -> Element<'a, Message> {
+            mouse_area(space().width(width).height(height))
+                .on_press(Message::Window(WindowMsg::ResizeDragged(edge)))
+                .interaction(cursor)
+                .into()
+        };
+    let (band, corner) = (Length::Fixed(GRIP), Length::Fixed(GRIP * 2.0));
+    let top = row![
+        grip(
+            Edge::NorthWest,
+            Cursor::ResizingDiagonallyDown,
+            corner,
+            band
+        ),
+        grip(Edge::North, Cursor::ResizingVertically, Fill, band),
+        grip(Edge::NorthEast, Cursor::ResizingDiagonallyUp, corner, band),
+    ];
+    let sides = row![
+        grip(Edge::West, Cursor::ResizingHorizontally, band, Fill),
+        space().width(Fill).height(Fill),
+        grip(Edge::East, Cursor::ResizingHorizontally, band, Fill),
+    ]
+    .height(Fill);
+    let bottom = row![
+        grip(Edge::SouthWest, Cursor::ResizingDiagonallyUp, corner, band),
+        grip(Edge::South, Cursor::ResizingVertically, Fill, band),
+        grip(
+            Edge::SouthEast,
+            Cursor::ResizingDiagonallyDown,
+            corner,
+            band
+        ),
+    ];
+    column![top, sides, bottom].width(Fill).height(Fill).into()
 }
 
 // ---------------------------------------------------------------- hover tooltip
