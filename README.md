@@ -6,7 +6,7 @@
 
 **An AI-powered tool for analyzing and reading code**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/RutaTang/Clew/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/RutaTang/Clew/actions/workflows/ci.yml) &nbsp; [![Release](https://img.shields.io/github/v/release/RutaTang/Clew?style=flat-square&color=4078f2)](https://github.com/RutaTang/Clew/releases/latest) &nbsp; [![Downloads](https://img.shields.io/github/downloads/RutaTang/Clew/total?style=flat-square&color=50a14f)](https://github.com/RutaTang/Clew/releases) &nbsp; ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-000?style=flat-square) &nbsp; ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white&style=flat-square) &nbsp; [![Stars](https://img.shields.io/github/stars/RutaTang/Clew?style=flat-square&logo=github&color=e3b341)](https://github.com/RutaTang/Clew/stargazers) &nbsp; [![PRs welcome](https://img.shields.io/badge/PRs-welcome-4c8eda?style=flat-square)](https://github.com/RutaTang/Clew/pulls)
+[![CI](https://img.shields.io/github/actions/workflow/status/RutaTang/Clew/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/RutaTang/Clew/actions/workflows/ci.yml) &nbsp; [![Release](https://img.shields.io/github/v/release/RutaTang/Clew?style=flat-square&color=4078f2)](https://github.com/RutaTang/Clew/releases/latest) &nbsp; [![Downloads](https://img.shields.io/github/downloads/RutaTang/Clew/total?style=flat-square&color=50a14f)](https://github.com/RutaTang/Clew/releases) &nbsp; ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-000?style=flat-square) &nbsp; ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white&style=flat-square) &nbsp; [![Stars](https://img.shields.io/github/stars/RutaTang/Clew?style=flat-square&logo=github&color=e3b341)](https://github.com/RutaTang/Clew/stargazers) &nbsp; [![PRs welcome](https://img.shields.io/badge/PRs-welcome-4c8eda?style=flat-square)](https://github.com/RutaTang/Clew/pulls)
 
 **English** &nbsp;|&nbsp; [简体中文](README.zh-CN.md)
 
@@ -26,7 +26,7 @@ Unlike an editor or IDE, Clew builds in a range of capabilities made for reading
 
 ## Quick start
 
-Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releases/latest): the `.dmg` for macOS (Apple silicon), the `.tar.gz` for Linux or the `.zip` for Windows (x86-64 both; unpack it anywhere and run `clew`, keeping `clew-server` beside it). On Linux it needs ALSA's library (`libasound2`, which every desktop has) and an X11 or Wayland desktop. On the welcome screen, click **Open Folder** and open the codebase you want to read. Then click the **⋯** button on the tool strip down the right edge and choose **Tutorial**, and Clew will walk you through how to use it right inside the project you opened.
+Download the latest Clew from [Releases](https://github.com/RutaTang/Clew/releases/latest): the `.dmg` for macOS (Apple silicon) or the `.tar.gz` for Linux (x86-64; unpack it anywhere and run `clew`, keeping `clew-server` beside it). On Linux it needs ALSA's library (`libasound2`, which every desktop has) and an X11 or Wayland desktop. On the welcome screen, click **Open Folder** and open the codebase you want to read. Then click the **⋯** button on the tool strip down the right edge and choose **Tutorial**, and Clew will walk you through how to use it right inside the project you opened.
 
 Everything Clew does is also a keystroke away (on Linux and Windows, **⌘** is **Ctrl**): **⌘⇧P** opens the command palette, where you can search for any command — the graphs and maps, the sidebar's views and panels, what the right-click menu does at the cursor, the debugger's controls, the theme — and run it with Enter. Typing `>` in the file finder (⌘P) does the same, and **⌘/** lists the shortcuts. Or say it: **⌘⇧S** listens for a command or a question (see [Voice](#voice)).
 
@@ -88,7 +88,7 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 **Models.** Whisper.cpp's own models, the same ones [Echo](https://github.com/damien-schneider/Echo) uses, downloaded only when you click a model's **Download** (its size is on the button) and accepted only if they are, byte for byte, the published file: **Small** (`small-q5_1`, 190 MB, the default), **Medium** (`large-v3-turbo-q5_0`, 574 MB) and **Large** (`large-v3-q5_0`, 1081 MB), checked by their SHA-256 and exact size as Echo checks them, all of them multilingual; and Tiny and Base (English) for quick commands on slower machines, checked by the SHA-1 whisper.cpp lists. They are kept in Clew's data folder (`voice/`), and can be removed there. On macOS, the first time Clew listens, the system asks whether it may use the microphone.
 
-Voice works the same on macOS, Linux and Windows, as does everything else in Clew's window: the whole app is built and tested on all three in CI, and each release ships it for all three.
+Voice works the same on macOS and Linux, as does everything else in Clew's window: the whole app is built and tested on both in CI, and each release ships it for both.
 
 ## Language support
 
