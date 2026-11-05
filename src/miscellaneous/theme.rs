@@ -1264,12 +1264,33 @@ pub fn modal_panel(_theme: &Theme) -> container::Style {
             width: 1.0,
             radius: MENU_RADIUS.into(),
         },
-        shadow: iced::Shadow {
-            color: scrim(if is_light() { 0.14 } else { 0.45 }),
-            offset: iced::Vector::new(0.0, 8.0),
-            blur_radius: 24.0,
-        },
+        shadow: panel_shadow(),
         ..container::Style::default()
+    }
+}
+
+/// [`modal_panel`] with the corners of `radius`: the design rounds its
+/// command bar 12, its ⋯ menu 11.
+pub fn modal_panel_rounded(radius: f32) -> impl Fn(&Theme) -> container::Style {
+    move |theme| {
+        let style = modal_panel(theme);
+        container::Style {
+            border: Border {
+                radius: radius.into(),
+                ..style.border
+            },
+            ..style
+        }
+    }
+}
+
+/// The design's shadow under what floats over the window — a menu, the
+/// command bar, Ask, the voice panel (`panelShadow`).
+pub fn panel_shadow() -> iced::Shadow {
+    iced::Shadow {
+        color: scrim(if is_light() { 0.22 } else { 0.6 }),
+        offset: iced::Vector::new(0.0, 24.0),
+        blur_radius: 70.0,
     }
 }
 
@@ -1694,11 +1715,7 @@ pub fn floating_card(_theme: &Theme) -> container::Style {
             width: 1.0,
             radius: 12.0.into(),
         },
-        shadow: iced::Shadow {
-            color: scrim(if is_light() { 0.16 } else { 0.5 }),
-            offset: iced::Vector::new(0.0, 8.0),
-            blur_radius: 28.0,
-        },
+        shadow: panel_shadow(),
         ..container::Style::default()
     }
 }
@@ -1721,7 +1738,8 @@ pub fn level_meter(_theme: &Theme) -> progress_bar::Style {
 /// as the window's, so they stay clear.
 pub fn backdrop(_theme: &Theme) -> container::Style {
     container::Style {
-        background: Some(scrim(0.45).into()),
+        // The design's `scrim`.
+        background: Some(scrim(if is_light() { 0.16 } else { 0.5 }).into()),
         border: Border {
             radius: window_corners().into(),
             ..Border::default()

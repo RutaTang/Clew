@@ -167,6 +167,18 @@ pub(crate) mod ts {
         (top + (line - (ascent + descent)) / 2.0 + ascent).round() - ascent
     }
 
+    /// Where to draw a line of `face` at `size`, laid out
+    /// [`Face::snapped_line`] tall, whose own line box is `own` tall (the
+    /// design's `line-height`) and centred in a box `height` tall from
+    /// `top`: the design's renderer puts that line box on a whole pixel,
+    /// and the text in it as it lays it out, its `normal` box centred in
+    /// the line box — a part of a pixel off, when the line box is not
+    /// `normal` tall, which it keeps. With a `normal` line box, as
+    /// [`baseline_top`].
+    pub(crate) fn line_top(top: f32, height: f32, own: f32, face: Face, size: f32) -> f32 {
+        (top + (height - own) / 2.0).round() + (own - face.normal(size)) / 2.0
+    }
+
     /// `content`, a line of `face` at `size`, set in a box `height` tall as
     /// the design centres a line in one (a button, a row of the chrome, a
     /// menu's): its baseline where the design's renderer paints it, by
@@ -178,14 +190,26 @@ pub(crate) mod ts {
         face: Face,
         size: f32,
     ) -> iced::Element<'a, M> {
+        set_in_line(content, height, face.normal(size), face, size)
+    }
+
+    /// [`set_in`], for a line the design gives a `line-height` of its own:
+    /// its line box `own` tall ([`line_top`]).
+    pub(crate) fn set_in_line<'a, M: 'a>(
+        content: iced::widget::Text<'a>,
+        height: f32,
+        own: f32,
+        face: Face,
+        size: f32,
+    ) -> iced::Element<'a, M> {
         let line = iced::widget::text::LineHeight::Absolute(face.snapped_line(size).into());
         let laid = iced::widget::container(content.size(size).line_height(line))
             .height(iced::Length::Fixed(height))
             .padding(iced::Padding {
-                top: baseline_top(0.0, height, face, size),
+                top: line_top(0.0, height, own, face, size),
                 ..iced::Padding::ZERO
             });
-        super::baseline::Snapped::new(laid.into(), height, face, size).into()
+        super::baseline::Snapped::new(laid.into(), height, own, face, size).into()
     }
 
     /// The room a browser leaves either side of what is typed into an
@@ -218,7 +242,7 @@ pub(crate) mod ts {
             bottom: 0.0,
             left: FIELD_INSET,
         });
-        super::baseline::Snapped::new(laid.into(), height, face, size).into()
+        super::baseline::Snapped::new(laid.into(), height, face.normal(size), face, size).into()
     }
 }
 

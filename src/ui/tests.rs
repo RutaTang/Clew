@@ -1601,10 +1601,12 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
     let main = region_rect(&app, Anchor::Main).unwrap();
     assert!(main.contains(code.center()), "{code:?} outside {main:?}");
     let sidebar = region_rect(&app, Anchor::Sidebar).unwrap();
+    // The divider lies over the sidebar's edge, as the design has it: the
+    // sidebar and the reader meet.
     assert_eq!(
         main.x - (sidebar.x + sidebar.width),
-        crate::resize::THICKNESS,
-        "the divider is neither sidebar nor reader"
+        0.0,
+        "the sidebar and the reader meet"
     );
     assert_eq!(margin.x - (main.x + main.width), 0.0);
 

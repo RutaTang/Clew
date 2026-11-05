@@ -199,25 +199,60 @@ const TIP_SIZE: f32 = 12.0;
 
 /// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
 pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
-    caps_in(caps, crate::fonts::UI_MEDIUM)
+    caps_in(caps, crate::fonts::UI_MEDIUM, CapSize::FIELD)
 }
 
 /// [`keycap`] on a control (the chat field), whose words keep the face's
 /// own spacing (`fonts::in_control`).
 fn control_keycap<'a>(caps: String) -> Element<'a, Message> {
-    caps_in(caps, crate::fonts::in_control(crate::fonts::UI_MEDIUM))
+    caps_in(
+        caps,
+        crate::fonts::in_control(crate::fonts::UI_MEDIUM),
+        CapSize::FIELD,
+    )
 }
 
-fn caps_in<'a>(caps: String, font: iced::Font) -> Element<'a, Message> {
+/// [`keycap`] at the size the design gives the keys of a row of the
+/// command bar.
+pub(crate) fn row_keycap<'a>(caps: String) -> Element<'a, Message> {
+    caps_in(caps, crate::fonts::UI_MEDIUM, CapSize::ROW)
+}
+
+/// A size of the design's caps: what they say, how tall they are, and
+/// how narrow they may be.
+#[derive(Clone, Copy)]
+struct CapSize {
+    text: f32,
+    height: f32,
+    least: f32,
+}
+
+impl CapSize {
+    /// In the chat field and the field while listening.
+    const FIELD: Self = Self {
+        text: ts::CAPTION,
+        height: KEYCAP_H,
+        least: KEYCAP_MIN_W,
+    };
+    /// In a row of the command bar.
+    const ROW: Self = Self {
+        text: 11.0,
+        height: 20.0,
+        least: 19.0,
+    };
+}
+
+fn caps_in<'a>(caps: String, font: iced::Font, size: CapSize) -> Element<'a, Message> {
     // The design's cap: 5 either side of its words inside its 1 px edge
-    // (drawn inside the box by iced), 18 wide at least, its words centred.
+    // (drawn inside the box by iced), as wide as `size` lets it be at
+    // least, its words centred.
     Row::with_children(split_caps(&caps).into_iter().map(|key| {
-        let width = (text_width(&key, ts::CAPTION, font) + 2.0 * (5.0 + 1.0)).max(KEYCAP_MIN_W);
+        let width = (text_width(&key, size.text, font) + 2.0 * (5.0 + 1.0)).max(size.least);
         container(ts::set_in(
             text(key).font(font).color(theme::fg_muted()),
-            KEYCAP_H,
+            size.height,
             ts::INTER,
-            ts::CAPTION,
+            size.text,
         ))
         .center_x(Length::Fixed(width))
         .style(theme::keycap)
@@ -1164,7 +1199,8 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
         .width(TOOLS_MENU_W)
         .padding(MENU_PAD)
-        .style(theme::modal_panel);
+        // The design's ⋯ menu is rounded 11.
+        .style(theme::modal_panel_rounded(11.0));
     modal(
         panel,
         Placement::TopRight {

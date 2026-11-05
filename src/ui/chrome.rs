@@ -32,7 +32,8 @@ pub(crate) const SETTINGS_W: f32 = 480.0;
 pub(crate) const WHY_W: f32 = 480.0;
 pub(crate) const SHORTCUTS_W: f32 = 540.0;
 pub(crate) const DIALOG_W: f32 = 560.0;
-pub(crate) const FINDER_W: f32 = 580.0;
+/// The command bar: the design's 580 inside its 1 px border.
+pub(crate) const FINDER_W: f32 = 582.0;
 pub(crate) const SERVER_PANEL_W: f32 = 720.0;
 pub(crate) const GRAPH_MODAL_W: f32 = 760.0;
 /// Width of the reading-target dropdown.

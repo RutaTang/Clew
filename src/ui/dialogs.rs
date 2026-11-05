@@ -17,6 +17,8 @@ pub(crate) const FINDER_HEAD_H: f32 = 29.0;
 const BAR_DETAIL_SIZE: f32 = 12.0;
 /// Height of the finder's query row, over its results.
 const FINDER_INPUT_H: f32 = 52.0;
+/// The command bar's corners, as the design rounds them.
+const FINDER_RADIUS: f32 = 12.0;
 /// Height of the finder's foot, the line of key hints under its results.
 const FINDER_FOOT_H: f32 = 32.0;
 
@@ -316,7 +318,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     // The border is drawn over the panel's edge; what is in it starts inside.
     .padding(1)
     .clip(true)
-    .style(theme::modal_panel);
+    .style(theme::modal_panel_rounded(FINDER_RADIUS));
 
     modal(
         panel,
@@ -332,7 +334,14 @@ fn finder_footer<'a>() -> Element<'a, Message> {
     } else {
         "Enter to open"
     };
-    let hint = |what: &'a str| text(what).size(ts::SMALL).color(theme::dim());
+    let hint = |what: &'a str| {
+        ts::set_in(
+            text(what).color(theme::dim()),
+            FINDER_FOOT_H,
+            ts::INTER,
+            ts::SMALL,
+        )
+    };
     container(
         row![hint("↑ ↓ to move"), hint(enter), hint("Esc to close")]
             .spacing(16)
@@ -398,25 +407,31 @@ fn bar_row<'a>(
     selected: bool,
     pick: Message,
 ) -> Element<'a, Message> {
+    // Each line on the design's baseline in the row.
+    let row_h = FINDER_ROW_H - FINDER_ROW_GAP;
     let detail: Element<'a, Message> = match detail {
-        Some(detail) => text(detail)
-            .size(BAR_DETAIL_SIZE)
-            .color(theme::dim())
-            .wrapping(Wrapping::None)
-            .into(),
+        Some(detail) => ts::set_in(
+            text(detail).color(theme::dim()).wrapping(Wrapping::None),
+            row_h,
+            ts::INTER,
+            BAR_DETAIL_SIZE,
+        ),
         None => slot(),
     };
     let keys: Element<'a, Message> = match keys {
-        Some(keys) => super::toolbar::keycap(keys),
+        Some(keys) => super::toolbar::row_keycap(keys),
         None => slot(),
     };
     finder_row(
         row![
             glyph::icon(glyph, tint, 15.0),
-            text(title)
-                .size(ts::READING)
-                .wrapping(Wrapping::None)
-                .width(Fill),
+            container(ts::set_in(
+                text(title).wrapping(Wrapping::None),
+                row_h,
+                ts::INTER,
+                ts::READING,
+            ))
+            .width(Fill),
             detail,
             keys,
         ]
@@ -614,7 +629,7 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
             continue;
         };
         let keys: Element<'_, Message> = match &command.keys {
-            Some(keys) => super::toolbar::keycap(keys.clone()),
+            Some(keys) => super::toolbar::row_keycap(keys.clone()),
             None => slot(),
         };
         rows.push(finder_row(

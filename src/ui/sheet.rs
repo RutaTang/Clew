@@ -185,8 +185,18 @@ fn title_w(app: &App, v: &Viewer) -> f32 {
 
 /// Width of the View menu's button.
 fn view_button_w() -> f32 {
-    8.0 * 2.0 + 14.0 + 6.0 + text_width("View", ts::BODY, FILE_TOOL_FONT) + 6.0 + 11.0
+    VIEW_PAD.x() + 14.0 + 6.0 + text_width("View", ts::BODY, FILE_TOOL_FONT) + 6.0 + VIEW_CHEVRON
 }
+
+/// The View menu's button: the design's 9 before what it holds, 8 after,
+/// and the chevron it ends with.
+const VIEW_PAD: Padding = Padding {
+    top: 0.0,
+    right: 8.0,
+    bottom: 0.0,
+    left: 9.0,
+};
+const VIEW_CHEVRON: f32 = 10.0;
 
 /// Where the header's file tools are drawn (Explain through View), in
 /// window coordinates — at the header's right end, as the header lays them
@@ -368,21 +378,25 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     };
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let (name, folder) = title_parts(v);
-    let mut title = row![ts::set_in(
+    // The design sets the name and its folder a line high (`line-height:
+    // 1`).
+    let mut title = row![ts::set_in_line(
         text(name)
             .font(TITLE_FONT)
             .color(theme::fg_bright())
             .wrapping(Wrapping::None),
         HEADER_CONTROL_H,
+        ts::EMPHASIS,
         ts::INTER,
         ts::EMPHASIS,
     )]
     .spacing(8)
     .align_y(iced::Center);
     if !folder.is_empty() {
-        title = title.push(ts::set_in(
+        title = title.push(ts::set_in_line(
             text(folder).color(theme::dim()).wrapping(Wrapping::None),
             HEADER_CONTROL_H,
+            ts::BODY,
             ts::INTER,
             ts::BODY,
         ));
@@ -423,13 +437,13 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
                 ts::INTER,
                 ts::BODY,
             ),
-            glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
+            glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON),
         ]
         .spacing(6)
         .align_y(iced::Center),
     )
     .style(theme::icon_button(app.show_view_menu))
-    .padding([0, 8])
+    .padding(VIEW_PAD)
     .on_press(Message::Window(WindowMsg::ToggleViewMenu));
     let tools = row![
         file_tool(

@@ -7,26 +7,36 @@ use iced::advanced::widget::{Operation, Tree, Widget};
 use iced::advanced::{Clipboard, Shell, mouse, overlay};
 use iced::{Element, Event, Length, Rectangle, Size, Vector};
 
-use super::ts::{Face, baseline_top};
+use super::ts::{Face, line_top};
 
-/// `content` — a box `line` tall holding a line of `face` at `size`, laid
-/// out to set its baseline where the design's renderer paints it in a box
-/// whose top is a whole pixel — drawn moved by under a pixel, so the
-/// baseline lands there from wherever the box really is: a box at a
-/// fractional place (a menu placed by arithmetic, a row centred in an
-/// odd height) would otherwise set it off by as much.
+/// `content` — a box holding a line of `face` at `size`, laid out to set
+/// its baseline where the design's renderer paints it in a box whose top
+/// is a whole pixel — drawn moved by under a pixel, so the baseline lands
+/// there from wherever the box really is: a box at a fractional place (a
+/// menu placed by arithmetic, a row centred in an odd height) would
+/// otherwise set it off by as much.
 pub(crate) struct Snapped<'a, Message> {
     content: Element<'a, Message>,
-    line: f32,
+    height: f32,
+    own: f32,
     face: Face,
     size: f32,
 }
 
 impl<'a, Message> Snapped<'a, Message> {
-    pub(crate) fn new(content: Element<'a, Message>, line: f32, face: Face, size: f32) -> Self {
+    /// `content`, a box `height` tall holding a line whose own line box is
+    /// `own` tall ([`line_top`]).
+    pub(crate) fn new(
+        content: Element<'a, Message>,
+        height: f32,
+        own: f32,
+        face: Face,
+        size: f32,
+    ) -> Self {
         Self {
             content,
-            line,
+            height,
+            own,
             face,
             size,
         }
@@ -74,8 +84,8 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Snapped<'_, Messa
         // Where the line goes from where the box is, less where the
         // content puts it, laid out as if the box's top were whole.
         let top = layout.bounds().y;
-        let laid = baseline_top(0.0, self.line, self.face, self.size);
-        let shift = baseline_top(top, self.line, self.face, self.size) - (top + laid);
+        let at = |top| line_top(top, self.height, self.own, self.face, self.size);
+        let shift = at(top) - (top + at(0.0));
         renderer.with_translation(Vector::new(0.0, shift), |renderer| {
             self.content.as_widget().draw(
                 &tree.children[0],

@@ -244,10 +244,21 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
         };
         tries = tries.push(
             row![
-                text(say).size(ts::BASE).color(theme::fg()).width(Fill),
-                container(text(does).size(ts::SMALL).color(theme::fg_muted()))
-                    .padding([2, 8])
-                    .style(theme::chip),
+                container(ts::set_in(
+                    text(say).color(theme::fg()),
+                    TRY_ROW_H,
+                    ts::INTER,
+                    ts::BASE,
+                ))
+                .width(Fill),
+                container(ts::set_in(
+                    text(does).color(theme::fg_muted()),
+                    ts::INTER.normal(ts::SMALL),
+                    ts::INTER,
+                    ts::SMALL,
+                ))
+                .padding([2, 8])
+                .style(theme::chip),
             ]
             .spacing(10)
             .height(Length::Fixed(TRY_ROW_H))
