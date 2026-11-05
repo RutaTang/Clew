@@ -124,6 +124,83 @@ pub(crate) fn x11_composited(window: u64) -> bool {
         .is_some_and(|reply| reply.owner != x11rb::NONE)
 }
 
+/// Which pixels of a rounded corner show what is behind the window and
+/// which show the window, as iced's GPU renderer draws a rounded quad: for
+/// reading a window's corners off the screen (the Windows test above all).
+#[cfg(test)]
+mod profile {
+    /// How much of the pixel at (`x`, `y`) of the top-left corner of a quad
+    /// whose corners have `radius` (physical pixels) iced's quad shader
+    /// covers: all of it whose centre is half a pixel or more inside the
+    /// edge, none half a pixel or more outside, and in between in
+    /// proportion (`clamp(0.5 - distance, 0, 1)`).
+    pub(super) fn coverage(x: i32, y: i32, radius: f32) -> f32 {
+        (0.5 - beyond(x, y, radius)).clamp(0.0, 1.0)
+    }
+
+    /// How far the centre of the pixel at (`x`, `y`) lies outside the edge
+    /// of a corner of `radius` (negative: inside).
+    fn beyond(x: i32, y: i32, radius: f32) -> f32 {
+        let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+        let (dx, dy) = (radius - cx, radius - cy);
+        if dx > 0.0 && dy > 0.0 {
+            dx.hypot(dy) - radius
+        } else {
+            -cx.min(cy)
+        }
+    }
+
+    /// The pixels of a top-left corner of `radius` that the shader leaves
+    /// wholly clear (`false`) or wholly covers (`true`), each by a tenth of
+    /// a pixel more than it must: what a screen shows of them is the colour
+    /// behind or the colour drawn, never a blend of the two.
+    pub(super) fn corner_profile(radius: f32) -> Vec<((i32, i32), bool)> {
+        let side = radius.ceil() as i32;
+        (0..side)
+            .flat_map(|y| (0..side).map(move |x| (x, y)))
+            .filter_map(|(x, y)| {
+                let beyond = beyond(x, y, radius);
+                if beyond >= 0.6 {
+                    Some(((x, y), false))
+                } else if beyond <= -0.6 {
+                    Some(((x, y), true))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The profile of the design's corner tells it from a corner a pixel
+    /// smaller or larger, and from Windows 11's own: drawn so, some of its
+    /// pixels would be covered a tenth or more differently, a difference a
+    /// screen shows (a tenth of the test's colours apart is 12 levels or
+    /// more in a channel). Radii nearer the design's than that the profile
+    /// cannot tell from it.
+    #[test]
+    fn a_corner_profile_tells_its_radius_from_its_neighbours() {
+        let radius = crate::ui::WINDOW_RADIUS;
+        let profile = corner_profile(radius);
+        let clear = profile.iter().filter(|&&(_, drawn)| !drawn).count();
+        assert!(clear >= 20 && profile.len() - clear >= 80, "{profile:?}");
+        let largest_difference = |other: f32| {
+            profile
+                .iter()
+                .map(|&((x, y), drawn)| {
+                    (coverage(x, y, other) - if drawn { 1.0 } else { 0.0 }).abs()
+                })
+                .fold(0.0_f32, f32::max)
+        };
+        assert_eq!(largest_difference(radius), 0.0);
+        for other in [radius - 1.0, radius + 1.0, 8.0, 16.0] {
+            assert!(
+                largest_difference(other) >= 0.1,
+                "a {other} px corner reads as the design's {radius}"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, windows))]
 mod tests {
     use iced::window::settings::platform::CornerPreference;
@@ -221,7 +298,9 @@ mod tests {
     /// rounds it nor draws a border round it, nor shows a surface of GDI's
     /// over it (the vendored `iced_winit` makes it without one), and
     /// composites it by its alpha. Read off the screen over a window of a
-    /// known colour.
+    /// known colour, at every pixel of each corner that the design's radius
+    /// leaves wholly clear or wholly drawn (`profile`), which a radius a
+    /// pixel smaller or larger, or Windows' own, would show otherwise.
     #[test]
     fn a_window_presented_through_a_visual_is_clear_at_its_corners() {
         use iced_winit::winit;
@@ -390,50 +469,49 @@ mod tests {
 
         let drawn = u32::from(r) | (u32::from(g) << 8) | (u32::from(b) << 16);
         let middle = (w / 2, h / 2);
-        // Clear: the corners' outermost pixels, outside the design's 12
-        // radius by more than a pixel of its edge's smoothing.
-        let clear = [
-            (0, 0),
-            (1, 1),
-            (w - 1, 0),
-            (w - 2, 1),
-            (0, h - 1),
-            (1, h - 2),
-            (w - 1, h - 1),
-            (w - 2, h - 2),
-        ];
-        // Drawn: the middle, each edge's middle (no border of the
-        // system's), and well inside each corner's curve.
-        let filled = [
+        // What each pixel looked at should show: in each corner, every
+        // pixel the design's radius leaves wholly clear or wholly drawn
+        // (`super::profile`), which tells that radius from one a pixel
+        // smaller or larger; each edge's middle and the window's, drawn (no
+        // border of the system's); and round the window, what is behind it.
+        let radius = crate::ui::WINDOW_RADIUS * window.scale_factor() as f32;
+        let corners = super::profile::corner_profile(radius);
+        let mut expected: Vec<((i32, i32), u32)> = Vec::new();
+        for &((cx, cy), is_drawn) in &corners {
+            let colour = if is_drawn { drawn } else { BEHIND };
+            for at in [
+                (cx, cy),
+                (w - 1 - cx, cy),
+                (cx, h - 1 - cy),
+                (w - 1 - cx, h - 1 - cy),
+            ] {
+                expected.push((at, colour));
+            }
+        }
+        for at in [
             middle,
             (w / 2, 0),
             (0, h / 2),
             (w - 1, h / 2),
             (w / 2, h - 1),
-            (5, 5),
-            (w - 6, 5),
-            (5, h - 6),
-            (w - 6, h - 6),
-        ];
-        // Around the window: what is behind it, as the screen is read.
+        ] {
+            expected.push((at, drawn));
+        }
         let around = [(-12, -12), (w + 11, h / 2)];
-
-        let read_all = || -> Vec<((i32, i32), u32)> {
-            [&clear[..], &filled[..], &around[..]]
-                .concat()
-                .into_iter()
-                .map(|(dx, dy)| ((dx, dy), pixel(x + dx, y + dy)))
+        expected.extend(around.iter().map(|&at| (at, BEHIND)));
+        let ready: Vec<((i32, i32), u32)> = std::iter::once((middle, drawn))
+            .chain(around.iter().map(|&at| (at, BEHIND)))
+            .collect();
+        let differing = |of: &[((i32, i32), u32)]| -> Vec<((i32, i32), u32, u32)> {
+            let points: Vec<(i32, i32)> = of.iter().map(|&(at, _)| at).collect();
+            of.iter()
+                .zip(pixels(&points, x, y))
+                .filter(|&(&(_, want), got)| !near(got, want))
+                .map(|(&(at, want), got)| (at, want, got))
                 .collect()
         };
-        let all = |read: &[((i32, i32), u32)], points: &[(i32, i32)], colour: u32| {
-            points.iter().all(|point| {
-                read.iter()
-                    .find(|(p, _)| p == point)
-                    .is_some_and(|(_, got)| near(*got, colour))
-            })
-        };
-        let mut shown = false;
-        let mut read = Vec::new();
+
+        let mut wrong = None;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         while std::time::Instant::now() < deadline {
             if let Err(error) = draw() {
@@ -443,16 +521,12 @@ mod tests {
                 );
             }
             pump(60);
-            read = read_all();
-            if all(&read, &filled[..1], drawn) && all(&read, &around, BEHIND) {
+            if differing(&ready).is_empty() {
                 // Drawn and on top: give the compositor a frame or two more.
                 pump(250);
                 let _ = draw();
                 pump(250);
-                read = read_all();
-                shown = all(&read, &clear, BEHIND)
-                    && all(&read, &filled, drawn)
-                    && all(&read, &around, BEHIND);
+                wrong = Some(differing(&expected));
                 break;
             }
         }
@@ -467,17 +541,52 @@ mod tests {
         } == hwnd;
         drop(surface);
         drop(behind);
-        let pixels: Vec<String> = read
-            .iter()
-            .map(|((dx, dy), got)| format!("({dx},{dy})={got:06X}"))
-            .collect();
-        (
-            shown,
-            format!(
-                "drawn by {drawn_by} at {x},{y} {w}x{h}, on top: {on_top}; behind {BEHIND:06X}, drawn {drawn:06X}; clear {clear:?}, drawn {filled:?}, behind {around:?}: {}",
-                pixels.join(" ")
+        let clear_count = corners.iter().filter(|&&(_, d)| !d).count() * 4;
+        let drawn_count = corners.iter().filter(|&&(_, d)| d).count() * 4;
+        let head = format!(
+            "drawn by {drawn_by} at {x},{y} {w}x{h}, on top: {on_top}; behind {BEHIND:06X}, drawn {drawn:06X}; a {radius} px radius leaves {clear_count} corner pixels clear and {drawn_count} drawn"
+        );
+        match wrong {
+            None => {
+                let seen: Vec<String> = ready
+                    .iter()
+                    .map(|&(at, _)| at)
+                    .zip(pixels(
+                        &ready.iter().map(|&(at, _)| at).collect::<Vec<_>>(),
+                        x,
+                        y,
+                    ))
+                    .map(|((dx, dy), got)| format!("({dx},{dy})={got:06X}"))
+                    .collect();
+                (
+                    false,
+                    format!("{head}; never shown as drawn on top: {}", seen.join(" ")),
+                )
+            }
+            Some(wrong) if wrong.is_empty() => (
+                true,
+                format!(
+                    "{head}: all {} pixels read as expected (the corners, the edges' and the middle, and round the window)",
+                    expected.len()
+                ),
             ),
-        )
+            Some(wrong) => {
+                let listed: Vec<String> = wrong
+                    .iter()
+                    .take(48)
+                    .map(|((dx, dy), want, got)| format!("({dx},{dy}) {got:06X} not {want:06X}"))
+                    .collect();
+                (
+                    false,
+                    format!(
+                        "{head}; {} of {} pixels differ: {}",
+                        wrong.len(),
+                        expected.len(),
+                        listed.join(", ")
+                    ),
+                )
+            }
+        }
     }
 
     /// Whether two colours Windows reads (0x00BBGGRR) are the same, to a
@@ -490,15 +599,19 @@ mod tests {
         })
     }
 
-    /// The colour on the screen at (`x`, `y`), in physical pixels.
-    fn pixel(x: i32, y: i32) -> u32 {
+    /// The colours on the screen at `points`, each from (`x`, `y`), in
+    /// physical pixels.
+    fn pixels(points: &[(i32, i32)], x: i32, y: i32) -> Vec<u32> {
         use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
-        // SAFETY: the screen's DC, released below; a point is read from it.
+        // SAFETY: the screen's DC, released below; points are read from it.
         unsafe {
             let screen = GetDC(std::ptr::null_mut());
-            let colour = GetPixel(screen, x, y);
+            let colours = points
+                .iter()
+                .map(|&(dx, dy)| GetPixel(screen, x + dx, y + dy))
+                .collect();
             ReleaseDC(std::ptr::null_mut(), screen);
-            colour
+            colours
         }
     }
 
