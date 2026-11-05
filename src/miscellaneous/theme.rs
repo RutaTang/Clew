@@ -1285,13 +1285,32 @@ pub fn modal_panel_rounded(radius: f32) -> impl Fn(&Theme) -> container::Style {
 }
 
 /// The design's shadow under what floats over the window — a menu, the
-/// command bar, Ask, the voice panel (`panelShadow`).
+/// command bar, Ask, the voice panel (`panelShadow`) — its reach scaled as
+/// [`with_shadow_scale`] asks.
 pub fn panel_shadow() -> iced::Shadow {
+    let scale = SHADOW_SCALE.with(std::cell::Cell::get);
     iced::Shadow {
         color: scrim(if is_light() { 0.22 } else { 0.6 }),
-        offset: iced::Vector::new(0.0, 24.0),
-        blur_radius: 70.0,
+        offset: iced::Vector::new(0.0, PANEL_SHADOW_OFFSET * scale),
+        blur_radius: PANEL_SHADOW_BLUR * scale,
     }
+}
+
+/// How far the design's panel shadow falls below what casts it, and how
+/// far it blurs.
+pub const PANEL_SHADOW_OFFSET: f32 = 24.0;
+pub const PANEL_SHADOW_BLUR: f32 = 70.0;
+
+thread_local! {
+    static SHADOW_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Draw with [`panel_shadow`]'s reach scaled by `scale`.
+pub fn with_shadow_scale<R>(scale: f32, draw: impl FnOnce() -> R) -> R {
+    let before = SHADOW_SCALE.replace(scale);
+    let drawn = draw();
+    SHADOW_SCALE.set(before);
+    drawn
 }
 
 /// A tooltip: the design's dark bubble in either appearance (`tip`), its

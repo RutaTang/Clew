@@ -145,15 +145,17 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
             return slot();
         }
         let width = VOICE_PANEL_W.min(app.window_width - 2.0 * ASK_MARGIN);
-        return container(container(opaque(voice_panel(app))).width(width))
-            .width(Fill)
-            .height(Fill)
-            .padding(Padding {
-                top: voice_panel_top(app),
-                left: under_field(app, width),
-                ..Padding::ZERO
-            })
-            .into();
+        return container(super::corner_safe::CornerSafe::new(
+            container(opaque(voice_panel(app))).width(width),
+        ))
+        .width(Fill)
+        .height(Fill)
+        .padding(Padding {
+            top: voice_panel_top(app),
+            left: under_field(app, width),
+            ..Padding::ZERO
+        })
+        .into();
     };
     let (top, bottom) = band(app);
     // The border is drawn over the card's edge; what is in it starts inside.
@@ -184,7 +186,10 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     } else {
         container(space()).width(Fill).height(Fill).into()
     };
-    let frame = container(card).width(Fill).height(Fill);
+    // Its shadow kept off the window's clear corners.
+    let frame = container(super::corner_safe::CornerSafe::new(card))
+        .width(Fill)
+        .height(Fill);
     let frame = if large {
         frame
             .align_x(iced::Center)

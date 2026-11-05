@@ -24,6 +24,7 @@ use crate::{
 mod anchored;
 // A line of text on the design's baseline wherever it lands (`ts::set_in`).
 mod baseline;
+mod corner_safe;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;

@@ -142,13 +142,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .style(theme::icon_button(false))
         .padding([2, 8])
         .on_press(Message::Connect(ConnectMsg::Open)),
+        // The design's tooltip bubble.
         container(
             text("Connect to a remote host")
                 .size(ts::SMALL)
-                .color(theme::fg()),
+                .color(theme::tip_text()),
         )
         .padding([3, 7])
-        .style(theme::modal_panel),
+        .style(theme::tip),
         tooltip::Position::Top,
     );
 

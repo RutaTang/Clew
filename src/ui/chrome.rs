@@ -103,7 +103,8 @@ pub(crate) fn modal<'a>(
     placement: Placement,
     backdrop: Backdrop,
 ) -> Element<'a, Message> {
-    let panel = container(opaque(panel)).id(modal_scope_id());
+    // Its shadow kept off the window's clear corners.
+    let panel = super::corner_safe::CornerSafe::new(container(opaque(panel)).id(modal_scope_id()));
     let frame = container(panel).width(Fill).height(Fill);
     let frame = match placement {
         Placement::Center => frame
