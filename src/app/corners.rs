@@ -676,19 +676,78 @@ mod tests {
     }
 
     /// The colours on the screen at `points`, each from (`x`, `y`), in
-    /// physical pixels.
+    /// physical pixels, as Windows reads them (0x00BBGGRR). The screen is
+    /// copied once, the rectangle round the points, and read from the copy:
+    /// a read of the screen for each point (`GetPixel`) has the desktop
+    /// copied for each, which on CI's software renderer held up the tests
+    /// running beside this one for seconds. A copy that read the screen
+    /// wrong could not pass for one that read it right: what it must show
+    /// is the colour behind or the colour drawn, exactly, at every point.
     fn pixels(points: &[(i32, i32)], x: i32, y: i32) -> Vec<u32> {
-        use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC};
-        // SAFETY: the screen's DC, released below; points are read from it.
+        use windows_sys::Win32::Graphics::Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleBitmap,
+            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits,
+            ReleaseDC, SRCCOPY, SelectObject,
+        };
+        if points.is_empty() {
+            return Vec::new();
+        }
+        let left = points.iter().map(|p| p.0).min().unwrap_or(0);
+        let top = points.iter().map(|p| p.1).min().unwrap_or(0);
+        let width = points.iter().map(|p| p.0).max().unwrap_or(0) - left + 1;
+        let height = points.iter().map(|p| p.1).max().unwrap_or(0) - top + 1;
+        let mut copied = vec![0u32; (width * height) as usize];
+        // SAFETY: the screen's DC and a bitmap of its kind, the rectangle
+        // copied into it and its rows read out top first into `copied`, as
+        // many as it holds; every handle released or deleted after.
         unsafe {
             let screen = GetDC(std::ptr::null_mut());
-            let colours = points
-                .iter()
-                .map(|&(dx, dy)| GetPixel(screen, x + dx, y + dy))
-                .collect();
+            let memory = CreateCompatibleDC(screen);
+            let bitmap = CreateCompatibleBitmap(screen, width, height);
+            let before = SelectObject(memory, bitmap);
+            BitBlt(
+                memory,
+                0,
+                0,
+                width,
+                height,
+                screen,
+                x + left,
+                y + top,
+                SRCCOPY | CAPTUREBLT,
+            );
+            SelectObject(memory, before);
+            let mut info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: width,
+                    biHeight: -height,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    biCompression: BI_RGB,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
+            GetDIBits(
+                memory,
+                bitmap,
+                0,
+                height as u32,
+                copied.as_mut_ptr().cast(),
+                &mut info,
+                DIB_RGB_COLORS,
+            );
+            DeleteObject(bitmap);
+            DeleteDC(memory);
             ReleaseDC(std::ptr::null_mut(), screen);
-            colours
         }
+        // A copy's pixel is 0x00RRGGBB; Windows' colour 0x00BBGGRR.
+        let colour = |p: u32| ((p & 0xFF) << 16) | (p & 0xFF00) | ((p >> 16) & 0xFF);
+        points
+            .iter()
+            .map(|&(px, py)| colour(copied[((py - top) * width + (px - left)) as usize]))
+            .collect()
     }
 
     /// A plain window of the colour [`BEHIND`], kept under another.
