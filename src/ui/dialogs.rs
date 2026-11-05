@@ -9,7 +9,7 @@ use iced::widget::row;
 /// the key handler can compute where the selected row sits in the list and
 /// scroll it into view.
 pub(crate) const FINDER_ROW_H: f32 = 39.0;
-/// The gap under each result row, inside its pitch.
+/// The gap between the list's rows (and headings), inside their pitch.
 const FINDER_ROW_GAP: f32 = 1.0;
 /// Height of a heading over a group of the command bar's suggestions.
 pub(crate) const FINDER_HEAD_H: f32 = 29.0;
@@ -297,11 +297,16 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let panel = container(iced::widget::column![
         input,
         hairline(),
-        // No spacing or padding inside the list: row `i` must start at
-        // exactly `i * FINDER_ROW_H` for `reveal_finder_selection`.
+        // The design's gap between what the list holds, and no padding
+        // inside it: row `i` starts at exactly `i * FINDER_ROW_H` (its
+        // height and the gap after it) for `reveal_finder_selection`.
         // Capped so the foot under it always shows.
         container(
-            scrollable(Column::with_children(rows).width(Fill))
+            scrollable(
+                Column::with_children(rows)
+                    .spacing(FINDER_ROW_GAP)
+                    .width(Fill),
+            )
                 .id(finder_list_id())
                 .direction(thin_scroll())
                 .style(theme::overlay_scrollbar)
@@ -361,24 +366,22 @@ fn finder_row<'a>(
     selected: bool,
     pick: Message,
 ) -> Element<'a, Message> {
-    container(
-        button(
-            container(content)
-                .height(Fill)
-                .align_y(iced::alignment::Vertical::Center),
-        )
-        .style(theme::finder_row(selected))
-        .width(Fill)
-        .height(Length::Fixed(FINDER_ROW_H - FINDER_ROW_GAP))
-        .padding([0, 10])
-        .on_press(pick),
+    button(
+        container(content)
+            .height(Fill)
+            .align_y(iced::alignment::Vertical::Center),
     )
-    .height(Length::Fixed(FINDER_ROW_H))
+    .style(theme::finder_row(selected))
+    .width(Fill)
+    .height(Length::Fixed(FINDER_ROW_H - FINDER_ROW_GAP))
+    .padding([0, 10])
+    .on_press(pick)
     .into()
 }
 
 /// A heading over a group of the command bar's suggestions.
 fn finder_heading<'a>(title: &'static str) -> Element<'a, Message> {
+    // The design's 10 over it and 4 under, in its pitch less the list's gap.
     container(
         text(title)
             .size(ts::SMALL)
@@ -386,10 +389,9 @@ fn finder_heading<'a>(title: &'static str) -> Element<'a, Message> {
             .font(crate::fonts::UI_MEDIUM)
             .color(theme::dim()),
     )
-    .height(Length::Fixed(FINDER_HEAD_H))
-    .align_y(iced::alignment::Vertical::Bottom)
+    .height(Length::Fixed(FINDER_HEAD_H - FINDER_ROW_GAP))
     .padding(Padding {
-        top: 0.0,
+        top: 10.0,
         right: 10.0,
         bottom: 4.0,
         left: 10.0,
@@ -567,22 +569,19 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
 /// (`reveal_finder_selection`, which places row `i` at `i * FINDER_ROW_H`)
 /// one row off for everything after it.
 fn stale_finder_row<'a>(selected: bool) -> Element<'a, Message> {
-    container(
-        button(
-            container(
-                text("— no longer in the project —")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-            )
-            .height(Fill)
-            .align_y(iced::alignment::Vertical::Center),
+    button(
+        container(
+            text("— no longer in the project —")
+                .size(ts::SMALL)
+                .color(theme::dim()),
         )
-        .style(theme::finder_row(selected))
-        .width(Fill)
-        .height(Length::Fixed(FINDER_ROW_H - FINDER_ROW_GAP))
-        .padding([0, 10]),
+        .height(Fill)
+        .align_y(iced::alignment::Vertical::Center),
     )
-    .height(Length::Fixed(FINDER_ROW_H))
+    .style(theme::finder_row(selected))
+    .width(Fill)
+    .height(Length::Fixed(FINDER_ROW_H - FINDER_ROW_GAP))
+    .padding([0, 10])
     .into()
 }
 
