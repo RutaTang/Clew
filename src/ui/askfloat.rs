@@ -262,7 +262,7 @@ fn voice_panel(app: &App) -> Element<'_, Message> {
             text(title)
                 .size(ts::SUBTITLE)
                 .line_height(ts::normal_line(ts::SUBTITLE))
-                .font(crate::fonts::UI_MEDIUM)
+                .font(crate::fonts::titled(crate::fonts::UI_MEDIUM))
                 .color(theme::fg()),
             text(hint)
                 .size(HINT_SIZE)
@@ -432,19 +432,17 @@ pub(crate) fn level_bars<'a>(heights: &[f32], level: f32, fade: bool) -> Element
 
 /// A small borderless control of the card's header.
 fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Message> {
-    tooltip(
+    super::tip_at(
         button(container(glyph::icon(g, theme::fg_muted(), 15.0)).center(Fill))
             .style(theme::toolbar_button)
             .width(Length::Fixed(HEADER_BUTTON))
             .height(Length::Fixed(HEADER_BUTTON))
             .padding(0)
             .on_press(msg),
-        text(tip).size(ts::CAPTION),
+        tip,
+        None,
         tooltip::Position::Bottom,
     )
-    .style(theme::modal_panel)
-    .padding(6)
-    .into()
 }
 
 /// Height of the card's header row.
@@ -657,7 +655,7 @@ pub(crate) fn ask_margin(app: &App, height: f32) -> Element<'_, Message> {
         header = header.push(
             button(ts::set_in(
                 text("Clear")
-                    .font(crate::fonts::UI_MEDIUM)
+                    .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
                     .color(theme::fg_muted()),
                 HEADER_BUTTON,
                 ts::INTER,

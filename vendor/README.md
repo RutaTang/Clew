@@ -20,10 +20,16 @@ upstream (0.19.0); when iced moves to a release that no longer has it, delete
 this copy and the patch entry.
 
 A second patch sets the tracking text is shaped with where none is asked
-for (`DEFAULT_LETTER_SPACING` in `src/shape.rs`): -0.004 em, the design's
-`letter-spacing` (-0.048 px at the sizes Clew's text is read at). iced 0.14
-has no way to ask for tracking; when it has, ask for it there and drop this
-one.
+for (`letter_spacing` in `src/shape.rs`): -0.004 em, the design's
+`letter-spacing` (-0.048 px at the sizes Clew's text is read at). As a
+browser does, the text of a control (a button, an input) is left in the
+face's own spacing, and the design's titles are tracked -0.01 em. iced 0.14
+has no way to ask for tracking, so Clew asks for these by a stretch its
+faces do not come in — semi-expanded for a control's, semi-condensed for a
+title's (`fonts::in_control`, `fonts::titled`) — and the patch matches such
+text to the face of the normal width (`Attrs::matches` in `src/attrs.rs`).
+When iced has a way to ask for tracking, ask for it there and drop this
+patch.
 
 ## tree-sitter-lean4 0.3.0
 

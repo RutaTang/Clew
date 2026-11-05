@@ -218,13 +218,16 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let input = container(
         row![
             glyph::icon(glyph, theme::dim(), 16.0),
-            text_input(placeholder, &app.proj.finder.query)
-                .id(finder_input_id())
-                .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
-                .on_submit(Message::Nav(NavMsg::FinderConfirm))
-                .size(ts::SUBTITLE)
-                .padding(0)
-                .style(theme::bare_input),
+            ts::field_in(
+                text_input(placeholder, &app.proj.finder.query)
+                    .id(finder_input_id())
+                    .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
+                    .on_submit(Message::Nav(NavMsg::FinderConfirm))
+                    .style(theme::bare_input),
+                FINDER_INPUT_H,
+                ts::INTER,
+                ts::SUBTITLE,
+            ),
             talk,
         ]
         .spacing(11)

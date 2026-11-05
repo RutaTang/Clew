@@ -113,7 +113,7 @@ pub(crate) mod ts {
     impl Face {
         /// Its ascent and descent at `size`, each rounded to a whole
         /// pixel, as the design's renderer takes them (at every scale).
-        fn rounded(self, size: f32) -> (f32, f32) {
+        pub(crate) fn rounded(self, size: f32) -> (f32, f32) {
             ((self.ascent * size).round(), (self.descent * size).round())
         }
 
@@ -185,6 +185,39 @@ pub(crate) mod ts {
                 top: baseline_top(0.0, height, face, size),
                 ..iced::Padding::ZERO
             });
+        super::baseline::Snapped::new(laid.into(), height, face, size).into()
+    }
+
+    /// The room a browser leaves either side of what is typed into an
+    /// input — its own padding, which the design's inputs keep.
+    pub(crate) const FIELD_INSET: f32 = 2.0;
+
+    /// `field`, one line of the interface's face at `size` (`face`'s
+    /// metrics), set in a box `height` tall as the design's renderer sets an
+    /// input in one: what is typed [`FIELD_INSET`] in from either side, in
+    /// the face's own spacing (`fonts::in_control`), its baseline as
+    /// [`set_in`]'s.
+    pub(crate) fn field_in<'a, M: Clone + 'a>(
+        field: iced::widget::TextInput<'a, M>,
+        height: f32,
+        face: Face,
+        size: f32,
+    ) -> iced::Element<'a, M> {
+        let line = iced::widget::text::LineHeight::Absolute(face.snapped_line(size).into());
+        let laid = iced::widget::container(
+            field
+                .font(crate::fonts::in_control(crate::fonts::UI))
+                .size(size)
+                .line_height(line)
+                .padding(0),
+        )
+        .height(iced::Length::Fixed(height))
+        .padding(iced::Padding {
+            top: baseline_top(0.0, height, face, size),
+            right: FIELD_INSET,
+            bottom: 0.0,
+            left: FIELD_INSET,
+        });
         super::baseline::Snapped::new(laid.into(), height, face, size).into()
     }
 }
@@ -465,13 +498,22 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
     let frame = app.window_frame;
+    // Its divider lies over the sidebar's right padding, where nothing is
+    // drawn, as the design's sidebar runs on to the sheet; the sidebar's
+    // edge follows the divider's middle.
     let left: Element<'_, Message> = if app.show_left_sidebar {
-        row![
+        let half = crate::resize::THICKNESS / 2.0;
+        stack![
             sidebar(app),
-            crate::resize::Divider::vertical(move |v| {
-                Message::Window(WindowMsg::ResizeSidebar(v - frame))
-            })
-            .panel(crate::resize::Panel::Before),
+            container(
+                crate::resize::Divider::vertical(move |v| {
+                    Message::Window(WindowMsg::ResizeSidebar(v - frame + half))
+                })
+                .panel(crate::resize::Panel::Before),
+            )
+            .width(Length::Fixed(app.sidebar_width))
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Right),
         ]
         .into()
     } else {

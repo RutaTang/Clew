@@ -1465,11 +1465,11 @@ fn active_note<'a>(
                 glyph::icon(glyph, tint, 13.0),
                 text(label)
                     .size(NOTE_ACTION_SIZE)
-                    .font(if accent {
+                    .font(crate::fonts::in_control(if accent {
                         crate::fonts::UI_SEMIBOLD
                     } else {
                         crate::fonts::UI_MEDIUM
-                    })
+                    }))
                     .color(tint),
             ]
             .spacing(6)

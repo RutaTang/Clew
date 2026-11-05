@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, container, progress_bar, scrollable, text_input, toggler};
+use iced::widget::{button, container, progress_bar, scrollable, text_input};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -939,6 +939,11 @@ pub fn warning() -> Color {
 pub fn danger() -> Color {
     active().danger
 }
+/// The dot that says the microphone is on: the design's red, in either
+/// appearance.
+pub fn recording() -> Color {
+    Color::from_rgb8(0xF0, 0x50, 0x4F)
+}
 pub fn info() -> Color {
     active().info
 }
@@ -1263,6 +1268,55 @@ pub fn modal_panel(_theme: &Theme) -> container::Style {
             color: scrim(if is_light() { 0.14 } else { 0.45 }),
             offset: iced::Vector::new(0.0, 8.0),
             blur_radius: 24.0,
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A tooltip: the design's dark bubble in either appearance (`tip`), its
+/// hairline edge in dark (`tipBorder`) and its shadow (`tipShadow`).
+pub fn tip(_theme: &Theme) -> container::Style {
+    let light = is_light();
+    container::Style {
+        background: Some(if light { rgb(0x18181B) } else { rgb(0x2A2A2F) }.into()),
+        text_color: Some(tip_text()),
+        border: Border {
+            color: if light {
+                Color::TRANSPARENT
+            } else {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.08)
+            },
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        shadow: iced::Shadow {
+            color: scrim(if light { 0.18 } else { 0.5 }),
+            offset: iced::Vector::new(0.0, if light { 6.0 } else { 8.0 }),
+            blur_radius: if light { 20.0 } else { 24.0 },
+        },
+        ..container::Style::default()
+    }
+}
+
+/// A tooltip's words (`tipText`): light on its dark bubble.
+pub fn tip_text() -> Color {
+    if is_light() {
+        rgb(0xFAFAFA)
+    } else {
+        rgb(0xEDEDEF)
+    }
+}
+
+/// A key of a tooltip's shortcut (`tipKey`): a wash of white on the bubble.
+pub fn tip_key(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(
+            Color::from_rgba(1.0, 1.0, 1.0, if is_light() { 0.14 } else { 0.10 }).into(),
+        ),
+        text_color: Some(tip_text()),
+        border: Border {
+            radius: 4.0.into(),
+            ..Border::default()
         },
         ..container::Style::default()
     }
@@ -1767,33 +1821,40 @@ pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// A switch (Keep listening): the accent when on, a quiet well when off,
-/// its knob white either way.
-pub fn switch(_theme: &Theme, status: toggler::Status) -> toggler::Style {
-    let (on, hovered) = match status {
-        toggler::Status::Active { is_toggled } => (is_toggled, false),
-        toggler::Status::Hovered { is_toggled } => (is_toggled, true),
-        toggler::Status::Disabled { is_toggled } => (is_toggled, false),
-    };
-    let background = if on {
-        if hovered {
-            active().accent_hover
+/// A switch's track (Keep listening): the accent when `on`, a quiet well
+/// when off, round at its ends.
+pub fn switch(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        let background = if on {
+            if hovered {
+                active().accent_hover
+            } else {
+                accent()
+            }
         } else {
-            accent()
+            wash(if hovered { 0.24 } else { 0.18 })
+        };
+        button::Style {
+            background: Some(background.into()),
+            border: Border {
+                radius: 8.0.into(),
+                ..Border::default()
+            },
+            ..button::Style::default()
         }
-    } else {
-        wash(if hovered { 0.24 } else { 0.18 })
-    };
-    toggler::Style {
-        background: background.into(),
-        background_border_width: 0.0,
-        background_border_color: Color::TRANSPARENT,
-        foreground: Color::WHITE.into(),
-        foreground_border_width: 0.0,
-        foreground_border_color: Color::TRANSPARENT,
-        text_color: Some(fg_muted()),
-        border_radius: None,
-        padding_ratio: 0.12,
+    }
+}
+
+/// A switch's knob: white, round.
+pub fn switch_knob(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Color::WHITE.into()),
+        border: Border {
+            radius: 6.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
     }
 }
 

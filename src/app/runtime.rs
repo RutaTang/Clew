@@ -167,7 +167,9 @@ impl App {
             window_focused: true,
             asking: Default::default(),
             controls_hovered: false,
-            sidebar_width: 248.0,
+            // The design's sidebar, as it is laid out: its six views take
+            // 234 between its 10s.
+            sidebar_width: 254.0,
             right_width: 272.0,
             bottom_height: 340.0,
             font_size: DEFAULT_FONT_SIZE,

@@ -34,6 +34,26 @@ pub const CODE_BOLD: Font = Font {
     ..CODE
 };
 
+/// `font` as a browser sets it in a control — a button, an input: in the
+/// face's own spacing, where the design's tracking does not reach. Asked
+/// for by a stretch the faces do not come in, which the vendored shaper
+/// reads as that (`vendor/README.md`).
+pub const fn in_control(font: Font) -> Font {
+    Font {
+        stretch: iced::font::Stretch::SemiExpanded,
+        ..font
+    }
+}
+
+/// `font` tracked as the design's titles are (`letter-spacing: -0.01em`),
+/// by a stretch the vendored shaper reads as that ([`in_control`]).
+pub const fn titled(font: Font) -> Font {
+    Font {
+        stretch: iced::font::Stretch::SemiCondensed,
+        ..font
+    }
+}
+
 /// Every embedded face: Inter regular, medium and semibold; JetBrains Mono
 /// regular, semibold, bold and italic.
 pub const ALL: [&[u8]; 7] = [

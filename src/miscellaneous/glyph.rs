@@ -244,7 +244,8 @@ fn body(g: Glyph) -> &'static str {
         ChevronDown => "<path d='m6 9 6 6 6-6'/>",
         CheckCircle => "<circle cx='12' cy='12' r='8'/><path d='M8.2 12 L11 14.8 L15.8 9.4'/>",
         Circle => "<circle cx='12' cy='12' r='8'/>",
-        Search => "<circle cx='10.5' cy='10.5' r='6'/><path d='M15 15 L19.5 19.5'/>",
+        // The design's own magnifier.
+        Search => "<circle cx='11' cy='11' r='8'/><path d='m21 21-4.3-4.3'/>",
         Bookmark => "<path d='m19 21-7-4-7 4V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v16z'/>",
         List => {
             "<circle cx='5.5' cy='7' r='1' fill='STROKE' stroke='none'/><path d='M9 7 H19'/>\

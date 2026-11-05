@@ -52,8 +52,18 @@ const CODE_GAP: f32 = 20.0;
 /// Width of the gutter: the line number right-aligned in the first
 /// [`NUMBER_COLS`], then room before the code that holds the fold arrow.
 fn gutter_width(char_width: f32, font_size: f32) -> f32 {
-    NUMBER_COLS as f32 * char_width + CODE_GAP * font_size / 13.0
+    number_width(char_width, font_size) + CODE_GAP * font_size / 13.0
 }
+
+/// Width of the column the line number is right-aligned in: the design's
+/// 48 at 13 px code, and never too narrow for [`NUMBER_COLS`] digits of the
+/// code's own.
+fn number_width(char_width: f32, font_size: f32) -> f32 {
+    (NUMBER_W * font_size / 13.0).max(NUMBER_COLS as f32 * char_width)
+}
+
+/// The design's line-number column, at 13 px code.
+const NUMBER_W: f32 = 48.0;
 
 /// Columns the line number is right-aligned in.
 const NUMBER_COLS: usize = 6;
@@ -1892,7 +1902,7 @@ where
         let lh = self.line_height;
         let gutter_px = gutter_width(state.char_width, self.font_size);
         // The line numbers' column, right-aligned to its edge.
-        let number_w = NUMBER_COLS as f32 * state.char_width;
+        let number_w = number_width(state.char_width, self.font_size);
 
         // Visible row range relative to the content top (rows, not source
         // lines — collapsed folds compress the vertical space).

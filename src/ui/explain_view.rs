@@ -61,6 +61,31 @@ const PROSE_CODE_SIZE: f32 = 12.0;
 /// as an en space (half the size it is set at).
 const PROSE_CODE_ROOM: f32 = 10.0;
 
+/// The room itself: an en space, joined to the code by a word joiner. The
+/// design's chip is one box, its padding laid out with its code and broken
+/// before or after, never inside; a bare space at a line's end hangs past
+/// it, uncounted (cosmic-text's way with trailing white space), so the
+/// line took up to 5 px more than the design's and wrapped a word later.
+const PROSE_CODE_ROOM_TEXT: &str = "\u{2002}\u{2060}";
+
+/// The design's padding of a chip of code in prose, above and below it.
+const PROSE_CODE_PAD_Y: f32 = 1.0;
+
+/// How far inside its line a chip of code in prose (`size`, lines `line`
+/// tall) is drawn, at its top and at its bottom. The design's renderer
+/// draws an inline code's background around the code face's ascent and
+/// descent from the line's baseline (each rounded, as it takes them), its
+/// padding out; a span's background here spans its line.
+fn chip_inset(size: f32, line: f32) -> (f32, f32) {
+    let (ascent, descent) = ts::INTER.rounded(size);
+    let baseline = (line - (ascent + descent)) / 2.0 + ascent;
+    let (code_ascent, code_descent) = ts::MONO.rounded(PROSE_CODE_SIZE);
+    (
+        baseline - code_ascent - PROSE_CODE_PAD_Y,
+        line - (baseline + code_descent + PROSE_CODE_PAD_Y),
+    )
+}
+
 /// How the markdown widget sets prose of a type of its own (a note, an
 /// answer): its paragraphs at their size and line height, the code in them
 /// at [`PROSE_CODE_SIZE`] on a chip with room of its own either side (a
@@ -86,9 +111,11 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
         // Every span its line height in pixels: a line takes its height from
         // the spans that state one, so code (sized apart) would otherwise
         // set the lines it is on closer than the rest.
-        let line = LineHeight::Absolute((self.size * self.line_height).into());
+        let line_px = self.size * self.line_height;
+        let line = LineHeight::Absolute(line_px.into());
+        let (inset_top, inset_bottom) = chip_inset(self.size, line_px);
         let room = || {
-            Span::new("\u{2002}")
+            Span::new(PROSE_CODE_ROOM_TEXT)
                 .size(PROSE_CODE_ROOM)
                 .line_height(line)
         };
@@ -100,8 +127,8 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
                     span.size(PROSE_CODE_SIZE)
                         .line_height(line)
                         .padding(iced::Padding {
-                            top: 1.0,
-                            bottom: 1.0,
+                            top: -inset_top,
+                            bottom: -inset_bottom,
                             left: PROSE_CODE_ROOM / 2.0,
                             right: PROSE_CODE_ROOM / 2.0,
                         }),

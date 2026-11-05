@@ -36,6 +36,8 @@ pub(crate) const ICON_BTN: f32 = 30.0;
 /// The top bar's inset from the window's left edge, before the window
 /// buttons (macOS) or the app menu's ☰.
 const BAR_PAD_L: f32 = if MAC_CHROME { 16.0 } else { 10.0 };
+/// Room after the sidebar toggle, at the end of the top bar's left cluster.
+const BAR_CLUSTER_PAD_R: f32 = 12.0;
 /// Width of macOS's three window buttons and the gaps between them.
 const TRAFFIC_W: f32 = 3.0 * 12.0 + 2.0 * 8.0;
 /// Width of back / forward: the room before them, and their gap.
@@ -45,6 +47,10 @@ const NAV_PAD_L: f32 = 4.0;
 /// either side of it.
 const FIELD_MAX_W: f32 = 460.0;
 const FIELD_H: f32 = 34.0;
+/// The field while listening: its red dot, and the design's gap between
+/// what it holds.
+const REC_DOT: f32 = 7.0;
+const LISTENING_GAP: f32 = 9.0;
 const FIELD_MARGIN: f32 = 14.0;
 /// Width of one of the window buttons of Windows and Linux.
 const WIN_BTN_W: f32 = 46.0;
@@ -57,16 +63,22 @@ const WIN_BTNS_GAP: f32 = 14.0;
 /// the sidebar toggle sits at the sidebar's edge; else just its controls.
 pub(crate) fn left_cluster_w(app: &App) -> f32 {
     let least = if MAC_CHROME {
-        BAR_PAD_L + TRAFFIC_W + 12.0 + ICON_BTN + 10.0
+        BAR_PAD_L + TRAFFIC_W + 12.0 + ICON_BTN + BAR_CLUSTER_PAD_R
     } else {
-        BAR_PAD_L + ICON_BTN + 6.0 + ICON_BTN + 10.0
+        BAR_PAD_L + ICON_BTN + 6.0 + ICON_BTN + BAR_CLUSTER_PAD_R
     };
     if app.show_left_sidebar {
-        app.sidebar_width.max(least)
+        (app.sidebar_width - SIDEBAR_PAST_BAR).max(least)
     } else {
         least
     }
 }
+
+/// How far the sidebar runs past the top bar's cluster over it: the design
+/// sets the cluster at 248 and lays the sidebar under it out at 254, the
+/// room its six views take. The cluster keeps that short of the sidebar's
+/// edge as the sidebar is resized.
+const SIDEBAR_PAST_BAR: f32 = 6.0;
 
 /// Width of the top bar's right cluster: the panel toggle (macOS), or the
 /// window buttons (Windows and Linux).
@@ -111,16 +123,25 @@ pub(crate) fn tip_at<'a>(
     shortcut: Option<String>,
     side: tooltip::Position,
 ) -> Element<'a, Message> {
-    let mut body = row![
+    // Its words centred on its keys' row, as the design's flex row sets
+    // them; with no keys, on a line of their own.
+    let line = if shortcut.is_some() {
+        TIP_KEY_H
+    } else {
+        ts::INTER.normal(TIP_SIZE)
+    };
+    let mut body = row![ts::set_in(
         text(name)
-            .size(TIP_SIZE)
             .font(crate::fonts::UI_MEDIUM)
-            .color(theme::fg())
-    ]
+            .color(theme::tip_text()),
+        line,
+        ts::INTER,
+        TIP_SIZE,
+    )]
     .spacing(8)
     .align_y(iced::Center);
     if let Some(sc) = shortcut {
-        body = body.push(keycap(sc));
+        body = body.push(tip_keys(&sc));
     }
     // The design's padding, inside the border drawn over the bubble's edge.
     let bubble = container(body)
@@ -130,27 +151,75 @@ pub(crate) fn tip_at<'a>(
             bottom: 7.0,
             left: 11.0,
         })
-        .style(theme::modal_panel);
-    tooltip(control, bubble, side).gap(8).into()
+        .style(theme::tip);
+    // No padding of the tooltip's own (iced's is 5) round the bubble: it
+    // set the bubble 5 further from what it names than the design's 10.
+    tooltip(control, bubble, side)
+        .gap(TIP_GAP)
+        .padding(0)
+        .into()
 }
 
-/// Height of a key cap.
+/// A tooltip's shortcut, as its keys: each a cap of its own on the bubble,
+/// the design's 17 wide at least and 18 high, 4 either side of its words.
+fn tip_keys<'a>(caps: &str) -> Element<'a, Message> {
+    Row::with_children(split_caps(caps).into_iter().map(|key| {
+        let width = (text_width(&key, ts::CAPTION, crate::fonts::UI_MEDIUM) + 2.0 * TIP_KEY_PAD)
+            .max(TIP_KEY_MIN_W);
+        container(ts::set_in(
+            text(key)
+                .font(crate::fonts::UI_MEDIUM)
+                .color(theme::tip_text()),
+            TIP_KEY_H,
+            ts::INTER,
+            ts::CAPTION,
+        ))
+        .width(Length::Fixed(width))
+        .center_x(Length::Fixed(width))
+        .style(theme::tip_key)
+        .into()
+    }))
+    .spacing(3)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// A tooltip's distance from what it names: the design's 10.
+const TIP_GAP: f32 = 10.0;
+/// A tooltip key's height, least width, and room either side of its words.
+const TIP_KEY_H: f32 = 18.0;
+const TIP_KEY_MIN_W: f32 = 17.0;
+const TIP_KEY_PAD: f32 = 4.0;
+
+/// Height of a key cap, and its least width.
 const KEYCAP_H: f32 = 19.0;
+const KEYCAP_MIN_W: f32 = 18.0;
 /// Size of a tooltip's words.
 const TIP_SIZE: f32 = 12.0;
 
 /// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
 pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
+    caps_in(caps, crate::fonts::UI_MEDIUM)
+}
+
+/// [`keycap`] on a control (the chat field), whose words keep the face's
+/// own spacing (`fonts::in_control`).
+fn control_keycap<'a>(caps: String) -> Element<'a, Message> {
+    caps_in(caps, crate::fonts::in_control(crate::fonts::UI_MEDIUM))
+}
+
+fn caps_in<'a>(caps: String, font: iced::Font) -> Element<'a, Message> {
+    // The design's cap: 5 either side of its words inside its 1 px edge
+    // (drawn inside the box by iced), 18 wide at least, its words centred.
     Row::with_children(split_caps(&caps).into_iter().map(|key| {
-        container(
-            text(key)
-                .size(ts::CAPTION)
-                .font(crate::fonts::UI_MEDIUM)
-                .color(theme::fg_muted()),
-        )
-        .height(Length::Fixed(KEYCAP_H))
-        .align_y(iced::Center)
-        .padding([0, 5])
+        let width = (text_width(&key, ts::CAPTION, font) + 2.0 * (5.0 + 1.0)).max(KEYCAP_MIN_W);
+        container(ts::set_in(
+            text(key).font(font).color(theme::fg_muted()),
+            KEYCAP_H,
+            ts::INTER,
+            ts::CAPTION,
+        ))
+        .center_x(Length::Fixed(width))
         .style(theme::keycap)
         .into()
     }))
@@ -244,7 +313,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center)
             .padding(Padding {
                 left: BAR_PAD_L,
-                right: 10.0,
+                right: BAR_CLUSTER_PAD_R,
                 ..Padding::ZERO
             }),
     )
@@ -505,13 +574,24 @@ fn chat_field(app: &App) -> Element<'_, Message> {
                 // Listening: how loud, and how to stop — the microphone itself,
                 // lit, or Esc.
                 VoicePhase::Listening { level, .. } if !covered => row![
-                    text("●").size(ts::SMALL).color(theme::danger()),
-                    text("Listening…").size(ts::BASE).color(theme::fg()),
+                    container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
+                        container::Style {
+                            background: Some(theme::recording().into()),
+                            border: iced::border::rounded(REC_DOT / 2.0),
+                            ..container::Style::default()
+                        }
+                    }),
+                    ts::set_in(
+                        text("Listening…").color(theme::fg()),
+                        FIELD_H - 2.0,
+                        ts::INTER,
+                        ts::BASE,
+                    ),
                     super::askfloat::level_bars(&[5.0, 9.0, 13.0, 8.0, 11.0, 6.0], level, false),
                     space().width(Fill),
                     keycap("Esc".to_string()),
                 ]
-                .spacing(8)
+                .spacing(LISTENING_GAP)
                 .align_y(iced::Center)
                 .into(),
                 VoicePhase::Transcribing { .. } if !covered => row![
@@ -530,19 +610,27 @@ fn chat_field(app: &App) -> Element<'_, Message> {
                     button(
                         row![
                             glyph::icon(Glyph::Message, theme::accent(), 15.0),
-                            text("Ask a question, or say what to do")
-                                .size(ts::BASE)
-                                .color(theme::dim())
-                                .width(Fill)
-                                .wrapping(Wrapping::None),
-                            keycap(chord),
+                            container(ts::set_in(
+                                text("Ask a question, or say what to do")
+                                    .font(crate::fonts::in_control(crate::fonts::UI))
+                                    .color(theme::dim())
+                                    .wrapping(Wrapping::None),
+                                FIELD_H - 2.0,
+                                ts::INTER,
+                                ts::BASE,
+                            ))
+                            .width(Fill)
+                            .clip(true),
+                            control_keycap(chord),
                         ]
                         .spacing(9)
+                        .height(Fill)
                         .align_y(iced::Center),
                     )
                     .style(theme::field_face)
-                    .padding([4, 4])
+                    .padding(0)
                     .width(Fill)
+                    .height(Fill)
                     .on_press(Message::Ask(AskMsg::Toggle))
                     .into()
                 }
@@ -580,6 +668,8 @@ fn chat_field(app: &App) -> Element<'_, Message> {
         Some(chord),
         tooltip::Position::Bottom,
     );
+    // The design's 12 before and 4 after, inside the field's 1 px edge
+    // (which iced draws inside the box).
     container(
         row![face, mic]
             .spacing(4)
@@ -587,10 +677,10 @@ fn chat_field(app: &App) -> Element<'_, Message> {
             .align_y(iced::Center),
     )
     .padding(Padding {
-        top: 0.0,
-        right: 3.0,
-        bottom: 0.0,
-        left: 7.0,
+        top: 1.0,
+        right: 4.0 + 1.0,
+        bottom: 1.0,
+        left: 12.0 + 1.0,
     })
     .width(Length::Fixed(rect.width))
     .height(Length::Fixed(FIELD_H))
@@ -757,7 +847,12 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         .height(Length::Fixed(STRIP_RULE_H))
         .align_y(iced::Center)
     };
-    let mut strip = Column::new().spacing(STRIP_SPACING).align_x(iced::Center);
+    // As wide as the strip, so its tools are centred in it (a column only
+    // as wide as its tools was laid at the strip's left edge).
+    let mut strip = Column::new()
+        .width(Fill)
+        .spacing(STRIP_SPACING)
+        .align_x(iced::Center);
     for (i, t) in STRIP_TOP.iter().enumerate() {
         if STRIP_RULE_BEFORE.contains(&i) {
             strip = strip.push(rule());

@@ -39,6 +39,8 @@ pub(crate) const STATUSBAR_H: f32 = 32.0;
 
 /// Between the status bar's items.
 const STATUS_GAP: f32 = 18.0;
+/// Height of the target picker at the bar's end.
+const PICKER_H: f32 = 22.0;
 
 /// One quiet item of the status bar.
 fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
@@ -173,10 +175,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         slot()
     };
     // The design's gap after where the code is read from, less the padding
-    // of the button that says it.
-    let mut bar = row![conn_indicator, said]
-        .spacing(STATUS_GAP - 8.0)
-        .align_y(iced::Center);
+    // of the button that says it — a row of its own, since the bar's own
+    // spacing (the design's gap between everything else) is one for all.
+    let mut bar = row![
+        row![conn_indicator, said]
+            .spacing(STATUS_GAP - 8.0)
+            .align_y(iced::Center)
+    ]
+    .align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
     // pass is slow, so show how far along it is (the status text alone is easy
     // to miss / read as stuck). It is the one place the pass's progress shows:
@@ -330,22 +336,27 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .and_then(|v| v.lang_key)
         .is_some_and(crate::inactive::reads_target)
     {
+        // The design's button: 22 high, 6 either side of what it says.
         let picker = button(
             row![
-                text(format!(
-                    "Reading for {}",
-                    target_name(&app.proj.reading_target)
-                ))
-                .size(ts::SMALL)
-                .font(crate::fonts::UI_MEDIUM)
-                .color(theme::fg()),
+                ts::set_in(
+                    text(format!(
+                        "Reading for {}",
+                        target_name(&app.proj.reading_target)
+                    ))
+                    .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
+                    .color(theme::fg()),
+                    PICKER_H,
+                    ts::INTER,
+                    ts::SMALL,
+                ),
                 glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0),
             ]
             .spacing(5)
             .align_y(iced::Center),
         )
         .style(theme::icon_button(app.show_target_menu))
-        .padding([2, 7])
+        .padding([0, 6])
         .on_press(Message::Window(WindowMsg::ToggleTargetMenu));
         bar = bar.push(picker);
     }

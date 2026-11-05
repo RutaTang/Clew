@@ -116,8 +116,9 @@ fn header_right(app: &App) -> f32 {
 
 /// Left edge of the sheet's content, in window coordinates.
 fn sheet_content_left(app: &App) -> f32 {
+    // The sidebar's divider lies over it, taking no room of its own.
     let sidebar = if app.show_left_sidebar {
-        app.sidebar_width + crate::resize::THICKNESS
+        app.sidebar_width
     } else {
         0.0
     };
@@ -143,8 +144,13 @@ fn file_tool_w(label: &str) -> f32 {
     FILE_TOOL_PAD_X * 2.0
         + FILE_TOOL_GLYPH
         + FILE_TOOL_SPACING
-        + text_width(label, ts::BODY, crate::fonts::UI)
+        + text_width(label, ts::BODY, FILE_TOOL_FONT)
 }
+
+/// The face of the file's name over the sheet: a title's.
+const TITLE_FONT: iced::Font = crate::fonts::titled(crate::fonts::UI_SEMIBOLD);
+/// The face of what the header's tools say: in a control.
+const FILE_TOOL_FONT: iced::Font = crate::fonts::in_control(crate::fonts::UI_MEDIUM);
 
 /// Inner padding across a header tool, its glyph's size, and the gap
 /// between glyph and label.
@@ -165,7 +171,7 @@ const HEADER_PAD_RIGHT: f32 = 16.0;
 /// markdown file, the switch between it rendered and its source.
 fn title_w(app: &App, v: &Viewer) -> f32 {
     let (name, folder) = title_parts(v);
-    let mut w = text_width(&name, ts::EMPHASIS, crate::fonts::UI_SEMIBOLD);
+    let mut w = text_width(&name, ts::EMPHASIS, TITLE_FONT);
     if !folder.is_empty() {
         w += 8.0 + text_width(&folder, ts::BODY, crate::fonts::UI);
     }
@@ -179,7 +185,7 @@ fn title_w(app: &App, v: &Viewer) -> f32 {
 
 /// Width of the View menu's button.
 fn view_button_w() -> f32 {
-    8.0 * 2.0 + 14.0 + 6.0 + text_width("View", ts::BODY, crate::fonts::UI) + 6.0 + 11.0
+    8.0 * 2.0 + 14.0 + 6.0 + text_width("View", ts::BODY, FILE_TOOL_FONT) + 6.0 + 11.0
 }
 
 /// Where the header's file tools are drawn (Explain through View), in
@@ -302,7 +308,7 @@ fn file_tool<'a>(
         row![
             glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
             ts::set_in(
-                text(label).font(crate::fonts::UI_MEDIUM).color(tint),
+                text(label).font(FILE_TOOL_FONT).color(tint),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -326,7 +332,7 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: crate::MarginTab| {
         let chosen = app.margin_tab == this;
         button(ts::set_in(
-            text(label).font(crate::fonts::UI_MEDIUM).color(if chosen {
+            text(label).font(FILE_TOOL_FONT).color(if chosen {
                 theme::fg()
             } else {
                 theme::fg_muted()
@@ -364,7 +370,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     let (name, folder) = title_parts(v);
     let mut title = row![ts::set_in(
         text(name)
-            .font(crate::fonts::UI_SEMIBOLD)
+            .font(TITLE_FONT)
             .color(theme::fg_bright())
             .wrapping(Wrapping::None),
         HEADER_CONTROL_H,
@@ -412,9 +418,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         row![
             glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
             ts::set_in(
-                text("View")
-                    .font(crate::fonts::UI_MEDIUM)
-                    .color(theme::fg_muted()),
+                text("View").font(FILE_TOOL_FONT).color(theme::fg_muted()),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -536,11 +540,11 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         line = line.push(
             button(ts::set_in(
                 text(name)
-                    .font(if current {
+                    .font(crate::fonts::in_control(if current {
                         crate::fonts::UI_MEDIUM
                     } else {
                         crate::fonts::UI
-                    })
+                    }))
                     .color(if current {
                         theme::fg()
                     } else {

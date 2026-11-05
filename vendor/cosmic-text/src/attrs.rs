@@ -321,9 +321,16 @@ impl<'a> Attrs<'a> {
 
     /// Check if font matches
     pub fn matches(&self, face: &fontdb::FaceInfo) -> bool {
+        // clew patch: a semi-expanded or semi-condensed stretch asks for a
+        // tracking, not a width (`shape::letter_spacing`): the face that
+        // matches is the one of the normal width.
+        let stretch = match self.stretch {
+            Stretch::SemiExpanded | Stretch::SemiCondensed => Stretch::Normal,
+            stretch => stretch,
+        };
         //TODO: smarter way of including emoji
         face.post_script_name.contains("Emoji")
-            || (face.style == self.style && face.stretch == self.stretch)
+            || (face.style == self.style && face.stretch == stretch)
     }
 
     /// Check if this set of attributes can be shaped with another

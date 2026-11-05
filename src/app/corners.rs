@@ -74,6 +74,13 @@ mod tests {
         // SAFETY: `version` is an OSVERSIONINFOW with its size filled in.
         unsafe { RtlGetVersion(&mut version) };
         if version.dwBuildNumber < 22000 {
+            // CI's Windows is of 11's era (`windows-latest`): passing there
+            // by skipping would say nothing about the request being taken.
+            assert!(
+                std::env::var_os("GITHUB_ACTIONS").is_none(),
+                "CI's Windows is build {}, older than 11's: nothing would be tested",
+                version.dwBuildNumber
+            );
             return;
         }
         let class: Vec<u16> = "STATIC\0".encode_utf16().collect();

@@ -30,7 +30,10 @@ libc = "0.2"
 # renders the text invisibly on the dark block background (godoc/reST example
 # blocks showed as empty black boxes). Without it, iced falls back to plain,
 # visible monospace text.
-iced = { version = "0.14", features = ["advanced", "canvas", "image", "markdown", "svg", "tokio"] }
+# `advanced-shaping`: text is shaped as the design's renderer shapes it,
+# kerned (iced's default shapes ASCII text unkerned, which set a line of
+# the interface's words up to a few pixels longer than the design's).
+iced = { version = "0.14", features = ["advanced", "advanced-shaping", "canvas", "image", "markdown", "svg", "tokio"] }
 # For `task::effect`: a widget operation sent with no answer awaited, as
 # iced's own `snap_to` is (iced re-exports neither).
 iced_runtime = "0.14.0"

@@ -397,13 +397,14 @@ const SAID_SIZE: f32 = 11.0;
 /// the design's 82%.
 const BUBBLE_SHARE: f32 = 0.82;
 
-/// The width of the conversation's text column: the card's, or the
-/// margin's while it is kept there, less the 16 either side.
+/// The width of the conversation's text column: the card's, inside its
+/// 1 px edge, or the margin's while it is kept there; less the 16 either
+/// side.
 fn conversation_width(app: &App) -> f32 {
     let panel = if crate::ui::askfloat::ask_in_margin(app) {
         app.right_width
     } else {
-        crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width)
+        crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width) - 2.0
     };
     panel - 32.0
 }
@@ -777,13 +778,16 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         ),
         None => "Ask about this codebase…".to_string(),
     };
-    let input = text_input(&placeholder, &app.proj.ask_input)
-        .id(ask_input_id())
-        .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
-        .on_submit(Message::Ask(AskMsg::Submit))
-        .size(ts::READING)
-        .padding(0)
-        .style(theme::bare_input);
+    let input = ts::field_in(
+        text_input(&placeholder, &app.proj.ask_input)
+            .id(ask_input_id())
+            .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
+            .on_submit(Message::Ask(AskMsg::Submit))
+            .style(theme::bare_input),
+        ROUND_BUTTON,
+        ts::INTER,
+        ts::READING,
+    );
     // The send button is the composer's primary action, a round button in
     // the accent (a quiet one while an answer is coming in, when it does
     // nothing). Any answer still coming in — an agent turn, a server chat
@@ -920,15 +924,41 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     } else {
         slot()
     };
-    // A conversation by voice: once Clew has answered, listen again.
-    let keep_listening = iced::widget::toggler(app.voice.keep_listening)
-        .label("Keep listening")
-        .on_toggle(|on| Message::Voice(crate::VoiceMsg::SetKeepListening(on)))
-        .size(16)
-        .text_size(KEEP_LISTENING_SIZE)
-        .spacing(7)
-        .width(Length::Shrink)
-        .style(theme::switch);
+    // A conversation by voice: once Clew has answered, listen again. The
+    // design's switch — a track, its knob in from the end it is at — and
+    // beside it what it does, which turns it as well.
+    let on = app.voice.keep_listening;
+    let turn = Message::Voice(crate::VoiceMsg::SetKeepListening(!on));
+    let knob = container(space().width(SWITCH_KNOB).height(SWITCH_KNOB)).style(theme::switch_knob);
+    let track = button(
+        container(knob)
+            .width(Fill)
+            .height(Fill)
+            .padding((SWITCH_H - SWITCH_KNOB) / 2.0)
+            .align_x(if on {
+                iced::alignment::Horizontal::Right
+            } else {
+                iced::alignment::Horizontal::Left
+            }),
+    )
+    .width(Length::Fixed(SWITCH_W))
+    .height(Length::Fixed(SWITCH_H))
+    .padding(0)
+    .style(theme::switch(on))
+    .on_press(turn.clone());
+    let keep_listening = row![
+        track,
+        iced::widget::mouse_area(ts::set_in(
+            text("Keep listening").color(theme::fg_muted()),
+            SWITCH_H,
+            ts::INTER,
+            KEEP_LISTENING_SIZE,
+        ))
+        .on_press(turn)
+        .interaction(iced::mouse::Interaction::Pointer),
+    ]
+    .spacing(KEEP_LISTENING_GAP)
+    .align_y(iced::Center);
     // The composer, under a rule across the card: the question as it is
     // typed, Stop while an answer comes in, Keep listening, the microphone
     // and send.
@@ -958,6 +988,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
 pub(crate) const ROUND_BUTTON: f32 = 30.0;
 /// Size of the composer's "Keep listening", as the design sets it.
 const KEEP_LISTENING_SIZE: f32 = 12.0;
+/// The design's gap between the switch and what it says.
+const KEEP_LISTENING_GAP: f32 = 7.0;
+/// The design's switch: its track, and the knob in it.
+const SWITCH_W: f32 = 26.0;
+const SWITCH_H: f32 = 16.0;
+const SWITCH_KNOB: f32 = 12.0;
 /// Padding around the composer's row: a little more room at its start,
 /// where the question begins.
 pub(crate) const COMPOSER_PAD: Padding = Padding {
@@ -1090,15 +1126,13 @@ pub(crate) fn approval_card<'a>(
             });
             // The design's 30 px buttons, the one that allows a little wider.
             let shown = button(
-                container(
-                    text(option.label.clone())
-                        .size(ts::BODY)
-                        .font(if option.allows {
-                            crate::fonts::UI_SEMIBOLD
-                        } else {
-                            crate::fonts::UI_MEDIUM
-                        }),
-                )
+                container(text(option.label.clone()).size(ts::BODY).font(
+                    crate::fonts::in_control(if option.allows {
+                        crate::fonts::UI_SEMIBOLD
+                    } else {
+                        crate::fonts::UI_MEDIUM
+                    }),
+                ))
                 .height(Fill)
                 .align_y(iced::Center),
             )
@@ -1230,9 +1264,17 @@ fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head
         .iter()
         .map(|o| {
             if o.allows {
-                text_width(&o.label, ts::BODY, crate::fonts::UI_SEMIBOLD) + 24.0
+                text_width(
+                    &o.label,
+                    ts::BODY,
+                    crate::fonts::in_control(crate::fonts::UI_SEMIBOLD),
+                ) + 24.0
             } else {
-                text_width(&o.label, ts::BODY, crate::fonts::UI_MEDIUM) + 20.0
+                text_width(
+                    &o.label,
+                    ts::BODY,
+                    crate::fonts::in_control(crate::fonts::UI_MEDIUM),
+                ) + 20.0
             }
         })
         .sum::<f32>()
@@ -1265,24 +1307,39 @@ fn approval_card_height(approval: &crate::app::model::Approval, width: f32, head
 /// Clickable when the step touched code (jumps to the first ref).
 /// Height of one step of an agent's turn.
 const STEP_ROW_H: f32 = 28.0;
+/// The design's gap between what a step's row holds: its mark, its
+/// words, its code.
+const STEP_GAP: f32 = 9.0;
+/// Size of what a step was done to, as code: the design's 12.
+const STEP_CODE_SIZE: f32 = 12.0;
 
 /// A step's title as the reader takes it in: what was done, in words, then
 /// what it was done to, as code — `read src/lib.rs:1-50` reads "Read
 /// `src/lib.rs:1-50`", and a title in words marks its code with backticks
 /// ("Went to `on_watch_batch`"). A title of another shape is shown as it is.
 fn step_title<'a>(title: &str) -> Element<'a, Message> {
-    let word = |s: &str| {
-        text(s.to_string())
-            .size(ts::BODY)
-            .color(theme::fg_muted())
-            .wrapping(Wrapping::None)
+    // Each centred in the step's row as the design centres it (its words
+    // at 12.5, its code at 12).
+    let word = |s: &str| -> Element<'a, Message> {
+        ts::set_in(
+            text(s.to_string())
+                .color(theme::fg_muted())
+                .wrapping(Wrapping::None),
+            STEP_ROW_H,
+            ts::INTER,
+            ts::BODY,
+        )
     };
-    let code = |s: &str| {
-        text(s.to_string())
-            .size(ts::BODY)
-            .font(crate::fonts::CODE)
-            .color(theme::fg())
-            .wrapping(Wrapping::None)
+    let code = |s: &str| -> Element<'a, Message> {
+        ts::set_in(
+            text(s.to_string())
+                .font(crate::fonts::CODE)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+            STEP_ROW_H,
+            ts::MONO,
+            STEP_CODE_SIZE,
+        )
     };
     // Words with their code in backticks: every other part is code.
     if title.matches('`').count() >= 2 {
@@ -1292,13 +1349,13 @@ fn step_title<'a>(title: &str) -> Element<'a, Message> {
             .filter(|(_, part)| !part.trim().is_empty())
             .map(|(i, part)| {
                 if i % 2 == 1 {
-                    code(part).into()
+                    code(part)
                 } else {
-                    word(part.trim()).into()
+                    word(part.trim())
                 }
             });
         return Row::with_children(parts)
-            .spacing(6)
+            .spacing(STEP_GAP)
             .align_y(iced::Center)
             .into();
     }
@@ -1310,11 +1367,11 @@ fn step_title<'a>(title: &str) -> Element<'a, Message> {
             let mut said = verb.to_string();
             said[..1].make_ascii_uppercase();
             row![word(&said), code(rest.trim())]
-                .spacing(6)
+                .spacing(STEP_GAP)
                 .align_y(iced::Center)
                 .into()
         }
-        None => word(title).into(),
+        None => word(title),
     }
 }
 
@@ -1354,7 +1411,12 @@ fn agent_step_chip<'a>(
     });
     let clickable = target.is_some();
     let show: Element<'a, Message> = if clickable {
-        text("Show").size(ts::SMALL).color(theme::accent()).into()
+        ts::set_in(
+            text("Show").color(theme::accent()),
+            STEP_ROW_H,
+            ts::INTER,
+            ts::SMALL,
+        )
     } else {
         space().into()
     };
@@ -1364,7 +1426,7 @@ fn agent_step_chip<'a>(
             container(step_title(&step.title)).width(Fill).clip(true),
             show,
         ]
-        .spacing(9)
+        .spacing(STEP_GAP)
         .height(Fill)
         .align_y(iced::Center),
     )
