@@ -74,11 +74,12 @@ const PROSE_CODE_PAD_Y: f32 = 1.0;
 /// How far inside its line a chip of code in prose (`size`, lines `line`
 /// tall) is drawn, at its top and at its bottom. The design's renderer
 /// draws an inline code's background around the code face's ascent and
-/// descent from the line's baseline (each rounded, as it takes them), its
-/// padding out; a span's background here spans its line.
+/// descent from the line's baseline (each rounded, as it takes them, and
+/// the leading over the line's text floored), its padding out; a span's
+/// background here spans its line.
 fn chip_inset(size: f32, line: f32) -> (f32, f32) {
     let (ascent, descent) = ts::INTER.rounded(size);
-    let baseline = (line - (ascent + descent)) / 2.0 + ascent;
+    let baseline = ((line - (ascent + descent)) / 2.0).floor() + ascent;
     let (code_ascent, code_descent) = ts::MONO.rounded(PROSE_CODE_SIZE);
     (
         baseline - code_ascent - PROSE_CODE_PAD_Y,
@@ -111,7 +112,10 @@ impl<'a> iced::widget::markdown::Viewer<'a, Message> for Prose {
         // Every span its line height in pixels: a line takes its height from
         // the spans that state one, so code (sized apart) would otherwise
         // set the lines it is on closer than the rest.
-        let line_px = self.size * self.line_height;
+        // In the design's renderer's unit of layout, a 64th of a pixel,
+        // rounded down: line after line, a paragraph's lines fall where
+        // the design's do.
+        let line_px = (self.size * self.line_height * 64.0).floor() / 64.0;
         let line = LineHeight::Absolute(line_px.into());
         let (inset_top, inset_bottom) = chip_inset(self.size, line_px);
         let room = || {

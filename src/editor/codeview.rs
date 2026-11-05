@@ -1472,7 +1472,7 @@ impl<'a, Message> CodeView<'a, Message> {
             size: self.font_size.into(),
             // Laid out so its baseline lands on a whole pixel, and drawn
             // where the design sets it (`ts::baseline_top`).
-            line_height: text::LineHeight::Absolute(ts::MONO.snapped_line(self.font_size).into()),
+            line_height: text::LineHeight::Absolute(ts::MONO.normal(self.font_size).into()),
             font: crate::fonts::CODE,
             align_x: text::Alignment::Left,
             align_y: iced::alignment::Vertical::Top,
@@ -2219,7 +2219,7 @@ where
                     bounds: Size::new(number_w, lh),
                     size: (self.font_size * NUMBER_SCALE).into(),
                     line_height: text::LineHeight::Absolute(
-                        ts::MONO.snapped_line(self.font_size * NUMBER_SCALE).into(),
+                        ts::MONO.normal(self.font_size * NUMBER_SCALE).into(),
                     ),
                     font: crate::fonts::CODE,
                     align_x: text::Alignment::Right,
@@ -2243,7 +2243,7 @@ where
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
                             line_height: text::LineHeight::Absolute(
-                                ts::MONO.snapped_line(self.font_size).into(),
+                                ts::MONO.normal(self.font_size).into(),
                             ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
@@ -2288,7 +2288,7 @@ where
                             bounds: Size::new(2.0 * cw, lh),
                             size: self.font_size.into(),
                             line_height: text::LineHeight::Absolute(
-                                ts::MONO.snapped_line(self.font_size).into(),
+                                ts::MONO.normal(self.font_size).into(),
                             ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
@@ -2322,9 +2322,7 @@ where
                             content: note.as_str(),
                             bounds: Size::new(CHIP_MAX_W, lh),
                             size: size.into(),
-                            line_height: text::LineHeight::Absolute(
-                                ts::INTER.snapped_line(size).into(),
-                            ),
+                            line_height: text::LineHeight::Absolute(ts::INTER.normal(size).into()),
                             font: crate::fonts::UI_MEDIUM,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
@@ -2368,7 +2366,7 @@ where
                             bounds: Size::new(2.0 * state.char_width, lh),
                             size: self.font_size.into(),
                             line_height: text::LineHeight::Absolute(
-                                ts::MONO.snapped_line(self.font_size).into(),
+                                ts::MONO.normal(self.font_size).into(),
                             ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
@@ -2411,9 +2409,7 @@ where
                             bounds: Size::new(f32::MAX, lh),
                             size: annotation_size(self.font_size).into(),
                             line_height: text::LineHeight::Absolute(
-                                ts::MONO
-                                    .snapped_line(annotation_size(self.font_size))
-                                    .into(),
+                                ts::MONO.normal(annotation_size(self.font_size)).into(),
                             ),
                             font: crate::fonts::CODE,
                             align_x: text::Alignment::Left,
@@ -2529,7 +2525,7 @@ where
                         bounds: Size::new(number_w, lh),
                         size: (self.font_size * NUMBER_SCALE).into(),
                         line_height: text::LineHeight::Absolute(
-                            ts::MONO.snapped_line(self.font_size * NUMBER_SCALE).into(),
+                            ts::MONO.normal(self.font_size * NUMBER_SCALE).into(),
                         ),
                         font: crate::fonts::CODE,
                         align_x: text::Alignment::Right,

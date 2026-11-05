@@ -123,20 +123,6 @@ pub(crate) mod ts {
             let (ascent, descent) = self.rounded(size);
             ascent + descent
         }
-
-        /// The line height to lay a line of it out with, at `size`, for
-        /// its baseline to fall exactly its rounded ascent below the
-        /// line's top — a whole pixel, where cosmic-text, centring the
-        /// face's exact ascent and descent, puts it anywhere. Drawn at a
-        /// whole pixel (see [`baseline_top`]), such a line keeps its
-        /// baseline on one at every whole scale: iced truncates where a
-        /// line starts to a device pixel and rounds how far down its
-        /// baseline is, each on its own, and a fractional pair loses a
-        /// device pixel between them.
-        pub(crate) fn snapped_line(self, size: f32) -> f32 {
-            let (ascent, _) = self.rounded(size);
-            2.0 * ascent - (self.ascent - self.descent) * size
-        }
     }
 
     /// The design's `line-height: normal` for Inter at `size`: the face's
@@ -157,27 +143,24 @@ pub(crate) mod ts {
     }
 
     /// Where to draw a line of `face` at `size`, laid out
-    /// [`Face::snapped_line`] tall, for its text to sit where the design's
-    /// renderer paints it in a line `line` tall from `top`: a `normal` box
-    /// centred in the line, its baseline that box's rounded ascent down,
-    /// then snapped to a whole pixel. Left to centre itself in the line,
-    /// cosmic-text paints the text up to a pixel higher (a line number at
-    /// 11.5 px in a 24 px line, by one; the code at 13 px, by a half).
+    /// [`Face::normal`] tall (its baseline then its rounded ascent down, as
+    /// the vendored text engine sets a line), for its text to sit where
+    /// the design's renderer paints it in a line `line` tall from `top`: a
+    /// `normal` box centred in the line, its baseline that box's rounded
+    /// ascent down, then snapped to a whole pixel.
     pub(crate) fn baseline_top(top: f32, line: f32, face: Face, size: f32) -> f32 {
         let (ascent, descent) = face.rounded(size);
         (top + (line - (ascent + descent)) / 2.0 + ascent).round() - ascent
     }
 
     /// Where to draw a line of `face` at `size`, laid out
-    /// [`Face::snapped_line`] tall, whose own line box is `own` tall (the
+    /// [`Face::normal`] tall, whose own line box is `own` tall (the
     /// design's `line-height`) and centred in a box `height` tall from
     /// `top`: the design's renderer puts that line box on a whole pixel,
-    /// and the text in it as it lays it out, its `normal` box centred in
-    /// the line box — a part of a pixel off, when the line box is not
-    /// `normal` tall, which it keeps. With a `normal` line box, as
-    /// [`baseline_top`].
+    /// and the text in it a whole number of pixels down, the leading over
+    /// it floored. With a `normal` line box, as [`baseline_top`].
     pub(crate) fn line_top(top: f32, height: f32, own: f32, face: Face, size: f32) -> f32 {
-        (top + (height - own) / 2.0).round() + (own - face.normal(size)) / 2.0
+        (top + (height - own) / 2.0).round() + ((own - face.normal(size)) / 2.0).floor()
     }
 
     /// `content`, a line of `face` at `size`, set in a box `height` tall as
@@ -203,7 +186,7 @@ pub(crate) mod ts {
         face: Face,
         size: f32,
     ) -> iced::Element<'a, M> {
-        let line = iced::widget::text::LineHeight::Absolute(face.snapped_line(size).into());
+        let line = iced::widget::text::LineHeight::Absolute(face.normal(size).into());
         let laid = iced::widget::container(content.size(size).line_height(line))
             .height(iced::Length::Fixed(height))
             .padding(iced::Padding {
@@ -228,7 +211,7 @@ pub(crate) mod ts {
         face: Face,
         size: f32,
     ) -> iced::Element<'a, M> {
-        let line = iced::widget::text::LineHeight::Absolute(face.snapped_line(size).into());
+        let line = iced::widget::text::LineHeight::Absolute(face.normal(size).into());
         let laid = iced::widget::container(
             field
                 .font(crate::fonts::in_control(crate::fonts::UI))

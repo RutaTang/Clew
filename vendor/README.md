@@ -31,6 +31,23 @@ text to the face of the normal width (`Attrs::matches` in `src/attrs.rs`).
 When iced has a way to ask for tracking, ask for it there and drop this
 patch.
 
+A third patch sets a line's text in its line box as a browser does
+(`LayoutRunIter::next` in `src/buffer.rs`): the face's ascent and descent
+each rounded to a whole pixel, the leading above them floored to one, and
+the baseline of a line box that falls at a part of a pixel (in a paragraph
+of 21.59375 px lines) rounded to a whole one, where cosmic-text centred
+the exact ascent and descent — a part of a pixel
+off from the design's text in every line, and in each line of a paragraph
+by a different part. A line laid out the face's `normal` height
+(`ts::Face::normal`) then has its baseline exactly its rounded ascent down.
+With it, the place a glyph is drawn at is rounded to a device pixel rather
+than truncated (`LayoutGlyph::physical` in `src/layout.rs`): iced adds the
+line's baseline to it rounded, and text whose box falls at a part of a
+pixel was drawn a device pixel above where a browser draws it.
+cosmic-text centres a line the same way up to 0.19.0; drop these patches
+with the others when iced moves to a release that sets a line as a browser
+does.
+
 ## tree-sitter-lean4 0.3.0
 
 The Lean 4 grammar. The release's binding depends on `tree-sitter = "0.25"`,
