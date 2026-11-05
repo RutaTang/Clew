@@ -1,9 +1,10 @@
 name: CI
 
 # Build + test on every push and PR. Clew's window — the editor, the floating
-# Ask, voice, every tool — is the same program on macOS, Linux and Windows, so
-# the whole workspace is built, linted and tested on each: macOS in its own
-# job, Linux and Windows in `desktop`. The headless backend (`clew-server` +
+# Ask, voice, every tool — is the same program on macOS and Linux, so the
+# whole workspace is built, linted and tested on each: macOS in its own job,
+# Linux in `desktop`. (Windows is not built or tested for now; see `desktop`.)
+# The headless backend (`clew-server` +
 # `clew-core` + `clew-protocol`) is the piece deployed to remote hosts over
 # SSH, so it is also built and tested on Linux on its own (no audio stack, as
 # on a server), and cross-built for the static musl targets the release ships.
@@ -84,18 +85,25 @@ jobs:
       - name: Test (server + core + protocol)
         run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
 
-  # The desktop app on Linux and Windows, where it must work as it does on
-  # macOS: the window and every feature in it — voice through each system's
-  # own audio stack (ALSA, WASAPI; Core Audio is the macOS job's) and
-  # whisper.cpp compiled by each platform's C++ toolchain, the floating Ask,
+  # The desktop app on Linux, where it must work as it does on macOS: the
+  # window and every feature in it — voice through the system's own audio
+  # stack (ALSA; Core Audio is the macOS job's) and whisper.cpp compiled by
+  # its C++ toolchain, the floating Ask,
   # language servers, the debugger, the terminal. The microphone test opens
   # the runner's default input for real (it has none, and must say so in
   # words, not crash).
   #
   # Linux: the client and voice crates (the backend crates are the
-  # `linux-server` job's), hermetic like every Unix test run. Windows: the
-  # whole workspace — nothing else runs it there. (`hermetic-test.sh` moves
-  # HOME and TMPDIR, which Windows programs do not read.)
+  # `linux-server` job's), hermetic like every Unix test run.
+  #
+  # Windows is left out for now, to keep CI to macOS and Linux. Its steps
+  # below are kept: adding this entry back to the matrix builds and tests the
+  # whole workspace there again (`hermetic-test.sh` moves HOME and TMPDIR,
+  # which Windows programs do not read, so it runs plain `cargo test`):
+  #
+  #       - os: Windows
+  #         runner: windows-latest
+  #         packages: --workspace
   desktop:
     name: Build & test · ${{ matrix.os }} · desktop app
     runs-on: ${{ matrix.runner }}
@@ -107,9 +115,6 @@ jobs:
           - os: Linux
             runner: ubuntu-latest
             packages: -p clew -p clew-voice
-          - os: Windows
-            runner: windows-latest
-            packages: --workspace
     defaults:
       run:
         shell: bash

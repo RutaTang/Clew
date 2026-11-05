@@ -11,14 +11,13 @@ name: Release
 #   - the macOS app: signed with a Developer ID, notarized (so it launches on
 #     other Macs with no Gatekeeper prompt), packed into a drag-to-Applications
 #     DMG. It is built AFTER the servers, because it embeds their digests.
-#   - the same app for Linux (x86_64, a .tar.gz) and Windows (x86_64, a .zip):
-#     `clew` and the `clew-server` it opens local projects with, side by side,
-#     with the license notices of both and a `.sha256` sidecar. Built after the
-#     servers too, for the same digests.
+#   - the same app for Linux (x86_64, a .tar.gz): `clew` and the `clew-server`
+#     it opens local projects with, side by side, with the license notices of
+#     both and a `.sha256` sidecar. Built after the servers too, for the same
+#     digests. (Windows is not released for now: see the `desktop` job.)
 #
 # Order: preflight (versions agree; fmt, clippy, rustdoc and the FULL test
-# suite pass, on macOS, Linux and Windows) → server builds → app builds →
-# publish.
+# suite pass, on macOS and Linux) → server builds → app builds → publish.
 #
 # Server digests embedded into the app — CLEW_SERVER_DIGESTS:
 #   The app job downloads the server jobs' artifacts, checks each binary against
@@ -88,7 +87,7 @@ jobs:
   # Nothing is built until the tag, the crate version and the protocol agree,
   # the toolchain pins agree, and the whole suite passes: fmt, clippy and
   # rustdoc at `-D warnings`, and every workspace test, client included (here
-  # on macOS; `preflight-desktop` runs the client on Linux and Windows). A
+  # on macOS; `preflight-desktop` runs the client on Linux). A
   # release that disagrees with
   # itself is the failure mode this guards: v0.1.12 shipped assets named for a
   # protocol its own source no longer spoke, so every fresh remote install
@@ -181,9 +180,9 @@ jobs:
       - name: Test (server + core + protocol)
         run: scripts/hermetic-test.sh -p clew-server -p clew-core -p clew-protocol --locked
 
-  # The client on Linux and Windows, as CI's `desktop` job runs it, for a tag
-  # on a commit CI never passed: the window, voice and every tool are shipped
-  # there too.
+  # The client on Linux, as CI's `desktop` job runs it, for a tag on a commit
+  # CI never passed: the window, voice and every tool are shipped there too.
+  # (Windows comes back with the `desktop` job's entry; see there.)
   preflight-desktop:
     name: Preflight · app tests on ${{ matrix.os }}
     runs-on: ${{ matrix.runner }}
@@ -197,9 +196,6 @@ jobs:
           - os: Linux
             runner: ubuntu-latest
             packages: -p clew -p clew-voice
-          - os: Windows
-            runner: windows-latest
-            packages: --workspace
     defaults:
       run:
         shell: bash
@@ -603,12 +599,12 @@ jobs:
   # One release for the tag, holding the DMG and every server binary. Only on a
   # tag push (a manual dispatch just builds, as a dry run). The only job with
   # write access, and it runs no code from the repository.
-  # The license notices of what the Linux and Windows apps compile in, read
-  # from `cargo tree` for each target. Made here, on Linux, for both: the
-  # script is a Unix shell script, and the dependency graph of a target does
-  # not depend on the machine that reads it.
+  # The license notices of what the Linux app compiles in, read from `cargo
+  # tree` for its target. Made here, on Linux, for every desktop app shipped:
+  # the script is a Unix shell script, and the dependency graph of a target
+  # does not depend on the machine that reads it.
   desktop-notices:
-    name: App notices · Linux, Windows
+    name: App notices · Linux
     needs: [preflight]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -628,7 +624,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p notices
-          for pair in linux-x86_64:x86_64-unknown-linux-gnu windows-x86_64:x86_64-pc-windows-msvc; do
+          for pair in linux-x86_64:x86_64-unknown-linux-gnu; do
             slug="${pair%%:*}"; target="${pair#*:}"
             cargo fetch --locked --target "$target"
             scripts/third-party-notices.sh "notices/$slug.THIRD-PARTY-NOTICES.txt" --target "$target" clew clew-server
@@ -639,13 +635,23 @@ jobs:
           path: notices/
           if-no-files-found: error
 
-  # The app for Linux and Windows: `clew` and `clew-server` built for release,
+  # The app for Linux: `clew` and `clew-server` built for release,
   # with this release's server digests embedded exactly as in the macOS app,
   # packed with their notices. Not signed: clew does not update itself on
   # these systems (its update notice opens the release page), and nothing in
   # the archive asks for more than the user who unpacks it. The Linux build
   # links the system's C library and ALSA's (libasound2); the window finds
   # X11 or Wayland when it starts.
+  #
+  # Windows is not released for now. Its packaging below is kept; to ship it
+  # again, add back this matrix entry, `preflight-desktop`'s Windows entry
+  # (`os: Windows`, `runner: windows-latest`, `packages: --workspace`), the
+  # `windows-x86_64:x86_64-pc-windows-msvc` pair to `desktop-notices`, and
+  # `Clew-*-windows-x86_64.zip` to the assets `publish` requires:
+  #
+  #       - os: Windows
+  #         runner: windows-latest
+  #         slug: windows-x86_64
   desktop:
     name: App · ${{ matrix.os }}
     needs: [preflight, server, desktop-notices]
@@ -660,9 +666,6 @@ jobs:
           - os: Linux
             runner: ubuntu-latest
             slug: linux-x86_64
-          - os: Windows
-            runner: windows-latest
-            slug: windows-x86_64
     defaults:
       run:
         shell: bash
@@ -798,7 +801,7 @@ jobs:
             done
           done
           ls dist/*.dmg >/dev/null 2>&1 || { echo "::error::no DMG in the release"; missing=1; }
-          for app in "Clew-*-linux-x86_64.tar.gz" "Clew-*-windows-x86_64.zip"; do
+          for app in "Clew-*-linux-x86_64.tar.gz"; do
             # shellcheck disable=SC2086 # the pattern is meant to glob
             if ! compgen -G "dist/$app" >/dev/null || ! compgen -G "dist/$app.sha256" >/dev/null; then
               echo "::error::missing release asset $app (or its .sha256)"

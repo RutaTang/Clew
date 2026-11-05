@@ -6,7 +6,7 @@
 
 **一个 AI 驱动的「代码分析和阅读」工具**
 
-[![CI](https://img.shields.io/github/actions/workflow/status/RutaTang/Clew/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/RutaTang/Clew/actions/workflows/ci.yml) &nbsp; [![Release](https://img.shields.io/github/v/release/RutaTang/Clew?style=flat-square&color=4078f2)](https://github.com/RutaTang/Clew/releases/latest) &nbsp; [![Downloads](https://img.shields.io/github/downloads/RutaTang/Clew/total?style=flat-square&color=50a14f)](https://github.com/RutaTang/Clew/releases) &nbsp; ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-000?style=flat-square) &nbsp; ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white&style=flat-square) &nbsp; [![Stars](https://img.shields.io/github/stars/RutaTang/Clew?style=flat-square&logo=github&color=e3b341)](https://github.com/RutaTang/Clew/stargazers) &nbsp; [![PRs welcome](https://img.shields.io/badge/PRs-welcome-4c8eda?style=flat-square)](https://github.com/RutaTang/Clew/pulls)
+[![CI](https://img.shields.io/github/actions/workflow/status/RutaTang/Clew/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/RutaTang/Clew/actions/workflows/ci.yml) &nbsp; [![Release](https://img.shields.io/github/v/release/RutaTang/Clew?style=flat-square&color=4078f2)](https://github.com/RutaTang/Clew/releases/latest) &nbsp; [![Downloads](https://img.shields.io/github/downloads/RutaTang/Clew/total?style=flat-square&color=50a14f)](https://github.com/RutaTang/Clew/releases) &nbsp; ![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux-000?style=flat-square) &nbsp; ![Rust](https://img.shields.io/badge/Rust-000?logo=rust&logoColor=white&style=flat-square) &nbsp; [![Stars](https://img.shields.io/github/stars/RutaTang/Clew?style=flat-square&logo=github&color=e3b341)](https://github.com/RutaTang/Clew/stargazers) &nbsp; [![PRs welcome](https://img.shields.io/badge/PRs-welcome-4c8eda?style=flat-square)](https://github.com/RutaTang/Clew/pulls)
 
 [English](README.md) &nbsp;|&nbsp; **简体中文**
 
@@ -26,7 +26,7 @@ Clew 不是编辑器，而是专门为**阅读、理解和分析代码**而设�
 
 ## 快速开始
 
-从 [Releases](https://github.com/RutaTang/Clew/releases/latest) 下载最新的 Clew 版本：macOS（Apple 芯片）下载 `.dmg`，Linux 下载 `.tar.gz`，Windows 下载 `.zip`（后两者为 x86-64；解压到任意位置后运行 `clew`，`clew-server` 要和它放在一起）。Linux 上需要 ALSA 的库（`libasound2`，桌面系统都自带）和 X11 或 Wayland 桌面。进入初始页面，点击 Open Folder，打开你要阅读的代码库。点击右上角的「⋯」按钮展开菜单，点击 Tutorial 按钮，Clew 会在你打开的项目上为你介绍如何使用 Clew。
+从 [Releases](https://github.com/RutaTang/Clew/releases/latest) 下载最新的 Clew 版本：macOS（Apple 芯片）下载 `.dmg`，Linux 下载 `.tar.gz`（x86-64；解压到任意位置后运行 `clew`，`clew-server` 要和它放在一起）。Linux 上需要 ALSA 的库（`libasound2`，桌面系统都自带）和 X11 或 Wayland 桌面。进入初始页面，点击 Open Folder，打开你要阅读的代码库。点击右上角的「⋯」按钮展开菜单，点击 Tutorial 按钮，Clew 会在你打开的项目上为你介绍如何使用 Clew。
 
 Clew 的每个功能也都可以只用键盘完成（Linux 和 Windows 上 **⌘** 即 **Ctrl**）：按 **⌘⇧P** 打开命令面板，搜索任意命令（图谱和地图、侧边栏的标签页和各个面板、右键菜单在光标处的操作、调试器的控制、主题），按回车执行。在文件查找（⌘P）里输入 `>` 也一样，**⌘/** 列出所有快捷键。也可以直接说：**⌘⇧S** 会听你说命令或问题（见 [语音](#语音)）。
 
@@ -88,7 +88,7 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 
 **模型。** 使用 whisper.cpp 自己的模型，与 [Echo](https://github.com/damien-schneider/Echo) 使用的相同，只有在你点击某个模型的 **Download**（按钮上标有大小）时才会下载，并且只有与公布的文件逐字节一致才会被接受：**Small**（`small-q5_1`，190 MB，默认）、**Medium**（`large-v3-turbo-q5_0`，574 MB）和 **Large**（`large-v3-q5_0`，1081 MB）按 Echo 的方式用 SHA-256 和精确大小核对，三者都支持多语言；另有 Tiny 和 Base（英文），适合在较慢的机器上快速下命令，用 whisper.cpp 列出的 SHA-1 核对。模型保存在 Clew 的数据目录（`voice/`）中，可以在那里删除。在 macOS 上，Clew 第一次收音时，系统会询问是否允许使用麦克风。
 
-语音在 macOS、Linux 和 Windows 上的表现一致，Clew 窗口里的其他功能也一样：整个应用在 CI 中于三个平台上构建并测试，每个版本都为三个平台发布。
+语音在 macOS 和 Linux 上的表现一致，Clew 窗口里的其他功能也一样：整个应用在 CI 中于这两个平台上构建并测试，每个版本都为这两个平台发布。
 
 ## 语言支持
 
