@@ -162,7 +162,7 @@ impl App {
             window_outer: iced::Size::ZERO,
             window_frame: 0.0,
             window_radius: 0.0,
-            composited: window_unplaced(),
+            composited: composited_from_start(),
             software_renderer: false,
             window_focused: true,
             asking: Default::default(),
@@ -736,7 +736,31 @@ fn window_unplaced() -> bool {
     *UNPLACED.get_or_init(wayland_named)
 }
 
+/// Whether the window system composites Clew's windows over the desktop
+/// before anything is asked: Wayland always does, and Windows does a window
+/// presented through a visual (`app::corners`). X is asked once the window
+/// is up ([`App::ask_composited`]).
+fn composited_from_start() -> bool {
+    window_unplaced() || crate::app::corners::through_visual()
+}
+
 impl App {
+    /// Have Windows draw no border of its own round this window, which
+    /// presents through a visual and leaves its corners clear
+    /// (`app::corners`). Nothing to do elsewhere.
+    pub(crate) fn leave_edges_clear(&self) -> Task<Message> {
+        #[cfg(windows)]
+        if let Some(id) = self.main_window
+            && crate::app::corners::through_visual()
+        {
+            return iced::window::raw_id::<Message>(id).then(|window| {
+                crate::app::corners::leave_edges_clear(window);
+                Task::none()
+            });
+        }
+        Task::none()
+    }
+
     /// Ask whether X composites this window (`app::corners`), for its
     /// corners: where they can be left clear, they are rounded. Nothing to
     /// ask on Wayland, which always composites, nor off Linux.

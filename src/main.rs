@@ -83,6 +83,11 @@ pub fn main() -> iced::Result {
     // to it: Wayland's client takes `WAYLAND_SOCKET` out of the environment
     // as it does.
     app::note_window_system();
+    // On Windows, whether the windows present through a visual, for their
+    // corners to be the design's: decided before iced makes the renderer,
+    // which reads it, and the first window, made to suit it.
+    #[cfg(windows)]
+    app::corners::decide_presentation();
     // The user's login-shell PATH (asked of the shell once, for an app opened
     // from the Finder) is found now, off the UI thread: the first MCP server
     // or ACP agent started, or added in the settings, would wait for it.
@@ -121,6 +126,12 @@ pub fn main() -> iced::Result {
 /// space moves the window. On other platforms there is no such trick, so the
 /// window stays borderless.
 pub(crate) fn window_settings() -> iced::window::Settings {
+    window_settings_for(app::corners::through_visual())
+}
+
+/// [`window_settings`] for a window that presents through a visual
+/// (`through_visual`, only ever on Windows; see `app::corners`) or not.
+pub(crate) fn window_settings_for(through_visual: bool) -> iced::window::Settings {
     #[cfg(target_os = "macos")]
     let platform_specific = iced::window::settings::PlatformSpecific {
         // A titled window that looks frameless: no title text, a transparent
@@ -129,12 +140,22 @@ pub(crate) fn window_settings() -> iced::window::Settings {
         titlebar_transparent: true,
         fullsize_content_view: true,
     };
-    // Windows 11 rounds the borderless window's corners itself, as the
-    // design's are (its own radius; Windows 10 has none to round with).
+    // A window presented through a visual has the design's corners, left
+    // clear by Clew's own drawing, and Windows is asked to round none of
+    // its own; otherwise Windows 11 rounds the borderless window's corners
+    // itself, to its own radius (Windows 10 has none to round with). See
+    // `app::corners`.
     #[cfg(target_os = "windows")]
-    let platform_specific = iced::window::settings::PlatformSpecific {
-        corner_preference: iced::window::settings::platform::CornerPreference::Round,
-        ..iced::window::settings::PlatformSpecific::default()
+    let platform_specific = {
+        use iced::window::settings::platform::CornerPreference;
+        iced::window::settings::PlatformSpecific {
+            corner_preference: if through_visual {
+                CornerPreference::DoNotRound
+            } else {
+                CornerPreference::Round
+            },
+            ..iced::window::settings::PlatformSpecific::default()
+        }
     };
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let platform_specific = iced::window::settings::PlatformSpecific::default();
@@ -150,10 +171,12 @@ pub(crate) fn window_settings() -> iced::window::Settings {
         decorations: cfg!(target_os = "macos"),
         // The rounded corners are clipped from the content layer on macOS (see
         // `macos::configure_frameless`), and left clear by Clew's own drawing
-        // on Linux (`ui::window_radius_for`): either needs the window surface
-        // to carry an alpha channel, for the corners to composite over the
-        // desktop.
-        transparent: true,
+        // on Linux and Windows (`ui::window_radius_for`): either needs the
+        // window surface to carry an alpha channel, for the corners to
+        // composite over the desktop. On Windows only a window presented
+        // through a visual is composited by its alpha (`app::corners`), and
+        // any other is made opaque.
+        transparent: !cfg!(target_os = "windows") || through_visual,
         // A close the OS asks for (a window manager, the Accessibility API)
         // comes to the shell as a request, like ⌘W: a window holding edits it
         // cannot send asks before it goes (`Shell::CloseRequested`). Left on,

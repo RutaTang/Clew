@@ -747,6 +747,8 @@ dependencies = [
  "iced",
  "iced_runtime",
  "iced_test",
+ "iced_wgpu",
+ "iced_winit",
  "libc",
  "mermaid-rs-renderer",
  "nucleo-matcher",
@@ -2356,8 +2358,6 @@ dependencies = [
 [[package]]
 name = "iced_wgpu"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff144a999b0ca0f8a10257934500060240825c42e950ec0ebee9c8ae30561c13"
 dependencies = [
  "bitflags 2.13.0",
  "bytemuck",
@@ -2373,6 +2373,7 @@ dependencies = [
  "rustc-hash 2.1.3",
  "thiserror 2.0.18",
  "wgpu",
+ "wgpu-types",
 ]
 
 [[package]]

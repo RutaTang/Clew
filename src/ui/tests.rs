@@ -7599,20 +7599,16 @@ fn the_window_is_framed_as_designed_unless_maximized() {
     assert_eq!(app.window_width, size.width - 2.0 * frame);
 }
 
-/// The design rounds the window's corners (12) on every system. On Linux,
-/// where Clew draws the window whole, it rounds them where they can be
-/// left clear — the window system composites the window, and iced draws
-/// it on the GPU — while the window does not fill the screen; macOS and
-/// Windows round the window themselves.
+/// The design rounds the window's corners (12) on every system. On Linux
+/// and Windows, where Clew draws the window whole, it rounds them where
+/// they can be left clear — the window system composites the window, and
+/// iced draws it on the GPU — while the window does not fill the screen;
+/// macOS rounds the window itself.
 #[test]
 fn the_window_rounds_its_corners_where_they_can_be_left_clear() {
     let mut app = reader_app();
     let _ = app.on_window_resized(iced::Size::new(1216.0, 912.0));
-    let round = if cfg!(all(unix, not(target_os = "macos"))) {
-        12.0
-    } else {
-        0.0
-    };
+    let round = if cfg!(target_os = "macos") { 0.0 } else { 12.0 };
     let _ = app.update(Message::Window(WindowMsg::Composited(true)));
     assert_eq!(app.window_radius, round);
     // Filling the screen, square and unframed.
@@ -7624,12 +7620,13 @@ fn the_window_rounds_its_corners_where_they_can_be_left_clear() {
     assert_eq!((app.window_radius, app.window_frame), (0.0, 0.0));
     let _ = app.update(Message::Window(WindowMsg::ModeIs(window::Mode::Windowed)));
     assert_eq!(app.window_radius, round);
-    // Drawn in software, whose Wayland surface has no alpha: square.
+    // Drawn in software, whose surface has no alpha: square.
     let _ = app.update(Message::Window(WindowMsg::SoftwareRenderer(true)));
     assert_eq!(app.window_radius, 0.0);
     let _ = app.update(Message::Window(WindowMsg::SoftwareRenderer(false)));
     assert_eq!(app.window_radius, round);
-    // Not composited (X with no compositing manager): square.
+    // Not composited (X with no compositing manager, Windows presenting
+    // to the window directly): square.
     let _ = app.update(Message::Window(WindowMsg::Composited(false)));
     assert_eq!(app.window_radius, 0.0);
 }

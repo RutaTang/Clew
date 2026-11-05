@@ -48,6 +48,27 @@ cosmic-text centres a line the same way up to 0.19.0; drop these patches
 with the others when iced moves to a release that sets a line as a browser
 does.
 
+## iced_wgpu 0.14.0
+
+iced 0.14's GPU renderer. On Windows it presents to a window's own swap
+chain, which Windows composites opaque whatever its alpha, so a window
+whose corners Clew leaves clear for the design's rounded ones showed them
+black, and Clew left the rounding to Windows 11, at its own radius. wgpu
+can present through a DirectComposition visual instead, which Windows
+composites by its alpha, but only for an instance made to (DX12's
+`Dx12SwapchainKind::DxgiFromVisual`), and iced makes its instance with
+wgpu's defaults. The patch (`src/window/compositor.rs`) lets Clew ask,
+before the renderer is made: `present_through_visual` has every compositor
+requested after it make its instance for DX12 alone, presenting through a
+visual, where its settings include DX12, and `visual_presentation_available`
+says whether there is a DX12 adapter to draw with (and `WGPU_BACKEND`, if
+set, names DX12). Such a compositor takes premultiplied alpha, which is
+what iced draws and the only alpha a visual's swap chain takes, where iced
+prefers the straight kind. `app::corners` (in Clew) decides it once at
+start. The release ships no license file; its manifest declares MIT, and
+`LICENSE` is iced's. When iced lets an application choose how wgpu
+presents, ask for it there and delete this copy and the patch entry.
+
 ## tree-sitter-lean4 0.3.0
 
 The Lean 4 grammar. The release's binding depends on `tree-sitter = "0.25"`,

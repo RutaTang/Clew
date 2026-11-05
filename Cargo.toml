@@ -68,6 +68,15 @@ unicode-width = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 x11rb = "0.13"
 
+# iced's GPU renderer, asked on Windows to present through a DirectComposition
+# visual, so the window's clear corners show the desktop (src/app/corners.rs):
+# the version iced brings in, patched (vendor/README.md).
+[target.'cfg(windows)'.dependencies]
+iced_wgpu = { version = "0.14", default-features = false }
+# Asking Windows to draw no border round such a window: the version the
+# build already carries.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = [
@@ -98,11 +107,16 @@ iced_test = "0.14"
 socket2 = "0.6"
 
 # A borderless window of winit's kind, asked of Windows' compositor to be
-# rounded (src/app/corners.rs): the version the build already carries.
+# rounded, and one made as iced makes Clew's, drawn by iced's renderer and
+# read back from the screen (src/app/corners.rs): the versions the build
+# already carries.
 [target.'cfg(windows)'.dev-dependencies]
+iced_winit = "0.14"
 windows-sys = { version = "0.61", features = [
     "Wdk_System_SystemServices",
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
     "Win32_UI_WindowsAndMessaging",
 ] }
@@ -117,5 +131,8 @@ path = "src/main.rs"
 # patched copy shapes such a line in one direction (vendor/README.md).
 [patch.crates-io]
 cosmic-text = { path = "vendor/cosmic-text" }
+# iced 0.14's GPU renderer, able to present through a DirectComposition visual
+# on Windows (vendor/README.md).
+iced_wgpu = { path = "vendor/iced_wgpu" }
 # The Lean 4 grammar, loadable by clew's tree-sitter (vendor/README.md).
 tree-sitter-lean4 = { path = "vendor/tree-sitter-lean4" }

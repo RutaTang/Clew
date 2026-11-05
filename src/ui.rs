@@ -584,13 +584,14 @@ pub(crate) fn window_frame_for(full: bool) -> f32 {
 const WINDOW_BORDER: f32 = 1.0;
 
 /// The radius Clew rounds its window's corners to: the design's 12 on
-/// Linux, where Clew draws the window whole, while the window does not
-/// fill the screen and its corners can be left clear (`clear`: the window
-/// system composites it, and the renderer leaves them so; see
+/// Linux and Windows, where Clew draws the window whole, while the window
+/// does not fill the screen and its corners can be left clear (`clear`:
+/// the window system composites it, and the renderer leaves them so; see
 /// `app::corners`). None elsewhere: macOS rounds the window itself
-/// (`macos::WINDOW_RADIUS`), and Windows 11 too (`window_settings`).
+/// (`macos::WINDOW_RADIUS`), and so does Windows 11 a window whose corners
+/// cannot be left clear (`window_settings`).
 pub(crate) fn window_radius_for(full: bool, clear: bool) -> f32 {
-    if cfg!(all(unix, not(target_os = "macos"))) && clear && !full {
+    if !cfg!(target_os = "macos") && clear && !full {
         WINDOW_RADIUS
     } else {
         0.0

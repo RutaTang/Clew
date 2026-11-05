@@ -1292,9 +1292,14 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // it asked for is told of no resize (X11), and the frame round
             // it, its corners and all laid out in it go by its size. And
             // whether X composites it, for its corners (Wayland always
-            // does; nothing to ask elsewhere).
-            Task::batch([app.on_window_resized(size), app.ask_composited()])
-                .map(move |m| Shell::Window(id, m))
+            // does; nothing to ask elsewhere), and on Windows no border of
+            // the system's over them.
+            Task::batch([
+                app.on_window_resized(size),
+                app.ask_composited(),
+                app.leave_edges_clear(),
+            ])
+            .map(move |m| Shell::Window(id, m))
         }
         Shell::CloseRequested(id) => clew.request_close(id, Asker::Outside),
         Shell::Closed(id) => clew.close_window(id),
@@ -1333,13 +1338,14 @@ pub fn theme(clew: &Clew, id: window::Id) -> Theme {
     clew.windows.get(&id).map(App::theme).unwrap_or(Theme::Dark)
 }
 
-/// What a window is cleared to before it is drawn: on Linux nothing, so
+/// What a window is cleared to before it is drawn: on Linux, and on Windows
+/// where the window presents through a visual (`app::corners`), nothing, so
 /// the corners Clew leaves clear show the desktop (`ui::window_radius_for`)
 /// — its view covers all the rest; elsewhere iced's own, the theme's
 /// background.
 pub fn style(_: &Clew, theme: &Theme) -> iced::theme::Style {
     let style = <Theme as iced::theme::Base>::base(theme);
-    if cfg!(all(unix, not(target_os = "macos"))) {
+    if cfg!(all(unix, not(target_os = "macos"))) || crate::app::corners::through_visual() {
         iced::theme::Style {
             background_color: iced::Color::TRANSPARENT,
             ..style
