@@ -75,7 +75,18 @@ fn visual_presentation_possible() -> bool {
             .find(|backend| !backend.is_empty())
             .is_none_or(|first| first == "wgpu")
     });
-    gpu_first && iced_wgpu::window::compositor::visual_presentation_available()
+    (gpu_first || for_any_renderer())
+        && iced_wgpu::window::compositor::visual_presentation_available()
+}
+
+/// Whether to present through a visual whatever renderer iced draws with:
+/// for the test of the relaunch (`tests/relaunch.rs`) to have iced draw a
+/// window made for a visual in software, as it would should the GPU fail
+/// after Clew asked for it. A debug build's alone; a release build asks
+/// nothing of the environment here.
+#[cfg(windows)]
+fn for_any_renderer() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("CLEW_TEST_VISUAL_FOR_ANY_RENDERER").is_some()
 }
 
 /// Start Clew again as it was started (its program and its arguments),

@@ -108,16 +108,19 @@ socket2 = "0.6"
 
 # A borderless window of winit's kind, asked of Windows' compositor to be
 # rounded, and one made as iced makes Clew's, drawn by iced's renderer and
-# read back from the screen (src/app/corners.rs): the versions the build
-# already carries.
+# read back from the screen (src/app/corners.rs); and the processes and
+# windows of a Clew started by a test (tests/relaunch.rs): the versions the
+# build already carries.
 [target.'cfg(windows)'.dev-dependencies]
 iced_winit = "0.14"
 windows-sys = { version = "0.61", features = [
     "Wdk_System_SystemServices",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_LibraryLoader",
     "Win32_System_SystemInformation",
+    "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ] }
 
