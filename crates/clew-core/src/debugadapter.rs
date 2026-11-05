@@ -1560,7 +1560,9 @@ mod tests {
 
     /// A fake interpreter: answers the probe from `probe_answer` (a shell
     /// expression printing "<has_debugpy> <in_venv>"), and records where it
-    /// ran and with what.
+    /// ran and with what. It runs nothing found on `PATH`: a child's `PATH`
+    /// is taken once per process (`linerpc::spawn_path`), and a test that
+    /// set it to an empty directory may have been the first to take it.
     #[cfg(unix)]
     fn fake_python(dir: &Path, probe_answer: &str) -> PathBuf {
         let log = dir.join("log");
@@ -1570,7 +1572,7 @@ mod tests {
                 "case \"$1\" in -c|-m) echo \"$(pwd) $PYTHONSAFEPATH $*\" >> '{log}' ;; esac\n\
                  case \"$1\" in\n\
                    -c) {probe_answer} ;;\n\
-                   -m) touch '{mark}' ;;\n\
+                   -m) : > '{mark}' ;;\n\
                  esac",
                 log = log.display(),
                 mark = dir.join("installed").display(),
@@ -1732,7 +1734,7 @@ mod tests {
         let dir = TempDir::new("dap-pip-cancel");
         let python = script(
             &dir.join("bin/python3"),
-            "case \"$1\" in -m) sleep 60 ;; *) echo '0 0' ;; esac",
+            "case \"$1\" in -m) /bin/sleep 60 ;; *) echo '0 0' ;; esac",
         );
         let cancel = std::sync::Arc::new(AtomicBool::new(false));
         let flip = {
@@ -1756,7 +1758,7 @@ mod tests {
     #[cfg(unix)]
     fn a_hung_interpreter_fails_the_probe() {
         let dir = TempDir::new("dap-py-hang");
-        let python = fake_python(&dir, "sleep 30");
+        let python = fake_python(&dir, "/bin/sleep 30");
         let started = std::time::Instant::now();
         let err = probe_python_within(&python, Duration::from_secs(1)).unwrap_err();
         assert!(err.contains("did not finish"), "{err}");
