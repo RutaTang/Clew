@@ -307,10 +307,10 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
                     .spacing(FINDER_ROW_GAP)
                     .width(Fill),
             )
-                .id(finder_list_id())
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(iced::Length::Shrink),
+            .id(finder_list_id())
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(iced::Length::Shrink),
         )
         .max_height(FINDER_MAX_H - FINDER_INPUT_H - FINDER_FOOT_H - 24.0)
         .padding(6),
