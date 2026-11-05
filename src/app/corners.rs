@@ -18,12 +18,20 @@
 //! without the surface GDI draws to (the vendored `iced_winit`), else shown
 //! over its clear pixels; and Windows is asked to round none of its
 //! corners and to draw no border of its own round it. Elsewhere Windows 11
-//! rounds the window itself, to its own radius.
+//! rounds the window itself, to its own radius. Such a window shows nothing
+//! iced draws in software: should iced fall back to software all the same,
+//! Clew quits and starts again presenting directly
+//! (`relaunch_presenting_directly`).
 
 /// Whether Clew's windows present through a DirectComposition visual,
 /// once [`decide_presentation`] has decided it.
 #[cfg(windows)]
 static THROUGH_VISUAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// What a relaunched Clew is told by, in its environment, to present its
+/// windows directly (`relaunch_presenting_directly`).
+#[cfg(windows)]
+const PRESENT_DIRECTLY: &str = "CLEW_PRESENT_DIRECTLY";
 
 /// Decide, before iced makes its renderer, whether Clew's windows present
 /// through a DirectComposition visual, and if so ask iced's GPU renderer
@@ -33,11 +41,22 @@ static THROUGH_VISUAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 /// Windows rounds them. A window presenting so shows nothing iced draws in
 /// software, so this asks for that adapter and device now, as the renderer
 /// will (`visual_presentation_available`), rather than have iced fall back
-/// to software with the window made for a visual.
+/// to software with the window made for a visual. A Clew relaunched for
+/// having found that happen anyway presents directly
+/// ([`relaunch_presenting_directly`]). Called first in `main`, before any
+/// thread is started.
 #[cfg(windows)]
 pub fn decide_presentation() {
     THROUGH_VISUAL.get_or_init(|| {
-        let through = visual_presentation_possible();
+        let told = std::env::var_os(PRESENT_DIRECTLY).is_some();
+        if told {
+            // Taken out of the environment, for what Clew starts not to
+            // inherit it (another Clew started from its terminal).
+            // SAFETY: `main` decides this before it starts any thread, so
+            // nothing reads or writes the environment meanwhile.
+            unsafe { std::env::remove_var(PRESENT_DIRECTLY) };
+        }
+        let through = !told && visual_presentation_possible();
         if through {
             iced_wgpu::window::compositor::present_through_visual();
         }
@@ -57,6 +76,27 @@ fn visual_presentation_possible() -> bool {
             .is_none_or(|first| first == "wgpu")
     });
     gpu_first && iced_wgpu::window::compositor::visual_presentation_available()
+}
+
+/// Start Clew again as it was started (its program and its arguments),
+/// told to present its windows directly: as this one exits, having found
+/// iced drawing in software a window it made for a visual, which shows
+/// none of it (`shell::update`). Said on stderr if it cannot start.
+#[cfg(windows)]
+pub(crate) fn relaunch_presenting_directly() {
+    if let Err(error) = relaunch_command().and_then(|mut command| command.spawn()) {
+        eprintln!("clew: could not start again presenting directly: {error}");
+    }
+}
+
+/// How [`relaunch_presenting_directly`] starts Clew.
+#[cfg(windows)]
+fn relaunch_command() -> std::io::Result<std::process::Command> {
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(std::env::args_os().skip(1))
+        .env(PRESENT_DIRECTLY, "1");
+    Ok(command)
 }
 
 /// Whether Clew's windows present through a visual, so their corners can
@@ -270,6 +310,31 @@ mod tests {
         // SAFETY: made above, on this thread.
         unsafe { DestroyWindow(window) };
         assert_eq!(answer, S_OK, "build {build}");
+    }
+
+    /// A relaunch starts this program again, with the arguments it was
+    /// started with, told to present its windows directly.
+    #[test]
+    fn a_relaunch_starts_clew_as_it_was_started_presenting_directly() {
+        let command = super::relaunch_command().expect("the program's path");
+        assert_eq!(
+            command.get_program(),
+            std::env::current_exe().unwrap().as_os_str()
+        );
+        let started: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+        let given: Vec<&std::ffi::OsStr> = command.get_args().collect();
+        assert_eq!(
+            given,
+            started.iter().map(|a| a.as_os_str()).collect::<Vec<_>>()
+        );
+        let told: Vec<_> = command.get_envs().collect();
+        assert_eq!(
+            told,
+            [(
+                std::ffi::OsStr::new(super::PRESENT_DIRECTLY),
+                Some(std::ffi::OsStr::new("1"))
+            )]
+        );
     }
 
     /// The build of the Windows the tests run on.

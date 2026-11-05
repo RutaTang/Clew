@@ -92,6 +92,10 @@ pub struct Clew {
     tearing_down: HashSet<u64>,
     /// The exit has been issued (or left to AppKit).
     exiting: bool,
+    /// Clew starts again as it exits, presenting its windows directly: iced
+    /// draws in software a window made for a visual, which shows none of it
+    /// ([`Platform::presents_through_visual`]).
+    relaunch: bool,
     /// The last ticket handed out, to a question, a wait or a teardown.
     tickets: u64,
     /// What the shell leaves to the platform.
@@ -278,6 +282,13 @@ trait Platform {
     /// Answer macOS's request to terminate ([`Shell::Terminate`]): `true`
     /// lets it terminate the process, `false` keeps clew running.
     fn reply_terminate(&self, terminate: bool);
+    /// Whether clew's windows present through a DirectComposition visual
+    /// (`app::corners`), which shows nothing iced draws in software.
+    fn presents_through_visual(&self) -> bool;
+    /// Start clew again as it was started, presenting its windows directly
+    /// (`app::corners`): as it exits, having found a window it made for a
+    /// visual drawn in software.
+    fn relaunch_presenting_directly(&self);
 }
 
 /// The platform clew runs on: questions in native sheets (rfd, an `NSAlert`
@@ -315,6 +326,15 @@ impl Platform for Native {
         crate::macos::terminate::reply(terminate);
         #[cfg(not(target_os = "macos"))]
         let _ = terminate;
+    }
+
+    fn presents_through_visual(&self) -> bool {
+        crate::app::corners::through_visual()
+    }
+
+    fn relaunch_presenting_directly(&self) {
+        #[cfg(windows)]
+        crate::app::corners::relaunch_presenting_directly();
     }
 }
 
@@ -502,6 +522,7 @@ impl Clew {
             terminating: false,
             tearing_down: HashSet::new(),
             exiting: false,
+            relaunch: false,
             tickets: 0,
             platform,
         }
@@ -1004,6 +1025,7 @@ impl Clew {
     /// stays; and the windows asked to close while it went on close as
     /// asked, now that it does not take them.
     fn quit_cancelled(&mut self) -> Task<Shell> {
+        self.relaunch = false;
         if std::mem::take(&mut self.terminating) {
             self.platform.reply_terminate(false);
         }
@@ -1164,6 +1186,9 @@ impl Clew {
             return Task::none();
         }
         self.exiting = true;
+        if std::mem::take(&mut self.relaunch) {
+            self.platform.relaunch_presenting_directly();
+        }
         if std::mem::take(&mut self.terminating) {
             self.platform.reply_terminate(true);
             return Task::none();
@@ -1196,6 +1221,22 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             // it go.
             if matches!(msg, Message::Window(WindowMsg::Close)) {
                 return clew.request_close(id, Asker::User);
+            }
+            // iced draws in software a window made for a DirectComposition
+            // visual, which shows none of it (`app::corners`): it found no
+            // GPU to draw with after all. Clew quits, as ⌘Q does, and starts
+            // again as it exits, presenting its windows directly — opaque,
+            // rounded by Windows. Once, whichever windows say so.
+            if matches!(msg, Message::Window(WindowMsg::SoftwareRenderer(true)))
+                && clew.platform.presents_through_visual()
+                && !clew.relaunch
+            {
+                clew.relaunch = true;
+                let recorded = match clew.windows.get_mut(&id) {
+                    Some(app) => app.update(msg).map(move |m| Shell::Window(id, m)),
+                    None => Task::none(),
+                };
+                return Task::batch([recorded, update(clew, Shell::Quit)]);
             }
             // The update helper is installed and waits for this PROCESS to
             // exit, so the quit that follows is the whole app's: every window's
@@ -1528,6 +1569,9 @@ mod tests {
         /// platform's tasks run, and as windows close: what
         /// [`Runtime::check_sheets`] holds against AppKit's rules.
         steps: Arc<Mutex<Vec<Step>>>,
+        /// Whether the windows present through a visual
+        /// ([`Platform::presents_through_visual`]).
+        through_visual: bool,
     }
 
     /// A question whose sheet was begun.
@@ -1555,6 +1599,8 @@ mod tests {
         Dismissed(window::Id),
         /// A window was closed.
         Closed(window::Id),
+        /// Clew was started again, presenting its windows directly.
+        Relaunched,
     }
 
     /// A test's platform: nothing is shown and nothing reaches AppKit — all
@@ -1662,6 +1708,14 @@ mod tests {
 
         fn reply_terminate(&self, terminate: bool) {
             self.0.borrow_mut().replies.push(terminate);
+        }
+
+        fn presents_through_visual(&self) -> bool {
+            self.0.borrow().through_visual
+        }
+
+        fn relaunch_presenting_directly(&self) {
+            self.0.borrow().steps.lock().unwrap().push(Step::Relaunched);
         }
     }
 
@@ -1907,6 +1961,7 @@ mod tests {
                             "a window was closed without its sheets ended first"
                         );
                     }
+                    Step::Relaunched => {}
                 }
             }
         }
@@ -2150,6 +2205,46 @@ mod tests {
 
         rt.send(Shell::CloseRequested(second));
         assert_eq!(rt.exits, 1);
+    }
+
+    /// iced draws in software a window made for a visual, which shows none
+    /// of it: clew quits, every window torn down and closed, and starts
+    /// again as it exits, presenting its windows directly — once, however
+    /// many windows say so. Where the windows present directly, a window
+    /// drawn in software is shown, and nothing happens.
+    #[tokio::test]
+    async fn a_window_made_for_a_visual_drawn_in_software_relaunches_clew() {
+        let in_software =
+            |id| Shell::Window(id, Message::Window(WindowMsg::SoftwareRenderer(true)));
+        let relaunches = |rt: &Runtime| {
+            rt.steps()
+                .iter()
+                .filter(|s| **s == Step::Relaunched)
+                .count()
+        };
+
+        let mut rt = Runtime::new();
+        let id = rt.window(blank_app());
+        rt.send(in_software(id));
+        assert!(rt.is_open(id));
+        assert_eq!((rt.exits, relaunches(&rt)), (0, 0));
+
+        let mut rt = Runtime::new();
+        rt.script.borrow_mut().through_visual = true;
+        let ids = [rt.window(blank_app()), rt.window(blank_app())];
+        rt.deliver(in_software(ids[0]));
+        rt.deliver(in_software(ids[1]));
+        rt.settle();
+        assert_eq!((rt.exits, relaunches(&rt)), (1, 1));
+        let steps = rt.steps();
+        let relaunched = steps.iter().position(|s| *s == Step::Relaunched).unwrap();
+        for id in ids {
+            let closed = steps.iter().position(|s| *s == Step::Closed(id));
+            assert!(
+                closed.is_some_and(|closed| closed < relaunched),
+                "{id:?} not closed before the relaunch: {steps:?}"
+            );
+        }
     }
 
     /// An exit waits for the servers to be reaped — not less: exiting at
