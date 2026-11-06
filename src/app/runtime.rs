@@ -97,6 +97,7 @@ impl App {
             show_bottom: false,
             ask_view: AskView::Hidden,
             ask_sessions_menu: false,
+            ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
             debug: DebugState::default(),
             debug_hover_eval: false,

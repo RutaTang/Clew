@@ -1104,6 +1104,8 @@ pub struct App {
     pub ask_view: AskView,
     /// The menu of Ask's sessions, open under the card's title.
     pub ask_sessions_menu: bool,
+    /// What the menu's search looks for; cleared as the menu closes.
+    pub ask_sessions_query: String,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
     /// The debugger (DAP): the active session plus breakpoints and watches that

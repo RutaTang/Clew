@@ -7447,6 +7447,24 @@ fn the_card_names_its_session_and_lists_the_others() {
             .any(|m| matches!(m, Message::Ask(AskMsg::NewSession))),
         "{sent:?}"
     );
+    // Searched: only what has it, with where it is when it is past the name.
+    app.proj.ask_sessions[1].turns[1].answer = "Over SSH, with the user's own keys.".into();
+    app.ask_sessions_query = "ssh".into();
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "1 session found"));
+        assert!(shows(&mut sim, "How is a host connected?"));
+        assert!(shows(&mut sim, "Over SSH, with the user's own keys."));
+        assert!(
+            !shows(&mut sim, "2 min ago · 1 question"),
+            "the other is not found"
+        );
+    }
+    app.ask_sessions_query = "kubernetes".into();
+    assert!(shows(
+        &mut sim_of(&app),
+        "No session has “kubernetes” in it."
+    ));
 }
 
 /// What voice is doing shows in Ask's corner, never in the field at the

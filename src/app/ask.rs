@@ -219,6 +219,7 @@ impl App {
     /// Put Ask away — its pill too — the keyboard back with the code.
     pub(crate) fn close_ask(&mut self) {
         self.ask_sessions_menu = false;
+        self.ask_sessions_query.clear();
         self.ask_view = AskView::Closed;
         self.code_focused = true;
     }
@@ -227,6 +228,7 @@ impl App {
     /// code; the conversation is kept, a click on the pill away.
     pub(crate) fn hide_ask(&mut self) {
         self.ask_sessions_menu = false;
+        self.ask_sessions_query.clear();
         self.ask_view = AskView::Hidden;
         self.code_focused = true;
     }
@@ -238,6 +240,7 @@ impl App {
         // The menu of sessions first, over the card it opened on.
         if self.ask_sessions_menu {
             self.ask_sessions_menu = false;
+            self.ask_sessions_query.clear();
             return true;
         }
         match self.ask_view {
@@ -1323,8 +1326,26 @@ impl App {
             AskMsg::NewSession => self.new_ask_session(),
             AskMsg::SessionsMenu(open) => {
                 self.ask_sessions_menu = open;
+                self.ask_sessions_query.clear();
+                if open {
+                    // Typing goes to its search at once.
+                    self.code_focused = false;
+                    operation::focus(ui::ask_sessions_search_id())
+                } else {
+                    Task::none()
+                }
+            }
+            AskMsg::SessionsQuery(query) => {
+                self.ask_sessions_query = query;
                 Task::none()
             }
+            AskMsg::OpenFirstFound => match self.found_ask_sessions().first() {
+                Some((session, _)) => {
+                    let id = session.id;
+                    self.switch_ask_session(id)
+                }
+                None => Task::none(),
+            },
             AskMsg::SwitchSession(id) => self.switch_ask_session(id),
             AskMsg::DeleteSession(id) => self.delete_ask_session(id),
             AskMsg::Close => {

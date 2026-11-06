@@ -1074,6 +1074,10 @@ pub enum AskMsg {
     NewSession,
     /// Open or close the menu of sessions under the card's title.
     SessionsMenu(bool),
+    /// What the menu's search looks for changed.
+    SessionsQuery(String),
+    /// Enter in the menu's search: go back to the first session it found.
+    OpenFirstFound,
     /// Go back to a session.
     SwitchSession(u64),
     /// Forget a session.
@@ -2392,6 +2396,8 @@ impl AskMsg {
             | AskMsg::Hide
             | AskMsg::NewSession
             | AskMsg::SessionsMenu(..)
+            | AskMsg::SessionsQuery(..)
+            | AskMsg::OpenFirstFound
             | AskMsg::SwitchSession(..)
             | AskMsg::DeleteSession(..)
             | AskMsg::Close

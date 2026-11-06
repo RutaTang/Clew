@@ -84,6 +84,93 @@ pub(crate) fn when(updated: i64, now: i64) -> String {
     }
 }
 
+/// How a session answers a search: found, and — when what was looked for
+/// is in its questions or answers rather than its name — the passage it is
+/// in.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Found {
+    pub passage: Option<String>,
+}
+
+/// How much of a question or answer is shown around a word found in it.
+const PASSAGE_CHARS: usize = 64;
+
+/// Whether `session` has every word of `query` in it — its name, its
+/// questions or its answers, in any case — and where. An empty query finds
+/// every session, no passage shown.
+pub(crate) fn search(session: &AskSession, query: &str) -> Option<Found> {
+    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    if words.is_empty() {
+        return Some(Found { passage: None });
+    }
+    let title = session.title.to_lowercase();
+    let texts: Vec<&str> = session
+        .turns
+        .iter()
+        .flat_map(|t| [t.question.as_str(), t.answer.as_str()])
+        .collect();
+    let lowered: Vec<String> = texts.iter().map(|t| t.to_lowercase()).collect();
+    let everywhere =
+        |word: &String| title.contains(word) || lowered.iter().any(|t| t.contains(word));
+    if !words.iter().all(everywhere) {
+        return None;
+    }
+    if words.iter().all(|w| title.contains(w)) {
+        return Some(Found { passage: None });
+    }
+    // The first passage holding a word the name does not.
+    let word = words.iter().find(|w| !title.contains(w.as_str()))?;
+    let passage = texts.iter().zip(&lowered).find_map(|(text, low)| {
+        low.find(word.as_str())
+            .map(|at| passage_around(text, low, at))
+    });
+    Some(Found { passage })
+}
+
+/// The line of `text` around byte `at` of its lowercase `low`, cut to
+/// [`PASSAGE_CHARS`], with an ellipsis where it was cut.
+fn passage_around(text: &str, low: &str, at: usize) -> String {
+    // The lowercase text may differ in length from the text: count in
+    // characters, which lowercasing keeps for all but a few scripts.
+    let char_at = low[..at].chars().count();
+    let chars: Vec<char> = text.chars().collect();
+    let char_at = char_at.min(chars.len());
+    let line_start = chars[..char_at]
+        .iter()
+        .rposition(|&c| c == '\n')
+        .map_or(0, |i| i + 1);
+    let line_end = chars[char_at..]
+        .iter()
+        .position(|&c| c == '\n')
+        .map_or(chars.len(), |i| char_at + i);
+    // A line that fits is shown whole; a longer one, around the word.
+    let (mut start, mut end) = if line_end - line_start <= PASSAGE_CHARS {
+        (line_start, line_end)
+    } else {
+        let start = char_at.saturating_sub(PASSAGE_CHARS / 3).max(line_start);
+        (start, (start + PASSAGE_CHARS).min(line_end))
+    };
+    // Cut between words, never through one: forward to the next word's
+    // start, back to the last word's end (but never past the word found).
+    if start > line_start
+        && let Some(gap) = chars[start..char_at].iter().position(|c| c.is_whitespace())
+    {
+        start += gap + 1;
+    }
+    if end < line_end
+        && let Some(gap) = chars[char_at..end].iter().rposition(|c| c.is_whitespace())
+    {
+        end = char_at + gap;
+    }
+    let body: String = chars[start..end].iter().collect();
+    let body = body.trim();
+    format!(
+        "{}{body}{}",
+        if start > line_start { "…" } else { "" },
+        if end < line_end { "…" } else { "" }
+    )
+}
+
 /// The sessions kept in `dir`, newest first; none when there are none, or
 /// the file is not one this version of clew wrote.
 pub(crate) fn load(dir: &Path) -> Vec<AskSession> {
@@ -134,6 +221,17 @@ impl App {
         let Some(first) = turns.first() else {
             return;
         };
+        // Only looked at, not asked in: it keeps its place, and the file is
+        // left as it is.
+        if let Some(id) = self.proj.ask_session
+            && self
+                .proj
+                .ask_sessions
+                .iter()
+                .any(|s| s.id == id && s.turns == turns)
+        {
+            return;
+        }
         let id = match self.proj.ask_session {
             Some(id) => id,
             None => {
@@ -193,6 +291,7 @@ impl App {
             link.options.clear();
         }
         self.ask_sessions_menu = false;
+        self.ask_sessions_query.clear();
         stop
     }
 
@@ -209,6 +308,7 @@ impl App {
     pub(crate) fn switch_ask_session(&mut self, id: u64) -> Task<Message> {
         if self.proj.ask_session == Some(id) {
             self.ask_sessions_menu = false;
+            self.ask_sessions_query.clear();
             return Task::none();
         }
         let Some(session) = self.proj.ask_sessions.iter().find(|s| s.id == id).cloned() else {
@@ -254,6 +354,16 @@ impl App {
         stop
     }
 
+    /// The sessions the menu's search finds, newest first, each with how it
+    /// was found.
+    pub(crate) fn found_ask_sessions(&self) -> Vec<(&AskSession, Found)> {
+        self.proj
+            .ask_sessions
+            .iter()
+            .filter_map(|s| search(s, &self.ask_sessions_query).map(|found| (s, found)))
+            .collect()
+    }
+
     /// The name of the session on screen: "New session" until something
     /// has been asked in it.
     pub(crate) fn ask_session_title(&self) -> String {
@@ -295,6 +405,67 @@ mod tests {
             when(now - 3 * 86_400, now),
             crate::ui::short_date(now - 3 * 86_400, now)
         );
+    }
+
+    /// A search finds a session with every word of it in its name, its
+    /// questions or its answers, in any case; found past its name, it says
+    /// the passage, cut short around the word.
+    #[test]
+    fn a_search_finds_sessions_by_what_was_asked_and_answered() {
+        let session = AskSession {
+            id: 1,
+            title: "Where is the origin?".into(),
+            updated: 0,
+            turns: vec![
+                SavedTurn {
+                    question: "Where is the origin?".into(),
+                    spoken: false,
+                    answer: "It is set in `origin.rs`, by `set_origin`.\nThe server reads it \
+                             when a project opens, then keeps it for the whole session it \
+                             serves, so a later change waits for a reopen."
+                        .into(),
+                },
+                SavedTurn {
+                    question: "And the WATCHER?".into(),
+                    spoken: true,
+                    answer: "The watcher batches changes.".into(),
+                },
+            ],
+        };
+        assert_eq!(search(&session, ""), Some(Found { passage: None }));
+        assert_eq!(
+            search(&session, "ORIGIN"),
+            Some(Found { passage: None }),
+            "its name"
+        );
+        let found = search(&session, "origin set_origin").expect("both words");
+        assert_eq!(
+            found.passage.as_deref(),
+            Some("It is set in `origin.rs`, by `set_origin`.")
+        );
+        let found = search(&session, "reopen").expect("in an answer");
+        let passage = found.passage.unwrap();
+        assert!(
+            passage.starts_with('…') && passage.contains("reopen"),
+            "{passage}"
+        );
+        assert!(
+            passage.starts_with("…when")
+                || passage.starts_with("…then")
+                || passage[3..].starts_with(char::is_alphabetic),
+            "starts on a word: {passage}"
+        );
+        assert!(
+            !passage.contains(" a…") && !passage.ends_with(" …"),
+            "{passage}"
+        );
+        assert!(passage.chars().count() <= PASSAGE_CHARS + 2, "{passage}");
+        assert_eq!(
+            search(&session, "watcher").and_then(|f| f.passage),
+            Some("And the WATCHER?".into()),
+            "in any case, the first passage holding it"
+        );
+        assert_eq!(search(&session, "origin nowhere"), None, "every word");
     }
 
     /// Kept and read back, newest first; a file of another format, or none,

@@ -727,8 +727,26 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     .padding([7, 9])
     .width(Fill)
     .on_press(Message::Ask(AskMsg::NewSession));
+    // The search over the sessions' names, questions and answers.
+    let search = container(
+        row![
+            glyph::icon(Glyph::Search, theme::fg_muted(), 14.0),
+            text_input("Search sessions", &app.ask_sessions_query)
+                .id(crate::ui::ask_sessions_search_id())
+                .on_input(|q| Message::Ask(AskMsg::SessionsQuery(q)))
+                .on_submit(Message::Ask(AskMsg::OpenFirstFound))
+                .size(ts::BASE)
+                .padding([5, 0])
+                .style(theme::bare_input),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .padding([0, 9])
+    .style(theme::field(!app.ask_sessions_query.is_empty()));
+    let found = app.found_ask_sessions();
     let mut list = Column::new().spacing(1);
-    for session in &app.proj.ask_sessions {
+    for (session, how) in &found {
         let current = app.proj.ask_session == Some(session.id);
         let questions = session.turns.len();
         let meta = format!(
@@ -747,18 +765,26 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                 ..container::Style::default()
             });
         let pick = button(
-            row![
-                dot,
-                column![
+            row![dot, {
+                let mut lines = column![
                     text(cut_short(&session.title, 36))
                         .size(ts::BASE)
                         .color(theme::fg())
                         .wrapping(Wrapping::None),
-                    text(meta).size(ts::SMALL).color(theme::dim()),
                 ]
                 .spacing(1)
-                .width(Fill),
-            ]
+                .width(Fill);
+                // Found in what was asked or answered: where.
+                if let Some(passage) = &how.passage {
+                    lines = lines.push(
+                        text(passage.clone())
+                            .size(ts::SMALL)
+                            .color(theme::fg_muted())
+                            .wrapping(Wrapping::WordOrGlyph),
+                    );
+                }
+                lines.push(text(meta).size(ts::SMALL).color(theme::dim()))
+            },]
             .spacing(9)
             .align_y(iced::Center),
         )
@@ -788,26 +814,44 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         }
         list = list.push(line);
     }
+    let note = |s: String| -> Element<'_, Message> {
+        container(text(s).size(ts::SMALL).color(theme::dim()))
+            .padding([4, 9])
+            .into()
+    };
     let body: Element<'_, Message> = if app.proj.ask_sessions.is_empty() {
-        container(
-            text("Nothing asked yet: a session is kept once Clew has answered in it.")
-                .size(ts::SMALL)
-                .color(theme::dim()),
-        )
-        .padding([4, 9])
-        .into()
+        note("Nothing asked yet: a session is kept once Clew has answered in it.".into())
+    } else if found.is_empty() {
+        note(format!(
+            "No session has “{}” in it.",
+            app.ask_sessions_query.trim()
+        ))
     } else {
         scrollable(list)
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .into()
     };
+    let heading = if app.ask_sessions_query.trim().is_empty() {
+        format!("Sessions in {project}")
+    } else {
+        match found.len() {
+            1 => "1 session found".to_string(),
+            n => format!("{n} sessions found"),
+        }
+    };
+    // Searching is worth it once there is more than one to look through.
+    let top = if app.proj.ask_sessions.len() > 1 {
+        column![search, new].spacing(4)
+    } else {
+        column![new]
+    };
     container(opaque(
         column![
-            new,
+            top,
             container(hairline()).padding([3, 2]),
             container(
-                text(format!("Sessions in {project}"))
+                text(heading)
                     .size(ts::SMALL)
                     .font(crate::fonts::UI_MEDIUM)
                     .color(theme::dim()),

@@ -259,6 +259,11 @@ pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }
 
+/// The search field of Ask's menu of sessions, focused as the menu opens.
+pub fn ask_sessions_search_id() -> iced::widget::Id {
+    iced::widget::Id::new("ask-sessions-search")
+}
+
 /// The Ask conversation scrollable, so a new answer can snap it to the bottom.
 pub fn ask_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-conversation")

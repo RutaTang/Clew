@@ -275,6 +275,49 @@ fn ask_keeps_its_sessions() {
     assert_eq!(app.proj.ask_turns[0].answer_md, "In `origin.rs`.");
     assert!(app.proj.ask_turns.iter().all(|t| !t.streaming));
 
+    // The menu's search: what is found, and Enter goes back to the first.
+    let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
+    let _ = app.update(Message::Ask(AskMsg::SessionsQuery("ssh".into())));
+    let found: Vec<String> = app
+        .found_ask_sessions()
+        .iter()
+        .map(|(s, _)| s.title.clone())
+        .collect();
+    assert_eq!(found, ["How is a host connected?"], "by its answer");
+    let host = app
+        .proj
+        .ask_sessions
+        .iter()
+        .find(|s| s.title == "How is a host connected?")
+        .map(|s| s.id);
+    let before: Vec<u64> = app.proj.ask_sessions.iter().map(|s| s.id).collect();
+    let _ = app.update(Message::Ask(AskMsg::OpenFirstFound));
+    assert_eq!(app.proj.ask_session, host);
+    assert_eq!(app.proj.ask_turns[0].question, "How is a host connected?");
+    assert_eq!(
+        app.proj
+            .ask_sessions
+            .iter()
+            .map(|s| s.id)
+            .collect::<Vec<_>>(),
+        before,
+        "only looked at, the one left keeps its place"
+    );
+    assert!(!app.ask_sessions_menu && app.ask_sessions_query.is_empty());
+    let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
+    let _ = app.update(Message::Ask(AskMsg::SessionsQuery(
+        "nothing like it".into(),
+    )));
+    assert!(app.found_ask_sessions().is_empty());
+    let _ = app.update(Message::Ask(AskMsg::OpenFirstFound));
+    assert!(app.ask_sessions_menu, "nothing found: nothing to go to");
+    assert!(app.step_ask_down());
+    assert!(
+        app.ask_sessions_query.is_empty(),
+        "closed, the search is cleared"
+    );
+    let _ = app.update(Message::Ask(AskMsg::SwitchSession(first)));
+
     // Kept in the project's own data: opened again, they are there.
     let mut again = scanned_app("ask-sessions");
     assert_eq!(again.proj.derived_dir, Some(derived.clone()));
