@@ -906,7 +906,9 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
         VoicePhase::Listening { level, .. } => Some(
             row![
                 text("●").size(ts::SMALL).color(theme::danger()),
-                text(tr!("Listening")).size(ts::SMALL).color(theme::fg()),
+                text(tr!("listening now\u{4}Listening"))
+                    .size(ts::SMALL)
+                    .color(theme::fg()),
                 container(super::meter::eased_bar(
                     level,
                     64.0,

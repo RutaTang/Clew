@@ -458,11 +458,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             for (say, does) in crate::ui::askfloat::try_saying(app) {
                 convo.push(
                     row![
+                        // Wrapped, not run under its result: an example
+                        // in some languages is longer than its row.
                         text(say)
                             .size(ts::SMALL)
                             .color(theme::fg())
                             .width(Fill)
-                            .wrapping(Wrapping::None),
+                            .wrapping(Wrapping::WordOrGlyph),
                         container(text(does).size(ts::CAPTION).color(theme::fg_muted()))
                             .padding([2, 8])
                             .style(theme::chip),

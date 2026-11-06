@@ -4,7 +4,7 @@ use super::*;
 
 /// Gap between the pointer and the hover peek below (or above) it.
 const PEEK_GAP: f32 = 10.0;
-/// Width of the right-click menu.
+/// Width of the right-click menu as designed: wider where a row needs it.
 const MENU_W: f32 = 210.0;
 
 pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
@@ -83,16 +83,8 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
 pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
     use crate::GotoKind;
 
-    let item = |label: &'static str, msg: Message| {
-        button(text(label).size(ts::BASE))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12])
-            .on_press(msg)
-    };
-    let goto = |kind: GotoKind| item(kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
-
-    let mut items = vec![
+    let goto = |kind: GotoKind| (kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
+    let mut rows = vec![
         goto(GotoKind::Definition),
         goto(GotoKind::References),
         goto(GotoKind::Implementation),
@@ -100,29 +92,46 @@ pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
     ];
     // The language's own action, for a file whose language has one.
     if let Some(kind) = menu.insight {
-        items.push(item(kind.label(), Message::Hover(HoverMsg::Insight)));
+        rows.push((kind.label(), Message::Hover(HoverMsg::Insight)));
     }
-    items.extend([
-        item(tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
-        item(tr!("Call Hierarchy"), Message::Calls(CallsMsg::FromMenu)),
-        item(tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu)),
-        item(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
-        item(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
-        item(
+    rows.extend([
+        (tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
+        (tr!("Call Hierarchy"), Message::Calls(CallsMsg::FromMenu)),
+        (tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu)),
+        (tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
+        (tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
+        (
             tr!("Why is this here?"),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         ),
-        item(
+        (
             tr!("Toggle Breakpoint"),
             Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
         ),
-        item(
+        (
             tr!("Conditional Breakpoint…"),
             Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
         ),
     ]);
-    let panel = container(Column::with_children(items.into_iter().map(Element::from)).spacing(1))
-        .width(MENU_W)
+    // As designed, or as wide as its longest row in the reader's language,
+    // so none wraps.
+    let width = rows
+        .iter()
+        .map(|(label, _)| {
+            super::sheet::text_width(label, ts::BASE, crate::fonts::UI) + 2.0 * 12.0 + 2.0 * 4.0
+        })
+        .fold(MENU_W, f32::max)
+        .ceil();
+    let items = rows.into_iter().map(|(label, msg)| {
+        button(text(label).size(ts::BASE).wrapping(Wrapping::None))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12])
+            .on_press(msg)
+            .into()
+    });
+    let panel = container(Column::with_children(items).spacing(1))
+        .width(width)
         .padding(4)
         .style(theme::modal_panel);
 

@@ -308,10 +308,18 @@ pub(crate) fn parse_catalog(text: &str) -> Catalog {
 /// title, kept in English as its name — whose every value is marked with
 /// [`tr_noop!`](crate::tr_noop) where it is written.
 pub fn lookup(english: &str) -> &str {
-    match current() {
-        Lang::En => english,
-        lang => catalog(lang).get(english).copied().unwrap_or(english),
-    }
+    let found = match current() {
+        Lang::En => None,
+        lang => catalog(lang).get(english).copied(),
+    };
+    // A key may say which sense of its words it means, before a U+0004
+    // (gettext's way): "programming language\u{4}Language" is "Language"
+    // as in Rust, not as in French. Untranslated, it reads as its words.
+    found.unwrap_or_else(|| {
+        english
+            .rsplit_once('\u{4}')
+            .map_or(english, |(_, text)| text)
+    })
 }
 
 /// `template` with each `{name}` replaced by its argument's value. `{{`
@@ -717,6 +725,14 @@ mod tests {
         assert_eq!(ago(now - 60, now), "1 minute ago");
         assert_eq!(ago(now - 3 * 86_400, now), "3 days ago");
         assert_eq!(ago(now - 400 * 86_400, now), "1 year ago");
+    }
+
+    /// A key with a sense before its words reads as its words where nothing
+    /// translates it.
+    #[test]
+    fn a_keys_sense_is_not_shown() {
+        assert_eq!(lookup("programming language\u{4}Language"), "Language");
+        assert_eq!(lookup("no such text"), "no such text");
     }
 
     /// No catalog keeps text the program no longer shows.

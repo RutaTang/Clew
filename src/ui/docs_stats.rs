@@ -773,7 +773,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     let table_header = row![
         // Match the color swatch's width so headers line up with the cells below.
         space().width(10),
-        head(tr!("Language"), 150.0),
+        head(tr!("programming language\u{4}Language"), 150.0),
         head(tr!("Files"), 70.0),
         head(tr!("Code"), 90.0),
         head(tr!("Comments"), 90.0),

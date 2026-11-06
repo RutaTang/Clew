@@ -1349,7 +1349,7 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     languages.dedup();
     let ready = drafts.server_language.is_some();
     rows.push(form::field(
-        tr!("Language"),
+        tr!("programming language\u{4}Language"),
         None,
         form::pick(languages, drafts.server_language.clone(), |l: String| {
             Message::Languages(L::ServerLanguage(l))
