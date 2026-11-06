@@ -24117,6 +24117,38 @@ fn an_unchecked_summary_is_marked_in_the_hover() {
     assert!(shown.starts_with(crate::app::UNCHECKED_MARK), "{shown}");
 }
 
+/// Browse… picks what its field names — a JDK's home is a folder, a
+/// version is typed, not browsed to — under the field's own title (every
+/// one was "Choose an SSH private key"); and a picker that could not be
+/// shown says so instead of doing nothing.
+#[test]
+fn browse_picks_what_its_field_names_and_a_missing_dialog_is_said() {
+    use crate::LangField as F;
+    use crate::app::languages::browse_for;
+    assert_eq!(
+        browse_for(F::JavaHome).map(|(folder, _)| folder),
+        Some(true)
+    );
+    assert_eq!(
+        browse_for(F::CDatabase).map(|(folder, _)| folder),
+        Some(true)
+    );
+    assert_eq!(
+        browse_for(F::PythonPath).map(|(folder, _)| folder),
+        Some(false)
+    );
+    assert_eq!(browse_for(F::PhpVersion), None);
+    assert_eq!(browse_for(F::ServerArgs), None);
+    for field in [F::PythonPath, F::ServerCommand, F::ZigPath] {
+        let (_, title) = browse_for(field).unwrap();
+        assert!(!title.contains("SSH"), "{title}");
+    }
+
+    let mut app = blank_app();
+    let _ = app.update(Message::Window(WindowMsg::NoFileDialog));
+    assert!(app.status.contains("xdg-desktop-portal"), "{}", app.status);
+}
+
 /// A summary's code marks are not shown in the plain-text views of it (the
 /// margin's notes, the file banner, the hover): they read "`Cart.total`
 /// sums…", backticks and all.

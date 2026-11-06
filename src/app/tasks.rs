@@ -3065,21 +3065,26 @@ fn bridge_streams(
     (client_stdin, client_stdout, feed)
 }
 
-/// Native picker for a project folder (Open Folder), in a sheet on `window`.
-pub(crate) fn pick_folder(window: Option<iced::window::Id>) -> Task<Option<PathBuf>> {
-    picker(window, |dialog| {
-        dialog.set_title(tr!("Open a project folder")).pick_folder()
-    })
+/// What a file picker came back with: a path, nothing (the reader closed
+/// it), or [`NoDialog`].
+pub(crate) type Picked = Result<Option<PathBuf>, NoDialog>;
+
+/// No dialog could be shown: on Linux, without an xdg-desktop-portal or
+/// zenity to show one, rfd answers at once as if the reader had closed it,
+/// and Open Folder, Export or Browse… did nothing and said nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NoDialog;
+
+/// Native picker for a folder titled `title` (Open Folder, a folder a
+/// language setting names), in a sheet on `window`.
+pub(crate) fn pick_folder(window: Option<iced::window::Id>, title: String) -> Task<Picked> {
+    picker(window, move |dialog| dialog.set_title(title).pick_folder())
 }
 
-/// Native picker for an SSH private-key file (the Connect form's "Browse…"),
-/// in a sheet on `window`.
-pub(crate) fn pick_file(window: Option<iced::window::Id>) -> Task<Option<PathBuf>> {
-    picker(window, |dialog| {
-        dialog
-            .set_title(tr!("Choose an SSH private key"))
-            .pick_file()
-    })
+/// Native picker for a file titled `title` (an SSH private key, a language
+/// server's program), in a sheet on `window`.
+pub(crate) fn pick_file(window: Option<iced::window::Id>, title: String) -> Task<Picked> {
+    picker(window, move |dialog| dialog.set_title(title).pick_file())
 }
 
 /// Native save dialog for a Markdown export (the ⋯ menu's Export row), in a
@@ -3088,7 +3093,7 @@ pub(crate) fn save_markdown(
     window: Option<iced::window::Id>,
     file_name: String,
     folder: Option<PathBuf>,
-) -> Task<Option<PathBuf>> {
+) -> Task<Picked> {
     picker(window, move |dialog| {
         let dialog = dialog
             .set_title(tr!("Export reading notes"))
@@ -3114,24 +3119,39 @@ pub(crate) fn save_markdown(
 fn picker<F>(
     window: Option<iced::window::Id>,
     pick: impl FnOnce(rfd::AsyncFileDialog) -> F + Send + 'static,
-) -> Task<Option<PathBuf>>
+) -> Task<Picked>
 where
     F: std::future::Future<Output = Option<rfd::FileHandle>> + Send + 'static,
 {
     let Some(window) = window else {
-        return Task::done(None);
+        return Task::done(Ok(None));
     };
     iced::window::run(window, move |parent| {
-        pick(rfd::AsyncFileDialog::new().set_parent(parent))
+        let started = std::time::Instant::now();
+        let shown = pick(rfd::AsyncFileDialog::new().set_parent(parent));
+        async move { (shown.await, started.elapsed()) }
     })
     .collect()
     .then(|shown| match shown.into_iter().next() {
-        Some(picked) => {
-            Task::future(picked).map(|picked| picked.map(|handle| handle.path().to_path_buf()))
-        }
-        None => Task::done(None),
+        Some(picked) => Task::future(picked).map(|(picked, took)| match picked {
+            Some(handle) => Ok(Some(handle.path().to_path_buf())),
+            None if never_shown(took) => Err(NoDialog),
+            None => Ok(None),
+        }),
+        None => Task::done(Ok(None)),
     })
 }
+
+/// Whether a picker that came back with nothing after `took` was never on
+/// screen: on Linux, where rfd answers at once when no portal or zenity can
+/// show one — sooner than anyone closes a dialog they saw. Elsewhere the
+/// system's own dialog is always there.
+fn never_shown(took: std::time::Duration) -> bool {
+    cfg!(all(unix, not(target_os = "macos"))) && took < NO_DIALOG_WITHIN
+}
+
+/// How soon a picker that answers nothing is taken for one never shown.
+const NO_DIALOG_WITHIN: std::time::Duration = std::time::Duration::from_millis(400);
 
 ///
 /// `confine` is the project root when `abs` names a file of the project: it

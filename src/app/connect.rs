@@ -528,7 +528,12 @@ impl App {
             }
             ConnectMsg::Field(field, value) => self.on_connect_field(field, value),
             ConnectMsg::PickIdentity => {
-                pick_file(self.main_window).map(|v| Message::Connect(ConnectMsg::IdentityPicked(v)))
+                pick_file(self.main_window, tr!("Choose an SSH private key").into()).map(|picked| {
+                    match picked {
+                        Ok(v) => Message::Connect(ConnectMsg::IdentityPicked(v)),
+                        Err(_) => Message::Window(WindowMsg::NoFileDialog),
+                    }
+                })
             }
             ConnectMsg::IdentityPicked(path) => {
                 if let (Some(ui), Some(path)) = (&mut self.connect, path) {

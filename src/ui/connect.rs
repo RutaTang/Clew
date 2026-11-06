@@ -423,7 +423,8 @@ fn other_path<'a>(
     ]
     .spacing(6)
     .align_y(iced::Center);
-    if !app.connection.is_remote() {
+    // A version or flags are typed: there is no file to browse to.
+    if !app.connection.is_remote() && crate::app::languages::browse_for(field).is_some() {
         line = line.push(form::action(
             tr!("Browse…"),
             Some(Message::Languages(L::Browse(field))),
@@ -782,7 +783,9 @@ fn python_block<'a>(
             PythonSource::LspToml => tr!("Set in the project's .clew/lsp.toml"),
             PythonSource::ProjectVenv => tr!("Found in the project"),
             PythonSource::Activated => tr!("Active in the shell clew started from"),
-            PythonSource::Server => tr!("None"),
+            // Nobody named one: the server looks for its own. "None" read
+            // as though Python went without an interpreter.
+            PythonSource::Server => tr!("Left to the language server: it finds one itself"),
         };
         let mut in_use = column![text(who).size(ts::BASE).color(theme::fg())].spacing(2);
         if let Some(path) = &effect.interpreter {

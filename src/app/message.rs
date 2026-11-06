@@ -1945,6 +1945,8 @@ pub enum WindowMsg {
     ToggleInlineBlame,
     /// Toggle the lines down the code's indentation.
     ToggleIndentGuides,
+    /// A file picker could not be shown ([`crate::app::tasks::NoDialog`]).
+    NoFileDialog,
     /// Open / close the app menu of Windows and Linux (the top bar's ☰).
     ToggleAppMenu,
     /// Open / close the reader's View menu (the file tools' View ▾).
@@ -2713,6 +2715,7 @@ impl WindowMsg {
             | WindowMsg::ToggleMinimap
             | WindowMsg::ToggleInlineBlame
             | WindowMsg::ToggleIndentGuides
+            | WindowMsg::NoFileDialog
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
             | WindowMsg::FileFilterChanged(..)

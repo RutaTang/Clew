@@ -734,6 +734,12 @@ impl App {
                 self.keep_view_pref(VIEW_INDENT_GUIDES, self.show_indent_guides);
                 Task::none()
             }
+            WindowMsg::NoFileDialog => {
+                self.status =
+                    tr!("No file dialog could open here — install xdg-desktop-portal or zenity")
+                        .into();
+                Task::none()
+            }
         }
     }
 }

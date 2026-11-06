@@ -132,16 +132,21 @@ impl App {
                     return Task::none();
                 }
                 let stamp = self.stamp();
-                let picked = match field {
-                    LangField::CDatabase => crate::app::tasks::pick_folder(self.main_window),
-                    _ => crate::app::tasks::pick_file(self.main_window),
+                let Some((folder, title)) = browse_for(field) else {
+                    return Task::none();
                 };
-                picked.map(move |path| {
-                    Message::Languages(LanguagesMsg::Browsed {
+                let picked = if folder {
+                    crate::app::tasks::pick_folder(self.main_window, title.into())
+                } else {
+                    crate::app::tasks::pick_file(self.main_window, title.into())
+                };
+                picked.map(move |picked| match picked {
+                    Ok(path) => Message::Languages(LanguagesMsg::Browsed {
                         stamp: stamp.clone(),
                         field,
                         path,
-                    })
+                    }),
+                    Err(_) => Message::Window(WindowMsg::NoFileDialog),
                 })
             }
             LanguagesMsg::Browsed { field, path, .. } => match path {
@@ -601,6 +606,27 @@ pub(crate) fn join_args(args: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// What Browse… looks for on `field`'s behalf — a folder or a file — and
+/// the dialog's title; `None` for a field no file names (a version, flags).
+/// Every one was a file picker titled "Choose an SSH private key", and a
+/// JDK's home folder could not be picked at all.
+pub(crate) fn browse_for(field: LangField) -> Option<(bool, &'static str)> {
+    Some(match field {
+        LangField::PythonPath => (false, tr!("Choose a Python interpreter")),
+        LangField::CDatabase => (true, tr!("Choose the folder with compile_commands.json")),
+        LangField::TypeScriptPath => (false, tr!("Choose tsserver.js")),
+        LangField::ZigPath => (false, tr!("Choose the zig program")),
+        LangField::JavaHome => (true, tr!("Choose a JDK's home folder")),
+        LangField::CSharpSolution => (false, tr!("Choose a .sln or .slnx file")),
+        LangField::ServerCommand => (false, tr!("Choose a language server program")),
+        LangField::RustTarget
+        | LangField::GoTag
+        | LangField::CFlags
+        | LangField::PhpVersion
+        | LangField::ServerArgs => return None,
+    })
 }
 
 #[cfg(test)]

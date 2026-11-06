@@ -255,11 +255,12 @@ impl App {
                 // root is a path on another machine.
                 let folder = self.local_project_state().then_some(root);
                 let stamp = self.stamp();
-                save_markdown(self.main_window, file_name, folder).map(move |path| {
-                    Message::Export(ExportMsg::Picked {
+                save_markdown(self.main_window, file_name, folder).map(move |picked| match picked {
+                    Ok(path) => Message::Export(ExportMsg::Picked {
                         stamp: stamp.clone(),
                         path,
-                    })
+                    }),
+                    Err(_) => Message::Window(WindowMsg::NoFileDialog),
                 })
             }
             ExportMsg::Picked { path: None, .. } => Task::none(),

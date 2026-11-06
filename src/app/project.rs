@@ -1103,7 +1103,12 @@ impl App {
                 Task::none()
             }
             ProjectMsg::OpenFolderPressed => {
-                pick_folder(self.main_window).map(|v| Message::Project(ProjectMsg::FolderPicked(v)))
+                pick_folder(self.main_window, tr!("Open a project folder").into()).map(|picked| {
+                    match picked {
+                        Ok(v) => Message::Project(ProjectMsg::FolderPicked(v)),
+                        Err(_) => Message::Window(WindowMsg::NoFileDialog),
+                    }
+                })
             }
             ProjectMsg::FolderPicked(None) => Task::none(),
             // A picker opened before a connect can still answer after it: the
