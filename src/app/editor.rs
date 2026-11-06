@@ -1124,6 +1124,7 @@ impl App {
             && d.abs == *abs
         {
             self.proj.diff = None;
+            self.proj.diff_refresh = None;
             // The code view is built anew in the diff's place: put it back
             // where the reader left it.
             return self.restore_code_scroll(self.proj.active);
@@ -1134,10 +1135,30 @@ impl App {
         let Some(git) = self.git_source() else {
             return Task::none();
         };
-        let rel = self.rel_of(&abs);
         let req = self.mint_request_id();
         self.proj.diff_pending = Some((req, abs.clone()));
-        self.status = tr!("Computing the diff of {file}…", file = rel);
+        self.status = tr!("Computing the diff of {file}…", file = self.rel_of(&abs));
+        self.load_diff(git, req, abs)
+    }
+
+    /// The diff on screen again, when `path` — just changed or deleted on
+    /// disk — is its file: it showed the file as it was when Diff was
+    /// pressed, and said "no uncommitted changes" over a file just edited.
+    pub(crate) fn refresh_open_diff(&mut self, path: &Path) -> Task<Message> {
+        if self.proj.diff.as_ref().is_none_or(|d| d.abs != path) {
+            return Task::none();
+        }
+        let Some(git) = self.git_source() else {
+            return Task::none();
+        };
+        let req = self.mint_request_id();
+        self.proj.diff_refresh = Some(req);
+        self.load_diff(git, req, path.to_path_buf())
+    }
+
+    /// Compute `abs`'s diff against `HEAD`, arriving as `DiffLoaded`.
+    fn load_diff(&self, git: crate::app::rpc::GitSource, req: u64, abs: PathBuf) -> Task<Message> {
+        let rel = self.rel_of(&abs);
         let stamp = self.stamp();
         Task::perform(
             async move {
@@ -1171,6 +1192,17 @@ impl App {
         rel: String,
         result: Result<Option<Vec<git::DiffLine>>, String>,
     ) -> Task<Message> {
+        if self.proj.diff_refresh == Some(req) {
+            self.proj.diff_refresh = None;
+            // The view takes the new lines while it still shows that file;
+            // a failure leaves what it showed (the edit's own status stands).
+            if let Ok(lines) = result
+                && self.proj.diff.as_ref().is_some_and(|d| d.abs == abs)
+            {
+                self.proj.diff = Some(DiffState::new(abs, rel, lines.unwrap_or_default()));
+            }
+            return Task::none();
+        }
         if self.proj.diff_pending.as_ref().map(|(r, _)| *r) != Some(req) {
             return Task::none();
         }

@@ -521,30 +521,22 @@ fn trail_row(app: &App) -> Element<'_, Message> {
     let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
         .spacing(6)
         .align_y(iced::Center);
-    for (i, (id, loc, label)) in stops.into_iter().enumerate() {
+    // Where the reader is now: the function the caret is in, when it is in
+    // one of the current stop's file's.
+    let here = match (app.cursor_target(), stops.last()) {
+        (Some(crate::explain::Node::Function { file, name, .. }), Some((_, loc, _)))
+            if file == loc.path =>
+        {
+            Some(name)
+        }
+        _ => None,
+    };
+    let names = trail_names(&stops, here);
+    for (i, ((id, loc, _), name)) in stops.into_iter().zip(names).enumerate() {
         if i > 0 {
             line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 11.0));
         }
         let current = i == last;
-        // Where the reader is now: the function the caret is in, when it is
-        // in one of this file's.
-        let here = match app.cursor_target() {
-            Some(crate::explain::Node::Function { file, name, .. })
-                if current && file == loc.path =>
-            {
-                Some(name)
-            }
-            _ => None,
-        };
-        let name = match (here, label) {
-            (Some(here), _) => here,
-            (None, Some(label)) => label.to_string(),
-            (None, None) => loc
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        };
         line = line.push(
             button(ts::set_in(
                 text(name)
@@ -583,9 +575,81 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// What each trail stop is called: the function it was in, else its file's
+/// name — with its line when a stop beside it has the same name, which two
+/// visits to one file outside any function otherwise read as ("cart.py ›
+/// cart.py"). `here` names the current (last) stop when the caret is in a
+/// function of its file.
+fn trail_names(
+    stops: &[(usize, &crate::history::Loc, Option<&str>)],
+    here: Option<String>,
+) -> Vec<String> {
+    let last = stops.len().saturating_sub(1);
+    let mut here = here;
+    let mut names: Vec<(String, bool)> = stops
+        .iter()
+        .enumerate()
+        .map(
+            |(i, (_, loc, label))| match (here.take_if(|_| i == last), label) {
+                (Some(here), _) => (here, true),
+                (None, Some(label)) => (label.to_string(), true),
+                (None, None) => (
+                    loc.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    false,
+                ),
+            },
+        )
+        .collect();
+    let twins: Vec<bool> = (0..names.len())
+        .map(|i| {
+            let same = |j: usize| names.get(j).is_some_and(|(n, _)| *n == names[i].0);
+            !names[i].1 && ((i > 0 && same(i - 1)) || same(i + 1))
+        })
+        .collect();
+    for (i, twin) in twins.into_iter().enumerate() {
+        if twin && let Some(line) = stops[i].1.line {
+            names[i].0 = format!("{}:{line}", names[i].0);
+        }
+    }
+    names.into_iter().map(|(n, _)| n).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two stops beside each other in one file, outside any function, are
+    /// told apart by their lines; a named stop and a lone file are not.
+    #[test]
+    fn neighbouring_stops_in_one_file_show_their_lines() {
+        let loc = |p: &str, line| crate::history::Loc {
+            path: std::path::PathBuf::from(p),
+            line,
+        };
+        let (a18, a1, b) = (
+            loc("src/cart.py", Some(18)),
+            loc("src/cart.py", Some(1)),
+            loc("src/main.py", Some(4)),
+        );
+        let stops = vec![
+            (0, &b, None),
+            (1, &a18, Some("subtotal")),
+            (2, &a18, None),
+            (3, &a1, None),
+        ];
+        assert_eq!(
+            trail_names(&stops, None),
+            ["main.py", "subtotal", "cart.py:18", "cart.py:1"]
+        );
+        // The caret in a function names the current stop.
+        assert_eq!(
+            trail_names(&stops, Some("total".into())),
+            ["main.py", "subtotal", "cart.py", "total"]
+        );
+    }
 
     /// The divider over the margin's edge, held by its middle and not yet
     /// moved, leaves the margin as wide as it was; moved, the margin follows.

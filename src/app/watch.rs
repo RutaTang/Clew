@@ -371,6 +371,13 @@ impl App {
         if !structural && touched.iter().any(|p| highlight::detect(p) == Some("rust")) {
             tasks.push(self.request_structure_build());
         }
+        // A diff on screen shows its file against HEAD: computed again over
+        // the new bytes (or none, once deleted).
+        if let Some(abs) = self.proj.diff.as_ref().map(|d| d.abs.clone())
+            && touched.contains(&abs)
+        {
+            tasks.push(self.refresh_open_diff(&abs));
+        }
         if refreshed > 0 {
             self.status = trn!(
                 "Refreshed a file changed on disk",

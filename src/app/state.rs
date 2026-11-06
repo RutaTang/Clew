@@ -1750,6 +1750,11 @@ pub struct ProjectSession {
     /// toggle while it loads cancels it (clears this), so its reply is
     /// dropped instead of opening the view the user just turned off.
     pub diff_pending: Option<(u64, PathBuf)>,
+    /// A diff on screen being recomputed because its file changed on disk:
+    /// the request's stamp. Kept apart from `diff_pending`, so a press of
+    /// Diff meanwhile still closes the view rather than cancelling a load
+    /// the reader never asked for.
+    pub diff_refresh: Option<u64>,
     /// Per file, the newest blame request (local `git::try_info` pass or
     /// server `GitInfo`, one id space). A `GitInfoLoaded` paints only when it is
     /// still the newest request for its file.
@@ -2106,6 +2111,7 @@ impl Default for ProjectSession {
             context_menu: Default::default(),
             diff: Default::default(),
             diff_pending: Default::default(),
+            diff_refresh: None,
             git_latest: Default::default(),
             blame_why: Default::default(),
             insight: Default::default(),

@@ -17720,6 +17720,54 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     );
 }
 
+/// A diff on screen follows its file: an edit on disk computes it again over
+/// the new bytes (it said "no uncommitted changes" over a file just edited),
+/// quietly, and a press of Diff meanwhile closes the view rather than
+/// cancelling a load the reader never asked for.
+#[test]
+fn an_open_diff_follows_its_file_changing_on_disk() {
+    let mut app = scanned_app("diff-follows");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let stamp = app.stamp();
+    let loaded = |req: u64, lines: Vec<git::DiffLine>| {
+        Message::Editor(EditorMsg::DiffLoaded {
+            stamp: stamp.clone(),
+            req,
+            abs: abs.clone(),
+            rel: "src/lib.rs".into(),
+            result: Ok(Some(lines)),
+        })
+    };
+    let _load = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    let (req, _) = app.proj.diff_pending.clone().unwrap();
+    let _ = app.update(loaded(req, Vec::new()));
+    assert!(app.proj.diff.as_ref().unwrap().lines.is_empty());
+
+    let src = "pub fn edited() {}\n";
+    std::fs::write(&abs, src).unwrap();
+    let _ = app.update(rehashed(&app, vec![modified(&abs, 424242, src)]));
+    let again = app.proj.diff_refresh.expect("the diff is computed again");
+    assert!(app.proj.diff_pending.is_none());
+    assert_eq!(app.status, "Refreshed a file changed on disk");
+    let added = git::DiffLine {
+        kind: git::DiffKind::Add,
+        text: "pub fn edited() {}".into(),
+    };
+    let _ = app.update(loaded(again, vec![added.clone()]));
+    assert_eq!(app.proj.diff.as_ref().unwrap().lines, vec![added]);
+    assert_eq!(app.status, "Refreshed a file changed on disk");
+
+    // Diff pressed while a refresh is out closes the view, and the refresh
+    // then lands on nothing.
+    let _ = app.update(rehashed(&app, vec![modified(&abs, 525252, "x\n")]));
+    let late = app.proj.diff_refresh.expect("computed again");
+    let _ = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    assert!(app.proj.diff.is_none(), "Diff did not close the view");
+    let _ = app.update(loaded(late, Vec::new()));
+    assert!(app.proj.diff.is_none(), "a refresh reopened a closed diff");
+}
+
 /// The change-frequency overlay's data: a loaded history is keyed by
 /// absolute path with the heat scale's top, a project without git has none
 /// and says nothing, any other failure is reported, and the map's paint
