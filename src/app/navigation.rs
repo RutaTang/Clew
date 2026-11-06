@@ -23,12 +23,44 @@ use crate::*;
 /// index's: a file the pane will open must be one the preview can read, and it
 /// is the number the server's own reference preview uses (`agent_lsp.rs`).
 pub(crate) fn read_location_previews(
-    targets: Vec<(usize, PathBuf, usize)>,
+    targets: Vec<(usize, PathBuf, usize, usize)>,
+    enc: viewer::PositionEncoding,
 ) -> Vec<(usize, String)> {
-    read_location_lines(targets)
+    let at: HashMap<usize, usize> = targets.iter().map(|&(i, _, _, ch)| (i, ch)).collect();
+    let lines = targets
         .into_iter()
-        .map(|(i, line)| (i, line.trim().to_string()))
+        .map(|(i, path, line, _)| (i, path, line))
+        .collect();
+    read_location_lines(lines)
+        .into_iter()
+        .map(|(i, line)| {
+            let preview = location_preview(&line, at.get(&i).copied(), enc);
+            (i, preview)
+        })
         .collect()
+}
+
+/// A location's line as the Search list shows it: as a search hit's is, from
+/// just before the place it points at, so a hit far along a long line is not
+/// cut off past the list's edge. `character` is in the server's `enc` units.
+pub(crate) fn location_preview(
+    line: &str,
+    character: Option<usize>,
+    enc: viewer::PositionEncoding,
+) -> String {
+    let at = character.map(|ch| {
+        let mut units = 0;
+        line.char_indices()
+            .find(|&(_, c)| {
+                let past = units >= ch;
+                units += enc.units(c);
+                past
+            })
+            .map_or(line.len(), |(i, _)| i)
+    });
+    clew_core::search::preview_around(line, at)
+        .trim_end()
+        .to_string()
 }
 
 /// [`read_location_previews`], each line as the file has it: untrimmed, so a
@@ -219,6 +251,7 @@ impl App {
             // dropped search reply can no longer clear it either.
             self.proj.link.pending_search = None;
             self.proj.search.running = false;
+            self.proj.refs_encoding = client.encoding;
             self.proj.search_seq
         } else {
             self.proj.goto_seq += 1;
@@ -263,7 +296,7 @@ impl App {
                     "{count} definitions — pick one in the Search list",
                     count = targets.len()
                 );
-                self.show_locations(tr!("(definitions)"), targets)
+                self.show_locations(tr!("(definitions)"), targets, self.proj.goto_encoding)
             }
             Ok(targets) if !targets.is_empty() => {
                 let t = &targets[0];
@@ -301,7 +334,7 @@ impl App {
                     "{n} references — showing them in Search",
                     refs.len()
                 );
-                self.show_locations(tr!("(references)"), refs)
+                self.show_locations(tr!("(references)"), refs, self.proj.refs_encoding)
             }
             Ok(_) => {
                 self.status = tr!("No references").into();
@@ -326,13 +359,14 @@ impl App {
         &mut self,
         label: &str,
         targets: Vec<lsp::client::Target>,
+        enc: viewer::PositionEncoding,
     ) -> Task<Message> {
         // Painting the sidebar supersedes whatever it was waiting for — a
         // server-side text search included (see `goto_request`).
         self.proj.search_seq += 1;
         self.proj.link.pending_search = None;
         let seq = self.proj.search_seq;
-        let mut to_read: Vec<(usize, PathBuf, usize)> = Vec::new();
+        let mut to_read: Vec<(usize, PathBuf, usize, usize)> = Vec::new();
         let hits: Vec<SearchHit> = targets
             .into_iter()
             .take(search::MAX_HITS)
@@ -349,9 +383,9 @@ impl App {
                     .flatten()
                     .find(|v| v.abs == t.path)
                     .filter(|v| t.line < v.lines.len())
-                    .map(|v| v.line_text(t.line + 1).trim().to_string());
+                    .map(|v| location_preview(&v.line_text(t.line + 1), Some(t.character), enc));
                 if from_pane.is_none() {
-                    to_read.push((i, t.path.clone(), t.line));
+                    to_read.push((i, t.path.clone(), t.line, t.character));
                 }
                 SearchHit {
                     abs: t.path,
@@ -381,7 +415,7 @@ impl App {
         let stamp = self.stamp();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || read_location_previews(to_read))
+                tokio::task::spawn_blocking(move || read_location_previews(to_read, enc))
                     .await
                     .unwrap_or_default()
             },
@@ -1005,6 +1039,7 @@ mod location_tests {
                 target(&big, 1),
                 target(&outside, 0),
             ],
+            viewer::PositionEncoding::Utf16,
         );
         // Nothing was read on the update loop: the list is on screen at once,
         // and the previews arrive from the blocking pool.
@@ -1027,7 +1062,11 @@ mod location_tests {
         );
 
         // Previews for a list the sidebar has since replaced are dropped.
-        let stale = app.show_locations("(references)", vec![target(&plain, 0)]);
+        let stale = app.show_locations(
+            "(references)",
+            vec![target(&plain, 0)],
+            viewer::PositionEncoding::Utf16,
+        );
         app.proj.search_seq += 1; // a newer search took the sidebar
         app.proj.search.hits[0].preview = String::new();
         for msg in run_task(stale) {

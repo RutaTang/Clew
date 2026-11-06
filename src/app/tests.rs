@@ -11650,6 +11650,7 @@ async fn a_superseded_server_search_cannot_repaint_the_reference_list() {
             line: 0,
             character: 0,
         }],
+        crate::viewer::PositionEncoding::Utf16,
     );
     assert_eq!(
         app.proj.search.hits.len(),
@@ -29797,31 +29798,55 @@ fn reference_previews_come_from_the_lines_asked_for() {
     let (a, b) = (root.join("a.rs"), root.join("b.rs"));
     std::fs::write(&a, "  one\ntwo\n\tthree  \n").unwrap();
     std::fs::write(&b, "alpha\nbeta\n").unwrap();
-    let previews = crate::app::navigation::read_location_previews(vec![
-        (0, a.clone(), 2),
-        (1, b.clone(), 0),
-        (2, a.clone(), 0),
-        (3, a.clone(), 2),
-        (4, a.clone(), 99),
-        (5, root.join("missing.rs"), 0),
-    ]);
+    let utf16 = crate::viewer::PositionEncoding::Utf16;
+    let previews = crate::app::navigation::read_location_previews(
+        vec![
+            (0, a.clone(), 2, 1),
+            (1, b.clone(), 0, 0),
+            (2, a.clone(), 0, 2),
+            (3, a.clone(), 2, 1),
+            (4, a.clone(), 99, 0),
+            (5, root.join("missing.rs"), 0, 0),
+        ],
+        utf16,
+    );
     let want: Vec<(usize, String)> = [(0, "three"), (1, "alpha"), (2, "one"), (3, "three")]
         .into_iter()
         .map(|(i, t)| (i, t.to_string()))
         .collect();
     assert_eq!(previews, want);
 
+    // A hit far along a long line is shown from just before it, as a search
+    // hit is, its place counted in the server's units: an emoji is two
+    // UTF-16 units but one character.
+    let long = format!("    call({}needle);", "arg, ".repeat(40));
+    let at = long.find("needle").unwrap();
+    let shown = crate::app::navigation::location_preview(&long, Some(at), utf16);
+    assert!(
+        shown.starts_with('…') && shown.contains("needle);"),
+        "{shown}"
+    );
+    let wide = format!("{}needle", "😀".repeat(40));
+    let shown = crate::app::navigation::location_preview(&wide, Some(80), utf16);
+    assert!(
+        shown.starts_with('…') && shown.ends_with("😀needle"),
+        "{shown}"
+    );
+    let utf8 = crate::viewer::PositionEncoding::Utf8;
+    let shown = crate::app::navigation::location_preview(&wide, Some(160), utf8);
+    assert!(shown.ends_with("😀needle"), "{shown}");
+
     // Each file is read once and let go before the next: however many files
     // the hits are spread over, one file's text is held at a time.
-    let spread: Vec<(usize, PathBuf, usize)> = (0..30)
+    let spread: Vec<(usize, PathBuf, usize, usize)> = (0..30)
         .map(|k| {
             let path = root.join(format!("f{k}.rs"));
             std::fs::write(&path, format!("line {k}\n")).unwrap();
-            (k, path, 0)
+            (k, path, 0, 0)
         })
         .collect();
     crate::app::navigation::preview_texts::reset();
-    let previews = crate::app::navigation::read_location_previews(spread);
+    let previews = crate::app::navigation::read_location_previews(spread, utf16);
     assert_eq!(previews.len(), 30);
     assert_eq!(
         crate::app::navigation::preview_texts::peak(),
@@ -29837,7 +29862,7 @@ fn reference_previews_come_from_the_lines_asked_for() {
         line,
         character: 0,
     };
-    let _ = app.show_locations("refs", vec![target(2), target(40)]);
+    let _ = app.show_locations("refs", vec![target(2), target(40)], utf16);
     let previews: Vec<&str> = app
         .proj
         .search
@@ -29862,7 +29887,7 @@ fn reference_previews_come_from_the_lines_asked_for() {
         })
         .collect();
     let started = std::time::Instant::now();
-    let _ = app.show_locations("refs", deep);
+    let _ = app.show_locations("refs", deep, utf16);
     let took = started.elapsed();
     assert!(app.proj.search.hits.iter().all(|h| h.preview == "x"));
     assert!(took < std::time::Duration::from_secs(1), "{took:?}");

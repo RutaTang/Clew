@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use grep_matcher::Matcher as _;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::sinks::Lossy;
 use grep_searcher::{BinaryDetection, Searcher, SearcherBuilder};
@@ -217,7 +218,7 @@ fn run(
             // script in memory at once.
             search_notebook(&mut searcher, &matcher, f, cap, file, &mut report.hits)
         } else {
-            let sink = hit_sink(file, &mut report.hits);
+            let sink = hit_sink(file, &matcher, &mut report.hits);
             searcher
                 .search_reader(&matcher, Capped::new(f, cap), sink)
                 .map_err(|e| e.to_string())
@@ -318,14 +319,20 @@ fn build_matcher(query: &str, opts: &SearchOptions) -> Result<RegexMatcher, Stri
 /// the error nobody read.
 fn hit_sink<'a>(
     file: &'a FileEntry,
+    matcher: &'a RegexMatcher,
     hits: &'a mut Vec<SearchHit>,
 ) -> Lossy<impl FnMut(u64, &str) -> Result<bool, std::io::Error> + 'a> {
     Lossy(move |line, text: &str| {
+        let at = matcher
+            .find(text.as_bytes())
+            .ok()
+            .flatten()
+            .map(|m| m.start());
         hits.push(SearchHit {
             abs: file.abs.clone(),
             rel: file.rel.clone(),
             line: line as usize,
-            preview: preview_of(text),
+            preview: preview_around(text, at),
         });
         Ok(hits.len() < MAX_HITS)
     })
@@ -348,7 +355,7 @@ fn search_notebook(
     }
     let json = String::from_utf8(bytes).map_err(|_| "not valid UTF-8 JSON".to_string())?;
     let notebook = crate::notebook::parse(&json).ok_or("not a readable notebook")?;
-    let sink = hit_sink(file, hits);
+    let sink = hit_sink(file, matcher, hits);
     searcher
         .search_slice(matcher, notebook.projection.as_bytes(), sink)
         .map_err(|e| e.to_string())
@@ -388,16 +395,41 @@ fn build_globset(spec: &str) -> Result<Option<GlobSet>, String> {
     builder.build().map(Some).map_err(|e| e.to_string())
 }
 
-fn preview_of(text: &str) -> String {
+/// Characters of a line a preview keeps before its match: enough to read
+/// what leads to it, few enough that the match shows in a narrow sidebar.
+const LEAD_CHARS: usize = 16;
+
+/// The preview of a line `text` whose match starts at byte `at`: the line
+/// without its indentation and, when the match starts far into it, from a
+/// little before the match on, an ellipsis for what is left out — shown
+/// from its start, a match past the sidebar's edge was not to be seen.
+/// Cut at [`MAX_PREVIEW_CHARS`].
+pub fn preview_around(text: &str, at: Option<usize>) -> String {
+    let line = text.trim_end_matches(['\n', '\r']);
+    let indent = line.len() - line.trim_start().len();
+    let start = match at {
+        Some(at) if at > indent && at <= line.len() && line.is_char_boundary(at) => {
+            let before: Vec<usize> = line[indent..at].char_indices().map(|(i, _)| i).collect();
+            match before.len().checked_sub(LEAD_CHARS) {
+                Some(cut) if cut > 0 => indent + before[cut],
+                _ => indent,
+            }
+        }
+        _ => indent,
+    };
     // Drawn as the code view draws the line (`highlight::line_in_order`): a
     // preview holding a direction control read in another order than the
     // line does, and one holding a `\r` split where the line does not.
-    let trimmed =
-        crate::highlight::line_in_order(text.trim_end_matches(['\n', '\r'])).replace('\t', "    ");
-    if trimmed.chars().count() <= MAX_PREVIEW_CHARS {
-        return trimmed;
+    let shown = crate::highlight::line_in_order(&line[start..]).replace('\t', "    ");
+    let mut out = String::new();
+    if start > indent {
+        out.push('…');
     }
-    let mut out: String = trimmed.chars().take(MAX_PREVIEW_CHARS).collect();
+    if shown.chars().count() <= MAX_PREVIEW_CHARS {
+        out.push_str(&shown);
+        return out;
+    }
+    out.extend(shown.chars().take(MAX_PREVIEW_CHARS));
     out.push('…');
     out
 }
@@ -426,6 +458,35 @@ mod tests {
     fn escapes_regex_metacharacters() {
         let escaped = escape_regex("a.b(c)*+?");
         assert_eq!(escaped, r"a\.b\(c\)\*\+\?");
+    }
+
+    /// A hit's preview drops the line's indentation and, when the match
+    /// starts far into it, starts a little before the match: shown from its
+    /// start, a match past a narrow sidebar's edge was not to be seen.
+    #[test]
+    fn a_preview_shows_its_match() {
+        let line = "        return apply_discount(self.subtotal(), discount)";
+        let at = line.find("apply_discount");
+        assert_eq!(
+            preview_around(line, at),
+            "return apply_discount(self.subtotal(), discount)"
+        );
+        let far = "    \"\"\"A shopping cart: items, totals and discounts.\"\"\"";
+        let at = far.find("discounts");
+        let said = preview_around(far, at);
+        assert!(said.starts_with('…'), "{said}");
+        let lead = said.chars().position(|c| c == 'd').unwrap();
+        assert!(lead <= LEAD_CHARS + 1, "{said}");
+        assert!(said.contains("totals and discounts"), "{said}");
+        // Found by a search, the same.
+        let dir = TempDir::new("search-preview");
+        std::fs::write(dir.join("cart.py"), format!("{far}\n")).unwrap();
+        let files = Arc::new(vec![FileEntry {
+            abs: dir.join("cart.py"),
+            rel: "cart.py".into(),
+        }]);
+        let out = search_in(&dir, files, literal("discounts"));
+        assert_eq!(out.hits[0].preview, said);
     }
 
     fn literal(query: &str) -> SearchOptions {
@@ -790,7 +851,7 @@ mod tests {
         let result = searcher.search_reader(
             &matcher,
             Capped::new(&body[..], 12),
-            hit_sink(&file, &mut hits),
+            hit_sink(&file, &matcher, &mut hits),
         );
         assert!(result.is_err(), "the growth is an error the caller sees");
         assert_eq!(

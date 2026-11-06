@@ -1842,6 +1842,9 @@ pub struct ProjectSession {
     /// The position encoding of the server a go-to-definition was last
     /// asked of: the one its answer's character is counted in.
     pub goto_encoding: crate::viewer::PositionEncoding,
+    /// The same for the last references request: the encoding its
+    /// locations' characters are counted in.
+    pub refs_encoding: crate::viewer::PositionEncoding,
     /// Where the last jump to a definition or a symbol lands on its line:
     /// the file, its 0-based line, and the place there. The caret goes on
     /// the name, not the line's first column.
@@ -2131,6 +2134,7 @@ impl Default for ProjectSession {
             search_seq: Default::default(),
             goto_seq: Default::default(),
             goto_encoding: crate::viewer::PositionEncoding::Utf16,
+            refs_encoding: crate::viewer::PositionEncoding::Utf16,
             landing: None,
             call_graph: Default::default(),
             call_pending: Default::default(),
