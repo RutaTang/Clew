@@ -509,16 +509,26 @@ impl Viewer {
     /// line seen under them. The line at the top is under the pinned
     /// headers, so a function that ends there was pinned over the next one:
     /// `def subtotal` over `def total`, as if one were inside the other.
+    /// With no line left under them (the view scrolled on past the file's
+    /// end), a header would only cover the file's last lines: the end of a
+    /// file read as its last function's `def` and nothing after it.
     pub fn sticky_at_row(&self, row: usize) -> Vec<usize> {
+        let rows = if self.visible.is_empty() {
+            self.lines.len()
+        } else {
+            self.visible.len()
+        };
         let mut headers =
             crate::analyze::sticky_headers(&self.folds, self.line_at_row(row), STICKY_MAX);
         while let Some(&last) = headers.last() {
-            let below = self.line_at_row(row + headers.len());
-            let ends_above = self
-                .folds
-                .iter()
-                .find(|&&(header, _)| header == last)
-                .is_some_and(|&(_, end)| end < below);
+            let under = row + headers.len();
+            let below = self.line_at_row(under);
+            let ends_above = under >= rows
+                || self
+                    .folds
+                    .iter()
+                    .find(|&&(header, _)| header == last)
+                    .is_some_and(|&(_, end)| end < below);
             if !ends_above {
                 break;
             }
@@ -1529,6 +1539,10 @@ mod tests {
             plain_lines(deep),
         );
         assert_eq!(v.sticky_at_row(2), vec![0, 1]);
+        // Scrolled on until the last line is the first in view: no header
+        // covers it, nor the line before it with the last line under it.
+        assert_eq!(v.sticky_at_row(5), Vec::<usize>::new());
+        assert_eq!(v.sticky_at_row(4), vec![0]);
     }
 
     #[test]

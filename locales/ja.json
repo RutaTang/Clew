@@ -1054,6 +1054,7 @@
  "Review branch changes": "ブランチの変更をレビュー",
  "Reviewing changes…": "変更をレビュー中…",
  "Revoke": "取り消す",
+ "Right-click a function and choose Call Hierarchy.": "関数を右クリックして「呼び出し階層」を選んでください。",
  "Right-click a line, and clew explains it from git history.": "行を右クリックすると、clew が Git の履歴をもとにその行を解説します。",
  "Routes": "ルート",
  "Run": "実行",

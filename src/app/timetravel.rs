@@ -1307,7 +1307,10 @@ impl App {
             return Task::none();
         }
         let md = match result {
-            Ok(m) => m,
+            Ok(m) => {
+                self.settle_status(&[tr!("Explaining why…")]);
+                m
+            }
             Err(e) => {
                 self.status = tr!("Couldn't explain: {error}", error = e);
                 format!("*{}*", tr!("Couldn't explain why: {error}", error = e))

@@ -364,6 +364,14 @@ impl App {
                     }
                     return Task::none();
                 }
+                // The tour on screen says it is done; a save failure said
+                // above stays.
+                self.settle_status(&[
+                    tr!("Generating walkthrough…"),
+                    tr!("Narrating the run…"),
+                    tr!("Reviewing changes…"),
+                    tr!("Retrying walkthrough…"),
+                ]);
                 // By scope: the merge re-reads a library another window may
                 // have appended to, which moves every index.
                 self.proj.walk.open = Some(scope);

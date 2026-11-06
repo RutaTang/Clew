@@ -1054,6 +1054,7 @@
  "Review branch changes": "审阅分支改动",
  "Reviewing changes…": "正在审阅改动…",
  "Revoke": "撤销",
+ "Right-click a function and choose Call Hierarchy.": "右键点击一个函数，然后选择“调用层次结构”。",
  "Right-click a line, and clew explains it from git history.": "右键点击某一行，clew 会根据 Git 历史解释它的来由。",
  "Routes": "路由",
  "Run": "运行",

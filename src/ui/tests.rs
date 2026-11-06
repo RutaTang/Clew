@@ -5018,6 +5018,16 @@ fn call_item(name: &str) -> crate::lsp::client::CallItem {
     }
 }
 
+/// The empty call-hierarchy view says how to fill it: the tab alone gave no
+/// way in, the menu item that does lives on the code's right-click menu.
+#[test]
+fn the_empty_call_hierarchy_says_how_to_fill_it() {
+    let app = reader_app();
+    assert!(app.proj.call_graph.is_none());
+    let mut sim = sim_elem(super::calls_tab(&app));
+    assert!(shows(&mut sim, "choose Call Hierarchy"));
+}
+
 /// I1 / E1-11: a call-tree arrow names its tree (token) as well as the node,
 /// and a node the size cap cut short says how many callers it holds back.
 #[test]

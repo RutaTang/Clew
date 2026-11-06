@@ -1004,6 +1004,16 @@ impl App {
         !self.connection.is_remote()
     }
 
+    /// The work a "…ing" status line named is done and says nothing of its
+    /// own: the line is cleared if it still says one of `busy`, so it does
+    /// not go on saying "Explaining why…" under the answer. Whatever was
+    /// said there since is left to be read.
+    pub(crate) fn settle_status(&mut self, busy: &[&str]) {
+        if busy.iter().any(|b| self.status == *b) {
+            self.status.clear();
+        }
+    }
+
     /// The stamp for project-scoped work spawned now (see [`Stamp`]): its
     /// result is accepted while this project instance stays open, across
     /// reconnects of the transport.

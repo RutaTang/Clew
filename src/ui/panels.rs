@@ -1741,7 +1741,13 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
 /// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.call_graph else {
-        return empty_state(Glyph::CallGraph, tr!("No call hierarchy yet"), "", None);
+        // How to fill it: the tab alone gave no way in.
+        return empty_state(
+            Glyph::CallGraph,
+            tr!("No call hierarchy yet"),
+            tr!("Right-click a function and choose Call Hierarchy."),
+            None,
+        );
     };
 
     use crate::graph::callgraph::Direction;

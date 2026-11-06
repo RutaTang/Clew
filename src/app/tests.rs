@@ -8040,6 +8040,76 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
     );
 }
 
+/// Work that ends by showing its answer leaves no "…ing" behind it: the
+/// status line went on saying "Explaining why…" under the answer, and
+/// "Generating walkthrough…" over the tour it had generated. A line said
+/// since (a save that failed) is not cleared.
+#[test]
+fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
+    let mut app = scanned_app("busy-status-settles");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let epoch = app.project_epoch;
+    let stamp = || Stamp {
+        root: Some(root.clone()),
+        epoch,
+        conn: None,
+    };
+
+    // Why is this line here?
+    app.blame_why_seq += 1;
+    let token = app.blame_why_seq;
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        token,
+        title: "Why line 3 exists".into(),
+        commits: vec![("abc1234".into(), "Add it".into())],
+        loading: true,
+        prepared: Vec::new(),
+    });
+    app.status = tr!("Explaining why…").into();
+    let s = stamp();
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
+        stamp: s,
+        token,
+        title: "Why line 3 exists".into(),
+        commits: vec![("abc1234".into(), "Add it".into())],
+        result: Ok("Because.".into()),
+    }));
+    assert!(app.status.is_empty(), "still says {:?}", app.status);
+
+    // A walkthrough.
+    app.status = tr!("Generating walkthrough…").into();
+    app.proj.walk.seq += 1;
+    app.proj.walk.pending = Some(app.proj.walk.seq);
+    let tour = walkthrough::Walkthrough {
+        title: "Tour".into(),
+        scope: String::new(),
+        steps: vec![walkthrough::Step {
+            title: "s".into(),
+            file: "src/lib.rs".into(),
+            symbol: None,
+            line: Some(1),
+            narration: "n".into(),
+        }],
+    };
+    let s = stamp();
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: s,
+        seq: app.proj.walk.seq,
+        scope: "tour".into(),
+        result: Ok(tour),
+    }));
+    assert!(
+        !app.status.contains("Generating walkthrough"),
+        "still says {:?}",
+        app.status
+    );
+
+    // Something said since stays.
+    app.status = "Saved".into();
+    app.settle_status(&[tr!("Explaining why…")]);
+    assert_eq!(app.status, "Saved");
+}
+
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.
 fn tour_json(scope: &str) -> String {
     format!(
