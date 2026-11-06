@@ -1,7 +1,7 @@
 //! Auto-update UI: the inline "update available" banner (with download
 //! progress, and Cancel) and the release-notes modal.
 
-use iced::widget::{Row, button, column, container, progress_bar, row, scrollable, space, text};
+use iced::widget::{Row, button, column, container, row, scrollable, space, text};
 use iced::{Element, Fill, Length};
 
 use super::{Backdrop, CONFIRM_PAD, DIALOG_W, NOTES_MAX_W, Placement, human_size, modal, slot, ts};
@@ -55,11 +55,13 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
                 _ => format!("Downloading clew {version}…  {}", human_size(done)),
             };
             let meter: Element<'_, Message> = match total {
-                Some(t) if t > 0 => progress_bar(0.0..=t as f32, done as f32)
-                    .length(160.0)
-                    .girth(4.0)
-                    .style(theme::progress)
-                    .into(),
+                Some(t) if t > 0 => super::meter::eased_bar(
+                    done as f32 / t as f32,
+                    160.0,
+                    4.0,
+                    theme::progress,
+                    super::meter::PROGRESS,
+                ),
                 _ => slot(),
             };
             row![

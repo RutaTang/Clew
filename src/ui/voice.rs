@@ -67,12 +67,13 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
             .max(1);
         let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
         row![
-            container(
-                progress_bar(0.0..=1.0, share)
-                    .length(70.0)
-                    .girth(4.0)
-                    .style(theme::progress)
-            )
+            container(super::meter::eased_bar(
+                share,
+                70.0,
+                4.0,
+                theme::progress,
+                super::meter::PROGRESS,
+            ))
             .width(70),
             text(format!("{:.0}%", share * 100.0))
                 .size(ts::CAPTION)

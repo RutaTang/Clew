@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, progress_bar,
-    row, scrollable, slider, space, stack, text, text_input, tooltip,
+    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
+    slider, space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Length, Padding, Task};
 
@@ -71,6 +71,7 @@ pub(crate) use overlays::*;
 mod updater;
 pub(crate) use updater::*;
 mod askfloat;
+mod meter;
 pub(crate) use askfloat::*;
 mod voice;
 pub(crate) use voice::*;

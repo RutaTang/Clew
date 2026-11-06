@@ -325,7 +325,7 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
                         }
                     }),
                     text("Listening…").size(ts::BASE).color(theme::fg()),
-                    level_bars(&[5.0, 9.0, 13.0, 8.0, 11.0, 6.0, 9.0], level, false),
+                    super::meter::level_meter(&PILL_BARS, level),
                     keycap("Esc".to_string()),
                 ]
                 .spacing(8)
@@ -503,36 +503,8 @@ fn character_name(literal: &str) -> Option<&'static str> {
     })
 }
 
-/// How loud the microphone hears, as bars in the accent: each of `heights`
-/// grown with the `level` (0–1), and, with `fade`, the ends quieter than
-/// the middle.
-pub(crate) fn level_bars<'a>(heights: &[f32], level: f32, fade: bool) -> Element<'a, Message> {
-    // The panel's meter has wide bars; the field's, thin ones.
-    let bar = if fade { 3.0 } else { 2.0 };
-    let n = heights.len().max(2) as f32;
-    let tallest = heights.iter().copied().fold(0.0_f32, f32::max);
-    let gain = 0.35 + 0.65 * level.clamp(0.0, 1.0);
-    let bars = heights.iter().enumerate().map(|(i, &h)| {
-        let alpha = if fade {
-            0.5 + 0.5 * (i as f32 / (n - 1.0) * std::f32::consts::PI).sin()
-        } else {
-            1.0
-        };
-        container(space())
-            .width(Length::Fixed(bar))
-            .height(Length::Fixed((h * gain).max(2.0)))
-            .style(move |_: &iced::Theme| container::Style {
-                background: Some(theme::with_alpha(theme::accent(), alpha).into()),
-                border: iced::border::rounded(bar / 2.0),
-                ..container::Style::default()
-            })
-            .into()
-    });
-    container(Row::with_children(bars).spacing(bar).align_y(iced::Center))
-        .height(Length::Fixed(tallest))
-        .align_y(iced::Center)
-        .into()
-}
+/// The pill's level meter: its bars' heights at the loudest.
+const PILL_BARS: [f32; 7] = [5.0, 9.0, 13.0, 8.0, 11.0, 6.0, 9.0];
 
 /// A small borderless control of the card's header.
 fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Message> {
@@ -901,12 +873,13 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
             row![
                 text("●").size(ts::SMALL).color(theme::danger()),
                 text("Listening").size(ts::SMALL).color(theme::fg()),
-                container(
-                    progress_bar(0.0..=1.0, level)
-                        .length(64)
-                        .girth(4)
-                        .style(theme::level_meter)
-                )
+                container(super::meter::eased_bar(
+                    level,
+                    64.0,
+                    4.0,
+                    theme::level_meter,
+                    super::meter::LEVEL,
+                ))
                 .width(64),
                 small("Done", Message::Voice(VoiceMsg::Stop), true),
             ]

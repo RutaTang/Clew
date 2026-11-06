@@ -204,12 +204,13 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         if let Some((done, total)) = app.proj.explain.progress
             && total > 0
         {
-            chip = chip.push(
-                progress_bar(0.0..=total as f32, done as f32)
-                    .length(90.0)
-                    .girth(4.0)
-                    .style(theme::progress),
-            );
+            chip = chip.push(super::meter::eased_bar(
+                done as f32 / total as f32,
+                90.0,
+                4.0,
+                theme::progress,
+                super::meter::PROGRESS,
+            ));
         }
         // Failures never hide behind the counter: a running tally in warn red.
         if app.proj.explain.failed > 0 {
