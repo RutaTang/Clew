@@ -456,8 +456,6 @@ impl App {
     }
 
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
-        // The server panel and an overlay are mutually exclusive modals.
-        self.server_panel = false;
         self.proj.overlay = Some(which);
         // A map laid out for another overlay is not shown under this one:
         // until its own lands, the map says what it waits for. One laid out

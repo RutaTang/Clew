@@ -46,10 +46,10 @@ impl App {
             self.step_ask_down();
             return Task::none();
         }
-        // While the shortcuts panel is open (and not capturing), swallow every
-        // key so nothing acts behind the modal. (Esc never gets here: the
-        // panel is an overlay, so `escape_message` above closed it.)
-        if self.show_shortcuts {
+        // While Settings shows the shortcuts (and is not capturing), swallow
+        // every key so nothing acts behind it. (Esc never gets here: Settings
+        // is an overlay, so `escape_message` above closed it.)
+        if self.shortcuts_shown() {
             return Task::none();
         }
         // Tab / Shift-Tab move keyboard focus between fields (inside the open
@@ -315,7 +315,7 @@ impl App {
             let chord = self.keymap.chord(action);
             return self.capture_chord(target, chord);
         }
-        if self.tutorial.is_some() || self.show_shortcuts {
+        if self.tutorial.is_some() || self.shortcuts_shown() {
             return Task::none();
         }
         self.run_command_action(action).unwrap_or_else(Task::none)

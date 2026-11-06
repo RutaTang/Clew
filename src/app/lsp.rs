@@ -1581,13 +1581,16 @@ impl App {
             }
             LspMsg::ToggleInlayHints => self.on_toggle_inlay_hints(),
             LspMsg::TogglePanel => {
-                self.server_panel = !self.server_panel;
-                if self.server_panel {
-                    // Sizing every installed server walks the store's whole
-                    // tree: done on the blocking pool, painted when it lands.
-                    return self.refresh_server_panel();
+                // The servers are a page of Settings — Languages — not a
+                // panel apart. Showing it lists them (`sync_server_listing`:
+                // sizing every installed server walks the store's whole tree,
+                // on the blocking pool, painted when it lands).
+                if self.settings.open && self.settings.page == crate::SettingsPage::Languages {
+                    return self.close_settings();
                 }
-                Task::none()
+                self.update(Message::Settings(crate::SettingsMsg::OpenAt(
+                    crate::SettingsPage::Languages,
+                )))
             }
             LspMsg::Restart(language) => {
                 // Drop the running server (kills its child), then re-provision.

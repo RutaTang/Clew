@@ -112,7 +112,6 @@ impl App {
             show_view_menu: false,
             file_filter: String::new(),
             keymap: keymap::Keymap::load(),
-            show_shortcuts: false,
             rebinding: None,
             keymap_notice: None,
             show_inline_summaries: true,
@@ -669,16 +668,12 @@ impl App {
                 Task::none()
             }
             WindowMsg::OpenShortcuts => {
-                self.show_shortcuts = true;
+                // The shortcuts are a page of Settings, not a panel apart.
                 self.rebinding = None;
                 self.keymap_notice = None;
-                Task::none()
-            }
-            WindowMsg::CloseShortcuts => {
-                self.show_shortcuts = false;
-                self.rebinding = None;
-                self.keymap_notice = None;
-                Task::none()
+                self.update(Message::Settings(SettingsMsg::OpenAt(
+                    crate::SettingsPage::Shortcuts,
+                )))
             }
             WindowMsg::RebindStart(action) => {
                 self.rebinding = Some(action);

@@ -1140,8 +1140,6 @@ pub struct App {
     pub file_filter: String,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
-    /// Whether the "Keyboard Shortcuts" modal is open.
-    pub show_shortcuts: bool,
     /// The action currently awaiting a new chord (capture mode), if any.
     pub rebinding: Option<keymap::Action>,
     /// Transient message in the shortcuts modal (conflict / invalid key).

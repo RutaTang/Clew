@@ -188,9 +188,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         ]),
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
-        SettingsPage::Languages if app.proj.project.is_none() => {
-            form::note("Open a project to set up its languages.").into()
-        }
+        SettingsPage::Languages if app.proj.project.is_none() => form::page(vec![
+            form::note("Open a project to set up its languages.").into(),
+            installed_servers(app),
+        ]),
         SettingsPage::Languages => languages_section(app),
         SettingsPage::Shortcuts => shortcuts_body(app),
     };
@@ -623,7 +624,101 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         ));
     }
     parts.push(servers_block(app));
+    parts.push(installed_servers(app));
+    parts.push(server_log(app));
     form::page(parts)
+}
+
+/// The servers downloaded so far — for every project, not this one only —
+/// each with its version, size, and a way to remove it.
+pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
+    let rows = app
+        .installed_servers
+        .iter()
+        .map(|srv| {
+            form::item(
+                srv.name.clone(),
+                Some(format!(
+                    "{} · {}",
+                    srv.version,
+                    super::explain_view::human_size(srv.bytes)
+                )),
+                form::action(
+                    "Remove",
+                    Some(Message::Lsp(crate::LspMsg::Remove {
+                        name: srv.name.clone(),
+                        version: srv.version.clone(),
+                    })),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    form::group(
+        "Downloaded servers",
+        Some(if rows.is_empty() {
+            "None yet. They are shared by every project.".to_string()
+        } else {
+            "Shared by every project.".to_string()
+        }),
+        None,
+        rows,
+    )
+}
+
+/// The newest lines of the open file's language server — copied from it
+/// only when its log moved (`App::sync_lsp_log`), never per repaint — or
+/// why there are none.
+fn server_log(app: &App) -> Element<'_, Message> {
+    use crate::LspSlot;
+    let slot = app
+        .active_viewer()
+        .and_then(|v| v.lang_key)
+        .and_then(|l| app.proj.link.lsp.get(l));
+    let (lines, unreadable): (&[String], _) = match &app.proj.link.lsp_log {
+        Some(tail) => match &tail.lines {
+            Ok(lines) => (lines, None),
+            // A poisoned state is not an empty log: say what happened.
+            Err(poisoned) => (&[], Some(*poisoned)),
+        },
+        None => (&[], None),
+    };
+    let row: Element<'_, Message> = if lines.is_empty() {
+        // A server that is not running has no log to show — say which, so an
+        // empty box is never mistaken for a quiet but healthy server.
+        let (why, color) = match (slot, unreadable) {
+            (_, Some(poisoned)) => (poisoned.to_string(), theme::warning()),
+            (Some(LspSlot::Ready(c)), None) if !c.alive() => (
+                "The server has stopped; restart it to see new output.".to_string(),
+                theme::dim(),
+            ),
+            (Some(LspSlot::Ready(_)), None) => ("No output.".to_string(), theme::dim()),
+            _ => ("No server running for this file.".to_string(), theme::dim()),
+        };
+        form::plain(text(why).size(ts::BODY).color(color))
+    } else {
+        form::plain(
+            scrollable(
+                Column::with_children(lines.iter().map(|line| {
+                    text(line.as_str())
+                        .size(ts::SMALL)
+                        .font(crate::fonts::CODE)
+                        .color(theme::fg_muted())
+                        .wrapping(Wrapping::None)
+                        .into()
+                }))
+                .spacing(1),
+            )
+            .direction(both_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(180),
+        )
+    };
+    form::group(
+        "Server log",
+        Some("The open file's server, newest last.".into()),
+        None,
+        vec![row],
+    )
 }
 
 /// The Python interpreter: the one in use and who named it, the ones
@@ -2056,60 +2151,6 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
     ]
     .spacing(10)
     .into()
-}
-
-/// The "Keyboard Shortcuts" modal: rebindable command chords on top, the fixed
-/// Vim-style reading motions below as a read-only reference.
-pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
-    // Header: title, optional "Reset all", Close.
-    let mut header = row![
-        text("Keyboard Shortcuts")
-            .size(ts::TITLE)
-            .color(theme::fg()),
-        space().width(Fill)
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
-    if app.keymap.any_overridden() {
-        header = header.push(
-            button(text("Reset all").size(ts::BODY))
-                .style(theme::toolbar_button)
-                .padding([3, 12])
-                .on_press(Message::Window(WindowMsg::RebindResetAll)),
-        );
-    }
-    header = header.push(super::chrome::close_button(Message::Window(
-        WindowMsg::CloseShortcuts,
-    )));
-
-    let panel = container(
-        column![
-            header,
-            scrollable(container(shortcuts_body(app)).padding(Padding {
-                top: 0.0,
-                right: 8.0,
-                bottom: 0.0,
-                left: 0.0,
-            }))
-            .direction(thin_scroll())
-            .style(theme::overlay_scrollbar)
-            // Fill what the panel leaves (at most its max height, less in a
-            // short window) instead of a fixed height that a short window
-            // clipped.
-            .height(Fill),
-        ]
-        .spacing(12),
-    )
-    .width(SHORTCUTS_W)
-    .max_height(SHORTCUTS_MAX_H)
-    .padding(MODAL_PAD)
-    .style(theme::modal_panel);
-
-    modal(
-        panel,
-        Placement::Center,
-        Backdrop::Dim(Some(Message::Window(WindowMsg::CloseShortcuts))),
-    )
 }
 
 /// The keyboard shortcuts — the ones a click rebinds, and the reading

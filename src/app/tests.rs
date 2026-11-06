@@ -18823,7 +18823,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
     // The View menu's rows close it too; and the menus open one at a time.
-    app.show_shortcuts = false;
+    app.settings.open = false;
     app.show_view_menu = true;
     let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
     assert!(!app.show_view_menu, "picking a View row left the menu open");
@@ -21109,7 +21109,7 @@ fn a_menu_action_runs_the_same_table_as_its_chord() {
     let _ = app.update(Message::Editor(EditorMsg::RunAction(
         keymap::Action::Shortcuts,
     )));
-    assert!(app.show_shortcuts);
+    assert!(app.shortcuts_shown());
 }
 
 /// A8: a menu action answers to the modal states its chord does — AppKit
@@ -21149,7 +21149,8 @@ fn a_menu_action_respects_the_modal_states_its_chord_does() {
     assert_eq!(app.rebinding, None);
     for modal in ["the tutorial", "the shortcuts panel"] {
         app.tutorial = (modal == "the tutorial").then_some(0);
-        app.show_shortcuts = modal == "the shortcuts panel";
+        app.settings.open = modal == "the shortcuts panel";
+        app.settings.page = crate::SettingsPage::Shortcuts;
         let out = run_task(app.update(explain_all()));
         assert!(
             out.is_empty() && app.status.is_empty(),
@@ -21158,7 +21159,7 @@ fn a_menu_action_respects_the_modal_states_its_chord_does() {
     }
     // With none of them up, the menu runs the action.
     app.tutorial = None;
-    app.show_shortcuts = false;
+    app.settings.open = false;
     let _ = app.update(explain_all());
     assert!(app.status.contains("API key"), "{}", app.status);
 }
@@ -26742,7 +26743,7 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
         "⌘← stepped the history under the shortcuts panel"
     );
     let _ = app.update(esc_press());
-    assert!(!app.show_shortcuts);
+    assert!(!app.settings.open);
 
     // So does the tutorial, whose ← ⌘← is; on its first step, it stays.
     app.tutorial = Some(0);
@@ -26784,7 +26785,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::UpdateNotes => "update notes",
             O::Settings => "settings",
             O::Connect => "connect",
-            O::Shortcuts => "shortcuts",
             O::BpCondition(_) => "breakpoint condition",
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
@@ -26795,7 +26795,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::AppMenu => "app menu",
             O::ViewMenu => "view menu",
             O::Graph(_) => "graph",
-            O::ServerPanel => "server panel",
             O::Finder => "finder",
             O::ContextMenu(_) => "context menu",
             O::Hover(_) => "hover",
@@ -26808,7 +26807,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.update.show_notes = false;
         app.settings.open = false;
         app.connect = None;
-        app.show_shortcuts = false;
         app.proj.bp_cond_edit = None;
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
@@ -26865,7 +26863,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.update.show_notes = true),
         Box::new(|a| a.settings.open = true),
         Box::new(|a| a.connect = Some(ConnectUi::default())),
-        Box::new(|a| a.show_shortcuts = true),
         Box::new(move |a| a.proj.bp_cond_edit = Some((lib.clone(), 1, String::new()))),
         Box::new(|a| a.proj.note_edit = Some(("src/lib.rs".into(), 1, String::new()))),
         Box::new(|a| {
@@ -26895,7 +26892,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.show_app_menu = true),
         Box::new(|a| a.show_view_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
-        Box::new(|a| a.server_panel = true),
         Box::new(|a| a.proj.finder.open = true),
         Box::new(|a| {
             a.proj.context_menu = Some(ContextMenu {
@@ -26928,7 +26924,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (20, 20),
+        (18, 18),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 

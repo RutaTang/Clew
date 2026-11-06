@@ -1720,10 +1720,11 @@ fn escape_names_the_topmost_overlay() {
         Some(Message::Window(WindowMsg::ToggleToolsMenu))
     ));
 
-    app.show_shortcuts = true;
+    app.settings.open = true;
+    app.settings.page = crate::SettingsPage::Shortcuts;
     assert!(matches!(
         super::escape_message(&app),
-        Some(Message::Window(WindowMsg::CloseShortcuts))
+        Some(Message::Settings(crate::SettingsMsg::Close))
     ));
 
     app.pending_consent = Some(PathBuf::from("/nonexistent/clew-ui-test"));
@@ -2248,13 +2249,15 @@ fn an_overlay_come_up_over_a_field_takes_the_keyboard_from_it() {
     );
 }
 
-/// I10: the shortcuts modal lists every rebindable action — the ten added in
-/// wave 1 included — each with its chord.
+/// I10: the shortcuts — Settings' page of them, which the menu's Keyboard
+/// Shortcuts opens — list every rebindable action, the ten added in wave 1
+/// included, each with its chord.
 #[test]
 fn the_shortcuts_modal_lists_every_action_with_its_chord() {
     use crate::keymap::Action;
     let mut app = reader_app();
-    app.show_shortcuts = true;
+    let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
+    assert!(app.settings.open && app.settings.page == crate::SettingsPage::Shortcuts);
     let mut sim = sim_of(&app);
     for action in [
         Action::ToggleAsk,
@@ -5153,12 +5156,25 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         !underlined(&app),
         "nothing is read past a poisoned snapshot"
     );
-    app.server_panel = true;
+    // Settings' Languages page, where the servers are. (Opening it is an
+    // update, which reads the live server again: poisoned once more.)
     app.proj.project_languages = vec!["rust".into()];
-    assert!(shows(
-        &mut sim_of(&app),
-        "state unreadable after an internal error"
-    ));
+    let _ = app.update(Message::Lsp(crate::LspMsg::TogglePanel));
+    assert!(app.server_panel);
+    app.proj
+        .link
+        .lsp_snapshots
+        .insert("rust".into(), Err(crate::lsp::client::StatePoisoned));
+    assert!(
+        text_at(
+            &mut sim_of(&app),
+            |t| t.contains("state unreadable after an internal error"),
+            0
+        )
+        .is_some(),
+        "the server's row says its state is unreadable"
+    );
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
 
     // A server that goes away takes its snapshot with it.
     app.proj.link.lsp.clear();
@@ -7914,7 +7930,9 @@ fn every_layer_leaves_the_rounded_corners_clear() {
         app.window_frame = 1.0;
         app.window_radius = crate::ui::WINDOW_RADIUS;
         match what {
-            "a dialog" => app.show_shortcuts = true,
+            "a dialog" => {
+                let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
+            }
             "the tutorial" => app.tutorial = Some(0),
             _ => {}
         }

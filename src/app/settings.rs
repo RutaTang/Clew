@@ -181,6 +181,26 @@ impl App {
         Task::none()
     }
 
+    /// Whether Settings shows the keyboard shortcuts: keys and menu chords
+    /// are the page's then, not the app's behind it.
+    pub(crate) fn shortcuts_shown(&self) -> bool {
+        self.settings.open && self.settings.page == SettingsPage::Shortcuts
+    }
+
+    /// Keep the language servers' listing and log current while Settings
+    /// shows its Languages page (`server_panel`): listed afresh when the
+    /// page comes up, and no longer followed once it goes.
+    pub(crate) fn sync_server_listing(&mut self) -> Task<Message> {
+        let showing = self.settings.open && self.settings.page == SettingsPage::Languages;
+        let was = self.server_panel;
+        self.server_panel = showing;
+        if showing && !was {
+            self.refresh_server_panel()
+        } else {
+            Task::none()
+        }
+    }
+
     /// Whether the AI fields differ from what the form was filled with:
     /// closing then saves them, and with none changed writes nothing.
     pub(crate) fn settings_drafts_changed(&self) -> bool {
@@ -225,7 +245,7 @@ impl App {
         // Back to reading, as the finder's close does: the motions the
         // form took from the code are the code's again.
         self.code_focused = true;
-        Task::none()
+        self.sync_server_listing()
     }
 
     /// Apply a new appearance preference: switch the palette, re-color any cached
@@ -316,17 +336,21 @@ impl App {
                 self.settings.embed_base_url = s;
                 Task::none()
             }
-            SettingsMsg::Open => self.on_open_settings(),
+            SettingsMsg::Open => {
+                let opened = self.on_open_settings();
+                Task::batch([opened, self.sync_server_listing()])
+            }
             SettingsMsg::OpenAt(page) => {
                 self.settings.page = page;
-                self.on_open_settings()
+                let opened = self.on_open_settings();
+                Task::batch([opened, self.sync_server_listing()])
             }
             SettingsMsg::Page(page) => {
                 self.settings.page = page;
                 // A shortcut half rebound stays with the page it was on.
                 self.rebinding = None;
                 self.keymap_notice = None;
-                Task::none()
+                self.sync_server_listing()
             }
             SettingsMsg::Close => self.close_settings(),
             SettingsMsg::ProviderPicked(p) => {

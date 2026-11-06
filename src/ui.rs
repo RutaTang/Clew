@@ -307,7 +307,6 @@ pub(crate) enum ActiveOverlay<'a> {
     UpdateNotes,
     Settings,
     Connect,
-    Shortcuts,
     BpCondition(&'a (std::path::PathBuf, usize, String)),
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
@@ -318,7 +317,6 @@ pub(crate) enum ActiveOverlay<'a> {
     AppMenu,
     ViewMenu,
     Graph(crate::Overlay),
-    ServerPanel,
     Finder,
     ContextMenu(&'a crate::ContextMenu),
     Hover(&'a crate::HoverState),
@@ -349,8 +347,6 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Settings
     } else if app.connect.is_some() {
         O::Connect
-    } else if app.show_shortcuts {
-        O::Shortcuts
     } else if let Some(edit) = &app.proj.bp_cond_edit {
         O::BpCondition(edit)
     } else if let Some(edit) = &app.proj.note_edit {
@@ -371,8 +367,6 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::ViewMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
-    } else if app.server_panel {
-        O::ServerPanel
     } else if app.proj.finder.open {
         O::Finder
     } else if let Some(menu) = &app.proj.context_menu {
@@ -406,7 +400,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
             Self::Connect => "connect",
-            Self::Shortcuts => "shortcuts",
             Self::Why(_) => "why",
             Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
@@ -414,7 +407,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::AppMenu => "app-menu",
             Self::ViewMenu => "view-menu",
             Self::Graph(_) => "graph",
-            Self::ServerPanel => "server-panel",
             Self::ContextMenu(_) => "context-menu",
             Self::BpCondition(_)
             | Self::BookmarkNote(_)
@@ -460,7 +452,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
-            Self::Shortcuts => shortcuts_modal(app),
             Self::BpCondition(edit) => bp_condition_modal(app, edit),
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
@@ -471,7 +462,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::AppMenu => app_menu(app),
             Self::ViewMenu => view_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
-            Self::ServerPanel => server_panel_modal(app),
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(menu),
             Self::Hover(hover) => hover_tooltip(hover),
@@ -490,7 +480,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),
-            Self::Shortcuts => Message::Window(WindowMsg::CloseShortcuts),
             Self::BpCondition(_) => Message::Debug(DebugMsg::BpConditionCancel),
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),
@@ -501,7 +490,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
             Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
-            Self::ServerPanel => Message::Lsp(LspMsg::TogglePanel),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
             Self::ContextMenu(_) => Message::Hover(HoverMsg::ContextMenuClosed),
             // Not `HoverMsg::Cleared`: that one keeps a peek the pointer rests in.

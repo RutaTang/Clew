@@ -1906,10 +1906,9 @@ pub enum WindowMsg {
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
     ToggleTargetMenu,
-    /// Open the "Keyboard Shortcuts" modal (from the More menu).
+    /// Show the keyboard shortcuts: Settings, on its Keyboard shortcuts
+    /// page.
     OpenShortcuts,
-    /// Close the "Keyboard Shortcuts" modal.
-    CloseShortcuts,
     /// Begin capturing a new chord for an action (click a binding).
     RebindStart(keymap::Action),
     /// Reset one action's binding to its default.
@@ -2683,7 +2682,6 @@ impl WindowMsg {
             | WindowMsg::ToggleToolsMenu
             | WindowMsg::ToggleTargetMenu
             | WindowMsg::OpenShortcuts
-            | WindowMsg::CloseShortcuts
             | WindowMsg::RebindStart(..)
             | WindowMsg::RebindReset(..)
             | WindowMsg::RebindResetAll
