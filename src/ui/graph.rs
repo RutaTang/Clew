@@ -479,6 +479,12 @@ pub(crate) struct GraphState {
     /// jumps as it settles, grows a depth or flattens.
     center: crate::graphlayout::V3,
     fit_base: f32,
+    /// Where, at a scale of one, the middle of the picture is off the
+    /// camera's centre: a 3D camera at rest centres what it shows by it.
+    shift: (f32, f32),
+    /// How fast `shift` is moving: it rides a spring, so a re-centring
+    /// starts from rest.
+    shift_vel: (f32, f32),
     /// The framing has not caught up with the graph yet.
     framing: bool,
     /// Which side of its node each label is drawn on: 0 right, 1 left,
@@ -534,6 +540,8 @@ impl Default for GraphState {
             zoom_vel: 0.0,
             center: [0.0; 3],
             fit_base: 0.0,
+            shift: (0.0, 0.0),
+            shift_vel: (0.0, 0.0),
             framing: false,
             label_side: Vec::new(),
             label_side_target: Vec::new(),
@@ -583,6 +591,8 @@ const DIM_SECS: f32 = 0.6;
 /// coasts) — pitch settling sooner.
 /// The zoom spring's rate (per second): settled in about a quarter second.
 const ZOOM_RATE: f32 = 18.0;
+/// The re-centring spring's rate: settled in about half a second.
+const SHIFT_RATE: f32 = 9.0;
 const FRAME_TAU: f32 = 0.14;
 const LABEL_TAU: f32 = 0.11;
 const TURN_TAU: f32 = 0.55;
@@ -610,6 +620,16 @@ fn ease_step(dt: f32, tau: f32) -> f32 {
 fn ease_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// One step of `dt` seconds of a critically damped spring at `rate`: where
+/// a value `x` off its rest, moving at `v`, is then, and how fast — solved
+/// exactly, so it gathers speed from rest and settles without overshoot at
+/// any frame rate.
+fn spring(x: f32, v: f32, rate: f32, dt: f32) -> (f32, f32) {
+    let decay = (-rate * dt).exp();
+    let k = v + rate * x;
+    ((x + k * dt) * decay, (v - rate * k * dt) * decay)
 }
 
 /// `a` wrapped into (−π, π]: the same turn of the camera.
@@ -759,8 +779,8 @@ impl GraphCanvas<'_> {
         let persp = 1.0 + (persp3 - 1.0) * e;
         let (x, y) = (rx / persp3 * persp, ry / persp3 * persp);
         (
-            x * st.fit_scale + st.fit_off.0 + st.pan.x * (1.0 - e),
-            y * st.fit_scale + st.fit_off.1 + st.pan.y * (1.0 - e),
+            (x - st.shift.0) * st.fit_scale + st.fit_off.0 + st.pan.x * (1.0 - e),
+            (y - st.shift.1) * st.fit_scale + st.fit_off.1 + st.pan.y * (1.0 - e),
             z * e,
             persp,
         )
@@ -806,8 +826,8 @@ impl GraphCanvas<'_> {
         let z2 = rotate([p[0] - c[0], p[1] - c[1], p[2] - c[2]], yaw, pitch)[2];
         let persp = 1.0 + (FOCAL / (CAM - z2).max(FOCAL * 0.15) - 1.0) * e;
         let scale = st.fit_scale.max(1e-3) * persp;
-        let x1 = (cursor.x - st.fit_off.0 - st.pan.x * (1.0 - e)) / scale;
-        let y2 = (cursor.y - st.fit_off.1 - st.pan.y * (1.0 - e)) / scale;
+        let x1 = (cursor.x - st.fit_off.0 - st.pan.x * (1.0 - e)) / scale + st.shift.0 / persp;
+        let y2 = (cursor.y - st.fit_off.1 - st.pan.y * (1.0 - e)) / scale + st.shift.1 / persp;
         // Un-rotate (inverse pitch, then inverse yaw).
         let (sy, cy) = yaw.sin_cos();
         let (sp, cp) = pitch.sin_cos();
@@ -1003,11 +1023,8 @@ impl GraphCanvas<'_> {
             // A critically damped spring, in log space (each step of the
             // wheel the same), solved exactly for the frame: it gathers
             // speed and settles without overshoot, at any frame rate.
-            let x0 = (from / to).ln();
-            let v0 = st.zoom_vel;
-            let decay = (-ZOOM_RATE * dt).exp();
-            let x = (x0 + (v0 + ZOOM_RATE * x0) * dt) * decay;
-            st.zoom_vel = (v0 - ZOOM_RATE * (v0 + ZOOM_RATE * x0) * dt) * decay;
+            let (x, v) = spring((from / to).ln(), st.zoom_vel, ZOOM_RATE, dt);
+            st.zoom_vel = v;
             if x.abs() < 1e-4 && st.zoom_vel.abs() < 1e-3 {
                 st.zoom = to;
                 st.zoom_vel = 0.0;
@@ -1135,6 +1152,38 @@ impl GraphCanvas<'_> {
             robust_extent(&d)
         };
         let fit_2d = (inner_w / (2.0 * half(0))).min(inner_h / (2.0 * half(1)));
+        // A 3D camera at rest centres the picture as it stands: the middle
+        // of what it shows, not the pivot it turns about (from some angles
+        // the graph sits off to one side of it). Turning — the spin, a fling,
+        // an orbit — it centres on the pivot again, the one centre no angle
+        // runs out of; the two ease into each other as the camera starts and
+        // stops. The scale stays the whole turn's: no zooming in and out as
+        // the camera is grabbed and let go.
+        let still = !st.spinning && st.drag == Drag::None;
+        let shift_to = if still && e > 0.0 {
+            let (lo_x, hi_x, lo_y, hi_y) = st.pos.iter().fold(
+                (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+                |(a, b, c, d), p| {
+                    let q = [
+                        p[0] - box_center[0],
+                        p[1] - box_center[1],
+                        p[2] - box_center[2],
+                    ];
+                    let (rx, ry, _, persp3) =
+                        Self::project_view(rotate(q, st.yaw * e, st.pitch * e));
+                    let persp = 1.0 + (persp3 - 1.0) * e;
+                    let (x, y) = (rx / persp3 * persp, ry / persp3 * persp);
+                    (a.min(x), b.max(x), c.min(y), d.max(y))
+                },
+            );
+            if n == 0 {
+                (0.0, 0.0)
+            } else {
+                ((lo_x + hi_x) / 2.0, (lo_y + hi_y) / 2.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
         let fit_to = fit_2d + (fit_3d - fit_2d) * e;
         let center_to = box_center;
         // While the mode switches, the blend of the two framings moves as
@@ -1142,19 +1191,33 @@ impl GraphCanvas<'_> {
         if st.fit_base <= 0.0 || resized || switching {
             st.fit_base = fit_to;
             st.center = center_to;
+            st.shift = shift_to;
+            st.shift_vel = (0.0, 0.0);
         } else {
             let step = ease_step(dt, FRAME_TAU);
             st.fit_base += (fit_to - st.fit_base) * step;
             for (now, to) in st.center.iter_mut().zip(center_to) {
                 *now += (to - *now) * step;
             }
+            // The re-centring jumps its target when the camera starts or
+            // stops: a critically damped spring takes it there from rest.
+            let (x, vx) = spring(st.shift.0 - shift_to.0, st.shift_vel.0, SHIFT_RATE, dt);
+            let (y, vy) = spring(st.shift.1 - shift_to.1, st.shift_vel.1, SHIFT_RATE, dt);
+            st.shift = (shift_to.0 + x, shift_to.1 + y);
+            st.shift_vel = (vx, vy);
         }
         let near_fit = (st.fit_base / fit_to - 1.0).abs() < 1e-3;
         let near_center = (0..3).all(|c| (st.center[c] - center_to[c]).abs() < 0.05);
-        st.framing = !(near_fit && near_center);
+        let near_shift = (st.shift.0 - shift_to.0).abs() < 0.05
+            && (st.shift.1 - shift_to.1).abs() < 0.05
+            && st.shift_vel.0.abs() < 0.5
+            && st.shift_vel.1.abs() < 0.5;
+        st.framing = !(near_fit && near_center && near_shift);
         if !st.framing {
             st.fit_base = fit_to;
             st.center = center_to;
+            st.shift = shift_to;
+            st.shift_vel = (0.0, 0.0);
         }
         st.fit_scale = st.fit_base.max(1e-4) * st.zoom;
         st.fit_off = (bounds.width * 0.5, bounds.height * 0.5);
@@ -2874,15 +2937,18 @@ mod tests {
     }
 
     /// The idle spin gathers speed when switched on and coasts to a stop
-    /// when switched off; a map woken from rest takes one frame's step, not
-    /// the whole pause's.
+    /// when switched off — the re-centring that goes with each riding a
+    /// spring; a map woken from rest takes one frame's step, not the whole
+    /// pause's.
     #[test]
     fn the_spin_starts_and_stops_without_a_jolt() {
         let l = layout(40);
         let (mut st, t0, f) = settled(&l, true);
         let on = steps(&canvas(&l, true, true), &mut st, t0, f + 600, 240);
-        assert!(on[0] < 0.05, "{:?}", &on[..4]);
-        assert!(jolt(0.0, &on) < 0.05, "{on:?}");
+        // Starting, the camera also moves from centring the picture at rest
+        // to centring the turn: both from rest, on a spring.
+        assert!(on[0] < 0.3, "{:?}", &on[..4]);
+        assert!(jolt(0.0, &on) < 0.5, "{on:?}");
         let off = steps(&canvas(&l, true, false), &mut st, t0, f + 840, 600);
         assert!(jolt(on[on.len() - 1], &off) < 0.05, "{:?}", &off[..4]);
         assert_eq!(off.last(), Some(&0.0), "it came to rest");
@@ -2909,8 +2975,32 @@ mod tests {
         let filled = filled.max((hi_y - lo_y) / (BOUNDS.height - 2.0 * GRAPH_PAD));
         assert!(filled > 0.99, "it fills the frame: {filled}");
 
-        let (mut st, _, _) = settled(&l, true);
-        let c = canvas(&l, true, false);
+        // A 3D camera at rest: what it shows is centred.
+        let (st, _, _) = settled(&l, true);
+        let shown = on_screen(&canvas(&l, true, false), &st);
+        let (lo_x, lo_y, hi_x, hi_y) = shown.iter().fold(
+            (f32::MAX, f32::MAX, f32::MAX * -1.0, f32::MAX * -1.0),
+            |(a, b, c, d), p| (a.min(p.0), b.min(p.1), c.max(p.0), d.max(p.1)),
+        );
+        assert!(
+            ((lo_x + hi_x) / 2.0 - BOUNDS.width / 2.0).abs() < 1.0,
+            "{lo_x}..{hi_x}"
+        );
+        assert!(
+            ((lo_y + hi_y) / 2.0 - BOUNDS.height / 2.0).abs() < 1.0,
+            "{lo_y}..{hi_y}"
+        );
+
+        // Spinning, it frames the whole turn.
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let c = canvas(&l, true, true);
+        let _ = steps(&c, &mut st, t0, 0, 1500);
+        assert!(
+            st.shift.0.abs() < 0.05 && st.shift.1.abs() < 0.05,
+            "{:?}",
+            st.shift
+        );
         // A whole turn of the spin: always inside the padding, and out to
         // its edge on one axis somewhere in the turn — the frame used, not
         // half of it.
