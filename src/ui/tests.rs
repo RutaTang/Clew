@@ -7857,6 +7857,22 @@ fn the_sessions_search_stays_while_it_filters_the_menu() {
     assert!(field.is_ok(), "the search that filters the menu is gone");
 }
 
+/// The margin's "not explained yet" note speaks the language just chosen:
+/// laid out once, it stayed in the one spoken when the file opened.
+#[test]
+fn the_unexplained_note_follows_a_language_switch() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let said = |app: &App| format!("{:?}", app.proj.explain.prepared);
+    let _ = app.show_explanation(crate::explain::Node::File(abs));
+    assert!(said(&app).contains("Not explained yet"), "{}", said(&app));
+    with_lang(Lang::Fr, || {
+        let _ = app.respeak_explanation();
+    });
+    assert!(said(&app).contains("Pas encore expliqué"), "{}", said(&app));
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]

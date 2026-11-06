@@ -363,7 +363,7 @@ impl App {
                 // window's AI calls is told which language to answer in.
                 theme::redraw_everywhere();
                 self.send_ai_config();
-                Task::none()
+                self.respeak_explanation()
             }
             SettingsMsg::SetThemeVariant { id, is_light } => {
                 self.set_theme_variant(id, is_light);
@@ -375,7 +375,7 @@ impl App {
                 // It may have been the language another window chose: this
                 // window's server answers in it too.
                 self.send_ai_config();
-                Task::none()
+                self.respeak_explanation()
             }
             SettingsMsg::SystemAppearanceChanged => {
                 // Only follow the OS when the preference is System; re-color

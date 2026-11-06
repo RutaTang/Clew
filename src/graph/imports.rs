@@ -1751,7 +1751,9 @@ impl Resolver {
         }
         let segs: Vec<&str> = body.split('.').filter(|s| !s.is_empty()).collect();
         // Absolute: try the project root and each ancestor of `from` as a source
-        // root (covers `src/`-layout and package-relative resolution).
+        // root (covers `src/`-layout and package-relative resolution), then
+        // `src/` itself, as Pyright does: a `tests/` file's `from cart import`
+        // of `src/cart.py` (pytest's `pythonpath = src`) read as a package.
         let mut bases: Vec<PathBuf> = vec![self.root.clone()];
         let mut p = from.parent();
         while let Some(d) = p {
@@ -1761,6 +1763,7 @@ impl Resolver {
             }
             p = d.parent();
         }
+        bases.push(self.root.join("src"));
         for base in bases {
             if let Some(f) = self.python_module_file(&base, &segs) {
                 return Target::Internal(f);
@@ -5058,6 +5061,23 @@ mod tests {
         assert_eq!(
             r.resolve(&ri("numpy"), &root.join("top.py"), "python"),
             Target::External("numpy".into())
+        );
+    }
+
+    /// A `src/` layout's module, imported from a test beside it (pytest's
+    /// `pythonpath = src`, Pyright's own default): the project's file, not a
+    /// package named `cart`.
+    #[test]
+    fn a_python_import_reaches_a_src_layout_module_from_tests() {
+        let root = Path::new("/proj");
+        let r = resolver(root, &["src/cart.py", "src/main.py", "tests/test_cart.py"]);
+        assert_eq!(
+            r.resolve(&ri("cart"), &root.join("tests/test_cart.py"), "python"),
+            Target::Internal(root.join("src/cart.py"))
+        );
+        assert_eq!(
+            r.resolve(&ri("cart"), &root.join("src/main.py"), "python"),
+            Target::Internal(root.join("src/cart.py"))
         );
     }
 

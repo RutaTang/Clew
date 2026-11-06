@@ -774,6 +774,27 @@ impl App {
         }
     }
 
+    /// The explanation on screen once more, when Clew wrote some of it — the
+    /// "Not explained yet" placeholder, the note before an unchecked summary
+    /// — so it speaks the language just chosen: it was laid out once, in the
+    /// one spoken then. A summary or walkthrough the model wrote stays.
+    pub(crate) fn respeak_explanation(&mut self) -> Task<Message> {
+        let Some(node) = self.proj.explain.view.clone() else {
+            return Task::none();
+        };
+        if self.proj.explain.showing_detail
+            || self
+                .proj
+                .explain
+                .cache
+                .get(&node)
+                .is_some_and(|c| !is_unchecked(c))
+        {
+            return Task::none();
+        }
+        self.show_explanation(node)
+    }
+
     /// Open the explanation overlay for `node`, showing its summary.
     pub(crate) fn show_explanation(&mut self, node: explain::Node) -> Task<Message> {
         let text = explanation_text(self.proj.explain.cache.get(&node));

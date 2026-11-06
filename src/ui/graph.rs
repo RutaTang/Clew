@@ -614,6 +614,10 @@ const FRAME_TAU: f32 = 0.14;
 const LABEL_TAU: f32 = 0.11;
 const TURN_TAU: f32 = 0.55;
 const PITCH_TAU: f32 = 0.3;
+/// Up to this many nodes no label fades with depth; the fade is full
+/// this many nodes past that.
+const FADE_FREE_NODES: f32 = 6.0;
+const FADE_FULL_NODES: f32 = 24.0;
 /// The lead-in a camera's start or stop eases its target in by, so the
 /// motion's acceleration builds from nought rather than jumping.
 const LEAD_TAU: f32 = 0.09;
@@ -1283,6 +1287,11 @@ impl GraphCanvas<'_> {
             maxz = maxz.max(p.2);
         }
         let span = (maxz - minz).max(1.0);
+        // The depth fade thins a crowd of labels; a few nodes keep all
+        // their names. Measured against the nodes' own depths, it took the
+        // farthest label away whatever the map, and a map of three files
+        // named one of them. Full from a few dozen nodes up.
+        let depth_fade = e * ((n as f32 - FADE_FREE_NODES) / FADE_FULL_NODES).clamp(0.0, 1.0);
         // Priority: hovered first, then nearest the camera.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
@@ -1300,7 +1309,7 @@ impl GraphCanvas<'_> {
             let fade = if is_hover {
                 1.0
             } else {
-                1.0 - e + e * smoothstep(0.34, 0.82, (z - minz) / span)
+                1.0 - depth_fade + depth_fade * smoothstep(0.34, 0.82, (z - minz) / span)
             };
             let r = node_radius(self.layout.nodes[i].weight, persp);
             // The width the label is actually drawn at, not a per-char guess.
@@ -2817,6 +2826,28 @@ mod tests {
         let flat = canvas(&l, false, false);
         assert!(frames_to_rest(&flat, &mut st, 5_000).is_some());
         assert!(st.pos.iter().all(|p| p[2].abs() <= 0.5));
+    }
+
+    /// A small map names every node however it is turned: the depth fade
+    /// took the farthest of three files' labels away, and the middle one's
+    /// was faint.
+    #[test]
+    fn a_small_map_names_every_node() {
+        let l = layout(3);
+        let c = canvas(&l, true, false);
+        let mut st = GraphState::default();
+        assert!(frames_to_rest(&c, &mut st, 5_000).is_some());
+        assert!(
+            st.label_target.iter().all(|&t| t > 0.99),
+            "{:?}",
+            st.label_target
+        );
+        // A crowd still thins by depth.
+        let crowd = layout(60);
+        let c = canvas(&crowd, true, false);
+        let mut st = GraphState::default();
+        assert!(frames_to_rest(&c, &mut st, 20_000).is_some());
+        assert!(st.label_target.iter().any(|&t| t < 0.5));
     }
 
     #[test]
