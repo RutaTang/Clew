@@ -408,7 +408,7 @@ impl App {
                 }
             })
             .collect();
-        self.proj.search.query = label.to_string();
+        self.proj.search.listing = Some(label.to_string());
         self.proj.search.ran = true;
         self.proj.search.running = false;
         self.proj.search.error = None;
@@ -487,6 +487,7 @@ impl App {
         self.proj.search.skipped.clear();
         self.proj.search.running = false;
         self.proj.search.ran = false;
+        self.proj.search.listing = None;
         // Nor is the count the status line still gives for them.
         if let Some(said) = self.proj.search.said.take() {
             self.settle_status(&[&said]);

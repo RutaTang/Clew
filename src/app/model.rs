@@ -1042,6 +1042,11 @@ pub struct SearchState {
     /// The status line the last search's results wrote ("6 matches"), taken
     /// back down when those results go.
     pub said: Option<String>,
+    /// What `hits` are when they are not this search's: a language
+    /// server's list ("(references)") shown in its place. It used to be
+    /// written into the query, so the search box read "(references)" — and
+    /// an option toggled, or a glob typed, searched the project for that.
+    pub listing: Option<String>,
     pub running: bool,
     pub ran: bool,
     pub hits: Vec<SearchHit>,

@@ -5028,6 +5028,24 @@ fn the_empty_call_hierarchy_says_how_to_fill_it() {
     assert!(shows(&mut sim, "choose Call Hierarchy"));
 }
 
+/// A language server's list in the Search sidebar says which list it is.
+#[test]
+fn a_reference_list_is_named_in_the_search_sidebar() {
+    let mut app = reader_app();
+    app.proj.search.ran = true;
+    app.proj.search.listing = Some("(references)".into());
+    app.proj.search.hits = vec![crate::search::SearchHit {
+        abs: PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "pub fn origin()".into(),
+    }];
+    assert!(shows(
+        &mut sim_elem(super::sidebar::search_tab(&app)),
+        "(references) · 1 match"
+    ));
+}
+
 /// One letter in the search field is searched only on Enter, and the
 /// sidebar says so: it stayed blank, as if nothing matched.
 #[test]

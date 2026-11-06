@@ -8222,6 +8222,41 @@ fn enter_in_the_file_filter_opens_its_first_file() {
     assert!(sent.is_empty(), "{sent:?}");
 }
 
+/// A reference list shown in the Search sidebar leaves the search box as
+/// the reader left it: the list's label was written into it, so the box
+/// read "(references)", and an option toggled or a glob typed then searched
+/// the project for "(references)". Searching again shows the search's own
+/// results, under no label.
+#[test]
+fn a_reference_list_leaves_the_search_box_alone() {
+    let mut app = scanned_app("refs-keep-query");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.search.query = "needle".into();
+    let _ = app.show_locations(
+        "(references)",
+        vec![lsp::client::Target {
+            path: root.join("src/lib.rs"),
+            line: 2,
+            character: 7,
+        }],
+        crate::viewer::PositionEncoding::Utf16,
+    );
+    assert_eq!(app.proj.search.query, "needle");
+    assert_eq!(app.proj.search.listing.as_deref(), Some("(references)"));
+    assert_eq!(app.proj.search.hits.len(), 1);
+
+    // An option toggled searches for what the box says.
+    for m in run_task(app.update(Message::Nav(NavMsg::SearchToggle(SearchOpt::Case)))) {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.proj.search.listing, None);
+    assert!(
+        app.proj.search.hits.iter().any(|h| h.rel == "notes.txt"),
+        "{:?}",
+        app.proj.search.hits
+    );
+}
+
 /// The margin's "Open the call hierarchy" asks about the function the margin
 /// shows, at its name where it is defined: it only switched the sidebar to
 /// Calls, which stayed empty — and the caret, inside the body, is on some
@@ -12344,7 +12379,7 @@ async fn a_superseded_server_search_cannot_repaint_the_reference_list() {
         vec![lib],
         "a search the references superseded must not repaint the sidebar"
     );
-    assert_eq!(app.proj.search.query, "(references)");
+    assert_eq!(app.proj.search.listing.as_deref(), Some("(references)"));
     assert!(
         !app.proj.search.running,
         "the retired search must not leave its spinner running: an empty or \

@@ -1465,11 +1465,36 @@ fn forward_key(
     }
 }
 
+/// The key the app is told was pressed: the character typed for a plain or
+/// shifted press, which is what the code view's motions are spelled in;
+/// the key itself, without its modifiers, for a chord with Ctrl, Alt or ⌘,
+/// which is how shortcuts are spelled. iced gives the key without its
+/// modifiers, so Shift+G arrived as "g" — `G` (to the end) began a `g`
+/// prefix that ate the next key — and `$` as "4", `zR` and `zM` as `zr`
+/// and `zm`: none of them ever ran.
+fn typed_key(
+    key: keyboard::Key,
+    modified_key: keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> keyboard::Key {
+    let chord = modifiers.command() || modifiers.control() || modifiers.alt() || modifiers.logo();
+    match modified_key {
+        keyboard::Key::Character(_) if !chord => modified_key,
+        _ => key,
+    }
+}
+
 /// Route a global runtime event to the shell message for the window it
 /// occurred in. A named `fn` because `listen_with` takes a non-capturing one.
 fn route(event: iced::Event, status: iced::event::Status, window: window::Id) -> Option<Shell> {
     match event {
-        iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modified_key,
+            modifiers,
+            ..
+        }) => {
+            let key = typed_key(key, modified_key, modifiers);
             forward_key(&key, modifiers, status).then(|| {
                 Shell::Window(
                     window,
@@ -3746,6 +3771,48 @@ mod tests {
     /// X11 winit gives Ctrl+= the text "=", and the search field took
     /// "a" to "a=0" as Ctrl+= and Ctrl+0 zoomed. AltGr — Ctrl+Alt on
     /// Windows — still types its character, and a plain or shifted key its.
+    /// A shifted letter or symbol reaches the code view as the character it
+    /// types — `G`, `$` — and a chord as its unmodified key, as shortcuts
+    /// are spelled.
+    #[test]
+    fn a_key_is_routed_as_the_character_it_types() {
+        use iced::keyboard::{Key, Modifiers};
+        let press = |key: &str, typed: &str, modifiers| {
+            let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(key.into()),
+                modified_key: Key::Character(typed.into()),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            });
+            match route(event, iced::event::Status::Ignored, window::Id::unique()) {
+                Some(Shell::Window(_, Message::Editor(EditorMsg::KeyPressed(key, _)))) => key,
+                _ => panic!("{key} was not routed as a key press"),
+            }
+        };
+        assert_eq!(
+            press("g", "G", Modifiers::SHIFT),
+            Key::Character("G".into())
+        );
+        assert_eq!(
+            press("4", "$", Modifiers::SHIFT),
+            Key::Character("$".into())
+        );
+        assert_eq!(
+            press("j", "j", Modifiers::empty()),
+            Key::Character("j".into())
+        );
+        assert_eq!(
+            press("f", "F", Modifiers::CTRL | Modifiers::SHIFT),
+            Key::Character("f".into())
+        );
+        assert_eq!(press("p", "p", Modifiers::LOGO), Key::Character("p".into()));
+    }
+
     #[test]
     fn a_ctrl_or_command_chord_types_nothing() {
         use iced::keyboard::Modifiers;

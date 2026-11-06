@@ -1037,6 +1037,12 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         } else {
             crate::app::count_matches(n)
         };
+        // A language server's list in place of the search's results says
+        // which list it is.
+        let msg = match &app.proj.search.listing {
+            Some(list) => format!("{list} · {msg}"),
+            None => msg,
+        };
         Some((msg, theme::dim()))
     } else if app.proj.search.query.trim().chars().count() == 1 {
         // One character, which matches most of a project, is searched for

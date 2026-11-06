@@ -1229,6 +1229,17 @@ impl<'a, Message> CodeView<'a, Message> {
     /// such lines; `layout` takes the max with the MEASURED right edge of every
     /// line drawn so far (see `State::measured`), which is exact for what the
     /// reader can actually scroll to.
+    /// Columns between a line's end and its inline blame: a gap of two, past
+    /// the `⋯` of a folded line — drawn two columns out, the blame ran into
+    /// the cue ("None: ⋯Tester, 4 hours ago").
+    fn blame_lead_cols(&self, line: usize) -> usize {
+        if self.is_collapsed(line) {
+            COLLAPSED_CUE_COLS + 2
+        } else {
+            2
+        }
+    }
+
     fn visual_max_cols(&self, char_width: f32) -> usize {
         let summary = self.annotation_summary();
         let mut cols = self
@@ -1244,7 +1255,7 @@ impl<'a, Message> CodeView<'a, Message> {
             0
         };
         if let Some((line, annotation)) = &self.blame {
-            let anno = 2 + annotation.chars().count();
+            let anno = self.blame_lead_cols(*line) + annotation.chars().count();
             cols = cols.max(visual_line_cols(self.lines, self.inlay_hints, *line) + anno + band);
         }
         cols
@@ -2425,9 +2436,10 @@ where
                 if let Some((bl, annotation)) = &self.blame
                     && *bl == i
                 {
-                    let end_x = text_x0 + text_w + 2.0 * cw;
+                    let lead = self.blame_lead_cols(i);
+                    let end_x = text_x0 + text_w + lead as f32 * cw;
                     right = right
-                        .max(text_w + (2 + estimated_cols(annotation)) as f32 * cw + band_room);
+                        .max(text_w + (lead + estimated_cols(annotation)) as f32 * cw + band_room);
                     renderer.fill_text(
                         text::Text {
                             content: annotation.clone(),
@@ -4253,6 +4265,76 @@ mod font_tests {
                 "{text:?} at {at:?} is clipped to {clip:?}, not its row"
             );
         }
+    }
+
+    /// A folded line's blame starts past its `⋯`, with the gap a line that
+    /// is not folded has: drawn two columns past the line's end, it ran into
+    /// the cue ("None: ⋯Tester, 4 hours ago").
+    #[test]
+    fn a_folded_lines_blame_clears_the_fold_cue() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        let source = "def add():\n    return 1\n\ndef sub():\n    return 2\n";
+        let lines = crate::highlight::plain_lines(source);
+        let headers: std::collections::HashSet<usize> = [0, 3].into();
+        let collapsed: std::collections::HashSet<usize> = [0].into();
+        let visible = [0usize, 2, 3, 4];
+        let draw = |line: usize| {
+            let mut view = crate::codeview::CodeView::new(
+                &lines,
+                5,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| (),
+                |_| (),
+                |_, _| (),
+            )
+            .folds(Some(&visible), &headers, &collapsed)
+            .blame(Some((line, "someone, 3 days ago".to_string())));
+            let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+            let mut tree = Tree::new(&*widget);
+            let mut renderer = Recorder::default();
+            let node = widget.layout(
+                &mut tree,
+                &renderer,
+                &iced::advanced::layout::Limits::new(
+                    iced::Size::ZERO,
+                    iced::Size::new(800.0, f32::INFINITY),
+                ),
+            );
+            widget.draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &iced::advanced::renderer::Style::default(),
+                iced::advanced::Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 400.0)),
+            );
+            renderer.boxes
+        };
+        let x_of = |boxes: &[(String, iced::Point, iced::Rectangle)], what: &str| {
+            boxes
+                .iter()
+                .find(|(text, ..)| text == what)
+                .map(|(_, at, clip)| (at.x, clip.x + clip.width))
+                .unwrap_or_else(|| panic!("{what:?} is not drawn"))
+        };
+        // `def add():` folded, `def sub():` not: the same length of line.
+        let folded = draw(0);
+        let (cue_x, cue_end) = x_of(&folded, "⋯");
+        // The cue's box is two columns wide.
+        let column = (cue_end - cue_x) / 2.0;
+        let (folded_blame, _) = x_of(&folded, "someone, 3 days ago");
+        assert!(
+            folded_blame - cue_end >= column - 0.5,
+            "the blame at {folded_blame} runs into the cue ending at {cue_end}"
+        );
+        // Not folded, it keeps its place: two columns past the line's end,
+        // where the cue would have begun one column out.
+        let (open_blame, _) = x_of(&draw(3), "someone, 3 days ago");
+        assert!((open_blame - (cue_x + column)).abs() < 0.5, "{open_blame}");
     }
 
     /// A15: the inline blame names people and quotes commit summaries, which
