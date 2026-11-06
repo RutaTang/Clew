@@ -1,4 +1,4 @@
-{"id":1,"request":{"Hello":{"protocol":20,"fingerprint":"f"}}}
+{"id":1,"request":{"Hello":{"protocol":20,"fingerprint":"f","locale":"fr"}}}
 {"id":1,"request":{"OpenProject":{"root":"/p"}}}
 {"id":1,"request":{"ReadFile":{"rel":"a.rs","target":{"label":"Host (macos)","os":"macos","arch":"aarch64","family":"unix"}}}}
 {"id":1,"request":{"Search":{"query":"q","regex":false,"case_sensitive":true,"whole_word":false,"include":"*.rs","exclude":"target"}}}

@@ -117,7 +117,8 @@ pub use payload::*;
 /// where its files are.
 ///
 /// v20: [`AiChatConfig`] carries the reader's `reply_language`, so what a
-/// model writes on the server (Ask's agent turns) is in their language.
+/// model writes on the server (Ask's agent turns) is in their language; and
+/// `Hello` their `locale`, for the language servers the server starts.
 pub const PROTOCOL_VERSION: u32 = 20;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
@@ -571,6 +572,12 @@ pub enum Request {
         protocol: u32,
         #[serde(default)]
         fingerprint: String,
+        /// The language the client's reader reads (the tag editors send:
+        /// `fr`, `zh-cn`), which the language servers this server starts
+        /// are told, so one that translates its messages answers in it.
+        /// Absent for English (and from an older client).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locale: Option<String>,
     },
     /// Open a project rooted at this server-side path. Reply: `Tree` (once the
     /// scan committed and the watcher is live); then a full `ProjectSymbols`

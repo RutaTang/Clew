@@ -498,7 +498,7 @@ impl Server {
             Request::Hello {
                 protocol,
                 fingerprint,
-                ..
+                locale,
             } => {
                 if protocol != PROTOCOL_VERSION {
                     self.hello_ok = false;
@@ -528,6 +528,7 @@ impl Server {
                     ));
                 }
                 self.hello_ok = true;
+                clew_core::lsp::client::set_locale(locale);
                 Some(Event::Ready {
                     protocol: PROTOCOL_VERSION,
                     fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
@@ -2402,6 +2403,7 @@ mod tests {
             let hello = Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: None,
             };
             assert!(matches!(
                 rt.block_on(server.handle(0, hello)),
@@ -2465,6 +2467,7 @@ mod tests {
             let hello = Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: None,
             };
             assert!(matches!(
                 server.handle(0, hello).await,
@@ -2507,6 +2510,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         server.root = Some(root.clone());
@@ -2586,6 +2590,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let config = |model: &str| Request::SetAiConfig {
@@ -2688,6 +2693,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let config = Request::SetAiConfig {
@@ -2770,6 +2776,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let config = Request::SetAiConfig {
@@ -2840,6 +2847,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let agents = server.agents.clone();

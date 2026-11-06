@@ -866,6 +866,7 @@ fn request_samples() -> Vec<Request> {
         Request::Hello {
             protocol: PROTOCOL_VERSION,
             fingerprint: "f".into(),
+            locale: Some("fr".into()),
         },
         Request::OpenProject { root: "/p".into() },
         Request::ReadFile {
@@ -1754,8 +1755,24 @@ fn defaulted_fields_decode_as_pinned() {
         serde_json::from_str(r#"{"id":1,"request":{"Hello":{"protocol":6}}}"#).unwrap();
     assert!(matches!(
         hello.request,
-        Request::Hello { protocol: 6, ref fingerprint } if fingerprint.is_empty()
+        Request::Hello { protocol: 6, ref fingerprint, locale: None } if fingerprint.is_empty()
     ));
+    // The reader's language, when not English, rides along; English sends
+    // the very Hello it always did.
+    let hello: ClientMessage = serde_json::from_str(
+        r#"{"id":1,"request":{"Hello":{"protocol":20,"fingerprint":"f","locale":"zh-cn"}}}"#,
+    )
+    .unwrap();
+    assert!(matches!(
+        hello.request,
+        Request::Hello { ref locale, .. } if locale.as_deref() == Some("zh-cn")
+    ));
+    let english = Request::Hello {
+        protocol: 20,
+        fingerprint: "f".into(),
+        locale: None,
+    };
+    assert!(!serde_json::to_string(&english).unwrap().contains("locale"));
     // A v5–v11 client's Hello, `ai` field and all: the extra field is ignored.
     let hello: ClientMessage = serde_json::from_str(
         r#"{"id":1,"request":{"Hello":{"protocol":11,"fingerprint":"f","ai":"Server"}}}"#,
@@ -1794,6 +1811,7 @@ fn every_serde_default_is_pinned() {
     const PINNED: &[&str] = &[
         "fingerprint",
         "fingerprint",
+        "locale",
         "refs",
         "reply_language",
         "skipped",

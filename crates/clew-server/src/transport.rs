@@ -602,6 +602,7 @@ mod tests {
                 request: clew_protocol::Request::Hello {
                     protocol: clew_protocol::PROTOCOL_VERSION,
                     fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                    locale: None,
                 },
             })
             .unwrap()

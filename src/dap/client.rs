@@ -341,15 +341,8 @@ impl DapClient {
     }
 
     pub async fn initialize(&self) -> Result<Value, String> {
-        self.request(
-            "initialize",
-            json!({
-                "adapterID": "clew", "clientID": "clew", "clientName": "clew",
-                "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
-                "supportsRunInTerminalRequest": false,
-            }),
-        )
-        .await
+        self.request("initialize", initialize_args(crate::i18n::current()))
+            .await
     }
 
     /// Launch the program with adapter-specific arguments. Sent at once; the
@@ -589,6 +582,21 @@ const MAX_PENDING_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// with [`EventSink`]: whatever `recv` hands out is no longer queued, so its
 /// bytes are credited back here.
 ///
+/// The `initialize` request's arguments. `lang`, the reader's, is named as
+/// the `locale` when it is not English, so an adapter that translates its
+/// messages answers in it.
+fn initialize_args(lang: crate::i18n::Lang) -> Value {
+    let mut args = json!({
+        "adapterID": "clew", "clientID": "clew", "clientName": "clew",
+        "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
+        "supportsRunInTerminalRequest": false,
+    });
+    if let Some(tag) = lang.server_locale() {
+        args["locale"] = json!(tag);
+    }
+    args
+}
+
 /// `recv` is cancel-safe: its only await is the channel's own cancel-safe
 /// `recv`. The session loop selects it against the Stop flag, so a poll that
 /// loses that race must not consume or mis-credit an event.
@@ -963,6 +971,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
     use clew_core::dapwire::parse_listening;
     use clew_core::framing::{read_message, write_frame};
     use std::time::Instant;
@@ -2331,5 +2340,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("could not connect"), "{err}");
+    }
+
+    /// The adapter is told the reader's language, when it is not English:
+    /// one that translates answers in it.
+    #[test]
+    fn initialize_names_the_readers_language() {
+        assert!(initialize_args(Lang::En).get("locale").is_none());
+        assert_eq!(initialize_args(Lang::Ja)["locale"], "ja");
+        assert_eq!(initialize_args(Lang::Zh)["locale"], "zh-cn");
+        assert_eq!(initialize_args(Lang::Fr)["adapterID"], "clew");
     }
 }

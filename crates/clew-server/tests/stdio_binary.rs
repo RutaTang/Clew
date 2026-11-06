@@ -136,6 +136,7 @@ impl Server {
             Request::Hello {
                 protocol: PROTOCOL_VERSION,
                 fingerprint: SCHEMA_FINGERPRINT.into(),
+                locale: None,
             },
         );
         match self.reply(1) {

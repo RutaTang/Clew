@@ -154,6 +154,7 @@ impl App {
             request: clew_protocol::Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: crate::i18n::current().server_locale().map(str::to_string),
             },
         };
         // A fresh channel has room: the greeting is its first frame.

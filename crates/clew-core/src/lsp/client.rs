@@ -765,7 +765,7 @@ impl LspClient {
 
         // On failure `client` — the only handle — drops here, which ends the
         // session and takes the child down with it.
-        let params = initialize_params(root, init_options, process_id);
+        let params = initialize_params(root, init_options, process_id, locale());
         let result = client.call("initialize", params).await?;
         let caps = result.get("capabilities");
         let encoding = match caps
@@ -1166,10 +1166,37 @@ impl LspClient {
     }
 }
 
+/// The language the reader reads clew in, as the tag editors send (`fr`,
+/// `zh-cn`): `initialize`'s `locale`, so a server that translates its
+/// messages answers in it. `None` (the default) sends none, and servers
+/// speak English. One for the process: the GUI sets it as its language
+/// changes, clew-server from its client's `Hello`. A server already running
+/// keeps the one it started with.
+static LOCALE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Name the language servers started from now on are told the reader
+/// reads (see [`LOCALE`]).
+pub fn set_locale(tag: Option<String>) {
+    if let Ok(mut locale) = LOCALE.write() {
+        *locale = tag;
+    }
+}
+
+/// The language [`set_locale`] named last.
+fn locale() -> Option<String> {
+    LOCALE.read().ok().and_then(|locale| locale.clone())
+}
+
 /// The `initialize` request's params. `process_id` is our pid for a server
 /// we spawned, `None` (sent as `null`) for one whose parent is someone else —
-/// see [`LspClient::connect`].
-fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Option<u32>) -> Value {
+/// see [`LspClient::connect`]. `locale`, the reader's language, if not
+/// English.
+fn initialize_params(
+    root: &Path,
+    init_options: Option<Value>,
+    process_id: Option<u32>,
+    locale: Option<String>,
+) -> Value {
     let mut params = json!({
         "processId": process_id,
         "rootUri": path_to_uri(root),
@@ -1215,6 +1242,9 @@ fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Optio
     });
     if let Some(opts) = init_options {
         params["initializationOptions"] = opts;
+    }
+    if let Some(tag) = locale {
+        params["locale"] = json!(tag);
     }
     params
 }
@@ -2867,8 +2897,13 @@ mod session_tests {
             "processId must be present and null, got {params}"
         );
         // A local child, by contrast, is ours and gets our pid.
-        let local = initialize_params(Path::new("/proj"), None, Some(4242));
+        let local = initialize_params(Path::new("/proj"), None, Some(4242), None);
         assert_eq!(local["processId"], 4242);
+        // English asks for nothing; another language is named, so a server
+        // that translates answers in it.
+        assert!(params.get("locale").is_none(), "{params}");
+        let french = initialize_params(Path::new("/proj"), None, None, Some("fr".into()));
+        assert_eq!(french["locale"], "fr");
         // Server-initiated progress is advertised; without it servers report
         // none, and "indexing" looks the same as "no answer".
         assert_eq!(params["capabilities"]["window"]["workDoneProgress"], true);

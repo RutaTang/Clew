@@ -83,6 +83,20 @@ impl Lang {
         }
     }
 
+    /// The tag the language servers and debuggers clew starts are told the
+    /// reader reads (LSP's and DAP's `locale`), in the form editors send,
+    /// so one that translates its messages recognises it. None for English,
+    /// what they speak unasked.
+    pub fn server_locale(self) -> Option<&'static str> {
+        match self {
+            Lang::En => None,
+            Lang::Fr => Some("fr"),
+            Lang::Zh => Some("zh-cn"),
+            Lang::Ko => Some("ko"),
+            Lang::Ja => Some("ja"),
+        }
+    }
+
     /// The language a code or a system locale names ("fr", "fr-FR",
     /// "fr_FR.UTF-8", "zh-Hans-CN", "ja-JP"), if one it speaks.
     pub fn parse(code: &str) -> Option<Lang> {
@@ -207,6 +221,8 @@ fn set_pref(pref: LangPref) {
     // Explanations and answers come back in the same language; English is
     // what a model writes unasked.
     clew_core::llm::set_reply_language((lang != Lang::En).then(|| lang.english_name()));
+    // And language servers started from now on, those that translate.
+    clew_core::lsp::client::set_locale(lang.server_locale().map(str::to_string));
 }
 
 thread_local! {
