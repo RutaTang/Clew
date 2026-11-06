@@ -875,7 +875,13 @@ impl LspClient {
             "position": { "line": line, "character": character }
         });
         if method.ends_with("/references") {
-            params["context"] = json!({ "includeDeclaration": false });
+            // The declaration is asked for too. Left out, pyright also left
+            // out every use reached through an import (`from cart import
+            // apply_discount` and the calls after it) and the use the
+            // request was made from: Find References listed one file's
+            // callers, and a value traced from a use lost that use. Callers
+            // that hold the declaration apart drop it again by position.
+            params["context"] = json!({ "includeDeclaration": true });
         }
         let result = self.call(method, params).await?;
         Ok(parse_definition(&result))
@@ -2926,6 +2932,24 @@ mod session_tests {
         let reply = peer.next().await;
         assert_eq!(reply["id"], "wf");
         assert_eq!(reply["result"], folders);
+    }
+
+    /// References ask for the declaration too: left out, pyright also left
+    /// out every use reached through an import, and the use asked from.
+    #[tokio::test]
+    async fn references_ask_for_the_declaration() {
+        let (client, mut peer, _) = connected().await;
+        let asked = tokio::spawn(async move {
+            client
+                .navigate("textDocument/references", Path::new("/proj/a.py"), 3, 4)
+                .await
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "textDocument/references");
+        assert_eq!(request["params"]["context"]["includeDeclaration"], true);
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": []}))
+            .await;
+        assert_eq!(asked.await.unwrap(), Ok(Vec::new()));
     }
 
     /// F5: several progress reports run at once; one ending must not declare

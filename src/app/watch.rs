@@ -523,7 +523,7 @@ impl App {
                 .get(path)
                 .map(|syms| {
                     syms.iter()
-                        .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
+                        .filter(|s| crate::app::navigation::names_trail_stops(&s.kind))
                         .map(|s| (s.name.clone(), s.line))
                         .collect()
                 })

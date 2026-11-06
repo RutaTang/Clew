@@ -182,6 +182,16 @@ pub(crate) fn search_status(
     }
 }
 
+/// The kinds of symbol a reading-trail stop is named for, and re-anchored
+/// to as edits move it: functions, and the types a jump lands on (Go to
+/// Type Definition). A class read as `cart.py:6` in the trail.
+pub(crate) fn names_trail_stops(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function" | "method" | "class" | "struct" | "enum" | "trait" | "interface" | "type"
+    )
+}
+
 impl App {
     /// Run a navigation request from the active pane's cursor.
     pub(crate) fn goto_at_cursor(&mut self, kind: GotoKind) -> Task<Message> {
@@ -694,10 +704,7 @@ impl App {
             .symbol_index_by_file
             .get(file)?
             .iter()
-            .find_map(|s| {
-                (s.line == line1 && matches!(s.kind.as_str(), "function" | "method"))
-                    .then(|| s.name.clone())
-            })
+            .find_map(|s| (s.line == line1 && names_trail_stops(&s.kind)).then(|| s.name.clone()))
     }
 
     /// Whether `(file, name)` is a test function, per the symbol index.

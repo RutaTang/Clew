@@ -8110,6 +8110,46 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
     assert_eq!(app.status, "Saved");
 }
 
+/// A jump onto a type is named for it in the reading trail, as a jump onto
+/// a function is: Go to Type Definition onto `class Item` left a stop read
+/// as `cart.py:6`.
+#[test]
+fn a_jump_onto_a_type_is_named_in_the_trail() {
+    let mut app = scanned_app("trail-names-types");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let symbol = |name: &str, kind: &str, line: usize| SymbolEntry {
+        name: name.into(),
+        kind: kind.into(),
+        rel: "src/lib.rs".into(),
+        abs: lib.clone(),
+        line,
+        is_test: false,
+        entry: None,
+    };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        Arc::new(vec![
+            symbol("Point", "struct", 1),
+            symbol("origin", "function", 3),
+        ]),
+    );
+    let _ = app.open_file(lib.clone(), Some(1), true);
+    let _ = app.open_file(lib.clone(), Some(3), true);
+    let labels: Vec<Option<String>> = app
+        .proj
+        .history
+        .flatten_with(&std::collections::HashSet::new())
+        .into_iter()
+        .map(|v| v.label)
+        .collect();
+    assert!(
+        labels.contains(&Some("Point".into())),
+        "the struct's stop is unnamed: {labels:?}"
+    );
+    assert!(labels.contains(&Some("origin".into())), "{labels:?}");
+}
+
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.
 fn tour_json(scope: &str) -> String {
     format!(
