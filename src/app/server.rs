@@ -230,6 +230,12 @@ impl App {
     /// business requests flow to the server.
     pub(crate) fn on_server_ready(&mut self) -> Task<Message> {
         self.server.ready = true;
+        // The switch is done: "Connecting to Local…" stayed in the status
+        // line for good once nothing else came to replace it. A headline
+        // carrying a note (what the switch dropped) is left to be read.
+        if self.status == tr!("Connecting to {host}…", host = self.connection.label()) {
+            self.status.clear();
+        }
         // Resume a scan that was waiting for the server (its Tree reply
         // opens the project); otherwise, if a project is already open
         // (local-fallback path), tell the server about it for search.
@@ -279,6 +285,12 @@ impl App {
         if let Some(ui) = &mut self.connect
             && matches!(ui.stage, ConnectStage::Connecting { .. })
         {
+            // The status line said "Connecting to …" behind the error.
+            self.status = reason.clone();
+            // Latched, as a remote link that gave up outside the modal is:
+            // the window says it is not connected (not "Connected to …"),
+            // and a project asked for next dials again.
+            self.handshake_failure = Some(reason.clone());
             ui.stage = ConnectStage::Error(reason);
             self.pending_scan_root = None;
             self.scanning = false;

@@ -6129,12 +6129,27 @@ fn rows_send_the_identity_of_what_they_show() {
     };
     app.saved_connections = vec![saved.clone()];
     app.connect = Some(crate::ConnectUi::default());
+    // The row names where it goes, the port with it: two hosts on one
+    // machine read the same without it.
+    assert!(shows(&mut sim_of(&app), "root@b.example:2222"));
     let sent = click(sim_of(&app), "prod");
     assert!(
         matches!(sent.as_slice(), [Message::Connect(ConnectMsg::ToSaved { user_host, port: 2222 })]
             if *user_host == saved.user_host()),
         "{sent:?}"
     );
+    // An unnamed host on ssh's own port is said once, not twice.
+    let plain = crate::connect::SavedConnection {
+        name: String::new(),
+        port: 22,
+        ..saved.clone()
+    };
+    app.saved_connections = vec![plain];
+    {
+        let mut sim = sim_of(&app);
+        assert!(text_at(&mut sim, |t| t == "root@b.example", 0).is_some());
+        assert!(text_at(&mut sim, |t| t == "root@b.example", 1).is_none());
+    }
     app.connect = None;
 
     // The symbol finder.
@@ -6262,6 +6277,34 @@ fn identity_messages_resolve_against_the_current_lists() {
         port: 22,
     }));
     assert_eq!(app.conn_gen, before, "an unknown host connects nowhere");
+}
+
+/// The welcome on a remote host says where the link stands: connected,
+/// connecting, or not reached. A host that could not be reached read
+/// "Connected to …" and offered its folders.
+#[test]
+fn the_remote_welcome_says_whether_the_host_was_reached() {
+    let mut app = blank_app();
+    let host = crate::connect::SavedConnection {
+        name: String::new(),
+        host: "h.example".into(),
+        user: "root".into(),
+        port: 22,
+        identity: String::new(),
+        send_ai_keys: false,
+    };
+    app.connection = host.target();
+    assert!(shows(&mut sim_of(&app), "Connecting to root@h.example"));
+    app.handshake_failure = Some("ssh is not installed here".into());
+    assert!(shows(
+        &mut sim_of(&app),
+        "Could not connect to root@h.example"
+    ));
+    assert!(!shows(&mut sim_of(&app), "Connected to"));
+    app.handshake_failure = None;
+    app.server.ready = true;
+    assert!(shows(&mut sim_of(&app), "Connected to root@h.example"));
+    assert!(shows(&mut sim_of(&app), "Browse folders"));
 }
 
 /// I9: a remote project's tsconfig/jsconfig path mappings, once fetched from

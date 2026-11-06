@@ -1710,7 +1710,7 @@ pub(crate) fn remote_join(dir: &str, name: &str) -> String {
 /// The Connect modal: pick or define an SSH host, then browse its folders for
 /// the one to open. Walks `ConnectStage` — picking → connecting → browsing —
 /// but always in one panel so the flow reads as a single place.
-pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
+pub(crate) fn connect_modal<'a>(app: &'a App) -> Element<'a, Message> {
     use crate::ConnectStage;
     let Some(ui) = &app.connect else {
         return slot();
@@ -1770,10 +1770,25 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
     // Always in the same slot (a zero-size one while there is nothing to say),
     // so the form's fields keep their widget state when the grant changes.
     let keys = live_ai_keys_row(app).unwrap_or_else(slot);
-    let panel = container(column![title, keys, body].spacing(14))
+    // The form's scrollbar has a gutter of its own, taken out of the panel's
+    // right padding: it was drawn over the Port field, Browse and Connect
+    // once an error made the form scroll. Everything else keeps its edge.
+    let gutter = |e: Element<'a, Message>| -> Element<'a, Message> {
+        container(e)
+            .padding(Padding::default().right(PICKER_GUTTER))
+            .into()
+    };
+    let body = match &ui.stage {
+        ConnectStage::Picking | ConnectStage::Error(_) => body,
+        _ => gutter(body),
+    };
+    let panel = container(column![gutter(title.into()), gutter(keys), body].spacing(14))
         .width(DIALOG_W)
         .max_height(DIALOG_MAX_H)
-        .padding(MODAL_PAD)
+        .padding(Padding {
+            right: MODAL_PAD - PICKER_GUTTER,
+            ..Padding::new(MODAL_PAD)
+        })
         .style(theme::modal_panel);
 
     modal(
@@ -1993,17 +2008,24 @@ pub(crate) fn connect_picker<'a>(
             // By identity: the list is re-merged from disk whenever any
             // window saves a host, so a row's index can name another host.
             let (user_host, port) = (conn.user_host(), conn.port);
+            // Where it goes, the port with it unless it is ssh's own: two
+            // hosts on one machine read the same. Said once, not under a
+            // title that already says it.
+            let dest = if port == 22 {
+                user_host.clone()
+            } else {
+                format!("{user_host}:{port}")
+            };
+            let title = conn.label();
+            let mut lines =
+                column![text(title.clone()).size(ts::BASE).color(theme::fg())].spacing(1);
+            if dest != title {
+                lines = lines.push(text(dest).size(ts::SMALL).color(theme::dim()));
+            }
             let open = button(
-                row![
-                    glyph::icon(Glyph::Remote, theme::fg_muted(), 14.0),
-                    column![
-                        text(conn.label()).size(ts::BASE).color(theme::fg()),
-                        text(conn.user_host()).size(ts::SMALL).color(theme::dim()),
-                    ]
-                    .spacing(1),
-                ]
-                .spacing(8)
-                .align_y(iced::Center),
+                row![glyph::icon(Glyph::Remote, theme::fg_muted(), 14.0), lines,]
+                    .spacing(8)
+                    .align_y(iced::Center),
             )
             .style(theme::list_row(false))
             .width(Fill)
@@ -2080,7 +2102,9 @@ pub(crate) fn connect_picker<'a>(
     );
     col = col.push(field(
         tr!("User"),
-        input("root", &ui.user, ConnectField::User).into(),
+        // An example, as the Name field's is: a bare "root" read as a value
+        // already filled in, and Connect then said the user was missing.
+        input(tr!("e.g. root"), &ui.user, ConnectField::User).into(),
     ));
     col = col.push(field(tr!("Identity file"), identity.into()));
     // Per-host consent for AI keys. Off: keys stay on this machine and AI
@@ -2117,12 +2141,19 @@ pub(crate) fn connect_picker<'a>(
         ]);
     }
 
-    scrollable(column![head, col.width(Fill)].width(Fill))
-        .direction(thin_scroll())
-        .style(theme::overlay_scrollbar)
-        .height(Length::Shrink)
-        .into()
+    scrollable(
+        container(column![head, col.width(Fill)].width(Fill))
+            .padding(Padding::default().right(PICKER_GUTTER)),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Length::Shrink)
+    .into()
 }
+
+/// Room at the Connect form's right for its scrollbar, out of the modal's
+/// padding (`connect_modal`): the bar and a gap before the fields.
+const PICKER_GUTTER: f32 = SCROLLBAR_W + 4.0;
 
 /// The line closing a folder listing the server cut at its cap: how many
 /// entries it left out (files — folders are listed first). `None` for a

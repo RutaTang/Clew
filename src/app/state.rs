@@ -1033,6 +1033,11 @@ pub struct App {
     /// server subscription: changing it restarts the transport against the new
     /// target, which is how an in-app Connect switches between local and remote.
     pub connection: connect::ConnTarget,
+    /// The local project this window had open when it switched to a remote
+    /// host: "Disconnect and read local code" opens it again. Going remote
+    /// closes it, and a connect that failed left the window empty, the
+    /// project it was reading a folder pick away.
+    pub left_local: Option<std::path::PathBuf>,
     /// Whether the user granted THIS remote connection the right to hold the
     /// AI API keys and run AI calls server-side (the per-host opt-in from the
     /// Connect form). Always reset to false on a transport switch; without

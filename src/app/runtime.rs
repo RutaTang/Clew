@@ -79,6 +79,7 @@ impl App {
             import_dir: imports::Dir::Imports,
             trail_writer: TrailWriter::default(),
             connection: Self::startup_connection(),
+            left_local: None,
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.
             remote_ai_opt_in: false,

@@ -667,12 +667,9 @@ async fn run_bounded(
     .stdout(Stdio::piped())
     .stderr(Stdio::piped())
     .kill_on_drop(true);
-    let mut child = cmd.spawn().map_err(|e| {
-        Failure::new(
-            FailureKind::Other,
-            tr!("could not run ssh: {error}", error = e),
-        )
-    })?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| Failure::new(FailureKind::Other, ssh_spawn_error(&e)))?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1280,6 +1277,16 @@ fn verify_script(layout: &RemoteLayout) -> String {
         "\"$HOME/.clew/server/{}/clew-server\" --version 2>&1",
         layout.dir
     )
+}
+
+/// Why `ssh` could not be started, in words: a machine without OpenSSH
+/// was told "No such file or directory (os error 2)".
+fn ssh_spawn_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        tr!("ssh is not installed here — install OpenSSH's client to connect to a host").into()
+    } else {
+        tr!("could not run ssh: {error}", error = e)
+    }
 }
 
 /// A token for temp names and markers: this process's id plus 64 bits from a
@@ -2388,6 +2395,20 @@ exit 3
 
     /// A step that hangs is killed at its timeout rather than hanging the
     /// connection forever.
+    #[tokio::test]
+    async fn a_missing_ssh_is_said_in_words() {
+        let missing = std::env::temp_dir().join(format!("clew-no-ssh-{}", unique_token()));
+        let cmd = clew_core::spawn::tokio_command(missing);
+        let out = run_bounded(cmd, None, Duration::from_secs(5), "probe", "host").await;
+        match out {
+            Err(f) => {
+                assert!(f.reason.contains("ssh is not installed"), "{}", f.reason);
+                assert!(!f.reason.contains("os error"), "{}", f.reason);
+            }
+            Ok(_) => panic!("a missing program cannot run"),
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_hanging_remote_command_times_out() {

@@ -148,6 +148,14 @@ impl App {
         headline: String,
     ) -> Task<Message> {
         let label = target.label();
+        // Leaving this machine for a host: its project is the one to come
+        // back to. Any other switch keeps what was remembered.
+        if !self.connection.is_remote()
+            && target.is_remote()
+            && let Some(project) = &self.proj.project
+        {
+            self.left_local = Some(project.root.clone());
+        }
         // Stop the old project's work FIRST: `drop_connection_state` drops the
         // project's link (its stream ids) and the server link (the channel) —
         // after either, a Cancel can no longer be addressed.
@@ -582,10 +590,16 @@ impl App {
             }
             ConnectMsg::Disconnect => {
                 self.connect = None;
-                if self.connection.is_remote() {
-                    self.connect_to(connect::ConnTarget::Local)
-                } else {
-                    Task::none()
+                if !self.connection.is_remote() {
+                    return Task::none();
+                }
+                let switched = self.connect_to(connect::ConnTarget::Local);
+                // Back to the project this window was reading here, through
+                // the same gate as any open: a folder since untrusted is
+                // asked about again.
+                match self.left_local.take() {
+                    Some(root) if root.is_dir() => Task::batch([switched, self.request_open(root)]),
+                    _ => switched,
                 }
             }
             ConnectMsg::BrowseTo(path) => {

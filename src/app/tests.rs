@@ -5571,6 +5571,62 @@ fn connect_bootstrap_failure_clears_the_scanning_placeholder() {
         !app.scanning,
         "the abandoned scan must not leave the window masked"
     );
+    assert!(
+        app.status.contains("host key has CHANGED"),
+        "the status line went on saying it was connecting: {:?}",
+        app.status
+    );
+}
+
+/// A connect that fails from the modal leaves the window saying so — the
+/// welcome read "Connected to …" over a host never reached — and
+/// "Disconnect and read local code" goes back to the local project the window
+/// left for it, not to an empty window. Once the local server is up, its
+/// "Connecting to Local…" headline goes too.
+#[test]
+fn a_failed_connect_says_so_and_disconnect_reads_the_local_project_again() {
+    let mut app = scanned_app("connect-failed-back-local");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let host = crate::connect::SavedConnection {
+        name: String::new(),
+        host: "h.example".into(),
+        user: "root".into(),
+        port: 2222,
+        identity: String::new(),
+        send_ai_keys: false,
+    };
+    app.connect = Some(ConnectUi::default());
+    let _ = app.connect_to(host.target());
+    assert!(
+        app.proj.project.is_none(),
+        "going remote closes the local project"
+    );
+    assert_eq!(app.left_local.as_deref(), Some(root.as_path()));
+
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "ssh is not installed here".into(),
+    }));
+    assert!(
+        app.handshake_failure.is_some(),
+        "the window must know the host was not reached"
+    );
+
+    let _ = app.update(Message::Connect(ConnectMsg::Disconnect));
+    assert!(!app.connection.is_remote());
+    assert!(app.left_local.is_none());
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening, "the local project is not opened again");
+
+    // The local transport's handshake lands: the headline has done its job.
+    app.status = tr!("Connecting to {host}…", host = app.connection.label());
+    let _ = app.on_server_ready();
+    assert!(
+        !app.status.contains("Connecting to"),
+        "the status line still says {:?}",
+        app.status
+    );
 }
 
 /// A server that refuses the handshake fails the Connect modal waiting on it

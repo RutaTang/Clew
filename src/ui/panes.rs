@@ -748,9 +748,28 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
     // opening local code or connecting out over SSH.
     let (subtitle, primary, secondary): (String, (&str, Message), (&str, Message)) =
         if app.connection.is_remote() {
+            let host = app.connection.label();
+            // Said as it is: a host that could not be reached read
+            // "Connected to …", with Browse folders offering its folders.
+            let (subtitle, primary) = if app.server.ready {
+                (
+                    tr!("Connected to {host}", host = host),
+                    tr!("Browse folders…"),
+                )
+            } else if app.handshake_failure.is_some() {
+                (
+                    tr!("Could not connect to {host}", host = host),
+                    tr!("Open Remote…"),
+                )
+            } else {
+                (
+                    tr!("Connecting to {host}…", host = host),
+                    tr!("Open Remote…"),
+                )
+            };
             (
-                tr!("Connected to {host}", host = app.connection.label()),
-                (tr!("Browse folders…"), Message::Connect(ConnectMsg::Open)),
+                subtitle,
+                (primary, Message::Connect(ConnectMsg::Open)),
                 (tr!("Disconnect"), Message::Connect(ConnectMsg::Disconnect)),
             )
         } else {
