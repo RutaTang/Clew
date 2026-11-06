@@ -300,6 +300,7 @@ impl FakeProvider {
             api_key: "k".into(),
             model: "m".into(),
             base_url: self.base.clone(),
+            reply_language: None,
         }
     }
 }

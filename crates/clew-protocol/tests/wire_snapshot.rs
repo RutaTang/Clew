@@ -1000,6 +1000,7 @@ fn request_samples() -> Vec<Request> {
                 api_key: "k".into(),
                 model: "m".into(),
                 base_url: "u".into(),
+                reply_language: Some("French".into()),
             }),
             embed: Some(AiEmbedConfig {
                 api_key: "k".into(),
@@ -1776,13 +1777,27 @@ fn defaulted_fields_decode_as_pinned() {
     )
     .unwrap();
     assert_eq!(report.skipped, 0);
+
+    // A chat config without a reply language: the reader's is English, the
+    // model's own.
+    let chat: AiChatConfig = serde_json::from_str(
+        r#"{"provider":"anthropic","api_key":"k","model":"m","base_url":"u"}"#,
+    )
+    .unwrap();
+    assert_eq!(chat.reply_language, None);
 }
 
 /// Every `#[serde(default)]` in the protocol source is one the test above
 /// pins. A new one fails here until it is pinned (and justified) there.
 #[test]
 fn every_serde_default_is_pinned() {
-    const PINNED: &[&str] = &["fingerprint", "fingerprint", "refs", "skipped"];
+    const PINNED: &[&str] = &[
+        "fingerprint",
+        "fingerprint",
+        "refs",
+        "reply_language",
+        "skipped",
+    ];
     let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut found = Vec::new();
     for entry in std::fs::read_dir(&src).unwrap() {

@@ -45,6 +45,7 @@ nucleo-matcher = "0.3.1"
 rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+sys-locale = "0.3.2"
 # Native math + mermaid rendering to self-contained SVG — no webview / no helper
 # binary (replaces the old `clew-view` MathJax/mermaid.js path).
 ratex-svg = { version = "0.1.13", features = ["standalone", "embed-fonts"] }

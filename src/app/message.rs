@@ -1794,6 +1794,8 @@ pub enum DocsMsg {
 pub enum SettingsMsg {
     /// Set the Light/Dark/System appearance preference.
     SetThemePref(theme::ThemePref),
+    /// Speak another language, or follow the system's.
+    SetLanguage(crate::i18n::LangPref),
     /// The OS light/dark appearance changed (only acted on when following System).
     SystemAppearanceChanged,
     /// Another window changed the appearance. The palette is process-global,
@@ -2617,6 +2619,7 @@ impl SettingsMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             SettingsMsg::SetThemePref(..)
+            | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged
             | SettingsMsg::ThemeResynced
             | SettingsMsg::SetThemeVariant { .. }

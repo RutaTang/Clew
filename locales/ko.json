@@ -1,0 +1,5 @@
+{
+ "Could not save the language: {error}": "언어 설정을 저장하지 못했습니다: {error}",
+ "Language": "언어",
+ "System ({language})": "시스템 설정 ({language})"
+}

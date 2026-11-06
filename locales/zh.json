@@ -1,0 +1,5 @@
+{
+ "Could not save the language: {error}": "无法保存语言设置：{error}",
+ "Language": "语言",
+ "System ({language})": "跟随系统（{language}）"
+}

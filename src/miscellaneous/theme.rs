@@ -621,6 +621,12 @@ fn bump_revision() {
     REVISION.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Have every window draw again — the language changed, which each draws
+/// from as it does from the palette.
+pub fn redraw_everywhere() {
+    bump_revision();
+}
+
 /// Whether a light theme is currently active.
 pub fn is_light() -> bool {
     MODE.load(Ordering::Relaxed) == 1

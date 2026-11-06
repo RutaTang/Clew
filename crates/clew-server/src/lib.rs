@@ -1615,6 +1615,9 @@ impl Server {
             // it: each piece holds a copy of the key it started with, and a
             // turn went on spending on a revoked key for as long as it ran.
             Request::SetAiConfig { chat, embed } => {
+                // The reader's language: what the models here write for
+                // them is written in it.
+                llm::set_reply_language(chat.as_ref().and_then(|c| c.reply_language.as_deref()));
                 let chat = chat.map(|c| llm::Config {
                     provider: llm::Provider::from_slug(&c.provider),
                     api_key: c.api_key,
@@ -2591,6 +2594,7 @@ mod tests {
                 api_key: "k".into(),
                 model: model.into(),
                 base_url: base.clone(),
+                reply_language: None,
             }),
             embed: None,
         };
@@ -2692,6 +2696,7 @@ mod tests {
                 api_key: "k".into(),
                 model: "m".into(),
                 base_url: base,
+                reply_language: None,
             }),
             embed: None,
         };

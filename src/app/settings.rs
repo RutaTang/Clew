@@ -309,6 +309,18 @@ impl App {
                 self.set_theme(pref);
                 Task::none()
             }
+            SettingsMsg::SetLanguage(pref) => {
+                if let Err(e) = crate::i18n::apply_and_save(pref) {
+                    self.status = tr!("Could not save the language: {error}", error = e);
+                }
+                // Every window speaks it: the others are told to draw again
+                // (as for an appearance change), and the menu bar — the
+                // system's, built with the words it had — is built again.
+                theme::redraw_everywhere();
+                #[cfg(target_os = "macos")]
+                crate::macos::menu::rebuild(&self.keymap);
+                Task::none()
+            }
             SettingsMsg::SetThemeVariant { id, is_light } => {
                 self.set_theme_variant(id, is_light);
                 Task::none()

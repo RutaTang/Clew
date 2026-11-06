@@ -743,6 +743,7 @@ impl App {
                     api_key: c.api_key,
                     model: c.model,
                     base_url: c.base_url,
+                    reply_language: llm::reply_language(),
                 }),
                 embed::Config::load().map(|c| clew_protocol::AiEmbedConfig {
                     api_key: c.api_key,

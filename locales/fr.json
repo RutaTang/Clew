@@ -1,0 +1,5 @@
+{
+ "Could not save the language: {error}": "Impossible d’enregistrer la langue : {error}",
+ "Language": "Langue",
+ "System ({language})": "Système ({language})"
+}

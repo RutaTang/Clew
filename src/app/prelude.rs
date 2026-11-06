@@ -11,6 +11,7 @@ pub(crate) use crate::index::SymbolEntry;
 pub(crate) use crate::outline::Symbol;
 pub(crate) use crate::search::SearchHit;
 pub(crate) use crate::viewer::Viewer;
+pub(crate) use crate::tr;
 
 pub(crate) use std::collections::{HashMap, HashSet};
 pub(crate) use std::path::{Path, PathBuf};

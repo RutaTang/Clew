@@ -127,7 +127,11 @@ impl App {
             acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
-            theme_pref: theme::init(),
+            theme_pref: {
+                // And the language, so the first frame speaks it.
+                crate::i18n::init();
+                theme::init()
+            },
             update: UpdateState {
                 auto_check: updater::auto_check_enabled(),
                 ..UpdateState::default()

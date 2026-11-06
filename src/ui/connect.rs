@@ -107,6 +107,11 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     }));
     // Which theme fills the light slot, and the dark.
     use crate::theme::ThemeChoice;
+    let language = form::pick(
+        crate::i18n::LangPref::all(),
+        Some(crate::i18n::pref()),
+        |p| Message::Settings(SettingsMsg::SetLanguage(p)),
+    );
     let light_pick = form::pick(
         crate::theme::light_choices(),
         Some(ThemeChoice(crate::theme::current_light())),
@@ -136,6 +141,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             None,
             None,
             vec![
+                form::item(crate::tr!("Language"), None, language),
                 form::item("Mode", None, mode),
                 form::item("Light theme", None, light_pick),
                 form::item("Dark theme", None, dark_pick),
