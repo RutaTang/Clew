@@ -342,7 +342,7 @@ fn section_frame(section: MenuSection) -> (Vec<Entry>, Vec<Entry>) {
         MenuSection::View => (
             vec![
                 command("Toggle Sidebar", TOGGLE_SIDEBAR),
-                command("Toggle Right Panel", TOGGLE_RIGHT),
+                command("Toggle Margin", TOGGLE_RIGHT),
             ],
             vec![
                 command("Overview", OVERVIEW),

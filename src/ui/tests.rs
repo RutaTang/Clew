@@ -7630,6 +7630,28 @@ fn blocks_are_the_view_menus_not_the_notes() {
     );
 }
 
+/// The margin is shown and hidden from the View menu — the bars carry no
+/// toggle for it — and a pick closes the menu.
+#[test]
+fn the_view_menu_shows_and_hides_the_margin() {
+    let mut app = reader_app();
+    app.show_view_menu = true;
+    let shown = app.show_right_panel;
+    let sent = click(sim_of(&app), "Margin");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Window(WindowMsg::ToggleRightPanel))),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.show_right_panel, !shown, "toggled");
+    assert!(!app.show_view_menu, "the pick closed the menu");
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "Toggle panel"), "no toggle in the bars");
+}
+
 /// On Linux and Windows the window is borderless and Clew draws the design's
 /// 1 px border round it, the room inside it what everything is laid out in;
 /// maximized, there is no frame, and restored, it is back. macOS keeps the

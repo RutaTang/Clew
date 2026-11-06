@@ -498,7 +498,7 @@ impl App {
                 send(Message::Window(WindowMsg::ToggleLeftSidebar)),
             );
             add(
-                toggle(self.show_right_panel, "Context Panel"),
+                toggle(self.show_right_panel, "Margin"),
                 None,
                 send(Message::Window(WindowMsg::ToggleRightPanel)),
             );

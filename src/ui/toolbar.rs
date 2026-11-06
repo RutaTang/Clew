@@ -48,7 +48,7 @@ const FIELD_H: f32 = 34.0;
 const FIELD_MARGIN: f32 = 14.0;
 /// Width of one of the window buttons of Windows and Linux.
 const WIN_BTN_W: f32 = 46.0;
-/// The slot the panel toggle is centred in at the top bar's right (macOS).
+/// The room kept at the top bar's right (macOS), past the search field.
 const TOGGLE_SLOT_W: f32 = 44.0;
 /// Room before the window buttons (Windows and Linux).
 const WIN_BTNS_GAP: f32 = 14.0;
@@ -74,8 +74,8 @@ pub(crate) fn left_cluster_w(app: &App) -> f32 {
 /// edge as the sidebar is resized.
 const SIDEBAR_PAST_BAR: f32 = 6.0;
 
-/// Width of the top bar's right cluster: the panel toggle (macOS), or the
-/// window buttons (Windows and Linux).
+/// Width of the top bar's right cluster: room at the corner (macOS), or
+/// the window buttons (Windows and Linux).
 fn right_cluster_w() -> f32 {
     if MAC_CHROME {
         TOGGLE_SLOT_W
@@ -396,25 +396,10 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         .align_x(iced::Center)
         .padding([0.0, FIELD_MARGIN]);
 
-    // Right: the panel toggle (macOS), or the window buttons.
+    // Right: room at the corner (macOS), or the window buttons. The margin
+    // is shown and hidden from the View menu, where it is.
     let right: Element<'_, Message> = if MAC_CHROME {
-        container(chrome_tip(
-            icon_button(
-                Glyph::PanelRight,
-                if app.show_right_panel {
-                    theme::fg_muted()
-                } else {
-                    theme::dim()
-                },
-                false,
-            )
-            .on_press(Message::Window(WindowMsg::ToggleRightPanel)),
-            "Toggle panel",
-            None,
-        ))
-        .width(Length::Fixed(TOGGLE_SLOT_W))
-        .align_x(iced::Center)
-        .into()
+        space().width(Length::Fixed(TOGGLE_SLOT_W)).into()
     } else {
         container(window_buttons(app))
             .padding(iced::padding::left(WIN_BTNS_GAP))
@@ -661,14 +646,7 @@ pub(crate) fn body_top(app: &App) -> f32 {
 pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
     let x = app.window_width - STRIP_W / 2.0;
     let y = match tool {
-        StripTool::Settings => {
-            let toggle = if MAC_CHROME {
-                0.0
-            } else {
-                ICON_BTN + STRIP_SPACING
-            };
-            app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - toggle - ICON_BTN / 2.0
-        }
+        StripTool::Settings => app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - ICON_BTN / 2.0,
         tool => {
             let i = STRIP_TOP.iter().position(|t| *t == tool).unwrap_or(0);
             let rules = STRIP_RULE_BEFORE.iter().filter(|&&r| r <= i).count();
@@ -781,25 +759,6 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     strip = strip
         .push(space().height(Fill))
         .push(tool(StripTool::Settings));
-    // Windows and Linux keep the right panel's toggle here, at the foot:
-    // their top-right corner belongs to the window buttons.
-    if !MAC_CHROME {
-        strip = strip.push(tip_at(
-            icon_button(
-                Glyph::PanelRight,
-                if app.show_right_panel {
-                    theme::fg_muted()
-                } else {
-                    theme::dim()
-                },
-                false,
-            )
-            .on_press(Message::Window(WindowMsg::ToggleRightPanel)),
-            "Toggle panel",
-            None,
-            tooltip::Position::Left,
-        ));
-    }
     container(strip.padding(Padding {
         top: STRIP_PAD_TOP,
         bottom: STRIP_PAD_BOTTOM,
@@ -1108,10 +1067,12 @@ pub(crate) enum ViewRow {
     InlineBlame,
     IndentGuides,
     Minimap,
+    /// The margin beside the code: its notes, calls and history.
+    Margin,
 }
 
 /// The View menu's rows, top to bottom.
-pub(crate) const VIEW_MENU_ROWS: [ViewRow; 7] = [
+pub(crate) const VIEW_MENU_ROWS: [ViewRow; 8] = [
     ViewRow::OutlineSummaries,
     ViewRow::FileSummary,
     ViewRow::Blocks,
@@ -1119,6 +1080,7 @@ pub(crate) const VIEW_MENU_ROWS: [ViewRow; 7] = [
     ViewRow::InlineBlame,
     ViewRow::IndentGuides,
     ViewRow::Minimap,
+    ViewRow::Margin,
 ];
 
 impl ViewRow {
@@ -1132,6 +1094,7 @@ impl ViewRow {
             ViewRow::InlineBlame => Message::Window(WindowMsg::ToggleInlineBlame),
             ViewRow::IndentGuides => Message::Window(WindowMsg::ToggleIndentGuides),
             ViewRow::Minimap => Message::Window(WindowMsg::ToggleMinimap),
+            ViewRow::Margin => Message::Window(WindowMsg::ToggleRightPanel),
         }
     }
 }
@@ -1147,6 +1110,7 @@ pub(crate) fn closes_view_menu(message: &Message) -> bool {
             | Message::Window(WindowMsg::ToggleInlineBlame)
             | Message::Window(WindowMsg::ToggleIndentGuides)
             | Message::Window(WindowMsg::ToggleMinimap)
+            | Message::Window(WindowMsg::ToggleRightPanel)
     )
 }
 
@@ -1201,6 +1165,7 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     (Glyph::TextLines, "Indent guides", app.show_indent_guides)
                 }
                 ViewRow::Minimap => (Glyph::Minimap, "Minimap", app.show_minimap),
+                ViewRow::Margin => (Glyph::PanelRight, "Margin", app.show_right_panel),
             };
             // Blocks are a function's: with no function explained, the row
             // is there, inert.
