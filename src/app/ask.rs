@@ -1177,14 +1177,28 @@ impl App {
 
     pub(crate) fn on_ask_about_selection(&mut self) -> Task<Message> {
         // Add the right-clicked pane's selection (or the active pane's) as a
-        // context chip, open the panel, and focus the input.
-        let pane = self
-            .proj
-            .context_menu
-            .take()
-            .map(|m| m.pane)
-            .unwrap_or(self.proj.active);
-        match self.selection_pin(pane) {
+        // context chip, open the panel, and focus the input. With nothing
+        // selected, the line right-clicked is what is meant: the menu said
+        // "Select some code first" over the very line it was opened on.
+        let menu = self.proj.context_menu.take();
+        let pane = menu.as_ref().map_or(self.proj.active, |m| m.pane);
+        let (pin, said) = match self.selection_pin(pane) {
+            Some(pin) => (
+                Some(pin),
+                tr!("Added the selection to Ask — now ask your question").to_string(),
+            ),
+            None => match menu.and_then(|m| self.line_pin(m.pane, m.line)) {
+                Some(pin) => {
+                    let said = tr!(
+                        "Added line {line} to Ask — now ask your question",
+                        line = pin.line
+                    );
+                    (Some(pin), said)
+                }
+                None => (None, String::new()),
+            },
+        };
+        match pin {
             Some(pin) => {
                 // Skip an exact duplicate (same file, line and code).
                 let dup = self
@@ -1197,7 +1211,7 @@ impl App {
                 }
                 self.reveal_ask();
                 self.code_focused = false; // the Ask input takes focus
-                self.status = tr!("Added the selection to Ask — now ask your question").into();
+                self.status = said;
                 operation::focus(ui::ask_input_id())
             }
             None => {
@@ -1289,6 +1303,22 @@ impl App {
     }
 
     /// Capture a pane's current text selection as a pinnable Ask context block.
+    /// The chip for line `line` (0-based) of `pane`'s file, as it reads;
+    /// `None` for a blank line, which says nothing to ask about.
+    fn line_pin(&self, pane: usize, line: usize) -> Option<AskPin> {
+        let v = self.proj.panes.get(pane).and_then(Option::as_ref)?;
+        let code = v.source_line(line)?.trim_end().to_string();
+        if code.trim().is_empty() {
+            return None;
+        }
+        Some(AskPin {
+            rel: v.rel.clone(),
+            file: v.abs.clone(),
+            line: line + 1,
+            code,
+        })
+    }
+
     pub(crate) fn selection_pin(&self, pane: usize) -> Option<AskPin> {
         let v = self.proj.panes.get(pane).and_then(Option::as_ref)?;
         let code = v.selected_text()?;

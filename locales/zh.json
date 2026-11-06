@@ -140,6 +140,7 @@
  "Added MCP server {names}": "已添加 MCP 服务器 {names}",
  "Added MCP servers {names}": "已添加 MCP 服务器 {names}",
  "Added agent `{name}` — pick it in the Ask panel": "已添加智能体 `{name}`，可在提问面板中选用",
+ "Added line {line} to Ask — now ask your question": "已将第 {line} 行添加到提问，现在可以输入问题了",
  "Added the selection to Ask — now ask your question": "已将所选内容添加到提问，现在可以输入问题了",
  "Added {label} — pick it in the Ask panel": "已添加 {label}，可在提问面板中选用",
  "Address already in use (os error {arg1})": "地址已在使用（系统错误 {arg1}）",

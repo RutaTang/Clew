@@ -140,6 +140,7 @@
  "Added MCP server {names}": "MCP 서버 추가됨: {names}",
  "Added MCP servers {names}": "MCP 서버 추가됨: {names}",
  "Added agent `{name}` — pick it in the Ask panel": "에이전트 `{name}` 추가됨 — 질문 패널에서 선택하세요",
+ "Added line {line} to Ask — now ask your question": "{line}번째 줄을 질문에 추가했습니다 — 이제 질문을 입력하세요",
  "Added the selection to Ask — now ask your question": "선택 영역을 질문에 추가했습니다 — 이제 질문을 입력하세요",
  "Added {label} — pick it in the Ask panel": "{label} 추가됨 — 질문 패널에서 선택하세요",
  "Address already in use (os error {arg1})": "주소가 이미 사용 중입니다 (시스템 오류 {arg1})",

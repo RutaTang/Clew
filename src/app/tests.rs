@@ -8167,6 +8167,39 @@ fn enter_in_the_file_filter_opens_its_first_file() {
     assert!(sent.is_empty(), "{sent:?}");
 }
 
+/// Add to Ask with nothing selected adds the line right-clicked: it said
+/// "Select some code first" over the very line the menu was opened on. A
+/// blank line still asks for a selection.
+#[test]
+fn add_to_ask_without_a_selection_adds_the_line_clicked() {
+    let mut app = scanned_app("ask-adds-line");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let menu = |line| ContextMenu {
+        pane: 0,
+        line,
+        col: 4,
+        x: 10.0,
+        y: 10.0,
+        insight: None,
+    };
+    // `pub fn origin() -> Point {`, the third line.
+    app.proj.context_menu = Some(menu(2));
+    let _ = app.update(Message::Ask(AskMsg::AboutSelection));
+    assert_eq!(app.proj.ask_pins.len(), 1);
+    let pin = &app.proj.ask_pins[0];
+    assert_eq!((pin.rel.as_str(), pin.line), ("src/lib.rs", 3));
+    assert_eq!(pin.code, "pub fn origin() -> Point {");
+    assert!(app.status.contains('3'), "{}", app.status);
+    // The blank second line says nothing to ask about.
+    app.proj.context_menu = Some(menu(1));
+    let _ = app.update(Message::Ask(AskMsg::AboutSelection));
+    assert_eq!(app.proj.ask_pins.len(), 1);
+    assert_eq!(
+        app.status,
+        tr!("Select some code first, then choose Add to Ask")
+    );
+}
+
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.
 fn tour_json(scope: &str) -> String {
     format!(

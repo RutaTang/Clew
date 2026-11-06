@@ -140,6 +140,7 @@
  "Added MCP server {names}": "MCP サーバー {names} を追加しました",
  "Added MCP servers {names}": "MCP サーバー {names} を追加しました",
  "Added agent `{name}` — pick it in the Ask panel": "エージェント `{name}` を追加しました。質問パネルで選択してください",
+ "Added line {line} to Ask — now ask your question": "{line} 行目を質問に追加しました。続けて質問を入力してください",
  "Added the selection to Ask — now ask your question": "選択範囲を質問に追加しました。続けて質問を入力してください",
  "Added {label} — pick it in the Ask panel": "{label} を追加しました。質問パネルで選択してください",
  "Address already in use (os error {arg1})": "アドレスは既に使用中です（システムエラー {arg1}）",

@@ -140,6 +140,7 @@
  "Added MCP server {names}": "Serveur MCP {names} ajouté",
  "Added MCP servers {names}": "Serveurs MCP {names} ajoutés",
  "Added agent `{name}` — pick it in the Ask panel": "Agent `{name}` ajouté — choisissez-le dans le panneau Questions",
+ "Added line {line} to Ask — now ask your question": "Ligne {line} ajoutée aux Questions — posez maintenant votre question",
  "Added the selection to Ask — now ask your question": "Sélection ajoutée aux Questions — posez maintenant votre question",
  "Added {label} — pick it in the Ask panel": "{label} ajouté — choisissez-le dans le panneau Questions",
  "Address already in use (os error {arg1})": "Adresse déjà utilisée (erreur système {arg1})",
