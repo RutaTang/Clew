@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::UNIX_EPOCH;
 
-use clew_core::projectcalls::{CallSite, FileCalls};
+use clew_core::projectcalls::{CallSite, FileCalls, Receiver};
 
 use crate::cache::{self, CachedCalls, CachedImport, CachedSymbol, FileCache};
 use crate::fs_scan::FileEntry;
@@ -134,6 +134,7 @@ pub fn analyze_file(abs: &Path, rel: &str, content: &str, lang: &'static str) ->
         analysis.lang,
         analysis.calls,
         &analysis.symbols,
+        analysis.owners.clone(),
     )
     .filter(|calls| !calls.is_empty())
     .map(Arc::new);
@@ -210,6 +211,7 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
     let mut names = Vec::new();
     let mut seen = HashMap::new();
     let mut sites = Vec::with_capacity(calls.calls.len() * 3);
+    let mut receivers = Vec::with_capacity(calls.calls.len());
     let mut previous = 0i64;
     for site in &calls.calls {
         let caller = match site.caller.as_deref() {
@@ -220,7 +222,22 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
         let line = site.line as i64;
         sites.extend([caller, callee, line - previous]);
         previous = line;
+        receivers.push(match &site.receiver {
+            None => 0,
+            Some(Receiver::Own) => 1,
+            Some(Receiver::Type(ty)) => intern(ty, &mut names, &mut seen) + 2,
+        });
     }
+    let mut owners: Vec<(usize, &str)> = calls
+        .owners
+        .iter()
+        .map(|(&line, name)| (line, name.as_str()))
+        .collect();
+    owners.sort_unstable();
+    let owners = owners
+        .into_iter()
+        .flat_map(|(line, name)| [line as i64, intern(name, &mut names, &mut seen)])
+        .collect();
     let mut declarations: Vec<usize> = calls.declarations.iter().copied().collect();
     declarations.sort_unstable();
     let mut bodies: Vec<(usize, (usize, usize))> = calls
@@ -238,6 +255,8 @@ fn to_cached_calls(calls: &FileCalls) -> CachedCalls {
             .into_iter()
             .flat_map(|(line, (first, last))| [line, first, last])
             .collect(),
+        receivers,
+        owners,
     }
 }
 
@@ -252,9 +271,13 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
     if !cached.sites.len().is_multiple_of(3) {
         return None;
     }
+    // Every site has its receiver, or the entry is damaged.
+    if cached.receivers.len() != cached.sites.len() / 3 {
+        return None;
+    }
     let mut previous = 0i64;
     let mut calls = Vec::with_capacity(cached.sites.len() / 3);
-    for site in cached.sites.chunks_exact(3) {
+    for (site, &receiver) in cached.sites.chunks_exact(3).zip(&cached.receivers) {
         let &[caller, callee, delta] = site else {
             return None;
         };
@@ -270,8 +293,23 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
             },
             callee: name(callee / 2)?,
             method: callee % 2 == 1,
+            receiver: match receiver {
+                0 => None,
+                1 => Some(Receiver::Own),
+                n => Some(Receiver::Type(name(n - 2)?)),
+            },
             line: usize::try_from(line).ok()?,
         });
+    }
+    if !cached.owners.len().is_multiple_of(2) {
+        return None;
+    }
+    let mut owners = HashMap::with_capacity(cached.owners.len() / 2);
+    for owner in cached.owners.chunks_exact(2) {
+        let &[line, class] = owner else {
+            return None;
+        };
+        owners.insert(usize::try_from(line).ok()?, name(class)?);
     }
     if !cached.bodies.len().is_multiple_of(3) {
         return None;
@@ -292,6 +330,7 @@ fn from_cached_calls(abs: &Path, cached: &CachedCalls) -> Option<FileCalls> {
         calls,
         declarations: cached.declarations.iter().copied().collect(),
         bodies,
+        owners,
     })
 }
 
@@ -544,6 +583,26 @@ pub fn build(root: &Path, files: Arc<Vec<FileEntry>>) -> Vec<SymbolEntry> {
 mod tests {
     use super::*;
     use clew_core::outline::is_test_fn;
+
+    /// A file's call facts come back from the cache as they went in: each
+    /// call's receiver and each method's class with them — read as unknown,
+    /// a warm start lost what a cold one knew. A receiver list that does not
+    /// match the sites is a damaged entry, not reused.
+    #[test]
+    fn receivers_and_owners_survive_the_cache() {
+        let src = "class Cart:\n    def total(self):\n        return self.sub()\n\n    def sub(self):\n        return 1\n\ndef main():\n    c = Cart()\n    c.total()\n";
+        let abs = Path::new("/p/cart.py");
+        let calls = FileCalls::read(abs, src).expect("python has a call model");
+        assert!(calls.calls.iter().any(|c| c.receiver.is_some()));
+        assert_eq!(calls.owners.len(), 2);
+        let cached = to_cached_calls(&calls);
+        let back = from_cached_calls(abs, &cached).expect("a sound entry");
+        assert_eq!(back.calls, calls.calls);
+        assert_eq!(back.owners, calls.owners);
+        let mut damaged = cached;
+        damaged.receivers.pop();
+        assert!(from_cached_calls(abs, &damaged).is_none());
+    }
 
     /// The size gate has to hold for the bytes actually read. A file that
     /// grows between the stat that admitted it and the read — the whole reason

@@ -7647,6 +7647,7 @@ fn the_raised_note_says_when_its_function_changed() {
         caller: Some(caller.into()),
         callee: callee.into(),
         method: false,
+        receiver: None,
         line,
     };
     let lib = root.join("src/lib.rs");
@@ -7662,6 +7663,7 @@ fn the_raised_note_says_when_its_function_changed() {
                 site("b", "other", 12),
             ],
             &[],
+            Default::default(),
         )),
     );
     assert!(shows(&mut sim_of(&app), "3 references"));
@@ -7673,6 +7675,7 @@ fn the_raised_note_says_when_its_function_changed() {
         caller: None,
         callee: callee.into(),
         method,
+        receiver: None,
         line,
     };
     app.proj.calls_by_file.insert(
@@ -7688,6 +7691,7 @@ fn the_raised_note_says_when_its_function_changed() {
                 top("origin", true, 21),
             ],
             &[],
+            Default::default(),
         )),
     );
     assert!(shows(&mut sim_of(&app), "4 references"));

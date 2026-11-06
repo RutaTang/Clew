@@ -1395,6 +1395,7 @@ pub(crate) fn gather_explain_inputs_from(
             analysis.lang,
             analysis.calls.clone(),
             &analysis.symbols,
+            analysis.owners.clone(),
         ));
     }
     let (stand_in_defs, stand_in_calls) = unread_stand_ins(&unread, recorded);
@@ -1605,8 +1606,13 @@ fn unread_stand_ins(
         // Declarations count only in a language with a call model, as for a
         // file that was read.
         if let Some(lang) = highlight::detect(file).and_then(highlight::Lang::from_key)
-            && let Some(mut stand_in) =
-                projectcalls::FileCalls::of(file.to_path_buf(), lang, Vec::new(), &[])
+            && let Some(mut stand_in) = projectcalls::FileCalls::of(
+                file.to_path_buf(),
+                lang,
+                Vec::new(),
+                &[],
+                Default::default(),
+            )
         {
             stand_in.declarations = declarations;
             calls.push(stand_in);
