@@ -1337,6 +1337,7 @@
  "Turn summaries, inlay hints and the minimap on or off.": "요약, 인레이 힌트, 미니맵을 켜거나 끕니다.",
  "Tutorial": "튜토리얼",
  "Type Map": "타입 맵",
+ "Type a line number": "줄 번호를 입력하세요",
  "Type at line {line}": "{line}번 줄의 타입",
  "Type class instances": "타입 클래스 인스턴스",
  "Type of {name}": "{name}의 타입",

@@ -1337,6 +1337,7 @@
  "Turn summaries, inlay hints and the minimap on or off.": "打开或关闭摘要、内嵌提示和缩略图。",
  "Tutorial": "教程",
  "Type Map": "类型图",
+ "Type a line number": "输入行号",
  "Type at line {line}": "第 {line} 行的类型",
  "Type class instances": "类型类实例",
  "Type of {name}": "{name} 的类型",

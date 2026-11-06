@@ -616,6 +616,11 @@ impl App {
             }
             return Task::none();
         }
+        // `:` with no line number yet: nothing to go to (it opened the
+        // first file of the project).
+        if self.proj.finder.is_line_query() {
+            return Task::none();
+        }
         match self
             .proj
             .finder

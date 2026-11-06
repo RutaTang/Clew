@@ -1337,6 +1337,7 @@
  "Turn summaries, inlay hints and the minimap on or off.": "要約、インレイヒント、ミニマップの表示を切り替えます。",
  "Tutorial": "チュートリアル",
  "Type Map": "型マップ",
+ "Type a line number": "行番号を入力してください",
  "Type at line {line}": "{line} 行目の型",
  "Type class instances": "型クラスのインスタンス",
  "Type of {name}": "{name} の型",

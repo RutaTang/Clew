@@ -24117,6 +24117,19 @@ fn an_unchecked_summary_is_marked_in_the_hover() {
     assert!(shown.starts_with(crate::app::UNCHECKED_MARK), "{shown}");
 }
 
+/// Go to Line before its number is typed says what to type, and Enter then
+/// stays put: it opened the project's first file.
+#[test]
+fn go_to_line_without_a_number_opens_nothing() {
+    let mut app = scanned_app("goto-colon");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.on_goto_line_requested();
+    assert!(app.proj.finder.is_line_query());
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
+    assert!(app.proj.finder.open, "the finder stays for the number");
+}
+
 /// Browse… picks what its field names — a JDK's home is a folder, a
 /// version is typed, not browsed to — under the field's own title (every
 /// one was "Choose an SSH private key"); and a picker that could not be

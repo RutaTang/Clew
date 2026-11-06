@@ -244,6 +244,18 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             .padding(8)
             .into(),
         );
+    } else if app.proj.finder.is_line_query() {
+        // Go to Line before its number: what to type, not the project's
+        // files (Enter took the first of them).
+        rows.push(
+            container(
+                text(tr!("Type a line number"))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
+            )
+            .padding(8)
+            .into(),
+        );
     } else if app.proj.finder.is_home() {
         suggestion_rows(app, &mut rows);
     } else if app.proj.finder.is_bar_search() {

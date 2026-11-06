@@ -1337,6 +1337,7 @@
  "Turn summaries, inlay hints and the minimap on or off.": "Activez ou désactivez les résumés, les indications intégrées et la minimap.",
  "Tutorial": "Tutoriel",
  "Type Map": "Carte des types",
+ "Type a line number": "Tapez un numéro de ligne",
  "Type at line {line}": "Type à la ligne {line}",
  "Type class instances": "Instances de classes de types",
  "Type of {name}": "Type de {name}",

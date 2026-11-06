@@ -42,6 +42,12 @@ impl Finder {
         (n > 0).then_some(n)
     }
 
+    /// Whether the query asks for a line (`:`, as Go to Line opens it) —
+    /// with or without its number typed yet.
+    pub fn is_line_query(&self) -> bool {
+        self.query.trim_start().starts_with(':')
+    }
+
     /// Whether the query asks for commands: it starts with `>`, as in the
     /// palette Cmd+Shift+P opens (deleting the `>` gives the files back).
     pub fn is_commands(&self) -> bool {
