@@ -76,7 +76,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     let stopped = session.status == DebugStatus::Stopped;
 
     let ctrl = |label: &'static str, msg: Message, enabled: bool| {
-        let mut b = button(text(label).size(ts::BODY))
+        let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if enabled {
@@ -108,16 +108,28 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true),
     ]
     .spacing(4);
-    let header = row![
-        text(tr!("Debug")).size(ts::BASE).color(theme::fg()),
-        text(status_txt).size(ts::SMALL).color(status_color),
-        space().width(Fill),
-        trace_control(app),
-        hover_eval_control(app),
-        controls,
-    ]
-    .spacing(8)
-    .align_y(iced::Center);
+    // The controls whole at the right; what is said before them takes the
+    // room left, cut short where a language's words need more.
+    let said = container(
+        row![
+            text(tr!("Debug"))
+                .size(ts::BASE)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+            text(status_txt)
+                .size(ts::SMALL)
+                .color(status_color)
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            trace_control(app),
+            hover_eval_control(app),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .width(Fill)
+    .clip(true);
+    let header = row![said, controls].spacing(8).align_y(iced::Center);
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![

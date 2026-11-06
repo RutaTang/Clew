@@ -14,7 +14,7 @@
 //!
 //! The language is the process's (every window speaks it), chosen in
 //! Settings or followed from the system; a test may speak another on its
-//! own thread ([`with_lang`]) without the others hearing it.
+//! own thread (`with_lang`) without the others hearing it.
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -435,7 +435,7 @@ macro_rules! tr {
 
 /// English text kept in English — a name something is known by, saved or
 /// compared — that is shown translated elsewhere, with
-/// [`lookup`](crate::i18n::lookup). Marks it for the catalogs; gives it as
+/// [`lookup`]. Marks it for the catalogs; gives it as
 /// written.
 #[macro_export]
 macro_rules! tr_noop {
