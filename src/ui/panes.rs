@@ -1741,7 +1741,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             text(short_kind(&symbol.kind))
                 .size(ts::CAPTION)
                 .color(theme::kind_color(&symbol.kind))
-                .width(40),
+                .width(34),
             // Understood symbols dim, so the outline shows at a glance what's left.
             text(&symbol.name)
                 .size(ts::BODY)
@@ -1843,26 +1843,18 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
 
-        let jump = button(col)
-            .style(theme::list_row(is_current))
-            .width(Fill)
-            .padding(Padding {
-                top: 4.0,
-                right: 4.0,
-                bottom: 4.0,
-                left: 4.0,
-            })
-            .on_press(Message::Editor(EditorMsg::OutlineJump(symbol.line)));
-        // Leading "understood" toggle and trailing note pencil sit outside the
-        // jump button so each captures its own click.
+        // Leading "understood" toggle and trailing note pencil sit inside
+        // the row — each a button of its own, which takes its own press
+        // before the row's — so the row's band, and its hover, run across
+        // the whole of it rather than starting after them.
         let (cg, gcolor) = if understood {
             (Glyph::CheckCircle, theme::accent())
         } else {
             (Glyph::Circle, theme::dim())
         };
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
-            .style(theme::list_row(false))
-            .padding([5, 5])
+            .style(theme::icon_button(false))
+            .padding([4, 4])
             .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
                 rel: v.rel.clone(),
                 symbol: symbol.name.clone(),
@@ -1876,20 +1868,29 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             },
             12.0,
         ))
-        .style(theme::list_row(false))
-        .padding([5, 5])
+        .style(theme::icon_button(false))
+        .padding([4, 4])
         .on_press(Message::Reading(ReadingMsg::NoteEditStart {
             rel: v.rel.clone(),
             symbol: symbol.name.clone(),
         }));
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
-        rows.push(
-            row![toggle, jump, pencil]
-                .spacing(1)
-                .align_y(iced::alignment::Vertical::Top)
-                .into(),
-        );
+        let jump = button(
+            row![toggle, col.width(Fill), pencil]
+                .spacing(2)
+                .align_y(iced::alignment::Vertical::Top),
+        )
+        .style(theme::list_row(is_current))
+        .width(Fill)
+        .padding(Padding {
+            top: 2.0,
+            right: 2.0,
+            bottom: 2.0,
+            left: 2.0,
+        })
+        .on_press(Message::Editor(EditorMsg::OutlineJump(symbol.line)));
+        rows.push(jump.into());
     }
 
     // Sub-label under "OUTLINE": the reader's manual "understood" coverage for

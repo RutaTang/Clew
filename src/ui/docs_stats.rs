@@ -880,10 +880,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     let header = row![
         text("Glossary").size(ts::HEADING).color(theme::fg()),
         space().width(Fill),
-        button(text("Close").size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Glossary(GlossaryMsg::Close)),
+        super::chrome::close_button(Message::Glossary(GlossaryMsg::Close)),
     ]
     .align_y(iced::Center);
 

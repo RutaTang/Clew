@@ -1932,6 +1932,32 @@ fn click_left_of<'a>(
     Vec::new()
 }
 
+/// Click right of the text `label`, along its line, until a press sends a
+/// `wanted` message: an icon button at the end of a title (a panel's ×)
+/// has no text to click.
+fn click_right_of<'a>(
+    view: impl Fn() -> Sim<'a>,
+    label: &str,
+    wanted: fn(&Message) -> bool,
+) -> Vec<Message> {
+    let text = label.to_string();
+    let start = {
+        let mut sim = view();
+        text_at(&mut sim, move |t| t == text, 0)
+            .unwrap_or_else(|| panic!("{label:?} is not on screen"))
+    };
+    for dx in (1..=500).map(|i| i as f32 * 4.0) {
+        let mut sim = view();
+        sim.point_at(Point::new(start.x + start.width + dx, start.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        let sent: Vec<Message> = sent_by(sim).into_iter().collect();
+        if sent.iter().any(wanted) {
+            return sent;
+        }
+    }
+    Vec::new()
+}
+
 /// Click the `nth` text equal to `label` and return what the click sent.
 fn click_nth(mut sim: Sim<'_>, label: &str, nth: usize) -> Vec<Message> {
     let wanted = label.to_string();
@@ -5788,7 +5814,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     app.proj.flow = Some(tree);
     app.sidebar = crate::SidebarTab::Flow;
     let mut sim = sim_elem(super::flow_tab(&app));
-    assert!(shows(&mut sim, "`total`"));
+    assert!(shows(&mut sim, "total"));
     assert!(shows(&mut sim, "3 places"));
     assert!(shows(&mut sim, "ASSIGNED"));
     assert!(shows(&mut sim, "= compute()"));
@@ -6502,10 +6528,16 @@ fn the_glossary_page_lists_terms_by_kind() {
         &app,
         "No term matches \u{201c}nothing-like-this\u{201d}"
     ));
-    // Close leaves the page.
-    let sent = click(sim_of(&app), "Close");
+    // Its × leaves the page.
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Glossary",
+        |m| matches!(m, Message::Glossary(GlossaryMsg::Close)),
+    );
+    // (The pointer over it opens its tip, which is said too.)
     assert!(
-        matches!(sent.as_slice(), [Message::Glossary(GlossaryMsg::Close)]),
+        sent.iter()
+            .any(|m| matches!(m, Message::Glossary(GlossaryMsg::Close))),
         "{sent:?}"
     );
     for msg in sent {
@@ -6521,7 +6553,8 @@ fn the_glossary_page_lists_terms_by_kind() {
     assert!(on_page(&app, "No terms yet"));
     let sent = click(sim_of(&app), "Rebuild");
     assert!(
-        matches!(sent.as_slice(), [Message::Docs(DocsMsg::Refresh)]),
+        sent.iter()
+            .any(|m| matches!(m, Message::Docs(DocsMsg::Refresh))),
         "{sent:?}"
     );
 }

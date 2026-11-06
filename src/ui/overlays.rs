@@ -289,10 +289,7 @@ pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
             row![
                 text("Language Servers").size(ts::TITLE).color(theme::fg()),
                 space().width(Fill),
-                button(text("Close").size(ts::BODY))
-                    .style(theme::toolbar_button)
-                    .padding([3, 12])
-                    .on_press(Message::Lsp(LspMsg::TogglePanel)),
+                super::chrome::close_button(Message::Lsp(LspMsg::TogglePanel)),
             ]
             .align_y(iced::Center),
             scrollable(Column::with_children(rows).spacing(2).width(Fill))

@@ -60,8 +60,6 @@ pub enum Suggestion {
     /// Ask Clew: the Ask window, its suggestions about what the caret is
     /// in. The row's words.
     Ask(String),
-    /// Talk instead of typing: voice.
-    Talk,
     /// The file finder.
     GoToFile,
     /// A symbol of the open file, from the one the caret is in on.
@@ -82,7 +80,7 @@ impl Suggestion {
     /// The heading it is listed under.
     pub(crate) fn group(&self) -> &'static str {
         match self {
-            Suggestion::Ask(_) | Suggestion::Talk => "Ask",
+            Suggestion::Ask(_) => "Ask",
             Suggestion::Command { recent: true, .. } => "Recent",
             Suggestion::GoToFile | Suggestion::Symbol { .. } | Suggestion::Command { .. } => {
                 "Go to"
@@ -190,7 +188,6 @@ impl App {
             Some(about) => format!("Ask Clew about {about}"),
             None => "Ask Clew a question".to_string(),
         }));
-        out.push(Suggestion::Talk);
         let listed = |title: &str| self.palette.iter().any(|c| c.title == title);
         if self.proj.project.is_some() {
             out.push(Suggestion::GoToFile);
@@ -281,7 +278,6 @@ impl App {
         self.code_focused = true;
         match suggestion {
             Suggestion::Ask(_) => self.update(Message::Ask(AskMsg::Open)),
-            Suggestion::Talk => self.update(Message::Voice(VoiceMsg::Toggle)),
             Suggestion::GoToFile => self.on_finder_opened(FinderMode::Files),
             Suggestion::Symbol { abs, line, .. } => self.open_file(abs, Some(line), true),
             Suggestion::Command { .. } => Task::none(),

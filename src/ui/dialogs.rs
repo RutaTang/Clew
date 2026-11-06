@@ -196,24 +196,6 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         FinderMode::Symbols if !app.proj.finder.is_commands() => Glyph::Cube,
         _ => Glyph::Search,
     };
-    // Or say it: what is said runs a command, or opens what it names.
-    let talk = super::toolbar::tip_at(
-        button(
-            container(glyph::icon(Glyph::Mic, theme::fg(), 15.0))
-                .width(Fill)
-                .height(Fill)
-                .align_x(iced::Center)
-                .align_y(iced::Center),
-        )
-        .style(theme::icon_button(true))
-        .padding(0)
-        .width(Length::Fixed(30.0))
-        .height(Length::Fixed(30.0))
-        .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
-        "Talk",
-        Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
-        tooltip::Position::Bottom,
-    );
     let input = container(
         row![
             glyph::icon(glyph, theme::dim(), 16.0),
@@ -227,7 +209,6 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
                 ts::INTER,
                 ts::SUBTITLE,
             ),
-            talk,
         ]
         .spacing(11)
         .align_y(iced::Center),
@@ -463,13 +444,6 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 title.clone(),
                 None,
                 Some(enter.to_string()),
-            ),
-            Suggestion::Talk => (
-                Glyph::Mic,
-                theme::dim(),
-                "Talk instead of typing".to_string(),
-                None,
-                Some(chord(crate::keymap::Action::Voice)),
             ),
             Suggestion::GoToFile => (
                 Glyph::File,

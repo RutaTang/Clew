@@ -211,16 +211,9 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     }
     // No Save: what is changed here is kept — as it changes, or (a typed
     // field) as Settings closes.
-    header = header.push(chrome_tip(
-        button(container(glyph::icon(Glyph::Close, theme::fg_muted(), 14.0)).center(Fill))
-            .style(theme::icon_button(false))
-            .width(CLOSE_SIDE)
-            .height(CLOSE_SIDE)
-            .padding(0)
-            .on_press(Message::Settings(SettingsMsg::Close)),
-        "Close",
-        Some("Esc".to_string()),
-    ));
+    header = header.push(super::chrome::close_button(Message::Settings(
+        SettingsMsg::Close,
+    )));
 
     let nav_item = |p: SettingsPage| -> Element<'_, Message> {
         let on = p == page;
@@ -303,9 +296,6 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Backdrop::Dim(Some(Message::Settings(SettingsMsg::Close))),
     )
 }
-
-/// Side of Settings' close button.
-const CLOSE_SIDE: f32 = 28.0;
 
 /// The glyph beside a page in Settings' list.
 fn settings_glyph(page: SettingsPage) -> Glyph {
@@ -1544,10 +1534,7 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         glyph::icon(Glyph::Remote, theme::accent(), 18.0),
         text("Connect to Remote").size(ts::TITLE).color(theme::fg()),
         space().width(Fill),
-        button(text("Close").size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Connect(ConnectMsg::Close)),
+        super::chrome::close_button(Message::Connect(ConnectMsg::Close)),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -1867,10 +1854,7 @@ pub(crate) fn connect_picker<'a>(
             ConnectField::Identity
         )
         .width(Fill),
-        button(text("Browse…").size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([6, 12])
-            .on_press(Message::Connect(ConnectMsg::PickIdentity)),
+        form::action("Browse…", Some(Message::Connect(ConnectMsg::PickIdentity))),
     ]
     .spacing(6);
 
@@ -2094,12 +2078,9 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
                 .on_press(Message::Window(WindowMsg::RebindResetAll)),
         );
     }
-    header = header.push(
-        button(text("Close").size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Window(WindowMsg::CloseShortcuts)),
-    );
+    header = header.push(super::chrome::close_button(Message::Window(
+        WindowMsg::CloseShortcuts,
+    )));
 
     let panel = container(
         column![

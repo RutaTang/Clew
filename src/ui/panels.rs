@@ -1445,6 +1445,77 @@ fn agent_step_chip<'a>(
     chip.into()
 }
 
+/// The head of a tree in the sidebar (Calls, Imports, Value flow): what it
+/// is rooted at and `detail` beside it, then its controls, and under them
+/// the way it reads (`switch`) — over a hairline, with no band of its own
+/// (the sidebar is the band).
+fn tree_head<'a>(
+    root: &'a str,
+    detail: Option<String>,
+    controls: Vec<Element<'a, Message>>,
+    switch: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut head = row![
+        text(root)
+            .size(ts::BODY)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if let Some(detail) = detail {
+        head = head.push(text(detail).size(ts::CAPTION).color(theme::dim()));
+    }
+    head = head.push(space().width(Fill));
+    for control in controls {
+        head = head.push(control);
+    }
+    let head: Element<'a, Message> = match switch {
+        Some(switch) => column![head, switch].spacing(6).into(),
+        None => head.into(),
+    };
+    column![
+        container(head)
+            .padding(Padding {
+                top: 4.0,
+                right: 8.0,
+                bottom: 6.0,
+                left: 10.0,
+            })
+            .width(Fill),
+        super::panes::hairline(),
+    ]
+    .into()
+}
+
+/// Expand every node of a tree.
+fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
+    button(text("Expand all").size(ts::SMALL))
+        .style(theme::toolbar_button)
+        .padding([2, 7])
+        .on_press(msg)
+        .into()
+}
+
+/// Which way a tree reads (callers or callees, imports or importers): a
+/// small segmented control, the way it reads raised; the other switches.
+fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a, Message> {
+    container(
+        Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
+            button(text(label).size(ts::SMALL))
+                .style(theme::segment(chosen))
+                .padding([1, 7])
+                .on_press_maybe((!chosen).then_some(msg))
+                .into()
+        }))
+        .spacing(1),
+    )
+    .padding(2)
+    .style(theme::trough)
+    .into()
+}
+
 /// The FLOW tab: the traced identifier's occurrences under the role each
 /// line gives it (declared, assigned, parameter, passed to, returned,
 /// branched on, member access, read), each opening its line; a `Passed`
@@ -1454,36 +1525,22 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         return empty_state(Glyph::Search, "No value trace yet", "", None);
     };
     let pending = app.proj.flow_pending == Some(tree.token);
-    let header = container(
-        row![
-            text(format!("`{}`", tree.symbol))
-                .size(ts::BODY)
-                .color(theme::accent())
-                .wrapping(Wrapping::None),
-            text(if pending {
-                "tracing…".to_string()
-            } else {
-                format!("{} places", tree.node_count())
-            })
-            .size(ts::CAPTION)
-            .color(theme::dim()),
-            space().width(Fill),
-            button(text("clear").size(ts::SMALL))
+    let header = tree_head(
+        &tree.symbol,
+        Some(if pending {
+            "tracing…".to_string()
+        } else {
+            format!("{} places", tree.node_count())
+        }),
+        vec![
+            button(text("Clear").size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 7])
-                .on_press(Message::Flow(crate::FlowMsg::Clear)),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .padding(Padding {
-        top: 6.0,
-        right: 8.0,
-        bottom: 6.0,
-        left: 10.0,
-    })
-    .style(theme::pane_header)
-    .width(Fill);
+                .on_press(Message::Flow(crate::FlowMsg::Clear))
+                .into(),
+        ],
+        None,
+    );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if tree.stale {
@@ -1631,33 +1688,21 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         return empty_state(Glyph::CallGraph, "No call hierarchy yet", "", None);
     };
 
-    let header = container(
-        row![
-            text(&tree.root_name)
-                .size(ts::BODY)
-                .color(theme::accent())
-                .wrapping(Wrapping::None),
-            space().width(Fill),
-            button(text("⇊ all").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 7])
-                .on_press(Message::Calls(CallsMsg::ExpandAll)),
-            button(text(tree.direction.label()).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Calls(CallsMsg::Direction)),
-        ]
-        .spacing(4)
-        .align_y(iced::Center),
-    )
-    .padding(Padding {
-        top: 6.0,
-        right: 8.0,
-        bottom: 6.0,
-        left: 10.0,
-    })
-    .style(theme::pane_header)
-    .width(Fill);
+    use crate::graph::callgraph::Direction;
+    let header = tree_head(
+        &tree.root_name,
+        None,
+        vec![expand_all(Message::Calls(CallsMsg::ExpandAll))],
+        Some(direction_switch(
+            [Direction::Incoming, Direction::Outgoing].map(|d| {
+                (
+                    d.label(),
+                    tree.direction == d,
+                    Message::Calls(CallsMsg::Direction),
+                )
+            }),
+        )),
+    );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for id in tree.visible() {
@@ -1789,33 +1834,19 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         .into();
     };
 
-    let header = container(
-        row![
-            text(&tree.root_name)
-                .size(ts::BODY)
-                .color(theme::accent())
-                .wrapping(Wrapping::None),
-            space().width(Fill),
-            button(text("⇊ all").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 7])
-                .on_press(Message::Graph(GraphMsg::ImportExpandAll)),
-            button(text(tree.direction.label()).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Graph(GraphMsg::ImportDirection)),
-        ]
-        .spacing(4)
-        .align_y(iced::Center),
-    )
-    .padding(Padding {
-        top: 6.0,
-        right: 8.0,
-        bottom: 6.0,
-        left: 10.0,
-    })
-    .style(theme::pane_header)
-    .width(Fill);
+    use crate::graph::imports::Dir;
+    let header = tree_head(
+        &tree.root_name,
+        None,
+        vec![expand_all(Message::Graph(GraphMsg::ImportExpandAll))],
+        Some(direction_switch([Dir::Imports, Dir::Importers].map(|d| {
+            (
+                d.label(),
+                tree.direction == d,
+                Message::Graph(GraphMsg::ImportDirection),
+            )
+        }))),
+    );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for id in tree.visible() {
