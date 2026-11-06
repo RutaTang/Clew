@@ -535,10 +535,14 @@ fn message_at(text: &str, depth: usize) -> String {
     if let Some(said) = catalog(lang).get(text) {
         return (*said).to_string();
     }
-    use crate::miscellaneous::extern_messages::{MESSAGES, TAILS};
+    use crate::miscellaneous::extern_messages::{EXTERNAL, MESSAGES, TAILS};
     static WHOLE: OnceLock<Vec<Template>> = OnceLock::new();
     static ENDS: OnceLock<Vec<Template>> = OnceLock::new();
-    let whole = WHOLE.get_or_init(|| templates(MESSAGES));
+    let whole = WHOLE.get_or_init(|| {
+        let mut all = templates(MESSAGES);
+        all.extend(templates(EXTERNAL));
+        all
+    });
     if let Some(said) = said_as(whole, text, depth) {
         return said;
     }
@@ -551,6 +555,24 @@ fn message_at(text: &str, depth: usize) -> String {
             return message_at(&text[..at], depth + 1) + &tail;
         }
         from = at + " — ".len();
+    }
+    // Lines another program wrote, joined with "; " (git's last lines of
+    // stderr): each said apart, when any of them is one clew knows.
+    if text.contains("; ") {
+        let pieces: Vec<&str> = text.split("; ").collect();
+        let said: Vec<String> = pieces.iter().map(|p| message_at(p, depth + 1)).collect();
+        if said.iter().zip(&pieces).any(|(s, p)| s != p) {
+            return said
+                .into_iter()
+                .reduce(|earlier, later| {
+                    crate::tr!(
+                        "lines joined\u{4}{earlier}; {later}",
+                        earlier = earlier,
+                        later = later
+                    )
+                })
+                .unwrap_or_default();
+        }
     }
     text.to_string()
 }
@@ -1108,11 +1130,47 @@ mod tests {
         });
     }
 
+    /// What git says reaches the reader in their language where clew knows
+    /// it: inside clew's own message, and line by line where git wrote
+    /// several (joined with "; "); a line clew does not know stays as git
+    /// wrote it.
+    #[test]
+    fn gits_own_words_are_translated() {
+        with_lang(Lang::Fr, || {
+            let fr = catalog(Lang::Fr);
+            let bad = format(fr["fatal: bad revision '{arg1}'"], &[("arg1", &"abc")]);
+            assert_ne!(bad, "fatal: bad revision 'abc'");
+            assert_eq!(
+                message("git failed: fatal: bad revision 'abc'"),
+                format(fr["git failed: {stderr}"], &[("stderr", &bad)])
+            );
+            let hint = "hint: use 'git switch' to change branches";
+            assert_eq!(
+                message(&format!("fatal: bad revision 'abc'; {hint}")),
+                format(
+                    fr["lines joined\u{4}{earlier}; {later}"],
+                    &[("earlier", &bad), ("later", &hint)]
+                )
+            );
+            let unknown = "warning: one thing; warning: another";
+            assert_eq!(message(unknown), unknown);
+            let os = format(
+                fr["No such file or directory (os error {arg1})"],
+                &[("arg1", &2)],
+            );
+            assert_eq!(
+                message("cannot be read: No such file or directory (os error 2)"),
+                format(fr["cannot be read: {e}"], &[("e", &os)])
+            );
+        });
+    }
+
     /// What clew-core, clew-server and clew-voice write that may reach the
     /// screen is listed in `extern_messages`, word for word, so the
     /// catalogs carry it — found as the list was made: the literal of each
-    /// `format!`, `Err(..)` and `msg =` outside tests and logging that
-    /// reads as a sentence.
+    /// `format!`, `Err(..)`, `msg =` and `Display` (`write!(f, ..)`,
+    /// `f.write_str(..)`) outside tests and logging that reads as a
+    /// sentence, or says in two words what failed before a colon and why.
     #[test]
     fn other_crates_messages_are_listed() {
         let listed: BTreeSet<&str> = crate::miscellaneous::extern_messages::MESSAGES
@@ -1140,24 +1198,42 @@ mod tests {
             for path in files {
                 let text = std::fs::read_to_string(&path).unwrap();
                 let text = text.split("#[cfg(test)]\nmod tests").next().unwrap();
-                for opener in ["format!(", "Err(", "msg ="] {
+                // A `Display` says its message with `write!(f, ..)` and
+                // `f.write_str(..)`.
+                for opener in ["format!(", "Err(", "msg =", "write!(", "f.write_str("] {
                     for (at, _) in text.match_indices(opener) {
-                        let after = text[at + opener.len()..].trim_start();
+                        let mut after = text[at + opener.len()..].trim_start();
+                        // `write!(f, ..)`, the formatter on any line.
+                        if opener == "write!(" {
+                            let Some(rest) = after.strip_prefix('f') else {
+                                continue;
+                            };
+                            let Some(rest) = rest.trim_start().strip_prefix(',') else {
+                                continue;
+                            };
+                            after = rest.trim_start();
+                        }
                         let Some(open) = after.strip_prefix('"') else {
                             continue;
                         };
-                        let mut from = at.saturating_sub(60);
+                        // What this statement says before the literal: back to
+                        // the end of the one before it (or a match arm's).
+                        let mut from = at.saturating_sub(200);
                         while !text.is_char_boundary(from) {
                             from -= 1;
                         }
                         let before = &text[from..at];
+                        let before = before
+                            .rfind([';', '{', '}', ','])
+                            .map_or(before, |end| &before[end + 1..]);
                         if LOGGING.iter().any(|l| before.contains(l)) {
                             continue;
                         }
                         let Some((said, tail)) = literal(open) else {
                             continue;
                         };
-                        if opener != "format!(" {
+                        let formats = opener == "format!(" || opener == "write!(";
+                        if !formats {
                             let tail = tail.trim_start();
                             if !(tail.starts_with(".into()")
                                 || tail.starts_with(".to_string()")
@@ -1169,8 +1245,22 @@ mod tests {
                         }
                         // Braces in a plain literal are its own (JSON, code),
                         // not places: not a message to a person.
-                        let plain_braces = opener != "format!(" && said.contains(['{', '}']);
-                        if reads_as_a_sentence(&said) && !plain_braces {
+                        let plain_braces = !formats && said.contains(['{', '}']);
+                        // Two words are enough for a formatted message
+                        // that says what failed and then why ("git failed:
+                        // {stderr}").
+                        let short_with_why = formats && {
+                            let words: Vec<&str> = said.split_whitespace().collect();
+                            let plain = |w: &str| {
+                                !w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic())
+                            };
+                            words.len() == 3
+                                && plain(words[0])
+                                && words[1].strip_suffix(':').is_some_and(plain)
+                                && words[2].starts_with('{')
+                                && words[2].find('}') == Some(words[2].len() - 1)
+                        };
+                        if (reads_as_a_sentence(&said) || short_with_why) && !plain_braces {
                             written.insert(as_template(&said));
                         }
                     }
