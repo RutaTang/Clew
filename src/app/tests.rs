@@ -8150,6 +8150,23 @@ fn a_jump_onto_a_type_is_named_in_the_trail() {
     assert!(labels.contains(&Some("origin".into())), "{labels:?}");
 }
 
+/// Enter in the Files view's filter opens the first file it lists, as a
+/// click on that row does; with nothing listed, nothing opens.
+#[test]
+fn enter_in_the_file_filter_opens_its_first_file() {
+    let mut app = scanned_app("filter-enter");
+    app.file_filter = " NOTES ".into();
+    let sent = run_task(app.update(Message::Window(WindowMsg::FileFilterSubmitted)));
+    assert!(
+        matches!(sent.as_slice(), [Message::Editor(EditorMsg::OpenRel { rel, line: None })]
+            if rel == "notes.txt"),
+        "{sent:?}"
+    );
+    app.file_filter = "nothing-like-this".into();
+    let sent = run_task(app.update(Message::Window(WindowMsg::FileFilterSubmitted)));
+    assert!(sent.is_empty(), "{sent:?}");
+}
+
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.
 fn tour_json(scope: &str) -> String {
     format!(

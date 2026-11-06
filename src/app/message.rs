@@ -1953,6 +1953,8 @@ pub enum WindowMsg {
     ToggleViewMenu,
     /// The Files view's filter changed.
     FileFilterChanged(String),
+    /// Enter in the Files view's filter: open the first file it lists.
+    FileFilterSubmitted,
     /// Maximize the window, or make it a window again (Windows and Linux).
     ToggleMaximize,
     /// The reading panel's view picked.
@@ -2719,6 +2721,7 @@ impl WindowMsg {
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
             | WindowMsg::FileFilterChanged(..)
+            | WindowMsg::FileFilterSubmitted
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::MaximizedIs(..)

@@ -651,6 +651,21 @@ impl App {
                 self.file_filter = filter;
                 Task::none()
             }
+            // Enter opens what the filter found first, as a click on its row
+            // would: typing a file's name and pressing Enter did nothing.
+            WindowMsg::FileFilterSubmitted => {
+                let first = self.proj.project.as_ref().and_then(|p| {
+                    crate::ui::filtered_files(p, &self.file_filter)
+                        .next()
+                        .map(|f| f.rel.clone())
+                });
+                match first {
+                    Some(rel) => {
+                        Task::done(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
+                    }
+                    None => Task::none(),
+                }
+            }
             // Asked first, then set: what the button shows next is what was
             // asked for, not a read that may race the change.
             WindowMsg::ToggleMaximize => match self.main_window {

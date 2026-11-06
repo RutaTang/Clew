@@ -152,6 +152,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                         ts::field_in(
                             text_input(tr!("Filter files"), &app.file_filter)
                                 .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
+                                .on_submit(Message::Window(WindowMsg::FileFilterSubmitted))
                                 .style(theme::bare_input),
                             FILTER_H - 2.0,
                             ts::INTER,
@@ -661,6 +662,21 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
 /// most of a large project, and the list is for picking, not browsing.
 const FILTER_LIMIT: usize = 400;
 
+/// The files the Files view's filter lists, in its order: every file whose
+/// path holds the filter (any case, its ends trimmed), at most
+/// [`FILTER_LIMIT`]. Enter in the filter opens the first.
+pub(crate) fn filtered_files<'a>(
+    project: &'a crate::Project,
+    filter: &str,
+) -> impl Iterator<Item = &'a crate::fs_scan::FileEntry> {
+    let needle = filter.trim().to_lowercase();
+    project
+        .files
+        .iter()
+        .filter(move |f| !needle.is_empty() && f.rel.to_lowercase().contains(&needle))
+        .take(FILTER_LIMIT)
+}
+
 /// The Files view narrowed by its filter: every file whose path holds it
 /// (any case), as its name with its folder beside it.
 fn filtered_file_rows<'a>(
@@ -669,13 +685,7 @@ fn filtered_file_rows<'a>(
     filter: &str,
     app: &'a App,
 ) {
-    let needle = filter.to_lowercase();
-    for f in project
-        .files
-        .iter()
-        .filter(|f| f.rel.to_lowercase().contains(&needle))
-        .take(FILTER_LIMIT)
-    {
+    for f in filtered_files(project, filter) {
         let (folder, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
         let is_current = app.active_viewer().is_some_and(|v| v.rel == f.rel);
         rows.push(
