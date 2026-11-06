@@ -123,7 +123,6 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
 pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
     let chord = app.keymap.chord(crate::keymap::Action::Voice).caps();
     let mut col = column![
-        text("Voice").size(ts::BODY).color(theme::accent()),
         text(format!(
             "Press {chord} (or the microphone on Ask) and say a command — “open the call \
              graph”, “hide the minimap” — or ask a question. Speech is turned into text on \

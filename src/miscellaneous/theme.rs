@@ -1269,6 +1269,25 @@ pub fn modal_panel(_theme: &Theme) -> container::Style {
     }
 }
 
+/// The list of Settings' pages, down the modal's left: the chrome's fill,
+/// rounded only on the modal's own left corners so it never shows past them.
+pub fn settings_nav(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(bg_panel().into()),
+        border: Border {
+            radius: iced::border::Radius {
+                top_left: MENU_RADIUS,
+                bottom_left: MENU_RADIUS,
+                top_right: 0.0,
+                bottom_right: 0.0,
+            },
+            ..Border::default()
+        },
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
 /// [`modal_panel`] with the corners of `radius`: the design rounds its
 /// command bar 12, its ⋯ menu 11.
 pub fn modal_panel_rounded(radius: f32) -> impl Fn(&Theme) -> container::Style {

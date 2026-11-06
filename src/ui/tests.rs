@@ -1143,8 +1143,9 @@ fn the_call_trees_stale_banner_keeps_the_trees_scroll() {
 }
 
 /// A16 / E2-7: at the smallest window the app allows, the Settings modal
-/// still fits — its form is a scrollable bounded by the window, taller in
-/// content than on screen, and the wheel reaches the rest of it.
+/// still fits — a page is a scrollable bounded by the window, taller in
+/// content than on screen when it is a long one (Voice), and the wheel
+/// reaches the rest of it.
 #[test]
 fn the_settings_modal_fits_the_smallest_window_and_scrolls() {
     let min = crate::window_settings()
@@ -1153,7 +1154,9 @@ fn the_settings_modal_fits_the_smallest_window_and_scrolls() {
     let mut app = reader_app();
     app.window_width = min.width;
     app.window_height = min.height;
-    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Voice,
+    )));
     let mut renderer = renderer();
     let over_form = mouse::Cursor::Available(Point::new(min.width / 2.0, min.height / 2.0));
     let form = |cache: Cache, renderer: &mut iced::Renderer, events: &[Event]| {
@@ -1168,11 +1171,11 @@ fn the_settings_modal_fits_the_smallest_window_and_scrolls() {
         );
         let mut all = AllScrolls(Vec::new());
         ui.operate(renderer, &mut all);
-        // The form: the scrollable inside the (narrower) modal panel.
-        let form = all
-            .0
-            .into_iter()
-            .find(|(b, _, _)| b.width <= super::SETTINGS_W + 1.0 && b.x > 0.0);
+        // The page: the topmost scrollable under the pointer (the modal is
+        // drawn over the window, so it comes last).
+        let form = all.0.into_iter().rev().find(|(b, _, _)| {
+            b.contains(Point::new(min.width / 2.0, min.height / 2.0)) && b.x > 0.0
+        });
         (ui.into_cache(), form)
     };
     let (cache, found) = form(Cache::default(), &mut renderer, &redraw());
@@ -1194,6 +1197,47 @@ fn the_settings_modal_fits_the_smallest_window_and_scrolls() {
         offset.y > 0.0,
         "the wheel did not reach the rest of the form"
     );
+}
+
+/// Settings shows one feature's page at a time: its list names every page,
+/// a click on one shows that page alone, and a flow that needs a page (voice
+/// without a model) opens Settings on it.
+#[test]
+fn settings_shows_one_page_at_a_time() {
+    use crate::SettingsPage;
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    {
+        let mut sim = sim_of(&app);
+        for page in SettingsPage::ALL {
+            assert!(
+                shows(&mut sim, page.title()),
+                "the list misses {}",
+                page.title()
+            );
+        }
+        assert!(shows(&mut sim, "Light theme"));
+        assert!(!shows(&mut sim, "Base URL"), "two pages at once");
+    }
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Page(
+        SettingsPage::LanguageModel,
+    )));
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Base URL"));
+        assert!(!shows(&mut sim, "Light theme"));
+    }
+    // Closed and opened again, it is where it was.
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    assert_eq!(app.settings.page, SettingsPage::LanguageModel);
+    // Shortcuts are a page too, with the fixed reading motions on it.
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Page(
+        SettingsPage::Shortcuts,
+    )));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Click a shortcut, then press the new keys"));
+    assert!(shows(&mut sim, "Commands"));
 }
 
 /// A16 / E2-6: Enter in a field of the Settings or Connect form submits it,
@@ -1220,7 +1264,9 @@ fn enter_in_a_form_field_submits_it() {
         sent_by(sim).into_iter().collect()
     };
     let mut app = reader_app();
-    let _ = app.update(Message::Settings(crate::SettingsMsg::Open));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::LanguageModel,
+    )));
     app.settings.model = "model-under-test".into();
     let sent = enter_in(&app, "model-under-test");
     assert!(

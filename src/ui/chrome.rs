@@ -28,7 +28,9 @@ pub(crate) const FINDER_TOP: f32 = 88.0;
 
 /// Dialog widths, narrowest first.
 pub(crate) const PROMPT_W: f32 = 460.0;
-pub(crate) const SETTINGS_W: f32 = 480.0;
+/// Settings: its list of pages and the page beside it.
+pub(crate) const SETTINGS_W: f32 = 860.0;
+pub(crate) const SETTINGS_NAV_W: f32 = 212.0;
 pub(crate) const WHY_W: f32 = 480.0;
 pub(crate) const SHORTCUTS_W: f32 = 540.0;
 pub(crate) const DIALOG_W: f32 = 560.0;
@@ -45,6 +47,7 @@ pub(crate) const TUTORIAL_CARD_W: f32 = 440.0;
 pub(crate) const WHY_MAX_H: f32 = 440.0;
 pub(crate) const FINDER_MAX_H: f32 = 520.0;
 pub(crate) const SHORTCUTS_MAX_H: f32 = 600.0;
+pub(crate) const SETTINGS_MAX_H: f32 = 640.0;
 pub(crate) const SERVER_PANEL_MAX_H: f32 = 600.0;
 pub(crate) const DIALOG_MAX_H: f32 = 620.0;
 pub(crate) const GRAPH_MODAL_MAX_H: f32 = 640.0;

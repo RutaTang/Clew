@@ -3,6 +3,7 @@
 use super::*;
 // Explicit macro imports shadow the glob from `super`, disambiguating
 // iced's column!/row! from the prelude macros of the same name.
+use crate::SettingsPage;
 use iced::widget::{column, row};
 
 pub(crate) fn explain_child_label(node: &crate::explain::Node) -> String {
@@ -106,8 +107,6 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         |v| Message::Settings(SettingsMsg::EmbedBaseUrlChanged(v)),
     );
 
-    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
-
     // A small segmented control: System / Light / Dark, active one filled.
     let theme_btn = |p: crate::theme::ThemePref| -> Element<'_, Message> {
         let active = app.theme_pref == p;
@@ -156,83 +155,183 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .into();
 
-    let header = row![
-        text("Settings").size(ts::TITLE).color(theme::fg()),
+    let page = app.settings.page;
+    let stored = || {
+        text(format!("Stored in {}", crate::llm::config_hint()))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+    };
+    let caption = |s: &str| text(s.to_string()).size(ts::CAPTION).color(theme::dim());
+    let body: Element<'_, Message> = match page {
+        SettingsPage::Appearance => column![
+            column![label("Mode"), appearance].spacing(3),
+            field("Light theme", light_pick),
+            field("Dark theme", dark_pick),
+            caption("A change shows at once; Save keeps it, Close goes back."),
+        ]
+        .spacing(14)
+        .into(),
+        SettingsPage::Updates => column![
+            iced::widget::checkbox(app.update.auto_check)
+                .label("Check for updates automatically")
+                .on_toggle(|v| Message::Updater(UpdaterMsg::SetAuto(v)))
+                .text_size(ts::BODY)
+                .size(16)
+                .spacing(8),
+            caption(&format!(
+                "You have clew {}",
+                crate::updater::current_version()
+            )),
+        ]
+        .spacing(10)
+        .into(),
+        SettingsPage::LanguageModel => column![
+            caption("The model Explain, Ask and the overview use."),
+            field("Provider", provider),
+            field("API key", key.into()),
+            field("Model", model.into()),
+            field("Base URL", base.into()),
+            stored(),
+        ]
+        .spacing(14)
+        .into(),
+        SettingsPage::Embeddings => column![
+            caption(
+                "Semantic search, and the code Ask finds by meaning: any OpenAI-compatible \
+                 /embeddings endpoint. DeepSeek has none; OpenAI's is the default."
+            ),
+            field("API key", embed_key.into()),
+            field("Model", embed_model.into()),
+            field("Base URL", embed_base.into()),
+            stored(),
+        ]
+        .spacing(14)
+        .into(),
+        SettingsPage::Voice => voice_section(app),
+        SettingsPage::Integrations => integrations_section(app),
+        SettingsPage::Languages if app.proj.project.is_none() => {
+            caption("Open a project to set up its languages.").into()
+        }
+        SettingsPage::Languages => languages_section(app),
+        SettingsPage::Shortcuts => shortcuts_body(app),
+    };
+
+    let mut header = row![
+        text(page.title()).size(ts::TITLE).color(theme::fg()),
         space().width(Fill),
-        button(text("Save").size(ts::BODY))
-            .style(theme::primary_button)
-            .padding([3, 14])
-            .on_press(Message::Settings(SettingsMsg::Saved)),
-        button(text("Close").size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Settings(SettingsMsg::Close)),
     ]
     .spacing(6)
     .align_y(iced::Center);
+    if page == SettingsPage::Shortcuts && app.keymap.any_overridden() {
+        header = header.push(
+            button(text("Reset all").size(ts::BODY))
+                .style(theme::toolbar_button)
+                .padding([3, 12])
+                .on_press(Message::Window(WindowMsg::RebindResetAll)),
+        );
+    }
+    header = header
+        .push(
+            button(text("Save").size(ts::BODY))
+                .style(theme::primary_button)
+                .padding([3, 14])
+                .on_press(Message::Settings(SettingsMsg::Saved)),
+        )
+        .push(
+            button(text("Close").size(ts::BODY))
+                .style(theme::toolbar_button)
+                .padding([3, 12])
+                .on_press(Message::Settings(SettingsMsg::Close)),
+        );
 
-    let form = column![
-        section("Appearance"),
-        appearance,
-        field("Light theme", light_pick),
-        field("Dark theme", dark_pick),
-        section("Updates"),
-        iced::widget::checkbox(app.update.auto_check)
-            .label("Check for updates automatically")
-            .on_toggle(|v| Message::Updater(UpdaterMsg::SetAuto(v)))
-            .text_size(ts::BODY)
-            .size(16)
-            .spacing(8),
-        text(format!(
-            "You have clew {}",
-            crate::updater::current_version()
-        ))
-        .size(ts::CAPTION)
-        .color(theme::dim()),
-        section("Language model"),
-        field("Provider", provider),
-        field("API key", key.into()),
-        field("Model", model.into()),
-        field("Base URL", base.into()),
-        section("Embeddings (semantic search)"),
-        field("API key", embed_key.into()),
-        field("Model", embed_model.into()),
-        field("Base URL", embed_base.into()),
-        text(format!("Stored in {}", crate::llm::config_hint()))
-            .size(ts::CAPTION)
-            .color(theme::dim()),
-        voice_section(app),
-        integrations_section(app),
-        languages_section(app),
-    ]
-    .spacing(12)
-    // Room for the scrollbar, so it never draws over a field's edge.
-    .padding(Padding {
-        right: SCROLLBAR_W + 6.0,
-        ..Padding::ZERO
-    });
-
-    let panel = container(
-        column![
-            header,
-            // Shrink: as tall as the form while it fits the window, then it
-            // scrolls — the panel itself is bounded by the modal's margins.
-            scrollable(form)
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(Length::Shrink),
-        ]
-        .spacing(12),
+    let nav_item = |p: SettingsPage| -> Element<'_, Message> {
+        let on = p == page;
+        button(
+            row![
+                glyph::icon(
+                    settings_glyph(p),
+                    if on {
+                        theme::accent()
+                    } else {
+                        theme::fg_muted()
+                    },
+                    15.0
+                ),
+                text(p.title()).size(ts::BASE),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        )
+        .style(theme::list_row(on))
+        .padding([7, 10])
+        .width(Fill)
+        .on_press(Message::Settings(SettingsMsg::Page(p)))
+        .into()
+    };
+    let nav = container(
+        iced::widget::Column::with_children(
+            std::iter::once(
+                container(text("Settings").size(ts::TITLE).color(theme::fg()))
+                    .padding([2, 10])
+                    .into(),
+            )
+            .chain(std::iter::once(space().height(10).into()))
+            .chain(SettingsPage::ALL.into_iter().map(nav_item)),
+        )
+        .spacing(2),
     )
-    .width(SETTINGS_W)
-    .padding(MODAL_PAD)
-    .style(theme::modal_panel);
+    .width(SETTINGS_NAV_W)
+    .height(Fill)
+    .padding([16, 10])
+    .style(theme::settings_nav);
+
+    let page_col = column![
+        container(header).padding(Padding {
+            top: 14.0,
+            right: 14.0,
+            bottom: 12.0,
+            left: 24.0,
+        }),
+        hairline(),
+        scrollable(container(body).width(Fill).padding(Padding {
+            top: 16.0,
+            right: 24.0 + SCROLLBAR_W,
+            bottom: 20.0,
+            left: 24.0,
+        }))
+        .direction(thin_scroll())
+        .style(theme::overlay_scrollbar)
+        .height(Fill),
+    ]
+    .width(Fill)
+    .height(Fill);
+
+    let panel = container(row![nav, page_col].height(Fill))
+        .width(Fill)
+        .max_width(SETTINGS_W)
+        .height(Fill)
+        .max_height(SETTINGS_MAX_H)
+        .style(theme::modal_panel);
 
     modal(
         panel,
         Placement::Center,
         Backdrop::Dim(Some(Message::Settings(SettingsMsg::Close))),
     )
+}
+
+/// The glyph beside a page in Settings' list.
+fn settings_glyph(page: SettingsPage) -> Glyph {
+    match page {
+        SettingsPage::Appearance => Glyph::Sun,
+        SettingsPage::Updates => Glyph::Refresh,
+        SettingsPage::LanguageModel => Glyph::Sparkle,
+        SettingsPage::Embeddings => Glyph::FindMeaning,
+        SettingsPage::Voice => Glyph::Mic,
+        SettingsPage::Integrations => Glyph::Plug,
+        SettingsPage::Languages => Glyph::Braces,
+        SettingsPage::Shortcuts => Glyph::Shortcuts,
+    }
 }
 
 /// A copy of `choices` changed by `change`, chosen.
@@ -2168,9 +2267,6 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
 /// The "Keyboard Shortcuts" modal: rebindable command chords on top, the fixed
 /// Vim-style reading motions below as a read-only reference.
 pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
-    use crate::keymap::Action;
-    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
-
     // Header: title, optional "Reset all", Close.
     let mut header = row![
         text("Keyboard Shortcuts")
@@ -2195,6 +2291,42 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             .on_press(Message::Window(WindowMsg::CloseShortcuts)),
     );
 
+    let panel = container(
+        column![
+            header,
+            scrollable(container(shortcuts_body(app)).padding(Padding {
+                top: 0.0,
+                right: 8.0,
+                bottom: 0.0,
+                left: 0.0,
+            }))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            // Fill what the panel leaves (at most its max height, less in a
+            // short window) instead of a fixed height that a short window
+            // clipped.
+            .height(Fill),
+        ]
+        .spacing(12),
+    )
+    .width(SHORTCUTS_W)
+    .max_height(SHORTCUTS_MAX_H)
+    .padding(MODAL_PAD)
+    .style(theme::modal_panel);
+
+    modal(
+        panel,
+        Placement::Center,
+        Backdrop::Dim(Some(Message::Window(WindowMsg::CloseShortcuts))),
+    )
+}
+
+/// The keyboard shortcuts — the ones a click rebinds, and the reading
+/// motions, which are fixed — as their modal and Settings' page show them.
+pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
+    use crate::keymap::Action;
+    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
+
     // A one-line hint, replaced by a warning when a rebind is rejected.
     let notice: Element<'_, Message> = match &app.keymap_notice {
         Some(msg) => text(msg.clone())
@@ -2206,7 +2338,6 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into(),
     };
-
     // Rebindable command rows.
     let mut cmds = Column::new().spacing(2);
     for action in Action::ALL {
@@ -2289,48 +2420,18 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
         );
     }
 
-    let scroll_body = scrollable(
-        column![
-            section("Commands"),
-            cmds,
-            space().height(8),
-            section("Reading motions (Vim, fixed)"),
-            vim,
-        ]
-        .spacing(8)
-        .width(Fill)
-        .padding(Padding {
-            top: 0.0,
-            right: 8.0,
-            bottom: 0.0,
-            left: 0.0,
-        }),
-    )
-    .direction(thin_scroll())
-    .style(theme::overlay_scrollbar)
-    // Fill what the panel leaves (at most its max height, less in a short
-    // window) instead of a fixed height that a short window clipped.
-    .height(Fill);
-
-    let panel = container(
-        column![
-            header,
-            notice,
-            scroll_body,
-            text(format!("Saved to {}", crate::llm::config_hint()))
-                .size(ts::CAPTION)
-                .color(theme::dim()),
-        ]
-        .spacing(12),
-    )
-    .width(SHORTCUTS_W)
-    .max_height(SHORTCUTS_MAX_H)
-    .padding(MODAL_PAD)
-    .style(theme::modal_panel);
-
-    modal(
-        panel,
-        Placement::Center,
-        Backdrop::Dim(Some(Message::Window(WindowMsg::CloseShortcuts))),
-    )
+    column![
+        notice,
+        section("Commands"),
+        cmds,
+        space().height(8),
+        section("Reading motions (Vim, fixed)"),
+        vim,
+        text(format!("Saved to {}", crate::llm::config_hint()))
+            .size(ts::CAPTION)
+            .color(theme::dim()),
+    ]
+    .spacing(8)
+    .width(Fill)
+    .into()
 }

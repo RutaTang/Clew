@@ -771,6 +771,49 @@ pub struct SettingsDraft {
     pub ai_snapshot: (llm::Config, embed::Config),
     /// The MCP servers and ACP agents section of the modal.
     pub integrations: crate::app::integrations::IntegrationsDraft,
+    /// The page Settings shows: one feature's settings at a time.
+    pub page: SettingsPage,
+}
+
+/// The pages of Settings, one for each feature, in the order its list shows
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsPage {
+    #[default]
+    Appearance,
+    Updates,
+    LanguageModel,
+    Embeddings,
+    Voice,
+    Integrations,
+    Languages,
+    Shortcuts,
+}
+
+impl SettingsPage {
+    pub const ALL: [SettingsPage; 8] = [
+        SettingsPage::Appearance,
+        SettingsPage::Updates,
+        SettingsPage::LanguageModel,
+        SettingsPage::Embeddings,
+        SettingsPage::Voice,
+        SettingsPage::Integrations,
+        SettingsPage::Languages,
+        SettingsPage::Shortcuts,
+    ];
+
+    pub fn title(self) -> &'static str {
+        match self {
+            SettingsPage::Appearance => "Appearance",
+            SettingsPage::Updates => "Updates",
+            SettingsPage::LanguageModel => "Language model",
+            SettingsPage::Embeddings => "Embeddings",
+            SettingsPage::Voice => "Voice",
+            SettingsPage::Integrations => "Integrations",
+            SettingsPage::Languages => "Languages",
+            SettingsPage::Shortcuts => "Keyboard shortcuts",
+        }
+    }
 }
 
 impl Default for SettingsDraft {
@@ -799,6 +842,7 @@ impl Default for SettingsDraft {
                 embed::Config::from_parts(String::new(), String::new(), String::new()),
             ),
             integrations: Default::default(),
+            page: SettingsPage::Appearance,
         }
     }
 }

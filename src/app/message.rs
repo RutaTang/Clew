@@ -1776,9 +1776,13 @@ pub enum SettingsMsg {
     EmbedKeyChanged(String),
     EmbedModelChanged(String),
     EmbedBaseUrlChanged(String),
-    /// Open / close the LLM settings modal.
+    /// Open / close the Settings modal: `Open` on the page it last showed,
+    /// `OpenAt` on the one a flow needs (Voice, for a model to download).
     Open,
+    OpenAt(SettingsPage),
     Close,
+    /// Show one of Settings' pages.
+    Page(SettingsPage),
     /// LLM settings draft edits.
     ProviderPicked(llm::Provider),
     KeyChanged(String),
@@ -2574,7 +2578,9 @@ impl SettingsMsg {
             | SettingsMsg::EmbedModelChanged(..)
             | SettingsMsg::EmbedBaseUrlChanged(..)
             | SettingsMsg::Open
+            | SettingsMsg::OpenAt(..)
             | SettingsMsg::Close
+            | SettingsMsg::Page(..)
             | SettingsMsg::ProviderPicked(..)
             | SettingsMsg::KeyChanged(..)
             | SettingsMsg::ModelChanged(..)

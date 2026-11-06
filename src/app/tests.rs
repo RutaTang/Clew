@@ -18875,7 +18875,12 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(out.as_slice(), [Message::Settings(SettingsMsg::Open)]),
+            matches!(
+                out.as_slice(),
+                [Message::Settings(SettingsMsg::OpenAt(
+                    SettingsPage::LanguageModel
+                ))]
+            ),
             "{what} did not offer Settings: {out:?}"
         );
     }
@@ -18950,7 +18955,12 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(out.as_slice(), [Message::Settings(SettingsMsg::Open)]),
+            matches!(
+                out.as_slice(),
+                [Message::Settings(SettingsMsg::OpenAt(
+                    SettingsPage::LanguageModel
+                ))]
+            ),
             "{what} did not offer Settings: {out:?}"
         );
         if what.contains("Ask") {

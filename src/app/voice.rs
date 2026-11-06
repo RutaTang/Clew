@@ -593,7 +593,7 @@ impl App {
                  Settings → Voice",
                 model.name, model.size_mb
             );
-            return self.update(Message::Settings(SettingsMsg::Open));
+            return self.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
         }
         match (self.voice.open_mic)(MAX_SECONDS) {
             Ok(listening) => {

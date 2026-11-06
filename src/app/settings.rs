@@ -33,7 +33,9 @@ impl App {
             Some(cfg) => Ok(cfg),
             None => {
                 self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                Err(Task::done(Message::Settings(SettingsMsg::Open)))
+                Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
+                    SettingsPage::LanguageModel,
+                ))))
             }
         }
     }
@@ -313,10 +315,23 @@ impl App {
                 Task::none()
             }
             SettingsMsg::Open => self.on_open_settings(),
+            SettingsMsg::OpenAt(page) => {
+                self.settings.page = page;
+                self.on_open_settings()
+            }
+            SettingsMsg::Page(page) => {
+                self.settings.page = page;
+                // A shortcut half rebound stays with the page it was on.
+                self.rebinding = None;
+                self.keymap_notice = None;
+                Task::none()
+            }
             SettingsMsg::Close => {
                 // Closing without Save discards any previewed theme change.
                 self.restore_theme_snapshot();
                 self.settings.open = false;
+                self.rebinding = None;
+                self.keymap_notice = None;
                 // A model's failed download is said under it, in here; once
                 // Settings is closed it has been read, and it goes.
                 self.voice.download_errors.clear();
