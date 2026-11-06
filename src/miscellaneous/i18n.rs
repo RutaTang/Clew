@@ -488,6 +488,14 @@ fn fill<'t>(parts: &[Part], text: &'t str, filled: &mut Vec<(&'static str, &'t s
     }
 }
 
+/// A template a message fits: its text, what fills each place, and how
+/// many bytes of it are words.
+type Fit<'t> = (&'static str, Vec<(&'static str, &'t str)>, usize);
+
+/// A message template: its text, its parts, and how many bytes of it are
+/// words (what a match is ranked by).
+type Template = (&'static str, Vec<Part>, usize);
+
 /// A message clew-core, clew-server or clew-voice wrote in English (see
 /// `extern_messages`), in the reader's language: the template it was
 /// written from found, and its translation filled with what the message
@@ -527,7 +535,7 @@ fn message_at(text: &str, depth: usize) -> String {
     if let Some(said) = catalog(lang).get(text) {
         return (*said).to_string();
     }
-    static TEMPLATES: OnceLock<Vec<(&'static str, Vec<Part>, usize)>> = OnceLock::new();
+    static TEMPLATES: OnceLock<Vec<Template>> = OnceLock::new();
     let templates = TEMPLATES.get_or_init(|| {
         crate::miscellaneous::extern_messages::MESSAGES
             .iter()
@@ -546,7 +554,7 @@ fn message_at(text: &str, depth: usize) -> String {
             .collect()
     });
     // Of the templates it fits, the one that says the most in words.
-    let mut best: Option<(&'static str, Vec<(&'static str, &str)>, usize)> = None;
+    let mut best: Option<Fit<'_>> = None;
     for (template, parts, words) in templates {
         if best.as_ref().is_some_and(|(_, _, w)| w >= words) {
             continue;
