@@ -454,6 +454,7 @@
  "Disconnect and read local code": "切断してローカルのコードを読む",
  "Disconnected from the remote host — cannot open {file}": "リモートホストから切断されているため、{file} を開けません",
  "Disconnected from the remote host — search will work again once reconnected": "リモートホストから切断されました。再接続すると検索できるようになります",
+ "Docs for “{name}”": "「{name}」のドキュメント",
  "Don't Check": "確認しない",
  "Don't allow": "許可しない",
  "Don't run": "実行しない",

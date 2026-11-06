@@ -7371,6 +7371,47 @@ fn a_margin_note_sits_level_with_its_function() {
     );
 }
 
+/// The raised note keeps clear of the Ask pill floating over the margin's
+/// foot: low in the view, its references, date and Ask went under the pill.
+#[test]
+fn the_raised_note_keeps_clear_of_the_ask_pill() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    assert_eq!(app.ask_view, crate::AskView::Hidden, "the pill shows");
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    app.proj.explain.view = Some(crate::explain::Node::Function {
+        file: abs,
+        name: "origin".into(),
+        ordinal: 0,
+    });
+    let mut seen_low = false;
+    for line in (4..60).step_by(2) {
+        app.proj.panes[0].as_mut().unwrap().symbols = vec![crate::outline::Symbol {
+            name: "origin".into(),
+            kind: "function".into(),
+            line,
+            end_line: line + 2,
+        }];
+        let mut sim = sim_of(&app);
+        let asks: Vec<iced::Rectangle> = (0..3)
+            .filter_map(|n| text_at(&mut sim, |t| t == "Ask", n))
+            .collect();
+        if asks.len() < 2 {
+            continue; // the note is out of view
+        }
+        let (note, pill) = (asks[0], asks[1]);
+        seen_low |= note.y > app.window_height * 0.6;
+        // The pill's box, around its label: the height it is drawn at.
+        let pill_h = crate::ui::askfloat::PILL_H;
+        let pill_top = pill.center_y() - pill_h / 2.0;
+        assert!(
+            note.y + note.height <= pill_top,
+            "line {line}: the note's Ask {note:?} is under the pill from {pill_top}"
+        );
+    }
+    assert!(seen_low, "the note was never brought low in the view");
+}
+
 /// A commit's day reads as a reader says it: the month and day, and the
 /// year when it is not this one.
 #[test]

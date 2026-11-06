@@ -454,6 +454,7 @@
  "Disconnect and read local code": "연결을 끊고 로컬 코드 읽기",
  "Disconnected from the remote host — cannot open {file}": "원격 호스트와 연결이 끊겼습니다 — {file} 파일을 열 수 없습니다",
  "Disconnected from the remote host — search will work again once reconnected": "원격 호스트와 연결이 끊겼습니다 — 다시 연결되면 검색할 수 있습니다",
+ "Docs for “{name}”": "“{name}” 문서",
  "Don't Check": "확인 안 함",
  "Don't allow": "허용 안 함",
  "Don't run": "실행 안 함",

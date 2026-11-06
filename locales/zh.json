@@ -454,6 +454,7 @@
  "Disconnect and read local code": "断开连接并阅读本地代码",
  "Disconnected from the remote host — cannot open {file}": "已与远程主机断开连接，无法打开 {file}",
  "Disconnected from the remote host — search will work again once reconnected": "已与远程主机断开连接，重新连接后才能搜索",
+ "Docs for “{name}”": "“{name}”的文档",
  "Don't Check": "不检查",
  "Don't allow": "不允许",
  "Don't run": "不运行",

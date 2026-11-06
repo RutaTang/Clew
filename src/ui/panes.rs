@@ -1201,6 +1201,14 @@ fn notes_beside_code<'a>(
         let offset = (size.height - v.viewport_h).max(0.0);
         let y_of =
             |line1: usize| offset + v.row_of(line1.saturating_sub(1)) as f32 * lh - v.scroll_y;
+        // The Ask pill floats over the margin's foot while Ask is hidden: a
+        // raised note low in the view had its references, date and Ask
+        // under it. The raised note stops above it.
+        let foot = if app.ask_view == crate::AskView::Hidden {
+            super::askfloat::PILL_H + super::askfloat::ASK_MARGIN + NOTE_GAP
+        } else {
+            0.0
+        };
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
         if matches!(active, Some(Node::File(_))) {
             let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
@@ -1257,7 +1265,12 @@ fn notes_beside_code<'a>(
                     .unwrap_or_default();
                 plain_note(sym.name.clone(), meta, summary, sym.line)
             };
-            notes.push(((y - lift).max(0.0), h, note));
+            let top = if is_active {
+                (y - lift).min(size.height - h - foot)
+            } else {
+                y - lift
+            };
+            notes.push((top.max(0.0), h, note));
         }
         notes.sort_by(|a, b| a.0.total_cmp(&b.0));
         // Each note level with its function, or just under the one above

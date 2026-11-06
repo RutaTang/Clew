@@ -454,6 +454,7 @@
  "Disconnect and read local code": "Se déconnecter et lire du code local",
  "Disconnected from the remote host — cannot open {file}": "Déconnecté de l’hôte distant — impossible d’ouvrir {file}",
  "Disconnected from the remote host — search will work again once reconnected": "Déconnecté de l’hôte distant — la recherche sera de nouveau disponible après la reconnexion",
+ "Docs for “{name}”": "Documentation de « {name} »",
  "Don't Check": "Ne pas vérifier",
  "Don't allow": "Ne pas autoriser",
  "Don't run": "Ne pas exécuter",

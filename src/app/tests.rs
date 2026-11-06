@@ -11416,6 +11416,25 @@ fn an_abandoned_docs_build_does_not_hijack_the_pane_later() {
     );
 }
 
+/// "View docs" that finds its symbol says so: it said nothing, and a failed
+/// try just before it ("No definition found") stood beside the page.
+#[test]
+fn view_docs_that_finds_its_symbol_says_so() {
+    let mut app = scanned_app("docs-found-status");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut rx = attach_server(&mut app);
+    app.view_docs_for("origin");
+    assert!(took_build_docs(&mut rx));
+    app.status = tr!("No definition found").into();
+    answer_docs(&mut app, &root, 3);
+    assert!(app.proj.docs.page.is_some(), "the page opens");
+    assert_eq!(app.status, tr!("Docs for “{name}”", name = "origin"));
+    // Asked again with the index current: the same.
+    app.status = tr!("No definition found").into();
+    app.view_docs_for("origin");
+    assert_eq!(app.status, tr!("Docs for “{name}”", name = "origin"));
+}
+
 /// A build reads every file, so there is only ever one in flight: a manual
 /// refresh pressed during one is dropped — `ensure_docs` was single-flight, but
 /// the refresh went straight to `request_docs` and was not. The guard lives in

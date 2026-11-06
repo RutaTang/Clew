@@ -97,7 +97,7 @@ impl App {
             match find_doc_by_name(&self.proj.docs.files, &name)
                 .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
             {
-                Some(page) => self.show_doc_page(page),
+                Some(page) => self.show_found_docs(page, &name),
                 None => self.status = tr!("No docs for “{name}”", name = name),
             }
         }
@@ -189,10 +189,18 @@ impl App {
         if let Some(page) = find_doc_by_name(&self.proj.docs.files, name)
             .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
         {
-            self.show_doc_page(page);
+            self.show_found_docs(page, name);
         } else {
             self.status = tr!("No docs for “{name}”", name = name);
         }
+    }
+
+    /// "View docs" found `name`: its page, and the status line saying so.
+    /// It said nothing, so a failed try before it ("No definition found")
+    /// stood beside the page it had just opened.
+    fn show_found_docs(&mut self, page: DocPage, name: &str) {
+        self.show_doc_page(page);
+        self.status = tr!("Docs for “{name}”", name = name);
     }
 
     pub(crate) fn on_view_docs_from_menu(&mut self) -> Task<Message> {
