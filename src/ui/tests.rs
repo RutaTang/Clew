@@ -2657,16 +2657,95 @@ fn the_consent_modal_says_how_many_more_wait() {
     ));
 }
 
+/// A first open's setup sheet for `root`, before its look at the project
+/// is in — the question that used to be the `.clew` consent alone.
+fn open_sheet(
+    root: &std::path::Path,
+    asked: impl Into<super::placed::Asked>,
+) -> Element<'static, Message> {
+    let app: &'static crate::app::state::App = Box::leak(Box::new(reader_app()));
+    let root: &'static std::path::Path = Box::leak(root.to_path_buf().into_boxed_path());
+    super::setup::setup_sheet(app, root, None, asked)
+}
+
+/// The setup sheet says, in a line each, where clew keeps its data, what
+/// its servers take and what explaining costs; its ticks and buttons send
+/// what they say.
+#[test]
+fn the_setup_sheet_says_what_each_choice_takes() {
+    use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
+    let mut app = reader_app();
+    app.llm_available = true;
+    app.embed_available = true;
+    let root = PathBuf::from("/nonexistent/iced");
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Open,
+        root: root.clone(),
+        servers: true,
+        explain: false,
+        census: Some(Census {
+            servers: vec![SetupServer {
+                language: "rust".into(),
+                name: "rust-analyzer".into(),
+                fetch: Fetch::Download,
+                builds: true,
+            }],
+            calls: Some(3617),
+        }),
+    });
+    fn sheet<'a>(
+        app: &'a crate::app::state::App,
+        root: &'a std::path::Path,
+    ) -> Element<'a, Message> {
+        super::setup::setup_sheet(app, root, app.setup.as_ref(), true)
+    }
+    let mut sim = sim_elem(sheet(&app, &root));
+    for said in [
+        "Open iced",
+        "/nonexistent/iced/.clew",
+        "Language servers",
+        "rust-analyzer: download, builds the project, running its code",
+        "Explain the project",
+        "About 3,600 AI calls. Also builds the search index.",
+        "Not now",
+    ] {
+        assert!(shows(&mut sim, said), "{said:?}");
+    }
+    assert!(matches!(
+        click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
+        [Message::Project(ProjectMsg::SetupServers(false))]
+    ));
+    assert!(matches!(
+        click(sim_elem(sheet(&app, &root)), "Explain the project").as_slice(),
+        [Message::Project(ProjectMsg::SetupExplain(true))]
+    ));
+    assert!(matches!(
+        click(sim_elem(sheet(&app, &root)), "Open").as_slice(),
+        [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
+    ));
+    // Explain All asking first: what it costs, and Explain.
+    drop(sim);
+    app.setup.as_mut().unwrap().mode = SetupMode::Explain;
+    app.setup.as_mut().unwrap().explain = true;
+    let mut sim = sim_elem(sheet(&app, &root));
+    assert!(shows(&mut sim, "Explain iced?"));
+    assert!(!shows(&mut sim, "Language servers"));
+    assert!(matches!(
+        click(sim_elem(sheet(&app, &root)), "Explain").as_slice(),
+        [Message::Project(ProjectMsg::SetupApply)]
+    ));
+}
+
 /// Every question's Allow is drawn disabled until it can have been read:
 /// a click on it sends nothing; its decline is pressed at once.
 #[test]
 fn an_unread_questions_allow_sends_nothing() {
     let root = PathBuf::from("/nonexistent/clew-ui-unread");
-    let sim = sim_elem(super::consent_modal(&root, false));
-    assert!(click(sim, "Allow in clew-ui-unread").is_empty());
-    let sim = sim_elem(super::consent_modal(&root, true));
+    let sim = sim_elem(open_sheet(&root, false));
+    assert!(click(sim, "Open").is_empty());
+    let sim = sim_elem(open_sheet(&root, true));
     assert!(matches!(
-        click(sim, "Allow in clew-ui-unread").as_slice(),
+        click(sim, "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
     ));
     let pending = crate::PendingLspCommand {
@@ -4402,8 +4481,8 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         }),
     );
     check(
-        |ready| super::consent_modal(&root, ready),
-        ("Allow in clew-ui-allow", |m| {
+        |ready| open_sheet(&root, ready),
+        ("Open", |m| {
             matches!(m, Message::Project(ProjectMsg::ConsentAllowed(_)))
         }),
         ("Not now", |m| {
@@ -4477,7 +4556,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         [8, 1]
     );
     assert_eq!(
-        keys_in(&super::consent_modal(&root, true)),
+        keys_in(&open_sheet(&root, true)),
         [hash(&|h| root.hash(h)), 1]
     );
     let target = port_2222_target();
@@ -4586,10 +4665,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         Question::LspCommand(8),
     );
     in_view(
-        placed(super::consent_modal(
-            &root,
-            asked(Question::Project(root.clone())),
-        )),
+        placed(open_sheet(&root, asked(Question::Project(root.clone())))),
         Question::Project(root.clone()),
     );
     in_view(

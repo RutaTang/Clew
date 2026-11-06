@@ -781,6 +781,7 @@ pub(crate) enum ToolsRow {
     OpenFolder,
     OpenRemote,
     ExportNotes,
+    SetUp,
     LspServers,
     Shortcuts,
     Tutorial,
@@ -790,13 +791,14 @@ pub(crate) enum ToolsRow {
 /// project, opening another, and the rest. The menu is built from this list,
 /// and the tutorial points at rows by their position in it — so the two
 /// cannot drift.
-pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 9] = [
+pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 10] = [
     ToolsRow::ExplainAll,
     ToolsRow::Walkthrough,
     ToolsRow::Glossary,
     ToolsRow::OpenFolder,
     ToolsRow::OpenRemote,
     ToolsRow::ExportNotes,
+    ToolsRow::SetUp,
     ToolsRow::LspServers,
     ToolsRow::Shortcuts,
     ToolsRow::Tutorial,
@@ -978,8 +980,9 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 Some(Glyph::TextLines),
                 "Explain All".into(),
                 slot(),
+                // Asking first what it costs (the setup sheet).
                 Some(if app.llm_available {
-                    Message::Explain(ExplainMsg::Project)
+                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
                 } else {
                     Message::Settings(SettingsMsg::Open)
                 }),
@@ -1015,6 +1018,14 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 "Export Notes…".into(),
                 slot(),
                 has_project.then_some(Message::Export(ExportMsg::Start)),
+            ),
+            ToolsRow::SetUp => menu_item(
+                Some(Glyph::Settings),
+                "Set Up Project…".into(),
+                slot(),
+                has_project.then_some(Message::Project(ProjectMsg::SetupShow(
+                    crate::app::setup::SetupMode::Manage,
+                ))),
             ),
             ToolsRow::LspServers => menu_item(
                 Some(Glyph::Plug),

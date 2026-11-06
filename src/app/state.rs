@@ -963,8 +963,13 @@ pub struct App {
     /// (set when the CLI argument is a file path).
     pub pending_open: Option<PathBuf>,
     /// Project root awaiting the user's consent to create `.clew`.
-    /// While `Some`, the consent modal is shown.
+    /// While `Some`, the setup sheet asks it (`setup`).
     pub pending_consent: Option<PathBuf>,
+    /// The setup sheet on screen, if any (see `crate::app::setup`).
+    pub setup: Option<crate::app::setup::ProjectSetup>,
+    /// What a first open's sheet asked for, waiting for the project to be
+    /// open and its state loaded.
+    pub pending_setup: Option<crate::app::setup::SetupIntent>,
     /// Workspace trust, loaded from clew's global data directory: which project
     /// roots may be opened, and which repo-specified language-server commands
     /// may run. Deliberately not stored in the project — see `trust`.

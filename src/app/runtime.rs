@@ -66,6 +66,8 @@ impl App {
             server: crate::app::server::ServerLink::default(),
             pending_open: None,
             pending_consent: None,
+            setup: None,
+            pending_setup: None,
             trust: clew_core::trust::Trust::load(),
             scanning: false,
             sidebar: SidebarTab::Files,

@@ -2979,7 +2979,7 @@ mod tests {
         let (st, _, _) = settled(&l, true);
         let shown = on_screen(&canvas(&l, true, false), &st);
         let (lo_x, lo_y, hi_x, hi_y) = shown.iter().fold(
-            (f32::MAX, f32::MAX, f32::MAX * -1.0, f32::MAX * -1.0),
+            (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
             |(a, b, c, d), p| (a.min(p.0), b.min(p.1), c.max(p.0), d.max(p.1)),
         );
         assert!(

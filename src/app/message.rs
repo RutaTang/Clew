@@ -257,6 +257,22 @@ pub enum ProjectMsg {
     /// `crate::app::model::Question`).
     ConsentAllowed(PathBuf),
     ConsentDenied(PathBuf),
+    /// Show the setup sheet over the open project: what to set up, or
+    /// Explain All asking first.
+    SetupShow(crate::app::setup::SetupMode),
+    /// The look at the project the sheet is for is in.
+    SetupCounted {
+        root: PathBuf,
+        census: crate::app::setup::Census,
+    },
+    /// The sheet's language-servers tick.
+    SetupServers(bool),
+    /// The sheet's explain tick.
+    SetupExplain(bool),
+    /// The sheet's Apply (or Explain).
+    SetupApply,
+    /// Put the sheet away (not a first open's: that is answered).
+    SetupClose,
     /// The client-side (fallback) scan finished. Its stamp is transport-bound
     /// (the transport and the project instance it was started under): the
     /// root alone cannot tell a local scan of `/p` from a
@@ -1702,6 +1718,15 @@ pub enum LspMsg {
         generation: u64,
         result: Result<PathBuf, String>,
     },
+    /// A server fetched ahead of need (the setup sheet) is in, or failed —
+    /// not started: it starts when a file of its language opens. Same
+    /// staleness rule as [`LspMsg::DownloadResult`].
+    Fetched {
+        stamp: Stamp,
+        language: String,
+        generation: u64,
+        result: Result<PathBuf, String>,
+    },
     /// The off-thread staging of a repository-named language-server command
     /// (`lsp.toml` `command`) finished: its bytes were hashed and, when that
     /// fingerprint is already approved, copied to clew's private exec store.
@@ -2036,6 +2061,12 @@ impl ProjectMsg {
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
             | ProjectMsg::ConsentDenied(..)
+            | ProjectMsg::SetupShow(..)
+            | ProjectMsg::SetupCounted { .. }
+            | ProjectMsg::SetupServers(..)
+            | ProjectMsg::SetupExplain(..)
+            | ProjectMsg::SetupApply
+            | ProjectMsg::SetupClose
             | ProjectMsg::ToggleDir(..) => None,
         }
     }
@@ -2490,6 +2521,7 @@ impl LspMsg {
             LspMsg::InlayHintsLoaded { stamp, .. }
             | LspMsg::StartResult { stamp, .. }
             | LspMsg::DownloadResult { stamp, .. }
+            | LspMsg::Fetched { stamp, .. }
             | LspMsg::Staged { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
             LspMsg::ConsentAllowed(..)

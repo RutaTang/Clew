@@ -15,6 +15,7 @@ mod navigation_debug;
 mod palette;
 mod remote_state_refresh;
 mod semantic_space;
+mod setup;
 mod voice;
 mod windowtools;
 
@@ -2776,7 +2777,7 @@ fn consent_gates_project_open() {
     ))));
     assert!(app.pending_consent.is_none());
     assert!(app.proj.project.is_none() && !app.scanning);
-    assert!(app.status.contains("not allowed"), "{}", app.status);
+    assert!(app.status.contains("not opened"), "{}", app.status);
     assert!(!clew_core::trust::Trust::load().is_root_trusted(None, &root));
 
     // A `.clew/` directory in the project does NOT imply consent: it ships with
@@ -18778,10 +18779,13 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::OpenFolder => vec![Message::Project(ProjectMsg::OpenFolderPressed)],
             ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
             ToolsRow::ExplainAll => vec![
-                Message::Explain(ExplainMsg::Project),
+                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain)),
                 Message::Settings(SettingsMsg::Open),
                 Message::Explain(ExplainMsg::Cancel),
             ],
+            ToolsRow::SetUp => vec![Message::Project(ProjectMsg::SetupShow(
+                crate::app::setup::SetupMode::Manage,
+            ))],
             ToolsRow::Walkthrough => vec![Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Walk,
             ))],
@@ -19835,6 +19839,12 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             generation: 0,
             result: Err("stale".into()),
         }),
+        Message::Lsp(LspMsg::Fetched {
+            stamp: s(),
+            language: "rust".into(),
+            generation: 0,
+            result: Err("stale".into()),
+        }),
         Message::Lsp(LspMsg::Staged {
             stamp: s(),
             language: "rust".into(),
@@ -20673,10 +20683,7 @@ fn a_server_nothing_needs_is_released_not_reconnected() {
         !app.conn_respawn,
         "a release is not a crash to back off from"
     );
-    assert_eq!(
-        app.status, "Project not opened: creating .clew was not allowed",
-        "a release is not news"
-    );
+    assert_eq!(app.status, "Project not opened", "a release is not news");
     // What the dropped stream had already queued is late, and dropped by the
     // one check.
     let dropped = app.stale_dropped;
@@ -21829,6 +21836,14 @@ fn a_refresh_that_paid_for_nothing_leaves_the_index_and_overview_alone() {
         (index, overview)
     };
     assert_eq!(refreshed(&mut app, 0), (false, false));
+    // No index yet: an automatic pass builds none nobody asked for.
+    assert_eq!(refreshed(&mut app, 1), (false, true));
+    // One there: it is kept fresh.
+    app.proj.embed_index.entries.push(embed::Entry {
+        node: explain::Node::File(root.join("src/lib.rs")),
+        hash: 1,
+        vec: vec![0.5, 0.5],
+    });
     assert_eq!(refreshed(&mut app, 1), (true, true));
 }
 
@@ -26750,6 +26765,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Consent(_) => "consent",
             O::LspCommand(..) => "lsp command",
             O::LspConsent(..) => "lsp consent",
+            O::Setup(_) => "setup",
             O::UpdateNotes => "update notes",
             O::Settings => "settings",
             O::Connect => "connect",

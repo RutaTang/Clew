@@ -22,6 +22,7 @@ pub(crate) fn closes_tools_menu(message: &Message) -> bool {
             | Message::Explain(ExplainMsg::Cancel)
             | Message::Settings(SettingsMsg::Open)
             | Message::Explain(ExplainMsg::Project)
+            | Message::Project(ProjectMsg::SetupShow(_))
             | Message::Window(WindowMsg::SidebarTabPicked(_))
             | Message::Lsp(LspMsg::TogglePanel)
             | Message::Window(WindowMsg::OpenShortcuts)
@@ -369,6 +370,11 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             "Export notes",
             "Your notes, bookmarks and trail as one Markdown file.",
             menu_row(ToolsRow::ExportNotes),
+        ),
+        TutStep::new(
+            "Set up the project",
+            "Language servers and explaining, again any time.",
+            menu_row(ToolsRow::SetUp),
         ),
         TutStep::new(
             "Language servers",

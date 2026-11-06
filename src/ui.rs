@@ -72,6 +72,7 @@ mod updater;
 pub(crate) use updater::*;
 mod askfloat;
 mod meter;
+mod setup;
 pub(crate) use askfloat::*;
 mod voice;
 pub(crate) use voice::*;
@@ -299,6 +300,9 @@ pub(crate) enum ActiveOverlay<'a> {
     LspCommand(&'a crate::PendingLspCommand, u64, usize),
     /// The question on screen, its number, and how many more wait behind it.
     LspConsent(&'a crate::LspConsent, u64, usize),
+    /// "Set up project…", or Explain All asking first (a first open's
+    /// sheet is `Consent`).
+    Setup(&'a crate::app::setup::ProjectSetup),
     UpdateNotes,
     Settings,
     Connect,
@@ -332,6 +336,12 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         )
     } else if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
         O::LspConsent(consent, number, app.proj.pending_lsp_consent.len() - 1)
+    } else if let Some(setup) = app
+        .setup
+        .as_ref()
+        .filter(|s| s.mode != crate::app::setup::SetupMode::Open)
+    {
+        O::Setup(setup)
     } else if app.update.show_notes {
         O::UpdateNotes
     } else if app.settings.open {
@@ -391,6 +401,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Consent(_) => "consent",
             Self::LspCommand(..) => "lsp-command",
             Self::LspConsent(..) => "lsp-consent",
+            Self::Setup(_) => "setup",
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
             Self::Connect => "connect",
@@ -424,9 +435,15 @@ impl<'a> ActiveOverlay<'a> {
         match self {
             // Each Allow is drawn enabled once its question has been within
             // reach long enough to be read, where it is (`App::asked`).
-            Self::Consent(root) => {
-                consent_modal(root, app.asked(Question::Project(root.to_path_buf())))
-            }
+            Self::Consent(root) => setup::setup_sheet(
+                app,
+                root,
+                app.setup
+                    .as_ref()
+                    .filter(|s| s.root == root && s.mode == crate::app::setup::SetupMode::Open),
+                app.asked(Question::Project(root.to_path_buf())),
+            ),
+            Self::Setup(s) => setup::setup_sheet(app, &s.root, Some(s), true),
             Self::LspCommand(pending, number, waiting) => lsp_command_modal(
                 pending,
                 number,
@@ -468,6 +485,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Consent(root) => Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
             Self::LspCommand(_, number, _) => Message::Lsp(LspMsg::CommandDismissed(*number)),
             Self::LspConsent(_, number, _) => Message::Lsp(LspMsg::ConsentDismissed(*number)),
+            Self::Setup(_) => Message::Project(ProjectMsg::SetupClose),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),

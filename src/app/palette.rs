@@ -551,6 +551,10 @@ impl App {
                 ("Glossary", Message::Glossary(GlossaryMsg::Open)),
                 ("Skim (Fold Bodies)", Message::Editor(EditorMsg::SkimFile)),
                 ("Export Notes…", Message::Export(ExportMsg::Start)),
+                (
+                    "Set Up Project…",
+                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage)),
+                ),
                 ("Tutorial", Message::Tutorial(TutorialMsg::Start)),
             ] {
                 add(title.into(), None, send(message));

@@ -87,9 +87,11 @@ impl App {
         {
             return self.start_scan(root);
         }
-        // Otherwise ask via an in-app modal (see ui::consent_modal).
-        self.pending_consent = Some(root);
-        Task::none()
+        // Otherwise ask, in the setup sheet (see `crate::app::setup`): where
+        // clew keeps its data, and what to set up — filled in by a look at
+        // the project that reads it and writes nothing.
+        self.pending_consent = Some(root.clone());
+        self.show_setup(crate::app::setup::SetupMode::Open, root)
     }
 
     pub(crate) fn start_scan(&mut self, root: PathBuf) -> Task<Message> {
@@ -293,9 +295,13 @@ impl App {
         let host = self.connection.approval_host().map(str::to_string);
         if let Err(e) = self.trust.update(|t| t.trust_root(host.as_deref(), &root)) {
             self.pending_open = None;
+            self.setup = None;
             self.status = format!("Cannot record consent: {e}");
             return Task::none();
         }
+        // What else the sheet had ticked: the leave to build now, the rest
+        // once the project is open.
+        self.take_open_setup(&root);
         // `.clew/` still holds this project's own state (bookmarks, caches);
         // create it now so the first save doesn't fail, but a failure here is
         // not fatal — a read-only project still opens, it just can't persist.
@@ -772,6 +778,9 @@ impl App {
                 problems.join("; ")
             );
         }
+        // What the setup sheet asked for, now that the explanations it
+        // would redo are known.
+        tasks.push(self.apply_pending_setup());
         Task::batch(tasks)
     }
 
@@ -1038,10 +1047,52 @@ impl App {
                 }
                 self.pending_consent = None;
                 self.pending_open = None;
-                self.status = "Project not opened: creating .clew was not allowed".to_string();
+                self.setup = None;
+                self.status = "Project not opened".to_string();
                 Task::none()
             }
             ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
+            ProjectMsg::SetupShow(mode) => {
+                // Explaining needs a key: without one, Settings, where it
+                // goes (the config may have changed since the flag was set).
+                if mode == crate::app::setup::SetupMode::Explain
+                    && let Err(open_settings) = self.require_llm()
+                {
+                    return open_settings;
+                }
+                match self.proj.project.as_ref() {
+                    Some(p) => {
+                        let root = p.root.clone();
+                        self.show_setup(mode, root)
+                    }
+                    None => Task::none(),
+                }
+            }
+            ProjectMsg::SetupCounted { root, census } => self.on_setup_counted(root, census),
+            ProjectMsg::SetupServers(on) => {
+                if let Some(setup) = self.setup.as_mut() {
+                    setup.servers = on;
+                }
+                Task::none()
+            }
+            ProjectMsg::SetupExplain(on) => {
+                if let Some(setup) = self.setup.as_mut() {
+                    setup.explain = on && self.llm_available;
+                }
+                Task::none()
+            }
+            ProjectMsg::SetupApply => self.on_setup_apply(),
+            ProjectMsg::SetupClose => {
+                // A first open's sheet is answered with Open or Not now.
+                if self
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s.mode != crate::app::setup::SetupMode::Open)
+                {
+                    self.setup = None;
+                }
+                Task::none()
+            }
             ProjectMsg::ScanDone { result, report, .. } => {
                 // Accept only the scan we are waiting for: a slow scan of a
                 // project the user has already left must not re-open it. The

@@ -542,7 +542,14 @@ impl App {
         // either: the overview is not re-billed for a new prompt wording.
         let mut tasks = vec![persist];
         let downstream = !automatic || tally.regenerated > 0;
-        if downstream && self.embed_available && !self.proj.explain.cache.is_empty() {
+        // The search index follows what was asked for: built after a pass
+        // someone started (the cost they agreed to says so), kept fresh
+        // after an automatic one — never built the first time by one.
+        let index_wanted = !automatic
+            || !self.proj.embed_index.entries.is_empty()
+            || self.proj.building_embeddings;
+        if downstream && index_wanted && self.embed_available && !self.proj.explain.cache.is_empty()
+        {
             tasks.push(Task::done(Message::Semantic(SemanticMsg::BuildIndex)));
         }
         if downstream && self.proj.overview.markdown.is_some() && self.overview_inputs_changed() {

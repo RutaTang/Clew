@@ -280,12 +280,12 @@ impl App {
             ImportGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(
                 Overlay::ProjectImports,
             ))),
-            // The same as the ⋯ menu's row: cancel a running pass, else start
-            // one (or ask for a key first).
+            // The same as the ⋯ menu's row: cancel a running pass, else ask
+            // first what one costs (or ask for a key first).
             ExplainAll => self.update(if self.proj.explain.running {
                 Message::Explain(ExplainMsg::Cancel)
             } else if self.llm_available {
-                Message::Explain(ExplainMsg::Project)
+                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
             } else {
                 Message::Settings(SettingsMsg::Open)
             }),

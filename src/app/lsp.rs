@@ -45,7 +45,7 @@ pub(crate) fn pretty_init_options(options: Option<&serde_json::Value>) -> Option
 
 /// A language-server install that runs on THIS machine, once the user
 /// consented to it (see `App::on_lsp_consent_allowed`).
-enum LocalInstall {
+pub(crate) enum LocalInstall {
     Download(lsp::registry::Download),
     Toolchain(lsp::registry::Install),
 }
@@ -840,7 +840,29 @@ impl App {
             .link
             .lsp
             .insert(c.language.clone(), LspSlot::Starting);
-        let (dest, language, version) = (c.dest_dir, c.language, c.version);
+        self.install_lsp(
+            c.language,
+            c.server_name,
+            c.version,
+            local,
+            c.dest_dir,
+            true,
+        )
+    }
+
+    /// Download or install `language`'s server (`server_name` at `version`)
+    /// into `dest`, off the UI thread: started when it is in (`start`), or
+    /// left in the store for when a file of the language opens
+    /// ([`LspMsg::Fetched`], a fetch ahead of need).
+    pub(crate) fn install_lsp(
+        &mut self,
+        language: String,
+        server_name: String,
+        version: String,
+        local: LocalInstall,
+        dest: PathBuf,
+        start: bool,
+    ) -> Task<Message> {
         // Mint this install's generation so a result landing after a restart
         // or project switch is recognized as superseded.
         let generation = self.next_lsp_gen(&language);
@@ -853,8 +875,8 @@ impl App {
         let cancel = guard.flag();
         self.proj.link.lsp_installs.insert(language.clone(), guard);
         self.status = match &local {
-            LocalInstall::Download(_) => format!("Downloading {}…", c.server_name),
-            LocalInstall::Toolchain(_) => format!("Installing {}…", c.server_name),
+            LocalInstall::Download(_) => format!("Downloading {server_name}…"),
+            LocalInstall::Toolchain(_) => format!("Installing {server_name}…"),
         };
         Task::perform(
             async move {
@@ -870,11 +892,21 @@ impl App {
                 .unwrap_or_else(|e| Err(e.to_string()))
             },
             move |result| {
-                Message::Lsp(LspMsg::DownloadResult {
-                    stamp: stamp.clone(),
-                    language: language.clone(),
-                    generation,
-                    result,
+                let (stamp, language) = (stamp.clone(), language.clone());
+                Message::Lsp(if start {
+                    LspMsg::DownloadResult {
+                        stamp,
+                        language,
+                        generation,
+                        result,
+                    }
+                } else {
+                    LspMsg::Fetched {
+                        stamp,
+                        language,
+                        generation,
+                        result,
+                    }
                 })
             },
         )
@@ -1495,6 +1527,20 @@ impl App {
                         Task::none()
                     }
                 }
+            }
+            LspMsg::Fetched {
+                language,
+                generation,
+                result,
+                ..
+            } => {
+                // An install begun for another project, or before a restart,
+                // is not this one's.
+                if self.lsp_gen.get(&language).copied() != Some(generation) {
+                    return Task::none();
+                }
+                self.proj.link.lsp_installs.remove(&language);
+                self.on_lsp_fetched(language, result)
             }
             LspMsg::Staged {
                 stamp,

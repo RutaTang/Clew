@@ -64,6 +64,9 @@ impl App {
                 for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
                     tasks.push(self.ensure_lsp(&language));
                 }
+                // The servers the setup sheet asked for, now that the
+                // choices that pick them are in.
+                tasks.push(self.apply_pending_setup());
                 Task::batch(tasks)
             }
             LanguagesMsg::FactsLoaded { result, .. } => {
