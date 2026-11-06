@@ -441,6 +441,49 @@ fn a_failed_download_says_why_briefly_until_settings_closes() {
     );
 }
 
+/// A failed download says why in the reader's language, how far it got
+/// in those words too, and the address it failed at cut to its host — a
+/// proxy it went through still said.
+#[test]
+fn a_failed_download_says_why_in_the_readers_language() {
+    use crate::app::voice::download_failure;
+    use crate::i18n::{Lang, with_lang};
+    let model = clew_voice::models::find("base.en").unwrap();
+    let signed = "https://us.aws.cdn.hf.co/xet-bridge-us/641ab5/32b578?Expires=1793944821\
+                  &Signature=MEUCIFr4ga";
+    with_lang(Lang::Fr, || {
+        assert_eq!(
+            download_failure(
+                &format!("{signed}: the transfer took too long — giving up"),
+                704_000_000,
+                model
+            ),
+            format!(
+                "Interrompu à 704 sur {} Mo\u{a0}: us.aws.cdn.hf.co\u{a0}: le transfert a \
+                 pris trop de temps — abandon",
+                model.size_mb
+            )
+        );
+        let said = download_failure(
+            &format!("{signed} (through the proxy http://p:3128): connection refused"),
+            0,
+            model,
+        );
+        assert!(
+            said.starts_with("us.aws.cdn.hf.co (via le proxy http://p:3128)\u{a0}: "),
+            "{said}"
+        );
+    });
+    assert_eq!(
+        download_failure(&format!("{signed}: HTTP 404 Not Found"), 0, model),
+        "us.aws.cdn.hf.co: HTTP 404 Not Found"
+    );
+    assert_eq!(
+        download_failure("the download was closed", 0, model),
+        "the download was closed"
+    );
+}
+
 /// A download that is not the model as published is refused and leaves
 /// nothing behind; one that fails says why; Cancel stops one.
 #[test]

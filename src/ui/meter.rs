@@ -48,7 +48,7 @@ const ARRIVED: f32 = 0.002;
 pub(crate) fn level_meter<'a, Message: 'a>(heights: &'a [f32], level: f32) -> Element<'a, Message> {
     Element::new(Meter {
         heights,
-        level: level.clamp(0.0, 1.0),
+        level: share(level),
     })
 }
 
@@ -63,12 +63,20 @@ pub(crate) fn eased_bar<'a, Message: 'a>(
     ease: Ease,
 ) -> Element<'a, Message> {
     Element::new(Bar {
-        share: share.clamp(0.0, 1.0),
+        share: self::share(share),
         length,
         girth,
         style,
         ease,
     })
+}
+
+/// `v` as a share, 0–1, and a reading that is no number (one NaN sample
+/// from the microphone makes its level NaN) as none. Kept, it never left
+/// what the bar showed — eased toward or from, it is NaN again, and never
+/// arrives — and a frame was asked for after every frame.
+fn share(v: f32) -> f32 {
+    if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
 }
 
 struct Meter<'a> {
@@ -334,10 +342,9 @@ mod tests {
         assert_eq!(run(60, 0.0, 1.0, 2.0), 0.0);
     }
 
-    /// The meter asks for frames while its bars move toward a reading, and
-    /// none once they are there: a quiet microphone costs nothing.
-    #[test]
-    fn the_meter_asks_for_frames_only_while_its_bars_move() {
+    /// Whether the meter asked for another frame after each of `levels`,
+    /// one a frame at 60 frames a second.
+    fn frames_asked(levels: &[f32]) -> Vec<bool> {
         use iced::window::RedrawRequest;
         use iced_test::runtime::user_interface::{Cache, State, UserInterface};
         let mut renderer = iced_test::futures::futures::executor::block_on(
@@ -351,14 +358,15 @@ mod tests {
         let bars = [5.0, 9.0, 13.0];
         let t0 = Instant::now();
         let mut cache = Cache::default();
-        let mut frame = |level: f32, k: u64, cache: Cache| {
+        let mut asked = Vec::new();
+        for (k, &level) in levels.iter().enumerate() {
             let mut ui = UserInterface::build(
                 level_meter::<()>(&bars, level),
                 Size::new(100.0, 40.0),
                 cache,
                 &mut renderer,
             );
-            let now = t0 + std::time::Duration::from_micros(16_667 * k);
+            let now = t0 + std::time::Duration::from_micros(16_667 * k as u64);
             let (state, _) = ui.update(
                 &[Event::Window(iced::window::Event::RedrawRequested(now))],
                 mouse::Cursor::Unavailable,
@@ -366,21 +374,23 @@ mod tests {
                 &mut iced::advanced::clipboard::Null,
                 &mut Vec::new(),
             );
-            let wants = matches!(
+            asked.push(matches!(
                 state,
                 State::Updated {
                     redraw_request: RedrawRequest::NextFrame,
                     ..
                 }
-            );
-            (wants, ui.into_cache())
-        };
-        let mut asked = Vec::new();
-        for k in 0..90 {
-            let (wants, next) = frame(1.0, k, cache);
-            cache = next;
-            asked.push(wants);
+            ));
+            cache = ui.into_cache();
         }
+        asked
+    }
+
+    /// The meter asks for frames while its bars move toward a reading, and
+    /// none once they are there: a quiet microphone costs nothing.
+    #[test]
+    fn the_meter_asks_for_frames_only_while_its_bars_move() {
+        let asked = frames_asked(&[1.0; 90]);
         assert!(asked[0], "a new reading moves the bars");
         assert!(!asked[89], "at rest, no frames: {asked:?}");
         let moving = asked.iter().take_while(|&&a| a).count();
@@ -388,6 +398,21 @@ mod tests {
             moving > 3 && asked[moving..].iter().all(|&a| !a),
             "{asked:?}"
         );
+    }
+
+    /// A reading that is no number — a NaN sample from the microphone —
+    /// reads as silence: the bars move with the readings after it and come
+    /// to rest, rather than staying NaN and asking for every frame after.
+    #[test]
+    fn a_reading_that_is_no_number_reads_as_silence() {
+        let mut levels = vec![0.5; 30];
+        levels.extend([f32::NAN; 3]);
+        levels.extend([0.8; 90]);
+        let asked = frames_asked(&levels);
+        assert!(asked[33], "the next reading moves the bars: {asked:?}");
+        assert!(!asked[levels.len() - 1], "and they come to rest: {asked:?}");
+        assert_eq!(share(f32::NAN), 0.0);
+        assert_eq!(share(2.0), 1.0);
     }
 
     /// No step is ever a jump: each frame moves the shown level a share of

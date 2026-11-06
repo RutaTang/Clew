@@ -384,7 +384,12 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
             tr!("Didn't catch that").to_string(),
             theme::dim(),
         ),
-        HeardOutcome::Failed(e) => (Glyph::Info, theme::warn(), e.clone(), theme::warn()),
+        HeardOutcome::Failed(e) => (
+            Glyph::Info,
+            theme::warn(),
+            crate::i18n::message(e),
+            theme::warn(),
+        ),
     };
     let mut line = row![glyph::icon(mark, mark_color, 14.0)]
         .spacing(8)
@@ -584,13 +589,35 @@ fn card_fits(app: &App) -> bool {
 fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let large = app.ask_view == AskView::Expanded;
     let fit = card_fits(app);
-    // The session's name, which opens the menu of sessions.
+    // What the reader is on, which is what a question is asked against —
+    // said in the large window, where there is room for it.
+    let reading = app.active_viewer().filter(|_| large).map(|v| {
+        let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
+        match &app.proj.explain.view {
+            Some(crate::explain::Node::Function { file, name: f, .. }) if *file == v.abs => {
+                tr!("Reading {file} · {function}", file = name, function = f)
+            }
+            _ => tr!("Reading {file}", file = name),
+        }
+    });
+    // The session's name, which opens the menu of sessions: cut to the room
+    // the header leaves it — less what is read, its padding and the gap
+    // before it, when that is said — as wide as it is drawn.
+    let mut room = title_room(place.width);
+    if let Some(on) = &reading {
+        room -= super::sheet::text_width(on, ts::SMALL, crate::fonts::UI) + 2.0 * 7.0 + 6.0;
+    }
+    if large {
+        room = room.min(TITLE_MAX_W);
+    }
     let menu_open = app.ask_sessions_menu;
     let title = button(
         row![
-            text(cut_short(
+            text(cut_to_width(
                 &app.ask_session_title(),
-                if large { 60 } else { 26 }
+                room,
+                ts::BASE,
+                crate::fonts::UI_SEMIBOLD
             ))
             .size(ts::BASE)
             .font(crate::fonts::UI_SEMIBOLD)
@@ -613,16 +640,7 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let mut header = row![glyph::icon(Glyph::Message, theme::accent(), 15.0), title]
         .spacing(6)
         .align_y(iced::Center);
-    // What the reader is on, which is what a question is asked against —
-    // said in the large window, where there is room for it.
-    if let Some(v) = app.active_viewer().filter(|_| large) {
-        let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
-        let on = match &app.proj.explain.view {
-            Some(crate::explain::Node::Function { file, name: f, .. }) if *file == v.abs => {
-                tr!("Reading {file} · {function}", file = name, function = f)
-            }
-            _ => tr!("Reading {file}", file = name),
-        };
+    if let Some(on) = reading {
         header = header.push(
             container(ts::set_in(
                 text(on).color(theme::fg_muted()).wrapping(Wrapping::None),
@@ -693,18 +711,76 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     .into()
 }
 
-/// `s`, cut short to `chars` characters with an ellipsis when longer.
-fn cut_short(s: &str, chars: usize) -> String {
-    if s.chars().count() <= chars {
-        return s.to_string();
+/// Widest the session's name is drawn in the large window, where the
+/// header has more room than a name needs.
+const TITLE_MAX_W: f32 = 420.0;
+
+/// Room the card's header leaves the session's name in a card `width`
+/// wide: less the card's border and the header's padding, its icon and four
+/// buttons, the six gaps between the seven, and the name's own padding,
+/// gap and chevron. A row is laid out in order, so a name wider than this
+/// left the buttons after it no room: they were drawn narrower, then not
+/// at all.
+fn title_room(width: f32) -> f32 {
+    let border_and_padding = 2.0 + 12.0 + ASK_HEADER_PAD.right;
+    let icon_and_buttons = 15.0 + 4.0 * HEADER_BUTTON;
+    let gaps = 6.0 * 6.0;
+    let name_around = 2.0 * 6.0 + 5.0 + 12.0;
+    (width - border_and_padding - icon_and_buttons - gaps - name_around).max(0.0)
+}
+
+/// `s`, cut short with an ellipsis to fit `width` when set at `size` in
+/// `font`. Measured, not counted: a name in Chinese, Japanese or Korean,
+/// about an em a character, is cut as soon as one in Latin letters is.
+fn cut_to_width(s: &str, width: f32, size: f32, font: iced::Font) -> String {
+    // Asked again with every view, for each name in the menu: kept.
+    type Key = (String, u32, u32, iced::Font);
+    thread_local! {
+        static CUT: std::cell::RefCell<std::collections::HashMap<Key, String>> =
+            Default::default();
     }
-    let cut: String = s.chars().take(chars.saturating_sub(1)).collect();
-    format!("{}…", cut.trim_end())
+    let key = (s.to_string(), width.to_bits(), size.to_bits(), font);
+    if let Some(cut) = CUT.with(|held| held.borrow().get(&key).cloned()) {
+        return cut;
+    }
+    let fits = |t: &str| super::sheet::text_width(t, size, font) <= width;
+    let cut = if fits(s) {
+        s.to_string()
+    } else {
+        // The most characters that fit with the ellipsis, found by halving.
+        let chars: Vec<char> = s.chars().collect();
+        let with_ellipsis = |n: usize| {
+            let kept: String = chars[..n].iter().collect();
+            format!("{}…", kept.trim_end())
+        };
+        let (mut least, mut most) = (0, chars.len());
+        while least < most {
+            let n = (least + most).div_ceil(2);
+            if fits(&with_ellipsis(n)) {
+                least = n;
+            } else {
+                most = n - 1;
+            }
+        }
+        with_ellipsis(least)
+    };
+    CUT.with(|held| {
+        let mut held = held.borrow_mut();
+        if held.len() > 256 {
+            held.clear();
+        }
+        held.insert(key, cut.clone());
+    });
+    cut
 }
 
 /// Widest the menu of sessions grows, and tallest before it scrolls.
 const SESSIONS_MENU_W: f32 = 320.0;
 const SESSIONS_MENU_MAX_H: f32 = 340.0;
+/// Room a session's name has in the menu: its width less its padding, a
+/// row's padding, dot and the gap after it, and the × that forgets it.
+pub(crate) const SESSIONS_MENU_NAME_W: f32 =
+    SESSIONS_MENU_W - 2.0 * 5.0 - 2.0 * 9.0 - (6.0 + 9.0) - (2.0 + 24.0);
 
 /// The menu of Ask's sessions, under the card's title: a new session, then
 /// this project's sessions, newest first — when each was last asked in and
@@ -767,9 +843,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         let pick = button(
             row![dot, {
                 let mut lines = column![
-                    text(cut_short(
+                    text(cut_to_width(
                         crate::app::ask_sessions::shown_title(&session.title),
-                        36
+                        SESSIONS_MENU_NAME_W,
+                        ts::BASE,
+                        crate::fonts::UI
                     ))
                     .size(ts::BASE)
                     .color(theme::fg())
@@ -843,8 +921,10 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     } else {
         trn!("1 session found", "{n} sessions found", found.len())
     };
-    // Searching is worth it once there is more than one to look through.
-    let top = if app.proj.ask_sessions.len() > 1 {
+    // Searching is worth it once there is more than one to look through —
+    // and the field stays while what it holds still filters the menu, so
+    // it can be cleared.
+    let top = if app.proj.ask_sessions.len() > 1 || !app.ask_sessions_query.is_empty() {
         column![search, new].spacing(4)
     } else {
         column![new]
@@ -958,7 +1038,7 @@ pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
                 ),
                 HeardOutcome::Asked => (format!("→ {}", tr!("asked")), theme::fg_muted()),
                 HeardOutcome::Nothing => (tr!("Didn't catch that").to_string(), theme::dim()),
-                HeardOutcome::Failed(e) => (e.clone(), theme::warn()),
+                HeardOutcome::Failed(e) => (crate::i18n::message(e), theme::warn()),
             };
             let mut line = row![].spacing(6).align_y(iced::Center);
             if !heard.text.is_empty() {

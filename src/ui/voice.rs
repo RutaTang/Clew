@@ -94,7 +94,7 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
     )];
     if let Some(e) = app.voice.download_errors.get(model.id) {
         rows = rows.push(form::plain(
-            text(e.clone())
+            text(crate::i18n::message(e))
                 .size(ts::SMALL)
                 .color(theme::warn())
                 .wrapping(Wrapping::WordOrGlyph),

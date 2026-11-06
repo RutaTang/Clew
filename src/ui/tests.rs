@@ -7612,6 +7612,159 @@ fn the_card_names_its_session_and_lists_the_others() {
     assert!(shows(&mut sim_of(&app), "No sessions match “kubernetes”."));
 }
 
+/// A session named in Chinese — about an em a character — is cut to the
+/// room the card's header leaves it, as a name in Latin letters is: New,
+/// Hide, Expand and Close after it all still answer a click. In the menu,
+/// the name stops short of the × that forgets it.
+#[test]
+fn a_long_chinese_session_name_leaves_the_cards_buttons_in_reach() {
+    use crate::app::ask_sessions::{AskSession, SavedTurn, now};
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    let name = "服务器在哪里把改动过的文件变成它要发送的相对路径以及为什么";
+    let session = |id| AskSession {
+        id,
+        title: name.into(),
+        updated: now(),
+        turns: vec![SavedTurn {
+            question: name.into(),
+            spoken: false,
+            answer: "a".into(),
+        }],
+    };
+    app.proj.ask_sessions = vec![session(1), session(2)];
+    app.proj.ask_session = Some(1);
+    let title = text_at(&mut sim_of(&app), |t| t.starts_with("服务器"), 0)
+        .expect("the session's name on the card");
+    type Sent = fn(&Message) -> bool;
+    let wanted: [(&str, Sent); 4] = [
+        ("New session", |m| {
+            matches!(m, Message::Ask(AskMsg::NewSession))
+        }),
+        ("Hide", |m| matches!(m, Message::Ask(AskMsg::Hide))),
+        ("Expand", |m| matches!(m, Message::Ask(AskMsg::Expand))),
+        ("Close", |m| matches!(m, Message::Ask(AskMsg::Close))),
+    ];
+    let mut sent = Vec::new();
+    for dx in (1..=100).map(|i| i as f32 * 4.0) {
+        let mut sim = sim_of(&app);
+        sim.point_at(Point::new(title.x + title.width + dx, title.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent.extend(sent_by(sim));
+        if wanted.iter().all(|(_, is)| sent.iter().any(is)) {
+            break;
+        }
+    }
+    for (button, is) in wanted {
+        assert!(sent.iter().any(is), "{button} is out of reach: {sent:?}");
+    }
+    // In the menu: cut short of the ×.
+    app.ask_sessions_menu = true;
+    // (The card is as tall as it may be with its menu open: its name is
+    // higher.)
+    let name = text_at(&mut sim_of(&app), |t| t.starts_with("服务器"), 0)
+        .expect("the session's name on the card");
+    let below = name.y + name.height;
+    let shown = sim_of(&app)
+        .find(move |c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text {
+                content,
+                visible_bounds: Some(bounds),
+                ..
+            } if content.starts_with("服务器") && bounds.y > below => Some(content.to_string()),
+            _ => None,
+        })
+        .expect("the session's name in the menu");
+    assert!(shown.ends_with('…'), "{shown}");
+    assert!(
+        super::sheet::text_width(&shown, super::ts::BASE, crate::fonts::UI)
+            <= super::askfloat::SESSIONS_MENU_NAME_W,
+        "{shown}"
+    );
+}
+
+/// The menu's search stays while what it holds still filters the menu —
+/// the session it found forgotten, the one left not found by it — so it
+/// can be cleared.
+#[test]
+fn the_sessions_search_stays_while_it_filters_the_menu() {
+    use crate::app::ask_sessions::{AskSession, SavedTurn, now};
+    use iced_test::selector::Candidate;
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    let session = |id, title: &str| AskSession {
+        id,
+        title: title.into(),
+        updated: now(),
+        turns: vec![SavedTurn {
+            question: title.into(),
+            spoken: false,
+            answer: "a".into(),
+        }],
+    };
+    app.proj.ask_sessions = vec![
+        session(1, "Where is the origin?"),
+        session(2, "How is a host connected?"),
+    ];
+    app.proj.ask_session = Some(1);
+    app.ask_sessions_menu = true;
+    app.ask_sessions_query = "host".into();
+    let _ = app.update(Message::Ask(AskMsg::DeleteSession(2)));
+    assert_eq!(app.proj.ask_sessions.len(), 1);
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "No sessions match “host”."));
+    let field = sim.find(|c: Candidate<'_>| match c {
+        Candidate::TextInput {
+            visible_bounds,
+            state,
+            ..
+        } if state.text() == "host" => visible_bounds,
+        _ => None,
+    });
+    assert!(field.is_ok(), "the search that filters the menu is gone");
+}
+
+/// What voice could not do is said in the reader's language: on the card,
+/// on the pill, and under a model in Settings.
+#[test]
+fn voice_failures_are_said_in_the_readers_language() {
+    use crate::app::voice::{Heard, HeardOutcome};
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.voice.hear(Heard {
+        text: String::new(),
+        outcome: HeardOutcome::Failed("the microphone did not open in time".into()),
+    });
+    let dir = crate::app::tests::test_dir("ui-voice-failures");
+    let _ = std::fs::remove_dir_all(&dir);
+    app.voice.store = Some(clew_voice::models::Store::new(dir));
+    app.voice.download_errors.insert(
+        "base.en",
+        "the download is not ggml-base.en.bin as published (13 bytes, not 147951465) — it was \
+         discarded"
+            .into(),
+    );
+    with_lang(Lang::Fr, || {
+        app.ask_view = crate::AskView::Compact;
+        assert!(
+            shows(&mut sim_of(&app), "le micro ne s’est pas ouvert à temps"),
+            "on the card"
+        );
+        app.ask_view = crate::AskView::Hidden;
+        assert!(
+            shows(&mut sim_of(&app), "le micro ne s’est pas ouvert à temps"),
+            "on the pill"
+        );
+        assert!(
+            shows(
+                &mut sim_elem(super::voice_section(&app)),
+                "le téléchargement ne correspond pas au fichier ggml-base.en.bin publié"
+            ),
+            "under the model"
+        );
+    });
+}
+
 /// What voice is doing shows in Ask's corner, never in the field at the
 /// top: on the pill while the card is hidden — even put away — and on the
 /// card while it is open; with a way to stop, and for a command that asks

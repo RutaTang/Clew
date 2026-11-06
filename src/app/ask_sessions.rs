@@ -114,17 +114,17 @@ const PASSAGE_CHARS: usize = 64;
 /// questions or its answers, in any case — and where. An empty query finds
 /// every session, no passage shown.
 pub(crate) fn search(session: &AskSession, query: &str) -> Option<Found> {
-    let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+    let words: Vec<String> = query.split_whitespace().map(fold).collect();
     if words.is_empty() {
         return Some(Found { passage: None });
     }
-    let title = session.title.to_lowercase();
+    let title = fold(&session.title);
     let texts: Vec<&str> = session
         .turns
         .iter()
         .flat_map(|t| [t.question.as_str(), t.answer.as_str()])
         .collect();
-    let lowered: Vec<String> = texts.iter().map(|t| t.to_lowercase()).collect();
+    let lowered: Vec<String> = texts.iter().map(|t| fold(t)).collect();
     let everywhere =
         |word: &String| title.contains(word) || lowered.iter().any(|t| t.contains(word));
     if !words.iter().all(everywhere) {
@@ -142,11 +142,21 @@ pub(crate) fn search(session: &AskSession, query: &str) -> Option<Found> {
     Some(Found { passage })
 }
 
-/// The line of `text` around byte `at` of its lowercase `low`, cut to
+/// `text` in lowercase, a character for a character: what a search
+/// compares. `str::to_lowercase` makes "İ" two ("i̇", an i and a combining
+/// dot); here it is "i", so "istemci" is found in "İSTEMCİ", and the two
+/// have as many characters, each where the other's is.
+fn fold(text: &str) -> String {
+    text.chars()
+        .map(|c| c.to_lowercase().next().unwrap_or(c))
+        .collect()
+}
+
+/// The line of `text` around byte `at` of its [`fold`] `low`, cut to
 /// [`PASSAGE_CHARS`], with an ellipsis where it was cut.
 fn passage_around(text: &str, low: &str, at: usize) -> String {
-    // The lowercase text may differ in length from the text: count in
-    // characters, which lowercasing keeps for all but a few scripts.
+    // Folded, the text keeps its characters: the one at `at` is the same
+    // character of `text`.
     let char_at = low[..at].chars().count();
     let chars: Vec<char> = text.chars().collect();
     let char_at = char_at.min(chars.len());
@@ -217,6 +227,48 @@ pub(crate) fn save(dir: &Path, sessions: &[AskSession]) -> std::io::Result<()> {
     std::fs::rename(&tmp, dir.join(FILE))
 }
 
+/// Serializes [`edit`]'s read, change and write across this process's
+/// windows.
+static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Apply one change to the sessions kept in `dir` as they are now, and keep
+/// the result: the sessions the caller adopts.
+///
+/// Each window on a project reads its sessions once, when it opens it; one
+/// that wrote its own list whole dropped every session another window had
+/// kept since. So the change is made to the file as it stands, under the
+/// same locks as the project's other stores: an in-process `Mutex` for
+/// this clew's windows, a file lock under it for another clew
+/// ([`clew_core::statefile::lock`], and its one failure policy). A lock
+/// that cannot be taken leaves the file as it is, and the change is made to
+/// `mine`, the caller's own sessions, for this run. The changed sessions
+/// come back even when they could not be written, and the `Err` says why.
+pub(crate) fn edit(
+    dir: &Path,
+    mine: &[AskSession],
+    change: impl FnOnce(&mut Vec<AskSession>),
+) -> (Vec<AskSession>, std::io::Result<()>) {
+    // Poisoning only means an earlier caller panicked; the sessions are
+    // read from the file again here, so there is nothing to inherit.
+    let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    match clew_core::derived::ensure_private_dir(dir)
+        .and_then(|()| clew_core::statefile::lock(&dir.join(FILE)))
+    {
+        // Held until the write is done.
+        Ok(_held) => {
+            let mut sessions = load(dir);
+            change(&mut sessions);
+            let saved = save(dir, &sessions);
+            (sessions, saved)
+        }
+        Err(e) => {
+            let mut sessions = mine.to_vec();
+            change(&mut sessions);
+            (sessions, Err(e))
+        }
+    }
+}
+
 impl App {
     /// Keep the conversation on screen as its session, newest first, and
     /// write the sessions out. A conversation with nothing answered yet is
@@ -247,47 +299,46 @@ impl App {
         {
             return;
         }
-        let id = match self.proj.ask_session {
-            Some(id) => id,
-            None => {
-                let id = self
-                    .proj
-                    .ask_sessions
-                    .iter()
-                    .map(|s| s.id)
-                    .max()
-                    .unwrap_or(0)
-                    + 1;
-                self.proj.ask_session = Some(id);
-                id
-            }
-        };
         let title = self
             .proj
-            .ask_sessions
-            .iter()
-            .find(|s| s.id == id)
+            .ask_session
+            .and_then(|id| self.proj.ask_sessions.iter().find(|s| s.id == id))
             .map_or_else(|| title_of(&first.question), |s| s.title.clone());
-        self.proj.ask_sessions.retain(|s| s.id != id);
-        self.proj.ask_sessions.insert(
-            0,
-            AskSession {
-                id,
-                title,
-                updated: now(),
-                turns,
-            },
-        );
-        self.proj.ask_sessions.truncate(MAX_SESSIONS);
-        self.write_ask_sessions();
+        // A new session's id is past every one kept: in the file, where
+        // another window may have kept one since, and in this window's list.
+        let past = self.proj.ask_sessions.iter().map(|s| s.id).max();
+        let mut kept = self.proj.ask_session;
+        self.edit_ask_sessions(|sessions| {
+            let id = *kept.get_or_insert_with(|| {
+                sessions.iter().map(|s| s.id).chain(past).max().unwrap_or(0) + 1
+            });
+            sessions.retain(|s| s.id != id);
+            sessions.insert(
+                0,
+                AskSession {
+                    id,
+                    title,
+                    updated: now(),
+                    turns,
+                },
+            );
+            sessions.truncate(MAX_SESSIONS);
+        });
+        self.proj.ask_session = kept;
     }
 
-    /// Write the sessions to the project's derived directory; with none (no
-    /// data directory), they are kept for this run only.
-    fn write_ask_sessions(&mut self) {
-        if let Some(dir) = self.proj.derived_dir.clone()
-            && let Err(e) = save(&dir, &self.proj.ask_sessions)
-        {
+    /// Apply `change` to the sessions as they are kept ([`edit`]), with
+    /// what other windows on the project kept since this one read them,
+    /// and take the result as this window's. With no data directory, to
+    /// this window's own: they are kept for this run only.
+    fn edit_ask_sessions(&mut self, change: impl FnOnce(&mut Vec<AskSession>)) {
+        let Some(dir) = self.proj.derived_dir.clone() else {
+            change(&mut self.proj.ask_sessions);
+            return;
+        };
+        let (sessions, saved) = edit(&dir, &self.proj.ask_sessions, change);
+        self.proj.ask_sessions = sessions;
+        if let Err(e) = saved {
             self.status = tr!("Could not save Ask sessions: {error}", error = e);
         }
     }
@@ -296,7 +347,23 @@ impl App {
     /// code and the ACP agent's session with it — for another to take its
     /// place.
     fn leave_ask_session(&mut self) -> Task<Message> {
-        let stop = self.stop_ask_streams();
+        let mut stop = self.stop_ask_streams();
+        // An answer clew's agent or the server writes is stopped there, and
+        // its turn left open for the server's closing notification, which
+        // finds no turn once the card is cleared. Closed here, as a stream
+        // on this machine is, the question and what was written of its
+        // answer are kept with the session.
+        let open: Vec<u64> = self
+            .proj
+            .ask_turns
+            .iter()
+            .filter(|t| t.streaming)
+            .map(|t| t.stream)
+            .collect();
+        for stream in open {
+            let closed = self.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Stopped);
+            stop = Task::batch([stop, closed]);
+        }
         self.keep_ask_session();
         self.proj.ask_turns.clear();
         self.proj.ask_pins.clear();
@@ -330,6 +397,23 @@ impl App {
             return Task::none();
         };
         let stop = self.leave_ask_session();
+        // The conversation left, kept, can put the oldest session past
+        // MAX_SESSIONS — this one, when it is that oldest. It is the one
+        // shown: it stays, and the oldest of the others goes in its place.
+        if !self.proj.ask_sessions.iter().any(|s| s.id == id) {
+            let shown = session.clone();
+            self.edit_ask_sessions(|sessions| {
+                if !sessions.iter().any(|s| s.id == id) {
+                    sessions.push(shown);
+                    sessions.sort_by_key(|s| std::cmp::Reverse(s.updated));
+                }
+                if sessions.len() > MAX_SESSIONS
+                    && let Some(oldest) = sessions.iter().rposition(|s| s.id != id)
+                {
+                    sessions.remove(oldest);
+                }
+            });
+        }
         self.proj.ask_session = Some(id);
         let mut tasks = vec![stop];
         for turn in session.turns {
@@ -364,8 +448,7 @@ impl App {
         } else {
             Task::none()
         };
-        self.proj.ask_sessions.retain(|s| s.id != id);
-        self.write_ask_sessions();
+        self.edit_ask_sessions(|sessions| sessions.retain(|s| s.id != id));
         stop
     }
 
@@ -482,6 +565,37 @@ mod tests {
             "in any case, the first passage holding it"
         );
         assert_eq!(search(&session, "origin nowhere"), None, "every word");
+    }
+
+    /// A search folds case a character for a character: "İ" is "i", so a
+    /// query typed in lowercase finds Turkish capitals, and the passage
+    /// shown holds what was found however many "İ" come before it.
+    #[test]
+    fn a_search_finds_what_follows_turkish_capitals() {
+        let answer = format!(
+            "{}config değeri burada ayarlanır ve sunucu açıldığında okunur, sonra tüm \
+             oturum boyunca tutulur",
+            "İSTEMCİ İÇİN İLK İSTEK ".repeat(4)
+        );
+        let session = AskSession {
+            id: 1,
+            title: "Sunucu".into(),
+            updated: 0,
+            turns: vec![SavedTurn {
+                question: "Nerede?".into(),
+                spoken: false,
+                answer,
+            }],
+        };
+        let passage = search(&session, "config")
+            .and_then(|found| found.passage)
+            .expect("in the answer");
+        assert!(passage.contains("config"), "{passage}");
+        let passage = search(&session, "istemci")
+            .and_then(|found| found.passage)
+            .expect("as typed, in lowercase");
+        assert!(passage.contains("İSTEMCİ"), "{passage}");
+        assert!(search(&session, "İçin").is_some());
     }
 
     /// Kept and read back, newest first; a file of another format, or none,

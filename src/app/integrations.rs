@@ -249,6 +249,25 @@ pub(crate) fn acp_label(config: &acp::AgentConfig) -> String {
         .unwrap_or_else(|| config.name.clone())
 }
 
+/// What a new ACP session is told of the conversation on the card before
+/// its first question: the last questions answered and their answers, as
+/// many as clew's agent is given. `None` when none has been answered.
+fn acp_history(turns: &[AskTurn]) -> Option<String> {
+    const HIST_TURNS: usize = 6;
+    let answered: Vec<&AskTurn> = turns.iter().filter(|t| !t.streaming).collect();
+    if answered.is_empty() {
+        return None;
+    }
+    let mut history = String::from("Earlier in this conversation:\n");
+    for turn in &answered[answered.len().saturating_sub(HIST_TURNS)..] {
+        history.push_str(&format!(
+            "\nUser: {}\n\nAssistant: {}\n",
+            turn.question, turn.answer_md
+        ));
+    }
+    Some(history)
+}
+
 /// Split a command line as a shell would split words: whitespace separates,
 /// single quotes keep everything, double quotes keep all but `\"` and `\\`,
 /// and a backslash outside quotes takes the next character as it is.
@@ -945,7 +964,19 @@ impl App {
         } else {
             format!("{question}\n\n{context}")
         };
-        let blocks = vec![acp::text_block(&text)];
+        let mut blocks = vec![acp::text_block(&text)];
+        // A session of its own is opened for this question (the first, one
+        // gone back to, or after another agent): it holds none of the
+        // conversation on the card, which it is told first, as clew's agent
+        // is given it ([`App::start_agent_turn`]).
+        let fresh = !self
+            .proj
+            .acp
+            .as_ref()
+            .is_some_and(|l| l.name == name && l.session.is_some());
+        if fresh && let Some(history) = acp_history(&self.proj.ask_turns) {
+            blocks.insert(0, acp::text_block(&history));
+        }
         // One agent per project: asking another ends the one running.
         let closing = if self.proj.acp.as_ref().is_some_and(|l| l.name != name) {
             self.end_acp_agent()

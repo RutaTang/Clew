@@ -344,3 +344,151 @@ fn ask_keeps_its_sessions() {
     assert!(!again.ask_sessions_menu);
     assert_eq!(again.ask_view, AskView::Compact);
 }
+
+/// A project's sessions, read afresh from its data, their names sorted.
+fn kept_titles(derived: &std::path::Path) -> Vec<String> {
+    let mut titles: Vec<String> = crate::app::ask_sessions::load(derived)
+        .into_iter()
+        .map(|s| s.title)
+        .collect();
+    titles.sort();
+    titles
+}
+
+/// Two windows on one project: each keeps its session in the file as it
+/// stands, so neither writes over what the other kept since it opened the
+/// project, nor names its session with the other's id; one forgotten in
+/// one window leaves the other's.
+#[test]
+fn two_windows_keep_each_others_sessions() {
+    let mut one = scanned_app("ask-sessions-two-windows");
+    let derived = one.proj.derived_dir.clone().expect("a derived dir");
+    let _ = std::fs::remove_file(derived.join("ask-sessions.json"));
+    one.proj.ask_sessions.clear();
+    let mut two = scanned_app("ask-sessions-two-windows");
+    assert_eq!(two.proj.derived_dir, Some(derived.clone()));
+    assert!(two.proj.ask_sessions.is_empty());
+
+    answered(&mut one, "Where is the origin?", "In `origin.rs`.");
+    answered(&mut two, "How is a host connected?", "Over SSH.");
+    assert_eq!(
+        kept_titles(&derived),
+        ["How is a host connected?", "Where is the origin?"],
+        "the second window's session did not write over the first's"
+    );
+    assert_ne!(one.proj.ask_session, two.proj.ask_session, "two ids");
+    assert_eq!(
+        two.proj.ask_sessions,
+        crate::app::ask_sessions::load(&derived),
+        "the window's menu is what is kept"
+    );
+
+    // The first window forgets its session: the second's stays.
+    let first = one.proj.ask_session.expect("kept");
+    let _ = one.update(Message::Ask(AskMsg::DeleteSession(first)));
+    assert_eq!(kept_titles(&derived), ["How is a host connected?"]);
+    // And the second, asked in again, keeps the first's forgotten.
+    answered(&mut two, "And its keys?", "The user's own.");
+    assert_eq!(kept_titles(&derived), ["How is a host connected?"]);
+    assert_eq!(
+        crate::app::ask_sessions::load(&derived)[0].turns.len(),
+        2,
+        "one session, two turns"
+    );
+}
+
+/// Leaving a session while clew's agent answers on the server keeps the
+/// question and what was written of its answer — for a session's first
+/// question, the session itself. The server's end of the stopped turn,
+/// coming later, changes nothing.
+#[test]
+fn leaving_a_session_keeps_the_question_the_server_is_answering() {
+    let mut app = scanned_app("ask-sessions-leave-agent");
+    let derived = app.proj.derived_dir.clone().expect("a derived dir");
+    let _ = std::fs::remove_file(derived.join("ask-sessions.json"));
+    app.proj.ask_sessions.clear();
+    // A turn of clew's agent, answering on the server.
+    let stream = app.mint_request_id();
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream,
+        question: "Where is the origin?".into(),
+        answer_md: "It is set in".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    app.proj.link.agent_stream = Some(stream);
+
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert!(app.proj.ask_turns.is_empty(), "a new session's empty card");
+    assert!(app.proj.link.agent_stream.is_none(), "the turn stopped");
+    let kept = crate::app::ask_sessions::load(&derived);
+    assert_eq!(kept.len(), 1, "the session of its first question: {kept:?}");
+    assert_eq!(kept[0].turns[0].question, "Where is the origin?");
+    assert!(
+        kept[0].turns[0].answer.starts_with("It is set in"),
+        "{:?}",
+        kept[0].turns[0].answer
+    );
+    assert_eq!(app.proj.ask_sessions, kept, "in the menu");
+
+    let stamp = app.stamp();
+    let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+        stamp,
+        stream,
+        outcome: clew_protocol::StreamOutcome::Stopped,
+    }));
+    assert_eq!(crate::app::ask_sessions::load(&derived), kept);
+    assert!(app.proj.ask_turns.is_empty());
+}
+
+/// Going back to the oldest session of a full menu while an answer streams
+/// on this machine: the conversation left is kept, and the oldest of the
+/// others makes room for it — not the one gone back to, which is on screen.
+#[test]
+fn going_back_to_the_oldest_session_keeps_it() {
+    use crate::app::ask_sessions::{AskSession, MAX_SESSIONS, SavedTurn, load, save};
+    let mut app = scanned_app("ask-sessions-oldest");
+    let derived = app.proj.derived_dir.clone().expect("a derived dir");
+    let full: Vec<AskSession> = (1..=MAX_SESSIONS as u64)
+        .map(|id| AskSession {
+            id,
+            title: format!("s{id}"),
+            updated: 1_000 + id as i64,
+            turns: vec![SavedTurn {
+                question: format!("q{id}"),
+                spoken: false,
+                answer: "a".into(),
+            }],
+        })
+        .collect();
+    save(&derived, &full).unwrap();
+    app.proj.ask_sessions = load(&derived);
+    app.proj.ask_session = None;
+    // A new session's first answer, streaming from the provider here.
+    let stream = app.mint_request_id();
+    let _ = app.start_ask_stream(
+        stream,
+        "why?".into(),
+        Vec::new(),
+        unreachable_llm(),
+        "system".into(),
+        vec![llm::ChatMsg::user("why?")],
+    );
+    assert!(app.proj.inflight.ask_local.is_some());
+
+    let _ = app.update(Message::Ask(AskMsg::SwitchSession(1)));
+    assert_eq!(app.proj.ask_session, Some(1));
+    assert_eq!(app.proj.ask_turns[0].question, "q1");
+    let kept = load(&derived);
+    assert_eq!(kept.len(), MAX_SESSIONS);
+    assert!(kept.iter().any(|s| s.id == 1), "the one on screen is kept");
+    assert!(
+        kept.iter().any(|s| s.turns[0].question == "why?"),
+        "and the one left"
+    );
+    assert!(
+        !kept.iter().any(|s| s.id == 2),
+        "the oldest of the others made room"
+    );
+    assert_eq!(app.proj.ask_sessions, kept, "in the menu");
+}

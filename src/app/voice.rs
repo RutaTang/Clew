@@ -1075,13 +1075,14 @@ impl App {
 }
 
 /// What a failed download of `model` says, under the model in Settings: why,
-/// without the address it failed at (a CDN's signed one is a paragraph), and
-/// how far it got if it got anywhere.
+/// in the reader's language, with the address it failed at cut to its host
+/// (a CDN's signed one is a paragraph), and how far it got if it got
+/// anywhere.
 pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model) -> String {
     let why = if clew_core::net::was_cut_short(error) {
         tr!("the connection closed").to_string()
     } else {
-        clew_core::net::without_url(error)
+        crate::i18n::message(&with_host_only(error))
     };
     if written == 0 {
         return why;
@@ -1092,6 +1093,36 @@ pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model)
         total = model.size_mb,
         why = why
     )
+}
+
+/// A transfer's `error` with the address it starts with cut to its host
+/// (and port, when it names one). Every error a transfer returns names the hop that failed first — `{url}:
+/// why`, or `{url} (through the proxy {spec}): why` — and the catalogs say
+/// it whole, address and all; what follows the address is left as it is,
+/// for them to know it.
+fn with_host_only(error: &str) -> String {
+    let Some(rest) = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| error.strip_prefix(scheme))
+    else {
+        return error.to_string();
+    };
+    // An address holds no spaces: it is all up to the first one, less the
+    // colon a reason follows it with.
+    let (address, after) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
+    let (address, colon) = match address.strip_suffix(':') {
+        Some(address) => (address, ":"),
+        None => (address, ""),
+    };
+    let authority = address.split(['/', '?', '#']).next().unwrap_or_default();
+    // Never a user's name or password, should the address hold one.
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() {
+        return error.to_string();
+    }
+    format!("{host}{colon}{after}")
 }
 
 /// Sets its flag when dropped.

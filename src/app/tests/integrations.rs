@@ -1186,6 +1186,61 @@ fn an_acp_sessions_settings_follow_the_agent() {
     assert_eq!(link.chosen.len(), 1);
 }
 
+/// The texts of the prompt waiting for the project's ACP agent.
+fn pending_texts(app: &App) -> Vec<String> {
+    let link = app.proj.acp.as_ref().expect("an agent");
+    let (_, blocks) = link.pending.as_ref().expect("a question waiting");
+    blocks
+        .iter()
+        .filter_map(|b| b["text"].as_str().map(str::to_string))
+        .collect()
+}
+
+/// A session gone back to has its questions and answers on the card, and
+/// the ACP agent opens a session of its own for what is asked next, which
+/// holds none of them: it is told them first. A session that has seen
+/// them is asked the question alone.
+#[test]
+fn an_acp_agent_is_told_the_conversation_its_new_session_has_not_seen() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut app = scanned_app("acp-history");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (agent, _fake) = fake_agent(&rt, &root);
+    app.acp_agents = vec![acp::AgentConfig {
+        name: "fake".into(),
+        launch: clew_core::linerpc::Launch::default(),
+        share_mcp: false,
+    }];
+    // As a session gone back to leaves it: its turn on the card, the agent
+    // up, its session let go.
+    let stream = app.mint_request_id();
+    app.proj.ask_turns.push(AskTurn {
+        stream,
+        question: "Where is the origin?".into(),
+        answer_md: "In `origin.rs`.".into(),
+        ..AskTurn::default()
+    });
+    let mut link = AcpLink::new("fake".into(), "Fake Agent".into());
+    link.agent = Some(agent);
+    app.proj.acp = Some(link);
+    let _ = app.start_acp_ask("fake".into(), "And its tests?".into());
+    let texts = pending_texts(&app);
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts[0].contains("Where is the origin?") && texts[0].contains("In `origin.rs`."),
+        "{texts:?}"
+    );
+    assert_eq!(texts[1], "And its tests?", "the question after it");
+
+    // The agent's session, open and answering, has seen the conversation.
+    let link = app.proj.acp.as_mut().unwrap();
+    link.pending = None;
+    link.session = Some("s1".into());
+    link.turn = Some(stream);
+    let _ = app.start_acp_ask("fake".into(), "And its docs?".into());
+    assert_eq!(pending_texts(&app), ["And its docs?"]);
+}
+
 #[test]
 fn an_agent_that_ignores_a_cancel_is_started_afresh_for_the_next_question() {
     let rt = tokio::runtime::Runtime::new().unwrap();
