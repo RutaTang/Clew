@@ -2469,6 +2469,58 @@ fn symbol_finder_flow() {
     let _ = app.update(Message::Reading(ReadingMsg::GoBack)); // no-op or previous loc; must not panic
 }
 
+/// The top bar's finder searches "files, symbols and commands": a
+/// function's name typed there lists the function after the files, and
+/// opening it lands the caret on its name.
+#[test]
+fn the_file_finder_finds_a_symbol_and_lands_on_its_name() {
+    let mut app = scanned_app("file-finder-symbols");
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        indexed: index::build_indexed(&root, files.clone()),
+    }));
+    settle_imports(&mut app, indexed);
+
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(
+        "origin".to_string(),
+    )));
+    let symbols = app.fresh_symbol_index();
+    let found = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .position(|&i| i >= files.len() && symbols[i - files.len()].name == "origin")
+        .expect("the function is listed");
+    app.proj.finder.selected = found;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    let target = root.join("src/lib.rs");
+    let content = read_text_file(&target).unwrap();
+    let req = app.proj.link.pane_pending[0].expect("open_file minted a load token");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane: 0,
+        abs: target,
+        target: Some(3),
+        result: Ok(content),
+    }));
+    // `pub fn origin() -> Point {`: on `origin`, not on `pub`.
+    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 7)));
+    // Nothing typed: the files alone.
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(String::new())));
+    assert!(app.proj.finder.results.iter().all(|&i| i < files.len()));
+}
+
 #[test]
 fn goto_line_via_finder() {
     let mut app = scanned_app("goto");
@@ -4542,9 +4594,21 @@ fn definition_result_jumps_and_records_history() {
         result: Ok(content),
     }));
     assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
-    // The cursor moves to the jump target (line 3 → 0-based line 2).
-    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 0)));
+    // The cursor moves to the jump target (line 3 → 0-based line 2), on the
+    // name it defines: `origin`, from the character the server named.
+    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 7)));
     assert!(app.proj.history.can_back(), "definition jump is undoable");
+    // A definition in the file already open lands on its name too.
+    let _ = app.update(Message::Nav(NavMsg::DefinitionResult {
+        stamp: app.stamp(),
+        seq: app.proj.goto_seq,
+        result: Ok(vec![lsp::client::Target {
+            path: app.active_viewer().unwrap().abs.clone(),
+            line: 0,
+            character: 11,
+        }]),
+    }));
+    assert_eq!(app.active_viewer().unwrap().caret, Some((0, 11)));
 }
 
 /// Full chain against a real rust-analyzer via the escape hatch: scan →

@@ -222,6 +222,7 @@ impl App {
             self.proj.search_seq
         } else {
             self.proj.goto_seq += 1;
+            self.proj.goto_encoding = client.encoding;
             self.proj.goto_seq
         };
         let stamp = self.stamp();
@@ -271,6 +272,11 @@ impl App {
                 // Clear the "Looking up definition…" progress; the jump itself
                 // is the feedback (otherwise the status stays stuck on it).
                 self.status.clear();
+                self.proj.landing = Some((
+                    abs.clone(),
+                    t.line,
+                    crate::app::state::LandingAt::Char(t.character, self.proj.goto_encoding),
+                ));
                 self.open_file(abs, Some(target_line), true)
             }
             Ok(_) => {
@@ -516,7 +522,8 @@ impl App {
             FinderMode::Files => {
                 if let Some(p) = &self.proj.project {
                     let files = p.files.clone();
-                    self.proj.finder.refresh_files(&files);
+                    let symbols = self.fresh_symbol_index();
+                    self.proj.finder.refresh_files(&files, &symbols);
                 }
             }
             FinderMode::Symbols => {
@@ -606,13 +613,18 @@ impl App {
         self.proj.finder.open = false;
         match self.proj.finder.mode {
             FinderMode::Files => {
-                let Some(entry) = self
-                    .proj
-                    .project
-                    .as_ref()
-                    .and_then(|p| p.files.get(idx))
-                    .cloned()
-                else {
+                let Some(files) = self.proj.project.as_ref().map(|p| &p.files) else {
+                    return Task::none();
+                };
+                // Past the files, the symbols the query named.
+                if let Some(symbol) = idx.checked_sub(files.len()) {
+                    let Some(entry) = self.proj.symbol_index.get(symbol).cloned() else {
+                        return Task::none();
+                    };
+                    self.land_on_name(&entry.abs, entry.line, entry.name);
+                    return self.open_file(entry.abs, Some(entry.line), true);
+                }
+                let Some(entry) = files.get(idx).cloned() else {
                     return Task::none();
                 };
                 self.open_file(entry.abs, None, true)
@@ -621,9 +633,19 @@ impl App {
                 let Some(entry) = self.proj.symbol_index.get(idx).cloned() else {
                     return Task::none();
                 };
+                self.land_on_name(&entry.abs, entry.line, entry.name);
                 self.open_file(entry.abs, Some(entry.line), true)
             }
         }
+    }
+
+    /// A jump to the symbol `name` on `line1` of `abs` lands on its name.
+    fn land_on_name(&mut self, abs: &Path, line1: usize, name: String) {
+        self.proj.landing = Some((
+            abs.to_path_buf(),
+            line1.saturating_sub(1),
+            crate::app::state::LandingAt::Name(name),
+        ));
     }
 
     /// The function/method defined exactly at `(file, line1)`, if any — recorded
@@ -784,8 +806,11 @@ impl App {
                 self.refresh_finder();
                 Task::none()
             }
-            NavMsg::FinderPick { abs, line } => {
+            NavMsg::FinderPick { abs, line, name } => {
                 self.proj.finder.open = false;
+                if let (Some(line), Some(name)) = (line, name) {
+                    self.land_on_name(&abs, line, name);
+                }
                 self.open_file(abs, line, true)
             }
             NavMsg::FinderConfirm => self.on_finder_confirm(),

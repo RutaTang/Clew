@@ -12,6 +12,15 @@ use crate::*;
 /// project cancels every task named here by construction — there is no
 /// hand-maintained list of what to stop, and a field added here is dropped
 /// (and its task aborted) without anyone having to remember a teardown site.
+/// Where on its line a jump lands (`landing`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LandingAt {
+    /// The character a language server named, in its position encoding.
+    Char(usize, crate::viewer::PositionEncoding),
+    /// The first place the line spells this name as a word.
+    Name(String),
+}
+
 #[derive(Default, Debug)]
 pub struct InFlight {
     /// The Ask answer streaming from the provider on THIS machine (the client
@@ -1830,6 +1839,13 @@ pub struct ProjectSession {
     /// Monotone go-to-definition counter, same pattern as `search_seq`: a
     /// `DefinitionResult` from a superseded request must not jump the editor.
     pub goto_seq: u64,
+    /// The position encoding of the server a go-to-definition was last
+    /// asked of: the one its answer's character is counted in.
+    pub goto_encoding: crate::viewer::PositionEncoding,
+    /// Where the last jump to a definition or a symbol lands on its line:
+    /// the file, its 0-based line, and the place there. The caret goes on
+    /// the name, not the line's first column.
+    pub landing: Option<(PathBuf, usize, LandingAt)>,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
     /// The token of the `CallsMsg::Prepared` currently awaited, if any.
@@ -2114,6 +2130,8 @@ impl Default for ProjectSession {
             search: Default::default(),
             search_seq: Default::default(),
             goto_seq: Default::default(),
+            goto_encoding: crate::viewer::PositionEncoding::Utf16,
+            landing: None,
             call_graph: Default::default(),
             call_pending: Default::default(),
             flow: None,

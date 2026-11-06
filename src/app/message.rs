@@ -599,6 +599,8 @@ pub enum NavMsg {
     FinderPick {
         abs: PathBuf,
         line: Option<usize>,
+        /// The symbol's name, for a symbol: the caret lands on it.
+        name: Option<String>,
     },
     FinderConfirm,
     /// Open the command bar: the finder, its suggestions showing.

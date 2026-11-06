@@ -6132,7 +6132,7 @@ fn rows_send_the_identity_of_what_they_show() {
     app.proj.finder.results = vec![0];
     let sent = click(sim_of(&app), "origin");
     assert!(
-        matches!(sent.as_slice(), [Message::Nav(NavMsg::FinderPick { abs, line: Some(12) })]
+        matches!(sent.as_slice(), [Message::Nav(NavMsg::FinderPick { abs, line: Some(12), .. })]
             if *abs == root.join("src/lib.rs")),
         "{sent:?}"
     );

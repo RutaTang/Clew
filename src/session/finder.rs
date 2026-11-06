@@ -13,6 +13,9 @@ pub const MAX_RESULTS: usize = 60;
 /// Most commands the command bar lists above the files a query matches.
 pub const BAR_COMMANDS: usize = 6;
 
+/// Most symbols the file finder lists below the files a query matches.
+pub const FILE_FINDER_SYMBOLS: usize = 20;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FinderMode {
     #[default]
@@ -61,14 +64,33 @@ impl Finder {
         self.query.trim_start().trim_start_matches('>').trim()
     }
 
-    pub fn refresh_files(&mut self, files: &[FileEntry]) {
+    /// Rank the files, then — once something is typed — the project's
+    /// symbols it names: the top bar's field searches "files, symbols and
+    /// commands", and a class or function typed there found nothing. A
+    /// result at or past `files.len()` is the symbol at that index less
+    /// `files.len()`.
+    pub fn refresh_files(&mut self, files: &[FileEntry], symbols: &[SymbolEntry]) {
         self.selected = 0;
-        self.results = rank(
+        let mut results = rank(
             &self.query,
             files.iter().map(|f| f.rel.as_str()),
             MAX_RESULTS,
             true,
         );
+        if !self.query.trim().is_empty() {
+            let n = files.len();
+            results.extend(
+                rank(
+                    &self.query,
+                    symbols.iter().map(|s| s.name.as_str()),
+                    FILE_FINDER_SYMBOLS,
+                    true,
+                )
+                .into_iter()
+                .map(|i| i + n),
+            );
+        }
+        self.results = results;
     }
 
     pub fn refresh_symbols(&mut self, symbols: &[SymbolEntry]) {

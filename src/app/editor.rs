@@ -217,6 +217,7 @@ impl App {
     fn open_file_at(&mut self, abs: PathBuf, line: Option<usize>) -> Task<Message> {
         // A jump lands the reader in the code view.
         self.code_focused = true;
+        let landing = self.proj.landing.clone();
         let pane = self.proj.active;
         let line_height = self.line_height();
         // Same file already in the active pane: move the cursor and scroll.
@@ -234,7 +235,8 @@ impl App {
             if let Some(l) = line {
                 let l0 = l.saturating_sub(1);
                 v.reveal(l0); // expand any fold hiding the jump target
-                v.caret = Some((l0, 0));
+                let col = landing_col(&landing, v, l0);
+                v.caret = Some((l0, col));
             }
             // Notebook cells have variable height, so their goto scrolls to an
             // estimated cell offset (the target ring points precisely).
@@ -383,7 +385,8 @@ impl App {
         }
         v.target_line = target;
         // Put the block cursor on the jump target (or the top of the file).
-        v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
+        let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
+        v.caret = Some((l0, landing_col(&self.proj.landing, &v, l0)));
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
         // Just the path here; the right status segment already reports line
@@ -659,7 +662,8 @@ impl App {
             v.viewport_h = h;
         }
         v.target_line = target;
-        v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
+        let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
+        v.caret = Some((l0, landing_col(&self.proj.landing, &v, l0)));
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
         self.status = open_status(&v.rel, lang_key);
@@ -1649,7 +1653,7 @@ impl App {
         let first_visible = v.line_at_row(row);
         // Read enclosing headers off the precomputed fold ranges — cheap enough
         // to recompute each frame, so sticky scroll stays smooth in huge files.
-        analyze::sticky_headers(&v.folds, first_visible, 5)
+        analyze::sticky_headers(&v.folds, first_visible, crate::viewer::STICKY_MAX)
     }
 
     pub(crate) fn rel_of(&self, abs: &Path) -> String {
@@ -1830,4 +1834,38 @@ impl App {
             }
         }
     }
+}
+
+/// The column a jump to `line0` of `v`'s file lands on: the name a
+/// definition or symbol jumped to there (`landing`), else the line's start.
+fn landing_col(
+    landing: &Option<(PathBuf, usize, crate::app::state::LandingAt)>,
+    v: &Viewer,
+    line0: usize,
+) -> usize {
+    use crate::app::state::LandingAt;
+    use crate::viewer::{Col, PositionEncoding};
+    let Some((abs, line, at)) = landing else {
+        return 0;
+    };
+    if *abs != v.abs || *line != line0 {
+        return 0;
+    }
+    let Some(raw) = v.source_line(line0) else {
+        return 0;
+    };
+    match at {
+        LandingAt::Char(character, encoding) => Col::from_offset(raw, *character, *encoding).0,
+        LandingAt::Name(name) => {
+            word_at(raw, name).map_or(0, |at| Col::from_offset(raw, at, PositionEncoding::Utf8).0)
+        }
+    }
+}
+
+/// Where `raw` first spells `name` as a whole word, in bytes.
+fn word_at(raw: &str, name: &str) -> Option<usize> {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    raw.match_indices(name).map(|(at, _)| at).find(|&at| {
+        !word(raw[..at].chars().next_back()) && !word(raw[at + name.len()..].chars().next())
+    })
 }

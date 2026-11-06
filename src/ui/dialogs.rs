@@ -546,6 +546,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             Message::Nav(NavMsg::FinderPick {
                 abs: entry.abs.clone(),
                 line: None,
+                name: None,
             }),
         ));
     }
@@ -578,8 +579,17 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
         return;
     };
     for (pos, &idx) in app.proj.finder.results.iter().enumerate() {
+        let selected = pos == app.proj.finder.selected;
+        // Past the files, the symbols the query named.
+        if let Some(symbol) = idx.checked_sub(project.files.len()) {
+            rows.push(match app.proj.symbol_index.get(symbol) {
+                Some(entry) => symbol_row(entry, selected),
+                None => stale_finder_row(selected),
+            });
+            continue;
+        }
         let Some(entry) = project.files.get(idx) else {
-            rows.push(stale_finder_row(pos == app.proj.finder.selected));
+            rows.push(stale_finder_row(selected));
             continue;
         };
         let (dir, name) = match entry.rel.rsplit_once('/') {
@@ -603,6 +613,7 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
             Message::Nav(NavMsg::FinderPick {
                 abs: entry.abs.clone(),
                 line: None,
+                name: None,
             }),
         ));
     }
@@ -635,35 +646,41 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
 
 pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
     for (pos, &idx) in app.proj.finder.results.iter().enumerate() {
-        let Some(entry) = app.proj.symbol_index.get(idx) else {
-            rows.push(stale_finder_row(pos == app.proj.finder.selected));
-            continue;
-        };
-        rows.push(finder_row(
-            row![
-                text(short_kind(&entry.kind))
-                    .size(ts::CAPTION)
-                    .color(theme::kind_color(&entry.kind))
-                    .width(40),
-                text(crate::highlight::in_order(&entry.name)).size(ts::READING),
-                text(format!(
-                    "{}:{}",
-                    crate::highlight::in_order(&entry.rel),
-                    entry.line
-                ))
-                .size(ts::SMALL)
-                .color(theme::dim())
-                .wrapping(Wrapping::None),
-            ]
-            .spacing(10)
-            .align_y(iced::Center),
-            pos == app.proj.finder.selected,
-            Message::Nav(NavMsg::FinderPick {
-                abs: entry.abs.clone(),
-                line: Some(entry.line),
-            }),
-        ));
+        let selected = pos == app.proj.finder.selected;
+        rows.push(match app.proj.symbol_index.get(idx) {
+            Some(entry) => symbol_row(entry, selected),
+            None => stale_finder_row(selected),
+        });
     }
+}
+
+/// A symbol in the finder: its kind, its name, where it is.
+fn symbol_row<'a>(entry: &'a crate::index::SymbolEntry, selected: bool) -> Element<'a, Message> {
+    finder_row(
+        row![
+            text(short_kind(&entry.kind))
+                .size(ts::CAPTION)
+                .color(theme::kind_color(&entry.kind))
+                .width(40),
+            text(crate::highlight::in_order(&entry.name)).size(ts::READING),
+            text(format!(
+                "{}:{}",
+                crate::highlight::in_order(&entry.rel),
+                entry.line
+            ))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+        ]
+        .spacing(10)
+        .align_y(iced::Center),
+        selected,
+        Message::Nav(NavMsg::FinderPick {
+            abs: entry.abs.clone(),
+            line: Some(entry.line),
+            name: Some(entry.name.clone()),
+        }),
+    )
 }
 
 #[cfg(test)]

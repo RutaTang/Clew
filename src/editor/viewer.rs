@@ -123,6 +123,10 @@ pub enum Motion {
     FileEnd,
 }
 
+/// The most sticky headers pinned over the top of a code view: the innermost
+/// enclosing blocks of the line there.
+pub const STICKY_MAX: usize = 5;
+
 #[derive(Debug, Clone)]
 pub struct Viewer {
     pub abs: PathBuf,
@@ -628,10 +632,26 @@ impl Viewer {
         match line {
             Some(l) => {
                 // Work in display rows so collapsed folds above the target are
-                // accounted for. `l` is 1-based; keep ~3 rows of context above.
+                // accounted for. `l` is 1-based; keep ~3 rows of context above
+                // — below the sticky headers pinned over the top of the view
+                // for the line there: three rows down from a line inside four
+                // nested blocks, the target was under their headers.
                 let row = self.row_of(l.saturating_sub(1));
                 let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
-                ((row.saturating_sub(3)) as f32 * line_height).clamp(0.0, max_y.max(0.0))
+                let mut top = row.saturating_sub(3);
+                for _ in 0..8 {
+                    let pinned = crate::analyze::sticky_headers(
+                        &self.folds,
+                        self.line_at_row(top),
+                        STICKY_MAX,
+                    )
+                    .len();
+                    if top == 0 || row >= top + pinned {
+                        break;
+                    }
+                    top = row.saturating_sub(3 + pinned);
+                }
+                (top as f32 * line_height).clamp(0.0, max_y.max(0.0))
             }
             None => 0.0,
         }
@@ -1375,6 +1395,49 @@ mod tests {
         let src3 = "aaa\nbb\nccc\n";
         v.reload(Arc::new(src3.to_string()), plain_lines(src3));
         assert_eq!(v.caret, Some((1, 2)));
+    }
+
+    /// A jump keeps its target clear of the sticky headers drawn over the
+    /// top of the view: three rows of context below a line four blocks
+    /// deep had the target under those blocks' headers.
+    #[test]
+    fn a_jump_target_is_not_under_the_sticky_headers() {
+        let mut source = String::new();
+        for (depth, line) in [
+            (0, "class Cart:"),
+            (1, "def add(self, item):"),
+            (2, "for existing in self.items:"),
+            (3, "if existing.name == item.name:"),
+            (4, "existing.quantity += 1"),
+            (4, "return"),
+            (2, "self.items.append(item)"),
+            (0, ""),
+            (1, "def subtotal(self):"),
+            (2, "return 0"),
+        ] {
+            source.push_str(&format!("{}{line}\n", "    ".repeat(depth)));
+        }
+        for _ in 0..60 {
+            source.push_str("x = 1\n");
+        }
+        let lines = plain_lines(&source);
+        let v = Viewer::new(
+            PathBuf::from("/tmp/cart.py"),
+            "cart.py".into(),
+            None,
+            Arc::new(source),
+            lines,
+        );
+        for target in 1..=10 {
+            let top = (v.scroll_offset_for(Some(target), LH) / LH).round() as usize;
+            let pinned =
+                crate::analyze::sticky_headers(&v.folds, v.line_at_row(top), STICKY_MAX).len();
+            let row = v.row_of(target - 1);
+            assert!(
+                row >= top + pinned,
+                "line {target} at row {row} under {pinned} headers pinned from row {top}"
+            );
+        }
     }
 
     #[test]

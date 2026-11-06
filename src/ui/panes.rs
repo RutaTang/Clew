@@ -275,7 +275,8 @@ pub(crate) fn time_travel_code<'a>(
 ) -> Element<'a, Message> {
     let lh = app.line_height();
     let row0 = (tt.scroll_y / lh) as usize;
-    let sticky = crate::analyze::sticky_headers(&hv.folds, hv.line_at_row(row0), 5);
+    let sticky =
+        crate::analyze::sticky_headers(&hv.folds, hv.line_at_row(row0), crate::viewer::STICKY_MAX);
     // Read-only, but clicking still places a caret and dragging selects (for
     // reading / copying). Right-click has no menu in a historical view.
     let code = CodeView::new(
