@@ -445,6 +445,9 @@ impl App {
             files: files.clone(),
             truncated: result.truncated,
         });
+        // The breakpoints set in this project before, by this window or the
+        // last run of clew.
+        self.restore_breakpoints();
         // The server cleared its per-project LSP approvals on OpenProject;
         // push this project's recorded ones so its spawn paths (SpawnLsp, the
         // Ask agent) honor them.

@@ -2195,6 +2195,7 @@ impl App {
         if map.is_empty() {
             self.debug.breakpoints.remove(&path);
         }
+        self.keep_breakpoint(&path, line);
         self.push_breakpoints(&path)
     }
 
@@ -2264,6 +2265,7 @@ impl App {
             .or_default()
             .insert(line, bp);
         self.status = tr!("Conditional breakpoint set").into();
+        self.keep_breakpoint(&path, line);
         self.push_breakpoints(&path)
     }
 

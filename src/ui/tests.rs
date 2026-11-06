@@ -5028,6 +5028,35 @@ fn the_empty_call_hierarchy_says_how_to_fill_it() {
     assert!(shows(&mut sim, "choose Call Hierarchy"));
 }
 
+/// A function with no callers (or callees) says so under its name: the
+/// panel showed the name and nothing else, as if it were still loading.
+#[test]
+fn a_call_tree_with_nothing_under_its_root_says_so() {
+    let mut app = reader_app();
+    for (direction, said) in [
+        (crate::callgraph::Direction::Incoming, "No callers found"),
+        (crate::callgraph::Direction::Outgoing, "No callees found"),
+    ] {
+        let mut tree =
+            crate::callgraph::CallTree::new(7, direction, "python", vec![call_item("root")]);
+        tree.set_children(0, Vec::new());
+        app.proj.call_graph = Some(tree);
+        assert!(shows(&mut sim_elem(super::calls_tab(&app)), said), "{said}");
+    }
+    // Not before it has been asked.
+    let tree = crate::callgraph::CallTree::new(
+        8,
+        crate::callgraph::Direction::Incoming,
+        "python",
+        vec![call_item("root")],
+    );
+    app.proj.call_graph = Some(tree);
+    assert!(!shows(
+        &mut sim_elem(super::calls_tab(&app)),
+        "No callers found"
+    ));
+}
+
 /// I1 / E1-11: a call-tree arrow names its tree (token) as well as the node,
 /// and a node the size cap cut short says how many callers it holds back.
 #[test]
@@ -7410,6 +7439,71 @@ fn the_raised_note_keeps_clear_of_the_ask_pill() {
         );
     }
     assert!(seen_low, "the note was never brought low in the view");
+}
+
+/// Escape in the Files view's filter empties it, as its × does: it stayed
+/// filled however often Escape was pressed. Only while the filter has the
+/// keyboard: Escape elsewhere leaves it be.
+#[test]
+fn escape_in_the_file_filter_clears_it() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.file_filter = "cart".into();
+    let cleared =
+        |m: &Message| matches!(m, Message::Window(WindowMsg::FileFilterChanged(s)) if s.is_empty());
+    let escape = Event::Keyboard(keyboard::Event::KeyPressed {
+        key: keyboard::Key::Named(keyboard::key::Named::Escape),
+        modified_key: keyboard::Key::Named(keyboard::key::Named::Escape),
+        physical_key: keyboard::key::Physical::Unidentified(
+            keyboard::key::NativeCode::Unidentified,
+        ),
+        location: keyboard::Location::Standard,
+        modifiers: keyboard::Modifiers::default(),
+        text: None,
+        repeat: false,
+    });
+    let press = |focus: bool| {
+        let mut renderer = renderer();
+        let size = Size::new(300.0, 600.0);
+        let mut ui = UserInterface::build(
+            super::sidebar::sidebar(&app),
+            size,
+            Cache::default(),
+            &mut renderer,
+        );
+        if focus {
+            let _ = run_operation::<()>(
+                &mut ui,
+                &renderer,
+                iced::advanced::widget::operation::focusable::focus(super::file_filter_id()),
+            );
+        }
+        let mut messages = Vec::new();
+        let _ = ui.update(
+            std::slice::from_ref(&escape),
+            mouse::Cursor::Unavailable,
+            &mut renderer,
+            &mut clipboard::Null,
+            &mut messages,
+        );
+        messages
+    };
+    assert!(press(true).iter().any(cleared), "Escape in the filter");
+    assert!(
+        !press(false).iter().any(cleared),
+        "Escape with it unfocused"
+    );
+    // Its ×, just right of the field, does the same.
+    let mut sim = sim_elem(super::sidebar::sidebar(&app));
+    let field = sim
+        .find(super::file_filter_id())
+        .expect("the filter is on screen")
+        .bounds();
+    sim.point_at(Point::new(field.x + field.width + 12.0, field.center_y()));
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent: Vec<Message> = sim.into_messages().collect();
+    assert!(sent.iter().any(cleared), "{sent:?}");
 }
 
 /// A commit's day reads as a reader says it: the month and day, and the

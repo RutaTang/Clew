@@ -577,6 +577,12 @@ pub enum HoverMsg {
 #[derive(Debug, Clone)]
 pub enum NavMsg {
     SearchQueryChanged(String),
+    /// Typing in the search sidebar paused: search, if `typed` is still the
+    /// latest edit ([`SearchState::typed`](crate::app::model::SearchState)).
+    SearchSettled {
+        stamp: Stamp,
+        typed: u64,
+    },
     SearchSubmitted,
     SearchDone {
         stamp: Stamp,
@@ -2177,6 +2183,7 @@ impl NavMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             NavMsg::SearchDone { stamp, .. }
+            | NavMsg::SearchSettled { stamp, .. }
             | NavMsg::DefinitionResult { stamp, .. }
             | NavMsg::ReferencesResult { stamp, .. }
             | NavMsg::LocationPreviews { stamp, .. } => Some(Origin::Stamped(stamp)),

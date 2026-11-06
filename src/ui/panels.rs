@@ -340,6 +340,24 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// [`tree_note_row`] for a node that has none to show ("No callers found"):
+/// quiet, as there is nothing wrong.
+fn tree_empty_row<'a>(depth: usize, note: String) -> Element<'a, Message> {
+    container(
+        text(note)
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+    )
+    .padding(Padding {
+        top: 0.0,
+        right: 4.0,
+        bottom: 2.0,
+        left: depth as f32 * 12.0 + 16.0 + 6.0,
+    })
+    .into()
+}
+
 /// A dim note row in a lazily-expanded tree, indented under the node it is
 /// about: what the tree's size cap left out ("12 more callers not shown").
 /// Without it a node cut short reads as if it had no more callers.
@@ -1848,6 +1866,15 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         // The tree's node cap cut this node short: say how many it holds back.
         if let Some(note) = tree.hidden_note(id) {
             rows.push(tree_note_row(node.depth + 1, note));
+        }
+        // The function asked about has none: said, where the panel otherwise
+        // showed its name and nothing under it, as if it were still loading.
+        if node.depth == 0 && node.children.as_ref().is_some_and(|c| c.is_empty()) {
+            let none = match tree.direction {
+                Direction::Incoming => tr!("No callers found"),
+                Direction::Outgoing => tr!("No callees found"),
+            };
+            rows.push(tree_empty_row(1, none.to_string()));
         }
     }
 

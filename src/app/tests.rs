@@ -8206,6 +8206,83 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
     );
 }
 
+/// Breakpoints are kept between runs: set in one window, they are there in
+/// the next window to open the project — a condition with its line — and a
+/// cleared one stays cleared. They used to live in memory only, so every
+/// restart dropped them.
+#[test]
+fn breakpoints_are_kept_for_the_next_run() {
+    let mut app = scanned_app("breakpoints-kept");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let toggle = |app: &mut App, line| {
+        let _ = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+            path: lib.clone(),
+            line,
+        }));
+    };
+    toggle(&mut app, 1);
+    toggle(&mut app, 4);
+    app.proj.bp_cond_edit = Some((lib.clone(), 3, "x > 1".into()));
+    let _ = app.update(Message::Debug(DebugMsg::BpConditionSet));
+    toggle(&mut app, 4); // cleared again
+
+    let mut next = blank_app();
+    scan_synchronously(&mut next, root.clone());
+    let kept: Vec<(usize, Option<String>)> = next
+        .debug
+        .breakpoints
+        .get(&lib)
+        .map(|file| {
+            file.iter()
+                .map(|(l, bp)| (*l, bp.condition.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(kept, vec![(1, None), (3, Some("x > 1".into()))]);
+    // Nothing the adapter said comes back with them: no session has.
+    assert!(
+        next.debug.breakpoints[&lib]
+            .values()
+            .all(|bp| bp.verified.is_none())
+    );
+}
+
+/// The search sidebar searches once typing pauses, with the query as it
+/// then is: it searched only on Enter, so a query typed and left showed
+/// nothing. A pause a later keystroke overtook searches nothing; one letter
+/// waits for Enter; a cleared query clears the results at once.
+#[test]
+fn search_runs_once_typing_pauses() {
+    let mut app = scanned_app("live-search");
+    let typed = |app: &mut App, q: &str| {
+        run_task(app.update(Message::Nav(NavMsg::SearchQueryChanged(q.into()))))
+    };
+    assert!(
+        typed(&mut app, "o").is_empty(),
+        "one letter waits for Enter"
+    );
+    let first = typed(&mut app, "or");
+    let second = typed(&mut app, "ori");
+    assert!(
+        matches!(
+            first.as_slice(),
+            [Message::Nav(NavMsg::SearchSettled { .. })]
+        ),
+        "{first:?}"
+    );
+    for m in first {
+        let _ = app.update(m);
+    }
+    assert!(!app.proj.search.ran, "a pause overtaken searches nothing");
+    for m in second {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.search.ran, "the last pause searches");
+    let _ = typed(&mut app, "");
+    assert!(!app.proj.search.ran && app.proj.search.hits.is_empty());
+}
+
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.
 fn tour_json(scope: &str) -> String {
     format!(
@@ -20511,6 +20588,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: app.proj.search_seq,
             result: Default::default(),
+        }),
+        Message::Nav(NavMsg::SearchSettled {
+            stamp: s(),
+            typed: app.proj.search.typed,
         }),
         Message::Editor(EditorMsg::DiffLoaded {
             stamp: s(),

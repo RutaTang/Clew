@@ -1035,6 +1035,10 @@ pub struct Project {
 #[derive(Default, Debug)]
 pub struct SearchState {
     pub query: String,
+    /// Bumped by every edit of the query or its globs: the search a pause
+    /// in typing starts is run only if nothing was typed since
+    /// (`NavMsg::SearchSettled`).
+    pub typed: u64,
     pub running: bool,
     pub ran: bool,
     pub hits: Vec<SearchHit>,

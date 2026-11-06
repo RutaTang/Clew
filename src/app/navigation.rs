@@ -182,6 +182,9 @@ pub(crate) fn search_status(
     }
 }
 
+/// How long typing in the search sidebar must pause before it searches.
+pub(crate) const LIVE_SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+
 /// The kinds of symbol a reading-trail stop is named for, and re-anchored
 /// to as edits move it: functions, and the types a jump lands on (Go to
 /// Type Definition). A class read as `cart.py:6` in the trail.
@@ -440,6 +443,35 @@ impl App {
     }
 
     /// Kick off a project search from the current query and options.
+    /// Search as the reader types: once typing pauses for
+    /// [`LIVE_SEARCH_PAUSE`], with what the query then is. It ran only on
+    /// Enter, so a query typed and left showed nothing. A query of one
+    /// character, which matches most of a project, waits for Enter; a query
+    /// cleared clears the results at once.
+    fn search_when_typing_pauses(&mut self) -> Task<Message> {
+        self.proj.search.typed += 1;
+        let typed = self.proj.search.typed;
+        let query = self.proj.search.query.trim();
+        if query.is_empty() {
+            return self.run_search();
+        }
+        if query.chars().count() < 2 {
+            return Task::none();
+        }
+        let stamp = self.stamp();
+        // Made inside the task: a timer needs the runtime, which the update
+        // that asks for it is not running on.
+        Task::perform(
+            async { tokio::time::sleep(LIVE_SEARCH_PAUSE).await },
+            move |()| {
+                Message::Nav(NavMsg::SearchSettled {
+                    stamp: stamp.clone(),
+                    typed,
+                })
+            },
+        )
+    }
+
     pub(crate) fn run_search(&mut self) -> Task<Message> {
         let Some((root, files)) = self
             .proj
@@ -816,7 +848,14 @@ impl App {
         match message {
             NavMsg::SearchQueryChanged(query) => {
                 self.proj.search.query = query;
-                Task::none()
+                self.search_when_typing_pauses()
+            }
+            NavMsg::SearchSettled { typed, .. } => {
+                if typed == self.proj.search.typed {
+                    self.run_search()
+                } else {
+                    Task::none()
+                }
             }
             NavMsg::SearchToggle(opt) => {
                 match opt {
@@ -833,11 +872,11 @@ impl App {
             }
             NavMsg::SearchIncludeChanged(s) => {
                 self.proj.search.include = s;
-                Task::none()
+                self.search_when_typing_pauses()
             }
             NavMsg::SearchExcludeChanged(s) => {
                 self.proj.search.exclude = s;
-                Task::none()
+                self.search_when_typing_pauses()
             }
             NavMsg::SearchSubmitted => self.run_search(),
             NavMsg::SearchDone { seq, result, .. } => {

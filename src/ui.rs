@@ -26,6 +26,7 @@ mod anchored;
 // A line of text on the design's baseline wherever it lands (`ts::set_in`).
 mod baseline;
 mod corner_safe;
+mod escape_clears;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
@@ -261,6 +262,11 @@ pub fn find_input_id() -> iced::widget::Id {
 
 pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
+}
+
+/// The Files view's filter field.
+pub fn file_filter_id() -> iced::widget::Id {
+    iced::widget::Id::new("file-filter")
 }
 
 /// The search field of Ask's menu of sessions, focused as the menu opens.

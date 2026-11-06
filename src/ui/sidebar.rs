@@ -142,32 +142,46 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         slot()
     };
 
-    // The Files view narrows to what its filter matches.
+    // The Files view narrows to what its filter matches. Escape in the
+    // field, or its ×, empties it: it stayed filled however often Escape
+    // was pressed, and only deleting every letter brought the tree back.
     let filter: Element<'_, Message> =
         if app.sidebar == SidebarTab::Files && app.proj.project.is_some() {
+            let cleared = Message::Window(WindowMsg::FileFilterChanged(String::new()));
+            let mut field = row![
+                glyph::icon(Glyph::Filter, theme::dim(), 13.0),
+                ts::field_in(
+                    text_input(tr!("Filter files"), &app.file_filter)
+                        .id(super::file_filter_id())
+                        .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
+                        .on_submit(Message::Window(WindowMsg::FileFilterSubmitted))
+                        .style(theme::bare_input),
+                    FILTER_H - 2.0,
+                    ts::INTER,
+                    ts::BODY,
+                ),
+            ]
+            .spacing(8)
+            .height(Fill)
+            .align_y(iced::Center);
+            if !app.file_filter.is_empty() {
+                field = field.push(tip_at(
+                    button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
+                        .style(theme::toolbar_button)
+                        .padding(3)
+                        .on_press(cleared.clone()),
+                    tr!("Clear filter"),
+                    None,
+                    tooltip::Position::Bottom,
+                ));
+            }
             container(
-                container(
-                    row![
-                        glyph::icon(Glyph::Filter, theme::dim(), 13.0),
-                        ts::field_in(
-                            text_input(tr!("Filter files"), &app.file_filter)
-                                .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
-                                .on_submit(Message::Window(WindowMsg::FileFilterSubmitted))
-                                .style(theme::bare_input),
-                            FILTER_H - 2.0,
-                            ts::INTER,
-                            ts::BODY,
-                        ),
-                    ]
-                    .spacing(8)
-                    .height(Fill)
-                    .align_y(iced::Center),
-                )
-                .height(Length::Fixed(FILTER_H))
-                // The design's 10 inside its 1 px border, which here takes
-                // no room of its own.
-                .padding([1, 11])
-                .style(theme::field(!app.file_filter.is_empty())),
+                container(super::escape_clears::EscapeClears::new(field, cleared))
+                    .height(Length::Fixed(FILTER_H))
+                    // The design's 10 inside its 1 px border, which here takes
+                    // no room of its own.
+                    .padding([1, 11])
+                    .style(theme::field(!app.file_filter.is_empty())),
             )
             .padding(Padding {
                 top: 0.0,
