@@ -361,7 +361,12 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     }
     let heard = app.voice.heard.as_ref()?;
     let (mark, mark_color, said, said_color) = match &heard.outcome {
-        HeardOutcome::Ran(title) => (Glyph::Check, theme::success(), title.clone(), theme::dim()),
+        HeardOutcome::Ran(title) => (
+            Glyph::Check,
+            theme::success(),
+            format!("→ {title}"),
+            theme::dim(),
+        ),
         HeardOutcome::Confirm(title) => (
             Glyph::Check,
             theme::dim(),
@@ -576,15 +581,14 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let menu_open = app.ask_sessions_menu;
     let title = button(
         row![
-            container(
-                text(app.ask_session_title())
-                    .size(ts::BASE)
-                    .font(crate::fonts::UI_SEMIBOLD)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-            )
-            .max_width(if large { 420.0 } else { 200.0 })
-            .clip(true),
+            text(cut_short(
+                &app.ask_session_title(),
+                if large { 60 } else { 26 }
+            ))
+            .size(ts::BASE)
+            .font(crate::fonts::UI_SEMIBOLD)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
             glyph::icon(Glyph::ChevronDown, theme::dim(), 12.0),
         ]
         .spacing(5)
@@ -682,6 +686,15 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     .into()
 }
 
+/// `s`, cut short to `chars` characters with an ellipsis when longer.
+fn cut_short(s: &str, chars: usize) -> String {
+    if s.chars().count() <= chars {
+        return s.to_string();
+    }
+    let cut: String = s.chars().take(chars.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// Widest the menu of sessions grows, and tallest before it scrolls.
 const SESSIONS_MENU_W: f32 = 320.0;
 const SESSIONS_MENU_MAX_H: f32 = 340.0;
@@ -737,7 +750,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
             row![
                 dot,
                 column![
-                    text(session.title.clone())
+                    text(cut_short(&session.title, 36))
                         .size(ts::BASE)
                         .color(theme::fg())
                         .wrapping(Wrapping::None),

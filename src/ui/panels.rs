@@ -790,12 +790,16 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             "Ask {} about this codebase…",
             crate::app::integrations::acp_label(agent)
         ),
-        // Once there is a conversation, what is typed is a reply — and the
-        // microphone's key is said, as another way to give it.
-        None if !app.proj.ask_turns.is_empty() => format!(
-            "Reply, or press {} to talk",
-            app.keymap.chord(crate::keymap::Action::Voice).caps()
-        ),
+        // Once there is a conversation, what is typed is a reply — and, in
+        // the large window, where there is room to say it, the microphone's
+        // key as another way to give it.
+        None if !app.proj.ask_turns.is_empty() && app.ask_view == crate::AskView::Expanded => {
+            format!(
+                "Reply, or press {} to talk",
+                app.keymap.chord(crate::keymap::Action::Voice).caps()
+            )
+        }
+        None if !app.proj.ask_turns.is_empty() => "Reply…".to_string(),
         None => "Ask about this codebase…".to_string(),
     };
     let input = ts::field_in(

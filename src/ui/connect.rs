@@ -306,11 +306,17 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill);
 
+    // Its size fixed — as large as it may be, within the window's margins —
+    // so the modal centres it, and a page's length never moves its frame.
+    let width = SETTINGS_W
+        .min(app.window_width - 2.0 * MODAL_MARGIN)
+        .max(320.0);
+    let height = SETTINGS_MAX_H
+        .min(app.window_height - 2.0 * MODAL_MARGIN)
+        .max(240.0);
     let panel = container(row![nav, page_col].height(Fill))
-        .width(Fill)
-        .max_width(SETTINGS_W)
-        .height(Fill)
-        .max_height(SETTINGS_MAX_H)
+        .width(Length::Fixed(width))
+        .height(Length::Fixed(height))
         .style(theme::modal_panel);
 
     modal(
