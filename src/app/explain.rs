@@ -1220,13 +1220,20 @@ pub(crate) const UNCHECKED_MARK: &str = tr_noop!("(unchecked)");
 /// A summary as a short view shows it — the hover, the file banner, the
 /// outline, a list of results, callers or contents — trimmed, and marked
 /// when it was kept unchecked ([`is_unchecked`]): it must not read as
-/// current there any more than in the overlay ([`explanation_text`]).
+/// current there any more than in the overlay ([`explanation_text`]). Each
+/// of those is plain text, so the summary's code marks go: the margin's
+/// notes and the banner showed `` `Cart.total` `` backticks and all.
 pub(crate) fn shown_summary(cached: &explain::Cached) -> std::borrow::Cow<'_, str> {
     let summary = cached.summary.trim();
+    let summary: std::borrow::Cow<'_, str> = if summary.contains('`') {
+        summary.replace('`', "").into()
+    } else {
+        summary.into()
+    };
     if is_unchecked(cached) {
         format!("{} {summary}", crate::i18n::lookup(UNCHECKED_MARK)).into()
     } else {
-        summary.into()
+        summary
     }
 }
 

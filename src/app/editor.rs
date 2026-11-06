@@ -1696,10 +1696,9 @@ impl App {
     /// Sticky-scroll header lines for a viewer at its current scroll position.
     pub fn sticky_headers(&self, v: &Viewer) -> Vec<usize> {
         let row = (v.scroll_y / self.line_height()) as usize;
-        let first_visible = v.line_at_row(row);
         // Read enclosing headers off the precomputed fold ranges — cheap enough
         // to recompute each frame, so sticky scroll stays smooth in huge files.
-        analyze::sticky_headers(&v.folds, first_visible, crate::viewer::STICKY_MAX)
+        v.sticky_at_row(row)
     }
 
     pub(crate) fn rel_of(&self, abs: &Path) -> String {

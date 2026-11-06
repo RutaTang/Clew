@@ -504,6 +504,29 @@ impl Viewer {
             .unwrap_or_else(|| self.lines.len().saturating_sub(1))
     }
 
+    /// The headers pinned over the view when display row `row` is at its
+    /// top: the blocks around that line — less any that ends above the first
+    /// line seen under them. The line at the top is under the pinned
+    /// headers, so a function that ends there was pinned over the next one:
+    /// `def subtotal` over `def total`, as if one were inside the other.
+    pub fn sticky_at_row(&self, row: usize) -> Vec<usize> {
+        let mut headers =
+            crate::analyze::sticky_headers(&self.folds, self.line_at_row(row), STICKY_MAX);
+        while let Some(&last) = headers.last() {
+            let below = self.line_at_row(row + headers.len());
+            let ends_above = self
+                .folds
+                .iter()
+                .find(|&&(header, _)| header == last)
+                .is_some_and(|&(_, end)| end < below);
+            if !ends_above {
+                break;
+            }
+            headers.pop();
+        }
+        headers
+    }
+
     /// Display row of a source line, accounting for collapsed folds above it.
     pub fn row_of(&self, line: usize) -> usize {
         if self.visible.is_empty() {
@@ -668,12 +691,7 @@ impl Viewer {
                 let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
                 let mut top = row.saturating_sub(3);
                 for _ in 0..8 {
-                    let pinned = crate::analyze::sticky_headers(
-                        &self.folds,
-                        self.line_at_row(top),
-                        STICKY_MAX,
-                    )
-                    .len();
+                    let pinned = self.sticky_at_row(top).len();
                     if top == 0 || row >= top + pinned {
                         break;
                     }
@@ -1475,14 +1493,42 @@ mod tests {
         );
         for target in 1..=10 {
             let top = (v.scroll_offset_for(Some(target), LH) / LH).round() as usize;
-            let pinned =
-                crate::analyze::sticky_headers(&v.folds, v.line_at_row(top), STICKY_MAX).len();
+            let pinned = v.sticky_at_row(top).len();
             let row = v.row_of(target - 1);
             assert!(
                 row >= top + pinned,
                 "line {target} at row {row} under {pinned} headers pinned from row {top}"
             );
         }
+    }
+
+    /// A block that ends among the lines under the pinned headers is not
+    /// pinned over what follows it: `def subtotal` was pinned over `def
+    /// total`, as if one were inside the other.
+    #[test]
+    fn a_header_is_not_pinned_over_the_block_after_it() {
+        let source = "class Cart:\n    def subtotal(self):\n        a = 1\n        return a\n\n    def total(self):\n        return 2\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/cart.py"),
+            "cart.py".into(),
+            None,
+            Arc::new(source.to_string()),
+            plain_lines(source),
+        );
+        // Row 2 (`a = 1`) at the top: `class Cart` and `def subtotal` would
+        // cover rows 2 and 3, and row 4 — the blank before `def total` — is
+        // past `subtotal`'s end.
+        assert_eq!(v.sticky_at_row(2), vec![0]);
+        // Deep inside a block, both stay pinned.
+        let deep = "class A:\n    def f(self):\n        a = 1\n        b = 2\n        c = 3\n        d = 4\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/a.py"),
+            "a.py".into(),
+            None,
+            Arc::new(deep.to_string()),
+            plain_lines(deep),
+        );
+        assert_eq!(v.sticky_at_row(2), vec![0, 1]);
     }
 
     #[test]

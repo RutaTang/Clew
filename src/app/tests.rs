@@ -24117,6 +24117,29 @@ fn an_unchecked_summary_is_marked_in_the_hover() {
     assert!(shown.starts_with(crate::app::UNCHECKED_MARK), "{shown}");
 }
 
+/// A summary's code marks are not shown in the plain-text views of it (the
+/// margin's notes, the file banner, the hover): they read "`Cart.total`
+/// sums…", backticks and all.
+#[test]
+fn a_short_view_of_a_summary_drops_its_code_marks() {
+    let cached = |summary: &str| crate::explain::Cached {
+        summary: summary.into(),
+        prompt_hash: 0,
+        detail: None,
+        basis: None,
+    };
+    let c = cached("`Cart.total` sums the items, then `apply_discount`s them.");
+    assert_eq!(
+        crate::app::shown_summary(&c),
+        "Cart.total sums the items, then apply_discounts them."
+    );
+    let plain = cached("Sums the items.");
+    assert!(matches!(
+        crate::app::shown_summary(&plain),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 /// ⌘H and ⌘L belong to the menu (Hide clew, Go to Line), so time travel
 /// steps with ⌘← / ⌘→ only; a ⌘H / ⌘L the handler does see is not a step.
 #[test]
