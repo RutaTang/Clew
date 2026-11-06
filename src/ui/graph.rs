@@ -587,6 +587,11 @@ const FRAME_TAU: f32 = 0.14;
 const LABEL_TAU: f32 = 0.11;
 const TURN_TAU: f32 = 0.55;
 const PITCH_TAU: f32 = 0.3;
+/// Turns of the spin the 3D framing is measured at, and the room it
+/// leaves for a node's farthest falling between two of them (cos of half
+/// a step, inverted, with a margin).
+const SPIN_SAMPLES: usize = 24;
+const SPIN_SAMPLE_SLACK: f32 = 1.012;
 /// Fastest a fling turns the camera, radians per second.
 const MAX_TURN: f32 = 8.0;
 /// The camera's angles a switch to 3D swings to from flat.
@@ -1090,7 +1095,15 @@ impl GraphCanvas<'_> {
             });
             if n == 0 { 0.0 } else { (lo + hi) / 2.0 }
         });
-        let mut dists: Vec<f32> = st
+        // In 3D: how far out each node is drawn — across and up — at the
+        // farthest it gets in a whole turn of the spin at this tilt, its
+        // perspective included. The spin only turns the camera round the
+        // upright axis, so the framing it gives holds at every angle of it
+        // (a spin never makes it breathe), yet is no bigger than the graph
+        // needs: a sphere round a flat or tall graph left half the frame
+        // empty. A tilt (an orbit up or down) eases it to the new bound.
+        let pitch = st.pitch * e;
+        let (mut across, mut up): (Vec<f32>, Vec<f32>) = st
             .pos
             .iter()
             .map(|p| {
@@ -1099,15 +1112,19 @@ impl GraphCanvas<'_> {
                     p[1] - box_center[1],
                     p[2] - box_center[2],
                 ];
-                (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+                (0..SPIN_SAMPLES).fold((0.0f32, 0.0f32), |(x, y), k| {
+                    let yaw = k as f32 * std::f32::consts::TAU / SPIN_SAMPLES as f32;
+                    let (rx, ry, _, _) = Self::project_view(rotate(d, yaw, pitch));
+                    (x.max(rx.abs()), y.max(ry.abs()))
+                })
             })
-            .collect();
-        dists.sort_by(f32::total_cmp);
-        // A node at the sphere's edge is drawn farthest out a little in front
-        // of the centre, its perspective enlarging it: room for that too.
-        let r3 = robust_extent(&dists);
-        let edge_persp = FOCAL / (CAM * CAM - r3 * r3).max((FOCAL * 0.15).powi(2)).sqrt();
-        let fit_3d = inner_w.min(inner_h) / (2.0 * r3 * edge_persp.max(1.0));
+            .unzip();
+        across.sort_by(f32::total_cmp);
+        up.sort_by(f32::total_cmp);
+        // Sampled turns can miss a node's farthest by a hair: a little room.
+        let fit_3d = (inner_w / (2.0 * robust_extent(&across)))
+            .min(inner_h / (2.0 * robust_extent(&up)))
+            / SPIN_SAMPLE_SLACK;
         let half = |axis: usize| {
             let mut d: Vec<f32> = st
                 .pos
@@ -2894,6 +2911,27 @@ mod tests {
 
         let (mut st, _, _) = settled(&l, true);
         let c = canvas(&l, true, false);
+        // A whole turn of the spin: always inside the padding, and out to
+        // its edge on one axis somewhere in the turn — the frame used, not
+        // half of it.
+        let (half_w, half_h) = (
+            BOUNDS.width / 2.0 - GRAPH_PAD,
+            BOUNDS.height / 2.0 - GRAPH_PAD,
+        );
+        let (mut far_x, mut far_y) = (0.0f32, 0.0f32);
+        let yaw = st.yaw;
+        for k in 0..360 {
+            st.yaw = yaw + k as f32 * std::f32::consts::TAU / 360.0;
+            for (x, y) in on_screen(&c, &st) {
+                far_x = far_x.max((x - BOUNDS.width / 2.0).abs());
+                far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
+            }
+        }
+        assert!(far_x <= half_w + 0.5 && far_y <= half_h + 0.5, "{far_x} {far_y}");
+        assert!(
+            far_x >= half_w * 0.97 || far_y >= half_h * 0.97,
+            "the turn reaches the frame's edge: {far_x} of {half_w}, {far_y} of {half_h}"
+        );
         for k in 0..24 {
             st.yaw = k as f32 * 0.27;
             st.pitch = (k as f32 * 0.4).sin() * 1.4;
