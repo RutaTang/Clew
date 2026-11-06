@@ -166,7 +166,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
 
     // What is open, in counts — unless Clew has something to say.
     let said: Element<'_, Message> = if !app.status.is_empty() {
-        status_text(&app.status).into()
+        // A status the back end wrote as it is (an error passed straight
+        // through) in the reader's language too.
+        status_text(crate::i18n::message(&app.status)).into()
     } else if let Some(project) = app.proj.project.as_ref() {
         let files = project.files.len();
         let symbols = app.proj.symbol_index.len();

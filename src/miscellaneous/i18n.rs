@@ -392,6 +392,11 @@ pub fn format(template: &str, args: &[(&str, &dyn Display)]) -> String {
         } else if let Some(end) = tail.strip_prefix('{').and_then(|t| t.find('}')) {
             let name = &tail[1..=end];
             match args.iter().find(|(k, _)| *k == name) {
+                // What went wrong, as another of clew's crates said it: in
+                // the reader's language where it is one of their messages.
+                Some((_, value)) if MESSAGE_PLACES.contains(&name) => {
+                    out.push_str(&message(&value.to_string()));
+                }
                 Some((_, value)) => {
                     use std::fmt::Write as _;
                     let _ = write!(out, "{value}");
@@ -408,6 +413,164 @@ pub fn format(template: &str, args: &[(&str, &dyn Display)]) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// The places of a template that hold what another part of clew said went
+/// wrong — filled with [`message`]'s translation of it.
+const MESSAGE_PLACES: &[&str] = &["error", "reason", "message", "detail"];
+
+/// A part of a message template: words as written, or a place a value
+/// fills.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Part {
+    Words(&'static str),
+    Place(&'static str),
+}
+
+/// A template's parts, `{{`/`}}` left among its words.
+fn parts(template: &'static str) -> Vec<Part> {
+    let mut out = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        if rest[open..].starts_with("{{") {
+            out.push(Part::Words(&rest[..open + 2]));
+            rest = &rest[open + 2..];
+            continue;
+        }
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        if open > 0 {
+            out.push(Part::Words(&rest[..open]));
+        }
+        out.push(Part::Place(&rest[open + 1..open + close]));
+        rest = &rest[open + close + 1..];
+    }
+    if !rest.is_empty() {
+        out.push(Part::Words(rest));
+    }
+    out
+}
+
+/// Whether `text` is `parts` filled in, and with what: each place the
+/// shortest text that lets the rest match, never empty.
+fn fill<'t>(parts: &[Part], text: &'t str, filled: &mut Vec<(&'static str, &'t str)>) -> bool {
+    match parts.split_first() {
+        None => text.is_empty(),
+        Some((Part::Words(words), rest)) => {
+            let words = words.replace("{{", "{").replace("}}", "}");
+            text.strip_prefix(words.as_str())
+                .is_some_and(|after| fill(rest, after, filled))
+        }
+        Some((Part::Place(name), rest)) => match rest.first() {
+            None => {
+                filled.push((name, text));
+                !text.is_empty()
+            }
+            Some(Part::Words(next)) => {
+                let next = next.replace("{{", "{").replace("}}", "}");
+                let mut from = text.chars().next().map_or(1, char::len_utf8);
+                while let Some(at) = text.get(from..).and_then(|t| t.find(next.as_str())) {
+                    let at = from + at;
+                    let kept = filled.len();
+                    filled.push((name, &text[..at]));
+                    if fill(rest, &text[at..], filled) {
+                        return true;
+                    }
+                    filled.truncate(kept);
+                    from = at + text[at..].chars().next().map_or(1, char::len_utf8);
+                }
+                false
+            }
+            // Two places side by side: where one ends cannot be told.
+            Some(Part::Place(_)) => false,
+        },
+    }
+}
+
+/// A message clew-core, clew-server or clew-voice wrote in English (see
+/// `extern_messages`), in the reader's language: the template it was
+/// written from found, and its translation filled with what the message
+/// held — each part that is itself such a message translated too. Text no
+/// template matches (git's own words, a server's) stays as it came.
+pub fn message(text: &str) -> String {
+    if current() == Lang::En || text.is_empty() {
+        return text.to_string();
+    }
+    // Asked again each frame for what is on screen: kept, per language.
+    static SAID: std::sync::Mutex<Option<HashMap<(u8, String), String>>> =
+        std::sync::Mutex::new(None);
+    let key = (current().to_u8(), text.to_string());
+    if let Some(said) = SAID
+        .lock()
+        .ok()
+        .and_then(|held| held.as_ref().and_then(|m| m.get(&key).cloned()))
+    {
+        return said;
+    }
+    let said = message_at(text, 0);
+    if let Ok(mut held) = SAID.lock() {
+        let held = held.get_or_insert_with(HashMap::new);
+        if held.len() > 512 {
+            held.clear();
+        }
+        held.insert(key, said.clone());
+    }
+    said
+}
+
+fn message_at(text: &str, depth: usize) -> String {
+    let lang = current();
+    if lang == Lang::En || depth > 3 || text.is_empty() {
+        return text.to_string();
+    }
+    if let Some(said) = catalog(lang).get(text) {
+        return (*said).to_string();
+    }
+    static TEMPLATES: OnceLock<Vec<(&'static str, Vec<Part>, usize)>> = OnceLock::new();
+    let templates = TEMPLATES.get_or_init(|| {
+        crate::miscellaneous::extern_messages::MESSAGES
+            .iter()
+            .filter(|t| t.contains('{'))
+            .map(|&t| {
+                let parts = parts(t);
+                let words = parts
+                    .iter()
+                    .map(|p| match p {
+                        Part::Words(w) => w.len(),
+                        Part::Place(_) => 0,
+                    })
+                    .sum();
+                (t, parts, words)
+            })
+            .collect()
+    });
+    // Of the templates it fits, the one that says the most in words.
+    let mut best: Option<(&'static str, Vec<(&'static str, &str)>, usize)> = None;
+    for (template, parts, words) in templates {
+        if best.as_ref().is_some_and(|(_, _, w)| w >= words) {
+            continue;
+        }
+        let mut filled = Vec::new();
+        if fill(parts, text, &mut filled) {
+            best = Some((template, filled, *words));
+        }
+    }
+    let Some((template, filled, _)) = best else {
+        return text.to_string();
+    };
+    let Some(said) = catalog(lang).get(template) else {
+        return text.to_string();
+    };
+    let values: Vec<(&str, String)> = filled
+        .into_iter()
+        .map(|(name, value)| (name, message_at(value, depth + 1)))
+        .collect();
+    let args: Vec<(&str, &dyn Display)> = values
+        .iter()
+        .map(|(name, value)| (*name, value as &dyn Display))
+        .collect();
+    format(said, &args)
 }
 
 /// Whether `n` takes the singular form ("1 file") in the language spoken.
@@ -834,6 +997,225 @@ mod tests {
             starts.iter().all(|&at| !chinese[..at].ends_with(' ')),
             "Chinese breaks between characters"
         );
+    }
+
+    /// A message another crate wrote is found by its template and said in
+    /// the reader's language, its parts in place — and a part that is
+    /// itself such a message translated too. English, and text no template
+    /// fits, stay as they came.
+    #[test]
+    fn another_crates_message_is_said_in_the_readers_language() {
+        let plain = "the session is ending";
+        let shaped = "no speech model at {arg1}";
+        let nested = "the connection to the server broke: {error}";
+        for t in [plain, shaped, nested] {
+            assert!(
+                crate::miscellaneous::extern_messages::MESSAGES.contains(&t),
+                "{t}"
+            );
+        }
+        assert_eq!(message(plain), plain);
+        with_lang(Lang::Fr, || {
+            let fr = catalog(Lang::Fr);
+            assert_eq!(message(plain), fr[plain]);
+            let said = message("no speech model at /m/small.bin");
+            assert_eq!(said, format(fr[shaped], &[("arg1", &"/m/small.bin")]));
+            assert!(said.contains("/m/small.bin"), "{said}");
+            let said = message("the connection to the server broke: the session is ending");
+            assert_eq!(said, format(fr[nested], &[("error", &fr[plain])]));
+            assert_eq!(
+                message("fatal: not a git repository"),
+                "fatal: not a git repository"
+            );
+            // As a sentence's error, in place.
+            let shown = crate::tr!("Could not save the language: {error}", error = plain);
+            assert!(shown.contains(fr[plain]), "{shown}");
+        });
+    }
+
+    /// What clew-core, clew-server and clew-voice write that may reach the
+    /// screen is listed in `extern_messages`, word for word, so the
+    /// catalogs carry it — found as the list was made: the literal of each
+    /// `format!`, `Err(..)` and `msg =` outside tests and logging that
+    /// reads as a sentence.
+    #[test]
+    fn other_crates_messages_are_listed() {
+        let listed: BTreeSet<&str> = crate::miscellaneous::extern_messages::MESSAGES
+            .iter()
+            .copied()
+            .collect();
+        let mut written = BTreeSet::new();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates");
+        fn walk(dir: &std::path::Path, files: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                let name = path.file_name().unwrap().to_string_lossy().to_string();
+                if path.is_dir() {
+                    if name != "tests" {
+                        walk(&path, files);
+                    }
+                } else if name.ends_with(".rs") && name != "tests.rs" {
+                    files.push(path);
+                }
+            }
+        }
+        for krate in ["clew-core", "clew-server", "clew-voice"] {
+            let mut files = Vec::new();
+            walk(&root.join(krate).join("src"), &mut files);
+            for path in files {
+                let text = std::fs::read_to_string(&path).unwrap();
+                let text = text.split("#[cfg(test)]\nmod tests").next().unwrap();
+                for opener in ["format!(", "Err(", "msg ="] {
+                    for (at, _) in text.match_indices(opener) {
+                        let after = text[at + opener.len()..].trim_start();
+                        let Some(open) = after.strip_prefix('"') else {
+                            continue;
+                        };
+                        let mut from = at.saturating_sub(60);
+                        while !text.is_char_boundary(from) {
+                            from -= 1;
+                        }
+                        let before = &text[from..at];
+                        if LOGGING.iter().any(|l| before.contains(l)) {
+                            continue;
+                        }
+                        let Some((said, tail)) = literal(open) else {
+                            continue;
+                        };
+                        if opener != "format!(" {
+                            let tail = tail.trim_start();
+                            if !(tail.starts_with(".into()")
+                                || tail.starts_with(".to_string()")
+                                || tail.starts_with(".to_owned()")
+                                || tail.starts_with(')'))
+                            {
+                                continue;
+                            }
+                        }
+                        if reads_as_a_sentence(&said) {
+                            written.insert(as_template(&said));
+                        }
+                    }
+                }
+            }
+        }
+        // UPDATE_EXTERN_MESSAGES=1 writes the list as the crates have it
+        // (then translate what is new in every catalog).
+        if std::env::var_os("UPDATE_EXTERN_MESSAGES").is_some() {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/miscellaneous/extern_messages.rs");
+            let old = std::fs::read_to_string(&path).unwrap();
+            let head = &old[..old.find("pub(crate) const MESSAGES").unwrap()];
+            let mut new = format!("{head}pub(crate) const MESSAGES: &[&str] = &[\n");
+            for w in &written {
+                new.push_str(&format!("    tr_noop!({w:?}),\n"));
+            }
+            new.push_str("];\n");
+            std::fs::write(&path, new).unwrap();
+            return;
+        }
+        let missing: Vec<&String> = written
+            .iter()
+            .filter(|w| !listed.contains(w.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "not in extern_messages: {missing:?}");
+        let stale: Vec<&&str> = listed.iter().filter(|l| !written.contains(**l)).collect();
+        assert!(stale.is_empty(), "no longer written: {stale:?}");
+    }
+
+    /// What, written just before a literal, makes it a log line's.
+    const LOGGING: &[&str] = &[
+        "eprintln!(",
+        "println!(",
+        "log::",
+        "debug!(",
+        "info!(",
+        "warn!(",
+        "error!(",
+        "trace!(",
+        "panic!(",
+        "assert",
+        "unreachable!(",
+        "expect(",
+        "writeln!(",
+        "write!(",
+    ];
+
+    /// Whether a literal reads as a message to a person: three words or
+    /// more, on one line, not code.
+    fn reads_as_a_sentence(said: &str) -> bool {
+        let mut words = 0;
+        let mut plain = String::new();
+        let mut depth = 0;
+        for c in said.chars() {
+            match c {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                c if depth == 0 => plain.push(c),
+                _ => {}
+            }
+        }
+        for word in plain.split(|c: char| !c.is_ascii_alphabetic()) {
+            if word.len() >= 2 {
+                words += 1;
+            }
+        }
+        let code = ["{ \"", "=>", "::", "fn ", "impl "];
+        words >= 3
+            && said.contains(' ')
+            && said.matches('\n').count() <= 1
+            && said.chars().count() <= 220
+            && !said.starts_with(char::is_whitespace)
+            && !said.starts_with(['[', '{', '<', '$'])
+            && !said.starts_with("--")
+            && !said.contains("{{")
+            && !said.trim_end().ends_with("()")
+            && !code.iter().any(|c| said.contains(c))
+    }
+
+    /// A format string as a template: each argument a named place, a
+    /// positional one `{argN}`, its format spec dropped.
+    fn as_template(said: &str) -> String {
+        let mut out = String::new();
+        let mut rest = said;
+        let mut positional = 0;
+        while let Some(i) = rest.find(['{', '}']) {
+            out.push_str(&rest[..i]);
+            let tail = &rest[i..];
+            if tail.starts_with("{{") || tail.starts_with("}}") {
+                out.push_str(&tail[..2]);
+                rest = &tail[2..];
+            } else if tail.starts_with('{') {
+                let end = tail.find('}').unwrap();
+                let inner = tail[1..end].split(':').next().unwrap().trim();
+                let name = if inner.is_empty() {
+                    positional += 1;
+                    format!("arg{positional}")
+                } else if let Ok(n) = inner.parse::<usize>() {
+                    format!("arg{}", n + 1)
+                } else {
+                    inner
+                        .chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || c == '_' {
+                                c
+                            } else {
+                                '_'
+                            }
+                        })
+                        .collect()
+                };
+                out.push('{');
+                out.push_str(&name);
+                out.push('}');
+                rest = &tail[end + 1..];
+            } else {
+                out.push('}');
+                rest = &tail[1..];
+            }
+        }
+        out.push_str(rest);
+        out
     }
 
     /// No catalog keeps text the program no longer shows.
