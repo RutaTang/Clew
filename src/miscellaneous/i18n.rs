@@ -1181,6 +1181,54 @@ mod tests {
         });
     }
 
+    /// Every message the other crates write, and every program's message
+    /// clew knows, is said whole in every language: each template, its
+    /// places filled with plain values, comes back as its translation so
+    /// filled. One the matcher cannot fit (two places side by side, a place
+    /// that may stand for nothing) fails here, not on a reader's screen.
+    #[test]
+    fn every_listed_message_is_said_whole_in_every_language() {
+        use crate::miscellaneous::extern_messages::{EXTERNAL, MESSAGES};
+        let mut unsaid = Vec::new();
+        for lang in [Lang::Fr, Lang::Zh, Lang::Ko, Lang::Ja] {
+            with_lang(lang, || {
+                for &template in MESSAGES.iter().chain(EXTERNAL) {
+                    // A place glued to a word's end, last, is a tail the
+                    // code may leave empty ("…settings{detail}"), and a
+                    // place that stands for nothing matches no template.
+                    if let [.., Part::Words(words), Part::Place(_)] = parts(template).as_slice()
+                        && words.ends_with(char::is_alphanumeric)
+                    {
+                        unsaid.push(format!("{}: {template} (a tail glued on)", lang.code()));
+                    }
+                    let mut sample = String::new();
+                    let mut values = Vec::new();
+                    for (i, part) in parts(template).into_iter().enumerate() {
+                        match part {
+                            Part::Words(words) => {
+                                sample.push_str(&words.replace("{{", "{").replace("}}", "}"));
+                            }
+                            Part::Place(name) => {
+                                let value = format!("v{i}");
+                                sample.push_str(&value);
+                                values.push((name, value));
+                            }
+                        }
+                    }
+                    let args: Vec<(&str, &dyn Display)> = values
+                        .iter()
+                        .map(|(name, value)| (*name, value as &dyn Display))
+                        .collect();
+                    let want = format(catalog(lang)[template], &args);
+                    if message(&sample) != want {
+                        unsaid.push(format!("{}: {template}", lang.code()));
+                    }
+                }
+            });
+        }
+        assert!(unsaid.is_empty(), "not said whole: {unsaid:#?}");
+    }
+
     /// A message said with or without a detail is two messages, each said
     /// whole: a place at a message's end cannot stand for nothing.
     #[test]
