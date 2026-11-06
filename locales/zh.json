@@ -644,7 +644,7 @@
  "Installing {name} {version}…": "正在安装 {name} {version}…",
  "Installing {name}…": "正在安装 {name}…",
  "Integrations": "集成",
- "Interface satisfaction": "接口满足关系",
+ "Interface satisfaction": "接口实现",
  "It now presents {kind} {fingerprint}.": "它现在提供的是 {kind} {fingerprint}。",
  "It presents {kind} {fingerprint}.": "它提供的是 {kind} {fingerprint}。",
  "Italian": "意大利语",

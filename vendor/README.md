@@ -48,6 +48,16 @@ cosmic-text centres a line the same way up to 0.19.0; drop these patches
 with the others when iced moves to a release that sets a line as a browser
 does.
 
+A fourth patch breaks Korean lines between words (`ShapeLine::build` in
+`src/shape.rs`), as Korean is set and as CSS's `word-break: keep-all` sets
+it: UAX #14, which cosmic-text follows, allows a break before every Hangul
+syllable, so a Korean label wrapped in the middle of a word. Break points
+inside a run of Hangul and the letters and digits written against it are
+dropped; Chinese and Japanese, written without spaces, still break between
+characters. The i18n test `korean_lines_break_between_words` keeps it.
+Upstream cosmic-text has no such option up to 0.19.0; keep this patch (or
+an equivalent setting, if one arrives) when the others are dropped.
+
 ## iced_wgpu 0.14.0
 
 iced 0.14's GPU renderer. On Windows it presents to a window's own swap

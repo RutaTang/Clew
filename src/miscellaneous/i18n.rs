@@ -735,6 +735,54 @@ mod tests {
         assert_eq!(lookup("no such text"), "no such text");
     }
 
+    /// Where a paragraph set at `width` breaks its lines: the byte at which
+    /// each line after the first starts.
+    fn line_starts(text: &str, width: f32) -> Vec<usize> {
+        use iced::advanced::graphics::text::cosmic_text as ct;
+        let mut fs = ct::FontSystem::new();
+        let mut buffer = ct::Buffer::new(&mut fs, ct::Metrics::new(14.0, 20.0));
+        buffer.set_size(&mut fs, Some(width), None);
+        buffer.set_wrap(&mut fs, ct::Wrap::Word);
+        buffer.set_text(
+            &mut fs,
+            text,
+            &ct::Attrs::new(),
+            ct::Shaping::Advanced,
+            None,
+        );
+        buffer.shape_until_scroll(&mut fs, false);
+        buffer
+            .layout_runs()
+            .skip(1)
+            .filter_map(|run| run.glyphs.first().map(|g| g.start))
+            .collect()
+    }
+
+    /// Korean is set as Korean is read: a line breaks between words, at a
+    /// space, never inside one — while Chinese and Japanese, written
+    /// without spaces, still break between characters.
+    #[test]
+    fn korean_lines_break_between_words() {
+        let korean =
+            "변경된 파일을 정밀화하려면 언어 서버가 프로젝트를 모두 불러올 때까지 기다려야 합니다";
+        let starts = line_starts(korean, 120.0);
+        assert!(starts.len() >= 3, "it wraps: {starts:?}");
+        for at in starts {
+            assert!(
+                korean[..at].ends_with(' '),
+                "a line starts inside a word: {:?}",
+                &korean[at..]
+            );
+        }
+        let chinese = "变更的文件需要等语言服务器加载完整个项目之后才能精确化调用图";
+        let starts = line_starts(chinese, 120.0);
+        assert!(!starts.is_empty(), "it wraps");
+        assert!(
+            starts.iter().all(|&at| !chinese[..at].ends_with(' ')),
+            "Chinese breaks between characters"
+        );
+    }
+
     /// No catalog keeps text the program no longer shows.
     #[test]
     fn no_catalog_keeps_text_the_program_dropped() {
