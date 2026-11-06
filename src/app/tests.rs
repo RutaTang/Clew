@@ -8190,6 +8190,12 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
     assert_eq!((pin.rel.as_str(), pin.line), ("src/lib.rs", 3));
     assert_eq!(pin.code, "pub fn origin() -> Point {");
     assert!(app.status.contains('3'), "{}", app.status);
+    // Asking the question heeds "now ask your question".
+    let added = app.status.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.ask_input = "What does it do?".into();
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert_ne!(app.status, added, "the hint stayed after the question");
     // The blank second line says nothing to ask about.
     app.proj.context_menu = Some(menu(1));
     let _ = app.update(Message::Ask(AskMsg::AboutSelection));

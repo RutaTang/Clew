@@ -265,6 +265,18 @@ impl App {
             self.status = tr!("Still answering — wait, or press Stop").into();
             return Task::none();
         }
+        // "… now ask your question" has been heeded: it stayed in the status
+        // line under the answer.
+        let heeded: Vec<String> =
+            std::iter::once(tr!("Added the selection to Ask — now ask your question").to_string())
+                .chain(self.proj.ask_pins.iter().map(|p| {
+                    tr!(
+                        "Added line {line} to Ask — now ask your question",
+                        line = p.line
+                    )
+                }))
+                .collect();
+        self.settle_status(&heeded.iter().map(String::as_str).collect::<Vec<_>>());
         // An ACP agent brings its own model: no key of clew's is needed.
         if let Some(agent) = self.ask_agent.clone() {
             return self.start_acp_ask(agent, question);
