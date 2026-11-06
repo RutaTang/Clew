@@ -192,35 +192,35 @@ impl ScanReport {
     /// One line describing what the scan skipped or added, or `None` when it
     /// was a plain walk.
     pub fn summary(&self) -> Option<String> {
+        // Each count said in a whole sentence of its own, one for one and one
+        // for more, in the words the app says them in (`scan_summary`): a
+        // word given its ending apart ("entr" + "ies") is one no catalog can
+        // translate.
         let mut parts = Vec::new();
         if self.non_utf8 > 0 {
-            parts.push(format!(
-                "{} entr{} skipped (name is not UTF-8)",
-                self.non_utf8,
-                if self.non_utf8 == 1 { "y" } else { "ies" }
-            ));
+            let n = self.non_utf8;
+            parts.push(if n == 1 {
+                "1 entry skipped (name is not UTF-8)".to_string()
+            } else {
+                format!("{n} entries skipped (name is not UTF-8)")
+            });
         }
         if self.walk_errors > 0 {
-            parts.push(format!(
-                "{} unreadable entr{}{}",
-                self.walk_errors,
-                if self.walk_errors == 1 { "y" } else { "ies" },
-                self.first_error
-                    .as_deref()
-                    .map(|e| format!(" (first: {e})"))
-                    .unwrap_or_default()
-            ));
+            let n = self.walk_errors;
+            parts.push(match (n, self.first_error.as_deref()) {
+                (1, Some(error)) => format!("1 unreadable entry (first: {error})"),
+                (1, None) => "1 unreadable entry".to_string(),
+                (_, Some(error)) => format!("{n} unreadable entries (first: {error})"),
+                (_, None) => format!("{n} unreadable entries"),
+            });
         }
         if !self.tracked_ignored.is_empty() {
-            parts.push(format!(
-                "{} tracked file{} shown despite .gitignore or a build-directory name",
-                self.tracked_ignored.len(),
-                if self.tracked_ignored.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ));
+            let n = self.tracked_ignored.len();
+            parts.push(if n == 1 {
+                "1 tracked file shown despite .gitignore or a build-directory name".to_string()
+            } else {
+                format!("{n} tracked files shown despite .gitignore or a build-directory name")
+            });
         }
         if let Some(e) = &self.tracked_error {
             parts.push(format!(

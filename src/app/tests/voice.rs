@@ -565,6 +565,32 @@ fn a_command_is_heard_in_the_language_the_palette_shows() {
         Some(0)
     );
     assert_eq!(said_as_shown(Lang::Fr, "Masquer la minimap", &fr), Some(1));
+    // Said formally, or to a group: the longer word is the one left out
+    // ("ouvrez", not "ouvre" and a "z").
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Ouvrez le graphe d'appels", &fr),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(
+            Lang::Fr,
+            "Affichez le graphe d'appels, s'il vous plaît",
+            &fr
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Allez aux paramètres", &["Paramètres"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(
+            Lang::Fr,
+            "Ouvrez une nouvelle fenêtre",
+            &["Nouvelle fenêtre"]
+        ),
+        Some(0)
+    );
     assert_eq!(said_as_shown(Lang::Fr, "Atteindre la ligne", &fr), Some(2));
     assert_eq!(
         said_as_shown(Lang::Fr, "Pourquoi le graphe d'appels ?", &fr),

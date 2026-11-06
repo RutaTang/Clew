@@ -475,7 +475,7 @@ impl VoiceMsg {
 pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str]) -> Option<usize> {
     use crate::i18n::Lang;
     // Each list is compacted as the text is, so "s'il vous plaît" is
-    // "silvousplaît". Longest first, so the shorter does not cut it short.
+    // "silvousplaît".
     let (leading, trailing): (&[&str], &[&str]) = match lang {
         Lang::En => return None,
         Lang::Fr => (
@@ -568,23 +568,25 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
             .flat_map(char::to_lowercase)
             .collect()
     }
+    // Each time the longest word that fits, whatever the lists' order:
+    // "ouvrez" is not "ouvre" and a "z", nor "aux" "au" and an "x".
     let bare = |text: &str| -> String {
         let mut text = compact(text);
         loop {
             let before = text.len();
-            for word in leading {
-                if let Some(rest) = text.strip_prefix(word)
-                    && !rest.is_empty()
-                {
-                    text = rest.to_string();
-                }
+            if let Some(word) = leading
+                .iter()
+                .filter(|word| text.starts_with(**word) && text.len() > word.len())
+                .max_by_key(|word| word.len())
+            {
+                text = text[word.len()..].to_string();
             }
-            for word in trailing {
-                if let Some(rest) = text.strip_suffix(word)
-                    && !rest.is_empty()
-                {
-                    text = rest.to_string();
-                }
+            if let Some(word) = trailing
+                .iter()
+                .filter(|word| text.ends_with(**word) && text.len() > word.len())
+                .max_by_key(|word| word.len())
+            {
+                text = text[..text.len() - word.len()].to_string();
             }
             if text.len() == before {
                 return text;

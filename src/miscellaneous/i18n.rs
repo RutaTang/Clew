@@ -342,7 +342,7 @@ fn run_defaults(args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// A way to run `defaults`: [`run_defaults`] on macOS, a stand-in in tests.
+/// A way to run `defaults`: `run_defaults` on macOS, a stand-in in tests.
 #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 type Defaults<'a> = &'a dyn Fn(&[&str]) -> Option<String>;
 
@@ -375,7 +375,7 @@ fn written_by_clew(defaults: Defaults, id: &str) -> Option<String> {
 }
 
 /// Record `pref` in the preferences of the bundle `id` (see
-/// [`tell_macos`]).
+/// `tell_macos`).
 #[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
 fn record_for_macos(defaults: Defaults, id: &str, pref: LangPref) {
     match pref {
@@ -622,11 +622,15 @@ pub fn message(text: &str) -> String {
 
 fn message_at(text: &str, depth: usize) -> String {
     let lang = current();
-    if lang == Lang::En || depth > 3 || text.is_empty() {
+    // Each level says a strictly shorter part of the text (what fills a
+    // place, what precedes a dash, one of several lines), so the depth only
+    // bounds the work; real messages nest five or six deep ("request
+    // failed: " around a proxy's refusal, its advice, the advice's parts).
+    if lang == Lang::En || depth > MAX_DEPTH || text.is_empty() {
         return text.to_string();
     }
     if let Some(said) = catalog(lang).get(text) {
-        return (*said).to_string();
+        return one_counted(text, said);
     }
     use crate::miscellaneous::extern_messages::{EXTERNAL, MESSAGES, TAILS};
     static WHOLE: OnceLock<Vec<Template>> = OnceLock::new();
@@ -636,18 +640,35 @@ fn message_at(text: &str, depth: usize) -> String {
         all.extend(templates(EXTERNAL));
         all
     });
+    // A message with advice added after a dash ("…: refused — to reach the
+    // host without the proxy, …"): each said apart. First where what
+    // precedes the dash is a whole message itself — before a looser
+    // template, whose last place would take the advice in, is tried on all
+    // of it; then whatever precedes it.
+    let ends = ENDS.get_or_init(|| templates(TAILS));
+    let advice = |head_whole: bool| {
+        let mut from = 0;
+        while let Some(at) = text[from..].find(" — ").map(|at| from + at) {
+            let head = &text[..at];
+            let whole_head =
+                catalog(lang).contains_key(head) || said_as(whole, head, depth + 1).is_some();
+            if (whole_head || !head_whole)
+                && let Some(tail) = said_as(ends, &text[at..], depth)
+            {
+                return Some(message_at(head, depth + 1) + &tail);
+            }
+            from = at + " — ".len();
+        }
+        None
+    };
+    if let Some(said) = advice(true) {
+        return said;
+    }
     if let Some(said) = said_as(whole, text, depth) {
         return said;
     }
-    // A message with advice added after a dash ("…: refused — to reach the
-    // host without the proxy, …"): each said apart.
-    let ends = ENDS.get_or_init(|| templates(TAILS));
-    let mut from = 0;
-    while let Some(at) = text[from..].find(" — ").map(|at| from + at) {
-        if let Some(tail) = said_as(ends, &text[at..], depth) {
-            return message_at(&text[..at], depth + 1) + &tail;
-        }
-        from = at + " — ".len();
+    if let Some(said) = advice(false) {
+        return said;
     }
     // Lines another program wrote, joined with "; " (git's last lines of
     // stderr): each said apart, when any of them is one clew knows.
@@ -669,6 +690,21 @@ fn message_at(text: &str, depth: usize) -> String {
     }
     text.to_string()
 }
+
+/// `said`, the translation of `english`, with a count's `{n}` given as one
+/// where `english` is a count's singular ("1 entry skipped …"), which its
+/// translation says with `{n}` (French says 0 and 1 alike) but which, met
+/// as another crate's message, comes with no count to fill it.
+fn one_counted(english: &str, said: &str) -> String {
+    if said.contains("{n}") && !english.contains("{n}") {
+        format(said, &[("n", &1)])
+    } else {
+        said.to_string()
+    }
+}
+
+/// How deep [`message`] says the parts of parts of a message.
+const MAX_DEPTH: usize = 8;
 
 /// The templates of `list` that have places, parsed, with how much of each
 /// is words.
@@ -708,10 +744,15 @@ fn said_as(templates: &[Template], text: &str, depth: usize) -> Option<String> {
         .into_iter()
         .map(|(name, value)| (name, message_at(value, depth + 1)))
         .collect();
-    let args: Vec<(&str, &dyn Display)> = values
+    let mut args: Vec<(&str, &dyn Display)> = values
         .iter()
         .map(|(name, value)| (*name, value as &dyn Display))
         .collect();
+    // A count's singular ("1 unreadable entry (first: {error})"): its
+    // translation says the one as `{n}` (see `one_counted`).
+    if !template.contains("{n}") {
+        args.push(("n", &1));
+    }
     Some(format(said, &args))
 }
 
@@ -1353,6 +1394,11 @@ mod tests {
                             }
                         }
                     }
+                    // A count's singular is said with its one (see
+                    // `one_counted`).
+                    if !template.contains("{n}") {
+                        values.push(("n", "1".to_string()));
+                    }
                     let args: Vec<(&str, &dyn Display)> = values
                         .iter()
                         .map(|(name, value)| (*name, value as &dyn Display))
@@ -1405,6 +1451,76 @@ mod tests {
                  Required): it asks for a user name and password",
             );
             assert!(!said.contains("asks for"), "{said}");
+        });
+    }
+
+    /// A proxy's failure as Ask and Explain show it — inside "request
+    /// failed: …", with advice after a dash whose own parts are said too —
+    /// comes out in the reader's language to its last part; and advice is
+    /// said apart before a looser message is tried on all of it, which
+    /// would take the advice into its last place.
+    #[test]
+    fn a_proxys_failure_is_said_to_its_last_part() {
+        let system_bypass = "list the host under \u{201c}Bypass proxy settings for these hosts\
+                             \u{201d} in System Settings \u{203a} Network \u{203a} Details \
+                             \u{203a} Proxies, or in no_proxy, which clew reads in place of \
+                             NO_PROXY";
+        let env_bypass = "list the host in no_proxy, which clew reads in place of NO_PROXY";
+        with_lang(Lang::Fr, || {
+            let said = message(&format!(
+                "request failed: the proxy http://proxy.corp:3128 answered HTTP 407 (Proxy \
+                 Authentication Required): it asks for a user name and password — clew does \
+                 not read proxy passwords from the keychain: name them in the environment \
+                 (percent-encoding any character in them that is not a letter or a digit), \
+                 which clew then reads instead of all of the system's proxy settings — so set \
+                 https_proxy=http://user:password@proxy.corp:3128, or {system_bypass}"
+            ));
+            for english in [
+                "request failed",
+                "answered",
+                "asks for",
+                "does not read",
+                "percent-encoding",
+                "list the host",
+            ] {
+                assert!(!said.contains(english), "{english}: {said}");
+            }
+            let said = message(&format!(
+                "request failed: the SOCKS proxy 10.0.0.1:1080 could not reach api.x.com:443 \
+                 (SOCKS4 answer 91: rejected or failed) — to reach the host without the proxy, \
+                 {env_bypass}"
+            ));
+            for english in [
+                "SOCKS4 answer",
+                "rejected",
+                "to reach the host",
+                "list the host",
+            ] {
+                assert!(!said.contains(english), "{english}: {said}");
+            }
+            let said = message(&format!(
+                "the SOCKS proxy 10.0.0.1:1080 closed the connection in its handshake — to \
+                 reach the host without the proxy, {env_bypass}"
+            ));
+            assert!(!said.contains("closed the connection"), "{said}");
+        });
+    }
+
+    /// A count's singular met as another crate's message ("1 entry skipped
+    /// …", from a remote scan) is said with its one, not with the `{n}` its
+    /// translation says it with.
+    #[test]
+    fn a_counts_singular_is_said_with_its_one() {
+        with_lang(Lang::Fr, || {
+            for text in [
+                "1 entry skipped (name is not UTF-8)",
+                "1 unreadable entry (first: permission denied)",
+                "1 entry skipped (name is not UTF-8); 3 unreadable entries (first: denied)",
+            ] {
+                let said = message(text);
+                assert!(!said.contains("{n}") && said.contains('1'), "{said}");
+                assert_ne!(said, text);
+            }
         });
     }
 
@@ -1580,12 +1696,26 @@ mod tests {
             && said.matches('\n').count() <= 1
             && said.chars().count() <= 220
             && !said.starts_with(char::is_whitespace)
-            && !said.starts_with(['[', '{', '<', '$'])
+            && !said.starts_with(['[', '<', '$'])
+            && (!said.starts_with('{') || opens_with_a_place(said))
             && !said.starts_with("--")
             && !said.contains("{{")
             && !said.trim_end().ends_with(';')
             && !said.trim_end().ends_with("()")
             && !code.iter().any(|c| said.contains(c))
+    }
+
+    /// Whether a literal opens with a format argument followed by words
+    /// ("{url}: the transfer took too long", "{path} is not valid TOML"),
+    /// not with a brace of its own (JSON, code).
+    fn opens_with_a_place(said: &str) -> bool {
+        said.strip_prefix('{')
+            .and_then(|rest| rest.split_once('}'))
+            .is_some_and(|(inner, after)| {
+                let name = inner.split(':').next().unwrap_or_default();
+                name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                    && (after.starts_with(' ') || after.starts_with(": "))
+            })
     }
 
     /// A format string as a template: each argument a named place, a
