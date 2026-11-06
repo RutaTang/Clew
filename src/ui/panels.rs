@@ -948,28 +948,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // beside it what it does, which turns it as well.
     let on = app.voice.keep_listening;
     let turn = Message::Voice(crate::VoiceMsg::SetKeepListening(!on));
-    let knob = container(space().width(SWITCH_KNOB).height(SWITCH_KNOB)).style(theme::switch_knob);
-    let track = button(
-        container(knob)
-            .width(Fill)
-            .height(Fill)
-            .padding((SWITCH_H - SWITCH_KNOB) / 2.0)
-            .align_x(if on {
-                iced::alignment::Horizontal::Right
-            } else {
-                iced::alignment::Horizontal::Left
-            }),
-    )
-    .width(Length::Fixed(SWITCH_W))
-    .height(Length::Fixed(SWITCH_H))
-    .padding(0)
-    .style(theme::switch(on))
-    .on_press(turn.clone());
+    let track = super::form::switch(on, turn.clone());
     let keep_listening = row![
         track,
         iced::widget::mouse_area(ts::set_in(
             text("Keep listening").color(theme::fg_muted()),
-            SWITCH_H,
+            super::form::SWITCH_H,
             ts::INTER,
             KEEP_LISTENING_SIZE,
         ))
@@ -1009,10 +993,6 @@ pub(crate) const ROUND_BUTTON: f32 = 30.0;
 const KEEP_LISTENING_SIZE: f32 = 12.0;
 /// The design's gap between the switch and what it says.
 const KEEP_LISTENING_GAP: f32 = 7.0;
-/// The design's switch: its track, and the knob in it.
-const SWITCH_W: f32 = 26.0;
-const SWITCH_H: f32 = 16.0;
-const SWITCH_KNOB: f32 = 12.0;
 /// Padding around the composer's row: a little more room at its start,
 /// where the question begins.
 pub(crate) const COMPOSER_PAD: Padding = Padding {

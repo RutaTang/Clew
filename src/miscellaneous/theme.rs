@@ -1677,6 +1677,39 @@ pub fn trough(_theme: &Theme) -> container::Style {
     }
 }
 
+/// A card of Settings' rows (`ui::form`): a faint well with a hairline
+/// edge, set off the page it is on.
+pub fn form_card(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(if is_light() { 0.018 } else { 0.03 }).into()),
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
+/// One of several choices in a card (`ui::form::choice`): a row of the
+/// card, washed while the pointer is over it.
+pub fn form_choice(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered => Some(wash(0.04).into()),
+            button::Status::Pressed => Some(wash(0.07).into()),
+            _ => None,
+        },
+        text_color: fg(),
+        border: Border {
+            radius: 10.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
+    }
+}
+
 /// One segment of a segmented control: the chosen one raised as a chip,
 /// the rest quiet until the pointer is over them.
 pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {

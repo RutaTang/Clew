@@ -6576,8 +6576,8 @@ fn a_long_glossary_section_does_not_hide_the_next() {
     assert!(shows(&mut sim, "Talks to the server"));
 }
 
-/// The settings' build choices, language by language: what is in effect
-/// first — and what the project's lsp.toml also sets — then what there is
+/// The settings' build choices, language by language: what each group
+/// sets — and what the project's lsp.toml also sets — then what there is
 /// to pick, each pick making the choice it names.
 #[test]
 fn the_languages_section_offers_each_languages_build_choices() {
@@ -6640,18 +6640,19 @@ fn the_languages_section_offers_each_languages_build_choices() {
     }));
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
-        "Rust: features and target",
-        "Features cli/color, and the defaults",
-        "Checked for the host's own target",
-        "Also set in .clew/lsp.toml: cargo.features. Settings here win.",
+        "What rust-analyzer checks the project with. \
+         Also set in .clew/lsp.toml: cargo.features. Settings here win.",
+        "Features",
+        "Target",
+        "cli:",
         "tls (default)",
-        "Go: build tags and platform",
-        "Build tags e2e",
-        "Read for windows/the host's architecture",
-        "C and C++: compilation",
+        "The build tags and platform gopls reads the project for.",
+        "e2e",
+        "GOOS",
+        "The compilation database and flags clangd compiles with.",
         "Automatic",
         "/p/build",
-        "Lean: toolchain",
+        "The toolchain its server runs from.",
         "The lake found on the PATH",
         "elan — the project's",
         "Server programs",
@@ -6714,17 +6715,17 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     let warning = "Runs the project's own code. Only for projects you trust.";
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
-        "TypeScript and JavaScript: TypeScript version",
+        "TypeScript and JavaScript",
         "clew's TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
-        "Zig: compiler",
+        "Zig",
         "zvm · Zig 0.13.0",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
     assert!(sim.find(warning).is_err(), "not said before it is chosen");
-    // The first "Use" is the project's TypeScript (both Automatics are in use).
-    let _ = sim.click("Use");
+    // The project's TypeScript, picked by its row.
+    let _ = sim.click("The project's TypeScript 5.4.5 — runs the project's own code");
     let chosen: Vec<LanguageChoices> = sim
         .into_messages()
         .filter_map(|m| match m {
@@ -6786,23 +6787,23 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     }));
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
-        "Java: JDK",
+        "Java",
         "JDK 21",
-        "PHP: version",
+        "PHP",
         "PHP 8.2 — composer.json's floor",
-        "C#: solution",
+        "C#",
         "src/App.sln",
-        "Ruby: the Ruby whose Ruby LSP runs",
+        "The Ruby whose Ruby LSP runs.",
         "rbenv · Ruby 3.3.0",
         "The ruby-lsp found on the PATH",
-        "Erlang: language platform",
+        "The language platform its server is.",
         "The elp found on the PATH",
-        "Haskell: language server",
+        "The language server it runs.",
         "The haskell-language-server-wrapper found on the PATH",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
     }
-    let _ = sim.click("Use");
+    let _ = sim.click("rbenv · Ruby 3.3.0");
     let chosen: Vec<LanguageChoices> = sim
         .into_messages()
         .filter_map(|m| match m {
@@ -6811,38 +6812,51 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         })
         .collect();
     assert_eq!(chosen.len(), 1);
-    // The first "Use" is the Ruby's: its programs come before the paths.
+    // The Ruby's row picks that Ruby's program.
     let ruby = chosen[0].servers.as_ref().and_then(|s| s.get("ruby"));
     assert_eq!(
         ruby.map(|r| (r.command.as_str(), r.args.is_none())),
         Some(("/h/.rbenv/versions/3.3.0/bin/ruby-lsp", true)),
         "a program found keeps its server's arguments"
     );
-    // Each one's "Use" chooses its own.
+    // Each one's row chooses its own.
     type Pick = (
+        &'static str,
         &'static str,
         fn(&LanguageChoices) -> Option<String>,
         &'static str,
     );
     let picks: [Pick; 5] = [
-        ("java", |c| c.java.clone(), "/usr/lib/jvm/java-21"),
-        ("php", |c| c.php.clone(), "8.2"),
-        ("csharp", |c| c.csharp.clone(), "/p/src/App.sln"),
+        ("java", "JDK 21", |c| c.java.clone(), "/usr/lib/jvm/java-21"),
+        (
+            "php",
+            "PHP 8.2 — composer.json's floor",
+            |c| c.php.clone(),
+            "8.2",
+        ),
+        (
+            "csharp",
+            "src/App.sln",
+            |c| c.csharp.clone(),
+            "/p/src/App.sln",
+        ),
         (
             "erlang",
+            "elp in /opt/elp/bin",
             |c| Some(c.servers.as_ref()?.get("erlang")?.command.clone()),
             "/opt/elp/bin/elp",
         ),
         (
             "haskell",
+            "ghcup",
             |c| Some(c.servers.as_ref()?.get("haskell")?.command.clone()),
             "/h/.ghcup/bin/haskell-language-server-wrapper",
         ),
     ];
-    for (language, get, want) in picks {
+    for (language, row_label, get, want) in picks {
         app.proj.project_languages = vec![language.to_string()];
         let mut sim = sim_elem(super::connect::languages_section(&app));
-        let _ = sim.click("Use");
+        let _ = sim.click(row_label);
         let chosen: Vec<LanguageChoices> = sim
             .into_messages()
             .filter_map(|m| match m {
@@ -6871,10 +6885,13 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         ),
         ..Default::default()
     };
+    // The ELP chosen is one of those found, not a program of the user's
+    // own: no row of its own for it.
     let mut sim = sim_elem(super::connect::languages_section(&app));
+    assert!(sim.find("elp in /opt/elp/bin").is_ok());
     assert!(
-        sim.find("The elp found on the PATH").is_err(),
-        "the chosen ELP replaces the PATH's"
+        sim.find("Your own program").is_err(),
+        "the chosen ELP is the one found"
     );
 }
 

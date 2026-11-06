@@ -36,33 +36,20 @@ pub(crate) fn explain_is_child(parent: &crate::explain::Node, node: &crate::expl
 /// The header (title, Save, Close) stays put while the form below it scrolls,
 /// so the whole form is reachable in a short window. Enter in any field saves,
 /// like the Save button.
+use super::form;
+
 pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     use crate::llm::Provider;
-    let label = |s: &str| text(s.to_string()).size(ts::SMALL).color(theme::dim());
-    let field =
-        |title: &str, input: Element<'static, Message>| column![label(title), input].spacing(3);
     // Every text field submits the form on Enter.
     let input = |placeholder: &str, value: &str, on_input: fn(String) -> Message| {
-        text_input(placeholder, value)
-            .style(theme::input)
+        form::input(placeholder, value)
             .on_input(on_input)
             .on_submit(Message::Settings(SettingsMsg::Saved))
-            .size(ts::BASE)
-            .padding(6)
     };
 
-    let provider: Element<'_, Message> =
-        pick_list(&Provider::ALL[..], Some(app.settings.provider), |v| {
-            Message::Settings(SettingsMsg::ProviderPicked(v))
-        })
-        .style(theme::pick)
-        .menu_style(theme::pick_menu)
-        .text_size(ts::BASE)
-        .padding([4, 8])
-        // Match the full width of the text fields below it, so the form column
-        // doesn't look ragged with a half-width dropdown.
-        .width(Fill)
-        .into();
+    let provider = form::pick(&Provider::ALL[..], Some(app.settings.provider), |v| {
+        Message::Settings(SettingsMsg::ProviderPicked(v))
+    });
 
     // A key that came from the environment is NOT pre-filled (see
     // `SettingsDraft::key_from_env`), so the placeholder has to explain the
@@ -110,26 +97,17 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         |v| Message::Settings(SettingsMsg::EmbedBaseUrlChanged(v)),
     );
 
-    // A small segmented control: System / Light / Dark, active one filled.
-    let theme_btn = |p: crate::theme::ThemePref| -> Element<'_, Message> {
-        let active = app.theme_pref == p;
-        let style: fn(&iced::Theme, iced::widget::button::Status) -> iced::widget::button::Style =
-            if active {
-                theme::primary_button
-            } else {
-                theme::secondary_button
-            };
-        button(text(p.label()).size(ts::BODY))
-            .style(style)
-            .padding([4, 16])
-            .on_press(Message::Settings(SettingsMsg::SetThemePref(p)))
-            .into()
-    };
-    let appearance = iced::widget::row(crate::theme::ThemePref::ALL.map(theme_btn)).spacing(6);
-
-    // Per-mode theme pickers: which theme fills the light slot, and the dark.
+    // System / Light / Dark, the one in use raised.
+    let mode = form::segmented(crate::theme::ThemePref::ALL.map(|p| {
+        (
+            p.label().to_string(),
+            app.theme_pref == p,
+            Message::Settings(SettingsMsg::SetThemePref(p)),
+        )
+    }));
+    // Which theme fills the light slot, and the dark.
     use crate::theme::ThemeChoice;
-    let light_pick: Element<'_, Message> = pick_list(
+    let light_pick = form::pick(
         crate::theme::light_choices(),
         Some(ThemeChoice(crate::theme::current_light())),
         |c: ThemeChoice| {
@@ -138,14 +116,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 is_light: true,
             })
         },
-    )
-    .style(theme::pick)
-    .menu_style(theme::pick_menu)
-    .text_size(ts::BASE)
-    .padding([4, 8])
-    .width(Fill)
-    .into();
-    let dark_pick: Element<'_, Message> = pick_list(
+    );
+    let dark_pick = form::pick(
         crate::theme::dark_choices(),
         Some(ThemeChoice(crate::theme::current_dark())),
         |c: ThemeChoice| {
@@ -154,66 +126,70 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 is_light: false,
             })
         },
-    )
-    .style(theme::pick)
-    .menu_style(theme::pick_menu)
-    .text_size(ts::BASE)
-    .padding([4, 8])
-    .width(Fill)
-    .into();
+    );
 
     let page = app.settings.page;
-    let stored = || {
-        text(format!("Stored in {}", crate::llm::config_hint()))
-            .size(ts::CAPTION)
-            .color(theme::dim())
-    };
-    let caption = |s: &str| text(s.to_string()).size(ts::CAPTION).color(theme::dim());
+    let stored = || form::note(format!("Stored in {}", crate::llm::config_hint())).into();
     let body: Element<'_, Message> = match page {
-        SettingsPage::Appearance => column![
-            column![label("Mode"), appearance].spacing(3),
-            field("Light theme", light_pick),
-            field("Dark theme", dark_pick),
-        ]
-        .spacing(14)
-        .into(),
-        SettingsPage::Updates => column![
-            iced::widget::checkbox(app.update.auto_check)
-                .style(theme::check)
-                .label("Check for updates automatically")
-                .on_toggle(|v| Message::Updater(UpdaterMsg::SetAuto(v)))
-                .text_size(ts::BODY)
-                .size(16)
-                .spacing(8),
-            caption(&format!(
-                "You have clew {}",
-                crate::updater::current_version()
-            )),
-        ]
-        .spacing(10)
-        .into(),
-        SettingsPage::LanguageModel => column![
-            field("Provider", provider),
-            field("API key", key.into()),
-            field("Model", model.into()),
-            field("Base URL", base.into()),
+        SettingsPage::Appearance => form::page(vec![form::group(
+            "",
+            None,
+            None,
+            vec![
+                form::item("Mode", None, mode),
+                form::item("Light theme", None, light_pick),
+                form::item("Dark theme", None, dark_pick),
+            ],
+        )]),
+        SettingsPage::Updates => form::page(vec![form::group(
+            "",
+            None,
+            None,
+            vec![
+                form::toggle(
+                    "Check for updates automatically",
+                    None,
+                    app.update.auto_check,
+                    |v| Message::Updater(UpdaterMsg::SetAuto(v)),
+                ),
+                form::item(
+                    "Version",
+                    Some(format!("clew {}", crate::updater::current_version())),
+                    form::action("Check now", Some(Message::Updater(UpdaterMsg::Check))),
+                ),
+            ],
+        )]),
+        SettingsPage::LanguageModel => form::page(vec![
+            form::group(
+                "",
+                None,
+                None,
+                vec![
+                    form::field("Provider", None, provider),
+                    form::field("API key", None, key),
+                    form::field("Model", None, model),
+                    form::field("Base URL", None, base),
+                ],
+            ),
             stored(),
-        ]
-        .spacing(14)
-        .into(),
-        SettingsPage::Embeddings => column![
-            caption("Any OpenAI-compatible /embeddings endpoint."),
-            field("API key", embed_key.into()),
-            field("Model", embed_model.into()),
-            field("Base URL", embed_base.into()),
+        ]),
+        SettingsPage::Embeddings => form::page(vec![
+            form::group(
+                "",
+                Some("Any OpenAI-compatible /embeddings endpoint.".into()),
+                None,
+                vec![
+                    form::field("API key", None, embed_key),
+                    form::field("Model", None, embed_model),
+                    form::field("Base URL", None, embed_base),
+                ],
+            ),
             stored(),
-        ]
-        .spacing(14)
-        .into(),
+        ]),
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
         SettingsPage::Languages if app.proj.project.is_none() => {
-            caption("Open a project to set up its languages.").into()
+            form::note("Open a project to set up its languages.").into()
         }
         SettingsPage::Languages => languages_section(app),
         SettingsPage::Shortcuts => shortcuts_body(app),
@@ -387,92 +363,70 @@ fn program_line(choice: &clew_protocol::ServerChoice) -> String {
     }
 }
 
-fn lang_caption<'a>(s: String) -> iced::widget::Text<'a> {
-    text(s).size(ts::CAPTION).color(theme::dim())
-}
-
-fn lang_heading<'a>(s: &str) -> iced::widget::Text<'a> {
-    text(s.to_string()).size(ts::BODY).color(theme::fg())
-}
-
-fn lang_button<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
-    button(text(label.to_string()).size(ts::SMALL))
-        .style(theme::secondary_button)
-        .padding([2, 8])
-        .on_press_maybe(msg)
-}
-
-/// A choice that is on or off, as a toggle.
-fn lang_chip<'a>(label: String, on: bool, msg: Message) -> iced::widget::Button<'a, Message> {
-    button(text(label).size(ts::SMALL))
-        .style(theme::tab_button(on))
-        .padding([2, 8])
-        .on_press(msg)
-}
-
-fn lang_path<'a>(path: String) -> iced::widget::Text<'a> {
-    text(path)
-        .size(ts::CAPTION)
-        .font(crate::fonts::CODE)
-        .color(theme::fg_muted())
-        .wrapping(Wrapping::Glyph)
-}
-
-/// What is in effect, set apart.
-fn lang_effect<'a>(lines: Vec<Element<'a, Message>>) -> Element<'a, Message> {
-    container(iced::widget::Column::with_children(lines).spacing(2))
-        .padding([6, 8])
-        .width(Fill)
-        .style(theme::panel)
-        .into()
-}
-
 /// A typed field of the section: Enter uses it.
-fn lang_field<'a>(
+fn draft_field<'a>(
     app: &'a App,
     placeholder: &str,
     field: crate::LangField,
 ) -> iced::widget::TextInput<'a, Message> {
     use crate::LanguagesMsg as L;
-    text_input(placeholder, app.proj.lang_drafts.field(field))
-        .style(theme::input)
+    form::input(placeholder, app.proj.lang_drafts.field(field))
         .on_input(move |v| Message::Languages(L::Draft(field, v)))
         .on_submit(Message::Languages(L::UseDraft(field)))
-        .size(ts::BASE)
-        .padding(6)
-        .width(Fill)
 }
 
-/// A choice from a list: its label and detail, then "in use" or "Use".
-fn lang_pick<'a>(
-    label: String,
-    detail: Element<'a, Message>,
-    selected: bool,
-    msg: Message,
+/// A typed path of the user's own for `field`: the field, Use, and —
+/// on this computer — Browse….
+fn other_path<'a>(
+    app: &'a App,
+    placeholder: &str,
+    field: crate::LangField,
 ) -> Element<'a, Message> {
-    row![
-        column![text(label).size(ts::SMALL).color(theme::fg()), detail]
-            .spacing(1)
-            .width(Fill),
-        if selected {
-            Element::from(text("in use").size(ts::SMALL).color(theme::success()))
-        } else {
-            lang_button("Use", Some(msg)).into()
-        },
+    use crate::LanguagesMsg as L;
+    let mut line = row![
+        draft_field(app, placeholder, field),
+        form::action(
+            "Use",
+            (!app.proj.lang_drafts.field(field).trim().is_empty())
+                .then_some(Message::Languages(L::UseDraft(field)))
+        ),
     ]
-    .spacing(8)
-    .align_y(iced::Center)
-    .into()
+    .spacing(6)
+    .align_y(iced::Center);
+    if !app.connection.is_remote() {
+        line = line.push(form::action(
+            "Browse…",
+            Some(Message::Languages(L::Browse(field))),
+        ));
+    }
+    form::field("Other", None, line)
+}
+
+/// A choice that is on or off among several (a feature, a build tag).
+fn chip<'a>(label: String, on: bool, msg: Message) -> Element<'a, Message> {
+    button(text(label).size(ts::BODY))
+        .style(theme::toggle(on))
+        .padding([3, 9])
+        .on_press(msg)
+        .into()
 }
 
 /// What the project's `lsp.toml` sets that a choice here also sets.
-fn project_sets_note<'a>(sets: &[String]) -> Option<Element<'a, Message>> {
+fn project_sets_note(sets: &[String]) -> Option<String> {
     (!sets.is_empty()).then(|| {
-        lang_caption(format!(
+        format!(
             "Also set in .clew/lsp.toml: {}. Settings here win.",
             sets.join(", ")
-        ))
-        .into()
+        )
+    })
+}
+
+/// A group's line under its title: what it sets, then what the project's
+/// lsp.toml also sets.
+fn about_with(about: &str, sets: Option<String>) -> Option<String> {
+    Some(match sets {
+        Some(sets) => format!("{about} {sets}"),
+        None => about.to_string(),
     })
 }
 
@@ -480,8 +434,7 @@ fn project_sets_note<'a>(sets: &[String]) -> Option<Element<'a, Message>> {
 /// what the user chooses for them — the Python interpreter, the Rust
 /// features and target, the Go build tags and platform, the C/C++
 /// compilation database and flags, Lean's and Dart's toolchains, a server
-/// program of their own — each showing what is in effect before what there
-/// is to pick, from what was found where the project is
+/// program of their own — from what was found where the project is
 /// (`App::refresh_language_options`). A pick is saved at once, for this
 /// project on this machine, and never written into the project.
 pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
@@ -489,18 +442,13 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         return space().height(0).into();
     }
     let choices = &app.proj.lang_choices;
-    let mut col = column![
-        text("Languages in this project")
-            .size(ts::BODY)
-            .color(theme::accent()),
-    ]
-    .spacing(8);
     let mut rows = app.proj.project_languages.clone();
     if let Some(servers) = &choices.servers {
         rows.extend(servers.keys().cloned());
     }
     rows.sort();
     rows.dedup();
+    let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
             Some(choice) => format!("Your program: {}", program_line(choice)),
@@ -514,33 +462,16 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         };
         let (status, action) = app.lsp_row(language);
         let action: Element<'_, Message> = match action {
-            Some((label, msg)) => lang_button(label, Some(msg)).into(),
+            Some((label, msg)) => form::action(label, Some(msg)).into(),
             None => space().width(0).into(),
         };
-        col = col.push(
-            row![
-                text(
-                    crate::highlight::lang_name(language)
-                        .map(str::to_string)
-                        .unwrap_or_else(|| language.clone())
-                )
-                .size(ts::BODY)
-                .color(theme::fg())
-                .width(90),
-                column![
-                    text(server)
-                        .size(ts::SMALL)
-                        .color(theme::fg_muted())
-                        .wrapping(Wrapping::Glyph),
-                    text(status).size(ts::CAPTION).color(theme::dim()),
-                ]
-                .spacing(1)
-                .width(Fill),
-                action,
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        );
+        servers.push(form::item(
+            crate::highlight::lang_name(language)
+                .map(str::to_string)
+                .unwrap_or_else(|| language.clone()),
+            Some(format!("{server} · {status}")),
+            action,
+        ));
     }
 
     let has = |l: &str| rows.iter().any(|x| x == l);
@@ -566,36 +497,43 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         ]
         .iter()
         .any(|l| has(l));
-    let options = match &app.proj.lang_options {
-        Some(Ok(options)) => Some(options),
-        Some(Err(why)) => {
-            col = col.push(
-                text(format!(
-                    "What the project offers could not be listed: {why}"
-                ))
-                .size(ts::CAPTION)
-                .color(theme::danger()),
-            );
-            None
-        }
-        None => {
-            if listed {
-                col = col.push(lang_caption("Looking at what the project offers…".into()));
-            }
-            None
-        }
+    let mut parts = Vec::new();
+    let (options, servers_about) = match &app.proj.lang_options {
+        Some(Ok(options)) => (Some(options), None),
+        Some(Err(why)) => (
+            None,
+            Some(format!(
+                "What the project offers could not be listed: {why}"
+            )),
+        ),
+        None => (
+            None,
+            listed.then(|| "Looking at what the project offers…".to_string()),
+        ),
     };
+    parts.push(form::group(
+        "Language servers",
+        servers_about,
+        listed.then(|| {
+            form::action(
+                "Look again",
+                Some(Message::Languages(crate::LanguagesMsg::Refresh)),
+            )
+            .into()
+        }),
+        servers,
+    ));
     if python {
-        col = col.push(python_block(app, options.and_then(|o| o.python.as_ref())));
+        parts.push(python_block(app, options.and_then(|o| o.python.as_ref())));
     }
     if has("rust") {
-        col = col.push(rust_block(app, options.and_then(|o| o.rust.as_ref())));
+        parts.push(rust_block(app, options.and_then(|o| o.rust.as_ref())));
     }
     if has("go") {
-        col = col.push(go_block(app, options.and_then(|o| o.go.as_ref())));
+        parts.push(go_block(app, options.and_then(|o| o.go.as_ref())));
     }
     if has("c") || has("cpp") {
-        col = col.push(c_block(app, options.and_then(|o| o.c.as_ref())));
+        parts.push(c_block(app, options.and_then(|o| o.c.as_ref())));
     }
     for language in ["lean", "dart", "ruby", "erlang", "haskell"] {
         if has(language) {
@@ -603,7 +541,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
                 .and_then(|o| o.toolchains.get(language))
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            col = col.push(toolchain_block(app, language, found));
+            parts.push(toolchain_block(app, language, found));
         }
     }
     let found = |language: &str| {
@@ -613,10 +551,11 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             .unwrap_or_default()
     };
     if has("typescript") || has("tsx") || has("javascript") {
-        col = col.push(path_choice_block(
+        parts.push(path_choice_block(
             app,
             PathChoice {
-                heading: "TypeScript and JavaScript: TypeScript version",
+                title: "TypeScript and JavaScript",
+                about: "The TypeScript its server runs.",
                 automatic: "clew's TypeScript 5",
                 chosen: app.proj.lang_choices.typescript.as_deref(),
                 found: found("typescript"),
@@ -628,10 +567,11 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         ));
     }
     if has("java") {
-        col = col.push(path_choice_block(
+        parts.push(path_choice_block(
             app,
             PathChoice {
-                heading: "Java: JDK",
+                title: "Java",
+                about: "The JDK its server reads the project with.",
                 automatic: "Automatic (JAVA_HOME or PATH)",
                 chosen: app.proj.lang_choices.java.as_deref(),
                 found: found("java"),
@@ -643,10 +583,11 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         ));
     }
     if has("php") {
-        col = col.push(path_choice_block(
+        parts.push(path_choice_block(
             app,
             PathChoice {
-                heading: "PHP: version",
+                title: "PHP",
+                about: "The version its server reads the project as.",
                 automatic: "The server's own default",
                 chosen: app.proj.lang_choices.php.as_deref(),
                 found: found("php"),
@@ -658,10 +599,11 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         ));
     }
     if has("csharp") {
-        col = col.push(path_choice_block(
+        parts.push(path_choice_block(
             app,
             PathChoice {
-                heading: "C#: solution",
+                title: "C#",
+                about: "The solution its server loads.",
                 automatic: "Automatic",
                 chosen: app.proj.lang_choices.csharp.as_deref(),
                 found: found("csharp"),
@@ -673,10 +615,11 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         ));
     }
     if has("zig") {
-        col = col.push(path_choice_block(
+        parts.push(path_choice_block(
             app,
             PathChoice {
-                heading: "Zig: compiler",
+                title: "Zig",
+                about: "The compiler zls uses.",
                 automatic: "The zig zls finds on the PATH",
                 chosen: app.proj.lang_choices.zig.as_deref(),
                 found: found("zig"),
@@ -687,23 +630,11 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             |c, path| c.zig = path,
         ));
     }
-    col = col.push(servers_block(app));
-    if listed {
-        col = col.push(
-            row![
-                space().width(Fill),
-                lang_button(
-                    "Look again",
-                    Some(Message::Languages(crate::LanguagesMsg::Refresh))
-                ),
-            ]
-            .align_y(iced::Center),
-        );
-    }
-    col.into()
+    parts.push(servers_block(app));
+    form::page(parts)
 }
 
-/// The Python interpreter: the one in effect and who named it, the ones
+/// The Python interpreter: the one in use and who named it, the ones
 /// found, and a path of the user's own.
 fn python_block<'a>(
     app: &'a App,
@@ -713,7 +644,7 @@ fn python_block<'a>(
     use clew_protocol::{PythonEnvKind, PythonSource};
     let remote = app.connection.is_remote();
     let chosen = app.proj.lang_choices.python.as_deref();
-    let mut col = column![lang_heading("Python interpreter")].spacing(6);
+    let mut rows = Vec::new();
     if let Some(envs) = envs {
         let effect = &envs.in_effect;
         let who = match effect.source {
@@ -723,25 +654,25 @@ fn python_block<'a>(
             PythonSource::Activated => "Active where clew started",
             PythonSource::Server => "None",
         };
-        let mut lines: Vec<Element<'a, Message>> =
-            vec![text(who).size(ts::SMALL).color(theme::fg()).into()];
+        let mut in_use = column![text(who).size(ts::BASE).color(theme::fg())].spacing(2);
         if let Some(path) = &effect.interpreter {
-            lines.push(lang_path(path.clone()).into());
+            in_use = in_use.push(form::path(path.clone()));
         }
-        col = col.push(lang_effect(lines));
+        rows.push(form::field("In use", None, in_use));
         if let Some(bad) = &effect.unusable_choice {
-            col = col.push(
+            rows.push(form::plain(
                 text(format!(
                     "Your choice {bad} cannot be used: it is gone, or it is a program of \
                      the repository's own. The one above is used until you pick another."
                 ))
-                .size(ts::CAPTION)
-                .color(theme::warning()),
-            );
+                .size(ts::SMALL)
+                .color(theme::warning())
+                .wrapping(Wrapping::WordOrGlyph),
+            ));
         }
-        col = col.push(lang_pick(
-            "Automatic".into(),
-            lang_caption("Automatic".into()).into(),
+        rows.push(form::choice(
+            "Automatic",
+            None,
             chosen.is_none(),
             Message::Languages(L::ChoosePython(None)),
         ));
@@ -762,9 +693,9 @@ fn python_block<'a>(
                 (_, Some(version)) => format!("{kind} · {} · Python {version}", candidate.name),
                 (_, None) => format!("{kind} · {}", candidate.name),
             };
-            col = col.push(lang_pick(
+            rows.push(form::choice(
                 label,
-                lang_path(candidate.interpreter.clone()).into(),
+                Some(form::path(candidate.interpreter.clone()).into()),
                 chosen == Some(candidate.interpreter.as_str()),
                 Message::Languages(L::ChoosePython(Some(candidate.interpreter.clone()))),
             ));
@@ -773,36 +704,29 @@ fn python_block<'a>(
         if let Some(other) = chosen
             && !envs.candidates.iter().any(|c| c.interpreter == other)
         {
-            col = col.push(lang_pick(
-                "Your choice".into(),
-                lang_path(other.to_string()).into(),
+            rows.push(form::choice(
+                "Your choice",
+                Some(form::path(other.to_string()).into()),
                 true,
                 Message::Languages(L::ChoosePython(Some(other.to_string()))),
             ));
         }
     }
-    let placeholder = if remote {
-        "Python path on the remote host"
-    } else {
-        "Path to a Python interpreter"
-    };
-    let draft_empty = app.proj.lang_drafts.python_path.trim().is_empty();
-    let mut path_row = row![
-        lang_field(app, placeholder, F::PythonPath),
-        lang_button(
-            "Use",
-            (!draft_empty).then_some(Message::Languages(L::UseDraft(F::PythonPath)))
-        ),
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
-    if !remote {
-        path_row = path_row.push(lang_button(
-            "Browse…",
-            Some(Message::Languages(L::Browse(F::PythonPath))),
-        ));
-    }
-    col.push(path_row).into()
+    rows.push(other_path(
+        app,
+        if remote {
+            "Python path on the remote host"
+        } else {
+            "Path to a Python interpreter"
+        },
+        F::PythonPath,
+    ));
+    form::group(
+        "Python",
+        Some("The interpreter its server reads the project with.".into()),
+        None,
+        rows,
+    )
 }
 
 /// The Cargo features and target rust-analyzer loads the project with.
@@ -813,48 +737,21 @@ fn rust_block<'a>(
     use crate::{LangField as F, LanguagesMsg as L};
     let choices = &app.proj.lang_choices;
     let rust = choices.rust.clone().unwrap_or_default();
-    let mut col = column![lang_heading("Rust: features and target")].spacing(6);
-    let features = if rust.all_features {
-        "Every feature of every package".to_string()
-    } else if rust.features.is_empty() {
-        match rust.no_default_features {
-            true => "No features at all".into(),
-            false => "Each package's default features".into(),
-        }
-    } else {
-        format!(
-            "Features {}{}",
-            rust.features.join(", "),
-            match rust.no_default_features {
-                true => ", without the defaults",
-                false => ", and the defaults",
-            }
-        )
-    };
-    let target = match &rust.target {
-        Some(target) => format!("Checked for {target}"),
-        None => "Checked for the host's own target".into(),
-    };
-    col = col.push(lang_effect(vec![
-        text(features).size(ts::SMALL).color(theme::fg()).into(),
-        text(target).size(ts::SMALL).color(theme::fg()).into(),
-    ]));
-    if let Some(note) = options.and_then(|o| project_sets_note(&o.project_sets)) {
-        col = col.push(note);
-    }
-    col = col.push(
-        iced::widget::checkbox(rust.all_features)
+    let check = |label: &'static str, on: bool, set: fn(&mut clew_protocol::RustChoices, bool)| {
+        iced::widget::checkbox(on)
             .style(theme::check)
-            .label("Every feature of every package")
-            .on_toggle(move |on| {
-                choose_with(choices, |c| {
-                    c.rust.get_or_insert_default().all_features = on
-                })
-            })
-            .text_size(ts::SMALL)
-            .size(14)
-            .spacing(6),
-    );
+            .label(label)
+            .on_toggle(move |on| choose_with(choices, |c| set(c.rust.get_or_insert_default(), on)))
+            .text_size(ts::BASE)
+            .size(15)
+            .spacing(8)
+    };
+    let mut features = column![check(
+        "Every feature of every package",
+        rust.all_features,
+        |r, on| r.all_features = on
+    )]
+    .spacing(10);
     if !rust.all_features {
         let toggle = |name: String| {
             choose_with(choices, move |c| {
@@ -874,7 +771,7 @@ fn rust_block<'a>(
             }
             let mut chips: Vec<Element<'a, Message>> = vec![
                 text(format!("{}:", package.name))
-                    .size(ts::SMALL)
+                    .size(ts::BODY)
                     .color(theme::dim())
                     .into(),
             ];
@@ -887,36 +784,35 @@ fn rust_block<'a>(
                     true => format!("{feature} (default)"),
                     false => feature.clone(),
                 };
-                chips.push(
-                    lang_chip(label, rust.features.contains(&name), toggle(name.clone())).into(),
-                );
+                chips.push(chip(
+                    label,
+                    rust.features.contains(&name),
+                    toggle(name.clone()),
+                ));
                 listed.push(name);
             }
-            col = col.push(Row::with_children(chips).spacing(4).wrap());
+            features = features.push(
+                Row::with_children(chips)
+                    .spacing(5)
+                    .align_y(iced::Center)
+                    .wrap(),
+            );
         }
         // Chosen ones no package lists (any more): shown, to be turned off.
         let others: Vec<Element<'a, Message>> = rust
             .features
             .iter()
             .filter(|f| !listed.contains(f))
-            .map(|f| lang_chip(f.clone(), true, toggle(f.clone())).into())
+            .map(|f| chip(f.clone(), true, toggle(f.clone())))
             .collect();
         if !others.is_empty() {
-            col = col.push(Row::with_children(others).spacing(4).wrap());
+            features = features.push(Row::with_children(others).spacing(5).wrap());
         }
-        col = col.push(
-            iced::widget::checkbox(rust.no_default_features)
-                .style(theme::check)
-                .label("Without the packages' default features")
-                .on_toggle(move |on| {
-                    choose_with(choices, |c| {
-                        c.rust.get_or_insert_default().no_default_features = on
-                    })
-                })
-                .text_size(ts::SMALL)
-                .size(14)
-                .spacing(6),
-        );
+        features = features.push(check(
+            "Without the packages' default features",
+            rust.no_default_features,
+            |r, on| r.no_default_features = on,
+        ));
     }
     let mut targets = vec![HOST_CHOICE.to_string()];
     targets.extend(options.into_iter().flat_map(|o| o.targets.iter().cloned()));
@@ -925,20 +821,15 @@ fn rust_block<'a>(
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(t.clone()));
     let selected = rust.target.clone().unwrap_or_else(|| HOST_CHOICE.into());
-    col.push(
-        row![
-            text("Target").size(ts::SMALL).color(theme::fg()),
-            pick_list(targets, Some(selected), move |t: String| {
-                choose_with(choices, |c| {
-                    c.rust.get_or_insert_default().target = (t != HOST_CHOICE).then_some(t)
-                })
+    let target = column![
+        form::pick(targets, Some(selected), move |t: String| {
+            choose_with(choices, |c| {
+                c.rust.get_or_insert_default().target = (t != HOST_CHOICE).then_some(t)
             })
-            .style(theme::pick)
-            .menu_style(theme::pick_menu)
-            .text_size(ts::SMALL)
-            .padding([2, 6]),
-            lang_field(app, "Another target triple", F::RustTarget),
-            lang_button(
+        }),
+        row![
+            draft_field(app, "Another target triple", F::RustTarget),
+            form::action(
                 "Use",
                 (!app.proj.lang_drafts.rust_target.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::RustTarget)))
@@ -946,8 +837,20 @@ fn rust_block<'a>(
         ]
         .spacing(6)
         .align_y(iced::Center),
+    ]
+    .spacing(8);
+    form::group(
+        "Rust",
+        about_with(
+            "What rust-analyzer checks the project with.",
+            options.and_then(|o| project_sets_note(&o.project_sets)),
+        ),
+        None,
+        vec![
+            form::field("Features", None, features),
+            form::field("Target", None, target),
+        ],
     )
-    .into()
 }
 
 /// The build tags and platform gopls loads the project with.
@@ -958,32 +861,13 @@ fn go_block<'a>(
     use crate::{LangField as F, LanguagesMsg as L};
     let choices = &app.proj.lang_choices;
     let go = choices.go.clone().unwrap_or_default();
-    let mut col = column![lang_heading("Go: build tags and platform")].spacing(6);
-    let tags = match go.tags.is_empty() {
-        true => "No build tags".to_string(),
-        false => format!("Build tags {}", go.tags.join(", ")),
-    };
-    let platform = match (&go.goos, &go.goarch) {
-        (None, None) => "Read for the host's own platform".to_string(),
-        (os, arch) => format!(
-            "Read for {}/{}",
-            os.as_deref().unwrap_or("the host's system"),
-            arch.as_deref().unwrap_or("the host's architecture")
-        ),
-    };
-    col = col.push(lang_effect(vec![
-        text(tags).size(ts::SMALL).color(theme::fg()).into(),
-        text(platform).size(ts::SMALL).color(theme::fg()).into(),
-    ]));
-    if let Some(note) = options.and_then(|o| project_sets_note(&o.project_sets)) {
-        col = col.push(note);
-    }
     let mut all: Vec<String> = options.map(|o| o.tags.clone()).unwrap_or_default();
     all.extend(go.tags.iter().cloned());
     let mut seen = std::collections::HashSet::new();
     all.retain(|t| seen.insert(t.clone()));
+    let mut tags = column![].spacing(8);
     if all.is_empty() {
-        col = col.push(lang_caption("No build tags in this project.".into()));
+        tags = tags.push(form::note("None in this project."));
     } else {
         let chips: Vec<Element<'a, Message>> = all
             .into_iter()
@@ -998,11 +882,23 @@ fn go_block<'a>(
                         None => tags.push(tag.clone()),
                     }
                 });
-                lang_chip(tag, on, msg).into()
+                chip(tag, on, msg)
             })
             .collect();
-        col = col.push(Row::with_children(chips).spacing(4).wrap());
+        tags = tags.push(Row::with_children(chips).spacing(5).wrap());
     }
+    tags = tags.push(
+        row![
+            draft_field(app, "Another build tag", F::GoTag),
+            form::action(
+                "Add",
+                (!app.proj.lang_drafts.go_tag.trim().is_empty())
+                    .then_some(Message::Languages(L::UseDraft(F::GoTag)))
+            ),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    );
     let platform_pick =
         |label: &'a str,
          known: &[&str],
@@ -1015,45 +911,47 @@ fn go_block<'a>(
             list.retain(|t| seen.insert(t.clone()));
             let selected = value.clone().unwrap_or_else(|| HOST_CHOICE.into());
             row![
-                text(label).size(ts::SMALL).color(theme::fg()),
-                pick_list(list, Some(selected), move |v: String| {
+                text(label)
+                    .size(ts::BODY)
+                    .font(crate::fonts::CODE)
+                    .color(theme::dim())
+                    .width(60),
+                form::pick(list, Some(selected), move |v: String| {
                     choose_with(choices, |c| {
                         set(
                             c.go.get_or_insert_default(),
                             (v != HOST_CHOICE).then_some(v),
                         )
                     })
-                })
-                .style(theme::pick)
-                .menu_style(theme::pick_menu)
-                .text_size(ts::SMALL)
-                .padding([2, 6]),
+                }),
             ]
-            .spacing(6)
+            .spacing(8)
             .align_y(iced::Center)
         };
-    col.push(
-        row![
-            lang_field(app, "Another build tag", F::GoTag),
-            lang_button(
-                "Add",
-                (!app.proj.lang_drafts.go_tag.trim().is_empty())
-                    .then_some(Message::Languages(L::UseDraft(F::GoTag)))
-            ),
-            platform_pick("GOOS", clew_core::lsp::langopts::GOOS, &go.goos, |g, v| g
-                .goos =
-                v),
-            platform_pick(
-                "GOARCH",
-                clew_core::lsp::langopts::GOARCH,
-                &go.goarch,
-                |g, v| { g.goarch = v }
-            ),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
+    let platform = column![
+        platform_pick("GOOS", clew_core::lsp::langopts::GOOS, &go.goos, |g, v| g
+            .goos =
+            v),
+        platform_pick(
+            "GOARCH",
+            clew_core::lsp::langopts::GOARCH,
+            &go.goarch,
+            |g, v| { g.goarch = v }
+        ),
+    ]
+    .spacing(8);
+    form::group(
+        "Go",
+        about_with(
+            "The build tags and platform gopls reads the project for.",
+            options.and_then(|o| project_sets_note(&o.project_sets)),
+        ),
+        None,
+        vec![
+            form::field("Build tags", None, tags),
+            form::field("Platform", None, platform),
+        ],
     )
-    .into()
 }
 
 /// The compilation database and flags clangd compiles C and C++ with.
@@ -1062,78 +960,49 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
     let choices = &app.proj.lang_choices;
     let remote = app.connection.is_remote();
     let c = choices.c.clone().unwrap_or_default();
-    let mut col = column![lang_heading("C and C++: compilation")].spacing(6);
-    let database: Element<'a, Message> = match &c.compile_commands {
-        Some(dir) => column![
-            text("Compilation database: your choice")
-                .size(ts::SMALL)
-                .color(theme::fg()),
-            lang_path(dir.clone()),
-        ]
-        .into(),
-        None => text("Automatic").size(ts::SMALL).color(theme::fg()).into(),
-    };
-    let flags = match c.flags.is_empty() {
-        true => "None".to_string(),
-        false => format!(
-            "For files it does not cover: {}",
-            crate::app::languages::join_args(&c.flags)
-        ),
-    };
-    col = col.push(lang_effect(vec![
-        database,
-        text(flags).size(ts::SMALL).color(theme::fg()).into(),
-    ]));
-    if let Some(note) = options.and_then(|o| project_sets_note(&o.project_sets)) {
-        col = col.push(note);
-    }
-    col = col.push(lang_pick(
-        "Automatic".into(),
-        lang_caption("Automatic".into()).into(),
+    let mut rows = vec![form::choice(
+        "Automatic",
+        Some(form::note("The compile_commands.json clangd finds.").into()),
         c.compile_commands.is_none(),
         choose_with(choices, |c| {
             c.c.get_or_insert_default().compile_commands = None
         }),
-    ));
+    )];
     let found = options.map(|o| o.databases.as_slice()).unwrap_or_default();
     for dir in found {
-        col = col.push(lang_pick(
-            "compile_commands.json".into(),
-            lang_path(dir.clone()).into(),
+        rows.push(form::choice(
+            "compile_commands.json",
+            Some(form::path(dir.clone()).into()),
             c.compile_commands.as_deref() == Some(dir.as_str()),
             choose_with(choices, |c| {
                 c.c.get_or_insert_default().compile_commands = Some(dir.clone())
             }),
         ));
     }
-    let mut path_row = row![
-        lang_field(
-            app,
-            if remote {
-                "compile_commands.json folder on the host"
-            } else {
-                "Folder holding compile_commands.json"
-            },
-            F::CDatabase
-        ),
-        lang_button(
-            "Use",
-            (!app.proj.lang_drafts.c_database.trim().is_empty())
-                .then_some(Message::Languages(L::UseDraft(F::CDatabase)))
-        ),
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
-    if !remote {
-        path_row = path_row.push(lang_button(
-            "Browse…",
-            Some(Message::Languages(L::Browse(F::CDatabase))),
+    if let Some(dir) = &c.compile_commands
+        && !found.contains(dir)
+    {
+        rows.push(form::choice(
+            "Your choice",
+            Some(form::path(dir.clone()).into()),
+            true,
+            choose_with(choices, |c| {
+                c.c.get_or_insert_default().compile_commands = Some(dir.clone())
+            }),
         ));
     }
-    col = col.push(path_row);
+    rows.push(other_path(
+        app,
+        if remote {
+            "compile_commands.json folder on the host"
+        } else {
+            "Folder holding compile_commands.json"
+        },
+        F::CDatabase,
+    ));
     let mut flags_row = row![
-        lang_field(app, "Flags, e.g. -DDEBUG -Iinclude -std=c++20", F::CFlags),
-        lang_button(
+        draft_field(app, "-DDEBUG -Iinclude -std=c++20", F::CFlags),
+        form::action(
             "Use",
             (!app.proj.lang_drafts.c_flags.trim().is_empty())
                 .then_some(Message::Languages(L::UseDraft(F::CFlags)))
@@ -1142,20 +1011,34 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
     .spacing(6)
     .align_y(iced::Center);
     if !c.flags.is_empty() {
-        flags_row = flags_row.push(lang_button(
+        flags_row = flags_row.push(form::action(
             "Clear",
             Some(choose_with(choices, |c| {
                 c.c.get_or_insert_default().flags.clear()
             })),
         ));
     }
-    col.push(flags_row).into()
+    let flags_about = match c.flags.is_empty() {
+        true => "For files the database does not cover.".to_string(),
+        false => format!("Now: {}", crate::app::languages::join_args(&c.flags)),
+    };
+    rows.push(form::field("Flags", Some(flags_about), flags_row));
+    form::group(
+        "C and C++",
+        about_with(
+            "The compilation database and flags clangd compiles with.",
+            options.and_then(|o| project_sets_note(&o.project_sets)),
+        ),
+        None,
+        rows,
+    )
 }
 
 /// A path chosen for a language from what was found, or typed: the
 /// TypeScript its server runs, the `zig` zls uses.
 struct PathChoice<'a> {
-    heading: &'static str,
+    title: &'static str,
+    about: &'static str,
     /// What is used when nothing is chosen.
     automatic: &'static str,
     chosen: Option<&'a str>,
@@ -1166,50 +1049,34 @@ struct PathChoice<'a> {
     project_note: Option<&'static str>,
 }
 
-/// A [`PathChoice`]: what is in effect, "Automatic", what was found, and a
-/// typed path — `set` making the choice in a copy of the choices.
+/// A [`PathChoice`]: "Automatic", what was found, and a typed path —
+/// `set` making the choice in a copy of the choices.
 fn path_choice_block<'a>(
     app: &'a App,
     choice: PathChoice<'a>,
     set: fn(&mut clew_protocol::LanguageChoices, Option<String>),
 ) -> Element<'a, Message> {
-    use crate::LanguagesMsg as L;
     let choices = &app.proj.lang_choices;
-    let remote = app.connection.is_remote();
-    let mut col = column![lang_heading(choice.heading)].spacing(6);
-    let effect: Vec<Element<'a, Message>> = match choice.chosen {
-        Some(path) => vec![
-            text("Your choice")
-                .size(ts::SMALL)
-                .color(theme::fg())
-                .into(),
-            lang_path(path.to_string()).into(),
-        ],
-        None => vec![
-            text(choice.automatic)
-                .size(ts::SMALL)
-                .color(theme::fg())
-                .into(),
-        ],
-    };
-    col = col.push(lang_effect(effect));
+    let mut rows = Vec::new();
     let chosen_is_projects = choice
         .found
         .iter()
         .any(|c| c.project && Some(c.command.as_str()) == choice.chosen);
     if let Some(note) = choice.project_note.filter(|_| chosen_is_projects) {
-        col = col.push(text(note).size(ts::CAPTION).color(theme::warning()));
+        rows.push(form::plain(
+            text(note).size(ts::SMALL).color(theme::warning()),
+        ));
     }
-    col = col.push(lang_pick(
-        "Automatic".into(),
-        lang_caption(choice.automatic.into()).into(),
+    rows.push(form::choice(
+        "Automatic",
+        Some(form::note(choice.automatic).into()),
         choice.chosen.is_none(),
         choose_with(choices, |c| set(c, None)),
     ));
     for candidate in choice.found {
-        col = col.push(lang_pick(
+        rows.push(form::choice(
             candidate.name.clone(),
-            lang_path(candidate.command.clone()).into(),
+            Some(form::path(candidate.command.clone()).into()),
             choice.chosen == Some(candidate.command.as_str()),
             choose_with(choices, |c| set(c, Some(candidate.command.clone()))),
         ));
@@ -1217,31 +1084,15 @@ fn path_choice_block<'a>(
     if let Some(other) = choice.chosen
         && !choice.found.iter().any(|c| c.command == other)
     {
-        col = col.push(lang_pick(
-            "Your choice".into(),
-            lang_path(other.to_string()).into(),
+        rows.push(form::choice(
+            "Your choice",
+            Some(form::path(other.to_string()).into()),
             true,
             choose_with(choices, |c| set(c, Some(other.to_string()))),
         ));
     }
-    let field = choice.field;
-    let mut path_row = row![
-        lang_field(app, choice.placeholder, field),
-        lang_button(
-            "Use",
-            (!app.proj.lang_drafts.field(field).trim().is_empty())
-                .then_some(Message::Languages(L::UseDraft(field)))
-        ),
-    ]
-    .spacing(6)
-    .align_y(iced::Center);
-    if !remote {
-        path_row = path_row.push(lang_button(
-            "Browse…",
-            Some(Message::Languages(L::Browse(field))),
-        ));
-    }
-    col.push(path_row).into()
+    rows.push(other_path(app, choice.placeholder, choice.field));
+    form::group(choice.title, Some(choice.about.into()), None, rows)
 }
 
 /// Where the toolchain `language`'s server is run from (Lean's `lake`,
@@ -1252,41 +1103,18 @@ fn toolchain_block<'a>(
     found: &'a [clew_protocol::ToolchainCandidate],
 ) -> Element<'a, Message> {
     let choices = &app.proj.lang_choices;
-    let (heading, program) = match language {
-        "lean" => ("Lean: toolchain", "lake"),
-        "ruby" => ("Ruby: the Ruby whose Ruby LSP runs", "ruby-lsp"),
-        "erlang" => ("Erlang: language platform", "elp"),
+    let (title, about, program) = match language {
+        "lean" => ("Lean", "The toolchain its server runs from.", "lake"),
+        "ruby" => ("Ruby", "The Ruby whose Ruby LSP runs.", "ruby-lsp"),
+        "erlang" => ("Erlang", "The language platform its server is.", "elp"),
         "haskell" => (
-            "Haskell: language server",
+            "Haskell",
+            "The language server it runs.",
             "haskell-language-server-wrapper",
         ),
-        _ => ("Dart: SDK", "dart"),
+        _ => ("Dart", "The SDK its server runs from.", "dart"),
     };
     let chosen = choices.servers.as_ref().and_then(|s| s.get(language));
-    let mut col = column![lang_heading(heading)].spacing(6);
-    let effect: Vec<Element<'a, Message>> = match chosen {
-        Some(choice) if choice.args.is_none() => vec![
-            text("Your choice")
-                .size(ts::SMALL)
-                .color(theme::fg())
-                .into(),
-            lang_path(choice.command.clone()).into(),
-        ],
-        Some(choice) => vec![
-            text("Your own program")
-                .size(ts::SMALL)
-                .color(theme::fg())
-                .into(),
-            lang_path(program_line(choice)).into(),
-        ],
-        None => vec![
-            text(format!("The {program} found on the PATH"))
-                .size(ts::SMALL)
-                .color(theme::fg())
-                .into(),
-        ],
-    };
-    col = col.push(lang_effect(effect));
     let set = |command: Option<String>| {
         choose_with(choices, |c| {
             let servers = c.servers.get_or_insert_default();
@@ -1306,28 +1134,41 @@ fn toolchain_block<'a>(
             }
         })
     };
-    col = col.push(lang_pick(
-        "Automatic".into(),
-        lang_caption(format!("The {program} on the PATH")).into(),
+    let mut rows = vec![form::choice(
+        "Automatic",
+        Some(form::note(format!("The {program} found on the PATH")).into()),
         chosen.is_none(),
         set(None),
-    ));
+    )];
     for candidate in found {
         let label = match candidate.project {
             true => format!("{} — the project's", candidate.name),
             false => candidate.name.clone(),
         };
-        col = col.push(lang_pick(
+        rows.push(form::choice(
             label,
-            lang_path(candidate.command.clone()).into(),
+            Some(form::path(candidate.command.clone()).into()),
             chosen.is_some_and(|c| c.args.is_none() && c.command == candidate.command),
             set(Some(candidate.command.clone())),
         ));
     }
-    if found.is_empty() {
-        col = col.push(lang_caption(format!("No other {program} found.")));
+    // A program the list does not hold: typed under Server programs, or
+    // with arguments of the user's own.
+    if let Some(choice) = chosen
+        && (choice.args.is_some() || !found.iter().any(|c| c.command == choice.command))
+    {
+        rows.push(form::choice(
+            "Your own program",
+            Some(form::path(program_line(choice)).into()),
+            true,
+            set(Some(choice.command.clone())),
+        ));
     }
-    col.into()
+    let about = match found.is_empty() {
+        true => format!("{about} No other {program} found."),
+        false => about.to_string(),
+    };
+    form::group(title, Some(about), None, rows)
 }
 
 /// The server programs the user chose, and the form to choose one — for a
@@ -1337,66 +1178,67 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     let choices = &app.proj.lang_choices;
     let remote = app.connection.is_remote();
     let drafts = &app.proj.lang_drafts;
-    let mut col = column![lang_heading("Server programs"),].spacing(6);
+    let mut rows = Vec::new();
     for (language, choice) in choices.servers.iter().flatten() {
         let name = crate::highlight::lang_name(language).unwrap_or(language.as_str());
         let remove = choose_with(choices, |c| {
             c.servers.get_or_insert_default().remove(language);
         });
-        col = col.push(
+        rows.push(form::plain(
             row![
-                text(name.to_string())
-                    .size(ts::SMALL)
-                    .color(theme::fg())
-                    .width(90),
-                lang_path(program_line(choice)).width(Fill),
-                lang_button(
+                column![
+                    text(name.to_string()).size(ts::BASE).color(theme::fg()),
+                    form::path(program_line(choice)),
+                ]
+                .spacing(2)
+                .width(Fill),
+                form::action(
                     "Edit",
                     Some(Message::Languages(L::ServerLanguage(language.clone())))
                 ),
-                lang_button("Reset", Some(remove)),
+                form::action("Reset", Some(remove)),
             ]
             .spacing(6)
             .align_y(iced::Center),
-        );
+        ));
     }
     let mut languages = app.proj.file_languages.clone();
     languages.extend(app.proj.project_languages.iter().cloned());
     languages.sort();
     languages.dedup();
     let ready = drafts.server_language.is_some();
-    let mut program_row = row![
-        pick_list(languages, drafts.server_language.clone(), |l: String| {
+    rows.push(form::field(
+        "Language",
+        None,
+        form::pick(languages, drafts.server_language.clone(), |l: String| {
             Message::Languages(L::ServerLanguage(l))
         })
-        .style(theme::pick)
-        .menu_style(theme::pick_menu)
-        .placeholder("Language")
-        .text_size(ts::SMALL)
-        .padding([4, 6]),
-        lang_field(
-            app,
-            if remote {
-                "Program on the host (path or name)"
-            } else {
-                "Program (path or name)"
-            },
-            F::ServerCommand
-        ),
-    ]
+        .placeholder("Choose…"),
+    ));
+    let mut program = row![draft_field(
+        app,
+        if remote {
+            "Program on the host (path or name)"
+        } else {
+            "Path or name"
+        },
+        F::ServerCommand
+    )]
     .spacing(6)
     .align_y(iced::Center);
     if !remote {
-        program_row = program_row.push(lang_button(
+        program = program.push(form::action(
             "Browse…",
             Some(Message::Languages(L::Browse(F::ServerCommand))),
         ));
     }
-    col = col.push(program_row);
-    col.push(
+    rows.push(form::field("Program", None, program));
+    rows.push(form::field(
+        "Arguments",
+        None,
         row![
-            lang_field(app, "Arguments (optional)", F::ServerArgs),
-            lang_button(
+            draft_field(app, "Optional", F::ServerArgs),
+            form::action(
                 "Use",
                 (ready && !drafts.server_command.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::ServerCommand)))
@@ -1404,8 +1246,16 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         ]
         .spacing(6)
         .align_y(iced::Center),
+    ));
+    form::group(
+        "Server programs",
+        Some(
+            "A program of your own for a language: another build, or a server clew does not know."
+                .into(),
+        ),
+        None,
+        rows,
     )
-    .into()
 }
 
 /// The settings' MCP servers and ACP agents: what is configured, how each
@@ -1414,246 +1264,259 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     use crate::IntegrationsMsg as M;
     use clew_core::mcp::hub::Status;
     let draft = &app.settings.integrations;
-    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
-    let caption = |s: String| text(s).size(ts::CAPTION).color(theme::dim());
-    let small_button = |label: &str, msg: Message| {
-        button(text(label.to_string()).size(ts::SMALL))
-            .style(theme::secondary_button)
-            .padding([2, 8])
-            .on_press(msg)
-    };
+    let small = |label: &str, msg: Message| form::action(label, Some(msg));
     let field =
         |placeholder: &str, value: &str, on_input: fn(String) -> Message, submit: Message| {
-            text_input(placeholder, value)
-                .style(theme::input)
+            form::input(placeholder, value)
                 .on_input(on_input)
                 .on_submit(submit)
-                .size(ts::BASE)
-                .padding(6)
         };
 
-    let mut col = column![section("MCP servers"),].spacing(8);
+    let mut servers = Vec::new();
     for server in &draft.mcp {
-        let status: Element<'_, Message> = match draft.statuses.get(&server.name) {
-            _ if !server.enabled => caption("off".into()).into(),
-            Some(Status::Connected { info, tools }) => text(format!(
-                "● connected{} · {tools} tools",
-                if info.name.is_empty() {
-                    String::new()
-                } else {
-                    format!(" to {}", info.name)
-                }
-            ))
-            .size(ts::CAPTION)
-            .color(theme::success())
-            .into(),
-            Some(Status::Connecting) => caption("connecting…".into()).into(),
-            Some(Status::Failed(why)) => text(format!("✗ {why}"))
-                .size(ts::CAPTION)
-                .color(theme::danger())
-                .into(),
-            Some(Status::Idle) | None => caption("not connected yet".into()).into(),
+        let (status, color) = match draft.statuses.get(&server.name) {
+            _ if !server.enabled => ("Off".to_string(), theme::dim()),
+            Some(Status::Connected { info, tools }) => (
+                format!(
+                    "Connected{} · {tools} tools",
+                    if info.name.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" to {}", info.name)
+                    }
+                ),
+                theme::success(),
+            ),
+            Some(Status::Connecting) => ("Connecting…".to_string(), theme::dim()),
+            Some(Status::Failed(why)) => (why.clone(), theme::danger()),
+            Some(Status::Idle) | None => ("Not connected yet".to_string(), theme::dim()),
         };
         let name = server.name.clone();
-        let policy: Element<'_, Message> = pick_list(
+        let policy = pick_list(
             &clew_core::mcp::Approve::ALL[..],
             Some(server.approve),
             move |a| Message::Integrations(M::McpApprove(name.clone(), a)),
         )
         .style(theme::pick)
         .menu_style(theme::pick_menu)
-        .text_size(ts::SMALL)
-        .padding([2, 6])
-        .into();
+        .text_size(ts::BODY)
+        .padding([4, 8]);
         // An HTTP server reached without a header of the user's signs in.
         let oauth = matches!(
             &server.transport,
             clew_core::mcp::Transport::Http { headers, .. }
                 if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         );
-        let sign_in: Element<'_, Message> = if !oauth {
-            space().width(0).into()
-        } else if draft.signed_in.contains(&server.name) {
-            small_button(
-                "Sign out",
-                Message::Integrations(M::McpSignOut(server.name.clone())),
-            )
-            .into()
-        } else {
-            small_button(
-                "Sign in",
-                Message::Integrations(M::McpSignIn(server.name.clone())),
-            )
-            .into()
-        };
+        let mut actions = row![policy, space().width(Fill)]
+            .spacing(6)
+            .align_y(iced::Center);
+        if oauth {
+            actions = actions.push(if draft.signed_in.contains(&server.name) {
+                small(
+                    "Sign out",
+                    Message::Integrations(M::McpSignOut(server.name.clone())),
+                )
+            } else {
+                small(
+                    "Sign in",
+                    Message::Integrations(M::McpSignIn(server.name.clone())),
+                )
+            });
+        }
+        actions = actions
+            .push(small(
+                "Test",
+                Message::Integrations(M::McpTest(server.name.clone())),
+            ))
+            .push(small(
+                "Remove",
+                Message::Integrations(M::McpRemove(server.name.clone())),
+            ));
         let name = server.name.clone();
-        let enabled = iced::widget::checkbox(server.enabled)
-            .style(theme::check)
-            .label("On")
-            .on_toggle(move |on| Message::Integrations(M::McpEnable(name.clone(), on)))
-            .text_size(ts::SMALL)
-            .size(14)
-            .spacing(4);
-        col = col.push(
-            container(
-                column![
-                    row![
-                        text(server.name.clone()).size(ts::BODY).color(theme::fg()),
-                        space().width(Fill),
-                        enabled,
-                        policy,
-                        sign_in,
-                        small_button(
-                            "Test",
-                            Message::Integrations(M::McpTest(server.name.clone()))
-                        ),
-                        small_button(
-                            "Remove",
-                            Message::Integrations(M::McpRemove(server.name.clone()))
-                        ),
+        let on = server.enabled;
+        servers.push(form::plain(
+            column![
+                row![
+                    column![
+                        text(server.name.clone())
+                            .size(ts::BASE)
+                            .font(crate::fonts::UI_MEDIUM)
+                            .color(theme::fg()),
+                        form::path(server.summary()),
+                        text(status)
+                            .size(ts::SMALL)
+                            .color(color)
+                            .wrapping(Wrapping::WordOrGlyph),
                     ]
-                    .spacing(6)
-                    .align_y(iced::Center),
-                    text(server.summary())
-                        .size(ts::CAPTION)
-                        .font(crate::fonts::CODE)
-                        .color(theme::fg_muted()),
-                    status,
+                    .spacing(3)
+                    .width(Fill),
+                    form::switch(on, Message::Integrations(M::McpEnable(name, !on))),
                 ]
-                .spacing(3),
-            )
-            .padding([6, 8])
-            .width(Fill)
-            .style(theme::panel),
-        );
+                .spacing(12)
+                .align_y(iced::alignment::Vertical::Top),
+                actions,
+            ]
+            .spacing(10),
+        ));
     }
-    col = col.push(
-        column![
-            row![
+    let add_mcp = form::group(
+        "Add an MCP server",
+        None,
+        None,
+        vec![
+            form::field(
+                "Name",
+                None,
                 field(
-                    "name",
+                    "e.g. github",
                     &draft.new_mcp_name,
                     |v| Message::Integrations(M::McpName(v)),
-                    Message::Integrations(M::McpAdd)
-                )
-                .width(Length::FillPortion(1)),
+                    Message::Integrations(M::McpAdd),
+                ),
+            ),
+            form::field(
+                "Command or URL",
+                Some("Or paste an mcpServers snippet.".into()),
                 field(
-                    "command (npx -y …), https:// URL, or a {\"mcpServers\": …} snippet",
+                    "npx -y … or https://…",
                     &draft.new_mcp_target,
                     |v| Message::Integrations(M::McpTarget(v)),
                     Message::Integrations(M::McpAdd),
-                )
-                .width(Length::FillPortion(3)),
-            ]
-            .spacing(6),
-            row![
+                ),
+            ),
+            form::field(
+                "Environment",
+                Some("Headers, for a URL.".into()),
                 field(
-                    "env for a command, headers for a URL: KEY=value; Authorization: Bearer …",
+                    "KEY=value; Authorization: Bearer …",
                     &draft.new_mcp_extra,
                     |v| Message::Integrations(M::McpExtra(v)),
                     Message::Integrations(M::McpAdd),
                 )
-                .secure(true)
-                .width(Fill),
-                button(text("Add server").size(ts::SMALL))
-                    .style(theme::primary_button)
-                    .padding([5, 12])
-                    .on_press(Message::Integrations(M::McpAdd)),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-        ]
-        .spacing(6),
+                .secure(true),
+            ),
+            form::plain(
+                row![
+                    space().width(Fill),
+                    form::primary("Add server", Some(Message::Integrations(M::McpAdd))),
+                ]
+                .align_y(iced::Center),
+            ),
+        ],
     );
 
-    col = col.push(section("ACP agents"));
+    let mut agents = Vec::new();
     for agent in &draft.acp {
         let name = agent.name.clone();
         let share = iced::widget::checkbox(agent.share_mcp)
             .style(theme::check)
             .label("Share my MCP servers")
             .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
-            .text_size(ts::SMALL)
-            .size(14)
-            .spacing(4);
-        col = col.push(
-            container(
+            .text_size(ts::BODY)
+            .size(15)
+            .spacing(6);
+        agents.push(form::plain(
+            row![
                 column![
-                    row![
-                        text(crate::app::integrations::acp_label(agent))
-                            .size(ts::BODY)
-                            .color(theme::fg()),
-                        space().width(Fill),
-                        share,
-                        small_button(
-                            "Remove",
-                            Message::Integrations(M::AcpRemove(agent.name.clone()))
-                        ),
-                    ]
-                    .spacing(6)
-                    .align_y(iced::Center),
-                    text(agent.summary())
-                        .size(ts::CAPTION)
-                        .font(crate::fonts::CODE)
-                        .color(theme::fg_muted()),
+                    text(crate::app::integrations::acp_label(agent))
+                        .size(ts::BASE)
+                        .font(crate::fonts::UI_MEDIUM)
+                        .color(theme::fg()),
+                    form::path(agent.summary()),
                 ]
-                .spacing(3),
-            )
-            .padding([6, 8])
-            .width(Fill)
-            .style(theme::panel),
-        );
+                .spacing(3)
+                .width(Fill),
+                share,
+                small(
+                    "Remove",
+                    Message::Integrations(M::AcpRemove(agent.name.clone()))
+                ),
+            ]
+            .spacing(10)
+            .align_y(iced::Center),
+        ));
     }
     let presets: Vec<Element<'_, Message>> = clew_core::acp::config::PRESETS
         .iter()
         .enumerate()
         .filter(|(_, p)| !draft.acp.iter().any(|a| a.name == p.name))
         .map(|(i, p)| {
-            button(text(format!("+ {}", p.label)).size(ts::SMALL))
-                .style(theme::secondary_button)
-                .padding([3, 10])
-                .on_press(Message::Integrations(M::AcpPreset(i)))
-                .into()
+            form::action(
+                &format!("+ {}", p.label),
+                Some(Message::Integrations(M::AcpPreset(i))),
+            )
+            .into()
         })
         .collect();
+    let mut add_acp = Vec::new();
     if !presets.is_empty() {
-        col = col.push(Row::with_children(presets).spacing(6).wrap());
+        add_acp.push(form::plain(Row::with_children(presets).spacing(6).wrap()));
     }
-    col = col.push(
+    add_acp.push(form::field(
+        "Name",
+        None,
+        field(
+            "e.g. my-agent",
+            &draft.new_acp_name,
+            |v| Message::Integrations(M::AcpName(v)),
+            Message::Integrations(M::AcpAdd),
+        ),
+    ));
+    add_acp.push(form::field(
+        "Command",
+        Some("Starts it in ACP mode.".into()),
+        field(
+            "my-agent --acp",
+            &draft.new_acp_command,
+            |v| Message::Integrations(M::AcpCommand(v)),
+            Message::Integrations(M::AcpAdd),
+        ),
+    ));
+    add_acp.push(form::plain(
         row![
-            field(
-                "name",
-                &draft.new_acp_name,
-                |v| Message::Integrations(M::AcpName(v)),
-                Message::Integrations(M::AcpAdd)
-            )
-            .width(Length::FillPortion(1)),
-            field(
-                "command that starts it in ACP mode",
-                &draft.new_acp_command,
-                |v| Message::Integrations(M::AcpCommand(v)),
-                Message::Integrations(M::AcpAdd),
-            )
-            .width(Length::FillPortion(3)),
-            button(text("Add agent").size(ts::SMALL))
-                .style(theme::primary_button)
-                .padding([5, 12])
-                .on_press(Message::Integrations(M::AcpAdd)),
+            space().width(Fill),
+            form::primary("Add agent", Some(Message::Integrations(M::AcpAdd))),
         ]
-        .spacing(6)
         .align_y(iced::Center),
-    );
+    ));
+
+    let mut parts = Vec::new();
     if let Some(note) = &draft.note {
-        col = col.push(text(note.clone()).size(ts::SMALL).color(theme::fg_muted()));
+        parts.push(
+            text(note.clone())
+                .size(ts::BODY)
+                .color(theme::fg_muted())
+                .into(),
+        );
     }
     for error in &draft.errors {
-        col = col.push(text(error.clone()).size(ts::SMALL).color(theme::danger()));
+        parts.push(
+            text(error.clone())
+                .size(ts::BODY)
+                .color(theme::danger())
+                .into(),
+        );
     }
-    col = col.push(caption(format!(
-        "More options in {}",
-        crate::llm::config_hint()
-    )));
-    col.into()
+    parts.push(form::group(
+        "MCP servers",
+        servers
+            .is_empty()
+            .then(|| "None yet. Their tools are offered to Ask.".to_string()),
+        None,
+        servers,
+    ));
+    parts.push(add_mcp);
+    parts.push(form::group(
+        "ACP agents",
+        agents
+            .is_empty()
+            .then(|| "None yet. An agent answers in Ask in clew's place.".to_string()),
+        None,
+        agents,
+    ));
+    parts.push(form::group("Add an ACP agent", None, None, add_acp));
+    parts.push(form::note(format!("More options in {}", crate::llm::config_hint())).into());
+    form::page(parts)
 }
 
 /// Join a browsed directory with a child name, tolerating a trailing slash (so
@@ -2270,21 +2133,17 @@ pub(crate) fn shortcuts_modal(app: &App) -> Element<'_, Message> {
 /// motions, which are fixed — as their modal and Settings' page show them.
 pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     use crate::keymap::Action;
-    let section = |s: &str| text(s.to_string()).size(ts::BODY).color(theme::accent());
 
     // A one-line hint, replaced by a warning when a rebind is rejected.
     let notice: Element<'_, Message> = match &app.keymap_notice {
         Some(msg) => text(msg.clone())
-            .size(ts::SMALL)
+            .size(ts::BODY)
             .color(theme::warning())
             .into(),
-        None => text("Click a shortcut, then press new keys.")
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .into(),
+        None => form::note("Click a shortcut, then press new keys.").into(),
     };
     // Rebindable command rows.
-    let mut cmds = Column::new().spacing(2);
+    let mut cmds = Vec::new();
     for action in Action::ALL {
         let binding: Element<'_, Message> = if app.rebinding == Some(action) {
             container(
@@ -2297,19 +2156,19 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         } else {
             let pill = button(
                 text(app.keymap.chord(action).caps())
-                    .size(ts::BASE)
+                    .size(ts::BODY)
                     .color(theme::fg()),
             )
-            .style(theme::toolbar_button)
+            .style(theme::secondary_button)
             .padding([3, 10])
             .on_press(Message::Window(WindowMsg::RebindStart(action)));
             if app.keymap.is_overridden(action) {
                 row![
-                    pill,
                     button(text("↺").size(ts::BASE).color(theme::dim()))
                         .style(theme::toolbar_button)
-                        .padding([3, 7])
+                        .padding([2, 7])
                         .on_press(Message::Window(WindowMsg::RebindReset(action))),
+                    pill,
                 ]
                 .spacing(4)
                 .align_y(iced::Center)
@@ -2318,16 +2177,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
                 pill.into()
             }
         };
-        cmds = cmds.push(
-            row![
-                text(action.label()).size(ts::BASE).color(theme::fg()),
-                space().width(Fill),
-                binding,
-            ]
-            .align_y(iced::Center)
-            .spacing(10)
-            .padding([1, 2]),
-        );
+        cmds.push(slim(action.label().to_string(), binding));
     }
 
     // Read-only reading motions (not part of the customizable keymap).
@@ -2349,34 +2199,37 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         ("Next / previous field", "tab   ⇧tab"),
         ("Close the top panel / clear selection", "esc"),
     ];
-    let mut vim = Column::new().spacing(2);
-    for (label, keys) in motions {
-        vim = vim.push(
-            row![
-                text(label).size(ts::BASE).color(theme::fg()),
-                space().width(Fill),
+    let vim = motions
+        .into_iter()
+        .map(|(label, keys)| {
+            slim(
+                label.to_string(),
                 text(crate::keymap::local_keys(keys))
                     .size(ts::BODY)
-                    .color(theme::dim()),
-            ]
-            .align_y(iced::Center)
-            .spacing(10)
-            .padding([1, 2]),
-        );
-    }
+                    .font(crate::fonts::CODE)
+                    .color(theme::fg_muted())
+                    .into(),
+            )
+        })
+        .collect();
 
-    column![
+    form::page(vec![
         notice,
-        section("Commands"),
-        cmds,
-        space().height(8),
-        section("Reading motions (Vim, fixed)"),
-        vim,
-        text(format!("Saved to {}", crate::llm::config_hint()))
-            .size(ts::CAPTION)
-            .color(theme::dim()),
+        form::group("Commands", None, None, cmds),
+        form::group("Reading motions", Some("Vim's, fixed.".into()), None, vim),
+        form::note(format!("Saved to {}", crate::llm::config_hint())).into(),
+    ])
+}
+
+/// A shortcut's row: what it does, and its keys at the right — slimmer
+/// than a setting's, as the list is long.
+fn slim<'a>(label: String, keys: Element<'a, Message>) -> Element<'a, Message> {
+    row![
+        text(label).size(ts::BASE).color(theme::fg()).width(Fill),
+        keys,
     ]
-    .spacing(8)
-    .width(Fill)
+    .spacing(12)
+    .align_y(iced::Center)
+    .padding([5, 14])
     .into()
 }

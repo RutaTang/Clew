@@ -71,6 +71,7 @@ pub(crate) use overlays::*;
 mod updater;
 pub(crate) use updater::*;
 mod askfloat;
+mod form;
 mod meter;
 mod setup;
 pub(crate) use askfloat::*;

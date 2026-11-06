@@ -7,6 +7,7 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::{column, row};
 
+use super::form;
 use crate::VoiceMsg;
 use crate::app::voice::LANGUAGES;
 use clew_voice::models::{MODELS, Model};
@@ -21,45 +22,11 @@ impl std::fmt::Display for LanguageChoice {
     }
 }
 
-/// One model's row: picked or not, what it is, and whether it is here.
+/// One model's row: picked or not (a radio's mark), what it is, and at
+/// its right whether it is here — its download, or getting it.
 fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
     let picked = app.voice.prefs.model == model.id;
     let installed = app.voice.installed(model);
-    let pick = button(
-        column![
-            row![
-                text(if picked { "●" } else { "○" })
-                    .size(ts::SMALL)
-                    .color(if picked {
-                        theme::accent()
-                    } else {
-                        theme::dim()
-                    }),
-                text(model.name).size(ts::BODY).color(theme::fg()),
-                text(format!("{} MB", model.size_mb))
-                    .size(ts::CAPTION)
-                    .color(theme::dim()),
-            ]
-            .spacing(6)
-            .align_y(iced::Center),
-            text(model.about).size(ts::CAPTION).color(theme::dim()),
-        ]
-        .spacing(2),
-    )
-    .style(theme::list_row(picked))
-    .padding([4, 6])
-    .width(Fill)
-    .on_press(Message::Voice(VoiceMsg::PickModel(model.id)));
-    let small = |label: String, msg: Message, primary: bool| {
-        button(text(label).size(ts::SMALL))
-            .style(if primary {
-                theme::primary_button
-            } else {
-                theme::secondary_button
-            })
-            .padding([2, 8])
-            .on_press(msg)
-    };
     let state: Element<'a, Message> = if let Some(d) = app.voice.downloads.get(model.id) {
         let total = d
             .total
@@ -76,64 +43,66 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
             ))
             .width(70),
             text(format!("{:.0}%", share * 100.0))
-                .size(ts::CAPTION)
+                .size(ts::SMALL)
                 .color(theme::dim()),
-            small(
-                "Cancel".into(),
-                Message::Voice(VoiceMsg::CancelDownload(model.id)),
-                false
+            form::action(
+                "Cancel",
+                Some(Message::Voice(VoiceMsg::CancelDownload(model.id)))
             ),
         ]
-        .spacing(6)
+        .spacing(8)
         .align_y(iced::Center)
         .into()
     } else if installed {
         row![
-            text("Downloaded").size(ts::CAPTION).color(theme::success()),
-            small(
-                "Remove".into(),
-                Message::Voice(VoiceMsg::RemoveModel(model.id)),
-                false
+            text("Downloaded").size(ts::SMALL).color(theme::success()),
+            form::action(
+                "Remove",
+                Some(Message::Voice(VoiceMsg::RemoveModel(model.id)))
             ),
         ]
-        .spacing(6)
+        .spacing(8)
         .align_y(iced::Center)
         .into()
     } else {
-        small(
-            format!("Download ({} MB)", model.size_mb),
-            Message::Voice(VoiceMsg::Download(model.id)),
-            picked,
-        )
-        .into()
+        let label = format!("Download ({} MB)", model.size_mb);
+        let msg = Some(Message::Voice(VoiceMsg::Download(model.id)));
+        if picked {
+            form::primary(&label, msg).into()
+        } else {
+            form::action(&label, msg).into()
+        }
     };
-    let mut rows = column![row![pick, state].spacing(8).align_y(iced::Center)].spacing(2);
+    let detail = column![
+        text(model.about)
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .wrapping(Wrapping::WordOrGlyph),
+    ];
+    let mut rows = column![form::choice_with(
+        model.name,
+        Some(detail.into()),
+        picked,
+        Message::Voice(VoiceMsg::PickModel(model.id)),
+        Some(state),
+    )];
     if let Some(e) = app.voice.download_errors.get(model.id) {
-        rows = rows.push(
+        rows = rows.push(form::plain(
             text(e.clone())
-                .size(ts::CAPTION)
+                .size(ts::SMALL)
                 .color(theme::warn())
                 .wrapping(Wrapping::WordOrGlyph),
-        );
+        ));
     }
     rows.into()
 }
 
-/// The settings' Voice section. Its changes take effect, and are saved, at
-/// once, like the integrations' below it.
+/// The settings' Voice section: which model listens, and how what it hears
+/// is used. Its changes take effect, and are saved, at once.
 pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
     let chord = app.keymap.chord(crate::keymap::Action::Voice).caps();
-    let mut col = column![
-        text(format!(
-            "Press {chord} and speak. Speech stays on this computer."
-        ))
-        .size(ts::CAPTION)
-        .color(theme::dim()),
-    ]
-    .spacing(6);
-    for model in MODELS {
-        col = col.push(model_row(app, model));
-    }
+    let models = MODELS.iter().map(|model| model_row(app, model)).collect();
+    let mut listening = Vec::new();
     if !app.voice.prefs.model().english_only {
         let choices: Vec<LanguageChoice> = LANGUAGES
             .iter()
@@ -143,48 +112,36 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
             .iter()
             .find(|c| c.0 == app.voice.prefs.language.as_deref())
             .copied();
-        col = col.push(
-            row![
-                text("Language").size(ts::SMALL).color(theme::fg_muted()),
-                pick_list(choices, selected, |c: LanguageChoice| {
-                    Message::Voice(VoiceMsg::SetLanguage(c.0))
-                })
-                .style(theme::pick)
-                .menu_style(theme::pick_menu)
-                .text_size(ts::SMALL)
-                .padding([3, 8]),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        );
-    }
-    let check = |label: &'static str, on: bool, msg: fn(bool) -> VoiceMsg| {
-        iced::widget::checkbox(on)
-            .style(theme::check)
-            .label(label)
-            .on_toggle(move |v| Message::Voice(msg(v)))
-            .text_size(ts::BODY)
-            .size(16)
-            .spacing(8)
-    };
-    col = col
-        .push(check(
-            "Run commands it hears",
-            app.voice.prefs.run_commands,
-            VoiceMsg::SetRunCommands,
-        ))
-        .push(check(
-            "Ask questions as soon as they are heard",
-            app.voice.prefs.send_questions,
-            VoiceMsg::SetSendQuestions,
+        listening.push(form::item(
+            "Language",
+            None,
+            form::pick(choices, selected, |c: LanguageChoice| {
+                Message::Voice(VoiceMsg::SetLanguage(c.0))
+            }),
         ));
-    if let Some(store) = &app.voice.store {
-        col = col.push(
-            text(format!("Models are kept in {}", store.dir().display()))
-                .size(ts::CAPTION)
-                .color(theme::dim())
-                .wrapping(Wrapping::Glyph),
-        );
     }
-    col.into()
+    listening.push(form::toggle(
+        "Run commands it hears",
+        None,
+        app.voice.prefs.run_commands,
+        |v| Message::Voice(VoiceMsg::SetRunCommands(v)),
+    ));
+    listening.push(form::toggle(
+        "Ask questions as soon as they are heard",
+        None,
+        app.voice.prefs.send_questions,
+        |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
+    ));
+    let mut parts = vec![
+        form::note(format!(
+            "Press {chord} and speak. Speech stays on this computer."
+        ))
+        .into(),
+        form::group("Model", None, None, models),
+        form::group("Listening", None, None, listening),
+    ];
+    if let Some(store) = &app.voice.store {
+        parts.push(form::note(format!("Models are kept in {}", store.dir().display())).into());
+    }
+    form::page(parts)
 }
