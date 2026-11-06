@@ -242,7 +242,8 @@ pub(crate) fn time_travel_banner<'a>(
             .color(theme::dim())
             .into()
     } else if let Some(w) = tt.why.get(&c.sha) {
-        text(w.clone())
+        // Plain text: a model's code marks would show as they are.
+        text(strip_backticks(w))
             .size(ts::SMALL)
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
