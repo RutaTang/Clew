@@ -394,6 +394,53 @@ fn failing_fetch(
     Err("HTTP 403 Forbidden".into())
 }
 
+/// Gets a megabyte and a half of a model, then loses the connection — the
+/// error naming the signed address a CDN served it from, as Clew's own
+/// transport does.
+fn dropping_fetch(
+    _url: &str,
+    _max_bytes: u64,
+    _cancel: &AtomicBool,
+    sink: &mut dyn std::io::Write,
+    _progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
+    sink.write_all(&vec![0u8; 1_500_000])
+        .map_err(|e| e.to_string())?;
+    Err(
+        "https://us.aws.cdn.hf.co/xet-bridge-us/641ab5/32b578?Expires=1793944821\
+         &Policy=eyJTdGF0ZW1lbnQiOlt7&Signature=MEUCIFr4ga: the connection closed before \
+         all bytes were read (1500000 of 147951465)"
+            .into(),
+    )
+}
+
+/// A download that fails part-way says how far it got and why, in words —
+/// not the address it failed at — and what it said goes once Settings,
+/// where it is said, is closed.
+#[test]
+fn a_failed_download_says_why_briefly_until_settings_closes() {
+    let mut app = scanned_app("voice-download-dropped");
+    own_store(&mut app, "voice-download-dropped");
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    app.voice.fetch = dropping_fetch;
+    let task = app.update(Message::Voice(VoiceMsg::Download("base.en")));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let size = clew_voice::models::find("base.en").unwrap().size_mb;
+    let error = app.voice.download_errors.get("base.en").cloned().unwrap();
+    assert_eq!(
+        error,
+        format!("Stopped at 1 of {size} MB: the connection closed")
+    );
+    assert!(!app.status.contains("https://"), "{}", app.status);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(
+        app.voice.download_errors.is_empty(),
+        "closing Settings keeps it"
+    );
+}
+
 /// A download that is not the model as published is refused and leaves
 /// nothing behind; one that fails says why; Cancel stops one.
 #[test]

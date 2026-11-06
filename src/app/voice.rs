@@ -147,7 +147,9 @@ fn fetch_over_net(
     if !url.starts_with("https://") {
         return Err("refusing a model download that is not HTTPS".into());
     }
-    clew_core::net::download(
+    // A gigabyte over a link that drops now and then: it picks up where it
+    // stopped rather than start again.
+    clew_core::net::download_resuming(
         url,
         &[],
         clew_core::net::Limits {
@@ -831,14 +833,16 @@ impl App {
                                 }));
                             }
                         };
-                        fetch(
+                        match fetch(
                             &model.url(),
                             model.max_bytes(),
                             &worker_cancel,
                             &mut install,
                             &mut progress,
-                        )?;
-                        install.finish()
+                        ) {
+                            Ok(_) => install.finish(),
+                            Err(e) => Err(download_failure(&e, install.written(), model)),
+                        }
                     })();
                     let _ = tx.send(Message::Voice(VoiceMsg::Downloaded { id, result }));
                 });
@@ -863,6 +867,25 @@ impl App {
         self.status = format!("Downloading {} ({} MB)…", model.name, model.size_mb);
         task
     }
+}
+
+/// What a failed download of `model` says, under the model in Settings: why,
+/// without the address it failed at (a CDN's signed one is a paragraph), and
+/// how far it got if it got anywhere.
+pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model) -> String {
+    let why = if clew_core::net::was_cut_short(error) {
+        "the connection closed".to_string()
+    } else {
+        clew_core::net::without_url(error)
+    };
+    if written == 0 {
+        return why;
+    }
+    format!(
+        "Stopped at {} of {} MB: {why}",
+        written / 1_000_000,
+        model.size_mb
+    )
 }
 
 /// Sets its flag when dropped.

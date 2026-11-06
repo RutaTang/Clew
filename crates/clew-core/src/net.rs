@@ -4508,8 +4508,11 @@ fn is_redirect(status: u16) -> bool {
 /// The caller's headers that follow a chain once it has left the caller's
 /// origin: the ones that carry nothing of the caller's. An allowlist, not a
 /// list of credential headers to strip: `x-api-key`, `PRIVATE-TOKEN`,
-/// `api-key` — a credential header can be called anything.
-const FOLLOWS_EVERY_HOP: &[&str] = &["accept"];
+/// `api-key` — a credential header can be called anything. `range` names
+/// only which bytes of the body are wanted, and must reach the hop that
+/// serves the body: a model file is served by a CDN another host redirects
+/// to.
+const FOLLOWS_EVERY_HOP: &[&str] = &["accept", "range"];
 
 fn follows_every_hop(name: &str) -> bool {
     FOLLOWS_EVERY_HOP
@@ -4589,6 +4592,169 @@ pub fn download(
     mut on_progress: impl FnMut(u64, Option<u64>),
 ) -> Result<u64, String> {
     transfer(url, headers, limits, cancel, sink, &mut on_progress)
+}
+
+/// How many attempts in a row [`download_resuming`] makes that get no
+/// further before it gives up. It waits [`FIRST_PAUSE`] before the first of
+/// them and twice as long before each next: about half a minute in all.
+const FRUITLESS_TRIES: u32 = 5;
+const FIRST_PAUSE: Duration = if cfg!(test) {
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(2)
+};
+
+/// How long [`download_resuming`] waits before asking for the rest after an
+/// attempt that got further.
+const RESUME_PAUSE: Duration = if cfg!(test) {
+    Duration::from_millis(20)
+} else {
+    Duration::from_secs(1)
+};
+
+/// The most attempts [`download_resuming`] makes, however each fares: a
+/// peer that drops every connection after a few bytes ends it too.
+const MAX_ATTEMPTS: u32 = 100;
+
+/// [`download`], picking up where it stopped when the transfer fails after
+/// some of the body arrived — a connection that closes or stalls part-way
+/// through a large file. Each further attempt starts again from `url`, so a
+/// short-lived signed redirect is signed afresh, and asks for the rest
+/// (`Range: bytes=N-`); a server that sends the whole body again has its
+/// first N bytes dropped, so `sink` gets each byte once either way.
+///
+/// A first attempt that gets nothing fails as [`download`] does. After that
+/// it gives up only after [`FRUITLESS_TRIES`] attempts in a row that get no
+/// further, a failing `sink` (whatever it was refused, it would be again),
+/// or `cancel`. `limits.deadline` bounds all the attempts together, and the
+/// error returned is the last attempt's. Progress counts from the start of
+/// the body throughout.
+pub fn download_resuming(
+    url: &str,
+    headers: &[(&str, &str)],
+    limits: Limits,
+    cancel: &AtomicBool,
+    sink: &mut impl Write,
+    mut on_progress: impl FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
+    let deadline = Instant::now() + limits.deadline;
+    let mut written = 0u64;
+    let mut fruitless = 0u32;
+    let mut attempts = 0u32;
+    loop {
+        attempts += 1;
+        let from = written;
+        let range = format!("bytes={from}-");
+        let mut asked: Vec<(&str, &str)> = headers
+            .iter()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("range"))
+            .copied()
+            .collect();
+        if from > 0 {
+            asked.push(("Range", &range));
+        }
+        let mut counted = Counted {
+            sink: &mut *sink,
+            written: &mut written,
+            refused: false,
+        };
+        let left = deadline.saturating_duration_since(Instant::now());
+        let attempt = Limits {
+            deadline: left,
+            ..limits
+        };
+        let result = transfer(url, &asked, attempt, cancel, &mut counted, &mut on_progress);
+        let refused = counted.refused;
+        let error = match result {
+            Ok(_) => return Ok(written),
+            Err(error) => error,
+        };
+        if refused || written == 0 || cancel.load(Ordering::Relaxed) || attempts >= MAX_ATTEMPTS {
+            return Err(error);
+        }
+        let pause = if written > from {
+            fruitless = 0;
+            RESUME_PAUSE
+        } else {
+            fruitless += 1;
+            if fruitless >= FRUITLESS_TRIES {
+                return Err(error);
+            }
+            FIRST_PAUSE * 2u32.pow(fruitless - 1)
+        };
+        let until = Instant::now() + pause;
+        if until >= deadline {
+            return Err(error);
+        }
+        while Instant::now() < until {
+            if cancel.load(Ordering::Relaxed) {
+                return Err(format!("{url}: download cancelled"));
+            }
+            std::thread::sleep(POLL);
+        }
+    }
+}
+
+/// A sink that counts what it takes, and says whether it refused any.
+struct Counted<'a, W: Write + ?Sized> {
+    sink: &'a mut W,
+    written: &'a mut u64,
+    refused: bool,
+}
+
+impl<W: Write + ?Sized> Write for Counted<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match self.sink.write(buf) {
+            Ok(n) => {
+                *self.written += n as u64;
+                Ok(n)
+            }
+            Err(e) => {
+                self.refused = true;
+                Err(e)
+            }
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sink.flush()
+    }
+}
+
+/// What a body cut short says (see [`copy_capped`]).
+const CUT_SHORT: &str = "the connection closed before all bytes were read";
+
+/// Whether `error`, from a transfer here, is a body cut short: the
+/// connection closed before all of it arrived.
+pub fn was_cut_short(error: &str) -> bool {
+    error.contains(CUT_SHORT)
+}
+
+/// What a transfer's `error` says without the address it starts with. Every
+/// error a transfer here returns names the hop that failed first — `{url}:
+/// why`, or `{url} (through the proxy {spec}): why` — which is what a log
+/// wants, but where the download is already named, as a model is in
+/// Settings, an address signed by a CDN is a paragraph of noise.
+pub fn without_url(error: &str) -> String {
+    let Some(rest) = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| error.strip_prefix(scheme))
+    else {
+        return error.to_string();
+    };
+    // An address holds no spaces: it is all up to the first one.
+    let Some((address, after)) = rest.split_once(' ') else {
+        return error.to_string();
+    };
+    if address.ends_with(':') {
+        return after.to_string();
+    }
+    if let Some(proxied) = after.strip_prefix("(through the proxy ")
+        && let Some((proxy, why)) = proxied.split_once("): ")
+    {
+        return format!("through the proxy {proxy}: {why}");
+    }
+    error.to_string()
 }
 
 fn transfer(
@@ -4844,6 +5010,21 @@ fn transfer_with(
         break response;
     };
     let url = current.as_str();
+    // The rest of a body, asked for from its byte `from` on
+    // ([`download_resuming`]), comes as just that rest (206, which must
+    // start there) or as the whole body (200, from a server that ignores
+    // ranges), whose first `from` bytes the sink already has and is not
+    // given again. Either way progress counts from the start of the body.
+    let from = range_from(url, headers)?;
+    let rest = from > 0 && response.status().as_u16() == 206;
+    if rest {
+        resumes_at(url, response.headers(), from)?;
+    }
+    let (skip, cap) = match (from, rest) {
+        (0, _) => (0, limits.max_bytes),
+        (_, true) => (0, limits.max_bytes.saturating_sub(from)),
+        (_, false) => (from, limits.max_bytes),
+    };
     // The length the body is sent with: none for a chunked body, and none
     // for one ureq decompresses (its declared length is the compressed one).
     let total = response.body().content_length();
@@ -4851,25 +5032,95 @@ fn transfer_with(
     // the bytes actually received — but an honest one over the cap can be
     // refused before any of it is transferred.
     if let Some(total) = total
-        && total > limits.max_bytes
+        && total > cap
     {
         return Err(format!(
-            "{url}: the response is {total} bytes, over the {} byte limit",
-            limits.max_bytes
+            "{url}: the response is {total} bytes, over the {cap} byte limit"
         ));
     }
+    let offset = if rest { from } else { 0 };
+    let mut progress = |done: u64, total: Option<u64>| {
+        on_progress(offset + done, total.map(|total| offset + total));
+    };
     copy_capped(
         url,
         &mut response.into_body().into_reader(),
-        sink,
+        &mut Skip { left: skip, sink },
         Bounds {
-            max_bytes: limits.max_bytes,
+            max_bytes: cap,
             deadline,
             cancel,
         },
         total,
-        on_progress,
+        &mut progress,
     )
+}
+
+/// Where the body asked for starts: the `N` of the caller's
+/// `Range: bytes=N-`, or 0 with no range. Only that open-ended form is
+/// understood ([`download_resuming`] is the one that asks).
+fn range_from(url: &str, headers: &[(&str, &str)]) -> Result<u64, String> {
+    let Some((_, value)) = headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("range"))
+    else {
+        return Ok(0);
+    };
+    value
+        .trim()
+        .strip_prefix("bytes=")
+        .and_then(|v| v.strip_suffix('-'))
+        .and_then(|n| n.parse().ok())
+        .ok_or_else(|| format!("{url}: a range other than `bytes=N-` was asked for: {value}"))
+}
+
+/// Check that a 206 holds the body from byte `from` on, as asked: its
+/// `Content-Range` must start there, and the bytes must be the file's own,
+/// not a compressed form (a range of which is a range of something else).
+fn resumes_at(url: &str, headers: &ureq::http::HeaderMap, from: u64) -> Result<(), String> {
+    if let Some(encoding) = headers.get("content-encoding")
+        && !encoding.as_bytes().eq_ignore_ascii_case(b"identity")
+    {
+        return Err(format!(
+            "{url}: the server sent the rest of the download compressed"
+        ));
+    }
+    let start = headers
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().strip_prefix("bytes "))
+        .and_then(|v| v.split_once('-'))
+        .and_then(|(start, _)| start.trim().parse::<u64>().ok());
+    match start {
+        Some(start) if start == from => Ok(()),
+        Some(start) => Err(format!(
+            "{url}: the server sent the download from byte {start}, not {from}"
+        )),
+        None => Err(format!(
+            "{url}: the server sent part of the download without saying which part"
+        )),
+    }
+}
+
+/// A sink that drops the first `left` bytes written to it.
+struct Skip<'a> {
+    left: u64,
+    sink: &'a mut dyn Write,
+}
+
+impl Write for Skip<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let skipped = self.left.min(buf.len() as u64) as usize;
+        self.left -= skipped as u64;
+        if skipped == buf.len() {
+            return Ok(skipped);
+        }
+        Ok(skipped + self.sink.write(&buf[skipped..])?)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sink.flush()
+    }
 }
 
 /// What stops a copy between chunks.
@@ -4908,10 +5159,7 @@ fn copy_capped(
             // ended without the peer ending TLS.
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof || is_cut_short(&e) => {
                 let of = total.map(|total| format!(" ({done} of {total})"));
-                return Err(format!(
-                    "{url}: the connection closed before all bytes were read{}",
-                    of.unwrap_or_default()
-                ));
+                return Err(format!("{url}: {CUT_SHORT}{}", of.unwrap_or_default()));
             }
             Err(e) => return Err(format!("{url}: {}", describe_io(&e))),
         };
@@ -5678,6 +5926,266 @@ mod tests {
         assert_eq!(get(&fine, &[], limits).unwrap(), b"ok");
     }
 
+    /// What a test server answers a request whose head it is given.
+    type Answer = Box<dyn Fn(&str) -> Vec<u8> + Send>;
+
+    /// A loopback server answering one connection after another, each with
+    /// what its `answer` makes of the request's head; the heads come back,
+    /// in order, as they are answered.
+    fn serve_each(answers: Vec<Answer>) -> (String, std::sync::mpsc::Receiver<String>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for answer in answers {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let request = crate::testutil::read_http(&mut stream);
+                let _ = stream.write_all(&answer(&request.head));
+                let _ = tx.send(request.head);
+            }
+        });
+        (format!("http://{addr}/model"), rx)
+    }
+
+    fn reply(raw: &'static str) -> Answer {
+        Box::new(move |_| raw.as_bytes().to_vec())
+    }
+
+    /// The `Range` a request's head asks for, if any.
+    fn range_of(head: &str) -> Option<String> {
+        head.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.trim()
+                .eq_ignore_ascii_case("range")
+                .then(|| value.trim().to_string())
+        })
+    }
+
+    const RESUMABLE: Limits = Limits {
+        max_bytes: 1024,
+        deadline: Duration::from_secs(20),
+    };
+
+    /// A body cut short part-way is picked up where it stopped: the next
+    /// attempt asks for the rest, which is appended, so the whole arrives
+    /// once and progress runs to the end of it.
+    #[test]
+    fn a_download_cut_short_resumes_where_it_stopped() {
+        let (url, heads) = serve_each(vec![
+            reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcd"),
+            reply(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\n\
+                 Content-Length: 6\r\n\r\nefghij",
+            ),
+        ]);
+        let mut sink = Vec::new();
+        let mut last = (0, None);
+        let n = download_resuming(
+            &url,
+            &[],
+            RESUMABLE,
+            &AtomicBool::new(false),
+            &mut sink,
+            |done, total| last = (done, total),
+        )
+        .unwrap();
+        assert_eq!((n, sink.as_slice()), (10, b"abcdefghij".as_slice()));
+        assert_eq!(last, (10, Some(10)));
+        let heads: Vec<String> = heads.try_iter().collect();
+        assert_eq!(heads.len(), 2, "{heads:?}");
+        assert_eq!(range_of(&heads[0]), None);
+        assert_eq!(range_of(&heads[1]).as_deref(), Some("bytes=4-"));
+    }
+
+    /// A server that ignores the range sends the whole body again: what the
+    /// sink already has is not given to it twice.
+    #[test]
+    fn a_resume_answered_with_the_whole_body_skips_what_arrived() {
+        let (url, _) = serve_each(vec![
+            reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcd"),
+            reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcdefghij"),
+        ]);
+        let mut sink = Vec::new();
+        let n = download_resuming(
+            &url,
+            &[],
+            RESUMABLE,
+            &AtomicBool::new(false),
+            &mut sink,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!((n, sink.as_slice()), (10, b"abcdefghij".as_slice()));
+    }
+
+    /// What is not a body cut part-way is not tried again: a first attempt
+    /// that gets nothing, or a sink that refuses what it is given.
+    #[test]
+    fn a_download_that_gets_nothing_or_is_refused_is_not_resumed() {
+        let (url, heads) = serve_each(vec![reply(
+            "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n",
+        )]);
+        let err = download_resuming(
+            &url,
+            &[],
+            RESUMABLE,
+            &AtomicBool::new(false),
+            &mut Vec::new(),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("404"), "{err}");
+        assert_eq!(heads.try_iter().count(), 1);
+
+        /// Takes four bytes, then refuses.
+        struct Full(Vec<u8>);
+        impl Write for Full {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                if self.0.len() + buf.len() > 4 {
+                    return Err(io::Error::other("the disk is full"));
+                }
+                self.0.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (url, heads) = serve_each(vec![
+            reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcdefghij"),
+            reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcdefghij"),
+        ]);
+        let err = download_resuming(
+            &url,
+            &[],
+            RESUMABLE,
+            &AtomicBool::new(false),
+            &mut Full(Vec::new()),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("the disk is full"), "{err}");
+        assert_eq!(heads.try_iter().count(), 1, "a refused write was retried");
+    }
+
+    /// After a body cut short, attempts that get no further are made a few
+    /// times, then the last one's error is the answer.
+    #[test]
+    fn a_resume_that_gets_no_further_gives_up() {
+        let mut answers = vec![reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcd")];
+        for _ in 0..FRUITLESS_TRIES + 3 {
+            answers.push(reply(
+                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n",
+            ));
+        }
+        let (url, heads) = serve_each(answers);
+        let mut sink = Vec::new();
+        let err = download_resuming(
+            &url,
+            &[],
+            RESUMABLE,
+            &AtomicBool::new(false),
+            &mut sink,
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(err.contains("503"), "{err}");
+        assert_eq!(sink, b"abcd");
+        assert_eq!(heads.try_iter().count(), 1 + FRUITLESS_TRIES as usize);
+    }
+
+    /// The range goes with the request through its redirects (the body is
+    /// served where they lead), and the answer is checked against it: a 206
+    /// must hold the bytes from where it was asked to start, saying so.
+    #[test]
+    fn a_range_follows_redirects_and_its_answer_is_checked() {
+        let never = AtomicBool::new(false);
+        let range = [("Range", "bytes=4-")];
+        let (hops, body) = fake_transfer(
+            "https://models.example/m.bin",
+            &range,
+            ROOMY,
+            &never,
+            &|_| None,
+            &mut |url| match url {
+                "https://models.example/m.bin" => redirect(302, "https://cdn.example/m?sig=1"),
+                _ => "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\n\
+                      Content-Length: 6\r\n\r\nefghij"
+                    .to_string(),
+            },
+        );
+        assert_eq!(body.unwrap(), b"efghij");
+        assert_eq!(hops[1].headers, ["Range"]);
+
+        let answered = |raw: &'static str| {
+            fake_transfer(
+                "https://cdn.example/m",
+                &range,
+                ROOMY,
+                &never,
+                &|_| None,
+                &mut |_| raw.to_string(),
+            )
+            .1
+        };
+        let err = answered(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 0-9/10\r\n\
+             Content-Length: 10\r\n\r\nabcdefghij",
+        )
+        .unwrap_err();
+        assert!(err.contains("from byte 0, not 4"), "{err}");
+        let err = answered("HTTP/1.1 206 Partial Content\r\nContent-Length: 6\r\n\r\nefghij")
+            .unwrap_err();
+        assert!(err.contains("without saying which part"), "{err}");
+        let err = answered(
+            "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-9/10\r\n\
+             Content-Encoding: gzip\r\nContent-Length: 6\r\n\r\nefghij",
+        )
+        .unwrap_err();
+        assert!(err.contains("compressed"), "{err}");
+        assert_eq!(
+            answered("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcdefghij").unwrap(),
+            b"efghij"
+        );
+        let err = fake_transfer(
+            "https://cdn.example/m",
+            &[("Range", "bytes=0-3")],
+            ROOMY,
+            &never,
+            &|_| None,
+            &mut |_| ok("abcd"),
+        )
+        .1
+        .unwrap_err();
+        assert!(err.contains("bytes=N-"), "{err}");
+    }
+
+    /// An error read without the address of the hop it names first.
+    #[test]
+    fn an_error_reads_without_its_address() {
+        let signed = "https://us.aws.cdn.hf.co/xet-bridge-us/641ab/32b5?Expires=1&Signature=a%2Fb";
+        assert_eq!(
+            without_url(&format!("{signed}: {CUT_SHORT} (1 of 2)")),
+            format!("{CUT_SHORT} (1 of 2)")
+        );
+        assert!(was_cut_short(&format!("{signed}: {CUT_SHORT} (1 of 2)")));
+        assert!(!was_cut_short("https://h/a: HTTP 404 Not Found"));
+        assert_eq!(
+            without_url("https://h/a (through the proxy http://p:3128): connection refused"),
+            "through the proxy http://p:3128: connection refused"
+        );
+        assert_eq!(
+            without_url("http://127.0.0.1:9/asset: HTTP 404 Not Found"),
+            "HTTP 404 Not Found"
+        );
+        assert_eq!(
+            without_url("the download was closed"),
+            "the download was closed"
+        );
+    }
+
     /// The copy binds the bytes received (the declared length is advisory)
     /// and stops between chunks once cancelled or past its deadline.
     #[test]
@@ -5870,10 +6378,10 @@ mod tests {
     /// The caller's headers go to the origin it named — scheme, host and
     /// port — and nowhere else: not to another port of the same host, not to
     /// the host a redirect hands the download to, and not back to the origin
-    /// through a chain another origin steered. Only `Accept` follows every
-    /// hop: a credential header can be called anything (`X-Api-Key`,
-    /// `PRIVATE-TOKEN`), so the ones that go on are listed, not the ones that
-    /// stay.
+    /// through a chain another origin steered. Only `Accept` (and `Range`,
+    /// below) follows every hop: a credential header can be called anything
+    /// (`X-Api-Key`, `PRIVATE-TOKEN`), so the ones that go on are listed, not
+    /// the ones that stay.
     #[test]
     fn credentials_stay_with_the_origin_the_caller_named() {
         let never = AtomicBool::new(false);
