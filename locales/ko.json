@@ -807,6 +807,7 @@
  "No file dialog could open here — install xdg-desktop-portal or zenity": "여기서는 파일 대화 상자를 열 수 없습니다 — xdg-desktop-portal 또는 zenity를 설치하세요",
  "No file focused.": "선택한 파일이 없습니다.",
  "No file open": "열린 파일 없음",
+ "No folder at {path}": "{path}에 폴더가 없습니다",
  "No folder open": "열린 폴더 없음",
  "No function here to explain": "여기에는 설명할 함수가 없습니다",
  "No functions found in this project.": "이 프로젝트에서 함수를 찾을 수 없습니다.",

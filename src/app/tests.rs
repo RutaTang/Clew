@@ -8257,6 +8257,31 @@ fn a_reference_list_leaves_the_search_box_alone() {
     );
 }
 
+/// A folder dialog that hands back a path with no folder there — typed into
+/// GTK's location bar, which completes as it is typed — opens nothing and
+/// says so: the setup sheet offered to open it, and make its `.clew`, in a
+/// folder that did not exist. A dialog tried again takes down the line that
+/// said none could open.
+#[test]
+fn a_picked_folder_that_is_not_there_is_not_opened() {
+    let mut app = blank_app();
+    let missing = test_dir("picked-missing").join("not-here");
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        missing.clone(),
+    ))));
+    assert!(app.pending_consent.is_none() && app.setup.is_none());
+    assert!(!app.scanning);
+    assert_eq!(
+        app.status,
+        tr!("No folder at {path}", path = missing.display())
+    );
+
+    let _ = app.update(Message::Window(WindowMsg::NoFileDialog));
+    assert!(app.status.contains("zenity"), "{}", app.status);
+    let _ = app.update(Message::Project(ProjectMsg::OpenFolderPressed));
+    assert!(app.status.is_empty(), "{}", app.status);
+}
+
 /// The margin's "Open the call hierarchy" asks about the function the margin
 /// shows, at its name where it is defined: it only switched the sidebar to
 /// Calls, which stayed empty — and the caret, inside the body, is on some

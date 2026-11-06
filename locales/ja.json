@@ -807,6 +807,7 @@
  "No file dialog could open here — install xdg-desktop-portal or zenity": "ここではファイルダイアログを開けません — xdg-desktop-portal か zenity をインストールしてください",
  "No file focused.": "フォーカスされているファイルはありません。",
  "No file open": "ファイルが開かれていません",
+ "No folder at {path}": "{path} にフォルダーがありません",
  "No folder open": "フォルダーが開かれていません",
  "No function here to explain": "ここには解説する関数がありません",
  "No functions found in this project.": "このプロジェクトに関数が見つかりません。",

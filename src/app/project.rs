@@ -1122,6 +1122,11 @@ impl App {
                 Task::none()
             }
             ProjectMsg::OpenFolderPressed => {
+                // A dialog that could not open before may now: the line that
+                // said so is taken down as another is tried.
+                self.settle_status(&[tr!(
+                    "No file dialog could open here — install xdg-desktop-portal or zenity"
+                )]);
                 pick_folder(self.main_window, tr!("Open a project folder").into()).map(|picked| {
                     match picked {
                         Ok(v) => Message::Project(ProjectMsg::FolderPicked(v)),
@@ -1133,6 +1138,14 @@ impl App {
             // A picker opened before a connect can still answer after it: the
             // path is this machine's, so it is not a remote project's root.
             ProjectMsg::FolderPicked(Some(_)) if self.connection.is_remote() => Task::none(),
+            // A dialog can hand back a path that is not there — one typed
+            // into GTK's location bar, which completes as it is typed — and
+            // opening it offered to set up a project, and make its `.clew`,
+            // in a folder that does not exist.
+            ProjectMsg::FolderPicked(Some(root)) if !root.is_dir() => {
+                self.status = tr!("No folder at {path}", path = root.display());
+                Task::none()
+            }
             ProjectMsg::FolderPicked(Some(root)) => {
                 // The user asking for a project is the retry a latched
                 // handshake refusal does not take on its own; without it

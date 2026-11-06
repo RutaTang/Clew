@@ -807,6 +807,7 @@
  "No file dialog could open here — install xdg-desktop-portal or zenity": "这里无法打开文件对话框——请安装 xdg-desktop-portal 或 zenity",
  "No file focused.": "未选中文件。",
  "No file open": "未打开文件",
+ "No folder at {path}": "{path} 处没有文件夹",
  "No folder open": "未打开文件夹",
  "No function here to explain": "此处没有可解释的函数",
  "No functions found in this project.": "此项目中未找到函数。",

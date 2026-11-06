@@ -807,6 +807,7 @@
  "No file dialog could open here — install xdg-desktop-portal or zenity": "Aucune boîte de dialogue de fichiers ne peut s’ouvrir ici — installez xdg-desktop-portal ou zenity",
  "No file focused.": "Aucun fichier sélectionné.",
  "No file open": "Aucun fichier ouvert",
+ "No folder at {path}": "Aucun dossier à {path}",
  "No folder open": "Aucun dossier ouvert",
  "No function here to explain": "Aucune fonction à expliquer ici",
  "No functions found in this project.": "Aucune fonction trouvée dans ce projet.",
