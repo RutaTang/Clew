@@ -2927,7 +2927,10 @@ mod tests {
                 far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
             }
         }
-        assert!(far_x <= half_w + 0.5 && far_y <= half_h + 0.5, "{far_x} {far_y}");
+        assert!(
+            far_x <= half_w + 0.5 && far_y <= half_h + 0.5,
+            "{far_x} {far_y}"
+        );
         assert!(
             far_x >= half_w * 0.97 || far_y >= half_h * 0.97,
             "the turn reaches the frame's edge: {far_x} of {half_w}, {far_y} of {half_h}"
