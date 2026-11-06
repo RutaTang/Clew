@@ -1181,6 +1181,47 @@ mod tests {
         });
     }
 
+    /// A message said with or without a detail is two messages, each said
+    /// whole: a place at a message's end cannot stand for nothing.
+    #[test]
+    fn a_refusal_is_said_with_or_without_its_detail() {
+        with_lang(Lang::Ja, || {
+            let refused = "the server refused the request (HTTP 401) — it needs credentials: \
+                           add them as a header (e.g. Authorization) in the server's settings";
+            let said = message(refused);
+            assert!(!said.contains("refused"), "{said}");
+            let said = message(&format!("{refused} (invalid_token)"));
+            assert!(
+                said.contains("invalid_token") && !said.contains("refused"),
+                "{said}"
+            );
+        });
+    }
+
+    /// A proxy's refusal is said whole, with its advice: the message, what
+    /// the proxy said and what to do, each in the reader's language.
+    #[test]
+    fn a_proxys_refusal_is_said_whole() {
+        with_lang(Lang::Fr, || {
+            let said = message(
+                "the proxy http://…@proxy.corp:3128 answered HTTP 407 (Proxy Authentication \
+                 Required): it takes only NTLM or Negotiate logins, which clew cannot make — \
+                 name a local relay that makes such logins for clew, such as cntlm or px, as the \
+                 proxy instead, or list the host in no_proxy, which clew reads in place of \
+                 NO_PROXY",
+            );
+            for english in ["answered", "takes only", "local relay", "list the host"] {
+                assert!(!said.contains(english), "{said}");
+            }
+            assert!(said.contains("http://…@proxy.corp:3128"), "{said}");
+            let said = message(
+                "the proxy http://proxy.corp:3128 answered HTTP 407 (Proxy Authentication \
+                 Required): it asks for a user name and password",
+            );
+            assert!(!said.contains("asks for"), "{said}");
+        });
+    }
+
     /// What clew-core, clew-server and clew-voice write that may reach the
     /// screen is listed in `extern_messages`, word for word, so the
     /// catalogs carry it — found as the list was made: the literal of each

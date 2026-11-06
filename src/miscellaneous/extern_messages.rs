@@ -414,7 +414,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the program is gone: {e}"),
     tr_noop!("the program is not stopped"),
     tr_noop!("the project: {e}"),
-    tr_noop!("the proxy {arg1} answered HTTP 407 (Proxy Authentication Required): {what}{arg2}"),
+    tr_noop!("the proxy {arg1} answered HTTP 407 (Proxy Authentication Required): {what}"),
     tr_noop!("the proxy {name} answered the CONNECT with over {arg1} KiB of headers"),
     tr_noop!(
         "the proxy {name} began to answer the CONNECT to {authority} with a 407 and broke off ({how}): {what}"
@@ -448,7 +448,10 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the server needs you to sign in (HTTP {status}) — Settings → MCP servers → Sign in"),
     tr_noop!("the server redirected to {arg1} — configure that URL instead"),
     tr_noop!(
-        "the server refused the request (HTTP {status}) — it needs credentials: add them as a header (e.g. Authorization) in the server's settings{arg1}"
+        "the server refused the request (HTTP {status}) — it needs credentials: add them as a header (e.g. Authorization) in the server's settings"
+    ),
+    tr_noop!(
+        "the server refused the request (HTTP {status}) — it needs credentials: add them as a header (e.g. Authorization) in the server's settings ({detail})"
     ),
     tr_noop!("the server speaks MCP {arg1}, and clew speaks {arg2} and {arg3}"),
     tr_noop!("the server speaks MCP {arg1}, which clew does not"),
@@ -542,6 +545,8 @@ pub(crate) const MESSAGES: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const PARTS: &[&str] = &[
     tr_noop!("sent nothing"),
+    tr_noop!("it refused the user name and password"),
+    tr_noop!("it asks for a user name and password"),
     tr_noop!("took nothing in"),
     tr_noop!("install the Dart or Flutter SDK"),
     tr_noop!("install Lean with elan"),

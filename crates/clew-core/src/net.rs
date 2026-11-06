@@ -810,11 +810,14 @@ impl Via {
     /// schemes `schemes` ([`login_schemes`]).
     fn login_failure(&self, schemes: &[String]) -> String {
         let (what, fault) = refused_login(schemes, self.names_credentials());
-        format!(
-            "the proxy {} answered HTTP 407 (Proxy Authentication Required): {what}{}",
+        // The message, then the advice after its dash: each a whole text,
+        // so each is said in the reader's language.
+        let mut said = format!(
+            "the proxy {} answered HTTP 407 (Proxy Authentication Required): {what}",
             redact_userinfo(&self.spec),
-            self.advice(fault)
-        )
+        );
+        said.push_str(&self.advice(fault));
+        said
     }
 
     /// Whether the setting names a user name and password.
