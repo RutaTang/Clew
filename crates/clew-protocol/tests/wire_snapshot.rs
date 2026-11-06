@@ -1008,10 +1008,12 @@ fn request_samples() -> Vec<Request> {
                 model: "m".into(),
                 base_url: "u".into(),
             }),
+            locale: Some("fr".into()),
         },
         Request::SetAiConfig {
             chat: None,
             embed: None,
+            locale: None,
         },
         Request::Chat {
             system: "s".into(),
@@ -1977,6 +1979,7 @@ fn only_the_pinned_fields_may_be_left_out() {
         "request.LspResolve.choices.zig",
         "request.SetAiConfig.chat",
         "request.SetAiConfig.embed",
+        "request.SetAiConfig.locale",
         "request.SpawnAdapter.choices.c",
         "request.SpawnAdapter.choices.c.compile_commands",
         "request.SpawnAdapter.choices.csharp",

@@ -999,7 +999,8 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .padding(5);
 
     let status_line = if let Some(err) = &app.proj.search.error {
-        Some((err.clone(), theme::danger()))
+        // As clew-core, or the host, said it: in the reader's language.
+        Some((crate::i18n::message(err), theme::danger()))
     } else if app.proj.search.running {
         Some((tr!("Searching…").to_string(), theme::dim()))
     } else if app.proj.search.ran {

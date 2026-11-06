@@ -247,7 +247,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     // banner.
     let body_top = TOOLBAR_H + update_banner_height(app);
     // The ⋯ dropdown's left edge, measured from the window's right edge.
-    let menu_left = TOOLS_MENU_RIGHT + tools_menu_w();
+    let menu_left = TOOLS_MENU_RIGHT + tools_menu_w(app);
     let lo = body_top + 14.0;
     let hi = (app.window_height - 260.0).max(lo);
     let (ax, ay, pad) = match step.anchor {

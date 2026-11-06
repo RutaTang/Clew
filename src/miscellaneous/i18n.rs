@@ -255,6 +255,11 @@ pub fn with_lang<R>(lang: Lang, f: impl FnOnce() -> R) -> R {
 /// The language the system asks for: the first of the user's preferred
 /// languages this speaks, English if none.
 pub fn system() -> Lang {
+    // The tests speak English, whatever the machine running them speaks:
+    // one that needs another language says so (`with_lang`).
+    if cfg!(test) {
+        return Lang::En;
+    }
     static SYSTEM: OnceLock<Lang> = OnceLock::new();
     *SYSTEM.get_or_init(|| {
         // On macOS the preferred languages are clew's own choice once it
@@ -275,19 +280,27 @@ pub fn system() -> Lang {
 
 const CONFIG_KEY: &str = "language";
 
-/// The saved preference, applied: called once, before the first frame.
+/// The saved preference, applied once for the process, before its first
+/// window's first frame; the preference in effect. A window opened later
+/// speaks what the windows open speak: applied again, config.toml's choice —
+/// which a save that failed, or another copy of clew, may have left saying
+/// something else — moved every open window to it, and only in part (not
+/// their menu bar, nor the servers that answer them).
 pub fn init() -> LangPref {
-    let pref = clew_core::globalconfig::get(CONFIG_KEY)
-        .as_ref()
-        .and_then(|v| v.as_str())
-        .and_then(LangPref::parse)
-        .unwrap_or(LangPref::System);
-    set_pref(pref);
-    // macOS's own parts of the window follow it from the next launch, also
-    // when it was chosen in another copy of clew or in config.toml.
-    #[cfg(target_os = "macos")]
-    tell_macos(pref);
-    pref
+    static APPLIED: std::sync::Once = std::sync::Once::new();
+    APPLIED.call_once(|| {
+        let pref = clew_core::globalconfig::get(CONFIG_KEY)
+            .as_ref()
+            .and_then(|v| v.as_str())
+            .and_then(LangPref::parse)
+            .unwrap_or(LangPref::System);
+        set_pref(pref);
+        // macOS's own parts of the window follow it from the next launch,
+        // also when it was chosen in another copy of clew or in config.toml.
+        #[cfg(target_os = "macos")]
+        tell_macos(pref);
+    });
+    pref()
 }
 
 /// Speak what `pref` resolves to, and keep it for the next launch.
@@ -1857,5 +1870,28 @@ mod tests {
         });
         assert_eq!(current(), Lang::En);
         assert!(!is_one(0));
+    }
+
+    /// The tests speak English whatever the machine running them speaks:
+    /// on one set to French or Japanese, every English assertion failed.
+    #[test]
+    fn the_system_a_test_runs_on_speaks_english() {
+        assert_eq!(system(), Lang::En);
+        assert_eq!(LangPref::System.resolve(), Lang::En);
+    }
+
+    /// The saved language is applied once for the process: a window opened
+    /// later (`App::blank` runs `init`) leaves the language every window
+    /// speaks as it is. It applied config.toml's again — one a save that
+    /// failed, or another copy of clew, had left saying something else.
+    #[test]
+    fn a_later_window_leaves_the_language_spoken() {
+        let _first = crate::app::tests::blank_app();
+        // The live choice, where config.toml names none: English, chosen —
+        // what the tests beside this one speak, so none of them is moved.
+        set_pref(LangPref::Chosen(Lang::En));
+        let _later = crate::app::tests::blank_app();
+        assert_eq!(pref(), LangPref::Chosen(Lang::En));
+        set_pref(LangPref::System);
     }
 }

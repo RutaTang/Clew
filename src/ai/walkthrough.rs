@@ -521,9 +521,42 @@ pub fn prompt(
     p
 }
 
+/// Why a generation brought no walkthrough, as the status line says it: the
+/// model's answer would not parse — the one failure worth asking the model
+/// again for — or anything else. Told apart by its kind, never by its
+/// words, which are in the reader's language.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Failure {
+    /// The answer's JSON object would not parse as a walkthrough.
+    Unparsable(String),
+    /// Anything else: the model call itself, an answer with no JSON, a tour
+    /// with no usable step.
+    Other(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Unparsable(why) | Failure::Other(why) => f.write_str(why),
+        }
+    }
+}
+
+impl From<String> for Failure {
+    fn from(why: String) -> Self {
+        Failure::Other(why)
+    }
+}
+
+impl From<&str> for Failure {
+    fn from(why: &str) -> Self {
+        Failure::Other(why.to_string())
+    }
+}
+
 /// Parse the planner's response into a walkthrough, tolerating a code fence or
 /// stray prose around the JSON object.
-pub fn parse(response: &str) -> Result<Walkthrough, String> {
+pub fn parse(response: &str) -> Result<Walkthrough, Failure> {
     let start = response
         .find('{')
         .ok_or(tr!("no JSON object in the response"))?;
@@ -533,8 +566,9 @@ pub fn parse(response: &str) -> Result<Walkthrough, String> {
     if end < start {
         return Err(tr!("malformed JSON in the response").into());
     }
-    let mut wt: Walkthrough = serde_json::from_str(&response[start..=end])
-        .map_err(|e| tr!("could not parse the response: {error}", error = e))?;
+    let mut wt: Walkthrough = serde_json::from_str(&response[start..=end]).map_err(|e| {
+        Failure::Unparsable(tr!("could not parse the response: {error}", error = e))
+    })?;
     // Paths are project-relative; `./src/x.rs` names `src/x.rs`. Anything that
     // could escape the root (absolute, `..`) is dropped here, as on load.
     wt.steps.retain_mut(|s| {

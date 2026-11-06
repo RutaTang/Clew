@@ -1123,10 +1123,15 @@ pub enum LspSlot {
     Starting,
     Ready(lsp::client::LspClient),
     Failed(String),
+    /// No server can be had for the language, and why: in English — the
+    /// words of clew-core or of the host, or a key of clew's own catalog —
+    /// said in the reader's language where it is shown, so a change of
+    /// language reaches it too.
     Unsupported(String),
     /// The user said no to what starting it needs — a download, leave to
-    /// build the project, the project's own command — and why. Not asked
-    /// again on its own; the server panel offers to ask again.
+    /// build the project, the project's own command — and why, in English
+    /// as `Unsupported`'s is. Not asked again on its own; the server panel
+    /// offers to ask again.
     Declined(String),
     /// Awaiting the user's answer about what starting it needs (see
     /// `LspConsent`, `PendingLspCommand`), or, remotely, the host's word on
@@ -1261,7 +1266,7 @@ impl LspSlot {
                 None => tr!("ready").into(),
             },
             LspSlot::Failed(e) => tr!("error: {error}", error = e),
-            LspSlot::Unsupported(e) | LspSlot::Declined(e) => e.clone(),
+            LspSlot::Unsupported(e) | LspSlot::Declined(e) => crate::i18n::message(e),
             // What the answer is about is the App's to say
             // (`App::lsp_awaiting`); the slot knows only that one is due.
             LspSlot::AwaitingConsent => tr!("waiting for your answer").into(),

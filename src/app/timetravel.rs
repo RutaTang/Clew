@@ -265,7 +265,13 @@ impl App {
         // with the history still loading, give this request up, so the
         // history the reader asked for never opened.
         self.proj.walk.reader_moved_in(&abs);
-        let generation = self.await_history(abs.clone(), pane, rescoping);
+        // What the status line says while the history loads (below).
+        let said = if symbol_refused {
+            no_cell_history()
+        } else {
+            loading_history()
+        };
+        let generation = self.await_history(abs.clone(), pane, rescoping, said);
         // (An earlier start's open keeps what its load's failure says, if
         // it failed while held: `SupersededOpen::failed`.)
         self.proj.link.superseded_open = superseded
@@ -285,12 +291,7 @@ impl App {
         // Say why the scope did not change, so the toggle is not silently
         // inert on a notebook. Transient: `TimeTravelMsg::Ready` clears the status
         // when the history lands, exactly as it does over "Loading history…".
-        self.status = if symbol_refused {
-            no_cell_history()
-        } else {
-            loading_history()
-        }
-        .into();
+        self.status = said.into();
         // Local git, or the protocol when the repository is on the remote host.
         let symbol_key = scope.symbol_key().map(|(n, o)| (n.to_string(), o));
         let rel_asked = rel.clone();
@@ -339,9 +340,16 @@ impl App {
     /// Await the history of `abs`, asked for in `pane`, as the one
     /// time-travel start still loading (`ProjectSession::time_start`), under
     /// a new number: the `Ready` that names it is the one that applies.
-    /// `rescope`: it re-scopes the session on screen. The caller has settled
-    /// the start it supersedes, if any (`give_up_time_travel_start`).
-    pub(crate) fn await_history(&mut self, abs: PathBuf, pane: usize, rescope: bool) -> u64 {
+    /// `rescope`: it re-scopes the session on screen; `said`: what the
+    /// caller has the status line say meanwhile. The caller has settled the
+    /// start it supersedes, if any (`give_up_time_travel_start`).
+    pub(crate) fn await_history(
+        &mut self,
+        abs: PathBuf,
+        pane: usize,
+        rescope: bool,
+        said: &str,
+    ) -> u64 {
         self.proj.time_gen += 1;
         let generation = self.proj.time_gen;
         self.proj.time_start = Some(TimeStart {
@@ -349,6 +357,7 @@ impl App {
             abs,
             pane,
             rescope,
+            said: said.to_string(),
         });
         generation
     }
@@ -366,7 +375,7 @@ impl App {
     /// waiting on it (`settle_walk_anchor`).
     pub(crate) fn give_up_time_travel_start(&mut self) -> Option<SupersededOpen> {
         let start = self.proj.time_start.take()?;
-        if self.status == loading_history() || self.status == no_cell_history() {
+        if self.status == start.said {
             self.status.clear();
         }
         self.proj
@@ -601,7 +610,7 @@ impl App {
             }
             // Otherwise only what the start itself said goes: the reader may
             // have made something else of the status line since.
-            None if self.status == loading_history() || self.status == no_cell_history() => {
+            None if self.status == start.said => {
                 self.status.clear();
             }
             None => {}

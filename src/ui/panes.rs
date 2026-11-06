@@ -1063,11 +1063,16 @@ pub(crate) const RIGHT_PANEL_MIN_WINDOW_W: f32 = 950.0;
 /// The one test the view and the tutorial's spotlight both use — the
 /// spotlight used to take `show_right_panel` alone and framed a panel the
 /// view had hidden (a split, a narrow window, no file).
+///
+/// Not beside a page that covers the panes (the Overview, Stats, Glossary,
+/// a Docs page): its notes are of the file under it, and the sheet's
+/// header, whose View menu shows and hides it, is not drawn there either.
 pub(crate) fn right_panel_shown(app: &App) -> bool {
     app.show_right_panel
         && !app.proj.split
         && app.window_width >= RIGHT_PANEL_MIN_WINDOW_W
         && app.active_viewer().is_some()
+        && super::docs_stats::pane_cover(app).is_none()
 }
 
 /// The reading panel — the margin beside the code: notes on what is read

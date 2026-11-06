@@ -163,7 +163,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|other| other.abs == open.abs && *pending == Some(other.req))
                 });
-        if !still_coming && self.status == tr!("Loading {file}…", file = self.rel_of(&open.abs)) {
+        if !still_coming && self.status == open.said {
             self.status.clear();
         }
     }
@@ -285,12 +285,13 @@ impl App {
                 // This is now the one load the pane is waiting for; any
                 // earlier in-flight load for it is superseded.
                 self.proj.link.pane_pending[pane] = Some(id);
+                self.status = tr!("Loading {file}…", file = rel);
                 self.proj.link.pane_opening[pane] = Some(PaneOpen {
                     req: id,
                     abs,
                     target: line,
+                    said: self.status.clone(),
                 });
-                self.status = tr!("Loading {file}…", file = rel);
                 return Task::none();
             }
         }
@@ -312,12 +313,13 @@ impl App {
             .next_req_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.proj.link.pane_pending[pane] = Some(req);
+        self.status = tr!("Loading {file}…", file = rel);
         self.proj.link.pane_opening[pane] = Some(PaneOpen {
             req,
             abs: abs.clone(),
             target: line,
+            said: self.status.clone(),
         });
-        self.status = tr!("Loading {file}…", file = rel);
         let stamp = self.stamp();
         // A file of the project is read only if it really is one (see
         // `load_file`); one outside it by its path is a dependency's source.

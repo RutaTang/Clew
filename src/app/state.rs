@@ -1242,11 +1242,13 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
-    /// The status line has said, in the wait a close or a quit is in, that
-    /// the window waits for its host (`App::show_waiting`): said once, it is
-    /// not said again over what the line says since, unless that is taken
-    /// back (`App::update_waiting`). Cleared as the wait ends.
-    pub waiting_said: bool,
+    /// What the status line said last, in the wait a close or a quit is in,
+    /// of the window waiting for its host (`App::show_waiting`): said once,
+    /// it is not said again over what the line says since, unless that is
+    /// taken back (`App::update_waiting`). The line still says it while it
+    /// holds these words, in whatever language they were said. Cleared as
+    /// the wait ends.
+    pub waiting_said: Option<String>,
     /// The main window's id, set once it is opened (daemon mode opens windows
     /// explicitly). Used to target window operations at the right window.
     pub main_window: Option<iced::window::Id>,
@@ -2013,6 +2015,10 @@ pub struct ProjectSession {
     /// tried again, to that one, which the same words speak for
     /// (`App::take_back_retrying`).
     pub remote_edit_retrying: Option<(String, String)>,
+    /// The words the status line said last of a journaled edit lost
+    /// (`remote_state::lost_status`): it still says so while it holds them,
+    /// in whatever language they were said.
+    pub remote_edit_lost_said: Option<String>,
     // -- Work in flight ----------------------------------------------------------
     /// Work in flight for this project, beyond the busy flags the views read
     /// (see [`InFlight`]).
@@ -2154,6 +2160,7 @@ impl Default for ProjectSession {
             remote_edit_ids: Default::default(),
             remote_edits_lost: Default::default(),
             remote_edit_retrying: Default::default(),
+            remote_edit_lost_said: Default::default(),
             inflight: Default::default(),
             link: Default::default(),
         }
@@ -2341,6 +2348,10 @@ pub struct PaneOpen {
     /// The file, and the 1-based line to show.
     pub abs: PathBuf,
     pub target: Option<usize>,
+    /// What the status line said of it ("Loading {file}…"): taken back with
+    /// the load while the line still says it, in whatever language it was
+    /// said.
+    pub said: String,
 }
 
 /// An open that going into the history of the file on screen superseded in
@@ -2386,6 +2397,10 @@ pub struct TimeStart {
     /// (`App::on_time_travel_ready`). Any other start's history starts a
     /// session of its own, from its live file.
     pub rescope: bool,
+    /// What the status line said as it began ("Loading history…"): taken
+    /// back as the start ends while the line still says it, in whatever
+    /// language it was said.
+    pub said: String,
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;

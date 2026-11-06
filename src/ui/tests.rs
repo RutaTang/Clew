@@ -1663,6 +1663,18 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
             Box::new(|a: &mut App| a.window_width = 900.0),
         ),
         ("no file", Box::new(|a: &mut App| a.proj.panes[0] = None)),
+        // A page over the panes hides the sheet's header, and with it the
+        // View menu that shows and hides the margin: the margin stayed
+        // beside the page, its notes of the file under it.
+        (
+            "the Overview",
+            Box::new(|a: &mut App| a.proj.overview.showing = true),
+        ),
+        ("Stats", Box::new(|a: &mut App| a.proj.stats.showing = true)),
+        (
+            "the Glossary",
+            Box::new(|a: &mut App| a.proj.glossary.showing = true),
+        ),
     ] {
         let mut hidden = reader_app();
         hidden.show_right_panel = true;
@@ -1678,6 +1690,81 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
             "{why}: the spotlight framed a panel that is not drawn"
         );
     }
+}
+
+/// While Explain All runs, the ⋯ menu's row says how far it has got, and the
+/// menu is as wide as that takes, in every language: it was measured for
+/// "Cancel explaining" alone, and the count ran past its edge.
+#[test]
+fn the_tools_menu_holds_the_explain_all_count() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.show_tools_menu = true;
+    app.proj.explain.running = true;
+    app.proj.explain.progress = Some((1200, 12040));
+    for lang in Lang::ALL {
+        with_lang(lang, || {
+            let label = crate::tr!(
+                "Cancel explaining ({done}/{total})",
+                done = 1200,
+                total = 12040
+            );
+            let row = super::tools_menu_rows_rect(&app, super::ToolsRow::ExplainAll.index(), 1);
+            let mut sim = sim_of(&app);
+            let wanted = label.clone();
+            let at = text_at(&mut sim, move |t| t == wanted, 0)
+                .unwrap_or_else(|| panic!("{label} is not drawn"));
+            let end = at.x + super::sheet::text_width(&label, super::ts::BASE, crate::fonts::UI);
+            assert!(
+                end <= row.x + row.width,
+                "{label} runs to {end}, past the menu's edge at {}",
+                row.x + row.width
+            );
+        });
+    }
+}
+
+/// What clew-core said, drawn outside the status line, is said in the
+/// reader's language as the status line says it: the search tab's error,
+/// an MCP server's failure on Settings → Integrations. Both were drawn as
+/// clew-core wrote them, in English.
+#[test]
+fn back_end_words_beside_the_status_line_are_said_in_the_readers_language() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Search;
+    app.proj.search.error = Some("Invalid pattern: unclosed group".into());
+    with_lang(Lang::Fr, || {
+        let said = crate::i18n::message("Invalid pattern: unclosed group");
+        assert_ne!(said, "Invalid pattern: unclosed group");
+        assert!(shows(&mut sim_of(&app), &said), "{said} is not drawn");
+    });
+
+    let mut app = reader_app();
+    app.settings.open = true;
+    app.settings.page = crate::SettingsPage::Integrations;
+    app.settings.integrations.mcp = vec![clew_core::mcp::ServerConfig {
+        name: "docs".into(),
+        transport: clew_core::mcp::Transport::Http {
+            url: "https://mcp.example/".into(),
+            headers: Vec::new(),
+        },
+        enabled: true,
+        approve: clew_core::mcp::Approve::Ask,
+        allow: Vec::new(),
+        timeout: std::time::Duration::from_secs(10),
+    }];
+    let failed = "The MCP server failed: it hung up";
+    app.settings.integrations.statuses.insert(
+        "docs".into(),
+        clew_core::mcp::hub::Status::Failed(failed.into()),
+    );
+    with_lang(Lang::Fr, || {
+        let said = crate::i18n::message(failed);
+        assert_ne!(said, failed);
+        assert!(shows(&mut sim_of(&app), &said), "{said} is not drawn");
+    });
 }
 
 /// E2-6: Escape dismisses exactly the overlay that is drawn on top.

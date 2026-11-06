@@ -1184,8 +1184,18 @@ impl GraphCanvas<'_> {
         // runs out of; the two ease into each other as the camera starts and
         // stops. The scale stays the whole turn's: no zooming in and out as
         // the camera is grabbed and let go.
+        //
+        // A node held is not a turn of the camera: the camera holds its
+        // framing while the node is held, so the node stays under the hand —
+        // neither re-centred for the grab nor followed as it is pulled out —
+        // and eases to the graph as it has become once it is let go. (A new
+        // frame, or a switch between 3D and 2D, still frames it at once.)
+        let reframe = st.fit_base <= 0.0 || resized || switching;
+        let held = matches!(st.drag, Drag::Node(..)) && !reframe;
         let still = !st.spinning && st.drag == Drag::None;
-        let shift_to = if still && e > 0.0 {
+        let shift_to = if held {
+            st.shift_goal
+        } else if still && e > 0.0 {
             let (lo_x, hi_x, lo_y, hi_y) = st.pos.iter().fold(
                 (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
                 |(a, b, c, d), p| {
@@ -1209,11 +1219,14 @@ impl GraphCanvas<'_> {
         } else {
             (0.0, 0.0)
         };
-        let fit_to = fit_2d + (fit_3d - fit_2d) * e;
-        let center_to = box_center;
+        let (fit_to, center_to) = if held {
+            (st.fit_base, st.center)
+        } else {
+            (fit_2d + (fit_3d - fit_2d) * e, box_center)
+        };
         // While the mode switches, the blend of the two framings moves as
         // smoothly as the switch does: followed, not eased after.
-        if st.fit_base <= 0.0 || resized || switching {
+        if reframe {
             st.fit_base = fit_to;
             st.center = center_to;
             st.shift = shift_to;
@@ -3009,6 +3022,56 @@ mod tests {
         assert!(
             (x2 - x).abs() < 0.5 && (y2 - y).abs() < 0.5,
             "the node under the pointer moved: ({x}, {y}) → ({x2}, {y2})"
+        );
+    }
+
+    /// A node grabbed in a still 3D map stays under the pointer, held still
+    /// or pulled out: the camera holds its framing while the node is held.
+    /// The grab used to re-centre the picture on the pivot, as a turn does,
+    /// sliding the node out from under a pointer held still, and the camera
+    /// followed a node pulled out.
+    #[test]
+    fn a_node_held_in_a_still_3d_map_stays_under_the_pointer() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        assert!(
+            st.shift.0.abs() + st.shift.1.abs() > 1.0,
+            "precondition: at rest the picture is centred off the pivot: {:?}",
+            st.shift
+        );
+        let c = canvas(&l, true, false);
+        let (x, y, _, _) = c.node_screen(7, BOUNDS, &st);
+        let program = |e: &iced::Event, st: &mut GraphState, at: Point| {
+            <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                &c,
+                st,
+                e,
+                BOUNDS,
+                iced::advanced::mouse::Cursor::Available(at),
+            )
+        };
+        let press =
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        let _ = program(&press, &mut st, Point::new(x, y));
+        let Drag::Node(i, _) = st.drag else {
+            panic!("the press grabbed no node: {:?}", st.drag);
+        };
+        let (x, y, _, _) = c.node_screen(i, BOUNDS, &st);
+        let _ = steps(&c, &mut st, t0, f, 60);
+        let (x1, y1, _, _) = c.node_screen(i, BOUNDS, &st);
+        assert!(
+            (x1 - x).abs() < 0.5 && (y1 - y).abs() < 0.5,
+            "held still, the node slid from ({x}, {y}) to ({x1}, {y1})"
+        );
+        // Pulled out toward the frame's edge, then held there.
+        let out = Point::new(x + 120.0 * (x - BOUNDS.width / 2.0).signum(), y);
+        let moved = iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: out });
+        let _ = program(&moved, &mut st, out);
+        let _ = steps(&c, &mut st, t0, f + 60, 60);
+        let (x2, y2, _, _) = c.node_screen(i, BOUNDS, &st);
+        assert!(
+            (x2 - out.x).abs() < 0.5 && (y2 - out.y).abs() < 0.5,
+            "pulled out to {out:?}, the node is drawn at ({x2}, {y2})"
         );
     }
 

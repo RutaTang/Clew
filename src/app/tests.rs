@@ -911,6 +911,84 @@ fn going_back_to_the_file_on_screen_takes_back_the_load_it_cancels() {
     );
 }
 
+/// What the status line said before the language changed is known by the
+/// words it was said in, not by its words in the language spoken now: a
+/// load's "Loading B…" and a history's "Loading history…", said in French,
+/// are taken back once English is spoken. They were compared with their
+/// English words, and stayed up.
+#[test]
+fn a_loading_line_said_before_a_language_switch_is_still_taken_back() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("loading-said-before-a-switch");
+    open_synchronously(&mut app, "notes.txt", None);
+    with_lang(Lang::Fr, || {
+        let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+            rel: "src/lib.rs".into(),
+            line: None,
+        }));
+    });
+    assert_ne!(app.status, "Loading src/lib.rs…", "said in French");
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: Some(1),
+    }));
+    assert_eq!(
+        app.status, "",
+        "the cancelled load still said it was coming"
+    );
+
+    let mut app = scanned_app("history-said-before-a-switch");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    with_lang(Lang::Fr, || {
+        let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    });
+    assert_ne!(app.status, "Loading history…", "said in French");
+    let _ = app.update(lib_history(&app, app.proj.time_gen));
+    assert!(app.proj.time_travel.is_some());
+    assert_eq!(
+        app.status, "",
+        "the history landed, its loading line still up"
+    );
+}
+
+/// The lines a close or a quit says as it waits for the host are known by
+/// the words they were said in: one said before the language changed is
+/// still counted down, and taken back as the wait ends; a "— retrying"
+/// said before is still not written over by the wait. Each was matched
+/// against its words in the language spoken now.
+#[test]
+fn a_waiting_line_said_before_a_language_switch_is_still_known() {
+    use crate::i18n::{Lang, with_lang};
+    let agreed = HashSet::new();
+    let mut app = blank_app();
+    app.show_waiting(true, &agreed);
+    let english = app.status.clone();
+    with_lang(Lang::Fr, || app.update_waiting(true, &agreed));
+    assert_ne!(app.status, english, "the wait is counted, now in French");
+    let french = app.status.clone();
+    app.end_waiting();
+    assert_eq!(app.status, "", "{french}: still up as the wait ended");
+
+    let tour = walkthrough::Walkthrough {
+        title: "tour".into(),
+        scope: "how it starts".into(),
+        steps: Vec::new(),
+    };
+    let (mut app, _, mut rx) = remote_app("waiting-said-before-a-switch");
+    let rel = walkthrough::LIBRARY_REL;
+    assert!(app.edit_remote_state(rel, walkthrough::merge_upsert(&tour).unwrap()));
+    let (sent, _) = took_state_edits(&mut rx, rel);
+    let [(request, _, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *request, "database is locked"));
+    let retrying = app.status.clone();
+    assert!(retrying.ends_with("— retrying"), "{retrying}");
+    with_lang(Lang::Fr, || app.update_waiting(true, &agreed));
+    assert_eq!(app.status, retrying, "the wait wrote over the retry");
+}
+
 /// A refusal for a read the window no longer waits on says nothing, as its
 /// `FileContent` would have changed nothing on screen: a refresh a newer
 /// one of the same file retired, a refresh of a file no pane shows any
@@ -3014,6 +3092,43 @@ fn opening_rust_prompts_for_server_download() {
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Declined(_))
     ));
+}
+
+/// What a language-server slot says is said in the language spoken when it
+/// is shown, in the status bar and on Settings → Languages alike. The slot
+/// keeps the English — clew's own words, clew-core's or the host's — where
+/// it kept a translation made as it was set, which stayed in that language
+/// after a switch until the project was reopened; and clew-core's words
+/// were shown in English whatever was spoken.
+#[test]
+fn a_language_server_slot_is_said_in_the_language_spoken_now() {
+    use crate::i18n::{Lang, with_lang};
+    let store = test_dir("lsp-slot-said-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let mut app = scanned_app("lsp-slot-said");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(consent_asked(&app))));
+    let _ = app.ensure_lsp("no-such-language");
+    let core = "jdtls is not available for this platform";
+    app.proj
+        .link
+        .lsp
+        .insert("java".into(), LspSlot::Unsupported(core.into()));
+    for (language, english) in [
+        ("rust", "server download declined"),
+        ("no-such-language", "no server for this language"),
+        ("java", core),
+    ] {
+        assert_eq!(app.lsp_status(language).as_deref(), Some(english));
+        assert_eq!(app.lsp_row(language).0, english);
+        with_lang(Lang::Fr, || {
+            let french = crate::i18n::message(english);
+            assert_ne!(french, english, "the catalog says it in French");
+            assert_eq!(app.lsp_status(language), Some(french.clone()), "{language}");
+            assert_eq!(app.lsp_row(language).0, french, "{language}");
+        });
+    }
 }
 
 /// The server panel lists only project-relevant languages — a Rust
@@ -6169,7 +6284,7 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
     // sent, carrying no keys. Sending nothing at all was the bug: it left a
     // server that had been granted the keys earlier still holding them.
     match rx.try_recv().expect("SetAiConfig is always sent").request {
-        clew_protocol::Request::SetAiConfig { chat, embed } => {
+        clew_protocol::Request::SetAiConfig { chat, embed, .. } => {
             assert!(chat.is_none() && embed.is_none(), "no keys without opt-in");
         }
         other => panic!("expected SetAiConfig, got {other:?}"),
@@ -6189,7 +6304,7 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
         .expect("revoking must reach the server")
         .request
     {
-        clew_protocol::Request::SetAiConfig { chat, embed } => {
+        clew_protocol::Request::SetAiConfig { chat, embed, .. } => {
             assert!(
                 chat.is_none() && embed.is_none(),
                 "revocation clears the keys"
@@ -6202,6 +6317,41 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
     app.remote_ai_opt_in = true;
     let _ = app.connect_to(crate::backend::connect::ConnTarget::Local);
     assert!(!app.remote_ai_opt_in);
+}
+
+/// The server is told the language the reader reads with the AI config,
+/// whatever that holds — no keys granted included — and so again when the
+/// language changes (here in another window, which `ThemeResynced` brings):
+/// the language servers it starts from then on are told it. Only `Hello`
+/// told it, and only the language read as the window connected.
+#[test]
+fn the_server_is_told_the_language_the_reader_reads_now() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("server-told-the-language");
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let mut rx = attach_server(&mut app);
+    for (lang, locale) in [
+        (Lang::Fr, Some("fr")),
+        (Lang::En, None),
+        (Lang::Zh, Some("zh-cn")),
+    ] {
+        while rx.try_recv().is_ok() {}
+        with_lang(lang, || {
+            let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+        });
+        let told = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|m| match m.request {
+            clew_protocol::Request::SetAiConfig { chat, locale, .. } => Some((chat, locale)),
+            _ => None,
+        });
+        let Some((chat, told)) = told else {
+            panic!("{lang:?}: the server was not told");
+        };
+        assert!(chat.is_none(), "no keys without the host's grant");
+        assert_eq!(told.as_deref(), locale, "{lang:?}");
+    }
 }
 
 /// Same-name methods in one file (different impls' `new`) get distinct explain
@@ -11068,7 +11218,7 @@ fn a_scrub_keeps_the_readers_place_on_both_axes() {
         v.scroll_x = 120.0;
         v.scroll_y = 40.0;
     }
-    let asked = app.await_history(abs.clone(), app.proj.active, false);
+    let asked = app.await_history(abs.clone(), app.proj.active, false, "");
     let commit = |sha: &str| clew_protocol::HistCommit {
         sha: sha.into(),
         author: "a".into(),
@@ -12252,7 +12402,7 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         subject: format!("subject {sha}"),
         path: "src/lib.rs".into(),
     };
-    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false);
+    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::Ready {
         stamp: app.stamp(),
         generation: asked,
@@ -12589,7 +12739,7 @@ fn a_git_failure_in_time_travel_is_reported_not_read_as_empty() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     // The history of src/lib.rs, as it lands for a request made for it.
     let ready = |app: &mut App, commits| {
-        let generation = app.await_history(root.join("src/lib.rs"), app.proj.active, false);
+        let generation = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
         Message::TimeTravel(TimeTravelMsg::Ready {
             stamp: app.stamp(),
             generation,
@@ -18108,7 +18258,7 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
         &app,
         first,
         "first",
-        Err("parse error: bad json".into()),
+        Err(walkthrough::Failure::Unparsable("bad json".into())),
     ));
     assert_eq!(app.proj.walk.generating.as_deref(), Some("second"));
     assert!(
@@ -18138,6 +18288,63 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
         Some("second"),
         "the awaited tour opens"
     );
+}
+
+/// A tour whose JSON the model botched is asked for once more, in whatever
+/// language clew speaks: the retry was keyed on the failure's words
+/// ("parse: …"), which say something else since they are translated, and
+/// it never happened. A failure of another kind is not retried.
+#[test]
+fn a_walkthrough_that_does_not_parse_is_asked_for_again_in_any_language() {
+    use crate::i18n::{Lang, with_lang};
+    for lang in [Lang::En, Lang::Fr, Lang::Ja] {
+        with_lang(lang, || {
+            let mut app = scanned_app(&format!("walk-retry-unparsable-{}", lang.code()));
+            let root = app.proj.project.as_ref().unwrap().root.clone();
+            let done = |app: &mut App, result| {
+                app.proj.walk.seq += 1;
+                app.proj.walk.pending = Some(app.proj.walk.seq);
+                app.update(Message::Walk(WalkMsg::Done {
+                    stamp: Stamp {
+                        root: Some(root.clone()),
+                        epoch: app.project_epoch,
+                        conn: None,
+                    },
+                    seq: app.proj.walk.seq,
+                    scope: "how it starts".into(),
+                    result,
+                }))
+            };
+            let botched = walkthrough::parse(r#"{"title": "t", "steps": [oops]}"#);
+            assert!(
+                matches!(botched, Err(walkthrough::Failure::Unparsable(_))),
+                "{botched:?}"
+            );
+            let again = run_task(done(&mut app, botched));
+            assert!(app.proj.walk.retried, "{lang:?}: not retried");
+            assert!(
+                matches!(
+                    again.as_slice(),
+                    [Message::Walk(WalkMsg::Generate(scope))] if scope == "how it starts"
+                ),
+                "{lang:?}: {again:?}"
+            );
+            // The retry spent, the next failure is said.
+            let _ = done(
+                &mut app,
+                walkthrough::parse(r#"{"title": "t", "steps": [oops]}"#),
+            );
+            assert!(!app.proj.walk.retried);
+            assert!(
+                app.status
+                    .starts_with(crate::tr!("Walkthrough failed: {error}", error = "").as_str())
+            );
+
+            // A failure of another kind: said at once.
+            let _ = done(&mut app, Err("the provider refused".into()));
+            assert!(!app.proj.walk.retried, "{lang:?}: retried a refusal");
+        });
+    }
 }
 
 /// D1-12: a definition with several targets (a trait method's impls, per-platform
@@ -18455,7 +18662,8 @@ fn the_ai_keys_box_configures_the_form_host_and_revoke_withdraws_the_live_grant(
             &m.request,
             clew_protocol::Request::SetAiConfig {
                 chat: None,
-                embed: None
+                embed: None,
+                ..
             }
         )),
         "the server was not told to forget the keys"
@@ -25951,7 +26159,7 @@ fn lib_revision(app: &App, generation: u64, idx: usize) -> Message {
 fn lib_history_awaited(app: &mut App) -> u64 {
     let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
     let pane = app.proj.active;
-    app.await_history(lib, pane, false)
+    app.await_history(lib, pane, false, "")
 }
 
 /// Going into the history of the step's file is the reader's own move there,

@@ -128,7 +128,8 @@ impl App {
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
             theme_pref: {
-                // And the language, so the first frame speaks it.
+                // And the language, so the first frame speaks it: the saved
+                // one for the first window, the one spoken for a later one.
                 crate::i18n::init();
                 theme::init()
             },
@@ -159,7 +160,7 @@ impl App {
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
             status: tr!("Open a folder to start reading").to_string(),
-            waiting_said: false,
+            waiting_said: None,
             main_window: None,
             tutorial: None,
             window_width: 1280.0,

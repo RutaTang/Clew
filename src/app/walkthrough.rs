@@ -45,8 +45,8 @@ impl App {
         let stamp = self.stamp();
         Task::perform(
             async move {
-                let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await;
-                resp.and_then(|r| walkthrough::parse(&r))
+                let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await?;
+                walkthrough::parse(&resp)
             },
             move |result| {
                 Message::Walk(WalkMsg::Done {
@@ -109,6 +109,7 @@ impl App {
                 let narrated = ai
                     .complete(cfg, walkthrough::TRACE_SYSTEM, prompt, 4096)
                     .await
+                    .map_err(walkthrough::Failure::from)
                     .and_then(|r| walkthrough::parse(&r));
                 // The model's titles and narration on the run's own anchors
                 // — a step's file, symbol and line are what happened, not
@@ -273,7 +274,7 @@ impl App {
         &mut self,
         seq: u64,
         scope: String,
-        result: Result<walkthrough::Walkthrough, String>,
+        result: Result<walkthrough::Walkthrough, walkthrough::Failure>,
     ) -> Task<Message> {
         // Supersession is decided BEFORE any flag is touched. A generation the
         // user has since replaced must not clear the busy row of the one now
@@ -382,7 +383,7 @@ impl App {
             Err(e) => {
                 // The model occasionally returns malformed JSON — retry the
                 // generation once before surfacing the failure.
-                if e.starts_with("parse") && !self.proj.walk.retried {
+                if matches!(e, walkthrough::Failure::Unparsable(_)) && !self.proj.walk.retried {
                     self.proj.walk.retried = true;
                     self.status = tr!("Retrying walkthrough…").into();
                     return if scope.starts_with("@diff") {

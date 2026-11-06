@@ -38,8 +38,8 @@
 {"id":1,"request":{"ProcessInput":{"proc":1,"data":"Q29udGVudC1MZW5ndGg6IDINCg0Ke30="}}}
 {"id":1,"request":{"ProcessKill":{"proc":1}}}
 {"id":1,"request":{"Cancel":{"id":1}}}
-{"id":1,"request":{"SetAiConfig":{"chat":{"provider":"anthropic","api_key":"k","model":"m","base_url":"u","reply_language":"French"},"embed":{"api_key":"k","model":"m","base_url":"u"}}}}
-{"id":1,"request":{"SetAiConfig":{"chat":null,"embed":null}}}
+{"id":1,"request":{"SetAiConfig":{"chat":{"provider":"anthropic","api_key":"k","model":"m","base_url":"u","reply_language":"French"},"embed":{"api_key":"k","model":"m","base_url":"u"},"locale":"fr"}}}
+{"id":1,"request":{"SetAiConfig":{"chat":null,"embed":null,"locale":null}}}
 {"id":1,"request":{"Chat":{"system":"s","messages":[{"role":"user","content":"q"}],"max_tokens":64}}}
 {"id":1,"request":{"Embed":{"texts":["t"]}}}
 {"id":1,"request":{"ChatStream":{"stream":1,"system":"s","messages":[{"role":"user","content":"q"}],"max_tokens":64}}}

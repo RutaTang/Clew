@@ -3140,6 +3140,7 @@ async fn use_provider(server: &mut Server, provider: &FakeProvider) {
                 Request::SetAiConfig {
                     chat: Some(provider.chat_config()),
                     embed: None,
+                    locale: None,
                 },
             )
             .await
@@ -3536,6 +3537,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
         Request::SetAiConfig {
             chat: Some(provider.chat_config()),
             embed: None,
+            locale: None,
         },
     );
     server.send(

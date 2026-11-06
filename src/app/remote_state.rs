@@ -634,15 +634,6 @@ const RETRYING: &str =
 /// ([`lost_status`]).
 const LOST: &str = tr_noop!("Could not save .clew/{rel}: the change to {what} is lost ({message})");
 
-/// Whether the status line says an edit of the journal is not saved: tried
-/// again ([`retrying_status`]), or lost ([`lost_status`]) — in whichever
-/// language it was said.
-fn says_not_saved(status: &str) -> bool {
-    [RETRYING, LOST]
-        .into_iter()
-        .any(|template| fills(crate::i18n::lookup(template), status))
-}
-
 /// The status line while a close waits for the host, by how many changes:
 /// one, or more.
 const CLOSING_WAITS: [&str; 2] = [
@@ -660,37 +651,6 @@ const QUITTING_WAITS: [&str; 2] = [
 /// filled in from `args`.
 fn fill(template: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
     crate::i18n::format(crate::i18n::lookup(template), args)
-}
-
-/// Whether `text` reads as `template` filled in: its words in their places,
-/// whatever each `{name}` became.
-fn fills(template: &str, text: &str) -> bool {
-    let mut words = Vec::new();
-    let mut rest = template;
-    while let Some(open) = rest.find('{') {
-        let Some(close) = rest[open..].find('}') else {
-            break;
-        };
-        words.push(&rest[..open]);
-        rest = &rest[open + close + 1..];
-    }
-    words.push(rest);
-    let Some((first, others)) = words.split_first() else {
-        return false;
-    };
-    let Some(mut text) = text.strip_prefix(first) else {
-        return false;
-    };
-    let Some((last, middle)) = others.split_last() else {
-        return text.is_empty();
-    };
-    for word in middle {
-        let Some(at) = text.find(word) else {
-            return false;
-        };
-        text = &text[at + word.len()..];
-    }
-    text.ends_with(last)
 }
 
 /// A journaled edit the server answered without applying it
@@ -1366,7 +1326,6 @@ impl App {
     /// answers it waits for, not an edit on the wire the user agreed to
     /// lose (`agreed`) that nothing waits behind.
     pub(crate) fn show_waiting(&mut self, quitting: bool, agreed: &HashSet<String>) {
-        self.waiting_said = true;
         let sent = self.awaited(agreed).len();
         let [one, other] = if quitting {
             QUITTING_WAITS
@@ -1379,6 +1338,7 @@ impl App {
             other
         };
         self.status = fill(waits, &[("n", &sent as &dyn std::fmt::Display)]);
+        self.waiting_said = Some(self.status.clone());
     }
 
     /// The wait goes on, and the host has answered some of it: the status
@@ -1390,7 +1350,7 @@ impl App {
     /// and again once what it said since is taken back: silent, it gave no
     /// reason why clew had not gone.
     pub(crate) fn update_waiting(&mut self, quitting: bool, agreed: &HashSet<String>) {
-        let first = !self.waiting_said && !says_not_saved(&self.status);
+        let first = self.waiting_said.is_none() && !self.says_not_saved();
         if self.shows_waiting() || first || self.status.is_empty() {
             self.show_waiting(quitting, agreed);
         }
@@ -1399,18 +1359,31 @@ impl App {
     /// The wait for the host is over: the status line stops saying it
     /// waits, unless it says something else by now.
     pub(crate) fn end_waiting(&mut self) {
-        self.waiting_said = false;
         if self.shows_waiting() {
             self.status.clear();
         }
+        self.waiting_said = None;
     }
 
-    /// Whether the status line says a close, or a quit, waits for the host.
+    /// Whether the status line says a close, or a quit, waits for the host:
+    /// it holds the words it was said in (`waiting_said`). Not its words in
+    /// the language spoken now, which a line said before a change of
+    /// language is not in.
     fn shows_waiting(&self) -> bool {
-        CLOSING_WAITS
-            .into_iter()
-            .chain(QUITTING_WAITS)
-            .any(|waits| fills(crate::i18n::lookup(waits), &self.status))
+        self.waiting_said.as_deref() == Some(self.status.as_str())
+    }
+
+    /// Whether the status line says an edit of the journal is not saved:
+    /// tried again ([`retrying_status`]), or lost ([`lost_status`]) — as it
+    /// still holds the words it was said in, whatever language that was.
+    fn says_not_saved(&self) -> bool {
+        let says = |said: Option<&str>| said == Some(self.status.as_str());
+        says(
+            self.proj
+                .remote_edit_retrying
+                .as_ref()
+                .map(|(_, said)| said.as_str()),
+        ) || says(self.proj.remote_edit_lost_said.as_deref())
     }
 
     /// The open project as the user knows it: its path, after its host's

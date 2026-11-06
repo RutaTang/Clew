@@ -225,7 +225,7 @@ impl App {
         let Some(server) = self.effective_server(language) else {
             self.proj.link.lsp.insert(
                 language.to_string(),
-                LspSlot::Unsupported(tr!("no server for this language").into()),
+                LspSlot::Unsupported(tr_noop!("no server for this language").into()),
             );
             return Task::none();
         };
@@ -1272,10 +1272,10 @@ impl App {
             ),
             Some(LspSlot::Starting) => (tr!("starting…").into(), None),
             Some(LspSlot::Failed(e)) => (tr!("error: {error}", error = e), provision(tr!("Retry"))),
-            Some(LspSlot::Unsupported(e)) => (e.clone(), None),
+            Some(LspSlot::Unsupported(e)) => (crate::i18n::message(e), None),
             // A "no" is not for good: without a way to ask again, the
             // language had no server until the project was reopened.
-            Some(LspSlot::Declined(e)) => (e.clone(), provision(tr!("Ask again"))),
+            Some(LspSlot::Declined(e)) => (crate::i18n::message(e), provision(tr!("Ask again"))),
             // The question waiting may be leave to build, or the project's
             // command, rather than an install: nothing to download, and no
             // button that reads so.
@@ -1304,7 +1304,7 @@ impl App {
                 Some(LocatedKind::NeedsInstall) => {
                     (tr!("not installed").into(), provision(tr!("Install")))
                 }
-                Some(LocatedKind::Unsupported(m)) => (m.clone(), None),
+                Some(LocatedKind::Unsupported(m)) => (crate::i18n::message(m), None),
                 Some(LocatedKind::NoServer) => (tr!("no server").into(), None),
                 None => (tr!("checking…").into(), None),
             },
@@ -1489,8 +1489,8 @@ impl App {
                         return Task::none();
                     }
                     let declined = match c.provision {
-                        LspProvision::Build { .. } => tr!("not allowed to build this project"),
-                        _ => tr!("server download declined"),
+                        LspProvision::Build { .. } => tr_noop!("not allowed to build this project"),
+                        _ => tr_noop!("server download declined"),
                     };
                     self.proj
                         .link
@@ -1508,8 +1508,8 @@ impl App {
                     // a slot that always said "command" left the user of an
                     // options-only config looking for one that is not there.
                     let declined = match c.command.is_some() {
-                        true => tr!("project's language-server command declined"),
-                        false => tr!("project's language-server initialize options declined"),
+                        true => tr_noop!("project's language-server command declined"),
+                        false => tr_noop!("project's language-server initialize options declined"),
                     };
                     self.proj
                         .link

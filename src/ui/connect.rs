@@ -1457,7 +1457,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 theme::success(),
             ),
             Some(Status::Connecting) => (tr!("Connecting…").to_string(), theme::dim()),
-            Some(Status::Failed(why)) => (why.clone(), theme::danger()),
+            Some(Status::Failed(why)) => (crate::i18n::message(why), theme::danger()),
             Some(Status::Idle) | None => (tr!("Not connected yet").to_string(), theme::dim()),
         };
         let name = server.name.clone();
@@ -1660,7 +1660,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     }
     for error in &draft.errors {
         parts.push(
-            text(error.clone())
+            text(crate::i18n::message(error))
                 .size(ts::BODY)
                 .color(theme::danger())
                 .into(),

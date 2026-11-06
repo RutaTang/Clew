@@ -162,12 +162,22 @@ impl App {
                 if dropped {
                     self.proj.embed_index = embed::Index::default();
                 }
-                self.status = if !kept.is_empty() {
+                // The fields kept, by the names their pages give them (the
+                // chat model's and the embeddings' API key are both "API
+                // key": named once), not by their keys in config.toml.
+                let mut fields: Vec<&str> = Vec::new();
+                for key in &kept {
+                    let field = saved_field_name(key);
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                self.status = if !fields.is_empty() {
                     trn!(
                         "Settings saved — {fields} was changed in another window, so it was kept",
                         "Settings saved — {fields} were changed in another window, so they were kept",
-                        kept.len(),
-                        fields = kept.join(", ")
+                        fields.len(),
+                        fields = fields.join(", ")
                     )
                 } else if self.llm_available {
                     tr!(
@@ -319,6 +329,18 @@ impl App {
         }
         self.restyle_svgs();
         self.persist_theme();
+    }
+}
+
+/// A field of the `[llm]` or `[embedding]` section of config.toml, by the
+/// name its Settings page gives it.
+fn saved_field_name(key: &str) -> &str {
+    match key {
+        "provider" => tr!("Provider"),
+        "api_key" => tr!("API key"),
+        "model" => tr!("Model"),
+        "base_url" => tr!("Base URL"),
+        other => other,
     }
 }
 
@@ -574,6 +596,48 @@ mod tests {
             config,
             "nothing changed, nothing written"
         );
+    }
+
+    /// A save that keeps fields another window changed names them as their
+    /// pages do, each name once, in the reader's language. It named their
+    /// keys in config.toml: "api_key, api_key".
+    #[test]
+    fn a_save_names_the_fields_it_kept_as_settings_does() {
+        use crate::app::tests::{blank_app, data_dir_override, test_dir};
+        use crate::i18n::{Lang, with_lang};
+        let config = |chat: &str, embedding: &str| {
+            format!(
+                "[llm]\nprovider = \"anthropic\"\napi_key = \"{chat}\"\nmodel = \"m\"\n\
+                 base_url = \"https://gateway.corp/v1\"\n\n[embedding]\napi_key = \"{embedding}\"\n\
+                 model = \"e\"\nbase_url = \"https://api.openai.com/v1\"\n"
+            )
+        };
+        for lang in [Lang::En, Lang::Fr] {
+            let dir = test_dir(&format!("settings-kept-named-{}", lang.code()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let _env = data_dir_override(&dir);
+            std::fs::write(dir.join("config.toml"), config("sk-a", "ek-a")).unwrap();
+            let mut app = blank_app();
+            let _ = app.update(Message::Settings(SettingsMsg::Open));
+            // Another window stores both keys meanwhile.
+            std::fs::write(dir.join("config.toml"), config("sk-b", "ek-b")).unwrap();
+            app.settings.model = "m2".into();
+            with_lang(lang, || {
+                let _ = app.on_settings_saved();
+                let field = crate::i18n::lookup("API key");
+                assert_eq!(
+                    app.status,
+                    trn!(
+                        "Settings saved — {fields} was changed in another window, so it was kept",
+                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        1,
+                        fields = field
+                    ),
+                    "{lang:?}"
+                );
+            });
+        }
     }
 
     /// A save that fails — `config.toml` holds a typo — keeps Settings open

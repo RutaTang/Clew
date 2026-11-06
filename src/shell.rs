@@ -3398,7 +3398,7 @@ mod tests {
         assert_eq!(rt.asked().len(), 1);
         rt.answer(0, false);
         // The wait is over: the next one says itself anew.
-        assert!(!rt.clew.windows[&window].waiting_said);
+        assert!(rt.clew.windows[&window].waiting_said.is_none());
 
         // The quit sends again the edit the host failed — due in its flush,
         // and the edit on the wire after it removes another bookmark — and

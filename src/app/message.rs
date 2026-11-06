@@ -1015,7 +1015,9 @@ pub enum WalkMsg {
         /// superseded one is still saved into the library (it was paid for).
         seq: u64,
         scope: String,
-        result: Result<walkthrough::Walkthrough, String>,
+        /// The tour, or why there is none — a failure to parse the model's
+        /// answer being one a generation is retried once for.
+        result: Result<walkthrough::Walkthrough, walkthrough::Failure>,
     },
     /// Open the library tour with this scope for reading.
     Open(String),

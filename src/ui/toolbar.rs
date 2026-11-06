@@ -869,12 +869,35 @@ fn tools_row_label(row: ToolsRow) -> &'static str {
     }
 }
 
+/// What the ⋯ menu's Explain All row says while a pass runs, `progress`
+/// being how far it has got (done, of total).
+fn cancel_explaining_label(progress: Option<(usize, usize)>) -> String {
+    match progress {
+        Some((done, total)) if total > 0 => tr!(
+            "Cancel explaining ({done}/{total})",
+            done = done,
+            total = total
+        ),
+        _ => tr!("Cancel explaining").to_string(),
+    }
+}
+
 /// Width of the ⋯ menu's panel, in the reader's language.
-pub(crate) fn tools_menu_w() -> f32 {
+pub(crate) fn tools_menu_w(app: &App) -> f32 {
+    // The Explain All row as it reads while a pass runs: with its count
+    // once there is one, at the most it says — as many done as the total —
+    // so the menu does not widen as the count climbs.
+    let cancel = cancel_explaining_label(
+        app.proj
+            .explain
+            .progress
+            .filter(|_| app.proj.explain.running)
+            .map(|(_, total)| (total, total)),
+    );
     let rows: Vec<(&str, f32)> = TOOLS_MENU_ROWS
         .iter()
         .map(|&r| (tools_row_label(r), 0.0))
-        .chain([(tr!("Cancel explaining"), 0.0)])
+        .chain([(cancel.as_str(), 0.0)])
         .collect();
     let headings: Vec<&str> = TOOLS_MENU_HEADINGS
         .iter()
@@ -921,9 +944,9 @@ pub(crate) fn tools_menu_rows_rect(app: &App, first: usize, count: usize) -> ice
     let last = first + count.max(1) - 1;
     let y = top_of(first);
     iced::Rectangle {
-        x: app.window_width - TOOLS_MENU_RIGHT - tools_menu_w() + MENU_PAD,
+        x: app.window_width - TOOLS_MENU_RIGHT - tools_menu_w(app) + MENU_PAD,
         y,
-        width: tools_menu_w() - 2.0 * MENU_PAD,
+        width: tools_menu_w(app) - 2.0 * MENU_PAD,
         height: top_of(last) + MENU_ROW_H - y,
     }
 }
@@ -1021,24 +1044,12 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             // While a pass runs the row cancels it — the bottom-up pass is
             // thousands of model calls on a big repo, so it must be
             // stoppable; with no key configured it routes to Settings.
-            ToolsRow::ExplainAll if app.proj.explain.running => {
-                let label = match app.proj.explain.progress {
-                    Some((done, total)) if total > 0 => {
-                        tr!(
-                            "Cancel explaining ({done}/{total})",
-                            done = done,
-                            total = total
-                        )
-                    }
-                    _ => tr!("Cancel explaining").to_string(),
-                };
-                menu_item(
-                    Some(Glyph::Close),
-                    label,
-                    slot(),
-                    Some(Message::Explain(ExplainMsg::Cancel)),
-                )
-            }
+            ToolsRow::ExplainAll if app.proj.explain.running => menu_item(
+                Some(Glyph::Close),
+                cancel_explaining_label(app.proj.explain.progress),
+                slot(),
+                Some(Message::Explain(ExplainMsg::Cancel)),
+            ),
             ToolsRow::ExplainAll => menu_item(
                 Some(Glyph::TextLines),
                 tr!("Explain All").into(),
@@ -1115,7 +1126,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         items.push(item);
     }
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(tools_menu_w())
+        .width(tools_menu_w(app))
         .padding(MENU_PAD)
         // The design's ⋯ menu is rounded 11.
         .style(theme::modal_panel_rounded(11.0));

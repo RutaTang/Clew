@@ -686,6 +686,7 @@ impl App {
             rel, what, last, ..
         } = edit;
         self.status = crate::app::remote_state::lost_status(&rel, &what, message);
+        self.proj.remote_edit_lost_said = Some(self.status.clone());
         if last
             && let Some(root) = self
                 .proj
@@ -759,7 +760,14 @@ impl App {
         // A refused config (a full queue) is said in the status line by
         // `send_message`: a revoke that did not reach the server must not
         // read as done.
-        let _ = self.send_to_server(clew_protocol::Request::SetAiConfig { chat, embed });
+        // And the language the reader reads, for the language servers the
+        // server starts: `Hello` told it only the one read as it connected.
+        let locale = crate::i18n::current().server_locale().map(str::to_string);
+        let _ = self.send_to_server(clew_protocol::Request::SetAiConfig {
+            chat,
+            embed,
+            locale,
+        });
     }
 
     /// Where this project's git history is read (see [`GitSource`]): the local
