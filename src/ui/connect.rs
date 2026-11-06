@@ -44,6 +44,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     // Every text field submits the form on Enter.
     let input = |placeholder: &str, value: &str, on_input: fn(String) -> Message| {
         text_input(placeholder, value)
+            .style(theme::input)
             .on_input(on_input)
             .on_submit(Message::Settings(SettingsMsg::Saved))
             .size(ts::BASE)
@@ -54,6 +55,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         pick_list(&Provider::ALL[..], Some(app.settings.provider), |v| {
             Message::Settings(SettingsMsg::ProviderPicked(v))
         })
+        .style(theme::pick)
+        .menu_style(theme::pick_menu)
         .text_size(ts::BASE)
         .padding([4, 8])
         // Match the full width of the text fields below it, so the form column
@@ -136,6 +139,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             })
         },
     )
+    .style(theme::pick)
+    .menu_style(theme::pick_menu)
     .text_size(ts::BASE)
     .padding([4, 8])
     .width(Fill)
@@ -150,6 +155,8 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             })
         },
     )
+    .style(theme::pick)
+    .menu_style(theme::pick_menu)
     .text_size(ts::BASE)
     .padding([4, 8])
     .width(Fill)
@@ -172,6 +179,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         .into(),
         SettingsPage::Updates => column![
             iced::widget::checkbox(app.update.auto_check)
+                .style(theme::check)
                 .label("Check for updates automatically")
                 .on_toggle(|v| Message::Updater(UpdaterMsg::SetAuto(v)))
                 .text_size(ts::BODY)
@@ -427,6 +435,7 @@ fn lang_field<'a>(
 ) -> iced::widget::TextInput<'a, Message> {
     use crate::LanguagesMsg as L;
     text_input(placeholder, app.proj.lang_drafts.field(field))
+        .style(theme::input)
         .on_input(move |v| Message::Languages(L::Draft(field, v)))
         .on_submit(Message::Languages(L::UseDraft(field)))
         .size(ts::BASE)
@@ -835,6 +844,7 @@ fn rust_block<'a>(
     }
     col = col.push(
         iced::widget::checkbox(rust.all_features)
+            .style(theme::check)
             .label("Every feature of every package")
             .on_toggle(move |on| {
                 choose_with(choices, |c| {
@@ -896,6 +906,7 @@ fn rust_block<'a>(
         }
         col = col.push(
             iced::widget::checkbox(rust.no_default_features)
+                .style(theme::check)
                 .label("Without the packages' default features")
                 .on_toggle(move |on| {
                     choose_with(choices, |c| {
@@ -922,6 +933,8 @@ fn rust_block<'a>(
                     c.rust.get_or_insert_default().target = (t != HOST_CHOICE).then_some(t)
                 })
             })
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
             .padding([2, 6]),
             lang_field(app, "Another target triple", F::RustTarget),
@@ -1011,6 +1024,8 @@ fn go_block<'a>(
                         )
                     })
                 })
+                .style(theme::pick)
+                .menu_style(theme::pick_menu)
                 .text_size(ts::SMALL)
                 .padding([2, 6]),
             ]
@@ -1354,6 +1369,8 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         pick_list(languages, drafts.server_language.clone(), |l: String| {
             Message::Languages(L::ServerLanguage(l))
         })
+        .style(theme::pick)
+        .menu_style(theme::pick_menu)
         .placeholder("Language")
         .text_size(ts::SMALL)
         .padding([4, 6]),
@@ -1408,6 +1425,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     let field =
         |placeholder: &str, value: &str, on_input: fn(String) -> Message, submit: Message| {
             text_input(placeholder, value)
+                .style(theme::input)
                 .on_input(on_input)
                 .on_submit(submit)
                 .size(ts::BASE)
@@ -1442,6 +1460,8 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
             Some(server.approve),
             move |a| Message::Integrations(M::McpApprove(name.clone(), a)),
         )
+        .style(theme::pick)
+        .menu_style(theme::pick_menu)
         .text_size(ts::SMALL)
         .padding([2, 6])
         .into();
@@ -1468,6 +1488,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         };
         let name = server.name.clone();
         let enabled = iced::widget::checkbox(server.enabled)
+            .style(theme::check)
             .label("On")
             .on_toggle(move |on| Message::Integrations(M::McpEnable(name.clone(), on)))
             .text_size(ts::SMALL)
@@ -1549,6 +1570,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     for agent in &draft.acp {
         let name = agent.name.clone();
         let share = iced::widget::checkbox(agent.share_mcp)
+            .style(theme::check)
             .label("Share my MCP servers")
             .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
             .text_size(ts::SMALL)
@@ -1966,6 +1988,7 @@ pub(crate) fn connect_picker<'a>(
     let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
     let input = |placeholder: &str, value: &str, f: ConnectField| {
         text_input(placeholder, value)
+            .style(theme::input)
             .on_input(move |s| Message::Connect(ConnectMsg::Field(f, s)))
             .on_submit(Message::Connect(ConnectMsg::Submit))
             .size(ts::BASE)
@@ -2012,6 +2035,7 @@ pub(crate) fn connect_picker<'a>(
     // runs Ask/Explain remotely.
     col = col.push(
         iced::widget::checkbox(ui.send_ai_keys)
+            .style(theme::check)
             .label("Send my AI keys to this host")
             .on_toggle(|v| Message::Connect(ConnectMsg::ToggleAiKeys(v)))
             .size(14)

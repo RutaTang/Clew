@@ -421,9 +421,9 @@ pub(crate) fn time_travel_story<'a>(
         ]
         .spacing(1),
         space().width(Fill),
-        button(text("✕").size(ts::SMALL).color(theme::dim()))
+        button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
             .style(theme::toolbar_button)
-            .padding([1, 6])
+            .padding([4, 6])
             .on_press(Message::TimeTravel(TimeTravelMsg::Story)),
     ]
     .align_y(iced::Center);
@@ -654,6 +654,7 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
     };
 
     let input = text_input("Find in file…", &app.proj.find.query)
+        .style(theme::input)
         .id(find_input_id())
         .on_input(|v| Message::Editor(EditorMsg::FindQueryChanged(v)))
         .on_submit(Message::Editor(EditorMsg::FindStep(1)))
@@ -661,10 +662,10 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         .padding([4, 8])
         .width(190);
 
-    let btn = |label: &'static str, msg: Message| {
-        button(text(label).size(ts::BASE))
+    let btn = |g: Glyph, msg: Message| {
+        button(glyph::icon(g, theme::fg_muted(), 12.0))
             .style(theme::toolbar_button)
-            .padding([2, 8])
+            .padding([6, 7])
             .on_press(msg)
     };
 
@@ -672,9 +673,9 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         row![
             input,
             text(count).size(ts::SMALL).color(theme::dim()).width(46),
-            btn("‹", Message::Editor(EditorMsg::FindStep(-1))),
-            btn("›", Message::Editor(EditorMsg::FindStep(1))),
-            btn("✕", Message::Editor(EditorMsg::FindClosed)),
+            btn(Glyph::ChevronLeft, Message::Editor(EditorMsg::FindStep(-1))),
+            btn(Glyph::ChevronRight, Message::Editor(EditorMsg::FindStep(1))),
+            btn(Glyph::Close, Message::Editor(EditorMsg::FindClosed)),
         ]
         .spacing(6)
         .align_y(iced::Center),
@@ -1019,9 +1020,9 @@ pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),
-            button(text("✕").size(ts::SMALL).color(theme::dim()))
+            button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                 .style(theme::toolbar_button)
-                .padding([0, 6])
+                .padding([4, 6])
                 .on_press(Message::Window(WindowMsg::ToggleFileBanner)),
         ]
         .spacing(8)

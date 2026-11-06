@@ -1907,6 +1907,31 @@ fn shows(sim: &mut Sim<'_>, needle: &str) -> bool {
     text_at(sim, move |t| t.contains(&needle), 0).is_some()
 }
 
+/// Click the icon button left of the `nth` text equal to `label` — a row's
+/// chevron or remove mark, drawn as an icon, not text — stepping left
+/// until a click sends what `wanted` looks for; what it sent. `view` draws
+/// it afresh for each try.
+fn click_left_of<'a>(
+    view: impl Fn() -> Sim<'a>,
+    label: &str,
+    nth: usize,
+    wanted: fn(&Message) -> bool,
+) -> Vec<Message> {
+    for dx in (1..=20).map(|i| i as f32 * 3.0) {
+        let mut sim = view();
+        let text = label.to_string();
+        let bounds = text_at(&mut sim, move |t| t == text, nth)
+            .unwrap_or_else(|| panic!("{label:?} (#{nth}) is not on screen"));
+        sim.point_at(Point::new(bounds.x - dx, bounds.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        let sent: Vec<Message> = sent_by(sim).into_iter().collect();
+        if sent.iter().any(wanted) {
+            return sent;
+        }
+    }
+    Vec::new()
+}
+
 /// Click the `nth` text equal to `label` and return what the click sent.
 fn click_nth(mut sim: Sim<'_>, label: &str, nth: usize) -> Vec<Message> {
     let wanted = label.to_string();
@@ -4839,7 +4864,12 @@ fn the_debug_panel_removes_watches_by_identity_and_offers_hover_evaluation() {
     let mut app = reader_app();
     app.debug.session = Some(paused_debug_session());
     app.debug.watches = vec!["a".into(), "b".into()];
-    let sent = click_nth(sim_elem(super::debug_panel(&app)), "✕", 1);
+    let sent = click_left_of(
+        || sim_elem(super::debug_panel(&app)),
+        "b",
+        0,
+        |m| matches!(m, Message::Debug(DebugMsg::WatchRemoveExpr(_))),
+    );
     assert!(
         matches!(sent.as_slice(), [Message::Debug(DebugMsg::WatchRemoveExpr(e))] if e == "b"),
         "{sent:?}"
@@ -4894,7 +4924,14 @@ fn the_call_tree_names_its_tree_and_shows_what_the_cap_hid() {
         shows(&mut sim, "6 more callers not shown (tree limit 800)"),
         "the cap's note is not under its node"
     );
-    let sent = click(sim, "▾");
+    drop(sim);
+    // (The header names the root too: the row is the second "root".)
+    let sent = click_left_of(
+        || sim_elem(super::calls_tab(&app)),
+        "root",
+        1,
+        |m| matches!(m, Message::Calls(CallsMsg::ExpandNode { .. })),
+    );
     assert!(
         matches!(
             sent.as_slice(),
@@ -5759,8 +5796,13 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     assert!(shows(&mut sim, "→ render"));
     assert!(shows(&mut sim, "src/lib.rs:4"));
     assert!(shows(&mut sim, "(line not read)"));
-    let _ = sim.click("▸");
-    let sent: Vec<Message> = sent_by(sim).into_iter().collect();
+    drop(sim);
+    let sent = click_left_of(
+        || sim_elem(super::flow_tab(&app)),
+        "→ render",
+        0,
+        |m| matches!(m, Message::Flow(_)),
+    );
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Flow(crate::FlowMsg::Expand { token: 7, id: 1 }))),

@@ -2213,6 +2213,8 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
             pick_list(choices, selected, |c: MapChoice| {
                 Message::Graph(GraphMsg::SelectMap(c.id))
             })
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
             .padding([3, 8])
             .into(),

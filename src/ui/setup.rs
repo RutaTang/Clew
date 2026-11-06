@@ -65,6 +65,7 @@ pub(crate) fn setup_sheet<'a>(
                   detail: String|
      -> Element<'a, Message> {
         let tick = checkbox(on)
+            .style(theme::check)
             .label(label)
             .size(16)
             .spacing(10)

@@ -335,6 +335,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         "Walk a feature, or leave empty for the whole codebase…"
     };
     let mut input = text_input(placeholder, &app.walk_ui.input)
+        .style(theme::input)
         .on_input(|v| Message::Walk(WalkMsg::InputChanged(v)))
         .size(ts::BODY)
         .padding(6);
@@ -460,9 +461,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         .style(theme::toolbar_button)
                         .padding([6, 9])
                         .on_press(Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))),
-                    button(text("✕").size(ts::BODY))
+                    button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
-                        .padding([6, 9])
+                        .padding([7, 9])
                         .on_press(Message::Walk(WalkMsg::Delete(wt.scope.clone()))),
                 ]
                 .spacing(2),
@@ -846,6 +847,33 @@ pub(crate) fn append_tree_rows<'a>(
     }
 }
 
+/// Room a tree row keeps for its chevron, so a row without one lines up.
+pub(crate) const CHEVRON_W: f32 = 18.0;
+
+/// A tree row's expand / collapse control: its chevron centred in a
+/// square of [`CHEVRON_W`], lit under the pointer — a target a pointer
+/// finds, not a glyph's width of one.
+pub(crate) fn chevron<'a>(expanded: bool, msg: Message) -> Element<'a, Message> {
+    button(
+        container(glyph::icon(
+            if expanded {
+                Glyph::ChevronDown
+            } else {
+                Glyph::ChevronRight
+            },
+            theme::dim(),
+            10.0,
+        ))
+        .center(Fill),
+    )
+    .style(theme::list_row(false))
+    .width(Length::Fixed(CHEVRON_W))
+    .height(Length::Fixed(CHEVRON_W))
+    .padding(0)
+    .on_press(msg)
+    .into()
+}
+
 /// A file-type glyph in the embedded icon font, for inline use (breadcrumb,
 /// finder rows, …).
 pub(crate) fn icon_text(glyph: char, color: iced::Color, size: f32) -> iced::widget::Text<'static> {
@@ -933,47 +961,19 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
     let input = text_input("Search in project…", &app.proj.search.query)
+        .style(theme::input)
         .id(search_input_id())
         .on_input(|v| Message::Nav(NavMsg::SearchQueryChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BASE)
         .padding(7);
 
-    // Match-option toggles: case-sensitive, whole-word, regex. Each carries a
-    // border so it reads as a clickable control even when off, and fills with the
-    // accent (like VS Code's search toggles) when on.
+    // Match-option toggles: case-sensitive, whole-word, regex — as round as
+    // the fields, outlined while off, filled in the accent while on.
     let chip = |label: &'static str, active: bool, opt: SearchOpt| -> Element<'_, Message> {
-        let style = move |_t: &iced::Theme, status: button::Status| {
-            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            let bg = if active {
-                theme::accent()
-            } else if hovered {
-                theme::bg_hover()
-            } else {
-                theme::bg()
-            };
-            button::Style {
-                background: Some(bg.into()),
-                text_color: if active {
-                    theme::on_accent()
-                } else {
-                    theme::fg_muted()
-                },
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    width: 1.0,
-                    color: if active {
-                        theme::accent()
-                    } else {
-                        theme::hairline()
-                    },
-                },
-                ..button::Style::default()
-            }
-        };
         button(text(label).size(ts::BODY).font(crate::fonts::CODE))
-            .style(style)
-            .padding([2, 7])
+            .style(theme::toggle(active))
+            .padding([3, 8])
             .on_press(Message::Nav(NavMsg::SearchToggle(opt)))
             .into()
     };
@@ -986,11 +986,13 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 
     // Include / exclude glob filters.
     let include = text_input("files to include (e.g. src/**)", &app.proj.search.include)
+        .style(theme::input)
         .on_input(|v| Message::Nav(NavMsg::SearchIncludeChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BODY)
         .padding(5);
     let exclude = text_input("files to exclude", &app.proj.search.exclude)
+        .style(theme::input)
         .on_input(|v| Message::Nav(NavMsg::SearchExcludeChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BODY)
@@ -1112,12 +1114,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // Indent by tree depth, but cap it: past ~8 levels a deep branch would
         // otherwise push the node (including the current one) off the panel's
         // right edge. Beyond the cap, depth stops adding indent.
-        let indent = 4.0 + (v.depth.min(8) as f32) * 10.0;
-        let name_color = if v.is_current {
-            theme::accent()
-        } else {
-            theme::fg()
-        };
+        let indent = (v.depth.min(8) as f32) * 14.0;
         let fname = v
             .loc
             .path
@@ -1129,17 +1126,15 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // A collapse chevron for nodes with children (forks stand out in accent);
         // leaves get a fixed-width spacer so names still line up.
         let toggle: Element<'_, Message> = if v.has_children {
-            let ar = if v.collapsed { "▸" } else { "▾" };
-            button(text(ar).size(ts::CAPTION).color(theme::dim()))
-                .style(theme::list_row(false))
-                .padding([2, 3])
-                .on_press(Message::Reading(ReadingMsg::TrailToggleCollapse {
+            chevron(
+                !v.collapsed,
+                Message::Reading(ReadingMsg::TrailToggleCollapse {
                     id: v.id,
                     loc: v.loc.clone(),
-                }))
-                .into()
+                }),
+            )
         } else {
-            space().width(12).into()
+            space().width(CHEVRON_W).into()
         };
         // Status marker: current dot (accent), fork ⋔ (accent), other visited
         // nodes a grey dot so the trail reads as a string of nodes. The dots
@@ -1162,41 +1157,47 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 .align_x(iced::Center)
                 .into()
         };
+        // The row is the whole width, as the file tree's are — its depth
+        // indents what is in it, not the row — and the place being read is
+        // the row lit as the open file is, its name in the medium weight.
         let jump = button(
             row![
+                space().width(indent),
+                toggle,
                 marker,
                 icon_text(glyph, gcolor, 12.0),
                 column![
                     text(loc_label(&v.loc, v.label.as_deref()))
                         .size(ts::BODY)
-                        .color(name_color),
+                        .font(if v.is_current {
+                            crate::fonts::UI_MEDIUM
+                        } else {
+                            crate::fonts::UI
+                        })
+                        .color(theme::fg()),
                     text(rel_of(app, &v.loc.path))
                         .size(ts::CAPTION)
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                 ],
             ]
-            .spacing(5)
+            .spacing(6)
             .align_y(iced::Center),
         )
         .style(theme::list_row(v.is_current))
+        .width(Fill)
         .padding(Padding {
-            top: 2.0,
+            top: 3.0,
             right: 8.0,
-            bottom: 2.0,
-            left: 4.0,
+            bottom: 3.0,
+            left: 6.0,
         })
         .on_press(Message::Reading(ReadingMsg::HistoryJump {
             id: v.id,
             loc: v.loc.clone(),
         }));
 
-        rows.push(
-            row![space().width(indent), toggle, jump]
-                .spacing(1)
-                .align_y(iced::Center)
-                .into(),
-        );
+        rows.push(jump.into());
     }
     column![
         header,
@@ -1524,6 +1525,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     let n = app.proj.embed_index.entries.len();
 
     let input = text_input("Ask by meaning…", &app.proj.semantic_query)
+        .style(theme::input)
         .on_input(|v| Message::Semantic(SemanticMsg::QueryChanged(v)))
         .on_submit(Message::Semantic(SemanticMsg::Search))
         .size(ts::BASE)

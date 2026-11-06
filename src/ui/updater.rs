@@ -192,9 +192,13 @@ fn action_button(label: &'static str, msg: Message, primary: bool) -> Element<'s
 
 /// The banner's dismiss (✕) button.
 fn dismiss_button() -> Element<'static, Message> {
-    button(text("✕").size(ts::SMALL).color(theme::dim()))
-        .style(theme::toolbar_button)
-        .padding([2, 6])
-        .on_press(Message::Updater(UpdaterMsg::BannerDismissed))
-        .into()
+    button(crate::glyph::icon(
+        crate::glyph::Glyph::Close,
+        theme::dim(),
+        10.0,
+    ))
+    .style(theme::toolbar_button)
+    .padding([2, 6])
+    .on_press(Message::Updater(UpdaterMsg::BannerDismissed))
+    .into()
 }

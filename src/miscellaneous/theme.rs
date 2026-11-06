@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, container, progress_bar, scrollable, text_input};
+use iced::widget::{button, checkbox, container, pick_list, progress_bar, scrollable, text_input};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -1526,6 +1526,132 @@ pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::St
         placeholder: dim(),
         value: fg(),
         selection: selection(),
+    }
+}
+
+/// A text field on its own: the same rounded well as [`field`] — the
+/// search field, Ask's input — its edge lit in the accent while it has the
+/// keyboard. Every field of the app looks like this one.
+pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    let hovered = matches!(status, text_input::Status::Hovered);
+    text_input::Style {
+        background: wash(if is_light() { 0.035 } else { 0.045 }).into(),
+        border: Border {
+            color: if focused {
+                with_alpha(accent(), 0.65)
+            } else if hovered {
+                wash(0.16)
+            } else {
+                hairline()
+            },
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        icon: dim(),
+        placeholder: dim(),
+        value: fg(),
+        selection: selection(),
+    }
+}
+
+/// A drop-down: the same rounded well as a field ([`input`]), its edge lit
+/// while it is open.
+pub fn pick(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    pick_list::Style {
+        text_color: fg(),
+        placeholder_color: dim(),
+        handle_color: dim(),
+        background: wash(if is_light() { 0.035 } else { 0.045 }).into(),
+        border: Border {
+            color: match status {
+                pick_list::Status::Opened { .. } => with_alpha(accent(), 0.65),
+                pick_list::Status::Hovered => wash(0.16),
+                pick_list::Status::Active => hairline(),
+            },
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+    }
+}
+
+/// A drop-down's list: a rounded panel as the menus are, its row under the
+/// pointer lit as theirs.
+pub fn pick_menu(_theme: &Theme) -> iced::overlay::menu::Style {
+    iced::overlay::menu::Style {
+        background: if is_light() {
+            Color::WHITE.into()
+        } else {
+            mix(bg(), Color::WHITE, 0.06).into()
+        },
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        text_color: fg(),
+        selected_text_color: fg_bright(),
+        selected_background: wash(0.08).into(),
+        shadow: iced::Shadow {
+            color: scrim(0.18),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+    }
+}
+
+/// A checkbox: rounded as the fields are, filled in the accent when on.
+pub fn check(_theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let (checked, hovered, disabled) = match status {
+        checkbox::Status::Active { is_checked } => (is_checked, false, false),
+        checkbox::Status::Hovered { is_checked } => (is_checked, true, false),
+        checkbox::Status::Disabled { is_checked } => (is_checked, false, true),
+    };
+    checkbox::Style {
+        background: if checked {
+            with_alpha(accent(), if disabled { 0.45 } else { 1.0 }).into()
+        } else if hovered {
+            wash(0.06).into()
+        } else {
+            Color::TRANSPARENT.into()
+        },
+        icon_color: on_accent(),
+        border: Border {
+            color: if checked {
+                with_alpha(accent(), if disabled { 0.45 } else { 1.0 })
+            } else if hovered {
+                wash(0.28)
+            } else {
+                wash(if disabled { 0.12 } else { 0.22 })
+            },
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        text_color: Some(if disabled { dim() } else { fg() }),
+    }
+}
+
+/// An on/off option beside a field (match case, whole word, regex): as
+/// round as the field, outlined while off, filled in the accent while on.
+pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(if on {
+                accent().into()
+            } else if hovered {
+                wash(0.06).into()
+            } else {
+                Color::TRANSPARENT.into()
+            }),
+            text_color: if on { on_accent() } else { fg_muted() },
+            border: Border {
+                radius: 7.0.into(),
+                width: 1.0,
+                color: if on { accent() } else { hairline() },
+            },
+            ..button::Style::default()
+        }
     }
 }
 

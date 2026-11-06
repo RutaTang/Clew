@@ -172,6 +172,7 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
         column![
             text(p.title).size(ts::EMPHASIS).color(theme::fg()),
             text_input(p.placeholder, p.value)
+                .style(theme::input)
                 .id(p.input_id)
                 .on_input(p.on_input)
                 .on_submit(p.submit.clone())

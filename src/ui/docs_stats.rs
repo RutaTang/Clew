@@ -218,6 +218,7 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     // Toolbar: a filter on top, then the grouping / visibility / rebuild
     // controls (two rows so they fit a narrow sidebar).
     let filter = text_input("Filter docs…", &app.proj.docs.filter)
+        .style(theme::input)
         .on_input(|v| Message::Docs(DocsMsg::FilterChanged(v)))
         .size(ts::BODY)
         .padding(6)
@@ -287,11 +288,15 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         });
         let label = group.label.clone();
         let expanded = !query.is_empty() || app.proj.docs.expanded.contains(&label);
-        let arrow = if expanded { "▾" } else { "▸" };
+        let arrow = if expanded {
+            Glyph::ChevronDown
+        } else {
+            Glyph::ChevronRight
+        };
         rows.push(
             button(
                 row![
-                    text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
+                    container(glyph::icon(arrow, theme::dim(), 10.0)).width(10),
                     text(label.clone())
                         .size(ts::BODY)
                         .color(theme::fg_muted())
@@ -907,6 +912,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     }
 
     let filter = text_input("Filter terms…", &app.proj.glossary.filter)
+        .style(theme::input)
         .on_input(|v| Message::Glossary(GlossaryMsg::FilterChanged(v)))
         .size(ts::BODY)
         .padding(6)

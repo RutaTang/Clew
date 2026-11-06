@@ -149,6 +149,8 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
                 pick_list(choices, selected, |c: LanguageChoice| {
                     Message::Voice(VoiceMsg::SetLanguage(c.0))
                 })
+                .style(theme::pick)
+                .menu_style(theme::pick_menu)
                 .text_size(ts::SMALL)
                 .padding([3, 8]),
             ]
@@ -158,6 +160,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
     }
     let check = |label: &'static str, on: bool, msg: fn(bool) -> VoiceMsg| {
         iced::widget::checkbox(on)
+            .style(theme::check)
             .label(label)
             .on_toggle(move |v| Message::Voice(msg(v)))
             .text_size(ts::BODY)

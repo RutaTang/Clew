@@ -34,7 +34,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     .padding([5, 12]);
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
-    let collapse = button(text("⌄").size(ts::BASE))
+    let collapse = button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
         .style(theme::list_row(false))
         .padding([3, 10])
         .on_press(Message::Window(WindowMsg::CollapseBottom));
@@ -209,6 +209,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         vec![text("WATCH").size(ts::CAPTION).color(theme::dim()).into()];
     watch_rows.push(
         text_input("Add watch…", &app.debug.watch_input)
+            .style(theme::input)
             .on_input(|v| Message::Debug(DebugMsg::WatchInput(v)))
             .on_submit(Message::Debug(DebugMsg::WatchAdd))
             .size(ts::SMALL)
@@ -226,7 +227,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             row![
                 // By identity (the expression): an index into the list drawn
                 // here can name another watch once the list changes.
-                button(text("✕").size(ts::CAPTION).color(theme::dim()))
+                button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                     .style(theme::list_row(false))
                     .padding([0, 4])
                     .on_press(Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone()))),
@@ -297,6 +298,7 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     }
     tooltip(
         iced::widget::checkbox(app.debug_hover_eval)
+            .style(theme::check)
             .label("Evaluate on hover")
             .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
             .size(14)
@@ -751,7 +753,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         .style(theme::toolbar_button)
                         .padding([0, 4])
                         .on_press(Message::Ask(AskMsg::PinGoto(key))),
-                        button(text("✕").size(ts::SMALL).color(theme::dim()))
+                        button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                             .style(theme::toolbar_button)
                             .padding([0, 6])
                             .on_press(Message::Ask(AskMsg::Unpin(key))),
@@ -880,6 +882,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                                 value: c.value,
                             })
                         })
+                        .style(theme::pick)
+                        .menu_style(theme::pick_menu)
                         .text_size(ts::CAPTION)
                         .padding([2, 6]),
                     ),
@@ -918,6 +922,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             pick_list(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
             .padding([6, 8]),
         ))
@@ -1565,24 +1571,20 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         text("…")
             .size(ts::SMALL)
             .color(theme::accent())
-            .width(16)
+            .width(super::sidebar::CHEVRON_W)
+            .align_x(iced::Center)
             .into()
     } else if node.role == crate::app::flow::Role::Passed && node.callee.is_some() {
-        button(
-            text(if node.expanded { "▾" } else { "▸" })
-                .size(ts::SMALL)
-                .color(theme::dim()),
+        super::sidebar::chevron(
+            node.expanded,
+            Message::Flow(if node.children.is_some() {
+                crate::FlowMsg::Toggle { token, id }
+            } else {
+                crate::FlowMsg::Expand { token, id }
+            }),
         )
-        .style(theme::list_row(false))
-        .padding([0, 3])
-        .on_press(Message::Flow(if node.children.is_some() {
-            crate::FlowMsg::Toggle { token, id }
-        } else {
-            crate::FlowMsg::Expand { token, id }
-        }))
-        .into()
     } else {
-        space().width(16).into()
+        space().width(super::sidebar::CHEVRON_W).into()
     };
     let label = match node.role {
         crate::app::flow::Role::Passed => format!("→ {}", node.detail),
@@ -1686,32 +1688,29 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
             text("…")
                 .size(ts::SMALL)
                 .color(theme::accent())
-                .width(16)
+                .width(super::sidebar::CHEVRON_W)
+                .align_x(iced::Center)
                 .into()
         } else if node.cyclic {
             text("↺")
                 .size(ts::SMALL)
                 .color(theme::dim())
-                .width(16)
+                .width(super::sidebar::CHEVRON_W)
+                .align_x(iced::Center)
                 .into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
-            space().width(16).into()
+            space().width(super::sidebar::CHEVRON_W).into()
         } else {
-            button(
-                text(if node.expanded { "▾" } else { "▸" })
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-            )
-            .style(theme::list_row(false))
-            .padding([0, 3])
             // Names the tree it was drawn from: node ids are bare indices, so
             // a click that lands after a direction flip or a new hierarchy
             // must act on nothing rather than on the new tree's node `id`.
-            .on_press(Message::Calls(CallsMsg::ExpandNode {
-                token: tree.token,
-                id,
-            }))
-            .into()
+            super::sidebar::chevron(
+                node.expanded,
+                Message::Calls(CallsMsg::ExpandNode {
+                    token: tree.token,
+                    id,
+                }),
+            )
         };
 
         let kind = kind_short(node.item.kind);
@@ -1848,23 +1847,19 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             text("↺")
                 .size(ts::SMALL)
                 .color(theme::dim())
-                .width(16)
+                .width(super::sidebar::CHEVRON_W)
+                .align_x(iced::Center)
                 .into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
-            space().width(16).into()
+            space().width(super::sidebar::CHEVRON_W).into()
         } else {
-            button(
-                text(if node.expanded { "▾" } else { "▸" })
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
+            super::sidebar::chevron(
+                node.expanded,
+                Message::Graph(GraphMsg::ImportExpand {
+                    token: app.proj.import_tree_token,
+                    id,
+                }),
             )
-            .style(theme::list_row(false))
-            .padding([0, 3])
-            .on_press(Message::Graph(GraphMsg::ImportExpand {
-                token: app.proj.import_tree_token,
-                id,
-            }))
-            .into()
         };
 
         // Internal files open on click; external/unresolved are dim leaves.
