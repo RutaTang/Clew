@@ -392,11 +392,22 @@ impl App {
         }
         let servers = Self::ticked_servers(&setup);
         self.allow_builds(&setup.root, &servers);
-        let mut tasks: Vec<Task<Message>> = servers
-            .iter()
-            .filter(|s| s.fetch != Fetch::Nothing)
-            .map(|s| self.fetch_lsp(&s.language))
-            .collect();
+        let mut tasks: Vec<Task<Message>> = Vec::new();
+        for server in &servers {
+            if server.fetch != Fetch::Nothing {
+                tasks.push(self.fetch_lsp(&server.language));
+            } else if matches!(
+                self.proj.link.lsp.get(&server.language),
+                Some(LspSlot::Declined(_))
+            ) {
+                // In hand, and declined before — the leave to build, just
+                // given above: started afresh, as the Languages page's "Ask
+                // again" starts it (`LspMsg::DownloadFor`). Left declined,
+                // it did not start until the project was opened again.
+                self.proj.link.lsp.remove(&server.language);
+                tasks.push(self.ensure_lsp(&server.language));
+            }
+        }
         if setup.explain {
             tasks.push(self.on_explain_project(false));
         }
@@ -429,13 +440,20 @@ impl App {
     /// Fetch `language`'s server ahead of need — downloaded or installed,
     /// not started: it starts as ever, when a file of the language opens,
     /// at once then. The sheet's tick was the consent the download would
-    /// otherwise ask for. A language whose server is in hand, on its way or
-    /// running is left alone.
+    /// otherwise ask for. A language whose server is in hand, on its way,
+    /// running or asked about is left alone; one whose download was declined
+    /// or failed is fetched: "Set Up Project…" is where it is asked for again.
     pub(crate) fn fetch_lsp(&mut self, language: &str) -> Task<Message> {
         if self.connection.is_remote() || self.proj.project.is_none() {
             return Task::none();
         }
-        if self.proj.link.lsp.contains_key(language) {
+        if self
+            .proj
+            .link
+            .lsp
+            .get(language)
+            .is_some_and(|slot| !matches!(slot, LspSlot::Declined(_) | LspSlot::Failed(_)))
+        {
             return Task::none();
         }
         let Some(server) = self.effective_server(language) else {

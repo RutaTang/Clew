@@ -6944,6 +6944,79 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     );
 }
 
+/// A server program of the user's own, with arguments of their own, is the
+/// one chosen; pressing its row again keeps it as it is. It used to choose
+/// the bare program, its arguments dropped for clew's defaults, and the
+/// server restarted with those.
+#[test]
+fn pressing_your_own_program_again_keeps_its_arguments() {
+    use clew_protocol::{LanguageChoices, LanguageOptions, ServerChoice, ToolchainCandidate};
+    let mut app = reader_app();
+    app.proj.project_languages = vec!["lean".into()];
+    app.proj.lang_options = Some(Ok(LanguageOptions {
+        toolchains: [(
+            "lean".to_string(),
+            vec![ToolchainCandidate {
+                command: "/opt/lake".into(),
+                name: "elan".into(),
+                project: false,
+            }],
+        )]
+        .into(),
+        ..Default::default()
+    }));
+    let own = ServerChoice {
+        command: "/opt/lake".into(),
+        args: Some(vec!["serve".into(), "--foo".into()]),
+    };
+    app.proj.lang_choices = LanguageChoices {
+        servers: Some([("lean".to_string(), own.clone())].into()),
+        ..Default::default()
+    };
+    let chosen: Vec<LanguageChoices> = click(
+        sim_elem(super::connect::languages_section(&app)),
+        "Your own program",
+    )
+    .into_iter()
+    .filter_map(|m| match m {
+        Message::Languages(crate::LanguagesMsg::Choose(next)) => Some(*next),
+        _ => None,
+    })
+    .collect();
+    assert_eq!(chosen.len(), 1, "{chosen:?}");
+    assert_eq!(
+        chosen[0].servers.as_ref().and_then(|s| s.get("lean")),
+        Some(&own),
+        "the arguments were dropped"
+    );
+}
+
+/// Explain All with no AI key opens Settings on the page that takes one —
+/// from the ⋯ menu and from its shortcut alike — not on whichever page
+/// Settings showed last.
+#[test]
+fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
+    let mut app = reader_app();
+    app.llm_available = false;
+    app.show_tools_menu = true;
+    let sent = click(sim_of(&app), "Explain All");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::SettingsPage::LanguageModel
+            ))
+        )),
+        "{sent:?}"
+    );
+    let mut app = reader_app();
+    app.llm_available = false;
+    app.settings.page = crate::SettingsPage::Shortcuts;
+    let _ = app.run_command_action(crate::keymap::Action::ExplainAll);
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, crate::SettingsPage::LanguageModel);
+}
+
 /// The status bar's target picker is there for a file whose dimming the
 /// platform decides — Rust's, Go's, Haskell's — and not for one whose does
 /// not (C#'s, Erlang's: their files' own symbols decide).

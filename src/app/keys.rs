@@ -281,13 +281,14 @@ impl App {
                 Overlay::ProjectImports,
             ))),
             // The same as the ⋯ menu's row: cancel a running pass, else ask
-            // first what one costs (or ask for a key first).
+            // first what one costs (or ask for a key first, on the page of
+            // Settings that takes it).
             ExplainAll => self.update(if self.proj.explain.running {
                 Message::Explain(ExplainMsg::Cancel)
             } else if self.llm_available {
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
             } else {
-                Message::Settings(SettingsMsg::Open)
+                Message::Settings(SettingsMsg::OpenAt(SettingsPage::LanguageModel))
             }),
             ToggleDiff => self.update(Message::Editor(EditorMsg::ToggleDiff)),
             TimeTravel => self.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false })),

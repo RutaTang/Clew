@@ -1043,11 +1043,12 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
                 Some(Glyph::TextLines),
                 tr!("Explain All").into(),
                 slot(),
-                // Asking first what it costs (the setup sheet).
+                // Asking first what it costs (the setup sheet), or for a key,
+                // on the page of Settings that takes it.
                 Some(if app.llm_available {
                     Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
                 } else {
-                    Message::Settings(SettingsMsg::Open)
+                    Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
                 }),
             ),
             ToolsRow::Walkthrough => menu_item(

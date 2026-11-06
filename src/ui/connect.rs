@@ -1304,11 +1304,14 @@ fn toolchain_block<'a>(
     if let Some(choice) = chosen
         && (choice.args.is_some() || !found.iter().any(|c| c.command == choice.command))
     {
+        // The choice in effect: pressed again, it stays as it is. Chosen
+        // again as its bare program, it lost the user's arguments to clew's
+        // defaults, and its server restarted with them.
         rows.push(form::choice(
             tr!("Your own program"),
             Some(form::path(program_line(choice)).into()),
             true,
-            set(Some(choice.command.clone())),
+            choose_with(choices, |_| {}),
         ));
     }
     let about = match found.is_empty() {

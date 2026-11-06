@@ -58,15 +58,17 @@ impl App {
             LanguagesMsg::ChoicesLoaded { choices, .. } => {
                 self.proj.lang_choices = choices;
                 self.proj.inflight.choices_loading = false;
+                // The servers the setup sheet asked for, now that the
+                // choices that pick them are in — before those a file asked
+                // for meanwhile: on their way, they are waited for, where
+                // asked first they each popped the very download question
+                // the sheet's tick had answered, and the tick was skipped.
+                let mut tasks = vec![self.refresh_build_facts(), self.apply_pending_setup()];
                 // The servers asked for meanwhile — each waits on, if the
                 // project's other state is still loading, that instead.
-                let mut tasks = vec![self.refresh_build_facts()];
                 for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
                     tasks.push(self.ensure_lsp(&language));
                 }
-                // The servers the setup sheet asked for, now that the
-                // choices that pick them are in.
-                tasks.push(self.apply_pending_setup());
                 Task::batch(tasks)
             }
             LanguagesMsg::FactsLoaded { result, .. } => {

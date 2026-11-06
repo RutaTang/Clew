@@ -766,6 +766,10 @@ pub struct SettingsDraft {
     /// what tells "the user cleared this field" apart from "the user never
     /// touched it".
     pub ai_snapshot: (llm::Config, embed::Config),
+    /// A save of the AI fields failed since Settings opened, its reason said
+    /// in the status bar: the next Close closes, saved or not (see
+    /// `App::close_settings`).
+    pub save_failed: bool,
     /// The MCP servers and ACP agents section of the modal.
     pub integrations: crate::app::integrations::IntegrationsDraft,
     /// The page Settings shows: one feature's settings at a time.
@@ -838,6 +842,7 @@ impl Default for SettingsDraft {
                 ),
                 embed::Config::from_parts(String::new(), String::new(), String::new()),
             ),
+            save_failed: false,
             integrations: Default::default(),
             page: SettingsPage::Appearance,
         }

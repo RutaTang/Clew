@@ -394,6 +394,17 @@ impl App {
         // (`forget_project_state`). That includes any tree resync still awaited
         // for it (this tree IS the project's file list, and answers it better).
         let _ = self.forget_project_state();
+        // A first open's answer is carried out for the project it opened.
+        // Another opened instead (⌘O while it scanned) drops it: kept, it
+        // waited for that path to open again, however much later, and ran
+        // then with nothing on screen.
+        if self
+            .pending_setup
+            .as_ref()
+            .is_some_and(|intent| intent.root != result.root)
+        {
+            self.pending_setup = None;
+        }
         // Tracked files the ignore rules hid, listed anyway: marked in the tree.
         self.proj.tracked_ignored = report.tracked_ignored.into_iter().collect();
         // Persisted project state (`.clew/`) lives WITH the project. For a
@@ -565,6 +576,17 @@ impl App {
         // the project being left (its lsp.toml, its host): they go with it,
         // and a listing still in flight for it is dropped by its stamp.
         self.lsp_located.clear();
+        // So does the sheet asking about it ("Set Up Project…", Explain All
+        // asking first): left up, its Apply acted on whatever project was
+        // open by then, at a cost the user had not seen. A first open's sheet
+        // asks about the folder it names, not this project, and stays.
+        if self
+            .setup
+            .as_ref()
+            .is_some_and(|s| s.mode != crate::app::setup::SetupMode::Open)
+        {
+            self.setup = None;
+        }
         // The two note editors carry a project-RELATIVE anchor plus a draft
         // (which is why neither may outlive its project: Save re-resolves the
         // root when it runs); what the user typed into them is lost with the
@@ -778,11 +800,6 @@ impl App {
                 Err(e) => problems.push(e),
             }
         }
-        // Language servers asked for before `lsp.toml` was known.
-        for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
-            tasks.push(self.ensure_lsp(&language));
-        }
-
         // Derived caches: whatever this session already produced is newer.
         if let Some(problem) = state.explain_problem {
             problems.push(problem);
@@ -836,6 +853,13 @@ impl App {
         // What the setup sheet asked for, now that the explanations it
         // would redo are known.
         tasks.push(self.apply_pending_setup());
+        // Language servers asked for before `lsp.toml` was known — after the
+        // sheet's: a server it fetches is on its way, and is waited for.
+        // Asked first, each popped the very download question the sheet's
+        // tick had answered, and the tick was skipped.
+        for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
+            tasks.push(self.ensure_lsp(&language));
+        }
         Task::batch(tasks)
     }
 
@@ -1105,6 +1129,17 @@ impl App {
             }
             ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
             ProjectMsg::SetupShow(mode) => {
+                // A first open's sheet is answered first. There is one sheet:
+                // replaced (⌘⇧E reaches under it), the first open's question
+                // read "Checking the project…" for good, and its Open lost
+                // what it had ticked.
+                if self
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s.mode == crate::app::setup::SetupMode::Open)
+                {
+                    return Task::none();
+                }
                 // Explaining needs a key: without one, Settings, where it
                 // goes (the config may have changed since the flag was set).
                 if mode == crate::app::setup::SetupMode::Explain

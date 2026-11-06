@@ -168,11 +168,15 @@ impl App {
         let discarded = self.forget_project_state();
         self.pending_scan_root = None;
         self.scanning = false;
-        // A folder awaiting consent, or a file waiting to open once a scan
+        // A folder awaiting consent (and its sheet), a first open's answer
+        // waiting for its project, or a file waiting to open once a scan
         // lands, names a path on the host being left. Kept, Allow would trust
         // — and open — the same path on the host being connected to, which is
-        // another machine's project.
+        // another machine's project, and the answer would be carried out
+        // there: its downloads, and a paid Explain All pass.
         self.pending_consent = None;
+        self.setup = None;
+        self.pending_setup = None;
         self.pending_open = None;
         // A new transport instance: late messages still queued from the old
         // one (its key differs, but its channel already held them) carry the

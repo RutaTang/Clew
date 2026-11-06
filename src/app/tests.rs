@@ -18809,7 +18809,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
             ToolsRow::ExplainAll => vec![
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain)),
-                Message::Settings(SettingsMsg::Open),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
                 Message::Explain(ExplainMsg::Cancel),
             ],
             ToolsRow::SetUp => vec![Message::Project(ProjectMsg::SetupShow(

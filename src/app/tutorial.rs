@@ -20,7 +20,7 @@ pub(crate) fn closes_tools_menu(message: &Message) -> bool {
             | Message::Project(ProjectMsg::OpenFolderPressed)
             | Message::Connect(ConnectMsg::Open)
             | Message::Explain(ExplainMsg::Cancel)
-            | Message::Settings(SettingsMsg::Open)
+            | Message::Settings(SettingsMsg::Open | SettingsMsg::OpenAt(_))
             | Message::Explain(ExplainMsg::Project)
             | Message::Project(ProjectMsg::SetupShow(_))
             | Message::Window(WindowMsg::SidebarTabPicked(_))

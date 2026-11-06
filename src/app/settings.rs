@@ -88,6 +88,7 @@ impl App {
                 self.settings.embed_base_url.clone(),
             ),
         );
+        self.settings.save_failed = false;
         self.settings.integrations.note = None;
         self.refresh_integrations();
         self.settings.open = true;
@@ -187,7 +188,10 @@ impl App {
                 // agent turns) — keep it in step with the new settings.
                 self.send_ai_config();
             }
-            Err(e) => self.status = tr!("Could not save settings: {error}", error = e),
+            Err(e) => {
+                self.status = tr!("Could not save settings: {error}", error = e);
+                self.settings.save_failed = true;
+            }
         }
         Task::none()
     }
@@ -240,10 +244,17 @@ impl App {
     /// saved when they were edited (a failed save leaves it open, its
     /// reason in the status bar); the appearance, the voice and the
     /// languages were saved as they changed.
+    ///
+    /// A save that fails again, its failure already said, closes all the
+    /// same, the reason left in the status bar. Held open each time,
+    /// Settings could not be left — by ×, Esc or a click outside — while
+    /// `config.toml` could not be written (a typo in it, its lock held),
+    /// until the file was fixed outside clew.
     pub(crate) fn close_settings(&mut self) -> Task<Message> {
         if self.settings_drafts_changed() {
+            let said = self.settings.save_failed;
             let _ = self.on_settings_saved();
-            if self.settings.open {
+            if self.settings.open && !said {
                 return Task::none();
             }
         }
@@ -380,11 +391,29 @@ impl App {
             }
             SettingsMsg::Close => self.close_settings(),
             SettingsMsg::ProviderPicked(p) => {
-                // Switching provider resets model/base_url to that provider's
-                // defaults (the user can still edit them).
+                // The drop-down sends the provider already picked too: that
+                // changes nothing. It used to put the provider's defaults over
+                // a model and base URL of the user's own, which closing
+                // Settings then saved.
+                if p == self.settings.provider {
+                    return Task::none();
+                }
                 self.settings.provider = p;
-                self.settings.model = p.default_model().to_string();
-                self.settings.base_url = p.default_base_url().to_string();
+                // Back to the provider Settings opened on: its model and base
+                // URL as they were then, so a wrong pick undone costs nothing.
+                // Another provider: its defaults (the user can still edit
+                // them).
+                let (model, base_url) = match &self.settings.ai_snapshot.0 {
+                    opened if opened.provider == p => {
+                        (opened.model.clone(), opened.base_url.clone())
+                    }
+                    _ => (
+                        p.default_model().to_string(),
+                        p.default_base_url().to_string(),
+                    ),
+                };
+                self.settings.model = model;
+                self.settings.base_url = base_url;
                 Task::none()
             }
             SettingsMsg::KeyChanged(s) => {
@@ -498,5 +527,91 @@ mod tests {
 
         drop(_env);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The provider drop-down sends the provider already picked as well:
+    /// picking it again changes nothing, and going back to it after a wrong
+    /// pick brings back its model and base URL. Both used to put the
+    /// provider's defaults over a model and gateway of the user's own — and
+    /// Settings has no Cancel: closing it saved them.
+    #[test]
+    fn picking_the_provider_again_keeps_the_users_model_and_base_url() {
+        use crate::app::tests::{blank_app, data_dir_override, test_dir};
+        let dir = test_dir("settings-provider-again");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = data_dir_override(&dir);
+        let config = "[llm]\nprovider = \"anthropic\"\napi_key = \"sk\"\n\
+                      model = \"claude-x-custom\"\nbase_url = \"https://gateway.corp/v1\"\n";
+        std::fs::write(dir.join("config.toml"), config).unwrap();
+        let mut app = blank_app();
+        let _ = app.update(Message::Settings(SettingsMsg::Open));
+        let users = |app: &App| (app.settings.model.clone(), app.settings.base_url.clone());
+        let own = (
+            "claude-x-custom".to_string(),
+            "https://gateway.corp/v1".to_string(),
+        );
+        assert_eq!(users(&app), own);
+
+        let pick = |app: &mut App, p| {
+            let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(p)));
+        };
+        pick(&mut app, llm::Provider::Anthropic);
+        assert_eq!(users(&app), own, "picked again");
+        pick(&mut app, llm::Provider::OpenAI);
+        assert_eq!(
+            app.settings.model,
+            llm::Provider::OpenAI.default_model(),
+            "another provider starts from its defaults"
+        );
+        pick(&mut app, llm::Provider::Anthropic);
+        assert_eq!(users(&app), own, "a wrong pick undone");
+        assert!(!app.settings_drafts_changed());
+        let _ = app.update(Message::Settings(SettingsMsg::Close));
+        assert!(!app.settings.open);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            config,
+            "nothing changed, nothing written"
+        );
+    }
+
+    /// A save that fails — `config.toml` holds a typo — keeps Settings open
+    /// once, its reason said, so what was typed is not lost unseen; closing
+    /// again closes. Every way out used to repeat the failed save, and
+    /// Settings could not be left until the file was fixed outside clew.
+    #[test]
+    fn settings_close_after_a_failed_save_has_been_said() {
+        use crate::app::tests::{blank_app, data_dir_override, test_dir};
+        let dir = test_dir("settings-save-fails");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = data_dir_override(&dir);
+        let broken = "[llm\napi_key = \"sk\"\n";
+        std::fs::write(dir.join("config.toml"), broken).unwrap();
+        let mut app = blank_app();
+        for _ in 0..2 {
+            let _ = app.update(Message::Settings(SettingsMsg::Open));
+            app.settings.key = "pasted".into();
+            let _ = app.update(Message::Settings(SettingsMsg::Close));
+            assert!(app.settings.open, "the failure is said first");
+            assert!(
+                app.status.contains("Could not save settings"),
+                "{}",
+                app.status
+            );
+            let _ = app.update(Message::Settings(SettingsMsg::Close));
+            assert!(!app.settings.open, "Settings cannot be left");
+            assert!(
+                app.status.contains("Could not save settings"),
+                "{}",
+                app.status
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            broken,
+            "the user's bytes are theirs to fix"
+        );
     }
 }
