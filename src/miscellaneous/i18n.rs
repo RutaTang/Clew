@@ -1626,11 +1626,28 @@ mod tests {
                             let plain = |w: &str| {
                                 !w.is_empty() && w.chars().all(|c| c.is_ascii_alphabetic())
                             };
-                            words.len() == 3
-                                && plain(words[0])
-                                && words[1].strip_suffix(':').is_some_and(plain)
-                                && words[2].starts_with('{')
-                                && words[2].find('}') == Some(words[2].len() - 1)
+                            let place = |w: &str| {
+                                let w = w.trim_matches('`');
+                                w.starts_with('{') && w.find('}') == Some(w.len() - 1)
+                            };
+                            match words.as_slice() {
+                                // "git failed: {stderr}"
+                                [first, second, why] => {
+                                    plain(first)
+                                        && second.strip_suffix(':').is_some_and(plain)
+                                        && place(why)
+                                        && !why.contains('`')
+                                }
+                                // "MCP server `{name}`: {why}"
+                                [first, second, named, why] => {
+                                    plain(first)
+                                        && plain(second)
+                                        && named.strip_suffix(':').is_some_and(place)
+                                        && place(why)
+                                        && !why.contains('`')
+                                }
+                                _ => false,
+                            }
                         };
                         if (reads_as_a_sentence(&said) || short_with_why) && !plain_braces {
                             written.insert(as_template(&said));
