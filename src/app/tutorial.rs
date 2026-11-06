@@ -403,10 +403,31 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     v
 }
 
+/// The layout a tour began from ([`App::on_tutorial_exit`] gives it back).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TourLayout {
+    left: bool,
+    right: bool,
+    bottom: bool,
+    ask: AskView,
+    sidebar: SidebarTab,
+}
+
 impl App {
     /// Begin the tour at step 0 (from the ⋯ menu, which the dispatcher has
     /// already closed).
     pub(crate) fn on_tutorial_start(&mut self) -> Task<Message> {
+        // The reader's own layout, to give back at the end (a tour started
+        // again while one runs keeps the first one's).
+        if self.tutorial.is_none() {
+            self.tutorial_layout = Some(TourLayout {
+                left: self.show_left_sidebar,
+                right: self.show_right_panel,
+                bottom: self.show_bottom,
+                ask: self.ask_view,
+                sidebar: self.sidebar,
+            });
+        }
         self.tutorial = Some(0);
         self.apply_tutorial_demo()
     }
@@ -422,16 +443,27 @@ impl App {
             return Task::none();
         }
         if next >= total {
-            self.tutorial = None;
-            return Task::none();
+            return self.on_tutorial_exit();
         }
         self.tutorial = Some(next as usize);
         self.apply_tutorial_demo()
     }
 
-    /// End the tour.
+    /// End the tour, the reader's layout as it was before it: each step set
+    /// the whole layout its spotlight needed, and the last one's stayed —
+    /// the margin hidden, the sidebar on another view, a menu open.
     pub(crate) fn on_tutorial_exit(&mut self) -> Task<Message> {
         self.tutorial = None;
+        self.close_menus();
+        self.show_tools_menu = false;
+        self.show_view_menu = false;
+        if let Some(layout) = self.tutorial_layout.take() {
+            self.show_left_sidebar = layout.left;
+            self.show_right_panel = layout.right;
+            self.show_bottom = layout.bottom;
+            self.ask_view = layout.ask;
+            self.sidebar = layout.sidebar;
+        }
         Task::none()
     }
 

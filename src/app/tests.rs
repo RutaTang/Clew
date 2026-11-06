@@ -24117,6 +24117,29 @@ fn an_unchecked_summary_is_marked_in_the_hover() {
     assert!(shown.starts_with(crate::app::UNCHECKED_MARK), "{shown}");
 }
 
+/// A tour gives the reader's layout back when it ends — skipped or walked
+/// to its end: it left the margin hidden, the sidebar on another view.
+#[test]
+fn the_tour_gives_the_layout_back() {
+    let mut app = scanned_app("tour-layout");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.show_right_panel = true;
+    app.sidebar = SidebarTab::Marks;
+    for end in [
+        Message::Tutorial(TutorialMsg::Exit),
+        Message::Tutorial(TutorialMsg::Step(1_000)),
+    ] {
+        let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+        let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
+        assert!(app.tutorial.is_some());
+        let _ = app.update(end);
+        assert!(app.tutorial.is_none());
+        assert!(app.show_right_panel, "the margin stayed hidden");
+        assert_eq!(app.sidebar, SidebarTab::Marks);
+        assert!(!app.show_tools_menu);
+    }
+}
+
 /// Go to Line before its number is typed says what to type, and Enter then
 /// stays put: it opened the project's first file.
 #[test]

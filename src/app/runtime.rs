@@ -163,6 +163,7 @@ impl App {
             waiting_said: None,
             main_window: None,
             tutorial: None,
+            tutorial_layout: None,
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,

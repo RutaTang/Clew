@@ -1151,6 +1151,8 @@ pub struct App {
     /// The interactive tutorial: the current step index while a tour is running,
     /// `None` when idle (see `crate::app::tutorial`).
     pub tutorial: Option<usize>,
+    /// The layout the running tour began from, given back when it ends.
+    pub(crate) tutorial_layout: Option<crate::app::tutorial::TourLayout>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
     /// The app menu of Windows and Linux (the ☰ in the top bar) is open.
