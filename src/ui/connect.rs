@@ -209,19 +209,18 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 .on_press(Message::Window(WindowMsg::RebindResetAll)),
         );
     }
-    header = header
-        .push(
-            button(text("Save").size(ts::BODY))
-                .style(theme::primary_button)
-                .padding([3, 14])
-                .on_press(Message::Settings(SettingsMsg::Saved)),
-        )
-        .push(
-            button(text("Close").size(ts::BODY))
-                .style(theme::toolbar_button)
-                .padding([3, 12])
-                .on_press(Message::Settings(SettingsMsg::Close)),
-        );
+    // No Save: what is changed here is kept — as it changes, or (a typed
+    // field) as Settings closes.
+    header = header.push(chrome_tip(
+        button(container(glyph::icon(Glyph::Close, theme::fg_muted(), 14.0)).center(Fill))
+            .style(theme::icon_button(false))
+            .width(CLOSE_SIDE)
+            .height(CLOSE_SIDE)
+            .padding(0)
+            .on_press(Message::Settings(SettingsMsg::Close)),
+        "Close",
+        Some("Esc".to_string()),
+    ));
 
     let nav_item = |p: SettingsPage| -> Element<'_, Message> {
         let on = p == page;
@@ -304,6 +303,9 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Backdrop::Dim(Some(Message::Settings(SettingsMsg::Close))),
     )
 }
+
+/// Side of Settings' close button.
+const CLOSE_SIDE: f32 = 28.0;
 
 /// The glyph beside a page in Settings' list.
 fn settings_glyph(page: SettingsPage) -> Glyph {

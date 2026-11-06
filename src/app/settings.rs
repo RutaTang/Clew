@@ -85,13 +85,6 @@ impl App {
                 self.settings.embed_base_url.clone(),
             ),
         );
-        // Capture the stored appearance so theme changes can preview live and
-        // revert on Close-without-Save (see `restore_theme_snapshot`).
-        self.settings.theme_snapshot = (
-            self.theme_pref,
-            theme::current_light().id,
-            theme::current_dark().id,
-        );
         self.settings.integrations.note = None;
         self.refresh_integrations();
         self.settings.open = true;
@@ -109,15 +102,6 @@ impl App {
         // as the modal opened, which another window may have overtaken, while
         // this is what the config says one instant before we change it.
         let space_before = embed::stored_space();
-        // Commit the previewed appearance (applied live but not persisted while
-        // the modal was open) and refresh the snapshot so Close won't revert it.
-        // A failed write is appended to whatever the AI half reports below.
-        let theme_saved = theme::save(self.theme_pref);
-        self.settings.theme_snapshot = (
-            self.theme_pref,
-            theme::current_light().id,
-            theme::current_dark().id,
-        );
         let cfg = llm::Config::from_parts(
             self.settings.provider,
             self.settings.key.clone(),
@@ -131,11 +115,11 @@ impl App {
         );
         // Written as an EDIT of what the modal was opened with, not as a
         // wholesale replacement of both sections: this form's values are as
-        // old as the modal, and Save is also the only way to commit a theme
-        // change, so a Save the user believed only changed the theme wrote a
-        // stale blank over an API key another window had stored in between —
-        // and `send_ai_config` below then revoked it on the server too. A
-        // field another writer has changed since is kept, and named.
+        // old as the modal, so a save the user believed changed something
+        // else wrote a stale blank over an API key another window had stored
+        // in between — and `send_ai_config` below then revoked it on the
+        // server too. A field another writer has changed since is kept, and
+        // named.
         let saved = cfg
             .save_from(&self.settings.ai_snapshot.0)
             .and_then(|mut kept| {
@@ -194,27 +178,65 @@ impl App {
             }
             Err(e) => self.status = format!("Save failed: {e}"),
         }
-        if let Err(e) = theme_saved {
-            self.status
-                .push_str(&format!(" — the appearance setting was not saved: {e}"));
+        Task::none()
+    }
+
+    /// Whether the AI fields differ from what the form was filled with:
+    /// closing then saves them, and with none changed writes nothing.
+    pub(crate) fn settings_drafts_changed(&self) -> bool {
+        let (chat, embedding) = &self.settings.ai_snapshot;
+        let now = llm::Config::from_parts(
+            self.settings.provider,
+            self.settings.key.clone(),
+            self.settings.model.clone(),
+            self.settings.base_url.clone(),
+        );
+        let embed_now = embed::Config::from_parts(
+            self.settings.embed_key.clone(),
+            self.settings.embed_model.clone(),
+            self.settings.embed_base_url.clone(),
+        );
+        now.provider != chat.provider
+            || now.api_key != chat.api_key
+            || now.model != chat.model
+            || now.base_url != chat.base_url
+            || embed_now.api_key != embedding.api_key
+            || embed_now.model != embedding.model
+            || embed_now.base_url != embedding.base_url
+    }
+
+    /// Put Settings away, keeping what was changed in it: the AI fields
+    /// saved when they were edited (a failed save leaves it open, its
+    /// reason in the status bar); the appearance, the voice and the
+    /// languages were saved as they changed.
+    pub(crate) fn close_settings(&mut self) -> Task<Message> {
+        if self.settings_drafts_changed() {
+            let _ = self.on_settings_saved();
+            if self.settings.open {
+                return Task::none();
+            }
         }
+        self.settings.open = false;
+        self.rebinding = None;
+        self.keymap_notice = None;
+        // A model's failed download is said under it, in here; once
+        // Settings is closed it has been read, and it goes.
+        self.voice.download_errors.clear();
+        // Back to reading, as the finder's close does: the motions the
+        // form took from the code are the code's again.
+        self.code_focused = true;
         Task::none()
     }
 
     /// Apply a new appearance preference: switch the palette, re-color any cached
-    /// diagrams so an open explanation follows the change, and persist it.
-    ///
-    /// While the Settings modal is open the change is a live preview only —
-    /// persistence is deferred to Save (Close reverts). Elsewhere (menu bar,
-    /// shortcut) it commits immediately.
+    /// diagrams so an open explanation follows the change, and persist it —
+    /// from Settings as from the menu bar: Settings saves as it changes.
     pub(crate) fn set_theme(&mut self, pref: theme::ThemePref) {
         self.theme_pref = pref;
         theme::apply_pref(pref);
         self.restyle_svgs();
         self.status = format!("Appearance: {}", pref.label());
-        if !self.settings.open {
-            self.persist_theme();
-        }
+        self.persist_theme();
     }
 
     /// Write the appearance settings to `config.toml`, saying so when that
@@ -245,9 +267,8 @@ impl App {
         }
     }
 
-    /// Apply a light- or dark-theme selection and re-color cached diagrams.
-    /// Like [`Self::set_theme`], persistence is deferred to Save while the
-    /// Settings modal is open (these pickers only live there).
+    /// Apply a light- or dark-theme selection, re-color cached diagrams and
+    /// persist it, as [`Self::set_theme`] does.
     pub(crate) fn set_theme_variant(&mut self, id: &str, is_light: bool) {
         if is_light {
             theme::set_light_theme(id);
@@ -255,26 +276,7 @@ impl App {
             theme::set_dark_theme(id);
         }
         self.restyle_svgs();
-        if !self.settings.open {
-            self.persist_theme();
-        }
-    }
-
-    /// Restore the appearance captured when the Settings modal opened. Used when
-    /// it closes without saving, so a previewed theme reverts to the stored one.
-    /// Runtime-only: the stored config already holds the snapshot (a preview
-    /// never persisted), so this just re-points the live palette at it.
-    pub(crate) fn restore_theme_snapshot(&mut self) {
-        let (pref, light, dark) = self.settings.theme_snapshot;
-        theme::set_light_theme(light);
-        theme::set_dark_theme(dark);
-        self.theme_pref = pref;
-        theme::apply_pref(pref);
-        self.restyle_svgs();
-        // Drop the "Appearance: …" note left by the discarded preview.
-        if self.status.starts_with("Appearance:") {
-            self.status.clear();
-        }
+        self.persist_theme();
     }
 }
 
@@ -326,20 +328,7 @@ impl App {
                 self.keymap_notice = None;
                 Task::none()
             }
-            SettingsMsg::Close => {
-                // Closing without Save discards any previewed theme change.
-                self.restore_theme_snapshot();
-                self.settings.open = false;
-                self.rebinding = None;
-                self.keymap_notice = None;
-                // A model's failed download is said under it, in here; once
-                // Settings is closed it has been read, and it goes.
-                self.voice.download_errors.clear();
-                // Back to reading, as the finder's close does: the motions
-                // the form took from the code are the code's again.
-                self.code_focused = true;
-                Task::none()
-            }
+            SettingsMsg::Close => self.close_settings(),
             SettingsMsg::ProviderPicked(p) => {
                 // Switching provider resets model/base_url to that provider's
                 // defaults (the user can still edit them).

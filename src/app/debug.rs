@@ -749,12 +749,10 @@ impl App {
             eprintln!("[clew] may be lost with the window: {}", sent.line());
         }
         self.quitting = true;
-        // An appearance previewed in its Settings and never saved goes with
-        // it, as Close discards it: the appearance is the process's, and the
-        // other windows, told of the preview, kept painting it — and wrote it
-        // to the config with their next appearance change.
+        // Settings open as the window goes: closed as Close closes it, what
+        // was typed in it kept.
         if self.settings.open {
-            self.restore_theme_snapshot();
+            let _ = self.close_settings();
             self.settings.open = false;
         }
         // The update download is this window's too, and iced keeps draining a

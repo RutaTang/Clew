@@ -754,20 +754,17 @@ pub struct SettingsDraft {
     pub key_from_env: bool,
     /// As `key_from_env`, for the embeddings endpoint (`OPENAI_API_KEY`).
     pub embed_key_from_env: bool,
-    /// The appearance captured when the modal opened: (mode, light-theme id,
-    /// dark-theme id). Theme changes in the modal preview live but only commit on
-    /// Save; Close restores this snapshot. Set in `on_open_settings`.
-    pub theme_snapshot: (theme::ThemePref, &'static str, &'static str),
-    /// The two AI configs as the modal pre-filled them, so Save can write only
-    /// the fields the user actually changed.
+    /// The two AI configs as the modal pre-filled them, so a save writes only
+    /// the fields the user actually changed — and closing with none changed
+    /// writes nothing.
     ///
-    /// The form is read from storage when the modal OPENS and written back on
-    /// Save, and Save is also the only way to commit a theme change — so a
-    /// window whose modal had been open since before another window stored an
-    /// API key wrote its own stale blank over that key, and pushed
-    /// `chat: None` to its server on top. Comparing against this snapshot
-    /// inside the config lock (`llm::Config::save_from`) is what tells "the
-    /// user cleared this field" apart from "the user never touched it".
+    /// The form is read from storage when the modal OPENS and written back
+    /// as it closes — so a window whose modal had been open since before
+    /// another window stored an API key wrote its own stale blank over that
+    /// key, and pushed `chat: None` to its server on top. Comparing against
+    /// this snapshot inside the config lock (`llm::Config::save_from`) is
+    /// what tells "the user cleared this field" apart from "the user never
+    /// touched it".
     pub ai_snapshot: (llm::Config, embed::Config),
     /// The MCP servers and ACP agents section of the modal.
     pub integrations: crate::app::integrations::IntegrationsDraft,
@@ -829,7 +826,6 @@ impl Default for SettingsDraft {
             embed_base_url: String::new(),
             key_from_env: false,
             embed_key_from_env: false,
-            theme_snapshot: (theme::ThemePref::System, "", ""),
             // Replaced with what was read from storage the moment the modal
             // opens; nothing saves from a modal that was never opened.
             ai_snapshot: (

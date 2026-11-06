@@ -2495,30 +2495,45 @@ fn a_launch_path_need_not_be_utf8() {
 
 /// Settings opened again while open — ⌘, again, or an action that asks
 /// for a key — leave the form as it stands: refilled, a key typed and not
-/// saved was lost, and the appearance Close goes back to became the one
-/// being previewed. And a window closed with Settings open puts back the
-/// appearance its preview changed, as Close does.
+/// yet saved was lost. Settings has no Save: what was typed is kept as it
+/// closes — by Close, and with the window — and closing with nothing typed
+/// writes nothing.
 #[test]
-fn settings_opened_again_or_closed_with_the_window_keep_what_was_there() {
-    use crate::theme::ThemePref;
+fn settings_keep_what_was_typed_as_they_close() {
+    let dir = test_dir("settings-close-keeps");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _env = data_dir_override(&dir);
     let mut app = blank_app();
     let _ = app.update(Message::Settings(SettingsMsg::Open));
-    let saved = app.settings.theme_snapshot;
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(!app.settings.open);
+    assert!(
+        !dir.join("config.toml").exists(),
+        "nothing typed, nothing written"
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
     app.settings.key = "typed, not saved".into();
-    let preview = if saved.0 == ThemePref::Light {
-        ThemePref::Dark
-    } else {
-        ThemePref::Light
-    };
-    let _ = app.update(Message::Settings(SettingsMsg::SetThemePref(preview)));
     let _ = app.update(Message::Settings(SettingsMsg::Open));
     assert_eq!(app.settings.key, "typed, not saved");
-    assert_eq!(app.settings.theme_snapshot, saved, "the saved appearance");
-    // The window goes, Settings open, the preview on.
-    assert_eq!(app.theme_pref, preview, "precondition: previewed");
-    let _ = app.on_window_closed();
-    assert_eq!(app.theme_pref, saved.0, "the preview went with the window");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
     assert!(!app.settings.open);
+    assert_eq!(
+        llm::Config::stored_key(),
+        "typed, not saved",
+        "kept by Close"
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    app.settings.key = "typed as the window closed".into();
+    let _ = app.on_window_closed();
+    assert!(!app.settings.open);
+    assert_eq!(
+        llm::Config::stored_key(),
+        "typed as the window closed",
+        "kept with the window"
+    );
 }
 
 /// A trail waiting to be written behind the one running when the window
@@ -29679,10 +29694,10 @@ fn a_poisoned_reply_map_still_routes_replies() {
 }
 
 /// A16 / D1-22: the appearance is applied on screen before it is written, so
-/// a write that fails says so — from the menu, where it is committed at once,
-/// and from Settings' Save, appended to what the AI half reports — instead of
-/// looking saved until the next launch reverts it. (The preference picked is
-/// the one in effect, so no other test sees the palette move.)
+/// a write that fails says so — from the menu and from Settings, each
+/// committing it at once — instead of looking saved until the next launch
+/// reverts it. (The preference picked is the one in effect, so no other
+/// test sees the palette move.)
 #[test]
 fn a_failed_appearance_write_is_reported() {
     let dir = test_dir("theme-save-fails");
@@ -29700,11 +29715,12 @@ fn a_failed_appearance_write_is_reported() {
         "{}",
         app.status
     );
+    app.status.clear();
     let _ = app.update(Message::Settings(SettingsMsg::Open));
     let _ = app.update(Message::Settings(SettingsMsg::SetThemePref(pref)));
-    let _ = app.update(Message::Settings(SettingsMsg::Saved));
     assert!(
-        app.status.contains("the appearance setting was not saved"),
+        app.status
+            .starts_with("Could not save the appearance setting"),
         "{}",
         app.status
     );
