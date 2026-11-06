@@ -1165,6 +1165,25 @@ impl<'a, Message> CodeView<'a, Message> {
         n
     }
 
+    /// The leading spaces of `line`, or `None` when it is blank (nothing
+    /// but spaces) or out of range.
+    fn indent_of(&self, line: usize) -> Option<usize> {
+        let l = self.lines.get(line)?;
+        let mut n = 0;
+        for (frag, _) in &l.spans {
+            for c in frag.chars() {
+                if c == ' ' {
+                    n += 1;
+                } else if c.is_whitespace() {
+                    continue;
+                } else {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
     /// The minimap band rectangle pinned to the right of the viewport, or `None`
     /// when there is no minimap callback or the file is too short to warrant one.
     fn minimap_band(&self, viewport: &Rectangle) -> Option<Rectangle> {
@@ -1973,6 +1992,10 @@ where
         } else {
             (((viewport.y + sticky_h - bounds.y) / lh).ceil() as usize).max(first)
         };
+        // The file's indent width, read once a draw from its first lines.
+        let indent_step = self.indent_guides.then(|| {
+            indent_step((0..self.lines.len().min(INDENT_SAMPLE_LINES)).map(|l| self.indent_of(l)))
+        });
         for row in first..last {
             if row < first_shown_row {
                 continue;
@@ -2072,11 +2095,12 @@ where
             }
 
             // Indentation guides: a faint vertical line at each enclosing
-            // indent level (columns 4, 8, … strictly inside this line's indent).
-            if self.indent_guides {
-                let ind = self.line_indent(i);
-                let mut level = 4;
-                while level < ind {
+            // indent level — columns 0, step, 2·step, … strictly inside this
+            // line's indent (`guide_levels`), a blank line inside a block
+            // carrying its block's.
+            if let Some(step) = indent_step {
+                let ind = guide_indent(|l| self.indent_of(l), i, self.lines.len());
+                for level in (0..ind).step_by(step) {
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -2089,7 +2113,6 @@ where
                         },
                         theme::with_alpha(theme::dim(), 0.45),
                     );
-                    level += 4;
                 }
             }
 
@@ -2932,12 +2955,95 @@ impl<'a, Message: 'a> From<CodeView<'a, Message>> for Element<'a, Message> {
     }
 }
 
+/// How many of a file's first lines [`indent_step`] reads.
+const INDENT_SAMPLE_LINES: usize = 2000;
+/// How far a blank line looks for code above and below it
+/// ([`guide_indent`]).
+const GUIDE_BLANK_REACH: usize = 64;
+
+/// The columns one level of indentation takes in a file, from the indents
+/// of its lines (`None` for a blank one): the step its indent most often
+/// grows by from one line of code to the next — 2 in a file indented by
+/// two, where guides every 4 columns marked every other level. 4 when
+/// nothing is indented.
+pub(crate) fn indent_step(indents: impl Iterator<Item = Option<usize>>) -> usize {
+    let mut grew_by = [0usize; 9];
+    let mut prev: Option<usize> = None;
+    for ind in indents.flatten() {
+        if let Some(p) = prev
+            && ind > p
+            && ind - p < grew_by.len()
+        {
+            grew_by[ind - p] += 1;
+        }
+        prev = Some(ind);
+    }
+    // A step of one is alignment (a continued argument), not a level.
+    (2..grew_by.len())
+        .filter(|&s| grew_by[s] > 0)
+        .max_by_key(|&s| (grew_by[s], std::cmp::Reverse(s)))
+        .unwrap_or(4)
+}
+
+/// The indent line `i`'s guides stop at: its own, or for a blank line the
+/// block it sits in — the lesser of the code above and below it — so the
+/// guides run through a blank line in a function rather than break at it.
+pub(crate) fn guide_indent(
+    indent_of: impl Fn(usize) -> Option<usize>,
+    i: usize,
+    len: usize,
+) -> usize {
+    if let Some(ind) = indent_of(i) {
+        return ind;
+    }
+    let above = (i.saturating_sub(GUIDE_BLANK_REACH)..i)
+        .rev()
+        .find_map(&indent_of);
+    let below = (i + 1..len.min(i + 1 + GUIDE_BLANK_REACH)).find_map(&indent_of);
+    match (above, below) {
+        (Some(a), Some(b)) => a.min(b),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     /// The minimap draws bars at least 2px apart with a gap between them —
     /// a long file used to fill the band solid — and a short file's rows
     /// each get their own bar.
+    /// A file indented by two has a guide at every level; one indented
+    /// by four, every four columns; alignment by one is not a level.
+    #[test]
+    fn the_indent_step_is_the_files_own() {
+        let step = |lines: &[Option<usize>]| super::indent_step(lines.iter().copied());
+        assert_eq!(step(&[Some(0), Some(2), Some(4), Some(2), Some(0)]), 2);
+        assert_eq!(step(&[Some(0), Some(4), None, Some(8), Some(4)]), 4);
+        assert_eq!(step(&[Some(0), Some(4), Some(5), Some(4), Some(8)]), 4);
+        assert_eq!(step(&[Some(0), Some(0)]), 4, "nothing indented");
+        assert_eq!(step(&[]), 4);
+    }
+
+    /// A blank line in a block keeps the block's guides; one between two
+    /// top-level definitions has none; code keeps its own indent.
+    #[test]
+    fn a_blank_line_carries_its_blocks_guides() {
+        // def f():      0
+        //     a = 1     4
+        //               blank, in f
+        //     return a  4
+        //               blank, between f and g
+        // def g():      0
+        let lines = [Some(0), Some(4), None, Some(4), None, Some(0)];
+        let at = |i| super::guide_indent(|l| lines.get(l).copied().flatten(), i, lines.len());
+        assert_eq!(at(1), 4);
+        assert_eq!(at(2), 4);
+        assert_eq!(at(4), 0);
+        assert_eq!(at(5), 0);
+        // Its guides: one, at column 0 — the first level is drawn too.
+        assert_eq!((0..at(2)).step_by(4).collect::<Vec<_>>(), [0]);
+    }
+
     #[test]
     fn minimap_bars_keep_a_gap_between_them() {
         // A long file: half a pixel a row; every fourth row, 1.2px bars.

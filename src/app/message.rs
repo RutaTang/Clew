@@ -733,6 +733,9 @@ pub enum CallsMsg {
     Requested,
     /// Open the call hierarchy from the right-click context menu.
     FromMenu,
+    /// Open the call hierarchy of the function the margin's Calls is about
+    /// (its "Open the call hierarchy").
+    OfFunction,
     /// `prepareCallHierarchy` resolved the anchor item(s). `token` was minted
     /// at request time; only the awaited request may install a tree.
     Prepared {
@@ -2248,6 +2251,7 @@ impl CallsMsg {
             }
             CallsMsg::Requested
             | CallsMsg::FromMenu
+            | CallsMsg::OfFunction
             | CallsMsg::ExpandNode { .. }
             | CallsMsg::Direction
             | CallsMsg::ExpandAll => None,

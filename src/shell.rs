@@ -3742,6 +3742,27 @@ mod tests {
     /// debuggee ran on with no window left to stop them. The teardown must
     /// also stay window-scoped: another window's session is not this one's to
     /// end.
+    /// A chord held with Ctrl or ⌘ types nothing into a focused field: on
+    /// X11 winit gives Ctrl+= the text "=", and the search field took
+    /// "a" to "a=0" as Ctrl+= and Ctrl+0 zoomed. AltGr — Ctrl+Alt on
+    /// Windows — still types its character, and a plain or shifted key its.
+    #[test]
+    fn a_ctrl_or_command_chord_types_nothing() {
+        use iced::keyboard::Modifiers;
+        use iced_winit::conversion::typed_text;
+        let text = |s: &str, m: Modifiers| typed_text(Some(s.into()), m).map(|t| t.to_string());
+        assert_eq!(text("=", Modifiers::CTRL), None);
+        assert_eq!(text("+", Modifiers::CTRL | Modifiers::SHIFT), None);
+        assert_eq!(text("0", Modifiers::LOGO), None);
+        assert_eq!(
+            text("€", Modifiers::CTRL | Modifiers::ALT),
+            Some("€".into())
+        );
+        assert_eq!(text("=", Modifiers::empty()), Some("=".into()));
+        assert_eq!(text("+", Modifiers::SHIFT), Some("+".into()));
+        assert_eq!(text("ø", Modifiers::ALT), Some("ø".into()));
+    }
+
     #[test]
     fn closing_a_window_ends_its_debug_run_and_leaves_the_other_windows_alone() {
         let mut clew = test_clew();

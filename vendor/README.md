@@ -94,7 +94,11 @@ where the same window made without one showed them clear. The patch
 (`window_attributes` in `src/conversion.rs`) makes every transparent
 window on Windows without one (winit's `with_no_redirection_bitmap`): it
 shows only what is presented through a visual, and Clew makes a window
-transparent there only when it presents so (`app::corners`). Its manifest
+transparent there only when it presents so (`app::corners`). A second patch
+(`typed_text`, same file) gives a key pressed with Ctrl (but not AltGr, which
+Windows reports as Ctrl+Alt) or the logo key no text: winit gives the text
+with every modifier applied, and on X11 Ctrl+= and Ctrl+0 came as "=" and
+"0", which a focused text input typed while the chord zoomed. Its manifest
 allows the `deprecated` lint, whose warnings (a method of `futures` the
 release calls) were capped while it came from crates.io. The release
 ships no license file; its manifest declares MIT, and `LICENSE` is iced's.

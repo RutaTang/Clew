@@ -5111,6 +5111,61 @@ fn debug_variables_open_into_their_children_for_the_stop() {
     assert!(app.debug.open_vars.is_empty() && app.debug.var_children.is_empty());
 }
 
+/// The status line stops saying the debugger runs once the run is over:
+/// "Debugger running…" stayed under a program that had exited. What else
+/// was said since is left; and a run going on after a stop says so again.
+#[test]
+fn a_finished_run_is_no_longer_said_to_be_running() {
+    let mut app = scanned_app("debug-said");
+    let session = || DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    };
+    app.debug_run = 1;
+    let event = |app: &mut App, event| {
+        let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+            stamp: app.transport_stamp(),
+            run: 1,
+            event,
+        }));
+    };
+    for end in [dap::DapEvent::Exited { code: 0 }, dap::DapEvent::Terminated] {
+        app.debug.session = Some(session());
+        app.say_debug_state(tr!("Debugger running…").into());
+        event(&mut app, end);
+        assert!(app.status.is_empty(), "{}", app.status);
+    }
+
+    // Something said since is not the debugger's to take down.
+    app.debug.session = Some(session());
+    app.say_debug_state(tr!("Debugger running…").into());
+    app.status = "Saved the note".into();
+    event(&mut app, dap::DapEvent::Terminated);
+    assert_eq!(app.status, "Saved the note");
+
+    // Stopped, then running again.
+    app.debug.session = Some(session());
+    app.say_debug_state(tr!("Stopped: {reason}", reason = "breakpoint"));
+    event(
+        &mut app,
+        dap::DapEvent::Continued {
+            thread_id: None,
+            all_threads: true,
+        },
+    );
+    assert_eq!(app.status, tr!("Debugger running…"));
+}
+
 /// A late event from a stopped debug run must not land on the next session.
 #[test]
 fn stale_debug_events_are_dropped() {
@@ -8165,6 +8220,54 @@ fn enter_in_the_file_filter_opens_its_first_file() {
     app.file_filter = "nothing-like-this".into();
     let sent = run_task(app.update(Message::Window(WindowMsg::FileFilterSubmitted)));
     assert!(sent.is_empty(), "{sent:?}");
+}
+
+/// The margin's "Open the call hierarchy" asks about the function the margin
+/// shows, at its name where it is defined: it only switched the sidebar to
+/// Calls, which stayed empty — and the caret, inside the body, is on some
+/// other name, so asking there would not do either.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_the_call_hierarchy_asks_about_the_function_shown() {
+    let mut app = scanned_app("calls-of-function");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    let (client, server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client));
+    // The caret on `x` in `Point { x: 0.0 }`, in origin()'s body.
+    app.proj.panes[0].as_mut().unwrap().caret = Some((3, 12));
+    app.proj.explain.view = Some(explain::Node::Function {
+        file: root.join("src/lib.rs"),
+        name: "origin".into(),
+        ordinal: 0,
+    });
+    app.sidebar = SidebarTab::Files;
+    let asked = app.update(Message::Calls(CallsMsg::OfFunction));
+    assert_eq!(app.sidebar, SidebarTab::Calls);
+    assert!(app.show_left_sidebar);
+    for m in run_task(asked) {
+        let _ = app.update(m);
+    }
+    // `pub fn origin() -> Point {`: line 2, from 0.
+    assert_eq!(server.prepared(2), 1, "{}", app.status);
+    assert_eq!(server.prepared(3), 0, "asked about the caret's line");
+    assert_eq!(
+        super::calls::name_col("pub fn origin() -> Point {", "origin"),
+        Some(7)
+    );
+    assert_eq!(
+        super::calls::name_col("    def total(self):", "total"),
+        Some(8)
+    );
+    // A whole word only: `subtotal` is not `total`.
+    assert_eq!(
+        super::calls::name_col("def subtotal(): total", "total"),
+        Some(16)
+    );
+    assert_eq!(super::calls::name_col("\tdef f():", "f"), Some(8));
 }
 
 /// The Escape that clears the Files filter does only that. The same press

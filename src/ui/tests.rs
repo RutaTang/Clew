@@ -8467,6 +8467,69 @@ fn the_window_rounds_its_corners_where_they_can_be_left_clear() {
     assert_eq!(app.window_radius, 0.0);
 }
 
+/// A diff's added lines and hunk headers are tinted across the pane, not
+/// only as far as its longest line: a diff of short lines showed a strip of
+/// green a third of the way across and nothing after it.
+#[test]
+fn a_diff_tints_its_rows_across_the_pane() {
+    use crate::git::{DiffKind, DiffLine};
+    use iced::advanced::renderer::Headless as _;
+    let size = iced::Size::new(800.0, 200.0);
+    let mut app = reader_app();
+    let line = |kind, text: &str| DiffLine {
+        kind,
+        text: text.into(),
+    };
+    let diff = crate::DiffState::new(
+        PathBuf::from("/p/src/main.py"),
+        "src/main.py".into(),
+        vec![
+            line(DiffKind::Hunk, "@@ -1,1 +1,2 @@"),
+            line(DiffKind::Context, " main()"),
+            line(DiffKind::Add, "+# local change"),
+        ],
+    );
+    app.proj.diff = Some(diff);
+    let d = app.proj.diff.as_ref().unwrap();
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(
+        super::panes::diff_view(&app, 0, d),
+        size,
+        Cache::default(),
+        &mut renderer,
+    );
+    let _ = ui.update(
+        &[Event::Window(window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        ))],
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut Vec::new(),
+    );
+    ui.draw(
+        &mut renderer,
+        &crate::theme::app_theme(),
+        &iced::advanced::renderer::Style {
+            text_color: iced::Color::BLACK,
+        },
+        mouse::Cursor::Unavailable,
+    );
+    let rgba = renderer.screenshot(
+        iced::Size::new(size.width as u32, size.height as u32),
+        1.0,
+        iced::Color::TRANSPARENT,
+    );
+    // Far right of the pane, below its header: the tinted rows are there,
+    // and the context line between them is not.
+    let x = size.width as u32 - 20;
+    let tinted = (40..size.height as u32)
+        .filter(|&y| rgba[((y * size.width as u32 + x) * 4 + 3) as usize] > 0)
+        .count();
+    assert!(tinted >= 20, "{tinted} tinted pixels at x = {x}");
+    assert!(tinted < 120, "the whole column is tinted: {tinted}");
+}
+
 /// Rounded, the window's corners are clear and what is inside them is not
 /// — whatever is over the window: every layer reaching a corner (the
 /// chrome, the status bar, a dialog's veil, the tutorial's) rounds its

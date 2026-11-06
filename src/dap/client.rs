@@ -89,6 +89,9 @@ pub struct DapClient {
     /// (where the same port number may be someone else's). `None` over stdio.
     addr: Option<SocketAddr>,
     timeout: Duration,
+    /// Set by the first [`Self::disconnect`] of any of this session's
+    /// handles: the session is asked to end once.
+    disconnected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DapClient {
@@ -291,6 +294,7 @@ impl DapClient {
             rpc,
             addr,
             timeout: REQUEST_TIMEOUT,
+            disconnected: Default::default(),
         };
         (client, events)
     }
@@ -556,8 +560,18 @@ impl DapClient {
             .to_string())
     }
 
-    /// End the session and kill the debuggee.
+    /// End the session and kill the debuggee — once, whichever handle asks
+    /// first. Stop asked twice, from the app and from the run's own stream as
+    /// it saw the run end, and debugpy, which closes its connection once it
+    /// has answered one, failed on the second and exited with code 1: its
+    /// traceback came up on the status line.
     pub async fn disconnect(&self) -> Result<(), String> {
+        if self
+            .disconnected
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
         let within = self.timeout.min(DISCONNECT_TIMEOUT);
         self.request_within("disconnect", json!({ "terminateDebuggee": true }), within)
             .await
@@ -1349,6 +1363,32 @@ mod tests {
             }
             other => panic!("expected the child-session request, got {other:?}"),
         }
+    }
+
+    /// A session is asked to disconnect once, however many of its handles
+    /// ask: Stop asked from the app and from the run's stream, and debugpy
+    /// crashed on the second.
+    #[tokio::test]
+    async fn a_session_is_disconnected_once() {
+        let (client, _events, mut adapter) = manual_adapter().await;
+        let other = client.clone();
+        let first = tokio::spawn(async move { client.disconnect().await });
+        let asked = adapter.next().await;
+        assert_eq!(asked["command"], "disconnect");
+        adapter
+            .send(
+                json!({"seq": 1, "type": "response", "request_seq": asked["seq"],
+                         "command": "disconnect", "success": true}),
+            )
+            .await;
+        assert_eq!(first.await.unwrap(), Ok(()));
+        assert_eq!(other.disconnect().await, Ok(()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), adapter.next())
+                .await
+                .is_err(),
+            "asked to disconnect again"
+        );
     }
 
     /// An adapter that does not answer `disconnect` is waited for a few

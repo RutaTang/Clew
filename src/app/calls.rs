@@ -69,6 +69,38 @@ impl App {
         )
     }
 
+    /// The call hierarchy of the function the margin's Calls shows, asked of
+    /// its name where it is defined — as a right-click there asks. The
+    /// margin's "Open the call hierarchy" only showed the sidebar's Calls,
+    /// empty until a function was right-clicked; the caret, inside the body,
+    /// is on some other name.
+    pub(crate) fn call_hierarchy_of_function(&mut self) -> Task<Message> {
+        let show = self.on_sidebar_tab_picked(SidebarTab::Calls);
+        let Some(explain::Node::Function {
+            file,
+            name,
+            ordinal,
+        }) = self.proj.explain.view.clone()
+        else {
+            return show;
+        };
+        let at = self.proj.panes.iter().enumerate().find_map(|(pane, v)| {
+            let v = v.as_ref().filter(|v| v.abs == file)?;
+            let sym = v.symbols.iter().find(|s| {
+                s.name == name
+                    && matches!(s.kind.as_str(), "function" | "method")
+                    && outline::fn_ordinal(&v.symbols, s) == ordinal
+            })?;
+            let line = sym.line.checked_sub(1)?;
+            let col = name_col(v.source_line(line)?, &name)?;
+            Some((pane, line, col))
+        });
+        match at {
+            Some((pane, line, col)) => Task::batch([show, self.call_hierarchy_at(pane, line, col)]),
+            None => show,
+        }
+    }
+
     pub(crate) fn on_call_hierarchy_prepared(
         &mut self,
         token: u64,
@@ -284,6 +316,7 @@ impl App {
                 };
                 self.call_hierarchy_at(menu.pane, menu.line, menu.col)
             }
+            CallsMsg::OfFunction => self.call_hierarchy_of_function(),
             CallsMsg::Prepared {
                 token,
                 direction,
@@ -319,4 +352,16 @@ impl App {
             CallsMsg::ExpandAll => self.on_call_hierarchy_expand_all(),
         }
     }
+}
+
+/// The display column where `name` first stands as a whole word on `line` —
+/// a function's name on the line that defines it, past `def`, `fn`, `pub`.
+pub(crate) fn name_col(line: &str, name: &str) -> Option<usize> {
+    let word = |c: char| c.is_alphanumeric() || c == '_';
+    line.match_indices(name)
+        .find(|&(at, _)| {
+            !line[..at].chars().next_back().is_some_and(word)
+                && !line[at + name.len()..].chars().next().is_some_and(word)
+        })
+        .map(|(at, _)| viewer::Col::from_offset(line, at, viewer::PositionEncoding::Utf8).0)
 }

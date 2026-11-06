@@ -106,6 +106,10 @@ objc2-foundation = { version = "0.3", features = [
 [dev-dependencies]
 iced_test = "0.14"
 socket2 = "0.6"
+# The vendored windowing: the text a key press types (`shell`'s tests), and
+# on Windows the window `app::corners` makes as iced makes Clew's. The
+# version the build already carries.
+iced_winit = "0.14"
 
 # A borderless window of winit's kind, asked of Windows' compositor to be
 # rounded, and one made as iced makes Clew's, drawn by iced's renderer and
@@ -113,7 +117,6 @@ socket2 = "0.6"
 # windows of a Clew started by a test (tests/relaunch.rs): the versions the
 # build already carries.
 [target.'cfg(windows)'.dev-dependencies]
-iced_winit = "0.14"
 windows-sys = { version = "0.61", features = [
     "Wdk_System_SystemServices",
     "Win32_Graphics_Dwm",

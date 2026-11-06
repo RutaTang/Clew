@@ -200,6 +200,11 @@ pub struct DebugState {
     /// Why the program last stopped (the adapter's reason), for the stop
     /// the trace records once its stack arrives.
     pub pending_reason: String,
+    /// What the debugger last put on the status line about the run —
+    /// "Debugger running…", "Stopped: breakpoint" — taken down when the run
+    /// ends: it went on saying "Debugger running…" over a program that had
+    /// exited.
+    pub said: Option<String>,
     /// Watch expressions (persist across stops/sessions).
     pub watches: Vec<String>,
     /// The add-watch input box.

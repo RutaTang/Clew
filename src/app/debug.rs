@@ -1109,6 +1109,20 @@ impl App {
 
     /// The session on screen is running: what the panel showed of another
     /// session's stop is gone.
+    /// Put `text` on the status line as what the run is doing now.
+    pub(crate) fn say_debug_state(&mut self, text: String) {
+        self.debug.said = Some(text.clone());
+        self.status = text;
+    }
+
+    /// Take down what [`say_debug_state`](Self::say_debug_state) said, if
+    /// the status line still says it: the run has ended.
+    fn unsay_debug_state(&mut self) {
+        if let Some(said) = self.debug.said.take() {
+            self.settle_status(&[&said]);
+        }
+    }
+
     fn show_debug_running(&mut self) {
         if let Some(session) = self.debug.session.as_mut() {
             session.status = DebugStatus::Running;
@@ -1147,7 +1161,10 @@ impl App {
             return Task::none();
         };
         let tid = s.thread_id.unwrap_or(0);
-        self.status = tr!("Stopped: {reason}", reason = stop_reason_label(&s.reason));
+        self.say_debug_state(tr!(
+            "Stopped: {reason}",
+            reason = stop_reason_label(&s.reason)
+        ));
         let run = self.debug_run;
         // This is a new stop: whatever is still loading for the previous
         // one is stale, and this fetch is stamped with the new identity.
@@ -1428,6 +1445,10 @@ impl App {
                 // behind, an inspection still in flight for it would arrive and
                 // fill the panel back in while the program is running.
                 self.bump_debug_stop();
+                // Running again: "Stopped: breakpoint" is no longer so.
+                if self.debug.said.as_deref().is_some_and(|s| s == self.status) {
+                    self.say_debug_state(tr!("Debugger running…").into());
+                }
                 self.show_paused_debug_session()
             }
             // Telemetry is the adapter's own ("ptvsd", "debugpy"), never the
@@ -1448,6 +1469,7 @@ impl App {
                 // The program is gone: an inspection still loading for the last
                 // stop must not resurrect a location in a dead process.
                 self.bump_debug_stop();
+                self.unsay_debug_state();
                 Task::none()
             }
             dap::DapEvent::Terminated => {
@@ -1456,6 +1478,7 @@ impl App {
                 session.frames.clear();
                 session.scopes.clear();
                 self.bump_debug_stop();
+                self.unsay_debug_state();
                 Task::none()
             }
             dap::DapEvent::StartDebugging(config) => {
@@ -2310,7 +2333,7 @@ impl App {
                     let children = self.debug_children();
                     children.own = Some((client, hover_safe));
                     children.active = crate::app::state::OWN_SESSION;
-                    self.status = tr!("Debugger running…").into();
+                    self.say_debug_state(tr!("Debugger running…").into());
                     self.bump_debug_stop();
                 }
                 Task::none()
@@ -2352,7 +2375,7 @@ impl App {
                         // "terminated", the next Start tore it down.
                         if status == Some(DebugStatus::Terminated) {
                             self.show_debug_running();
-                            self.status = tr!("Debugger running…").into();
+                            self.say_debug_state(tr!("Debugger running…").into());
                         }
                     }
                 }

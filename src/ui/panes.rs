@@ -504,81 +504,92 @@ pub(crate) fn diff_view<'a>(
     // content width and long lines become reachable via horizontal scroll —
     // measured, not guessed: the real monospace advance, and the columns the
     // widest line is drawn in (counted once, when the diff arrived — see
-    // `DiffState::new` — not per repaint).
-    let run_width = row_width(
+    // `DiffState::new` — not per repaint). Never narrower than the pane: a
+    // diff of short lines tinted its added lines and hunk headers only as
+    // far as its longest line, a third of the way across.
+    let content_width = row_width(
         d.max_cols,
         mono_advance(app.font_size),
         DIFF_PAD_LEFT + DIFF_PAD_RIGHT,
     );
-    // One text block per run of same-kind lines rather than a widget per line:
-    // the same picture (runs stack with no gap) at a fraction of the layout
-    // work on a long diff — prepared once, borrowed here.
-    let mut rows: Vec<Element<'a, Message>> = Vec::new();
-    for run in &d.runs {
-        let (bg, fg) = match run.kind {
-            DiffKind::Add => (
-                Some(theme::with_alpha(theme::success(), 0.14)),
-                theme::success(),
-            ),
-            DiffKind::Remove => (
-                Some(theme::with_alpha(theme::danger(), 0.14)),
-                theme::danger(),
-            ),
-            DiffKind::Hunk => (
-                Some(theme::with_alpha(theme::accent(), 0.12)),
-                theme::accent(),
-            ),
-            DiffKind::Header => (None, theme::dim()),
-            DiffKind::Context => (None, theme::fg()),
-        };
-        let mut cell = container(
-            text(run.text.as_str())
-                .font(crate::fonts::CODE)
-                .size(app.font_size)
-                .color(fg)
-                .wrapping(Wrapping::None),
-        )
-        .width(Length::Fixed(run_width))
-        .padding(Padding {
-            top: 0.0,
-            right: DIFF_PAD_RIGHT,
-            bottom: 0.0,
-            left: DIFF_PAD_LEFT,
-        });
-        if let Some(bg) = bg {
-            cell = cell.style(move |_: &iced::Theme| container::Style {
-                background: Some(bg.into()),
-                ..container::Style::default()
+    let body = iced::widget::responsive(move |size| {
+        let run_width = diff_run_width(content_width, size.width);
+        // One text block per run of same-kind lines rather than a widget per
+        // line: the same picture (runs stack with no gap) at a fraction of the
+        // layout work on a long diff — prepared once, borrowed here.
+        let mut rows: Vec<Element<'a, Message>> = Vec::new();
+        for run in &d.runs {
+            let (bg, fg) = match run.kind {
+                DiffKind::Add => (
+                    Some(theme::with_alpha(theme::success(), 0.14)),
+                    theme::success(),
+                ),
+                DiffKind::Remove => (
+                    Some(theme::with_alpha(theme::danger(), 0.14)),
+                    theme::danger(),
+                ),
+                DiffKind::Hunk => (
+                    Some(theme::with_alpha(theme::accent(), 0.12)),
+                    theme::accent(),
+                ),
+                DiffKind::Header => (None, theme::dim()),
+                DiffKind::Context => (None, theme::fg()),
+            };
+            let mut cell = container(
+                text(run.text.as_str())
+                    .font(crate::fonts::CODE)
+                    .size(app.font_size)
+                    .color(fg)
+                    .wrapping(Wrapping::None),
+            )
+            .width(Length::Fixed(run_width))
+            .padding(Padding {
+                top: 0.0,
+                right: DIFF_PAD_RIGHT,
+                bottom: 0.0,
+                left: DIFF_PAD_LEFT,
             });
+            if let Some(bg) = bg {
+                cell = cell.style(move |_: &iced::Theme| container::Style {
+                    background: Some(bg.into()),
+                    ..container::Style::default()
+                });
+            }
+            rows.push(cell.into());
         }
-        rows.push(cell.into());
-    }
-    if d.lines.len() > MAX_DIFF_ROWS {
-        rows.push(
-            text(trn!(
-                "… 1 more line",
-                "… {n} more lines",
-                d.lines.len() - MAX_DIFF_ROWS
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .into(),
-        );
-    }
+        if d.lines.len() > MAX_DIFF_ROWS {
+            rows.push(
+                text(trn!(
+                    "… 1 more line",
+                    "… {n} more lines",
+                    d.lines.len() - MAX_DIFF_ROWS
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into(),
+            );
+        }
 
-    // A walkthrough step can open its file here — the diff stays on for the
-    // file it was asked for — so the reader's scroll counts here as in the
-    // code this stands in for.
-    let body = reader_scroll(
-        scrollable(Column::with_children(rows).padding([4, 0]))
-            .direction(both_scroll())
-            .style(theme::overlay_scrollbar)
-            .width(Fill)
-            .height(Fill),
-        reader_scroll_report(app, pane, &d.abs),
-    );
+        // A walkthrough step can open its file here — the diff stays on for
+        // the file it was asked for — so the reader's scroll counts here as
+        // in the code this stands in for.
+        reader_scroll(
+            scrollable(Column::with_children(rows).padding([4, 0]))
+                .direction(both_scroll())
+                .style(theme::overlay_scrollbar)
+                .width(Fill)
+                .height(Fill),
+            reader_scroll_report(app, pane, &d.abs),
+        )
+    });
 
     column![header, body].width(Fill).height(Fill).into()
+}
+
+/// The width of a diff row: the widest line's (`content`), or the pane's
+/// (`visible`) when the lines are all shorter, so a row's tint spans it.
+pub(crate) fn diff_run_width(content: f32, visible: f32) -> f32 {
+    content.max(visible)
 }
 
 /// The most diff lines the view renders (the rest are summarized).
@@ -1665,9 +1676,7 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
     .style(theme::menu_row)
     .width(Fill)
     .padding([6, 8])
-    .on_press(Message::Window(WindowMsg::SidebarTabPicked(
-        SidebarTab::Calls,
-    )));
+    .on_press(Message::Calls(CallsMsg::OfFunction));
     scrollable(
         column![Column::with_children(rows).spacing(8).width(Fill), open,]
             .spacing(10)
