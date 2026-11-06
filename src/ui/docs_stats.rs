@@ -31,11 +31,10 @@ pub(crate) fn overview_map_canvas<'a>(
 }
 
 pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    let (glyph, color) = crate::icons::file_icon(name);
+    // The file tree's own quiet file mark, not a coloured one per language.
     container(
         row![
-            icon_text(glyph, color, 12.0),
+            container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
             // In the order it is spelled (`highlight::in_order`).
             text(crate::highlight::in_order(rel))
                 .size(ts::SMALL)

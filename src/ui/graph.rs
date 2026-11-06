@@ -458,6 +458,10 @@ pub(crate) struct GraphState {
     /// flings it with, easing toward the idle spin (or to rest).
     yaw_vel: f32,
     pitch_vel: f32,
+    /// The idle spin's rate as the turn eases toward it: itself eased in
+    /// (`LEAD_TAU`), so a spin starting or stopping builds its acceleration
+    /// from nought instead of jumping to it.
+    spin_goal: f32,
     /// The camera angles at the last tick, for the rate an orbit drag turns.
     last_yaw: f32,
     last_pitch: f32,
@@ -485,6 +489,9 @@ pub(crate) struct GraphState {
     /// How fast `shift` is moving: it rides a spring, so a re-centring
     /// starts from rest.
     shift_vel: (f32, f32),
+    /// Where the spring takes `shift`: its target, eased in (`LEAD_TAU`),
+    /// so a re-centring builds its acceleration from nought.
+    shift_goal: (f32, f32),
     /// The framing has not caught up with the graph yet.
     framing: bool,
     /// Which side of its node each label is drawn on: 0 right, 1 left,
@@ -529,6 +536,7 @@ impl Default for GraphState {
             flattening: false,
             yaw_vel: 0.0,
             pitch_vel: 0.0,
+            spin_goal: 0.0,
             last_yaw: 0.6,
             last_pitch: 0.35,
             dim: 1.0,
@@ -542,6 +550,7 @@ impl Default for GraphState {
             fit_base: 0.0,
             shift: (0.0, 0.0),
             shift_vel: (0.0, 0.0),
+            shift_goal: (0.0, 0.0),
             framing: false,
             label_side: Vec::new(),
             label_side_target: Vec::new(),
@@ -597,6 +606,9 @@ const FRAME_TAU: f32 = 0.14;
 const LABEL_TAU: f32 = 0.11;
 const TURN_TAU: f32 = 0.55;
 const PITCH_TAU: f32 = 0.3;
+/// The lead-in a camera's start or stop eases its target in by, so the
+/// motion's acceleration builds from nought rather than jumping.
+const LEAD_TAU: f32 = 0.09;
 /// Turns of the spin the 3D framing is measured at, and the room it
 /// leaves for a node's farthest falling between two of them (cos of half
 /// a step, inverted, with a margin).
@@ -961,6 +973,7 @@ impl GraphCanvas<'_> {
             st.dim_t = 0.0;
             st.yaw_vel = 0.0;
             st.pitch_vel = 0.0;
+            st.spin_goal = 0.0;
             st.touch();
         }
         let switching = st.dim_t < 1.0;
@@ -994,9 +1007,13 @@ impl GraphCanvas<'_> {
             } else {
                 0.0
             };
-            st.yaw_vel += (spin - st.yaw_vel) * ease_step(dt, TURN_TAU);
+            st.spin_goal += (spin - st.spin_goal) * ease_step(dt, LEAD_TAU);
+            if (st.spin_goal - spin).abs() < 1e-4 {
+                st.spin_goal = spin;
+            }
+            st.yaw_vel += (st.spin_goal - st.yaw_vel) * ease_step(dt, TURN_TAU);
             st.pitch_vel *= 1.0 - ease_step(dt, PITCH_TAU);
-            if st.yaw_vel.abs() < 1e-3 && spin == 0.0 {
+            if st.yaw_vel.abs() < 1e-3 && st.spin_goal == 0.0 {
                 st.yaw_vel = 0.0;
             }
             if st.pitch_vel.abs() < 1e-3 {
@@ -1193,6 +1210,7 @@ impl GraphCanvas<'_> {
             st.center = center_to;
             st.shift = shift_to;
             st.shift_vel = (0.0, 0.0);
+            st.shift_goal = shift_to;
         } else {
             let step = ease_step(dt, FRAME_TAU);
             st.fit_base += (fit_to - st.fit_base) * step;
@@ -1200,10 +1218,17 @@ impl GraphCanvas<'_> {
                 *now += (to - *now) * step;
             }
             // The re-centring jumps its target when the camera starts or
-            // stops: a critically damped spring takes it there from rest.
-            let (x, vx) = spring(st.shift.0 - shift_to.0, st.shift_vel.0, SHIFT_RATE, dt);
-            let (y, vy) = spring(st.shift.1 - shift_to.1, st.shift_vel.1, SHIFT_RATE, dt);
-            st.shift = (shift_to.0 + x, shift_to.1 + y);
+            // stops: the target eased in, then a critically damped spring
+            // takes it there — from rest, its acceleration building.
+            let lead = ease_step(dt, LEAD_TAU);
+            let goal = (
+                st.shift_goal.0 + (shift_to.0 - st.shift_goal.0) * lead,
+                st.shift_goal.1 + (shift_to.1 - st.shift_goal.1) * lead,
+            );
+            st.shift_goal = goal;
+            let (x, vx) = spring(st.shift.0 - goal.0, st.shift_vel.0, SHIFT_RATE, dt);
+            let (y, vy) = spring(st.shift.1 - goal.1, st.shift_vel.1, SHIFT_RATE, dt);
+            st.shift = (goal.0 + x, goal.1 + y);
             st.shift_vel = (vx, vy);
         }
         let near_fit = (st.fit_base / fit_to - 1.0).abs() < 1e-3;
@@ -1211,13 +1236,16 @@ impl GraphCanvas<'_> {
         let near_shift = (st.shift.0 - shift_to.0).abs() < 0.05
             && (st.shift.1 - shift_to.1).abs() < 0.05
             && st.shift_vel.0.abs() < 0.5
-            && st.shift_vel.1.abs() < 0.5;
+            && st.shift_vel.1.abs() < 0.5
+            && (st.shift_goal.0 - shift_to.0).abs() < 0.05
+            && (st.shift_goal.1 - shift_to.1).abs() < 0.05;
         st.framing = !(near_fit && near_center && near_shift);
         if !st.framing {
             st.fit_base = fit_to;
             st.center = center_to;
             st.shift = shift_to;
             st.shift_vel = (0.0, 0.0);
+            st.shift_goal = shift_to;
         }
         st.fit_scale = st.fit_base.max(1e-4) * st.zoom;
         st.fit_off = (bounds.width * 0.5, bounds.height * 0.5);
@@ -1615,6 +1643,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 // A grab holds the camera: no fling or spin under the hand.
                 state.yaw_vel = 0.0;
                 state.pitch_vel = 0.0;
+                state.spin_goal = 0.0;
                 state.last_yaw = state.yaw;
                 state.last_pitch = state.pitch;
                 state.drag = match self.hit(cin, bounds, state) {

@@ -1007,7 +1007,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         let msg = if n >= crate::search::MAX_HITS {
             format!("{n}+ matches (capped)")
         } else {
-            format!("{n} matches")
+            crate::app::count_matches(n)
         };
         Some((msg, theme::dim()))
     } else {
@@ -1086,7 +1086,8 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 /// The TRAIL tab: the navigation history as a tree. Backtracking then exploring
 /// elsewhere branches (the old path is kept), so this is the full reading trail.
 /// Indentation follows the tree depth; nodes with children can be collapsed;
-/// click a node to jump. Scrolls both ways for deep/wide trees.
+/// click a node to jump. Rows are the panel's width, as the file tree's are;
+/// a name too long for it is cut at the edge.
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
     if visits.is_empty() {
@@ -1115,13 +1116,6 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // otherwise push the node (including the current one) off the panel's
         // right edge. Beyond the cap, depth stops adding indent.
         let indent = (v.depth.min(8) as f32) * 14.0;
-        let fname = v
-            .loc
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        let (glyph, gcolor) = crate::icons::file_icon(fname);
 
         // A collapse chevron for nodes with children (forks stand out in accent);
         // leaves get a fixed-width spacer so names still line up.
@@ -1165,8 +1159,8 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 space().width(indent),
                 toggle,
                 marker,
-                icon_text(glyph, gcolor, 12.0),
-                column![
+                container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
+                container(column![
                     text(loc_label(&v.loc, v.label.as_deref()))
                         .size(ts::BODY)
                         .font(if v.is_current {
@@ -1174,12 +1168,15 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                         } else {
                             crate::fonts::UI
                         })
-                        .color(theme::fg()),
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
                     text(rel_of(app, &v.loc.path))
                         .size(ts::CAPTION)
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
-                ],
+                ])
+                .width(Fill)
+                .clip(true),
             ]
             .spacing(6)
             .align_y(iced::Center),
@@ -1202,7 +1199,7 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     column![
         header,
         scrollable(Column::with_children(rows).spacing(1))
-            .direction(both_scroll())
+            .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]

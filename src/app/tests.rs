@@ -19595,7 +19595,7 @@ fn a_search_that_skipped_files_says_so() {
     assert_eq!(app.proj.search.hits.len(), 1);
     assert_eq!(app.proj.search.skipped.len(), 1);
     assert!(
-        app.status.contains("1 matches")
+        app.status.contains("1 match")
             && app.status.contains("3 files not searched")
             && app.status.contains("dump.sql"),
         "{}",

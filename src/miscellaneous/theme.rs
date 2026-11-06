@@ -50,11 +50,10 @@ pub struct Palette {
     pub border: Color,    // hard borders around elevated surfaces
     pub hairline: Color,  // 1px dividers
     // Colors used only inside the widget-style helpers below.
-    pub elevated: Color,       // floating modal panel background
-    pub on_accent: Color,      // text on an accent-filled button
-    pub accent_hover: Color,   // accent button, hovered/pressed
-    pub control_border: Color, // border of a filled neutral (secondary) button
-    pub scrollbar: Color,      // overlay scrollbar thumb
+    pub elevated: Color,     // floating modal panel background
+    pub on_accent: Color,    // text on an accent-filled button
+    pub accent_hover: Color, // accent button, hovered/pressed
+    pub scrollbar: Color,    // overlay scrollbar thumb
     // Semantic status colors mirrored into the iced palette.
     pub success: Color,
     pub warning: Color,
@@ -126,7 +125,6 @@ const CLEW_DARK_PAL: Palette = Palette {
     elevated: rgb(0x1c1c1f),
     on_accent: rgb(0x0b0b0f),
     accent_hover: rgb(0xa5a3f8),
-    control_border: rgb(0x3a3a40),
     scrollbar: rgb(0x8e8e96),
     success: rgb(0x4ade80),
     warning: rgb(0xfbbf24),
@@ -173,7 +171,6 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xffffff),
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x4b48c9),
-    control_border: rgb(0xd4d4d8),
     scrollbar: rgb(0xa1a1aa),
     success: rgb(0x16a34a),
     warning: rgb(0xb45309),
@@ -220,7 +217,6 @@ const ONE_DARK_PAL: Palette = Palette {
     elevated: rgb(0x2c313a),
     on_accent: rgb(0x1b1d23),
     accent_hover: rgb(0x539bd4),
-    control_border: rgb(0x3d4450),
     scrollbar: rgb(0x8a94a6),
     success: rgb(0x98c379),
     warning: rgb(0xe5c07b),
@@ -265,7 +261,6 @@ const ONE_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xffffff),
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x3467d6),
-    control_border: rgb(0xc3c8d0),
     scrollbar: rgb(0x9096a1),
     success: rgb(0x50a14f),
     warning: rgb(0xb26f00),
@@ -312,7 +307,6 @@ const GRUVBOX_DARK_PAL: Palette = Palette {
     elevated: rgb(0x3c3836),
     on_accent: rgb(0x1d2021),
     accent_hover: rgb(0x9fbdb0),
-    control_border: rgb(0x504945),
     scrollbar: rgb(0x7c6f64),
     success: rgb(0xb8bb26),
     warning: rgb(0xfabd2f),
@@ -357,7 +351,6 @@ const GRUVBOX_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xfbf1c7),
     on_accent: rgb(0xfbf1c7),
     accent_hover: rgb(0x05505f),
-    control_border: rgb(0xbdae93),
     scrollbar: rgb(0xa89984),
     success: rgb(0x79740e),
     warning: rgb(0xb57614),
@@ -406,7 +399,6 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xfaf4e2),
     on_accent: rgb(0xf4ecd8),
     accent_hover: rgb(0x305d8c),
-    control_border: rgb(0xcabf9f),
     scrollbar: rgb(0xb3a988),
     success: rgb(0x4c6b3c),
     warning: rgb(0xa5762f),
@@ -451,7 +443,6 @@ const PAPER_DARK_PAL: Palette = Palette {
     elevated: rgb(0x302921),
     on_accent: rgb(0x1f1a14),
     accent_hover: rgb(0x96b4c2),
-    control_border: rgb(0x443a2c),
     scrollbar: rgb(0x6a5f4a),
     success: rgb(0xa3b072),
     warning: rgb(0xd9a441),
@@ -500,7 +491,6 @@ const CYBERPUNK_PAL: Palette = Palette {
     elevated: rgb(0x16112b),
     on_accent: rgb(0x0a0816),
     accent_hover: rgb(0x5cf7ff),
-    control_border: rgb(0x352b5a),
     scrollbar: rgb(0x4a4080),
     success: rgb(0x00ff9f),
     warning: rgb(0xfcee0a),
@@ -1332,16 +1322,17 @@ pub fn with_shadow_scale<R>(scale: f32, draw: impl FnOnce() -> R) -> R {
     drawn
 }
 
-/// A tooltip: the design's dark bubble in either appearance (`tip`), its
-/// hairline edge in dark (`tipBorder`) and its shadow (`tipShadow`).
+/// A tooltip, in the window's own appearance: a white bubble with a
+/// hairline edge in light, the dark one in dark — not a dark bubble over a
+/// light window. Its shadow lifts it off what it covers.
 pub fn tip(_theme: &Theme) -> container::Style {
     let light = is_light();
     container::Style {
-        background: Some(if light { rgb(0x18181B) } else { rgb(0x2A2A2F) }.into()),
+        background: Some(if light { Color::WHITE } else { rgb(0x2A2A2F) }.into()),
         text_color: Some(tip_text()),
         border: Border {
             color: if light {
-                Color::TRANSPARENT
+                hairline()
             } else {
                 Color::from_rgba(1.0, 1.0, 1.0, 0.08)
             },
@@ -1349,7 +1340,7 @@ pub fn tip(_theme: &Theme) -> container::Style {
             radius: 8.0.into(),
         },
         shadow: iced::Shadow {
-            color: scrim(if light { 0.18 } else { 0.5 }),
+            color: scrim(if light { 0.14 } else { 0.5 }),
             offset: iced::Vector::new(0.0, if light { 6.0 } else { 8.0 }),
             blur_radius: if light { 20.0 } else { 24.0 },
         },
@@ -1357,20 +1348,22 @@ pub fn tip(_theme: &Theme) -> container::Style {
     }
 }
 
-/// A tooltip's words (`tipText`): light on its dark bubble.
+/// A tooltip's words (`tipText`): the window's own text colour.
 pub fn tip_text() -> Color {
-    if is_light() {
-        rgb(0xFAFAFA)
-    } else {
-        rgb(0xEDEDEF)
-    }
+    if is_light() { fg() } else { rgb(0xEDEDEF) }
 }
 
-/// A key of a tooltip's shortcut (`tipKey`): a wash of white on the bubble.
+/// A key of a tooltip's shortcut (`tipKey`): a wash over the bubble — of
+/// the text's colour on the light one, of white on the dark.
 pub fn tip_key(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(
-            Color::from_rgba(1.0, 1.0, 1.0, if is_light() { 0.14 } else { 0.10 }).into(),
+            if is_light() {
+                wash(0.07)
+            } else {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.10)
+            }
+            .into(),
         ),
         text_color: Some(tip_text()),
         border: Border {
@@ -2119,20 +2112,25 @@ pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Secondary action button — a filled neutral button with a subtle border, for
-/// the non-primary choice next to a `primary_button` (e.g. "Open Remote…").
+/// Secondary action button — the non-primary choice next to a
+/// `primary_button` (e.g. "Open Remote…"), or a field's own button ("Use",
+/// "Browse…"): the rounded well of a field ([`input`]), a shade deeper so
+/// it reads as something to press.
 pub fn secondary_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let bg = match status {
-        button::Status::Hovered | button::Status::Pressed => bg_active(),
-        _ => bg_hover(),
+    let light = is_light();
+    let (shade, text_color) = match status {
+        button::Status::Hovered => (if light { 0.075 } else { 0.09 }, fg()),
+        button::Status::Pressed => (if light { 0.11 } else { 0.13 }, fg()),
+        button::Status::Disabled => (if light { 0.03 } else { 0.04 }, dim()),
+        button::Status::Active => (if light { 0.05 } else { 0.065 }, fg()),
     };
     button::Style {
-        background: Some(bg.into()),
-        text_color: fg_bright(),
+        background: Some(wash(shade).into()),
+        text_color,
         border: Border {
-            radius: RADIUS.into(),
+            radius: 8.0.into(),
             width: 1.0,
-            color: active().control_border,
+            color: hairline(),
         },
         ..button::Style::default()
     }

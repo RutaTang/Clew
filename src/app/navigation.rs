@@ -117,6 +117,15 @@ pub(crate) mod preview_texts {
     }
 }
 
+/// "1 match", "2 matches".
+pub(crate) fn count_matches(n: usize) -> String {
+    if n == 1 {
+        "1 match".to_string()
+    } else {
+        format!("{n} matches")
+    }
+}
+
 /// The status line for a finished search: the match count (capped or not),
 /// and — when files could not be searched — how many, naming the first.
 pub(crate) fn search_status(
@@ -127,7 +136,7 @@ pub(crate) fn search_status(
     let matches = if hits >= search::MAX_HITS {
         format!("{hits}+ matches (capped)")
     } else {
-        format!("{hits} matches")
+        count_matches(hits)
     };
     match skipped.first() {
         None => matches,
