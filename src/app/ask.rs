@@ -218,6 +218,7 @@ impl App {
 
     /// Put Ask away — its pill too — the keyboard back with the code.
     pub(crate) fn close_ask(&mut self) {
+        self.ask_sessions_menu = false;
         self.ask_view = AskView::Closed;
         self.code_focused = true;
     }
@@ -225,6 +226,7 @@ impl App {
     /// Hide the card to its pill in the corner, the keyboard back with the
     /// code; the conversation is kept, a click on the pill away.
     pub(crate) fn hide_ask(&mut self) {
+        self.ask_sessions_menu = false;
         self.ask_view = AskView::Hidden;
         self.code_focused = true;
     }
@@ -233,6 +235,11 @@ impl App {
     /// its pill. `false` when it is not open, for Esc to do what else it
     /// does.
     pub(crate) fn step_ask_down(&mut self) -> bool {
+        // The menu of sessions first, over the card it opened on.
+        if self.ask_sessions_menu {
+            self.ask_sessions_menu = false;
+            return true;
+        }
         match self.ask_view {
             AskView::Expanded => self.ask_view = AskView::Compact,
             AskView::Compact => self.hide_ask(),
@@ -1009,6 +1016,8 @@ impl App {
         };
         let (prepared, task) = self.prepare_segments(&md);
         self.proj.ask_turns[idx].answer = prepared;
+        // Answered: the session is kept as it now stands.
+        self.keep_ask_session();
         let to_bottom = operation::scroll_to(
             ui::ask_scroll_id(),
             AbsoluteOffset {
@@ -1311,6 +1320,13 @@ impl App {
                 self.hide_ask();
                 Task::none()
             }
+            AskMsg::NewSession => self.new_ask_session(),
+            AskMsg::SessionsMenu(open) => {
+                self.ask_sessions_menu = open;
+                Task::none()
+            }
+            AskMsg::SwitchSession(id) => self.switch_ask_session(id),
+            AskMsg::DeleteSession(id) => self.delete_ask_session(id),
             AskMsg::Close => {
                 self.close_ask();
                 Task::none()
@@ -1358,6 +1374,10 @@ impl App {
                 let stop = self.stop_ask_streams();
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();
+                // Cleared, the session goes from the menu too.
+                if let Some(id) = self.proj.ask_session.take() {
+                    let _ = self.delete_ask_session(id);
+                }
                 // A new conversation with the ACP agent, too: its session
                 // holds the old one.
                 // Its settings go with it; the user's choices among them

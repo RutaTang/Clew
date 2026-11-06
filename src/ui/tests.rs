@@ -7359,7 +7359,9 @@ fn the_floating_ask_is_driven_from_the_screen() {
     app.ask_view = crate::AskView::Expanded;
     {
         let mut sim = sim_of(&app);
-        let question = text_at(&mut sim, |t| t == "where is the origin?", 0).unwrap();
+        // The first is the card's name — the session is named for its
+        // first question — the second the question's bubble.
+        let question = text_at(&mut sim, |t| t == "where is the origin?", 1).unwrap();
         let place = super::ask_place(&app).unwrap();
         // The card is centred; the question, a bubble, sits at its right.
         let left = (WINDOW.width - place.width) / 2.0;
@@ -7380,6 +7382,71 @@ fn the_floating_ask_is_driven_from_the_screen() {
         sent_by(sim).as_slice(),
         [Message::Ask(AskMsg::Shrink)]
     ));
+}
+
+/// The card is named for its session; its name opens the menu of
+/// sessions, which offers a new one and lists this project's, the one on
+/// screen marked, each saying when it was last asked in; a pick goes back to
+/// it, and + on the card starts a new one.
+#[test]
+fn the_card_names_its_session_and_lists_the_others() {
+    use crate::app::ask_sessions::{AskSession, SavedTurn, now};
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    let turn = || SavedTurn {
+        question: "q".into(),
+        spoken: false,
+        answer: "a".into(),
+    };
+    app.proj.ask_sessions = vec![
+        AskSession {
+            id: 1,
+            title: "Where is the origin?".into(),
+            updated: now() - 120,
+            turns: vec![turn()],
+        },
+        AskSession {
+            id: 2,
+            title: "How is a host connected?".into(),
+            updated: now() - 7_200,
+            turns: vec![turn(), turn()],
+        },
+    ];
+    app.proj.ask_session = Some(1);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Where is the origin?"), "the card's name");
+        assert!(
+            !shows(&mut sim, "How is a host connected?"),
+            "the menu is shut"
+        );
+    }
+    let sent = click(sim_of(&app), "Where is the origin?");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::SessionsMenu(true)))),
+        "{sent:?}"
+    );
+    app.ask_sessions_menu = true;
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "New session"));
+        assert!(shows(&mut sim, "How is a host connected?"));
+        assert!(shows(&mut sim, "2 min ago · 1 question"));
+        assert!(shows(&mut sim, "2 h ago · 2 questions"));
+    }
+    let sent = click(sim_of(&app), "How is a host connected?");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::SwitchSession(2)))),
+        "{sent:?}"
+    );
+    let sent = click(sim_of(&app), "New session");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::NewSession))),
+        "{sent:?}"
+    );
 }
 
 /// What voice is doing shows in Ask's corner, never in the field at the

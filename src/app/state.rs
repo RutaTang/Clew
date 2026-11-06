@@ -1102,6 +1102,8 @@ pub struct App {
     pub show_bottom: bool,
     /// Where the floating Ask window is.
     pub ask_view: AskView,
+    /// The menu of Ask's sessions, open under the card's title.
+    pub ask_sessions_menu: bool,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
     /// The debugger (DAP): the active session plus breakpoints and watches that
@@ -1880,6 +1882,11 @@ pub struct ProjectSession {
     /// turn it becomes is marked so. Typing in the input makes it typed.
     pub ask_spoken: bool,
     pub ask_turns: Vec<AskTurn>,
+    /// The project's Ask sessions, newest first, kept in its derived
+    /// directory (`app::ask_sessions`).
+    pub ask_sessions: Vec<crate::app::ask_sessions::AskSession>,
+    /// The session on screen, once something has been asked in it.
+    pub ask_session: Option<u64>,
     pub asking: bool,
     /// Code selections pinned as context, shown as chips above the input. They
     /// persist across turns until removed.
@@ -2116,6 +2123,8 @@ impl Default for ProjectSession {
             ask_input: Default::default(),
             ask_spoken: false,
             ask_turns: Default::default(),
+            ask_sessions: Default::default(),
+            ask_session: None,
             asking: Default::default(),
             ask_pins: Default::default(),
             acp: Default::default(),

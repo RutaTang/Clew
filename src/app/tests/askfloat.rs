@@ -205,3 +205,99 @@ fn the_tour_shows_the_ask_card() {
     assert_eq!(app.ask_view, AskView::Hidden);
     assert!(app.show_bottom, "the Debug step shows the debugger's panel");
 }
+
+/// An answered question as the stream that carried it ends: the turn on
+/// the card, finished.
+fn answered(app: &mut App, question: &str, answer: &str) {
+    let stream = app
+        .next_req_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream,
+        question: question.into(),
+        answer_md: answer.into(),
+        streaming: true,
+        ..Default::default()
+    });
+    app.proj.asking = true;
+    let _ = app.on_ask_stream_ended(stream, clew_protocol::StreamOutcome::Done);
+}
+
+/// Ask's sessions: an answer keeps the conversation as a session, named
+/// for its first question; a new session is an empty card, the last one in
+/// the menu; going back to one puts its questions and answers on the card;
+/// one forgotten, or cleared, goes from the menu; and they are kept in the
+/// project's own data, there when the project is opened again.
+#[test]
+fn ask_keeps_its_sessions() {
+    let mut app = scanned_app("ask-sessions");
+    let derived = app.proj.derived_dir.clone().expect("a derived dir");
+    let _ = std::fs::remove_file(derived.join("ask-sessions.json"));
+    app.proj.ask_sessions.clear();
+    assert_eq!(app.ask_session_title(), "New session");
+    answered(&mut app, "Where is the origin?", "In `origin.rs`.");
+    assert_eq!(app.proj.ask_sessions.len(), 1);
+    let first = app.proj.ask_session.expect("a session once answered");
+    assert_eq!(app.ask_session_title(), "Where is the origin?");
+    answered(&mut app, "And its tests?", "In `tests/`.");
+    assert_eq!(
+        app.proj.ask_sessions[0].turns.len(),
+        2,
+        "one session, two turns"
+    );
+
+    // A new session: an empty card, the last one in the menu.
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert!(app.proj.ask_turns.is_empty());
+    assert_eq!(app.proj.ask_session, None);
+    assert_eq!(app.ask_view, AskView::Compact, "the card, open on it");
+    assert_eq!(app.ask_session_title(), "New session");
+    answered(&mut app, "How is a host connected?", "Over SSH.");
+    assert_eq!(app.proj.ask_sessions.len(), 2);
+    assert_eq!(
+        app.proj.ask_sessions[0].title, "How is a host connected?",
+        "newest first"
+    );
+
+    // Back to the first: its questions and answers on the card.
+    let _ = app.update(Message::Ask(AskMsg::SessionsMenu(true)));
+    assert!(app.ask_sessions_menu);
+    let _ = app.update(Message::Ask(AskMsg::SwitchSession(first)));
+    assert!(!app.ask_sessions_menu, "the menu closes on a pick");
+    assert_eq!(app.proj.ask_session, Some(first));
+    let questions: Vec<&str> = app
+        .proj
+        .ask_turns
+        .iter()
+        .map(|t| t.question.as_str())
+        .collect();
+    assert_eq!(questions, ["Where is the origin?", "And its tests?"]);
+    assert_eq!(app.proj.ask_turns[0].answer_md, "In `origin.rs`.");
+    assert!(app.proj.ask_turns.iter().all(|t| !t.streaming));
+
+    // Kept in the project's own data: opened again, they are there.
+    let mut again = scanned_app("ask-sessions");
+    assert_eq!(again.proj.derived_dir, Some(derived.clone()));
+    assert_eq!(again.proj.ask_sessions.len(), 2);
+    assert_eq!(again.proj.ask_session, None, "the card starts on a new one");
+
+    // Forgotten from the menu; the one on screen cleared goes too.
+    let other = again.proj.ask_sessions[0].id;
+    let _ = again.update(Message::Ask(AskMsg::DeleteSession(other)));
+    assert_eq!(again.proj.ask_sessions.len(), 1);
+    let _ = again.update(Message::Ask(AskMsg::SwitchSession(first)));
+    let _ = again.update(Message::Ask(AskMsg::Clear));
+    assert!(again.proj.ask_sessions.is_empty());
+    assert!(again.proj.ask_turns.is_empty());
+    assert!(
+        crate::app::ask_sessions::load(&derived).is_empty(),
+        "forgotten on disk too"
+    );
+
+    // Esc closes the menu before it hides the card.
+    again.ask_view = AskView::Compact;
+    again.ask_sessions_menu = true;
+    assert!(again.step_ask_down());
+    assert!(!again.ask_sessions_menu);
+    assert_eq!(again.ask_view, AskView::Compact);
+}

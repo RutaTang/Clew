@@ -573,7 +573,12 @@ impl App {
                     send(Message::Explain(ExplainMsg::ToggleBlocks)),
                 );
             }
-            // Where the conversation is, and clearing it.
+            // Where the conversation is, its sessions, and clearing it.
+            add(
+                "Ask: New Session".into(),
+                None,
+                send(Message::Ask(AskMsg::NewSession)),
+            );
             if self.ask_view.is_open() {
                 add("Ask: Hide".into(), None, send(Message::Ask(AskMsg::Hide)));
             }

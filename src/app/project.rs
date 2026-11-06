@@ -350,6 +350,13 @@ impl App {
         self.proj.derived_dir =
             clew_core::derived::dir(self.connection.approval_host(), &result.root);
         let store = self.proj.derived_dir.clone();
+        // Ask's sessions in this project, kept beside its other derived
+        // files; the card starts on a new one.
+        self.proj.ask_sessions = store
+            .as_deref()
+            .map(crate::app::ask_sessions::load)
+            .unwrap_or_default();
+        self.proj.ask_session = None;
         // Land on the architecture-overview home (filled from the cache when
         // the project's state has loaded).
         self.proj.overview.showing = true;

@@ -562,7 +562,9 @@ const ASK_HEADER_PAD: Padding = Padding {
 /// approval is given up to half the card, the conversation over it what is
 /// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
-    ask_is_card(app)
+    // With its menu of sessions open, the card is as tall as it may be, so
+    // the menu is inside it.
+    ask_is_card(app) && !app.ask_sessions_menu
 }
 
 /// The card: its header (what it is, what is being read, size, close),
@@ -570,19 +572,36 @@ fn card_fits(app: &App) -> bool {
 fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     let large = app.ask_view == AskView::Expanded;
     let fit = card_fits(app);
-    let mut header = row![
-        glyph::icon(Glyph::Message, theme::accent(), 15.0),
-        ts::set_in(
-            text("Ask")
-                .font(crate::fonts::UI_SEMIBOLD)
-                .color(theme::fg()),
-            ASK_HEADER_H,
-            ts::INTER,
-            ts::BASE,
-        ),
-    ]
-    .spacing(8)
-    .align_y(iced::Center);
+    // The session's name, which opens the menu of sessions.
+    let menu_open = app.ask_sessions_menu;
+    let title = button(
+        row![
+            container(
+                text(app.ask_session_title())
+                    .size(ts::BASE)
+                    .font(crate::fonts::UI_SEMIBOLD)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+            )
+            .max_width(if large { 420.0 } else { 200.0 })
+            .clip(true),
+            glyph::icon(Glyph::ChevronDown, theme::dim(), 12.0),
+        ]
+        .spacing(5)
+        .align_y(iced::Center),
+    )
+    .style(move |t: &iced::Theme, status| {
+        if menu_open {
+            theme::list_row(true)(t, status)
+        } else {
+            theme::toolbar_button(t, status)
+        }
+    })
+    .padding([4, 6])
+    .on_press(Message::Ask(AskMsg::SessionsMenu(!menu_open)));
+    let mut header = row![glyph::icon(Glyph::Message, theme::accent(), 15.0), title]
+        .spacing(6)
+        .align_y(iced::Center);
     // What the reader is on, which is what a question is asked against —
     // said in the large window, where there is room for it.
     if let Some(v) = app.active_viewer().filter(|_| large) {
@@ -605,8 +624,13 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         );
     }
     header = header.push(space().width(Fill));
-    // Hidden to the pill, made large or small again, put away.
+    // A new session; hidden to the pill, made large or small again, put away.
     header = header
+        .push(header_button(
+            Glyph::Plus,
+            "New session",
+            Message::Ask(AskMsg::NewSession),
+        ))
         .push(header_button(
             Glyph::ChevronDown,
             "Hide (Esc)",
@@ -626,11 +650,14 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
             "Put away",
             Message::Ask(AskMsg::Close),
         ));
-    column![
+    let card: Element<'_, Message> = column![
         container(header)
             .height(Length::Fixed(ASK_HEADER_H))
             .align_y(iced::Center)
-            .padding(ASK_HEADER_PAD),
+            .padding(Padding {
+                left: 12.0,
+                ..ASK_HEADER_PAD
+            }),
         hairline(),
         voice_strip(app).unwrap_or_else(slot),
         if fit {
@@ -640,6 +667,147 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         },
     ]
     .height(if fit { Length::Shrink } else { Fill })
+    .into();
+    if !menu_open {
+        return card;
+    }
+    stack![
+        card,
+        container(sessions_menu(app)).padding(Padding {
+            top: ASK_HEADER_H - 4.0,
+            left: 10.0,
+            ..Padding::ZERO
+        }),
+    ]
+    .into()
+}
+
+/// Widest the menu of sessions grows, and tallest before it scrolls.
+const SESSIONS_MENU_W: f32 = 320.0;
+const SESSIONS_MENU_MAX_H: f32 = 340.0;
+
+/// The menu of Ask's sessions, under the card's title: a new session, then
+/// this project's sessions, newest first — when each was last asked in and
+/// how many questions it holds; the one on screen marked, the others each a
+/// click from going back to, or from being forgotten.
+fn sessions_menu(app: &App) -> Element<'_, Message> {
+    use crate::app::ask_sessions::{now, when};
+    let now = now();
+    let project = app
+        .proj
+        .project
+        .as_ref()
+        .and_then(|p| p.root.file_name())
+        .map_or_else(
+            || "this project".to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
+    let new = button(
+        row![
+            glyph::icon(Glyph::Plus, theme::accent(), 14.0),
+            text("New session").size(ts::BASE).color(theme::fg()),
+        ]
+        .spacing(9)
+        .align_y(iced::Center),
+    )
+    .style(theme::menu_row)
+    .padding([7, 9])
+    .width(Fill)
+    .on_press(Message::Ask(AskMsg::NewSession));
+    let mut list = Column::new().spacing(1);
+    for session in &app.proj.ask_sessions {
+        let current = app.proj.ask_session == Some(session.id);
+        let questions = session.turns.len();
+        let meta = format!(
+            "{} · {questions} {}",
+            when(session.updated, now),
+            if questions == 1 {
+                "question"
+            } else {
+                "questions"
+            }
+        );
+        let dot =
+            container(space().width(6).height(6)).style(move |_: &iced::Theme| container::Style {
+                background: current.then(|| theme::accent().into()),
+                border: iced::border::rounded(3.0),
+                ..container::Style::default()
+            });
+        let pick = button(
+            row![
+                dot,
+                column![
+                    text(session.title.clone())
+                        .size(ts::BASE)
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
+                    text(meta).size(ts::SMALL).color(theme::dim()),
+                ]
+                .spacing(1)
+                .width(Fill),
+            ]
+            .spacing(9)
+            .align_y(iced::Center),
+        )
+        .style(move |t: &iced::Theme, status| {
+            if current {
+                theme::list_row(true)(t, status)
+            } else {
+                theme::menu_row(t, status)
+            }
+        })
+        .padding([6, 9])
+        .width(Fill)
+        .on_press(Message::Ask(AskMsg::SwitchSession(session.id)));
+        let mut line = row![pick].spacing(2).align_y(iced::Center);
+        if !current {
+            line = line.push(tip_at(
+                button(container(glyph::icon(Glyph::Close, theme::dim(), 12.0)).center(Fill))
+                    .style(theme::toolbar_button)
+                    .width(Length::Fixed(24.0))
+                    .height(Length::Fixed(24.0))
+                    .padding(0)
+                    .on_press(Message::Ask(AskMsg::DeleteSession(session.id))),
+                "Forget this session",
+                None,
+                tooltip::Position::Right,
+            ));
+        }
+        list = list.push(line);
+    }
+    let body: Element<'_, Message> = if app.proj.ask_sessions.is_empty() {
+        container(
+            text("Nothing asked yet: a session is kept once Clew has answered in it.")
+                .size(ts::SMALL)
+                .color(theme::dim()),
+        )
+        .padding([4, 9])
+        .into()
+    } else {
+        scrollable(list)
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .into()
+    };
+    container(opaque(
+        column![
+            new,
+            container(hairline()).padding([3, 2]),
+            container(
+                text(format!("Sessions in {project}"))
+                    .size(ts::SMALL)
+                    .font(crate::fonts::UI_MEDIUM)
+                    .color(theme::dim()),
+            )
+            .padding([4, 9]),
+            body,
+        ]
+        .spacing(1),
+    ))
+    .width(SESSIONS_MENU_W)
+    .max_height(SESSIONS_MENU_MAX_H)
+    .padding(5)
+    .style(theme::modal_panel_rounded(11.0))
     .into()
 }
 

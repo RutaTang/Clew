@@ -96,6 +96,7 @@ impl App {
             embed_available: embed::Config::available(),
             show_bottom: false,
             ask_view: AskView::Hidden,
+            ask_sessions_menu: false,
             voice: crate::app::voice::VoiceState::new(),
             debug: DebugState::default(),
             debug_hover_eval: false,

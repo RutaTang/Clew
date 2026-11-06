@@ -1070,6 +1070,14 @@ pub enum AskMsg {
     Shrink,
     /// Hide the card to its pill in the corner, the conversation kept.
     Hide,
+    /// Start a new session: an empty card, the last one kept in the menu.
+    NewSession,
+    /// Open or close the menu of sessions under the card's title.
+    SessionsMenu(bool),
+    /// Go back to a session.
+    SwitchSession(u64),
+    /// Forget a session.
+    DeleteSession(u64),
     /// Put Ask away: the pill goes too, until Ask is called again.
     Close,
     /// The Ask input box text changed.
@@ -2382,6 +2390,10 @@ impl AskMsg {
             | AskMsg::Expand
             | AskMsg::Shrink
             | AskMsg::Hide
+            | AskMsg::NewSession
+            | AskMsg::SessionsMenu(..)
+            | AskMsg::SwitchSession(..)
+            | AskMsg::DeleteSession(..)
             | AskMsg::Close
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
