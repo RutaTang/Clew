@@ -114,12 +114,12 @@ impl App {
             keymap: keymap::Keymap::load(),
             rebinding: None,
             keymap_notice: None,
-            show_inline_summaries: true,
-            show_file_banner: true,
-            show_inlay_hints: true,
-            show_minimap: false,
-            show_inline_blame: false,
-            show_indent_guides: false,
+            show_inline_summaries: view_pref(VIEW_SUMMARIES, true),
+            show_file_banner: view_pref(VIEW_BANNER, true),
+            show_inlay_hints: view_pref(VIEW_INLAY_HINTS, true),
+            show_minimap: view_pref(VIEW_MINIMAP, false),
+            show_inline_blame: view_pref(VIEW_BLAME, false),
+            show_indent_guides: view_pref(VIEW_INDENT_GUIDES, false),
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -711,24 +711,68 @@ impl App {
             }
             WindowMsg::ToggleInlineSummaries => {
                 self.show_inline_summaries = !self.show_inline_summaries;
+                self.keep_view_pref(VIEW_SUMMARIES, self.show_inline_summaries);
                 Task::none()
             }
             WindowMsg::ToggleFileBanner => {
                 self.show_file_banner = !self.show_file_banner;
+                self.keep_view_pref(VIEW_BANNER, self.show_file_banner);
                 Task::none()
             }
             WindowMsg::ToggleMinimap => {
                 self.show_minimap = !self.show_minimap;
+                self.keep_view_pref(VIEW_MINIMAP, self.show_minimap);
                 Task::none()
             }
             WindowMsg::ToggleInlineBlame => {
                 self.show_inline_blame = !self.show_inline_blame;
+                self.keep_view_pref(VIEW_BLAME, self.show_inline_blame);
                 Task::none()
             }
             WindowMsg::ToggleIndentGuides => {
                 self.show_indent_guides = !self.show_indent_guides;
+                self.keep_view_pref(VIEW_INDENT_GUIDES, self.show_indent_guides);
                 Task::none()
             }
+        }
+    }
+}
+
+/// The View menu's choices, as the global config's root keeps them: a
+/// minimap or blame turned on is there next launch (they were this
+/// session's only, unlike the theme).
+pub(crate) const VIEW_SUMMARIES: &str = "view_inline_summaries";
+pub(crate) const VIEW_BANNER: &str = "view_file_banner";
+pub(crate) const VIEW_INLAY_HINTS: &str = "view_inlay_hints";
+pub(crate) const VIEW_MINIMAP: &str = "view_minimap";
+pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
+pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
+
+/// A View-menu choice as saved, or `default` when it never was (or the
+/// config cannot be read).
+fn view_pref(key: &str, default: bool) -> bool {
+    // A test's app is the app as shipped: the suite shares one data
+    // directory, so a test that toggled a choice would change every later
+    // test's view.
+    if cfg!(test) {
+        return default;
+    }
+    clew_core::globalconfig::get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
+}
+
+impl App {
+    /// Keep a View-menu choice for the next launch. Not kept, it still holds
+    /// for this session, and the reader is told.
+    pub(crate) fn keep_view_pref(&mut self, key: &str, on: bool) {
+        if cfg!(test) {
+            return;
+        }
+        let saved =
+            clew_core::globalconfig::set_keys(vec![(key.to_string(), toml::Value::Boolean(on))]);
+        if let Err(e) = saved {
+            self.status = tr!("Could not save settings: {error}", error = e);
         }
     }
 }

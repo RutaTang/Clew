@@ -17720,6 +17720,35 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     );
 }
 
+/// Skim is a toggle like Diff and Time Travel, and its button says so: it
+/// shows pressed while the file's bodies are folded, and not once a second
+/// press has unfolded them.
+#[test]
+fn the_skim_button_shows_whether_the_file_is_skimmed() {
+    let mut app = scanned_app("skim-state");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![SymbolEntry {
+            name: "origin".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: abs.clone(),
+            line: 3,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let lines = app.skim_lines(&abs);
+    assert_eq!(lines, [2]);
+    assert!(!app.active_viewer().unwrap().skimmed(&lines));
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(app.active_viewer().unwrap().skimmed(&lines));
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(!app.active_viewer().unwrap().skimmed(&lines));
+}
+
 /// A diff on screen follows its file: an edit on disk computes it again over
 /// the new bytes (it said "no uncommitted changes" over a file just edited),
 /// quietly, and a press of Diff meanwhile closes the view rather than

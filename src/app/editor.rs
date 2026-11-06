@@ -378,10 +378,13 @@ impl App {
         let source = Arc::new(content);
         let lines = highlight::plain_lines(&source);
         let line_height = self.line_height();
-        let old_viewport = self.proj.panes[pane].as_ref().map(|v| v.viewport_h);
+        let old_viewport = self.proj.panes[pane]
+            .as_ref()
+            .map(|v| (v.viewport_h, v.viewport_measured));
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
-        if let Some(h) = old_viewport {
+        if let Some((h, measured)) = old_viewport {
             v.viewport_h = h;
+            v.viewport_measured = measured;
         }
         v.target_line = target;
         // Put the block cursor on the jump target (or the top of the file).
@@ -644,7 +647,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(|s| s.as_ref())
-            .map(|v| v.viewport_h);
+            .map(|v| (v.viewport_h, v.viewport_measured));
 
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
         v.symbols = symbols;
@@ -658,8 +661,9 @@ impl App {
         };
         v.set_inactive_lines(dimmed);
         v.highlighted = true;
-        if let Some(h) = old_viewport {
+        if let Some((h, measured)) = old_viewport {
             v.viewport_h = h;
+            v.viewport_measured = measured;
         }
         v.target_line = target;
         let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
@@ -846,9 +850,14 @@ impl App {
             let Some(slot) = self.proj.panes.get(pane) else {
                 continue;
             };
-            let old = slot
-                .as_ref()
-                .map(|v| (v.viewport_h, v.scroll_y, v.nb_expanded.clone()));
+            let old = slot.as_ref().map(|v| {
+                (
+                    v.viewport_h,
+                    v.viewport_measured,
+                    v.scroll_y,
+                    v.nb_expanded.clone(),
+                )
+            });
             let mut v = Viewer::new(
                 abs.clone(),
                 rel.clone(),
@@ -859,8 +868,9 @@ impl App {
             v.symbols = symbols.clone();
             v.highlighted = true;
             v.notebook = Some(doc.clone());
-            if let Some((h, old_scroll, old_expanded)) = old {
+            if let Some((h, measured, old_scroll, old_expanded)) = old {
                 v.viewport_h = h;
+                v.viewport_measured = measured;
                 if refresh {
                     v.nb_expanded = old_expanded;
                     v.scroll_y = old_scroll;
@@ -1462,18 +1472,22 @@ impl App {
         let Some(v) = self.active_viewer() else {
             return;
         };
-        let sig_lines: Vec<usize> = self
-            .proj
+        let sig_lines = self.skim_lines(&v.abs);
+        self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+    }
+
+    /// Where `abs`'s functions and methods start (0-based): what Skim folds.
+    pub(crate) fn skim_lines(&self, abs: &Path) -> Vec<usize> {
+        self.proj
             .symbol_index_by_file
-            .get(&v.abs)
+            .get(abs)
             .map(|syms| {
                 syms.iter()
                     .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
                     .map(|s| s.line.saturating_sub(1)) // 1-based symbol line → 0-based
                     .collect()
             })
-            .unwrap_or_default();
-        self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+            .unwrap_or_default()
     }
 
     pub(crate) fn on_find_opened(&mut self) -> Task<Message> {
@@ -1745,6 +1759,7 @@ impl App {
                     v.scroll_y = viewport.absolute_offset().y;
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
+                    v.viewport_measured = true;
                 }
                 Task::none()
             }

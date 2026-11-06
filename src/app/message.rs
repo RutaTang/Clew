@@ -638,6 +638,9 @@ pub enum NavMsg {
     JumpToCall {
         caller_file: PathBuf,
         caller: String,
+        /// Where the caller is defined (1-based): which of the file's
+        /// same-name functions (`Item.total`, `Cart.total`) it is.
+        caller_line: usize,
         callee: String,
     },
 }

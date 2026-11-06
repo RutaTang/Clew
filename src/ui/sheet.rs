@@ -450,7 +450,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         file_tool(
             Glyph::Skim,
             tr!("Skim"),
-            false,
+            v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
         ),

@@ -363,13 +363,14 @@ pub(crate) fn call_flow_rows<'a>(
     // Split callers into tests and the rest, so the tests that exercise this
     // function read as its executable spec. Callees stay their own group.
     let sorted = |ids: &[usize]| {
-        let mut v: Vec<&crate::projectcalls::SymNode> = ids.iter().map(|&i| g.node(i)).collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut v: Vec<(usize, &crate::projectcalls::SymNode)> =
+            ids.iter().map(|&i| (i, g.node(i))).collect();
+        v.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name).then(a.line.cmp(&b.line)));
         v
     };
     let (tests, callers): (Vec<_>, Vec<_>) = sorted(g.callers_of(id))
         .into_iter()
-        .partition(|n| app.is_test_symbol(&n.file, &n.name));
+        .partition(|(_, n)| app.is_test_symbol(&n.file, &n.name));
     let callees = sorted(g.callees_of(id));
     let green = theme::success();
 
@@ -384,11 +385,26 @@ pub(crate) fn call_flow_rows<'a>(
             continue;
         }
         out.push(section_header(label));
-        for n in items {
+        for (k, &(node_id, n)) in items.iter().enumerate() {
+            // Each row is its own function: a file's second `total` opens
+            // that one, not the first.
+            let ordinal = g.ordinals().get(node_id).copied().unwrap_or(0);
             let target = Node::Function {
                 file: n.file.clone(),
                 name: n.name.clone(),
-                ordinal: 0, // call-graph nodes are name-resolved
+                ordinal,
+            };
+            // Two rows that would read the same (`Item.total`, `Cart.total`)
+            // say where each is.
+            let twin = |j: usize| {
+                items
+                    .get(j)
+                    .is_some_and(|(_, m)| m.name == n.name && m.file == n.file)
+            };
+            let place = if (k > 0 && twin(k - 1)) || twin(k + 1) {
+                format!("{}:{}", rel_of(app, &n.file), n.line)
+            } else {
+                rel_of(app, &n.file)
             };
             let summary = app
                 .proj
@@ -406,9 +422,7 @@ pub(crate) fn call_flow_rows<'a>(
                     .size(ts::SMALL)
                     .color(if is_live { live } else { theme::dim() }),
                 text(n.name.clone()).size(ts::BODY).color(name_color),
-                text(rel_of(app, &n.file))
-                    .size(ts::CAPTION)
-                    .color(theme::dim()),
+                text(place).size(ts::CAPTION).color(theme::dim()),
             ]
             .spacing(6);
             if is_live {
@@ -422,6 +436,7 @@ pub(crate) fn call_flow_rows<'a>(
                 Message::Nav(NavMsg::JumpToCall {
                     caller_file: n.file.clone(),
                     caller: n.name.clone(),
+                    caller_line: n.line,
                     callee: name.clone(),
                 })
             } else {
@@ -550,7 +565,7 @@ fn reached_from_rows<'a>(
                     .on_press(Message::Semantic(SemanticMsg::OpenNode(Node::Function {
                         file: n.file.clone(),
                         name: n.name.clone(),
-                        ordinal: 0, // call-graph nodes are name-resolved
+                        ordinal: g.ordinals().get(step).copied().unwrap_or(0),
                     })))
                     .into(),
             );

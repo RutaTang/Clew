@@ -1179,6 +1179,7 @@ impl App {
 
     pub(crate) fn on_toggle_inlay_hints(&mut self) -> Task<Message> {
         self.show_inlay_hints = !self.show_inlay_hints;
+        self.keep_view_pref(crate::app::runtime::VIEW_INLAY_HINTS, self.show_inlay_hints);
         self.show_tools_menu = false;
         if self.show_inlay_hints {
             // Re-fetch for every shown file.

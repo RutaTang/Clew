@@ -169,6 +169,10 @@ pub struct Viewer {
     /// in content space can be mapped back to the window.
     pub scroll_x: f32,
     pub viewport_h: f32,
+    /// Whether `viewport_h` is the code view's height as last reported, not
+    /// the generous guess a pane starts with: only a measured height can say
+    /// a jump target is already in view.
+    pub viewport_measured: bool,
     pub target_line: Option<usize>, // 1-based jump target, drawn highlighted
     pub selection: Option<Selection>,
     /// Last clicked position as (0-based line, 0-based display column).
@@ -279,6 +283,7 @@ impl Viewer {
             // Generous default until the first scroll event reports the real
             // viewport; only affects how many rows are materialized.
             viewport_h: 2400.0,
+            viewport_measured: false,
             target_line: None,
             selection: None,
             caret: None,
@@ -535,18 +540,11 @@ impl Viewer {
     /// Unlike `collapse_all`, it leaves container folds (impl/mod) open so every
     /// signature stays visible.
     pub fn skim_bodies(&mut self, sig_lines: &[usize]) {
-        let headers: Vec<usize> = sig_lines
-            .iter()
-            .filter_map(|&l0| (l0..=l0.saturating_add(4)).find(|&l| self.is_fold_header(l)))
-            .collect();
+        let headers = self.skim_headers(sig_lines);
         if headers.is_empty() {
             return;
         }
-        let folded = headers
-            .iter()
-            .filter(|h| self.collapsed.contains(h))
-            .count();
-        if folded * 2 >= headers.len() {
+        if self.skimmed_among(&headers) {
             for h in &headers {
                 self.collapsed.remove(h);
             }
@@ -556,6 +554,30 @@ impl Viewer {
             }
         }
         self.after_fold_change();
+    }
+
+    /// Whether the bodies [`Self::skim_bodies`] folds are (mostly) folded:
+    /// what pressing Skim again would undo, so the button shows it pressed.
+    pub fn skimmed(&self, sig_lines: &[usize]) -> bool {
+        let headers = self.skim_headers(sig_lines);
+        !headers.is_empty() && self.skimmed_among(&headers)
+    }
+
+    /// The fold headers of the functions starting at `sig_lines` (0-based):
+    /// each the first header within a few lines of its signature.
+    fn skim_headers(&self, sig_lines: &[usize]) -> Vec<usize> {
+        sig_lines
+            .iter()
+            .filter_map(|&l0| (l0..=l0.saturating_add(4)).find(|&l| self.is_fold_header(l)))
+            .collect()
+    }
+
+    fn skimmed_among(&self, headers: &[usize]) -> bool {
+        let folded = headers
+            .iter()
+            .filter(|h| self.collapsed.contains(h))
+            .count();
+        folded * 2 >= headers.len()
     }
 
     /// Expand every fold.
@@ -627,7 +649,10 @@ impl Viewer {
     }
 
     /// Absolute scroll offset that brings `line` (1-based) near the top,
-    /// keeping a few lines of context above it.
+    /// keeping a few lines of context above it — or the top of the file,
+    /// when the line is in view there with room below it: a short file was
+    /// scrolled past its first lines (its imports) for a target already on
+    /// the first screen.
     pub fn scroll_offset_for(&self, line: Option<usize>, line_height: f32) -> f32 {
         match line {
             Some(l) => {
@@ -637,6 +662,9 @@ impl Viewer {
                 // for the line there: three rows down from a line inside four
                 // nested blocks, the target was under their headers.
                 let row = self.row_of(l.saturating_sub(1));
+                if self.viewport_measured && (row + 4) as f32 * line_height <= self.viewport_h {
+                    return 0.0;
+                }
                 let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
                 let mut top = row.saturating_sub(3);
                 for _ in 0..8 {
@@ -1259,6 +1287,23 @@ mod tests {
         // Clamped to content height.
         let small = viewer_with_lines(5);
         assert!(small.scroll_offset_for(Some(1_000_000), LH) <= 5.0 * LH);
+    }
+
+    /// A target on the first screen, room below it, keeps the file at its
+    /// top (a short file lost its first lines to the context rule) — once
+    /// the view's height is measured; the guess a pane starts with says
+    /// nothing about what is in view.
+    #[test]
+    fn a_target_on_the_first_screen_keeps_the_file_at_its_top() {
+        let mut v = viewer_with_lines(1000);
+        v.viewport_h = 20.0 * LH;
+        assert_eq!(v.scroll_offset_for(Some(6), LH), 2.0 * LH, "unmeasured");
+        v.viewport_measured = true;
+        assert_eq!(v.scroll_offset_for(Some(6), LH), 0.0);
+        assert_eq!(v.scroll_offset_for(Some(16), LH), 0.0);
+        // Too near the bottom edge to read with what follows it.
+        assert_eq!(v.scroll_offset_for(Some(18), LH), 14.0 * LH);
+        assert_eq!(v.scroll_offset_for(Some(100), LH), 96.0 * LH);
     }
 
     #[test]

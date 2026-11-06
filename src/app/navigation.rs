@@ -745,6 +745,7 @@ impl App {
         &self,
         caller_file: &Path,
         caller: &str,
+        caller_line: usize,
         callee: &str,
     ) -> Option<usize> {
         let lang = crate::highlight::detect(caller_file)?;
@@ -784,7 +785,13 @@ impl App {
             })?;
         projectcalls::calls_of(&source, lang)
             .into_iter()
-            .filter(|cs| cs.callee == callee && cs.caller.as_deref() == Some(caller))
+            // The first call after the caller's definition: a same-name
+            // function earlier in the file holds calls of its own.
+            .filter(|cs| {
+                cs.callee == callee
+                    && cs.caller.as_deref() == Some(caller)
+                    && cs.line >= caller_line
+            })
             .map(|cs| cs.line)
             .min()
     }
@@ -882,17 +889,13 @@ impl App {
             NavMsg::JumpToCall {
                 caller_file,
                 caller,
+                caller_line,
                 callee,
             } => {
                 let line = self
-                    .call_site_line(&caller_file, &caller, &callee)
-                    .or_else(|| {
-                        self.proj
-                            .symbol_index_by_file
-                            .get(&caller_file)
-                            .and_then(|syms| syms.iter().find(|s| s.name == caller).map(|s| s.line))
-                    });
-                self.open_file(caller_file, line, true)
+                    .call_site_line(&caller_file, &caller, caller_line, &callee)
+                    .unwrap_or(caller_line);
+                self.open_file(caller_file, Some(line), true)
             }
         }
     }
@@ -951,20 +954,32 @@ mod tests {
         });
 
         assert_eq!(
-            app.call_site_line(&plain, "caller", "callee"),
+            app.call_site_line(&plain, "caller", 1, "callee"),
             Some(2),
             "an ordinary in-project caller must still resolve"
         );
         assert_eq!(
-            app.call_site_line(&link, "caller", "callee"),
+            app.call_site_line(&link, "caller", 1, "callee"),
             None,
             "a symlink pointing out of the project was followed"
         );
         assert_eq!(
-            app.call_site_line(&big, "caller", "callee"),
+            app.call_site_line(&big, "caller", 1, "callee"),
             None,
             "a file past the index cap was read whole on the update loop"
         );
+
+        // Two same-name callers in one file (`Item.total`, `Cart.total`):
+        // each row jumps to its own function's call, by where it is defined.
+        let twins = dir.join("src/cart.py");
+        std::fs::write(
+            &twins,
+            "class Item:\n    def total(self):\n        return helper(1)\n\n\
+             class Cart:\n    def total(self):\n        return helper(2)\n",
+        )
+        .unwrap();
+        assert_eq!(app.call_site_line(&twins, "total", 2, "helper"), Some(3));
+        assert_eq!(app.call_site_line(&twins, "total", 6, "helper"), Some(7));
 
         for d in [&dir, &outside_dir] {
             let _ = std::fs::remove_dir_all(d);
