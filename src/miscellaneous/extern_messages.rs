@@ -467,3 +467,39 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("xz decode failed: {e}"),
     tr_noop!("zig could not build {arg1}:\n{arg2}"),
 ];
+
+/// Parts the code puts into those messages (why a connection timed out,
+/// how to install a toolchain, what to do about a proxy), each said in the
+/// reader's language where it fills a place. Kept by hand; `i18n`'s tests
+/// check each is still in the crates' source.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const PARTS: &[&str] = &[
+    tr_noop!("sent nothing"),
+    tr_noop!("took nothing in"),
+    tr_noop!("install the Dart or Flutter SDK"),
+    tr_noop!("install Lean with elan"),
+    tr_noop!("install Eclipse JDT LS (e.g. `brew install jdtls`)"),
+    tr_noop!("install it with `gem install ruby-lsp`"),
+    tr_noop!("install it with `dotnet tool install --global csharp-ls`"),
+    tr_noop!("install the Erlang Language Platform (elp) from its releases"),
+    tr_noop!("install it with ghcup (`ghcup install hls`)"),
+    tr_noop!("install its toolchain"),
+    tr_noop!("percent-encoding any character in them that is not a letter or a digit"),
+    tr_noop!(
+        "list the host under \u{201c}Bypass proxy settings for these hosts\u{201d} in System Settings \u{203a} Network \u{203a} Details \u{203a} Proxies, or in no_proxy, which clew reads in place of NO_PROXY"
+    ),
+    tr_noop!("list the host in no_proxy, which clew reads in place of NO_PROXY"),
+];
+
+/// Advice those crates add to a message after a dash; said apart from the
+/// message it follows. Kept by hand, checked as [`PARTS`] are.
+pub(crate) const TAILS: &[&str] = &[
+    tr_noop!(
+        " — if they are wrong, correct them in its setting ({arg1}, {PERCENT_ENCODING}); if they are right, try again later, or {bypass}"
+    ),
+    tr_noop!(
+        " — name a local relay that makes such logins for clew, such as cntlm or px, as the proxy instead, or {bypass}"
+    ),
+    tr_noop!(" — to reach the host without the proxy, {bypass}"),
+    tr_noop!(" — {give}, or {bypass}"),
+];

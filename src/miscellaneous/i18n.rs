@@ -535,25 +535,48 @@ fn message_at(text: &str, depth: usize) -> String {
     if let Some(said) = catalog(lang).get(text) {
         return (*said).to_string();
     }
-    static TEMPLATES: OnceLock<Vec<Template>> = OnceLock::new();
-    let templates = TEMPLATES.get_or_init(|| {
-        crate::miscellaneous::extern_messages::MESSAGES
-            .iter()
-            .filter(|t| t.contains('{'))
-            .map(|&t| {
-                let parts = parts(t);
-                let words = parts
-                    .iter()
-                    .map(|p| match p {
-                        Part::Words(w) => w.len(),
-                        Part::Place(_) => 0,
-                    })
-                    .sum();
-                (t, parts, words)
-            })
-            .collect()
-    });
-    // Of the templates it fits, the one that says the most in words.
+    use crate::miscellaneous::extern_messages::{MESSAGES, TAILS};
+    static WHOLE: OnceLock<Vec<Template>> = OnceLock::new();
+    static ENDS: OnceLock<Vec<Template>> = OnceLock::new();
+    let whole = WHOLE.get_or_init(|| templates(MESSAGES));
+    if let Some(said) = said_as(whole, text, depth) {
+        return said;
+    }
+    // A message with advice added after a dash ("…: refused — to reach the
+    // host without the proxy, …"): each said apart.
+    let ends = ENDS.get_or_init(|| templates(TAILS));
+    let mut from = 0;
+    while let Some(at) = text[from..].find(" — ").map(|at| from + at) {
+        if let Some(tail) = said_as(ends, &text[at..], depth) {
+            return message_at(&text[..at], depth + 1) + &tail;
+        }
+        from = at + " — ".len();
+    }
+    text.to_string()
+}
+
+/// The templates of `list` that have places, parsed, with how much of each
+/// is words.
+fn templates(list: &'static [&'static str]) -> Vec<Template> {
+    list.iter()
+        .filter(|t| t.contains('{'))
+        .map(|&t| {
+            let parts = parts(t);
+            let words = parts
+                .iter()
+                .map(|p| match p {
+                    Part::Words(w) => w.len(),
+                    Part::Place(_) => 0,
+                })
+                .sum();
+            (t, parts, words)
+        })
+        .collect()
+}
+
+/// `text` in the reader's language, if one of `templates` fits all of it
+/// (the one that says the most in words) and the catalog translates it.
+fn said_as(templates: &[Template], text: &str, depth: usize) -> Option<String> {
     let mut best: Option<Fit<'_>> = None;
     for (template, parts, words) in templates {
         if best.as_ref().is_some_and(|(_, _, w)| w >= words) {
@@ -564,12 +587,8 @@ fn message_at(text: &str, depth: usize) -> String {
             best = Some((template, filled, *words));
         }
     }
-    let Some((template, filled, _)) = best else {
-        return text.to_string();
-    };
-    let Some(said) = catalog(lang).get(template) else {
-        return text.to_string();
-    };
+    let (template, filled, _) = best?;
+    let said = catalog(current()).get(template)?;
     let values: Vec<(&str, String)> = filled
         .into_iter()
         .map(|(name, value)| (name, message_at(value, depth + 1)))
@@ -578,7 +597,7 @@ fn message_at(text: &str, depth: usize) -> String {
         .iter()
         .map(|(name, value)| (*name, value as &dyn Display))
         .collect();
-    format(said, &args)
+    Some(format(said, &args))
 }
 
 /// Whether `n` takes the singular form ("1 file") in the language spoken.
@@ -1041,6 +1060,54 @@ mod tests {
         });
     }
 
+    /// The parts those crates put into their messages and the advice they
+    /// add after a dash are still theirs: each is in their source.
+    #[test]
+    fn message_parts_and_tails_are_the_crates_own() {
+        use crate::miscellaneous::extern_messages::{PARTS, TAILS};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates");
+        let mut source = String::new();
+        for file in ["clew-core/src/net.rs", "clew-core/src/lsp/store.rs"] {
+            source.push_str(&std::fs::read_to_string(root.join(file)).unwrap());
+        }
+        for said in PARTS.iter().chain(TAILS) {
+            // As far as it is written plainly: up to its first character
+            // the source spells another way (a `\u{..}`, a line's end).
+            let plain: String = said
+                .replace("{arg1}", "{}")
+                .chars()
+                .take_while(|c| c.is_ascii() && *c != '\n')
+                .take(40)
+                .collect();
+            assert!(source.contains(&plain), "not in the source: {said:?}");
+        }
+    }
+
+    /// Advice added after a dash is said in the reader's language, apart
+    /// from what it follows, and a part the code puts into a message (why
+    /// a time-out happened) too.
+    #[test]
+    fn a_messages_advice_and_parts_are_translated() {
+        with_lang(Lang::Fr, || {
+            let fr = catalog(Lang::Fr);
+            let bypass = "list the host in no_proxy, which clew reads in place of NO_PROXY";
+            let tail = " — to reach the host without the proxy, {bypass}";
+            let said = message(&format!(
+                "the session is ending — to reach the host without the proxy, {bypass}"
+            ));
+            assert_eq!(
+                said,
+                format!(
+                    "{}{}",
+                    fr["the session is ending"],
+                    format(fr[tail], &[("bypass", &fr[bypass])])
+                )
+            );
+            let timed = message("timed out: the peer sent nothing for 30 s");
+            assert!(timed.contains(fr["sent nothing"]), "{timed}");
+        });
+    }
+
     /// What clew-core, clew-server and clew-voice write that may reach the
     /// screen is listed in `extern_messages`, word for word, so the
     /// catalogs carry it — found as the list was made: the literal of each
@@ -1116,12 +1183,15 @@ mod tests {
             let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("src/miscellaneous/extern_messages.rs");
             let old = std::fs::read_to_string(&path).unwrap();
-            let head = &old[..old.find("pub(crate) const MESSAGES").unwrap()];
-            let mut new = format!("{head}pub(crate) const MESSAGES: &[&str] = &[\n");
+            let start = old.find("pub(crate) const MESSAGES").unwrap();
+            let end = start + old[start..].find("\n];\n").unwrap() + "\n];\n".len();
+            let mut new = format!("{}pub(crate) const MESSAGES: &[&str] = &[\n", &old[..start]);
             for w in &written {
                 new.push_str(&format!("    tr_noop!({w:?}),\n"));
             }
             new.push_str("];\n");
+            // What follows the list (the parts and tails kept by hand) stays.
+            new.push_str(&old[end..]);
             std::fs::write(&path, new).unwrap();
             return;
         }
