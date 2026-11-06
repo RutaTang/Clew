@@ -129,8 +129,7 @@ impl App {
         // A past revision on screen: its lines are not the live file's, and
         // the bookmark went on the hidden live file's caret line instead.
         if ui::time_travel_pane(self).is_some() {
-            self.status =
-                "Bookmarks mark the file as it is now — leave time travel to mark a line".into();
+            self.status = "Leave time travel to bookmark".into();
             return Task::none();
         }
         let line_height = self.line_height();

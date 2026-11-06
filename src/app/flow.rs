@@ -898,9 +898,7 @@ impl App {
                 // A past revision on screen: its names are not the live
                 // file's, and the trace ran from the hidden live caret.
                 if ui::time_travel_pane(self).is_some() {
-                    self.status =
-                        "Values are traced in the file as it is now — leave time travel to trace one"
-                            .into();
+                    self.status = "Leave time travel to trace values".into();
                     return Task::none();
                 }
                 let pane = self.proj.active;

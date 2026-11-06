@@ -31,7 +31,6 @@ pub(crate) fn bp_condition_modal<'a>(
     let (path, line, draft) = edit;
     prompt_modal(Prompt {
         title: format!("Break at {}:{} when…", rel_of(app, path), line),
-        hint: "Expression evaluated in scope. Empty means always break.",
         placeholder: "e.g. i == 3",
         value: draft,
         input_id: bp_condition_input_id(),
@@ -47,7 +46,6 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
     let (rel, line, draft) = edit;
     prompt_modal(Prompt {
         title: format!("Note for {rel}:{line}"),
-        hint: "Plain-text note. Leave empty to remove it.",
         placeholder: "a short note to your future self…",
         value: draft,
         input_id: note_input_id(),
@@ -63,7 +61,6 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
     let (rel, symbol, draft) = edit;
     prompt_modal(Prompt {
         title: format!("Note on {symbol}  ·  {rel}"),
-        hint: "Plain-text note anchored to this symbol. Leave empty to remove it.",
         placeholder: "what you worked out about this symbol…",
         value: draft,
         input_id: note_input_id(),

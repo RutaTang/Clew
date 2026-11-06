@@ -2323,7 +2323,7 @@ impl App {
             DebugMsg::ToggleHoverEval => {
                 self.debug_hover_eval = !self.debug_hover_eval;
                 self.status = if self.debug_hover_eval {
-                    "Hovering a name while paused now evaluates it in the program".into()
+                    "Hover now evaluates names".into()
                 } else {
                     "Hover evaluation in the debuggee is off".into()
                 };

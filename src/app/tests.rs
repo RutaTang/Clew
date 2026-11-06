@@ -8755,8 +8755,7 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         close_question(&lost(1, "me@host:/srv/app", &["bookmarks"])),
         question(
             "A change is not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Keep the \
-             window open, and it is sent once it is connected again. Close it, and it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Close, and it is lost."
         )
     );
     let three = lost(
@@ -8768,18 +8767,14 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         close_question(&three),
         question(
             "3 changes are not saved to the host",
-            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be \
-             sent to the host. Keep the window open, and they are sent once it is connected \
-             again. Close it, and they are lost."
+            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. Close, and they are lost."
         )
     );
     assert_eq!(
         quit_question(std::slice::from_ref(&three)),
         question(
             "3 changes are not saved to the host",
-            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be \
-             sent to the host. Cancel to keep clew open, and they are sent once the window is \
-             connected again. Quit, and they are lost."
+            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. Quit, and they are lost."
         )
     );
     let (title, message) = quit_question(&[three, lost(2, "you@other:/x", &["notes"])]);
@@ -8816,34 +8811,28 @@ fn the_questions_say_when_edits_were_sent_but_not_confirmed() {
         close_question(&sent(1, "me@host:/srv/app")),
         question(
             "A change is not confirmed by the host",
-            "1 change to bookmarks in me@host:/srv/app was sent to the host, but it has not \
-             confirmed it: the connection may be down. Keep the window open, and it is sent \
-             again once it is connected again. Close it, and it may be lost."
+            "1 change to bookmarks in me@host:/srv/app was not confirmed by the host. Close, and it may be lost."
         )
     );
     assert_eq!(
         close_question(&sent(2, "me@host:/srv/app")),
         question(
             "2 changes are not confirmed by the host",
-            "2 changes to bookmarks in me@host:/srv/app were sent to the host, but it has not \
-             confirmed them: the connection may be down. Keep the window open, and they are \
-             sent again once it is connected again. Close it, and they may be lost."
+            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. Close, and they may be lost."
         )
     );
     assert_eq!(
         quit_question(&[sent(2, "me@host:/srv/app")]),
         question(
             "2 changes are not confirmed by the host",
-            "2 changes to bookmarks in me@host:/srv/app were sent to the host, but it has not \
-             confirmed them: the connection may be down. Cancel to keep clew open, and they are \
-             sent again once the window is connected again. Quit, and they may be lost."
+            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. Quit, and they may be lost."
         )
     );
     let (title, message) = quit_question(&[sent(2, "me@host:/srv/app"), sent(1, "you@other:/x")]);
     assert_eq!(title, "3 changes are not confirmed by their hosts");
     assert!(
         message.starts_with(
-            "These changes were sent to their hosts, which have not confirmed them:\n\n\
+            "Not confirmed by their hosts yet:\n\n\
              • 2 changes to bookmarks in me@host:/srv/app\n\
              • 1 change to bookmarks in you@other:/x\n\n"
         ) && message.ends_with("Quit, and they may be lost."),
@@ -8880,16 +8869,15 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "4 changes are not saved to the host",
             "4 changes to bookmarks in me@host:/srv/app are not saved to the host: 1 could not \
-             be sent, 2 were sent but not confirmed and 1 could not be saved by the host. Keep \
-             the window open, and clew keeps trying to save them. Close it, and they may be lost."
+             be sent, 2 were sent but not confirmed and 1 could not be saved by the host. Close, \
+             and they may be lost."
         )
     );
     assert_eq!(
         close_question(&edits("me@host:/srv/app", (0, 0, 2), &[])),
         question(
             "2 changes are not saved to the host",
-            "2 changes to bookmarks in me@host:/srv/app could not be saved by the host. Keep the \
-             window open, and they are tried again. Close it, and they are lost."
+            "2 changes to bookmarks in me@host:/srv/app could not be saved by the host. Close, and they are lost."
         )
     );
     assert_eq!(
@@ -8900,9 +8888,8 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         )),
         question(
             "2 changes are not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Keep the \
-             window open, and it is sent once it is connected again. Close it, and it is lost. \
-             The host could not save the change to the bookmark at a.rs:1: it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Close, and it \
+             is lost. The host could not save the change to the bookmark at a.rs:1: it is lost."
         )
     );
     assert_eq!(
@@ -8914,8 +8901,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "2 changes are not saved to the host",
             "The host could not save the changes to the bookmark at a.rs:1 and the note on f in \
-             lib.rs in me@host:/srv/app: they are lost. Keep the window open to make them again, \
-             or close it."
+             lib.rs in me@host:/srv/app: they are lost."
         )
     );
     assert_eq!(
@@ -8923,8 +8909,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "2 changes are not saved to the host",
             "2 changes to bookmarks in me@host:/srv/app are not saved to the host: 1 was sent but \
-             not confirmed and 1 could not be saved by the host. Cancel to keep clew open, and \
-             clew keeps trying to save them. Quit, and they may be lost."
+             not confirmed and 1 could not be saved by the host. Quit, and they may be lost."
         )
     );
     let (title, message) = quit_question(&[
@@ -8940,8 +8925,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
          • 1 change to bookmarks in you@other:/x could not be saved by the host\n\
          • the change to the walkthrough “tour” in you@other:/x: the host could not save it, \
          and it is lost\n\n\
-         Cancel to keep clew open, and clew keeps trying to save the others. Quit, and they may \
-         be lost."
+         Quit, and the others may be lost."
     );
 }
 
@@ -9040,9 +9024,8 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     };
     assert_eq!(
         close_question(&waiting).1,
-        "1 change to notes in me@host:/srv/app is not sent yet: it waits for the host to save an \
-         earlier change first. Keep the window open, and it is sent once the change before it is \
-         saved. Close it, and it is lost."
+        "1 change to notes in me@host:/srv/app is waiting for an earlier change. Close, and it is \
+         lost."
     );
     // Several, alone, and in a quit's list among another window's.
     let two = crate::app::remote_state::UnsavedEdits {
@@ -9053,9 +9036,8 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     };
     assert_eq!(
         close_question(&two).1,
-        "2 changes to notes in me@host:/srv/app are not sent yet: each waits for the host to save \
-         an earlier change first. Keep the window open, and they are sent once the changes before \
-         them are saved. Close it, and they are lost."
+        "2 changes to notes in me@host:/srv/app are waiting for an earlier change. Close, and \
+         they are lost."
     );
     // Among other reasons, counted as they are.
     let mixed = crate::app::remote_state::UnsavedEdits {
@@ -9374,7 +9356,11 @@ fn forgetting_a_key_mid_session_keeps_the_project_and_its_edits() {
         "and its unsent edit with it"
     );
     assert!(app.connect.is_none(), "nothing left to pick");
-    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+    assert!(
+        app.status.contains("old key — connecting"),
+        "{}",
+        app.status
+    );
 }
 
 /// A remote window holding `edits` bookmark removals (at most three) over a
@@ -12218,7 +12204,7 @@ fn enter_while_an_agent_turn_runs_starts_no_second_answer() {
     );
     assert_eq!(app.proj.ask_input, "and this?", "the question was lost");
     assert!(
-        app.status.contains("still being written"),
+        app.status.contains("Still answering"),
         "the refusal was not explained: {}",
         app.status
     );

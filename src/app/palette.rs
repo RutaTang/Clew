@@ -112,10 +112,9 @@ impl PaletteCommand {
             Message::Editor(EditorMsg::RunAction(Action::StartDebug)) | Message::Debug(_) => {
                 (Glyph::Debug, "This builds the program and runs it.")
             }
-            Message::Editor(EditorMsg::RunAction(Action::ExplainAll)) | Message::Explain(_) => (
-                Glyph::Sparkle,
-                "This asks the language model about the code, which costs money.",
-            ),
+            Message::Editor(EditorMsg::RunAction(Action::ExplainAll)) | Message::Explain(_) => {
+                (Glyph::Sparkle, "This uses the AI model, which costs money.")
+            }
             Message::Project(ProjectMsg::OpenFolderPressed) => {
                 (Glyph::Folder, "This opens another folder in this window.")
             }

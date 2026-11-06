@@ -145,22 +145,13 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // -- Intro ----------------------------------------------------------
         TutStep::new(
             "Welcome to clew",
-            &format!(
-                "clew is a reader for code. It is built for understanding a \
-                 codebase, not editing one. This tour walks through every feature, \
-                 live on {project}. Use Next and Back to move through it, or Skip to \
-                 leave at any time."
-            ),
+            &format!("A reader for code, not an editor. A quick tour of {project}."),
             Anchor::Center,
         ),
         // -- Reading --------------------------------------------------------
         TutStep::new(
             "The file tree",
-            &format!(
-                "The left sidebar lists every file in {project}. It respects your \
-                 .gitignore, so build output and dependencies stay out of the way. \
-                 Click a file to open it, or a folder to expand it."
-            ),
+            &format!("Every file in {project}, minus what .gitignore hides."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Files)),
@@ -169,9 +160,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     v.push(
         TutStep::new(
             "The reading view",
-            "This is the reader. Your code appears with syntax colors, and it is read \
-             only, so nothing changes while you explore. Click any line to place your \
-             reading cursor there.",
+            "Your code, read-only. Click a line to place the cursor.",
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
@@ -180,122 +169,84 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     v.extend([
         TutStep::new(
             "Move with the keyboard",
-            "With the code focused, h, j, k and l move the cursor and w and b jump \
-             by word. Press g then d to go to a definition, or g then r to see \
-             references. Holding ⌘ and clicking a name does the same.",
+            "h j k l move, w and b jump by word. g d goes to a definition, g r to references.",
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         // -- The top bar's left cluster -------------------------------------
         TutStep::new(
             "Navigate and retrace",
-            "The arrows at the top left move back and forward through everywhere you \
-             have been, just like a web browser. The line above the code shows the \
-             last places that led you here, each a click back to it. Hold ⌥ with the \
-             arrow keys to do the same from the keyboard.",
+            "Back and forward through where you have been. The line above the code shows how you got here.",
             Anchor::ToolbarLeft,
         ),
         // -- The margin beside the code, then the outline --------------------
         TutStep::new(
             "Notes beside the code",
-            "The margin beside the code holds clew's notes on it: a note on each \
-             function, level with the function, and the one you are in raised as a \
-             card, with its calls, its history, and a way to ask about it. Add an AI \
-             key in Settings, then run Explain All from the ⋯ menu on the right to \
-             fill them in.",
+            "clew's note on each function, beside it. Explain All fills them in.",
             Anchor::RightTop,
         ),
         TutStep::new(
             "The outline",
-            &format!(
-                "The Reading notes view of the sidebar opens with the outline of \
-                 {file}. It lists every function and type in the file, and the one \
-                 you are reading stays highlighted. Click any entry to jump straight \
-                 to it."
+            &format!("Every function and type in {file}."
             ),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Notes)),
         TutStep::new(
             "Reading notes",
-            &format!(
-                "In the outline you can mark a symbol as understood or write a note \
-                 on it. The NOTES tab gathers all of them here and tracks how much \
-                 of {project} you have worked through."
-            ),
+            "Mark symbols understood, or note them. They gather here.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Notes)),
         // -- Finding --------------------------------------------------------
         TutStep::new(
             "Search the project",
-            "The SEARCH tab looks through the full text of every file. Switch on \
-             regular expressions, case matching, or whole word when you need them. \
-             Click a result to jump to that line, and press ⌘⇧F to open it fast.",
+            "Full-text search across every file.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Search)),
         TutStep::new(
             "Find by meaning",
-            "The FIND tab searches by meaning rather than exact words. Describe what \
-             you are after, such as retry logic with backoff, and clew ranks the \
-             closest code for you. Reach for it when you do not know the name to \
-             search.",
+            "Search by what code does, not by its name.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Semantic)),
         // -- Navigating -----------------------------------------------------
         TutStep::new(
             "Your reading trail",
-            "Every jump you make is remembered. The TRAIL tab lays your whole path \
-             out as a tree, so you can see where you have been and retrace any \
-             branch. Backtrack and explore elsewhere, and the earlier path is still \
-             kept.",
+            "Every jump you made, as a tree.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Trail)),
         TutStep::new(
             "Bookmarks",
-            "Press ⌘D to bookmark the line you are on. The MARKS tab collects your \
-             bookmarks, and you can attach a note to each. They stay with the \
-             project, so your important spots are waiting next time.",
+            "⌘D bookmarks the line you are on.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Marks)),
         TutStep::new(
             "Guided walkthroughs",
-            "The WALK tab builds a guided tour of the code. Ask about a topic, such \
-             as how startup works, and clew lays out an ordered walk through the \
-             real files, one step at a time. It can also narrate the changes on \
-             your current branch.",
+            "Pick a topic, and clew walks you through the files.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Walk)),
         // -- Structure (per open file) --------------------------------------
         TutStep::new(
             "Imports for this file",
-            &format!(
-                "The IMPORTS tab focuses on the open file. It shows what {file} \
-                 imports and what imports it, and it can open the whole project map \
-                 with any cycles marked."
+            &format!("What {file} imports, and what imports it."
             ),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Imports)),
         TutStep::new(
             "Calls for this file",
-            "The CALLS tab is a call hierarchy for the symbol under your cursor. It \
-             shows who calls it and what it calls, resolved precisely for you. \
-             Expand it to trace the flow across the project.",
+            "Who calls the symbol at the cursor, and what it calls.",
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Calls)),
         TutStep::new(
             "API docs",
-            &format!(
-                "The DOCS tab gathers the public API of {project}. Every documented \
-                 type and function is listed, grouped by file, straight from the \
-                 source with no build step. Click an item to read its full page."
+            &format!("The public API of {project}, read from the source."
             ),
             Anchor::Sidebar,
         )
@@ -303,123 +254,82 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // -- Working in the reader ------------------------------------------
         TutStep::new(
             "Split and compare",
-            "Press ⌘\\ to split the reader into two panes. Read a caller on one side \
-             and what it calls on the other, each with its own scroll. Press it \
-             again to return to a single pane.",
+            "⌘\\ splits the reader in two.",
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         TutStep::new(
             "Why is this here?",
-            "Right click any line and choose Why is this here. clew reads the git \
-             history around it and explains why the code exists, grounded in the \
-             commits that actually shaped it.",
+            "Right-click a line, and clew explains it from git history.",
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         // -- Talking to clew: Ask, in the corner ----------------------------
         TutStep::new(
             "Ask clew, or tell it what to do",
-            "Ask lives in the bottom-right corner: a conversation with clew about \
-             the whole project. Ask about the codebase, such as where is auth \
-             handled, and clew answers with links into the real files. Or say what \
-             to do: open a file, take me to where the config is parsed, show the \
-             call graph. clew does it, and asks first before anything that runs \
-             code or costs money. The microphone lets you say it instead of \
-             typing; hide the card to its pill when you want the corner back.",
+            "Ask about the project, or tell clew what to do. It asks before running anything.",
             Anchor::AskCorner,
         )
         .demo(Message::Ask(AskMsg::Open)),
         // -- The file tools, over the code -----------------------------------
         TutStep::new(
             "Tools for this file",
-            &format!(
-                "Over the code sit the tools for {file}. Explain summarizes it, \
-                 Skim folds every body to its signature for a fast first read, Diff \
-                 shows what changed since the last commit, and Time Travel scrubs \
-                 the file back through its history, commit by commit."
+            &format!("Explain, Skim, Diff and Time Travel for {file}."
             ),
             Anchor::FileTools,
         )
         .demo_opt(open_demo.clone()),
         TutStep::new(
             "Reading aids",
-            "The View menu switches the reading aids on and off. Outline summaries \
-             and File summary show clew's one-line explanations in the code, Inlay \
-             hints add type and parameter labels, and Minimap shows the scroll \
-             overview down the right edge.",
+            "Summaries, inlay hints and the minimap, on or off.",
             Anchor::ViewMenu,
         )
         .demo_opt(open_demo.clone()),
         // -- The tool strip, top to bottom: one step per tool ----------------
         TutStep::new(
             "The overview",
-            &format!(
-                "The strip down the right edge holds the tools for the whole \
-                 project. The first opens the overview, a written tour of it: what \
-                 {project} does, its main modules and entry points, and a map you \
-                 can explore. It is the best place to begin on code you have never \
-                 seen."
+            &format!("Tools for the whole project. First, an overview of {project}."
             ),
             Anchor::Strip(StripTool::Overview),
         )
         .demo(Message::Overview(OverviewMsg::Show)),
         TutStep::new(
             "Project stats",
-            &format!(
-                "The chart opens the stats page. It breaks {project} down by \
-                 language, with lines of code, file counts, and the language mix, so \
-                 you know at a glance what you are looking at."
+            &format!("{project} by language and size."
             ),
             Anchor::Strip(StripTool::Stats),
         )
         .demo(Message::Overview(OverviewMsg::ShowStats)),
         TutStep::new(
             "Debug",
-            "The bug opens the debugger under the code. Set a breakpoint in the \
-             gutter, start a run, and step through it. The call stack, variables, \
-             and watches all show here.",
+            "Breakpoints, stepping, the stack and variables.",
             Anchor::Strip(StripTool::Debug),
         )
         .demo(Message::Window(WindowMsg::ShowDebugPanel)),
         TutStep::new(
             "The call graph",
-            &format!(
-                "The next tool opens the whole-project call graph. It draws how \
-                 functions across {project} call one another, so you can see the \
-                 flow of control at a glance."
+            &format!("How functions across {project} call each other."
             ),
             Anchor::Strip(StripTool::CallGraph),
         ),
         TutStep::new(
             "The import graph",
-            "The one under it opens the whole-project import graph. It maps how \
-             every file depends on the others, with any cycles marked, so the shape \
-             of the codebase is there in one picture.",
+            "How files depend on each other, cycles marked.",
             Anchor::Strip(StripTool::ImportGraph),
         ),
         TutStep::new(
             "The type map",
-            "The next opens the type map. It shows how the project's types relate: \
-             which ones name others in their fields and signatures, and which \
-             extend or implement which. The list beside it names the most \
-             referenced types and the base types with the most subtypes.",
+            "How the project's types relate.",
             Anchor::Strip(StripTool::TypeMap),
         ),
         TutStep::new(
             "Project maps",
-            "The next opens the project's maps: what its languages and frameworks \
-             say about how it fits together. A database's tables and their foreign keys, \
-             a web app's routes and their handlers, an OTP application's supervision \
-             tree, the interfaces a Go type satisfies without saying so. Pick a map at \
-             the top; each node opens where it is defined.",
+            "Schemas, routes, supervision trees and more, read from the code.",
             Anchor::Strip(StripTool::ProjectMaps),
         ),
         TutStep::new(
             "Settings",
-            "The gear at the foot of the strip opens Settings. Your AI and embedding \
-             keys live here, along with the reading preferences. clew keeps them \
-             per project, so each codebase can read the way it should.",
+            "AI keys and reading preferences.",
             Anchor::Strip(StripTool::Settings),
         ),
         // -- The ⋯ menu, opened: introduce each item top to bottom. These steps
@@ -427,77 +337,57 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         //    real rows, named by `ui::ToolsRow` — the list the menu is built from.
         TutStep::new(
             "The more menu",
-            "Everything that does not need a place on the strip lives in the ⋯ \
-             menu. It is open now. The next steps go through each item in it, from \
-             the top.",
+            "Everything else lives here.",
             Anchor::Strip(StripTool::More),
         ),
         TutStep::new(
             "Explain All",
-            "Explain All fills the whole project with AI summaries, one per \
-             function, file, and folder. It runs in the background and feeds the \
-             Explain panel and the Find view. It needs an AI key in Settings.",
+            "AI summaries for every function, file and folder. Needs an AI key.",
             menu_row(ToolsRow::ExplainAll),
         ),
         TutStep::new(
             "Walkthrough",
-            "Walkthrough is the guided tours of the walkthrough view, one click \
-             away. Ask for a topic and clew builds an ordered walk through the real \
-             files.",
+            "Guided tours through the code.",
             menu_row(ToolsRow::Walkthrough),
         ),
         TutStep::new(
             "Glossary",
-            "Glossary lists the project's own vocabulary: its types, modules and \
-             acronyms, each with the one-line definition the code gives it. Hover \
-             a term anywhere and the same definition appears in the peek.",
+            "The project's own terms, defined.",
             menu_row(ToolsRow::Glossary),
         ),
         TutStep::new(
             "Open a folder",
-            "Open Folder points clew at another project on this machine. It opens in \
-             place, and ⌘N opens a project in a new window instead.",
+            "Open another project. ⌘N opens it in a new window.",
             menu_row(ToolsRow::OpenFolder),
         ),
         TutStep::new(
             "Read remote code",
-            "Open Remote connects to another machine over SSH and reads its code as \
-             if it were your own. clew runs quietly on the far side and streams only \
-             what you look at.",
+            "Read code on another machine over SSH.",
             menu_row(ToolsRow::OpenRemote),
         ),
         TutStep::new(
             "Export notes",
-            "Export Notes writes everything you gathered while reading — notes, \
-             bookmarks, the reading trail, saved walkthroughs and the glossary — \
-             to one Markdown file you can keep or hand over.",
+            "Your notes, bookmarks and trail as one Markdown file.",
             menu_row(ToolsRow::ExportNotes),
         ),
         TutStep::new(
             "Language servers",
-            "Language Servers shows the language servers clew runs for you. \
-             Definitions, references, and the call graph all come from these, and \
-             you can restart one here if it ever gets stuck.",
+            "The servers behind definitions and references. Restart one here.",
             menu_row(ToolsRow::LspServers),
         ),
         TutStep::new(
             "Keyboard shortcuts",
-            "Keyboard Shortcuts lists every command in clew and lets you rebind any \
-             of them. The whole app is reachable from the keyboard.",
+            "Every command, and its keys.",
             menu_row(ToolsRow::Shortcuts),
         ),
         TutStep::new(
             "This tour",
-            "Tutorial opens this very walkthrough. You can replay it from here \
-             whenever you want a refresher on a feature.",
+            "Replay this tour any time.",
             menu_row(ToolsRow::Tutorial),
         ),
         TutStep::new(
             "That's clew",
-            "That is the whole tour. You have seen reading, finding, navigating, AI \
-             explanations, the graphs, git history, the debugger, and everything in \
-             the ⋯ menu. It is all a click or a shortcut away. Now go read some \
-             code. 🧵",
+            "That's the tour. Go read some code. 🧵",
             Anchor::Center,
         ),
     ]);

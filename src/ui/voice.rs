@@ -124,10 +124,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
     let chord = app.keymap.chord(crate::keymap::Action::Voice).caps();
     let mut col = column![
         text(format!(
-            "Press {chord} (or the microphone on Ask) and say a command — “open the call \
-             graph”, “hide the minimap” — or ask a question. Speech is turned into text on \
-             this computer by whisper.cpp: nothing you say leaves it. Pick a model and \
-             download it once."
+            "Press {chord} and speak. Speech stays on this computer."
         ))
         .size(ts::CAPTION)
         .color(theme::dim()),
@@ -168,7 +165,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
     };
     col = col
         .push(check(
-            "Run the commands it hears (ones that cost something ask first)",
+            "Run commands it hears",
             app.voice.prefs.run_commands,
             VoiceMsg::SetRunCommands,
         ))

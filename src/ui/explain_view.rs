@@ -504,11 +504,7 @@ fn reached_from_rows<'a>(
     );
     out.push(section_header("REACHED FROM"));
     if paths.is_empty() {
-        out.push(caption(
-            "no entry point reaches this in the call graph (called from outside the \
-             project, through an interface, or by a callback)"
-                .into(),
-        ));
+        out.push(caption("no entry point reaches this".into()));
         return out;
     }
     for chain in paths.iter() {
@@ -569,9 +565,9 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
         return compact_empty_state(
             Glyph::Lightbulb,
             if crate::keymap::MAC_KEYS {
-                "Move the cursor into a function, or ⌘-click a file or folder."
+                "Move the cursor into a function."
             } else {
-                "Move the cursor into a function, or Ctrl+click a file or folder."
+                "Move the cursor into a function."
             },
         );
     };
@@ -781,21 +777,15 @@ pub(crate) fn lsp_consent_modal(
     let asked = asked.into();
     let ready = asked.ready;
     use crate::LspProvision;
-    const SERVER_BLURB: &str = "clew manages its own “go to definition” server for this \
-                                language, separate from anything on your system:";
+    const SERVER_BLURB: &str = "Kept by clew, apart from your system:";
     let (title, blurb, action) = match consent.provision {
-        LspProvision::DebugAdapter { .. } => (
-            "Install a debug adapter?",
-            "Debugging this program needs a debug adapter that is not installed yet. \
-             This will run:",
-            "Install",
-        ),
+        LspProvision::DebugAdapter { .. } => {
+            ("Install a debug adapter?", "This will run:", "Install")
+        }
         LspProvision::Install(_) => ("Install a language server?", SERVER_BLURB, "Install"),
         LspProvision::Build { .. } => (
             "Let the language server build this project?",
-            "To understand this code, its language server builds the project — which runs \
-             the project's own code, with your permissions. Allow it only for code you \
-             trust; without it clew still reads the project with its own parser.",
+            "Building runs the project's own code. Allow only if you trust it.",
             "Allow",
         ),
         _ => ("Download a language server?", SERVER_BLURB, "Download"),
@@ -833,13 +823,18 @@ pub(crate) fn lsp_consent_modal(
             .padding(8)
             .width(Fill)
             .style(theme::editor),
-            // Wrapped: what it runs is the point of the question, and a
-            // line cut at the dialog's edge hid the most of it.
-            text(consent.describe())
-                .size(ts::BODY)
-                .color(theme::dim())
-                .wrapping(Wrapping::WordOrGlyph),
         ]
+        // Wrapped: what it runs is the point of the question, and a line
+        // cut at the dialog's edge hid the most of it.
+        .push({
+            let said = consent.describe();
+            (!said.is_empty()).then(|| {
+                text(said)
+                    .size(ts::BODY)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::WordOrGlyph)
+            })
+        })
         // Asked one at a time: say that more follow, so answering this one
         // and seeing another does not read as the same question again.
         .push(more_questions(waiting))
@@ -881,8 +876,7 @@ pub(crate) fn lsp_consent_modal(
 fn more_questions<'a>(waiting: usize) -> Option<Element<'a, Message>> {
     let said = match waiting {
         0 => return None,
-        1 => "1 more question is waiting for your answer after this one.".to_string(),
-        n => format!("{n} more questions are waiting for your answer after this one."),
+        n => format!("{n} more after this"),
     };
     Some(text(said).size(ts::SMALL).color(theme::dim()).into())
 }
@@ -958,13 +952,9 @@ pub(crate) fn lsp_command_modal(
             text("Let this project configure its language server?")
                 .size(ts::TITLE)
                 .color(theme::fg()),
-            text(
-                "This project's .clew/lsp.toml decides what clew runs for its \
-                 own “go to definition”, and with which options. It is part of \
-                 the repository — allow it only if you trust this project.",
-            )
-            .size(ts::BASE)
-            .color(theme::fg()),
+            text("Its .clew/lsp.toml chooses what runs. Allow only if you trust this project.",)
+                .size(ts::BASE)
+                .color(theme::fg()),
             column(blocks).spacing(8),
             text(format!(
                 "language: {} · server: {} {}",
@@ -1026,12 +1016,9 @@ pub(crate) fn consent_modal(
             text("Allow clew to use this project?")
                 .size(ts::TITLE)
                 .color(theme::fg()),
-            text(
-                "clew stores bookmarks and reading data in a “.clew” folder \
-                 inside the project:",
-            )
-            .size(ts::BASE)
-            .color(theme::fg()),
+            text("clew keeps its data in:",)
+                .size(ts::BASE)
+                .color(theme::fg()),
             container(
                 // Paths have no spaces to break on, so glyph-wrap to keep a long
                 // path inside the box instead of overflowing off the panel.
@@ -1044,9 +1031,6 @@ pub(crate) fn consent_modal(
             .padding(8)
             .width(Fill)
             .style(theme::editor),
-            text("Without it the project can't be opened. You can delete .clew any time.")
-                .size(ts::BODY)
-                .color(theme::dim()),
             row![
                 space().width(Fill),
                 button(text("Not now").size(ts::BASE))

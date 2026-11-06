@@ -323,8 +323,7 @@ impl App {
                 self.proj.embed_index = embed::Index::default();
             }
             self.proj.semantic_results.clear();
-            self.status =
-                "Embedding configuration changed — build the index and search again".into();
+            self.status = "Embedding settings changed — rebuild the index".into();
             return Task::none();
         }
         // A query whose vector length differs from the index's is an error

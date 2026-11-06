@@ -1144,7 +1144,7 @@ fn the_call_trees_stale_banner_keeps_the_trees_scroll() {
 
 /// A16 / E2-7: at the smallest window the app allows, the Settings modal
 /// still fits — a page is a scrollable bounded by the window, taller in
-/// content than on screen when it is a long one (Voice), and the wheel
+/// content than on screen when it is a long one (Shortcuts), and the wheel
 /// reaches the rest of it.
 #[test]
 fn the_settings_modal_fits_the_smallest_window_and_scrolls() {
@@ -1155,7 +1155,7 @@ fn the_settings_modal_fits_the_smallest_window_and_scrolls() {
     app.window_width = min.width;
     app.window_height = min.height;
     let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
-        crate::SettingsPage::Voice,
+        crate::SettingsPage::Shortcuts,
     )));
     let mut renderer = renderer();
     let over_form = mouse::Cursor::Available(Point::new(min.width / 2.0, min.height / 2.0));
@@ -1236,7 +1236,7 @@ fn settings_shows_one_page_at_a_time() {
         SettingsPage::Shortcuts,
     )));
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Click a shortcut, then press the new keys"));
+    assert!(shows(&mut sim, "Click a shortcut, then press new keys"));
     assert!(shows(&mut sim, "Commands"));
 }
 
@@ -1463,10 +1463,10 @@ fn finder_rows_stay_aligned_with_their_results() {
     );
 }
 
-/// A19: the overview's module map says what dragging it does in the mode it
-/// is drawn in — it said "orbit" while drawn flat, where a drag pans.
+/// The overview's module map stands without a caption telling how to use
+/// it, drawn flat or in 3D.
 #[test]
-fn the_overview_map_caption_follows_its_mode() {
+fn the_overview_map_has_no_caption() {
     let mut app = reader_app();
     app.proj.overview.showing = true;
     app.proj.overview.markdown = Some("## What it does\nA thing.".into());
@@ -1481,21 +1481,18 @@ fn the_overview_map_caption_follows_its_mode() {
         vec![node("a.rs"), node("b.rs")],
         vec![(0, 1)],
     ));
-    for (graph_3d, says, never) in [
-        (false, "drag to pan", "orbit"),
-        (true, "drag to orbit", "pan"),
-    ] {
+    for graph_3d in [false, true] {
         app.graph_3d = graph_3d;
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, says), "3D {graph_3d}: no {says:?}");
+        assert!(shows(&mut sim, "Module map"), "3D {graph_3d}: no map");
         assert!(
             text_at(
                 &mut sim,
-                |t| t.starts_with("size = how connected") && t.contains(never),
+                |t| t.contains("drag") || t.contains("click") || t.contains("size ="),
                 0
             )
             .is_none(),
-            "3D {graph_3d}: the caption says {never:?}"
+            "3D {graph_3d}: a caption says how to use the map"
         );
     }
 }
@@ -2275,7 +2272,7 @@ fn the_unknown_host_prompt_shows_the_fingerprint_and_trust_names_it() {
     assert!(sim.find("Unknown host key").is_ok());
     assert!(sim.find("ED25519 key").is_ok());
     assert!(sim.find("SHA256:Ed25519PrintForTests").is_ok());
-    assert!(shows(&mut sim, "~/.ssh/known_hosts is not changed"));
+    assert!(shows(&mut sim, "Trust it only if this matches"));
     let sent = click(sim, "Trust and connect");
     assert!(
         matches!(sent.as_slice(), [Message::Connect(ConnectMsg::TrustHost { fingerprint })]
@@ -2572,7 +2569,11 @@ fn a_changed_key_clew_recorded_is_forgotten_only_by_a_click_on_the_prompt() {
         stage(&app),
         Some(crate::ConnectStage::Connecting { .. })
     ));
-    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+    assert!(
+        app.status.contains("old key — connecting"),
+        "{}",
+        app.status
+    );
 }
 
 /// The forget-key reconnect drops the project as every switch does, and what
@@ -2602,7 +2603,11 @@ fn forgetting_a_key_keeps_the_discard_notice() {
     let _ = app.update(Message::Connect(ConnectMsg::ForgetHostKey {
         host: "[example.com]:2222".into(),
     }));
-    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+    assert!(
+        app.status.contains("old key — connecting"),
+        "{}",
+        app.status
+    );
     assert!(
         app.status
             .contains("Unsaved remote state was discarded: notes.json"),
@@ -2631,10 +2636,10 @@ fn the_consent_modal_says_how_many_more_wait() {
         dest_dir: PathBuf::new(),
     };
     let mut sim = sim_elem(super::lsp_consent_modal(&consent, 1, 2, true));
-    assert!(shows(&mut sim, "2 more questions are waiting"));
+    assert!(shows(&mut sim, "2 more after this"));
     let mut sim = sim_elem(super::lsp_consent_modal(&consent, 1, 0, true));
     assert!(shows(&mut sim, "rust-analyzer 1"));
-    assert!(!shows(&mut sim, "waiting for your answer"));
+    assert!(!shows(&mut sim, "more after this"));
 
     // Its Allow is pressed only once it can have been read, and names the
     // question; its decline at once.
@@ -4697,15 +4702,12 @@ fn a_capped_folder_listing_says_what_it_left_out() {
     };
     let capped = browser(41);
     let mut sim = sim_elem(super::remote_browser_view(&capped));
-    assert!(shows(&mut sim, "41 more entries"));
+    assert!(shows(&mut sim, "41 more"));
     let complete = browser(0);
     let mut sim = sim_elem(super::remote_browser_view(&complete));
     assert!(shows(&mut sim, "src"));
-    assert!(!shows(&mut sim, "more entr"));
-    assert_eq!(
-        super::omitted_note(1).as_deref(),
-        Some("… and 1 more entry, past the listing's cap")
-    );
+    assert!(!shows(&mut sim, "more"));
+    assert_eq!(super::omitted_note(1).as_deref(), Some("… and 1 more"));
 }
 
 /// I1: the Connect modal shows whether the LIVE host holds the AI keys, and
@@ -4717,7 +4719,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     app.remote_ai_opt_in = true;
     app.connect = Some(crate::ConnectUi::default());
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "holds your AI API keys"));
+    assert!(shows(&mut sim, "holds your AI keys"));
     let sent = click(sim, "Revoke");
     assert!(
         matches!(
@@ -4730,7 +4732,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
         let _ = app.update(msg);
     }
     assert_eq!(app.live_ai_opt_in(), Some(false));
-    assert!(shows(&mut sim_of(&app), "does not hold your AI API keys"));
+    assert!(shows(&mut sim_of(&app), "does not hold your AI keys"));
     // Locally there is nothing to grant, so nothing is shown.
     app.connection = crate::connect::ConnTarget::Local;
     let mut local = sim_of(&app);
@@ -4775,7 +4777,7 @@ fn the_debug_panel_removes_watches_by_identity_and_offers_hover_evaluation() {
     );
     app.debug.hover_safe = true;
     let mut safe = sim_elem(super::debug_panel(&app));
-    assert!(safe.find("hover shows values").is_ok());
+    assert!(safe.find("hover shows values").is_err(), "no caption");
     assert!(
         safe.find("Evaluate on hover").is_err(),
         "no switch is needed"
@@ -6456,116 +6458,6 @@ fn a_long_glossary_section_does_not_hide_the_next() {
     assert!(shows(&mut sim, "Talks to the server"));
 }
 
-/// A graph's legend says how to read the graph shown: what a node is, what
-/// an arrow means, what colour means with and without the heat overlay, and
-/// which rings it can carry. It once read as the import graph's for all of
-/// them ("of 838 files" on the type map).
-#[test]
-fn the_graph_legend_says_how_to_read_the_graph_shown() {
-    use crate::Overlay;
-    let calls = super::graph_legend(Overlay::ProjectCalls, true, (160, 163), false, false);
-    assert!(
-        calls.starts_with("Showing the 160 most-connected of 163 files · drag to orbit"),
-        "{calls}"
-    );
-    assert!(calls.contains("arrow → the file it calls into"), "{calls}");
-    assert!(calls.contains("hue = language"), "{calls}");
-    assert!(
-        !calls.contains("cycle") && !calls.contains("ring"),
-        "{calls}"
-    );
-    let types = super::graph_legend(Overlay::ProjectTypes, false, (160, 838), true, true);
-    assert!(types.contains("of 838 types"), "{types}");
-    assert!(
-        types.contains("arrow → the type it uses or inherits"),
-        "{types}"
-    );
-    assert!(
-        types.contains("colour = how often it changed") && !types.contains("hue = language"),
-        "{types}"
-    );
-    assert!(
-        types.contains("green ring = the last debug run stopped here"),
-        "{types}"
-    );
-    let imports = super::graph_legend(Overlay::ProjectImports, false, (4, 4), false, false);
-    assert!(!imports.contains("Showing"), "{imports}");
-    assert!(imports.starts_with("drag to pan"), "{imports}");
-    assert!(
-        imports.contains("arrow → the file it imports")
-            && imports.contains("gold ring = import cycle"),
-        "{imports}"
-    );
-}
-
-/// The settings' Python interpreter: what is in effect and who named it, the
-/// interpreters found to pick from, the one picked marked — and a "Use" on
-/// another picks it. A choice that cannot be used says so.
-#[test]
-fn the_languages_section_shows_the_interpreter_in_effect_and_picks_another() {
-    use clew_protocol::{
-        PythonCandidate, PythonEnvKind, PythonEnvironments, PythonInEffect, PythonSource,
-    };
-    let mut app = reader_app();
-    app.proj.project_languages = vec!["python".into()];
-    let venv = "/p/.venv/bin/python".to_string();
-    let poetry = "/cache/pypoetry/virtualenvs/app-AbCd-py3.12/bin/python".to_string();
-    app.proj.lang_options = Some(Ok(clew_protocol::LanguageOptions {
-        python: Some(PythonEnvironments {
-            candidates: vec![
-                PythonCandidate {
-                    interpreter: venv.clone(),
-                    kind: PythonEnvKind::Project,
-                    name: ".venv".into(),
-                    version: Some("3.12.1".into()),
-                },
-                PythonCandidate {
-                    interpreter: poetry.clone(),
-                    kind: PythonEnvKind::Poetry,
-                    name: "app-AbCd-py3.12".into(),
-                    version: None,
-                },
-            ],
-            in_effect: PythonInEffect {
-                interpreter: Some(venv.clone()),
-                source: PythonSource::ProjectVenv,
-                unusable_choice: Some("/gone/bin/python".into()),
-            },
-        }),
-        ..Default::default()
-    }));
-    let mut sim = sim_elem(super::connect::languages_section(&app));
-    assert!(sim.find("Python interpreter").is_ok());
-    assert!(
-        sim.find(
-            "Found in the project — run through its base Python, its packages read, as it \
-             came with the project"
-        )
-        .is_ok()
-    );
-    assert!(sim.find("Project · .venv · Python 3.12.1").is_ok());
-    assert!(sim.find("Poetry · app-AbCd-py3.12").is_ok());
-    assert!(sim.find(poetry.as_str()).is_ok());
-    assert!(sim.find("in use").is_ok(), "Automatic is the one in use");
-    assert!(
-        sim.find(
-            "Your choice /gone/bin/python cannot be used: it is gone, or it is a program of \
-             the repository's own. The one above is used until you pick another."
-        )
-        .is_ok()
-    );
-    // The first "Use" is the project's venv: Automatic is in use.
-    let _ = sim.click("Use");
-    let picked: Vec<_> = sim
-        .into_messages()
-        .filter_map(|m| match m {
-            Message::Languages(crate::LanguagesMsg::ChoosePython(p)) => Some(p),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(picked, [Some(venv)]);
-}
-
 /// The settings' build choices, language by language: what is in effect
 /// first — and what the project's lsp.toml also sets — then what there is
 /// to pick, each pick making the choice it names.
@@ -6633,13 +6525,13 @@ fn the_languages_section_offers_each_languages_build_choices() {
         "Rust: features and target",
         "Features cli/color, and the defaults",
         "Checked for the host's own target",
-        "The project's .clew/lsp.toml sets cargo.features — a choice here wins where both say.",
+        "Also set in .clew/lsp.toml: cargo.features. Settings here win.",
         "tls (default)",
         "Go: build tags and platform",
         "Build tags e2e",
         "Read for windows/the host's architecture",
         "C and C++: compilation",
-        "Compilation database: the one clangd finds beside the sources or in build/",
+        "Automatic",
         "/p/build",
         "Lean: toolchain",
         "The lake found on the PATH",
@@ -6701,12 +6593,11 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
         .into(),
         ..Default::default()
     }));
-    let warning = "This is the project's own TypeScript: the server runs its code — choose it \
-                   for a project you trust.";
+    let warning = "Runs the project's own code. Only for projects you trust.";
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
         "TypeScript and JavaScript: TypeScript version",
-        "clew's own TypeScript 5, installed with the server",
+        "clew's TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
         "Zig: compiler",
         "zvm · Zig 0.13.0",
@@ -7563,7 +7454,7 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         for model in clew_voice::models::MODELS {
             assert!(shows(&mut sim, model.name), "{}", model.name);
         }
-        assert!(shows(&mut sim, "nothing you say leaves it"));
+        assert!(shows(&mut sim, "Speech stays on this computer"));
         assert!(
             shows(&mut sim, "Language"),
             "Echo's Small hears any language"

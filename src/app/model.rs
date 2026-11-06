@@ -1546,9 +1546,11 @@ impl LspConsent {
                 format!("{} — on the remote host", shown(describe))
             }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
-            LspProvision::Build { runs, host, .. } => match host {
-                Some(_) => format!("It runs {} — on the remote host.", shown(runs)),
-                None => format!("It runs {runs}."),
+            // The question says it runs the project's own code; where is
+            // the one thing left to say.
+            LspProvision::Build { host, .. } => match host {
+                Some(_) => "On the remote host.".into(),
+                None => String::new(),
             },
         }
     }

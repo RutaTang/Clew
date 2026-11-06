@@ -167,7 +167,6 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             column![label("Mode"), appearance].spacing(3),
             field("Light theme", light_pick),
             field("Dark theme", dark_pick),
-            caption("A change shows at once; Save keeps it, Close goes back."),
         ]
         .spacing(14)
         .into(),
@@ -186,7 +185,6 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         .spacing(10)
         .into(),
         SettingsPage::LanguageModel => column![
-            caption("The model Explain, Ask and the overview use."),
             field("Provider", provider),
             field("API key", key.into()),
             field("Model", model.into()),
@@ -196,10 +194,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         .spacing(14)
         .into(),
         SettingsPage::Embeddings => column![
-            caption(
-                "Semantic search, and the code Ask finds by meaning: any OpenAI-compatible \
-                 /embeddings endpoint. DeepSeek has none; OpenAI's is the default."
-            ),
+            caption("Any OpenAI-compatible /embeddings endpoint."),
             field("API key", embed_key.into()),
             field("Model", embed_model.into()),
             field("Base URL", embed_base.into()),
@@ -465,7 +460,7 @@ fn lang_pick<'a>(
 fn project_sets_note<'a>(sets: &[String]) -> Option<Element<'a, Message>> {
     (!sets.is_empty()).then(|| {
         lang_caption(format!(
-            "The project's .clew/lsp.toml sets {} — a choice here wins where both say.",
+            "Also set in .clew/lsp.toml: {}. Settings here win.",
             sets.join(", ")
         ))
         .into()
@@ -485,21 +480,10 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         return space().height(0).into();
     }
     let choices = &app.proj.lang_choices;
-    let remote = app.connection.is_remote();
     let mut col = column![
         text("Languages in this project")
             .size(ts::BODY)
             .color(theme::accent()),
-        lang_caption(format!(
-            "Set up for this project {} — kept in clew's own data, never written into the \
-             project. A choice here wins over its .clew/lsp.toml, and the code its build then \
-             leaves out — features off, tags unset, macros undefined — is dimmed as you read.",
-            if remote {
-                "and its host"
-            } else {
-                "on this machine"
-            }
-        )),
     ]
     .spacing(8);
     let mut rows = app.proj.project_languages.clone();
@@ -624,15 +608,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 heading: "TypeScript and JavaScript: TypeScript version",
-                automatic: "clew's own TypeScript 5, installed with the server",
+                automatic: "clew's TypeScript 5",
                 chosen: app.proj.lang_choices.typescript.as_deref(),
                 found: found("typescript"),
                 field: crate::LangField::TypeScriptPath,
-                placeholder: "Path to a tsserver.js, or the TypeScript folder holding it",
-                project_note: Some(
-                    "This is the project's own TypeScript: the server runs its code — \
-                     choose it for a project you trust.",
-                ),
+                placeholder: "Path to tsserver.js or its folder",
+                project_note: Some("Runs the project's own code. Only for projects you trust."),
             },
             |c, path| c.typescript = path,
         ));
@@ -642,7 +623,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 heading: "Java: JDK",
-                automatic: "The JDK the server finds (JAVA_HOME, or the one on the PATH)",
+                automatic: "Automatic (JAVA_HOME or PATH)",
                 chosen: app.proj.lang_choices.java.as_deref(),
                 found: found("java"),
                 field: crate::LangField::JavaHome,
@@ -672,7 +653,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 heading: "C#: solution",
-                automatic: "The solution the server finds in the project",
+                automatic: "Automatic",
                 chosen: app.proj.lang_choices.csharp.as_deref(),
                 found: found("csharp"),
                 field: crate::LangField::CSharpSolution,
@@ -691,7 +672,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
                 chosen: app.proj.lang_choices.zig.as_deref(),
                 found: found("zig"),
                 field: crate::LangField::ZigPath,
-                placeholder: "Path to a zig compiler, or a name on the PATH",
+                placeholder: "Path or name of zig",
                 project_note: None,
             },
             |c, path| c.zig = path,
@@ -729,12 +710,9 @@ fn python_block<'a>(
         let who = match effect.source {
             PythonSource::Chosen => "Your choice",
             PythonSource::LspToml => "Named by the project's .clew/lsp.toml",
-            PythonSource::ProjectVenv => {
-                "Found in the project — run through its base Python, its packages read, \
-                 as it came with the project"
-            }
-            PythonSource::Activated => "The environment active where clew started",
-            PythonSource::Server => "None — the language server looks for one itself",
+            PythonSource::ProjectVenv => "Found in the project",
+            PythonSource::Activated => "Active where clew started",
+            PythonSource::Server => "None",
         };
         let mut lines: Vec<Element<'a, Message>> =
             vec![text(who).size(ts::SMALL).color(theme::fg()).into()];
@@ -754,10 +732,7 @@ fn python_block<'a>(
         }
         col = col.push(lang_pick(
             "Automatic".into(),
-            lang_caption(
-                "Whatever clew finds: the project's own venv, else the server's choice".into(),
-            )
-            .into(),
+            lang_caption("Automatic".into()).into(),
             chosen.is_none(),
             Message::Languages(L::ChoosePython(None)),
         ));
@@ -798,7 +773,7 @@ fn python_block<'a>(
         }
     }
     let placeholder = if remote {
-        "Path to a Python interpreter on the remote host"
+        "Python path on the remote host"
     } else {
         "Path to a Python interpreter"
     };
@@ -995,9 +970,7 @@ fn go_block<'a>(
     let mut seen = std::collections::HashSet::new();
     all.retain(|t| seen.insert(t.clone()));
     if all.is_empty() {
-        col = col.push(lang_caption(
-            "The project's files name no build tags of their own.".into(),
-        ));
+        col = col.push(lang_caption("No build tags in this project.".into()));
     } else {
         let chips: Vec<Element<'a, Message>> = all
             .into_iter()
@@ -1083,13 +1056,10 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
             lang_path(dir.clone()),
         ]
         .into(),
-        None => text("Compilation database: the one clangd finds beside the sources or in build/")
-            .size(ts::SMALL)
-            .color(theme::fg())
-            .into(),
+        None => text("Automatic").size(ts::SMALL).color(theme::fg()).into(),
     };
     let flags = match c.flags.is_empty() {
-        true => "No flags for files it does not cover".to_string(),
+        true => "None".to_string(),
         false => format!(
             "For files it does not cover: {}",
             crate::app::languages::join_args(&c.flags)
@@ -1104,7 +1074,7 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
     }
     col = col.push(lang_pick(
         "Automatic".into(),
-        lang_caption("clangd looks beside each file, and in build/".into()).into(),
+        lang_caption("Automatic".into()).into(),
         c.compile_commands.is_none(),
         choose_with(choices, |c| {
             c.c.get_or_insert_default().compile_commands = None
@@ -1125,7 +1095,7 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
         lang_field(
             app,
             if remote {
-                "Folder holding compile_commands.json, on the remote host"
+                "compile_commands.json folder on the host"
             } else {
                 "Folder holding compile_commands.json"
             },
@@ -1288,7 +1258,7 @@ fn toolchain_block<'a>(
             lang_path(choice.command.clone()).into(),
         ],
         Some(choice) => vec![
-            text("Your own server program (under Server programs)")
+            text("Your own program")
                 .size(ts::SMALL)
                 .color(theme::fg())
                 .into(),
@@ -1340,9 +1310,7 @@ fn toolchain_block<'a>(
         ));
     }
     if found.is_empty() {
-        col = col.push(lang_caption(format!(
-            "No other {program} was found; give one's path under Server programs."
-        )));
+        col = col.push(lang_caption(format!("No other {program} found.")));
     }
     col.into()
 }
@@ -1354,17 +1322,7 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     let choices = &app.proj.lang_choices;
     let remote = app.connection.is_remote();
     let drafts = &app.proj.lang_drafts;
-    let mut col = column![
-        lang_heading("Server programs"),
-        lang_caption(
-            "Run a program of your own as a language's server: another build, another \
-             server, or one for a language clew has none for. With no arguments given, it \
-             runs with the ones clew's server for the language takes. A server that builds \
-             the project still asks before it does."
-                .into(),
-        ),
-    ]
-    .spacing(6);
+    let mut col = column![lang_heading("Server programs"),].spacing(6);
     for (language, choice) in choices.servers.iter().flatten() {
         let name = crate::highlight::lang_name(language).unwrap_or(language.as_str());
         let remove = choose_with(choices, |c| {
@@ -1402,9 +1360,9 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         lang_field(
             app,
             if remote {
-                "Program on the remote host: a path, or a name on its PATH"
+                "Program on the host (path or name)"
             } else {
-                "Program: a path, or a name on the PATH"
+                "Program (path or name)"
             },
             F::ServerCommand
         ),
@@ -1420,11 +1378,7 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     col = col.push(program_row);
     col.push(
         row![
-            lang_field(
-                app,
-                "Its arguments (blank: clew's for the language)",
-                F::ServerArgs
-            ),
+            lang_field(app, "Arguments (optional)", F::ServerArgs),
             lang_button(
                 "Use",
                 (ready && !drafts.server_command.trim().is_empty())
@@ -1460,15 +1414,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 .padding(6)
         };
 
-    let mut col = column![
-        section("MCP servers"),
-        caption(
-            "Their tools join Ask's answers (with clew's own agent). Each call asks you first \
-             unless the server is set otherwise."
-                .into()
-        ),
-    ]
-    .spacing(8);
+    let mut col = column![section("MCP servers"),].spacing(8);
     for server in &draft.mcp {
         let status: Element<'_, Message> = match draft.statuses.get(&server.name) {
             _ if !server.enabled => caption("off".into()).into(),
@@ -1600,11 +1546,6 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     );
 
     col = col.push(section("ACP agents"));
-    col = col.push(caption(
-        "Coding agents that answer in the Ask panel instead of clew's own (pick one there). \
-         They run on this machine, with clew's code tools; they ask before they act."
-            .into(),
-    ));
     for agent in &draft.acp {
         let name = agent.name.clone();
         let share = iced::widget::checkbox(agent.share_mcp)
@@ -1687,8 +1628,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         col = col.push(text(error.clone()).size(ts::SMALL).color(theme::danger()));
     }
     col = col.push(caption(format!(
-        "Environment, timeouts and per-tool approvals: [mcp.servers.<name>] and \
-         [acp.agents.<name>] in {}",
+        "More options in {}",
         crate::llm::config_hint()
     )));
     col.into()
@@ -1734,7 +1674,7 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
                 text(format!("Connecting to {label}…"))
                     .size(ts::BASE)
                     .color(theme::fg()),
-                text("Preparing the server on the remote host.")
+                text("Preparing the host…")
                     .size(ts::SMALL)
                     .color(theme::dim()),
                 space().height(6),
@@ -1799,16 +1739,6 @@ pub(crate) fn trust_host_prompt<'a>(
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
     };
-    let where_to = match crate::connect::known_hosts_path() {
-        Some(path) => format!(
-            "Trusting records this one key in clew's own known_hosts ({}). Your \
-             ~/.ssh/known_hosts is not changed.",
-            path.display()
-        ),
-        None => "Trusting records this one key in clew's own known_hosts. Your \
-                 ~/.ssh/known_hosts is not changed."
-            .to_string(),
-    };
     let fingerprint = container(
         column![
             text(format!("{} key", key.kind))
@@ -1836,17 +1766,9 @@ pub(crate) fn trust_host_prompt<'a>(
         .spacing(8)
         .align_y(iced::Center),
         para(format!(
-            "clew has never seen {host} before, so it cannot tell whether it is really \
-             that host. It presented this key:"
+            "First connection to {host}. Trust it only if this matches the host's key."
         )),
         fingerprint,
-        para(
-            "Compare the fingerprint with one you trust — from the host's administrator, \
-             or `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` run on the host. Trust \
-             it only if they match."
-                .to_string()
-        ),
-        text(where_to).size(ts::SMALL).color(theme::dim()),
         row![
             space().width(Fill),
             button(text("Cancel").size(ts::BODY))
@@ -1906,10 +1828,7 @@ pub(crate) fn host_key_changed_prompt<'a>(
         .align_y(iced::Center),
         para(reason.to_string()),
         para(format!(
-            "Forgetting removes the key clew recorded for {forget_host} from clew's own \
-             known_hosts (your ~/.ssh/known_hosts is not changed) and connects to {} \
-             again. Its new key is then shown to be checked before it is trusted. Do \
-             this only if you know why the key changed.",
+            "Forget the old key for {forget_host} and reconnect to {}? Only if you know why it changed.",
             target.label()
         )),
         row![
@@ -1948,11 +1867,9 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let row: Element<'_, Message> = if held {
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 14.0),
-            text(format!(
-                "{host} holds your AI API keys — Ask and Explain run there."
-            ))
-            .size(ts::SMALL)
-            .color(theme::fg()),
+            text(format!("{host} holds your AI keys."))
+                .size(ts::SMALL)
+                .color(theme::fg()),
             space().width(Fill),
             button(text("Revoke").size(ts::SMALL))
                 .style(theme::toolbar_button)
@@ -1963,12 +1880,10 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
         .align_y(iced::Center)
         .into()
     } else {
-        text(format!(
-            "{host} does not hold your AI API keys — AI calls run on this Mac."
-        ))
-        .size(ts::SMALL)
-        .color(theme::dim())
-        .into()
+        text(format!("{host} does not hold your AI keys."))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .into()
     };
     Some(
         container(row)
@@ -2097,7 +2012,7 @@ pub(crate) fn connect_picker<'a>(
     // runs Ask/Explain remotely.
     col = col.push(
         iced::widget::checkbox(ui.send_ai_keys)
-            .label("Send my AI API keys to this host (Ask/Explain run remotely)")
+            .label("Send my AI keys to this host")
             .on_toggle(|v| Message::Connect(ConnectMsg::ToggleAiKeys(v)))
             .size(14)
             .text_size(ts::BODY)
@@ -2138,8 +2053,8 @@ pub(crate) fn connect_picker<'a>(
 pub(crate) fn omitted_note(omitted: usize) -> Option<String> {
     match omitted {
         0 => None,
-        1 => Some("… and 1 more entry, past the listing's cap".into()),
-        n => Some(format!("… and {n} more entries, past the listing's cap")),
+        1 => Some("… and 1 more".into()),
+        n => Some(format!("… and {n} more")),
     }
 }
 
@@ -2339,7 +2254,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             .size(ts::SMALL)
             .color(theme::warning())
             .into(),
-        None => text("Click a shortcut, then press the new keys. Esc cancels.")
+        None => text("Click a shortcut, then press new keys.")
             .size(ts::SMALL)
             .color(theme::dim())
             .into(),

@@ -154,10 +154,9 @@ pub(crate) fn modal<'a>(
 }
 
 /// The fields of a single-line prompt dialog (breakpoint condition, bookmark
-/// note, reading note): a title, a hint, one input, Cancel and a submit.
+/// note, reading note): a title, one input, Cancel and a submit.
 pub(crate) struct Prompt<'a> {
     pub(crate) title: String,
-    pub(crate) hint: &'a str,
     pub(crate) placeholder: &'a str,
     pub(crate) value: &'a str,
     pub(crate) input_id: iced::widget::Id,
@@ -172,7 +171,6 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
     let panel = container(
         column![
             text(p.title).size(ts::EMPHASIS).color(theme::fg()),
-            text(p.hint).size(ts::SMALL).color(theme::dim()),
             text_input(p.placeholder, p.value)
                 .id(p.input_id)
                 .on_input(p.on_input)

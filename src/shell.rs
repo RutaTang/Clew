@@ -2538,8 +2538,7 @@ mod tests {
         assert_eq!(question.title, "2 changes are not confirmed by the host");
         assert!(
             question.message.contains(&format!(
-                "2 changes to bookmarks in {project} were sent to the host, but it has not \
-                 confirmed them"
+                "2 changes to bookmarks in {project} were not confirmed by the host"
             )),
             "{}",
             question.message
@@ -2590,8 +2589,7 @@ mod tests {
         assert_eq!(question.title, "A change is not confirmed by the host");
         assert!(
             question.message.contains(&format!(
-                "1 change to bookmarks in {project} was sent to the host, but it has not \
-                 confirmed it"
+                "1 change to bookmarks in {project} was not confirmed by the host"
             )),
             "{}",
             question.message
@@ -2878,8 +2876,7 @@ mod tests {
             question.message,
             format!(
                 "3 changes to bookmarks in {project} are not saved to the host: 1 could not be \
-                 sent and 2 were sent but not confirmed. Keep the window open, and clew keeps \
-                 trying to save them. Close it, and they may be lost."
+                 sent and 2 were sent but not confirmed. Close, and they may be lost."
             )
         );
         // Asked after the grace, of a close the user asked for in clew.
@@ -2995,8 +2992,8 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "1 change to bookmarks in {project} could not be saved by the host. Keep the \
-                 window open, and it is tried again. Close it, and it is lost."
+                "1 change to bookmarks in {project} could not be saved by the host. Close, and \
+                 it is lost."
             )
         );
         assert!(rt.is_open(window));
@@ -3059,7 +3056,7 @@ mod tests {
             question.message,
             format!(
                 "The host could not save the change to the bookmark at a.rs:1 in {project}: it \
-                 is lost. Keep the window open to make it again, or close it."
+                 is lost."
             )
         );
         rt.answer(0, false);

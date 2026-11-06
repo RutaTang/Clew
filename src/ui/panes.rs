@@ -1116,9 +1116,9 @@ fn margin_notes(app: &App) -> Element<'_, Message> {
             return compact_empty_state(
                 Glyph::Lightbulb,
                 if crate::keymap::MAC_KEYS {
-                    "Move the cursor into a function, or ⌘-click a file or folder."
+                    "Move the cursor into a function."
                 } else {
-                    "Move the cursor into a function, or Ctrl+click a file or folder."
+                    "Move the cursor into a function."
                 },
             );
         }
@@ -1572,10 +1572,7 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
         .as_ref()
         .filter(|n| matches!(n, crate::explain::Node::Function { .. }));
     let Some(node) = node else {
-        return compact_empty_state(
-            Glyph::CallGraph,
-            "Move the cursor into a function to see who calls it and what it calls.",
-        );
+        return compact_empty_state(Glyph::CallGraph, "Move the cursor into a function.");
     };
     let rows = call_flow_rows(app, node);
     let open = button(

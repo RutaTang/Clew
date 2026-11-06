@@ -262,7 +262,7 @@ impl App {
         // (the retrieval path, beside a running agent turn) or report a
         // missing index that is not missing. The question stays in the input.
         if self.ask_stream_active() {
-            self.status = "An answer is still being written — wait for it, or press Stop".into();
+            self.status = "Still answering — wait, or press Stop".into();
             return Task::none();
         }
         // An ACP agent brings its own model: no key of clew's is needed.
@@ -303,8 +303,7 @@ impl App {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op.
             self.status = if self.proj.explain.running || self.proj.building_embeddings {
-                "Ask needs the semantic index — it's building now (finish Explain All), then re-ask"
-                    .into()
+                "Building the semantic index — ask again when it's ready".into()
             } else {
                 "Build the semantic index first (FIND tab → Build index)".into()
             };
@@ -410,9 +409,7 @@ impl App {
             {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status =
-                    "Ask's embedding index or configuration changed — retry the question once the index is ready"
-                        .into();
+                self.status = "The index changed — ask again when it's ready".into();
                 return Task::none();
             }
         }

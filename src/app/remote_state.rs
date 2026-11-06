@@ -167,17 +167,9 @@ impl UnsavedEdits {
         let n = self.pending();
         match self.why() {
             Some(Why::Unsent) => "could not be sent to the host".to_string(),
-            Some(Why::Unconfirmed) => format!(
-                "{} sent to the host, but it has not confirmed {}: the connection may be down",
-                were(n),
-                them(n)
-            ),
+            Some(Why::Unconfirmed) => format!("{} not confirmed by the host", were(n)),
             Some(Why::Failed) => "could not be saved by the host".to_string(),
-            Some(Why::Waiting) => format!(
-                "{} not sent yet: {} for the host to save an earlier change first",
-                is(n),
-                if n == 1 { "it waits" } else { "each waits" }
-            ),
+            Some(Why::Waiting) => format!("{} waiting for an earlier change", is(n)),
             None => format!("are not saved to the host: {}", self.breakdown()),
         }
     }
@@ -538,39 +530,13 @@ fn question_title(count: usize, confirming: bool, hosts: &str) -> String {
     }
 }
 
-/// What keeping the pending edits of `lost` does for them — `connected`
-/// says what connects again: "it is", "the window is" — and what giving
-/// them up does.
-fn keep_or_lose(lost: &UnsavedEdits, connected: &str) -> (String, String) {
+/// What giving up the pending edits of `lost` does to them.
+fn lose(lost: &UnsavedEdits) -> String {
     let n = lost.pending();
     match lost.why() {
-        Some(Why::Unsent) => (
-            format!("{} sent once {connected} connected again", they_are(n)),
-            format!("{} lost", they_are(n)),
-        ),
-        Some(Why::Unconfirmed) => (
-            format!(
-                "{} sent again once {connected} connected again",
-                they_are(n)
-            ),
-            format!("{} may be lost", they(n)),
-        ),
-        Some(Why::Failed) => (
-            format!("{} tried again", they_are(n)),
-            format!("{} lost", they_are(n)),
-        ),
-        Some(Why::Waiting) => (
-            if n == 1 {
-                "it is sent once the change before it is saved".to_string()
-            } else {
-                "they are sent once the changes before them are saved".to_string()
-            },
-            format!("{} lost", they_are(n)),
-        ),
-        None => (
-            "clew keeps trying to save them".to_string(),
-            format!("they {} lost", lost.may_be_lost()),
-        ),
+        Some(Why::Unconfirmed) => format!("{} may be lost", they(n)),
+        Some(Why::Unsent | Why::Failed | Why::Waiting) => format!("{} lost", they_are(n)),
+        None => format!("they {} lost", lost.may_be_lost()),
     }
 }
 
@@ -582,21 +548,15 @@ pub(crate) fn close_question(lost: &UnsavedEdits) -> (String, String) {
     let title = question_title(lost.count, lost.all_unconfirmed(), "the host");
     let mut message = Vec::new();
     if lost.pending() > 0 {
-        let (keep, close) = keep_or_lose(lost, "it is");
         message.push(format!(
-            "{} {}. Keep the window open, and {keep}. Close it, and {close}.",
+            "{} {}. Close, and {}.",
             lost.describe(),
-            lost.fate()
+            lost.fate(),
+            lose(lost)
         ));
     }
     if lost.given_up() > 0 {
         message.push(lost.lost_sentence(lost.pending() == 0));
-        if lost.pending() == 0 {
-            message.push(format!(
-                "Keep the window open to make {} again, or close it.",
-                them(lost.given_up())
-            ));
-        }
     }
     (title, message.join(" "))
 }
@@ -611,21 +571,15 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
         let title = question_title(total, confirming, "the host");
         let mut message = Vec::new();
         if one.pending() > 0 {
-            let (keep, quit) = keep_or_lose(one, "the window is");
             message.push(format!(
-                "{} {}. Cancel to keep clew open, and {keep}. Quit, and {quit}.",
+                "{} {}. Quit, and {}.",
                 one.describe(),
-                one.fate()
+                one.fate(),
+                lose(one)
             ));
         }
         if one.given_up() > 0 {
             message.push(one.lost_sentence(one.pending() == 0));
-            if one.pending() == 0 {
-                message.push(format!(
-                    "Cancel to keep clew open and make {} again, or quit.",
-                    them(one.given_up())
-                ));
-            }
         }
         return (title, message.join(" "));
     }
@@ -640,9 +594,7 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
     };
     if all(Why::Unconfirmed) {
         let message = format!(
-            "These changes were sent to their hosts, which have not confirmed them:\n\n{}\n\n\
-             The connections may be down. Cancel to keep clew open, and they are sent again \
-             once the windows are connected again. Quit, and they may be lost.",
+            "Not confirmed by their hosts yet:\n\n{}\n\nQuit, and they may be lost.",
             list()
         );
         return (title, message);
@@ -650,9 +602,7 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
     if all(Why::Unsent) {
         let they_are = they_are(total);
         let message = format!(
-            "These changes could not be sent to their hosts:\n\n{}\n\nCancel to keep clew \
-             open, and {they_are} sent once the windows are connected again. Quit, and \
-             {they_are} lost.",
+            "Not sent to their hosts:\n\n{}\n\nQuit, and {they_are} lost.",
             list()
         );
         return (title, message);
@@ -674,18 +624,15 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
         )
     }));
     let end = if lost.iter().all(|l| l.pending() == 0) {
-        "Cancel to keep clew open and make them again, or quit.".to_string()
+        "Quit anyway?".to_string()
     } else {
-        let others = if given_up { "the others" } else { "them" };
+        let others = if given_up { "the others" } else { "they" };
         let may_be = if lost.iter().any(|l| l.unconfirmed > 0) {
             "may be"
         } else {
             "are"
         };
-        format!(
-            "Cancel to keep clew open, and clew keeps trying to save {others}. Quit, and they \
-             {may_be} lost."
-        )
+        format!("Quit, and {others} {may_be} lost.")
     };
     let message = format!(
         "These changes are not saved to their hosts:\n\n{}\n\n{end}",

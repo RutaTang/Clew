@@ -11,7 +11,7 @@ use crate::*;
 /// What the status line says while a start's history loads.
 const LOADING_HISTORY: &str = "Loading history…";
 /// What it says instead when the start refused a notebook's cell scope.
-const NO_CELL_HISTORY: &str = "Cell history isn't available for notebooks — showing the whole file";
+const NO_CELL_HISTORY: &str = "No cell history for notebooks — showing the whole file";
 
 /// The 1-based line range, in HEAD's copy of `rel`, of the `ordinal`-th
 /// symbol named `name` (0 = the first), or `None` when HEAD's copy has no

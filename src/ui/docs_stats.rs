@@ -96,12 +96,7 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
 pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if let Some(cover) = pane_cover(app) {
         return editor_shell(match cover {
-            PaneCover::Scanning => empty_state(
-                Glyph::Search,
-                "Scanning project…",
-                "Indexing files so you can read and search them.",
-                None,
-            ),
+            PaneCover::Scanning => empty_state(Glyph::Search, "Scanning project…", "", None),
             PaneCover::Welcome => welcome(app),
             PaneCover::Docs(page) => docs_page(page),
             PaneCover::Overview => overview_home(app),
@@ -209,17 +204,12 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     if app.proj.docs.files.is_empty() {
         return if app.docs_loading() {
-            empty_state(
-                Glyph::Sparkle,
-                "Building docs…",
-                "Reading the project's public API.",
-                None,
-            )
+            empty_state(Glyph::Sparkle, "Building docs…", "", None)
         } else {
             empty_state(
                 Glyph::Note,
                 "No documentation",
-                "No documented symbols found in this project.",
+                "",
                 Some(("Rebuild", Message::Docs(DocsMsg::Refresh))),
             )
         };
@@ -550,12 +540,6 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                             .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
                     )
                     .width(Fill),
-                    text(format!(
-                        "size = how connected · {} · drag a node to move it · click to open",
-                        super::map_nav_hint(app.graph_3d)
-                    ))
-                    .size(ts::CAPTION)
-                    .color(theme::dim()),
                 ]
                 .spacing(6)
                 .into(),
@@ -590,7 +574,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             .color(theme::dim())
             .into()
     } else if app.proj.explain.cache.is_empty() {
-        text("Run “Explain All” first — the overview is built from the explanations.")
+        text("Run Explain All first.")
             .size(ts::BODY)
             .color(theme::dim())
             .into()
@@ -599,10 +583,9 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     };
     center(
         column![
-            text("Architecture Overview").size(ts::HEADING).color(theme::fg()),
-            text("A generated tour of this codebase: what it does, core modules, entry points, and where to start.")
-                .size(ts::BASE)
-                .color(theme::dim()),
+            text("Architecture Overview")
+                .size(ts::HEADING)
+                .color(theme::fg()),
             action,
         ]
         .spacing(12)
@@ -910,8 +893,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         } else {
             (
                 "No terms yet",
-                "A term is a type, module or acronym with a one-line definition: a \
-                 documented type or constant, or a file Explain All has summarised.",
+                "",
                 Some(("Rebuild", Message::Docs(DocsMsg::Refresh))),
             )
         };
@@ -931,11 +913,15 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         .width(Fill);
     let query = app.proj.glossary.filter.trim().to_lowercase();
     let matching: Vec<&crate::app::glossary::Term> = glossary.matching(&query).collect();
-    let hint = format!(
-        "{} of {} terms · click a term to open its definition · hovering a term in the code shows the same line",
-        matching.len(),
-        glossary.len()
-    );
+    // While a filter narrows the list, how many of the terms it kept.
+    let count: Element<'_, Message> = if query.is_empty() {
+        space().into()
+    } else {
+        text(format!("{} of {} terms", matching.len(), glossary.len()))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into()
+    };
 
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     if matching.is_empty() {
@@ -1031,7 +1017,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         column![
             header,
             filter,
-            text(hint).size(ts::CAPTION).color(theme::dim()),
+            count,
             scrollable(
                 Column::with_children(items)
                     .spacing(16)

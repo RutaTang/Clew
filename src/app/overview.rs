@@ -156,8 +156,7 @@ impl App {
             Err(ask_for_key) => return ask_for_key,
         };
         if self.proj.explain.cache.is_empty() {
-            self.status =
-                "Run Explain All first — the overview is built from the explanations".into();
+            self.status = "Run Explain All first".into();
             return Task::none();
         }
         if self.proj.project.is_none() {

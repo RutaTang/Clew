@@ -894,9 +894,7 @@ impl App {
             return Task::none();
         };
         if self.connection.is_remote() {
-            self.status = "ACP agents run on this machine — they answer about local projects. \
-                           Pick clew's own agent for this one."
-                .into();
+            self.status = "ACP agents work on local projects only".into();
             return Task::none();
         }
         let Some(config) = self.acp_agents.iter().find(|a| a.name == name).cloned() else {
@@ -1984,10 +1982,7 @@ impl App {
         draft.new_mcp_target.clear();
         draft.new_mcp_extra.clear();
         let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
-        Ok(Some(format!(
-            "Added MCP server {} — its tools join Ask's answers (calls ask first)",
-            names.join(", ")
-        )))
+        Ok(Some(format!("Added MCP server {}", names.join(", "))))
     }
 
     /// Add the ACP agent the form describes.

@@ -87,7 +87,7 @@ fn another_windows_space_change_is_checked_when_the_query_returns() {
         assert!(app.proj.semantic_results.is_empty());
         assert_eq!(app.proj.embed_index.space(), cfg.space());
         assert!(
-            app.status.contains("configuration changed"),
+            app.status.contains("Embedding settings changed"),
             "{}",
             app.status
         );

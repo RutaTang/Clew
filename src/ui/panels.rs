@@ -51,12 +51,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = if app.debug.session.is_some() {
         debug_panel(app)
     } else {
-        empty_state(
-            Glyph::Debug,
-            "No debug session",
-            "Press Debug on the tool strip to start one (needs .clew/launch.json).",
-            None,
-        )
+        empty_state(Glyph::Debug, "No debug session", "", None)
     };
 
     container(column![tabs, hairline(), content].height(Fill))
@@ -293,15 +288,12 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
 
 /// Whether hovering a name while paused evaluates it (see
 /// `dap::hover_eval_allowed`). An adapter that promised side-effect-free
-/// hovers needs no switch — the header just says hovers show values. For any
-/// other adapter an evaluation may run the program's own code, so it is a
-/// checkbox the reader has to tick, with the risk named beside it.
+/// hovers needs no switch, and nothing is shown. For any other adapter an
+/// evaluation may run the program's own code, so it is a checkbox the
+/// reader has to tick, with the risk named beside it.
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
-        return text("hover shows values")
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into();
+        return space().into();
     }
     tooltip(
         iced::widget::checkbox(app.debug_hover_eval)
@@ -311,12 +303,9 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
             .text_size(ts::SMALL)
             .spacing(6),
         container(
-            text(
-                "This adapter does not promise side-effect-free hovers: evaluating a \
-                 hovered name can run the program's own code (getters, Debug/toString).",
-            )
-            .size(ts::SMALL)
-            .color(theme::fg()),
+            text("May run the program's own code.")
+                .size(ts::SMALL)
+                .color(theme::fg()),
         )
         .max_width(TIP_MAX_W)
         .padding([4, 8])
@@ -1476,12 +1465,7 @@ fn agent_step_chip<'a>(
 /// row unfolds into the callee's parameter and ITS occurrences.
 pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.flow else {
-        return empty_state(
-            Glyph::Search,
-            "No value trace yet",
-            "Right-click an identifier → Trace Value to see where it is set, passed and returned.",
-            None,
-        );
+        return empty_state(Glyph::Search, "No value trace yet", "", None);
     };
     let pending = app.proj.flow_pending == Some(tree.token);
     let header = container(
@@ -1520,7 +1504,7 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         rows.push(
             container(
                 row![
-                    text("A traced file changed: rows marked changed were edited since the trace.")
+                    text("A traced file changed.")
                         .size(ts::CAPTION)
                         .color(theme::warning())
                         .width(Fill),
@@ -1662,12 +1646,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
 /// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.call_graph else {
-        return empty_state(
-            Glyph::CallGraph,
-            "No call hierarchy yet",
-            "Put the cursor on a function and press gc, or right-click it → Call Hierarchy.",
-            None,
-        );
+        return empty_state(Glyph::CallGraph, "No call hierarchy yet", "", None);
     };
 
     let header = container(

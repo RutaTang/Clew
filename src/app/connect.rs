@@ -354,8 +354,7 @@ impl App {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
                 let headline = format!(
-                    "Forgot {removed} key{} clew had recorded for {host} — connecting; check \
-                     the new key's fingerprint before trusting it",
+                    "Forgot {host}'s old key{} — connecting",
                     if removed == 1 { "" } else { "s" }
                 );
                 let task = self.reconnect_saying(target, headline);

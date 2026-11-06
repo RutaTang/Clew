@@ -220,69 +220,7 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .height(Fill);
-    let visited = trace_files(app);
-    let legend = graph_legend(
-        kind,
-        app.graph_3d,
-        (layout.nodes.len(), layout.total),
-        app.graph_heat && app.proj.churn.is_some(),
-        layout.nodes.iter().any(|n| visited.contains(&n.file)),
-    );
-    column![map, text(legend).size(ts::CAPTION).color(theme::dim())]
-        .spacing(6)
-        .height(iced::Length::Fill)
-        .into()
-}
-
-/// The line under a graph map that says how to read it: what a node is
-/// (`kind`), how many are shown of how many (`shown`), what its colour means
-/// (the heat overlay's change counts, or language and depth), what an arrow
-/// means, and the rings it may carry — a cycle (imports only) and a stop of
-/// the last debug run (`visited`).
-pub(crate) fn graph_legend(
-    kind: crate::Overlay,
-    graph_3d: bool,
-    shown: (usize, usize),
-    heat: bool,
-    visited: bool,
-) -> String {
-    use crate::Overlay;
-    let noun = match kind {
-        Overlay::ProjectTypes => "types",
-        Overlay::ProjectMaps => "nodes",
-        _ => "files",
-    };
-    let mut parts: Vec<String> = Vec::new();
-    if shown.1 > shown.0 {
-        parts.push(format!(
-            "Showing the {} most-connected of {} {noun}",
-            shown.0, shown.1
-        ));
-    }
-    parts.push(map_nav_hint(graph_3d).to_string());
-    parts.push("drag a node · scroll to zoom · size = degree".into());
-    parts.push(if heat {
-        "colour = how often it changed (red most, grey never)".into()
-    } else {
-        "hue = language, paler = deeper".into()
-    });
-    parts.push(
-        match kind {
-            Overlay::ProjectImports => "arrow → the file it imports",
-            Overlay::ProjectCalls => "arrow → the file it calls into",
-            Overlay::ProjectTypes => "arrow → the type it uses or inherits",
-            Overlay::ProjectMaps => "arrows as the map's own line says",
-        }
-        .into(),
-    );
-    if kind == Overlay::ProjectImports {
-        parts.push("gold ring = import cycle".into());
-    }
-    if visited {
-        parts.push("green ring = the last debug run stopped here".into());
-    }
-    parts.push("click a node to open it".into());
-    parts.join(" · ")
+    map.into()
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).
@@ -1511,17 +1449,6 @@ pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a
     .into()
 }
 
-/// What dragging the map's background does, as its caption says it: a 3D
-/// map orbits, a 2D one pans. One wording for every map (the overview's
-/// caption said "orbit" in 2D).
-pub(crate) fn map_nav_hint(graph_3d: bool) -> &'static str {
-    if graph_3d {
-        "drag to orbit"
-    } else {
-        "drag to pan"
-    }
-}
-
 pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.import_graph;
     if g.is_empty() {
@@ -1832,12 +1759,6 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
         .color(theme::accent())
         .into(),
     );
-    rows.push(
-        text("A relation is a type named in another's declaration, fields, variants or method signatures.")
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into(),
-    );
     const TOP: usize = 12;
     let referenced = g.most_referenced(TOP);
     if !referenced.is_empty() {
@@ -1932,11 +1853,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
         } else if app.proj.maps_building || app.scanning {
             "Reading the project's maps…".into()
         } else {
-            "No maps for this project. Maps are read from what the code declares: a SQL schema \
-             and its migrations, a web framework's routes, dependency injection and ORM \
-             relations, an OTP supervision tree, Go interfaces and the types that satisfy them, \
-             and more for each language."
-                .into()
+            "No maps for this project.".into()
         });
     };
     let root = app

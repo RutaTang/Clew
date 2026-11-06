@@ -384,20 +384,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
 
     if app.proj.walk.library.is_empty() && pending_new.is_none() {
-        return empty_state(
-            Glyph::Compass,
-            "No walkthroughs yet",
-            "Switch to Walk mode and generate a guided tour of the codebase or a feature.",
-            None,
-        );
+        return empty_state(Glyph::Compass, "No walkthroughs yet", "", None);
     }
     if visible.is_empty() && pending_new.is_none() {
-        return empty_state(
-            Glyph::Search,
-            "No matches",
-            "No saved walkthrough matches your search.",
-            None,
-        );
+        return empty_state(Glyph::Search, "No matches", "", None);
     }
 
     // The current step of the open tour (for highlighting the expanded steps).
@@ -622,12 +612,7 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         // No action button here: the open/connect actions live in the centered
         // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
-            empty_state(
-                Glyph::Search,
-                "Scanning…",
-                "Reading the project's files.",
-                None,
-            )
+            empty_state(Glyph::Search, "Scanning…", "", None)
         } else if app.connection.is_remote() {
             empty_state(
                 Glyph::Remote,
@@ -652,12 +637,7 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     } else {
         filtered_file_rows(&mut rows, project, filter, app);
         if rows.is_empty() {
-            return empty_state(
-                Glyph::Filter,
-                "No matching files",
-                "Nothing in this project is named like that.",
-                None,
-            );
+            return empty_state(Glyph::Filter, "No matching files", "", None);
         }
     }
     scrollable(
@@ -897,16 +877,20 @@ pub(crate) fn empty_state<'a>(
         text(title.to_string())
             .size(ts::EMPHASIS)
             .color(theme::fg()),
-        container(
-            text(subtitle.to_string())
-                .size(ts::BODY)
-                .color(theme::dim())
-                .align_x(iced::Center)
-        )
-        .max_width(260),
     ]
     .spacing(4)
     .align_x(iced::Center);
+    if !subtitle.is_empty() {
+        col = col.push(
+            container(
+                text(subtitle.to_string())
+                    .size(ts::BODY)
+                    .color(theme::dim())
+                    .align_x(iced::Center),
+            )
+            .max_width(260),
+        );
+    }
     if let Some((label, msg)) = action {
         col = col.push(space().height(10));
         col = col.push(
@@ -1104,12 +1088,7 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
     if visits.is_empty() {
-        return empty_state(
-            Glyph::Minimap,
-            "No reading trail yet",
-            "Jump around the code and your trail builds here.",
-            None,
-        );
+        return empty_state(Glyph::Minimap, "No reading trail yet", "", None);
     }
 
     let header = row![
@@ -1382,12 +1361,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 /// Every reading note in the project, file by file.
 fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
-        return empty_state(
-            Glyph::Note,
-            "No reading notes yet",
-            "In this file's outline, click ○ to mark a symbol understood, or ✎ to add a note.",
-            None,
-        );
+        return empty_state(Glyph::Note, "No reading notes yet", "", None);
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
