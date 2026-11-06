@@ -828,8 +828,60 @@ impl ToolsRow {
     }
 }
 
-/// Width of a menu panel.
-pub(crate) const TOOLS_MENU_W: f32 = 248.0;
+/// Width of the ⋯ menu's panel as designed.
+const TOOLS_MENU_DESIGN_W: f32 = 248.0;
+
+/// Width of a menu panel holding `rows` (each a label and the width of what
+/// trails it) and `headings`: as designed, or wider when a label in the
+/// reader's language needs it, so no row wraps.
+fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
+    // A row: its padding, its icon's gutter and the gaps around the label.
+    const ROW_CHROME: f32 = 2.0 * 9.0 + 15.0 + 3.0 * 10.0 + 2.0 * MENU_PAD;
+    let label = |l: &str| super::sheet::text_width(l, ts::BASE, crate::fonts::UI);
+    let widest_row = rows
+        .iter()
+        .map(|(l, trailing)| label(l) + trailing + ROW_CHROME)
+        .fold(0.0, f32::max);
+    let widest_heading = headings
+        .iter()
+        .map(|h| {
+            super::sheet::text_width(h, ts::SMALL, crate::fonts::UI_MEDIUM)
+                + 2.0 * 9.0
+                + 2.0 * MENU_PAD
+        })
+        .fold(0.0, f32::max);
+    design.max(widest_row).max(widest_heading).ceil()
+}
+
+/// What a ⋯ menu row says.
+fn tools_row_label(row: ToolsRow) -> &'static str {
+    match row {
+        ToolsRow::ExplainAll => tr!("Explain All"),
+        ToolsRow::Walkthrough => tr!("Walkthrough"),
+        ToolsRow::Glossary => tr!("Glossary"),
+        ToolsRow::OpenFolder => tr!("Open Folder…"),
+        ToolsRow::OpenRemote => tr!("Open Remote…"),
+        ToolsRow::ExportNotes => tr!("Export Notes…"),
+        ToolsRow::SetUp => tr!("Set Up Project…"),
+        ToolsRow::LspServers => tr!("Language Servers"),
+        ToolsRow::Shortcuts => tr!("Keyboard Shortcuts"),
+        ToolsRow::Tutorial => tr!("Tutorial"),
+    }
+}
+
+/// Width of the ⋯ menu's panel, in the reader's language.
+pub(crate) fn tools_menu_w() -> f32 {
+    let rows: Vec<(&str, f32)> = TOOLS_MENU_ROWS
+        .iter()
+        .map(|&r| (tools_row_label(r), 0.0))
+        .chain([(tr!("Cancel explaining"), 0.0)])
+        .collect();
+    let headings: Vec<&str> = TOOLS_MENU_HEADINGS
+        .iter()
+        .map(|&(_, h)| crate::i18n::lookup(h))
+        .collect();
+    menu_w(TOOLS_MENU_DESIGN_W, &rows, &headings)
+}
 /// Inner padding of a menu panel: the design's 5, inside the panel's 1 px
 /// edge — which CSS lays outside the padding and iced draws inside it.
 const MENU_PAD: f32 = 5.0 + 1.0;
@@ -869,9 +921,9 @@ pub(crate) fn tools_menu_rows_rect(app: &App, first: usize, count: usize) -> ice
     let last = first + count.max(1) - 1;
     let y = top_of(first);
     iced::Rectangle {
-        x: app.window_width - TOOLS_MENU_RIGHT - TOOLS_MENU_W + MENU_PAD,
+        x: app.window_width - TOOLS_MENU_RIGHT - tools_menu_w() + MENU_PAD,
         y,
-        width: TOOLS_MENU_W - 2.0 * MENU_PAD,
+        width: tools_menu_w() - 2.0 * MENU_PAD,
         height: top_of(last) + MENU_ROW_H - y,
     }
 }
@@ -891,7 +943,12 @@ fn menu_item<'a>(
     let mut b = button(
         row![
             container(gutter).width(15),
-            ts::set_in(text(label), MENU_ROW_H, ts::INTER, ts::BASE),
+            ts::set_in(
+                text(label).wrapping(Wrapping::None),
+                MENU_ROW_H,
+                ts::INTER,
+                ts::BASE
+            ),
             space().width(Fill),
             trailing,
         ]
@@ -1057,7 +1114,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         items.push(item);
     }
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(TOOLS_MENU_W)
+        .width(tools_menu_w())
         .padding(MENU_PAD)
         // The design's ⋯ menu is rounded 11.
         .style(theme::modal_panel_rounded(11.0));
@@ -1141,12 +1198,28 @@ pub(crate) fn view_menu_top(app: &App) -> f32 {
 /// button it opens from, kept inside the window.
 pub(crate) fn view_menu_left(app: &App) -> f32 {
     let x = super::sheet::view_button_rect(app).map_or(0.0, |b| b.x);
-    x.min(app.window_width - STRIP_W - VIEW_MENU_W - 8.0)
+    x.min(app.window_width - STRIP_W - view_menu_w() - 8.0)
         .max(8.0)
 }
 
-/// Width of the View menu.
-pub(crate) const VIEW_MENU_W: f32 = 220.0;
+/// Width of the View menu, in the reader's language (its rows end in a
+/// check).
+pub(crate) fn view_menu_w() -> f32 {
+    let rows: Vec<(&str, f32)> = [
+        tr!("Outline summaries"),
+        tr!("File summary"),
+        tr!("Explanation in blocks"),
+        tr!("Inlay hints"),
+        tr!("Inline blame"),
+        tr!("Indent guides"),
+        tr!("Minimap"),
+        tr!("Margin"),
+    ]
+    .into_iter()
+    .map(|l| (l, 14.0))
+    .collect();
+    menu_w(220.0, &rows, &[])
+}
 
 /// Height of the View menu's panel.
 pub(crate) fn view_menu_height() -> f32 {
@@ -1208,7 +1281,7 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(VIEW_MENU_W)
+        .width(view_menu_w())
         .padding(MENU_PAD)
         .style(theme::modal_panel);
     modal(
@@ -1223,8 +1296,22 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
 
 // ------------------------------------------------ the app menu (☰)
 
-/// Width of the app menu.
-const APP_MENU_W: f32 = 280.0;
+/// Width of the app menu, in the reader's language: its rows and their
+/// shortcuts.
+fn app_menu_w(app: &App) -> f32 {
+    let chord = |c: &str| super::sheet::text_width(c, ts::SMALL, crate::fonts::UI);
+    let mut rows: Vec<(String, f32)> = app_menu_head(app)
+        .into_iter()
+        .map(|(_, label, keys, _)| (label.to_string(), keys.as_deref().map_or(0.0, chord)))
+        .collect();
+    for action in Action::ALL {
+        let title = crate::i18n::lookup(action.menu().title).to_string();
+        rows.push((title, chord(&app.keymap.chord(action).caps())));
+    }
+    rows.push((tr!("Close Window").to_string(), 0.0));
+    let rows: Vec<(&str, f32)> = rows.iter().map(|(l, w)| (l.as_str(), *w)).collect();
+    menu_w(280.0, &rows, &[])
+}
 
 /// The rows of the app menu that are not keymap actions, top first.
 fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
@@ -1314,7 +1401,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar),
     )
-    .width(APP_MENU_W)
+    .width(app_menu_w(app))
     .max_height(max_h)
     .padding(MENU_PAD)
     .style(theme::modal_panel);

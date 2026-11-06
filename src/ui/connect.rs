@@ -242,7 +242,9 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                     },
                     15.0
                 ),
-                text(crate::i18n::lookup(p.title())).size(ts::BASE),
+                text(crate::i18n::lookup(p.title()))
+                    .size(ts::BASE)
+                    .wrapping(Wrapping::None),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -265,7 +267,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         )
         .spacing(2),
     )
-    .width(SETTINGS_NAV_W)
+    .width(settings_nav_w())
     .height(Fill)
     .padding([16, 10])
     .style(theme::settings_nav);
@@ -2352,4 +2354,19 @@ fn slim<'a>(label: String, keys: Element<'a, Message>) -> Element<'a, Message> {
     .align_y(iced::Center)
     .padding([5, 14])
     .into()
+}
+
+/// Width of Settings' list of pages: as designed, or wider when a page's
+/// name in the reader's language needs it, so none wraps.
+fn settings_nav_w() -> f32 {
+    // The list's padding, a row's padding, its icon and the gap after it.
+    const CHROME: f32 = 2.0 * 10.0 + 2.0 * 10.0 + 15.0 + 10.0;
+    SettingsPage::ALL
+        .into_iter()
+        .map(|p| {
+            super::sheet::text_width(crate::i18n::lookup(p.title()), ts::BASE, crate::fonts::UI)
+                + CHROME
+        })
+        .fold(SETTINGS_NAV_W, f32::max)
+        .ceil()
 }

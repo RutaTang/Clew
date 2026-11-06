@@ -17,6 +17,7 @@ pub(crate) fn all() -> Vec<&'static str> {
         MAP_DESCRIPTIONS,
         MAP_KINDS,
         NOTICES,
+        STEP_VERBS,
     ]
     .concat()
 }
@@ -212,7 +213,6 @@ pub(crate) const MAP_KINDS: &[&str] = &[
     tr_noop!("clause"),
     tr_noop!("component"),
     tr_noop!("entity"),
-    tr_noop!("entry"),
     tr_noop!("error"),
     tr_noop!("event"),
     tr_noop!("external"),
@@ -241,7 +241,6 @@ pub(crate) const MAP_KINDS: &[&str] = &[
     tr_noop!("service"),
     tr_noop!("set"),
     tr_noop!("stack"),
-    tr_noop!("step"),
     tr_noop!("system"),
     tr_noop!("table"),
     tr_noop!("template"),
@@ -265,4 +264,16 @@ pub(crate) const NOTICES: &[&str] = &[
     ),
     tr_noop!("larger than 64 MB"),
     tr_noop!("not a regular file inside the project (a link, or moved since the scan)"),
+];
+/// The words an agent step's title starts with, as clew-server writes it
+/// (`read src/lib.rs:1-50`), capitalized as the step shows them.
+pub(crate) const STEP_VERBS: &[&str] = &[
+    tr_noop!("Read"),
+    tr_noop!("Outline"),
+    tr_noop!("Search"),
+    tr_noop!("Find"),
+    tr_noop!("Files"),
+    tr_noop!("History"),
+    tr_noop!("Changes"),
+    tr_noop!("Explanations"),
 ];

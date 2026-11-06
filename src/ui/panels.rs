@@ -1402,6 +1402,12 @@ fn step_title<'a>(title: &str) -> Element<'a, Message> {
         Some((verb, rest)) => {
             let mut said = verb.to_string();
             said[..1].make_ascii_uppercase();
+            // The server's verbs, in the reader's language where known.
+            let said = if crate::miscellaneous::extern_text::STEP_VERBS.contains(&said.as_str()) {
+                crate::i18n::lookup(&said).to_string()
+            } else {
+                said
+            };
             row![word(&said), code(rest.trim())]
                 .spacing(STEP_GAP)
                 .align_y(iced::Center)

@@ -90,7 +90,7 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
         Anchor::ViewMenu => rect(
             view_menu_left(app),
             view_menu_top(app),
-            VIEW_MENU_W,
+            view_menu_w(),
             view_menu_height(),
         ),
         Anchor::Sidebar if sidebar > 1.0 => rect(0.0, top, sidebar, bot - top),
@@ -247,7 +247,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     // banner.
     let body_top = TOOLBAR_H + update_banner_height(app);
     // The ⋯ dropdown's left edge, measured from the window's right edge.
-    let menu_left = TOOLS_MENU_RIGHT + TOOLS_MENU_W;
+    let menu_left = TOOLS_MENU_RIGHT + tools_menu_w();
     let lo = body_top + 14.0;
     let hi = (app.window_height - 260.0).max(lo);
     let (ax, ay, pad) = match step.anchor {
@@ -334,7 +334,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Top,
             Padding {
                 top: view_menu_top(app),
-                left: (view_menu_left(app) + VIEW_MENU_W + gap)
+                left: (view_menu_left(app) + view_menu_w() + gap)
                     .min(app.window_width - TUTORIAL_CARD_W - STRIP_W - gap),
                 ..Padding::ZERO
             },

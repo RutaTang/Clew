@@ -678,6 +678,20 @@ mod tests {
         ));
         assert!(search.contains("format!(\"larger than {} MB\", cap / (1024 * 1024))"));
         assert_eq!(clew_core::search::MAX_SEARCH_FILE_BYTES / (1024 * 1024), 64);
+        // The verbs clew-server starts its agent steps' titles with.
+        let agent = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("crates/clew-server/src/agent.rs"),
+        )
+        .unwrap();
+        for verb in crate::miscellaneous::extern_text::STEP_VERBS {
+            let lower = verb.to_ascii_lowercase();
+            assert!(
+                agent.contains(&format!("format!(\"{lower} "))
+                    || agent.contains(&format!("format!(\"{lower}{{")),
+                "clew-server no longer titles a step {lower:?}"
+            );
+        }
         let missing: Vec<&String> = written
             .iter()
             .filter(|w| !listed.contains(w.as_str()))

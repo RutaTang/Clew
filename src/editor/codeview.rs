@@ -2326,7 +2326,9 @@ where
                             font: crate::fonts::UI_MEDIUM,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
-                            shaping: text::Shaping::Basic,
+                            // Its note is in the reader's language: a
+                            // script the UI font lacks falls back.
+                            shaping: text::Shaping::Auto,
                             wrapping: text::Wrapping::None,
                         })
                     });

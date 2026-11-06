@@ -167,26 +167,6 @@ const TOOLS_RULE_W: f32 = 9.0;
 const HEADER_PAD_X: f32 = 20.0;
 const HEADER_PAD_RIGHT: f32 = 16.0;
 
-/// Width of the header's title: the file's name, its folder, and, for a
-/// markdown file, the switch between it rendered and its source.
-fn title_w(app: &App, v: &Viewer) -> f32 {
-    let (name, folder) = title_parts(v);
-    let mut w = text_width(&name, ts::EMPHASIS, TITLE_FONT);
-    if !folder.is_empty() {
-        w += 8.0 + text_width(&folder, ts::BODY, crate::fonts::UI);
-    }
-    if v.md.is_some() {
-        let label = if v.show_source {
-            tr!("Rendered")
-        } else {
-            tr!("Source")
-        };
-        w += 8.0 + file_tool_w(label);
-    }
-    let _ = app;
-    w
-}
-
 /// Width of the View menu's button.
 fn view_button_w() -> f32 {
     VIEW_PAD.x()
@@ -209,20 +189,20 @@ const VIEW_CHEVRON: f32 = 10.0;
 
 /// Where the header's file tools are drawn (Explain through View), in
 /// window coordinates — at the header's right end, as the header lays them
-/// out, or just after the file's name when it is too long for that; `None`
-/// while the header is not drawn.
+/// out: a title too long for the room left is cut, not the tools (whose
+/// words are longer in some languages than in English); `None` while the
+/// header is not drawn.
 pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
     if !header_shows(app) {
         return None;
     }
-    let v = app.active_viewer()?;
-    let after_title = sheet_content_left(app) + HEADER_PAD_X + title_w(app, v) + TITLE_GAP;
+    let row_left = sheet_content_left(app) + HEADER_PAD_X;
     let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
         .iter()
         .map(|l| file_tool_w(l))
         .sum::<f32>();
     let width = tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING;
-    let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(after_title);
+    let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
         y: body_top(app) + 1.0,
@@ -327,7 +307,10 @@ fn file_tool<'a>(
         row![
             glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
             ts::set_in(
-                text(label).font(FILE_TOOL_FONT).color(tint),
+                text(label)
+                    .font(FILE_TOOL_FONT)
+                    .color(tint)
+                    .wrapping(Wrapping::None),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -351,11 +334,14 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: crate::MarginTab| {
         let chosen = app.margin_tab == this;
         button(ts::set_in(
-            text(label).font(FILE_TOOL_FONT).color(if chosen {
-                theme::fg()
-            } else {
-                theme::fg_muted()
-            }),
+            text(label)
+                .font(FILE_TOOL_FONT)
+                .color(if chosen {
+                    theme::fg()
+                } else {
+                    theme::fg_muted()
+                })
+                .wrapping(Wrapping::None),
             MARGIN_TAB_H,
             ts::INTER,
             ts::BODY,
@@ -439,7 +425,8 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             ts::set_in(
                 text(tr!("View"))
                     .font(FILE_TOOL_FONT)
-                    .color(theme::fg_muted()),
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::None),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -489,7 +476,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // The tools at the row's right end, as the design has them: the room
     // the title leaves goes between the two.
     let first = container(
-        row![title, space().width(Fill), tools]
+        row![container(title).width(Fill).clip(true), tools]
             .spacing(TITLE_GAP / 2.0)
             .align_y(iced::Center),
     )

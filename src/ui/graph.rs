@@ -2350,7 +2350,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     let mut listed = 0;
     'kinds: for kind in kinds {
         // A kind of node, as clew-core names it ("table", "route").
-        rows.push(section_header(crate::i18n::lookup(kind)));
+        rows.push(section_header(map_kind_label(kind)));
         for (i, n) in map.nodes.iter().enumerate().filter(|(_, n)| n.kind == kind) {
             if listed == MAP_LIST_MAX {
                 break 'kinds;
@@ -2621,6 +2621,18 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
 pub(crate) const CHURN_ROWS: usize = 12;
 
 // -------------------------------------------------- explanation overlay
+
+/// A kind of map node, as its list's heading says it: clew-core's word for
+/// it, in the reader's language. The two that name something else elsewhere
+/// (the debugger stops on a "step" and at an "entry") have headings of
+/// their own.
+fn map_kind_label(kind: &str) -> &str {
+    match kind {
+        "step" => tr!("Build step"),
+        "entry" => tr!("Entry point"),
+        other => crate::i18n::lookup(other),
+    }
+}
 
 #[cfg(test)]
 mod tests {
