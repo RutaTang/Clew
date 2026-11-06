@@ -579,6 +579,12 @@ impl App {
         // the project being left (its lsp.toml, its host): they go with it,
         // and a listing still in flight for it is dropped by its stamp.
         self.lsp_located.clear();
+        // Its breakpoints go too: they are kept with the project
+        // (`breakpoints_store`) and set again when it opens. Held by absolute
+        // path, those of a project left stayed in every gutter and every
+        // debug run of the next — a remote project with the same paths as a
+        // local one drew, and sent its debugger, the local one's.
+        self.debug.breakpoints.clear();
         // So does the sheet asking about it ("Set Up Project…", Explain All
         // asking first): left up, its Apply acted on whatever project was
         // open by then, at a cost the user had not seen. A first open's sheet

@@ -456,6 +456,9 @@ impl App {
             return self.run_search();
         }
         if query.chars().count() < 2 {
+            // What is listed is a longer query's: backspaced from "ab" to
+            // "a", the sidebar went on showing "ab"'s matches under "a".
+            self.clear_search_results();
             return Task::none();
         }
         let stamp = self.stamp();
@@ -472,6 +475,24 @@ impl App {
         )
     }
 
+    /// Drop what the Search sidebar lists, and any search still running
+    /// for it: none of it is for the query as it now stands.
+    fn clear_search_results(&mut self) {
+        // Every submission supersedes both search paths, including clearing
+        // the query or falling back after a server request could not be sent.
+        self.proj.search_seq += 1;
+        self.proj.link.pending_search = None;
+        self.proj.search.hits.clear();
+        self.proj.search.error = None;
+        self.proj.search.skipped.clear();
+        self.proj.search.running = false;
+        self.proj.search.ran = false;
+        // Nor is the count the status line still gives for them.
+        if let Some(said) = self.proj.search.said.take() {
+            self.settle_status(&[&said]);
+        }
+    }
+
     pub(crate) fn run_search(&mut self) -> Task<Message> {
         let Some((root, files)) = self
             .proj
@@ -481,16 +502,12 @@ impl App {
         else {
             return Task::none();
         };
-        // Every submission supersedes both search paths, including clearing
-        // the query or falling back after a server request could not be sent.
-        self.proj.search_seq += 1;
-        self.proj.link.pending_search = None;
-        self.proj.search.hits.clear();
-        self.proj.search.error = None;
-        self.proj.search.skipped.clear();
+        // A pause still being waited for would search again for what this
+        // search is already for: Enter, or an option toggled, mid-pause ran
+        // the same search twice.
+        self.proj.search.typed += 1;
+        self.clear_search_results();
         if self.proj.search.query.trim().is_empty() {
-            self.proj.search.running = false;
-            self.proj.search.ran = false;
             return Task::none();
         }
         self.proj.search.running = true;
@@ -577,6 +594,7 @@ impl App {
             Some(e) => e.clone(),
             None => search_status(report.hits.len(), &report.skipped, skipped_total),
         };
+        self.proj.search.said = Some(self.status.clone());
         self.proj.search.hits = report.hits;
         self.proj.search.skipped = report.skipped;
     }

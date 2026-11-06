@@ -176,12 +176,15 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                 ));
             }
             container(
-                container(super::escape_clears::EscapeClears::new(field, cleared))
-                    .height(Length::Fixed(FILTER_H))
-                    // The design's 10 inside its 1 px border, which here takes
-                    // no room of its own.
-                    .padding([1, 11])
-                    .style(theme::field(!app.file_filter.is_empty())),
+                container(super::escape_clears::EscapeClears::new(
+                    field,
+                    Message::Window(WindowMsg::FileFilterEscaped),
+                ))
+                .height(Length::Fixed(FILTER_H))
+                // The design's 10 inside its 1 px border, which here takes
+                // no room of its own.
+                .padding([1, 11])
+                .style(theme::field(!app.file_filter.is_empty())),
             )
             .padding(Padding {
                 top: 0.0,
@@ -1035,6 +1038,10 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             crate::app::count_matches(n)
         };
         Some((msg, theme::dim()))
+    } else if app.proj.search.query.trim().chars().count() == 1 {
+        // One character, which matches most of a project, is searched for
+        // only when asked (see `search_when_typing_pauses`).
+        Some((tr!("Press Enter to search").to_string(), theme::dim()))
     } else {
         None
     };

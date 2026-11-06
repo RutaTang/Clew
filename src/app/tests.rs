@@ -8167,6 +8167,38 @@ fn enter_in_the_file_filter_opens_its_first_file() {
     assert!(sent.is_empty(), "{sent:?}");
 }
 
+/// The Escape that clears the Files filter does only that. The same press
+/// also reaches the key handler (a field's Escape is forwarded so overlays
+/// close), where it went on to put the Ask card away or drop the code
+/// selection. With the filter empty, Escape does what it always does.
+#[test]
+fn escape_that_clears_the_filter_does_nothing_else() {
+    let mut app = scanned_app("filter-escape");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    app.proj.panes[0].as_mut().unwrap().selection = Some(((0, 0), (0, 10)));
+    app.ask_view = AskView::Compact;
+    app.file_filter = "lib".into();
+    let escape = esc_press;
+    let selected = |app: &App| app.proj.panes[0].as_ref().unwrap().selection.is_some();
+
+    // In the filter: the widget's message, then the forwarded press.
+    let _ = app.update(Message::Window(WindowMsg::FileFilterEscaped));
+    let _ = app.update(escape());
+    assert!(app.file_filter.is_empty());
+    assert!(selected(&app), "the selection went with the filter");
+    assert_eq!(app.ask_view, AskView::Compact, "Ask went with the filter");
+
+    // The next Escape, in the code, is the code's again.
+    let _ = app.update(escape());
+    assert!(!selected(&app));
+
+    // In the empty filter, Escape is not the filter's.
+    let _ = app.update(Message::Window(WindowMsg::FileFilterEscaped));
+    let _ = app.update(escape());
+    assert_eq!(app.ask_view, AskView::Hidden);
+}
+
 /// Add to Ask with nothing selected adds the line right-clicked: it said
 /// "Select some code first" over the very line the menu was opened on. A
 /// blank line still asks for a selection.
@@ -8246,6 +8278,77 @@ fn breakpoints_are_kept_for_the_next_run() {
             .values()
             .all(|bp| bp.verified.is_none())
     );
+
+    // Another project opened: this one's breakpoints leave the gutter and
+    // the debugger with it, and come back when it opens again.
+    let other = fixture_project("breakpoints-kept-other");
+    scan_synchronously(&mut next, other);
+    assert!(
+        next.debug.breakpoints.is_empty(),
+        "{:?}",
+        next.debug.breakpoints
+    );
+    scan_synchronously(&mut next, root.clone());
+    assert_eq!(next.debug.breakpoints[&lib].len(), 2);
+}
+
+/// A breakpoints file this clew cannot read (another version's, a hand
+/// edit) is never written over: read as none, one new breakpoint replaced
+/// every one it held. The breakpoint is still set for the session, and
+/// the status line says it was not kept.
+#[test]
+fn an_unreadable_breakpoints_file_is_left_as_it_is() {
+    let mut app = scanned_app("breakpoints-unreadable");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let dir = app.proj.derived_dir.clone().expect("a data directory");
+    let file = dir.join("breakpoints.json");
+    let theirs = r#"{"version":2,"breakpoints":[{"rel":"src/lib.rs","line":1,"hit":3}]}"#;
+    std::fs::write(&file, theirs).unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: root.join("src/lib.rs"),
+        line: 4,
+    }));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
+    assert!(app.status.contains("version 2"), "{}", app.status);
+    assert!(app.debug.breakpoints[&root.join("src/lib.rs")].contains_key(&4));
+}
+
+/// A remote project keeps its breakpoints as a local one does: by its path
+/// on the host, in this machine's data directory under the host's name —
+/// and a local project at the same path keeps its own.
+#[test]
+fn a_remote_projects_breakpoints_are_its_own() {
+    let host = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let root = PathBuf::from("/srv/remote-shop");
+    let open = |connection: crate::backend::connect::ConnTarget| {
+        let mut app = blank_app();
+        app.connection = connection;
+        app.proj.project = Some(crate::Project {
+            root: root.clone(),
+            tree: Default::default(),
+            files: Arc::new(Vec::new()),
+            truncated: false,
+        });
+        app.proj.derived_dir = clew_core::derived::dir(app.connection.approval_host(), &root);
+        app.restore_breakpoints();
+        app
+    };
+    let file = root.join("src/cart.py");
+    let mut remote = open(host.clone());
+    let _ = remote.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: file.clone(),
+        line: 7,
+    }));
+    let again = open(host);
+    assert!(again.debug.breakpoints[&file].contains_key(&7));
+    let local = open(crate::backend::connect::ConnTarget::Local);
+    assert!(
+        local.debug.breakpoints.is_empty(),
+        "the remote host's breakpoints in a local project at the same path"
+    );
 }
 
 /// The search sidebar searches once typing pauses, with the query as it
@@ -8281,6 +8384,34 @@ fn search_runs_once_typing_pauses() {
     assert!(app.proj.search.ran, "the last pause searches");
     let _ = typed(&mut app, "");
     assert!(!app.proj.search.ran && app.proj.search.hits.is_empty());
+
+    // Enter, or an option toggled, while a pause is waited for searches
+    // then — and the pause, when it comes, does not search again.
+    for act in [
+        NavMsg::SearchSubmitted,
+        NavMsg::SearchToggle(SearchOpt::Case),
+    ] {
+        let pending = typed(&mut app, "fn");
+        let _ = app.update(Message::Nav(act));
+        let seq = app.proj.search_seq;
+        for m in pending {
+            assert!(run_task(app.update(m)).is_empty(), "searched twice");
+        }
+        assert_eq!(app.proj.search_seq, seq);
+    }
+
+    // Backspaced to one letter: the longer query's matches go, and the
+    // sidebar says the letter waits for Enter.
+    for m in typed(&mut app, "fn") {
+        for done in run_task(app.update(m)) {
+            let _ = app.update(done);
+        }
+    }
+    assert!(!app.proj.search.hits.is_empty(), "the fixture has an fn");
+    assert!(app.status.contains("match"), "{}", app.status);
+    let _ = typed(&mut app, "f");
+    assert!(app.proj.search.hits.is_empty() && !app.proj.search.ran);
+    assert!(app.status.is_empty(), "the count stayed: {}", app.status);
 }
 
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.

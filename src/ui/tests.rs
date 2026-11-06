@@ -5028,6 +5028,23 @@ fn the_empty_call_hierarchy_says_how_to_fill_it() {
     assert!(shows(&mut sim, "choose Call Hierarchy"));
 }
 
+/// One letter in the search field is searched only on Enter, and the
+/// sidebar says so: it stayed blank, as if nothing matched.
+#[test]
+fn a_one_letter_search_says_it_waits_for_enter() {
+    let mut app = reader_app();
+    app.proj.search.query = "f".into();
+    assert!(shows(
+        &mut sim_elem(super::sidebar::search_tab(&app)),
+        "Press Enter to search"
+    ));
+    app.proj.search.query = "fn".into();
+    assert!(!shows(
+        &mut sim_elem(super::sidebar::search_tab(&app)),
+        "Press Enter to search"
+    ));
+}
+
 /// A function with no callers (or callees) says so under its name: the
 /// panel showed the name and nothing else, as if it were still loading.
 #[test]
@@ -7450,6 +7467,7 @@ fn escape_in_the_file_filter_clears_it() {
     app.show_left_sidebar = true;
     app.sidebar = crate::SidebarTab::Files;
     app.file_filter = "cart".into();
+    let escaped = |m: &Message| matches!(m, Message::Window(WindowMsg::FileFilterEscaped));
     let cleared =
         |m: &Message| matches!(m, Message::Window(WindowMsg::FileFilterChanged(s)) if s.is_empty());
     let escape = Event::Keyboard(keyboard::Event::KeyPressed {
@@ -7489,9 +7507,9 @@ fn escape_in_the_file_filter_clears_it() {
         );
         messages
     };
-    assert!(press(true).iter().any(cleared), "Escape in the filter");
+    assert!(press(true).iter().any(escaped), "Escape in the filter");
     assert!(
-        !press(false).iter().any(cleared),
+        !press(false).iter().any(escaped),
         "Escape with it unfocused"
     );
     // Its ×, just right of the field, does the same.

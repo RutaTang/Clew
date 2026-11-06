@@ -1961,6 +1961,9 @@ pub enum WindowMsg {
     FileFilterChanged(String),
     /// Enter in the Files view's filter: open the first file it lists.
     FileFilterSubmitted,
+    /// Escape in the Files view's filter, while it has the keyboard: clear
+    /// it (see `ui::escape_clears`).
+    FileFilterEscaped,
     /// Maximize the window, or make it a window again (Windows and Linux).
     ToggleMaximize,
     /// The reading panel's view picked.
@@ -2729,6 +2732,7 @@ impl WindowMsg {
             | WindowMsg::ToggleViewMenu
             | WindowMsg::FileFilterChanged(..)
             | WindowMsg::FileFilterSubmitted
+            | WindowMsg::FileFilterEscaped
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::MaximizedIs(..)

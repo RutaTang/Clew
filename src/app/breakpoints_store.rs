@@ -41,21 +41,34 @@ struct BreakpointsFile {
     breakpoints: Vec<Saved>,
 }
 
-/// The breakpoints kept in `dir`: none when there are none, or the file is
-/// not one this version of clew wrote. An entry whose path would leave the
-/// project is not shown.
-pub(crate) fn load(dir: &Path) -> Vec<Saved> {
-    let Ok(bytes) = std::fs::read(dir.join(FILE)) else {
-        return Vec::new();
+/// The breakpoints kept in `dir`: none when there are none yet; an error
+/// when there is a file this version cannot read — another clew's layout,
+/// a hand edit, a disk error — which is then never written over. An entry
+/// whose path would leave the project is not shown.
+fn load_checked(dir: &Path) -> std::io::Result<Vec<Saved>> {
+    let bytes = match std::fs::read(dir.join(FILE)) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
     match serde_json::from_slice::<BreakpointsFile>(&bytes) {
-        Ok(file) if file.version == VERSION => file
+        Ok(file) if file.version == VERSION => Ok(file
             .breakpoints
             .into_iter()
             .filter(|s| s.line > 0 && clew_core::statefile::safe_rel(&s.rel))
-            .collect(),
-        _ => Vec::new(),
+            .collect()),
+        Ok(file) => Err(std::io::Error::other(format!(
+            "{FILE} is version {}, not {VERSION}",
+            file.version
+        ))),
+        Err(e) => Err(std::io::Error::other(format!("{FILE}: {e}"))),
     }
+}
+
+/// [`load_checked`] for setting them again: a file that cannot be read
+/// sets none.
+pub(crate) fn load(dir: &Path) -> Vec<Saved> {
+    load_checked(dir).unwrap_or_default()
 }
 
 /// Write `list` whole beside the file, then move it over: a crash leaves
@@ -82,7 +95,9 @@ fn edit(dir: &Path, rel: &str, line: usize, now: Option<Option<String>>) -> std:
     let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     clew_core::derived::ensure_private_dir(dir)?;
     let _held = clew_core::statefile::lock(&dir.join(FILE))?;
-    let mut list = load(dir);
+    // A file it cannot read is left as it is: read as none, it was written
+    // over with this one change, and every other breakpoint in it was lost.
+    let mut list = load_checked(dir)?;
     list.retain(|s| !(s.rel == rel && s.line == line));
     if let Some(condition) = now {
         list.push(Saved {

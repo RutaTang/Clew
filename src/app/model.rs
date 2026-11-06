@@ -1039,6 +1039,9 @@ pub struct SearchState {
     /// in typing starts is run only if nothing was typed since
     /// (`NavMsg::SearchSettled`).
     pub typed: u64,
+    /// The status line the last search's results wrote ("6 matches"), taken
+    /// back down when those results go.
+    pub said: Option<String>,
     pub running: bool,
     pub ran: bool,
     pub hits: Vec<SearchHit>,

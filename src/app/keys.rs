@@ -15,6 +15,14 @@ impl App {
 
         let cmd = modifiers.command();
 
+        // An Escape a field used already (see `escape_taken`); read on every
+        // press, so it never holds over to a later one.
+        if std::mem::take(&mut self.escape_taken)
+            && matches!(key.as_ref(), Key::Named(Named::Escape))
+        {
+            return Task::none();
+        }
+
         // Rebinding capture takes priority: the next chord becomes the binding.
         if let Some(action) = self.rebinding {
             return self.capture_rebind(action, &key, modifiers);

@@ -943,6 +943,7 @@
  "Preparing the host…": "ホストを準備中…",
  "Preparing the index…": "インデックスを準備中…",
  "Press Ctrl+D to bookmark the current line.": "Ctrl+D で現在の行をブックマークできます。",
+ "Press Enter to search": "Enter キーで検索",
  "Press new keys… (Esc to cancel)": "新しいキーを押してください…（Esc でキャンセル）",
  "Press {chord} and speak. Speech stays on this computer.": "{chord} を押して話します。音声はこのコンピューター内で処理されます。",
  "Press ⌘D to bookmark the current line.": "⌘D で現在の行をブックマークできます。",

@@ -1038,6 +1038,10 @@ pub struct App {
     /// closes it, and a connect that failed left the window empty, the
     /// project it was reading a folder pick away.
     pub left_local: Option<std::path::PathBuf>,
+    /// The Escape now reaching the key handler has done its work already —
+    /// it cleared the Files filter (`WindowMsg::FileFilterEscaped`) — and is
+    /// to do nothing more. Any key press consumes it.
+    pub escape_taken: bool,
     /// Whether the user granted THIS remote connection the right to hold the
     /// AI API keys and run AI calls server-side (the per-host opt-in from the
     /// Connect form). Always reset to false on a transport switch; without

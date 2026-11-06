@@ -80,6 +80,7 @@ impl App {
             trail_writer: TrailWriter::default(),
             connection: Self::startup_connection(),
             left_local: None,
+            escape_taken: false,
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.
             remote_ai_opt_in: false,
@@ -649,6 +650,17 @@ impl App {
             }
             WindowMsg::FileFilterChanged(filter) => {
                 self.file_filter = filter;
+                Task::none()
+            }
+            // The Escape that clears a filled filter does only that: the
+            // same press, forwarded to the key handler (`shell::forward_key`),
+            // also closed the find bar or the Ask card, or dropped the code
+            // selection. An empty filter leaves Escape to do what it does.
+            WindowMsg::FileFilterEscaped => {
+                if !self.file_filter.is_empty() {
+                    self.file_filter.clear();
+                    self.escape_taken = true;
+                }
                 Task::none()
             }
             // Enter opens what the filter found first, as a click on its row
