@@ -1092,7 +1092,10 @@ mod tests {
                                 continue;
                             }
                         }
-                        if reads_as_a_sentence(&said) {
+                        // Braces in a plain literal are its own (JSON, code),
+                        // not places: not a message to a person.
+                        let plain_braces = opener != "format!(" && said.contains(['{', '}']);
+                        if reads_as_a_sentence(&said) && !plain_braces {
                             written.insert(as_template(&said));
                         }
                     }
@@ -1169,6 +1172,7 @@ mod tests {
             && !said.starts_with(['[', '{', '<', '$'])
             && !said.starts_with("--")
             && !said.contains("{{")
+            && !said.trim_end().ends_with(';')
             && !said.trim_end().ends_with("()")
             && !code.iter().any(|c| said.contains(c))
     }
