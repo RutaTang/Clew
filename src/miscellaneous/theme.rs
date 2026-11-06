@@ -2169,25 +2169,6 @@ pub fn secondary_button(_theme: &Theme, status: button::Status) -> button::Style
     }
 }
 
-/// Sidebar tab button (Files / Search).
-pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_theme, status| button::Style {
-        background: if active {
-            Some(bg().into())
-        } else if matches!(status, button::Status::Hovered) {
-            Some(bg_hover().into())
-        } else {
-            None
-        },
-        text_color: if active { fg_bright() } else { fg_muted() },
-        border: Border {
-            radius: 5.0.into(),
-            ..Border::default()
-        },
-        ..button::Style::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

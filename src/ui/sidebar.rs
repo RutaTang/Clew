@@ -317,22 +317,23 @@ pub(crate) fn scope_label(scope: &str) -> String {
 /// mode) a Generate button.
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let is_search = app.walk_ui.mode == crate::WalkMode::Search;
-    // Two-segment control; only the inactive segment is pressable (it flips mode).
+    // Two segments, the mode in use raised; only the other is pressable (it
+    // flips mode). On a line of its own: beside the field it left the field
+    // too narrow to say what it is for.
     let seg = |label: &str, active: bool| {
-        let mut b = button(text(label.to_string()).size(ts::SMALL))
-            .style(theme::tab_button(active))
-            .padding([3, 10]);
-        if !active {
-            b = b.on_press(Message::Walk(WalkMsg::ToggleMode));
-        }
-        b
+        button(text(label.to_string()).size(ts::SMALL))
+            .style(theme::segment(active))
+            .padding([2, 10])
+            .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
     };
-    let toggle = row![seg("Search", is_search), seg("Walk", !is_search)].spacing(2);
+    let toggle = container(row![seg("Search", is_search), seg("Walk", !is_search)].spacing(1))
+        .padding(2)
+        .style(theme::trough);
 
     let placeholder = if is_search {
         "Search walkthroughs…"
     } else {
-        "Walk a feature, or leave empty for the whole codebase…"
+        "A feature, or empty for all"
     };
     let mut input = text_input(placeholder, &app.walk_ui.input)
         .style(theme::input)
@@ -343,16 +344,18 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         // Enter submits the same way the Generate button does ("" = whole codebase).
         input = input.on_submit(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())));
     }
-    let mut bar = row![toggle, input].spacing(6).align_y(iced::Center);
+    let mut field = row![input].spacing(6).align_y(iced::Center);
     if !is_search {
-        bar = bar.push(
+        field = field.push(
             button(text("Generate").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([4, 12])
+                .style(theme::secondary_button)
+                .padding([5, 10])
                 .on_press(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone()))),
         );
     }
-    container(bar).padding(8).into()
+    container(column![toggle, field].spacing(8))
+        .padding(8)
+        .into()
 }
 
 /// The library list: every saved tour, filtered by the search query, each with a
