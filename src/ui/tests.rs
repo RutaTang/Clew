@@ -1565,12 +1565,12 @@ fn the_chrome_geometry_matches_what_is_drawn() {
             "{tool:?}'s computed centre clicked {sent:?}"
         );
     }
-    let field = super::chat_field_rect(&app);
+    let field = super::search_field_rect(&app);
     let sent = click_at(field.center());
     assert!(
         sent.iter()
-            .any(|m| matches!(m, Message::Ask(AskMsg::Toggle))),
-        "the chat field's computed centre clicked {sent:?}"
+            .any(|m| matches!(m, Message::Nav(crate::NavMsg::FinderOpened(_)))),
+        "the search field's computed centre clicked {sent:?}"
     );
 
     // The ⋯ menu's rows: each computed row rect holds that row's label.
@@ -1991,7 +1991,7 @@ fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
     assert!(all[at("Settings")].anchor == Anchor::Strip(StripTool::Settings));
     assert!(all[at("The type map")].anchor == Anchor::Strip(StripTool::TypeMap));
-    assert!(all.iter().any(|s| s.anchor == Anchor::ChatField));
+    assert!(all.iter().any(|s| s.anchor == Anchor::AskCorner));
     assert!(all.iter().any(|s| s.anchor == Anchor::FileTools));
     assert!(all.iter().any(|s| s.anchor == Anchor::ViewMenu));
     let search = at("Search the project");
@@ -3261,9 +3261,9 @@ fn a_question_moved_or_out_of_view_waits_again() {
     assert!(frame(&mut app).is_empty(), "where it was: nothing to say");
     assert!(app.may_allow(&card));
 
-    // The sidebar put away: the chat field moves, and with it the Ask card
-    // hanging from it and the approval card in it.
-    app.show_left_sidebar = !app.show_left_sidebar;
+    // The debugger's panel taller: the Ask card standing on it moves up,
+    // and with it the approval card in it.
+    app.bottom_height = 140.0;
     let _ = app.update(Message::Noop);
     let moved = frame(&mut app);
     assert!(
@@ -7258,20 +7258,47 @@ fn the_palette_lists_commands_with_their_keys() {
     assert!(shows(&mut sim_of(&app), "No matching command"));
 }
 
-/// The floating Ask, on screen: the launcher opens the card; the card's
-/// conversation is there; kept in the margin it is the margin's, cleared
-/// there, and taken out a card again; the large window's dimmed rest
-/// makes it a card again when clicked; and the card leaves the code beside
-/// it to the reader's clicks.
+/// Where Ask's pill and card stand, in window coordinates: their right
+/// edge, left of the tool strip, and their bottom edge, over the status bar.
+fn ask_corner_edges() -> (f32, f32) {
+    (
+        WINDOW.width - super::STRIP_W - 12.0,
+        WINDOW.height - super::STATUSBAR_H - super::askfloat::ASK_MARGIN,
+    )
+}
+
+/// The floating Ask, on screen: the field at the top searches, and the
+/// pill in the corner opens Ask; the card stands in that corner, its
+/// conversation in it, the code above and beside it taking its own clicks;
+/// Esc hides it to the pill, and put away the pill goes too; the large
+/// window's dimmed rest makes it a card again when clicked.
 #[test]
 fn the_floating_ask_is_driven_from_the_screen() {
     let mut app = reader_app();
-    // Put away: the chat field in the top bar opens it.
+    assert_eq!(app.ask_view, crate::AskView::Hidden, "the pill, at first");
+    // The field at the top is search: it opens the finder.
     assert!(matches!(
-        click(sim_of(&app), "Ask a question, or say what to do").as_slice(),
-        [Message::Ask(AskMsg::Toggle)]
+        click(sim_of(&app), "Search files, symbols and commands").as_slice(),
+        [Message::Nav(crate::NavMsg::FinderOpened(
+            crate::session::finder::FinderMode::Files
+        ))]
     ));
-    // A card under the field, with a conversation in it.
+    // The pill in the corner opens Ask.
+    {
+        let mut sim = sim_of(&app);
+        let pill = text_at(&mut sim, |t| t == "Ask", 0).expect("the pill says Ask");
+        let (right, bottom) = ask_corner_edges();
+        assert!(
+            pill.x > right - 200.0 && pill.x < right && pill.y > bottom - 60.0,
+            "in the corner: {pill:?}"
+        );
+    }
+    let sent = click(sim_of(&app), "Ask");
+    assert!(
+        sent.iter().any(|m| matches!(m, Message::Ask(AskMsg::Open))),
+        "{sent:?}"
+    );
+    // A card in the corner, with a conversation in it.
     app.ask_view = crate::AskView::Compact;
     app.proj.ask_turns.push(crate::app::model::AskTurn {
         stream: 1,
@@ -7283,60 +7310,24 @@ fn the_floating_ask_is_driven_from_the_screen() {
         let question = text_at(&mut sim, |t| t == "where is the origin?", 0)
             .expect("the conversation is on the card");
         let place = super::ask_place(&app).unwrap();
-        let field = super::chat_field_rect(&app);
+        let (right, _) = ask_corner_edges();
+        assert!(
+            (place.left + place.width - right).abs() < 1.0,
+            "the card's right edge by the tool strip: {place:?}"
+        );
         assert!(
             question.x >= place.left && question.x < place.left + place.width,
             "on the card: {question:?} in {place:?}"
         );
         assert!(
-            question.y > field.y + field.height && question.y < WINDOW.height / 2.0,
-            "hanging under the field: {question:?}"
+            !shows(&mut sim, "Keep in the margin"),
+            "Ask is the whole project's: it is no tab of a file's margin"
         );
     }
     assert!(
-        !shows(&mut sim_of(&app), "Clear"),
-        "the card's header is what it is, the margin, and put away"
+        !shows(&mut sim_of(&app), "1 answer"),
+        "no pill while the card is open"
     );
-    // Kept in the margin: no card; the conversation in the margin, under a
-    // tab of its own, clearing it there; taken out, a card again.
-    let _ = app.update(Message::Ask(AskMsg::KeepInMargin));
-    assert_eq!(app.ask_view, crate::AskView::Margin);
-    assert!(
-        super::ask_place(&app).is_none(),
-        "no card while in the margin"
-    );
-    {
-        let mut sim = sim_of(&app);
-        let question = text_at(&mut sim, |t| t == "where is the origin?", 0)
-            .expect("the conversation is in the margin");
-        let margin_left = WINDOW.width - super::STRIP_W - super::SHEET_GAP - app.right_width;
-        assert!(
-            question.x >= margin_left && question.x < WINDOW.width - super::STRIP_W,
-            "in the margin: {question:?}, from {margin_left}"
-        );
-        assert!(shows(&mut sim, "Ask"), "its tab over the margin");
-    }
-    assert!(matches!(
-        click(sim_of(&app), "Clear").as_slice(),
-        [Message::Ask(AskMsg::Clear)]
-    ));
-    // Its tab is one of the margin's: the notes, and back.
-    let _ = app.update(Message::Window(crate::WindowMsg::MarginTabPicked(
-        crate::MarginTab::Notes,
-    )));
-    assert!(text_at(&mut sim_of(&app), |t| t == "where is the origin?", 0).is_none());
-    let _ = app.update(Message::Ask(AskMsg::Open));
-    assert_eq!(app.margin_tab, crate::MarginTab::Ask, "opening it shows it");
-    // Where the margin cannot show, the card stands in for it.
-    app.proj.split = true;
-    assert!(
-        super::ask_place(&app).is_some(),
-        "a card while the panes split"
-    );
-    app.proj.split = false;
-    let _ = app.update(Message::Ask(AskMsg::Float));
-    assert_eq!(app.ask_view, crate::AskView::Compact);
-    assert_eq!(app.margin_tab, crate::MarginTab::Notes);
     // The code beside the card takes its own clicks.
     let mut sim = sim_of(&app);
     let beside = super::ask_place(&app).unwrap().left - 60.0;
@@ -7346,6 +7337,23 @@ fn the_floating_ask_is_driven_from_the_screen() {
     assert!(
         !sent.iter().any(|m| matches!(m, Message::Ask(_))),
         "{sent:?}"
+    );
+    // Esc hides it to the pill, which says how many answers it keeps.
+    assert!(app.step_ask_down());
+    assert_eq!(app.ask_view, crate::AskView::Hidden);
+    assert!(super::ask_place(&app).is_none());
+    assert!(shows(&mut sim_of(&app), "1 answer"));
+    // Put away, the pill goes too; the shortcut brings Ask back.
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    assert_eq!(app.ask_view, crate::AskView::Closed);
+    assert!(!shows(&mut sim_of(&app), "1 answer"));
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    assert_eq!(
+        app.ask_view,
+        crate::AskView::Hidden,
+        "the shortcut hides it"
     );
     // Large: centred, and a click on the dimmed rest makes it a card.
     app.ask_view = crate::AskView::Expanded;
@@ -7374,27 +7382,36 @@ fn the_floating_ask_is_driven_from_the_screen() {
     ));
 }
 
-/// What voice is doing shows where the user looks: on the launcher while
-/// Ask is put away, on the card while it is open — with a way to stop, and
-/// for a command that asks first, a way to say yes.
+/// What voice is doing shows in Ask's corner, never in the field at the
+/// top: on the pill while the card is hidden — even put away — and on the
+/// card while it is open; with a way to stop, and for a command that asks
+/// first, a way to say yes. A command it ran is said on the pill for a
+/// moment.
 #[test]
 fn voice_shows_what_it_is_doing() {
     use crate::app::voice::{Heard, HeardOutcome, VoicePhase};
     let mut app = reader_app();
+    app.ask_view = crate::AskView::Closed;
     app.voice.phase = VoicePhase::Listening {
         since: std::time::Instant::now(),
         level: 0.5,
     };
     {
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Listening"));
+        let listening = text_at(&mut sim, |t| t == "Listening…", 0)
+            .expect("the pill says it listens, even put away");
+        let (right, bottom) = ask_corner_edges();
+        assert!(
+            listening.x > right - 300.0 && listening.y > bottom - 60.0,
+            "in the corner, not the field at the top: {listening:?}"
+        );
     }
-    // The field's microphone, lit while it listens, stops it.
-    let field = super::toolbar::chat_field_rect(&app);
+    // The pill's microphone, lit while it listens, stops it.
+    let (right, bottom) = ask_corner_edges();
     let mut sim = sim_of(&app);
     sim.point_at(Point::new(
-        field.x + field.width - 17.0,
-        field.y + field.height / 2.0,
+        right - 7.0 - 1.0 - 13.0,
+        bottom - super::askfloat::PILL_H / 2.0,
     ));
     let _ = sim.simulate(iced_test::simulator::click());
     // (Its tooltip opens too, under the pointer.)
@@ -7421,15 +7438,28 @@ fn voice_shows_what_it_is_doing() {
         click(sim_of(&app), "Run").as_slice(),
         [Message::Voice(crate::VoiceMsg::Confirm)]
     ));
-    // Idle: what was last heard, and what came of it.
+    // On the card: what was last heard, and what came of it.
     app.voice.confirm = None;
-    app.voice.heard = Some(Heard {
+    app.voice.hear(Heard {
         text: "open the call graph".into(),
         outcome: HeardOutcome::Ran("Call Graph".into()),
     });
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "“open the call graph”"));
+        assert!(shows(&mut sim, "→ Call Graph"));
+    }
+    // Hidden, the pill says it for a moment, then is Ask's again.
+    app.ask_view = crate::AskView::Hidden;
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "“open the call graph”"));
+        assert!(shows(&mut sim, "Call Graph"));
+    }
+    app.voice.heard_at = Some(std::time::Instant::now() - crate::app::voice::HEARD_SHOWN);
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "“open the call graph”"));
-    assert!(shows(&mut sim, "→ Call Graph"));
+    assert!(!shows(&mut sim, "“open the call graph”"));
+    assert!(shows(&mut sim, "Ask"));
 }
 
 /// The settings' Voice section: every model with its size, downloaded

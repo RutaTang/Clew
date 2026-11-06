@@ -69,9 +69,9 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
         // The top bar's left cluster: the window buttons (or the app menu),
         // the sidebar toggle, back / forward.
         Anchor::ToolbarLeft => rect(0.0, 0.0, left_cluster_w(app) + NAV_W, TOOLBAR_H),
-        Anchor::ChatField => {
-            let f = chat_field_rect(app);
-            rect(f.x, f.y, f.width, f.height)
+        Anchor::AskCorner => {
+            let r = super::askfloat::ask_corner_rect(app);
+            rect(r.x, r.y, r.width, r.height)
         }
         Anchor::Strip(tool) => {
             let c = strip_tool_center(app, tool);
@@ -265,9 +265,9 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
                 ..Padding::ZERO
             },
         ),
-        // Ask hangs under the field in this step: the card goes to the
-        // bottom left, clear of it.
-        Anchor::ChatField => (
+        // Ask is open in the bottom-right corner in this step: the card goes
+        // to the bottom left, clear of it.
+        Anchor::AskCorner => (
             Horizontal::Left,
             Vertical::Bottom,
             Padding {

@@ -325,6 +325,9 @@ pub(crate) struct VoiceState {
     last_toggle: Option<Instant>,
     /// What was last heard, and what came of it.
     pub heard: Option<Heard>,
+    /// When it was heard: the pill in the corner says it for a moment
+    /// ([`HEARD_SHOWN`]).
+    pub heard_at: Option<Instant>,
     /// A command heard that asks before it runs: its title.
     pub confirm: Option<String>,
     /// Models downloading, by id.
@@ -342,7 +345,21 @@ pub(crate) struct VoiceState {
     pub(crate) fetch: Fetch,
 }
 
+/// How long the pill in the corner says what was last heard.
+pub(crate) const HEARD_SHOWN: Duration = Duration::from_secs(4);
+
 impl VoiceState {
+    /// Record what was heard, and when: the pill says it for a moment.
+    pub(crate) fn hear(&mut self, heard: Heard) {
+        self.heard = Some(heard);
+        self.heard_at = Some(Instant::now());
+    }
+
+    /// Whether what was last heard is still said on the pill.
+    pub(crate) fn heard_fresh(&self) -> bool {
+        self.heard.is_some() && self.heard_at.is_some_and(|at| at.elapsed() < HEARD_SHOWN)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             phase: VoicePhase::Idle,
@@ -351,6 +368,7 @@ impl VoiceState {
             token: 0,
             last_toggle: None,
             heard: None,
+            heard_at: None,
             confirm: None,
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
@@ -572,7 +590,7 @@ impl App {
     /// (this never sends the reader to Settings for one).
     pub(crate) fn resume_listening(&mut self) -> Task<Message> {
         let ready = self.voice.keep_listening
-            && self.ask_view != crate::app::model::AskView::Closed
+            && self.ask_view.is_open()
             && self.voice.phase == VoicePhase::Idle
             && self.voice.confirm.is_none()
             && self.voice.installed(self.voice.prefs.model());
@@ -607,7 +625,7 @@ impl App {
             }
             Err(e) => {
                 self.status = format!("Can't listen: {e}");
-                self.voice.heard = Some(Heard {
+                self.voice.hear(Heard {
                     text: String::new(),
                     outcome: HeardOutcome::Failed(e),
                 });
@@ -642,7 +660,7 @@ impl App {
             && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
         {
             self.cancel_voice();
-            self.voice.heard = Some(Heard {
+            self.voice.hear(Heard {
                 text: String::new(),
                 outcome: HeardOutcome::Nothing,
             });
@@ -731,7 +749,7 @@ impl App {
             Err(e) if e == "cancelled" => return Task::none(),
             Err(e) => {
                 self.status = format!("Could not transcribe: {e}");
-                self.voice.heard = Some(Heard {
+                self.voice.hear(Heard {
                     text: String::new(),
                     outcome: HeardOutcome::Failed(e),
                 });
@@ -740,7 +758,7 @@ impl App {
         };
         if text.is_empty() {
             self.status = "Didn't catch that — try again".into();
-            self.voice.heard = Some(Heard {
+            self.voice.hear(Heard {
                 text,
                 outcome: HeardOutcome::Nothing,
             });
@@ -755,14 +773,14 @@ impl App {
                 if command.costly() {
                     self.status = format!("“{text}” → {title}? Confirm or press Esc");
                     self.voice.confirm = Some(title.clone());
-                    self.voice.heard = Some(Heard {
+                    self.voice.hear(Heard {
                         text,
                         outcome: HeardOutcome::Confirm(title),
                     });
                     return Task::none();
                 }
                 self.status = format!("“{text}” → {title}");
-                self.voice.heard = Some(Heard {
+                self.voice.hear(Heard {
                     text,
                     outcome: HeardOutcome::Ran(title.clone()),
                 });
@@ -770,7 +788,7 @@ impl App {
             }
         }
         // A question: to Ask, with the window open on it.
-        self.voice.heard = Some(Heard {
+        self.voice.hear(Heard {
             text: text.clone(),
             outcome: HeardOutcome::Asked,
         });

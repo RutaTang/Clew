@@ -49,8 +49,8 @@ pub enum Anchor {
     /// The top bar's left cluster: the window buttons (or the app menu),
     /// the sidebar toggle, back / forward.
     ToolbarLeft,
-    /// The chat field in the top bar.
-    ChatField,
+    /// Ask's corner: its card, or the pill it hides to.
+    AskCorner,
     /// A tool on the strip down the window's right edge.
     Strip(StripTool),
     /// A row (or a run of `count` rows) in the opened ⋯ menu, by index from the
@@ -317,16 +317,17 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
-        // -- Talking to clew: the chat field at the top -----------------
+        // -- Talking to clew: Ask, in the corner ----------------------------
         TutStep::new(
             "Ask clew, or tell it what to do",
-            "The field at the top is a conversation with clew. Ask about the \
-             codebase, such as where is auth handled, and clew answers with links \
-             into the real files. Or say what to do: open a file, take me to where \
-             the config is parsed, show the call graph. clew does it, and asks \
-             first before anything that runs code or costs money. The microphone \
-             lets you say it instead of typing.",
-            Anchor::ChatField,
+            "Ask lives in the bottom-right corner: a conversation with clew about \
+             the whole project. Ask about the codebase, such as where is auth \
+             handled, and clew answers with links into the real files. Or say what \
+             to do: open a file, take me to where the config is parsed, show the \
+             call graph. clew does it, and asks first before anything that runs \
+             code or costs money. The microphone lets you say it instead of \
+             typing; hide the card to its pill when you want the corner back.",
+            Anchor::AskCorner,
         )
         .demo(Message::Ask(AskMsg::Open)),
         // -- The file tools, over the code -----------------------------------
@@ -561,7 +562,7 @@ impl App {
         self.ask_view = if matches!(demo, Some(Message::Ask(AskMsg::Open))) {
             AskView::Compact
         } else {
-            AskView::Closed
+            AskView::Hidden
         };
         // The ⋯-menu steps open the menu so their spotlight has the real
         // items to point at, and the View menu's step that menu; every other

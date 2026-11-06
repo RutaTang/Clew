@@ -1,13 +1,14 @@
-//! The floating Ask window (`ui::askfloat`, `AskView`): put away, a card in
-//! the corner, or large and centred — opened, resized, put away from the
-//! keyboard (Esc one step at a time) and by what happens in the window.
+//! The floating Ask window (`ui::askfloat`, `AskView`): hidden to its pill,
+//! put away, a card in the corner, or large and centred — opened, resized,
+//! hidden from the keyboard (Esc one step at a time) and by what happens in
+//! the window.
 
 use super::*;
 
 #[test]
 fn ask_opens_as_a_card_grows_large_and_steps_back_with_esc() {
     let mut app = scanned_app("askfloat-steps");
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden, "its pill, at first");
     // ⇧⌘A: a card, its input taking the keyboard.
     let _ = app.update(key_press(
         keyboard::Key::Character("a".into()),
@@ -17,19 +18,22 @@ fn ask_opens_as_a_card_grows_large_and_steps_back_with_esc() {
     assert!(!app.code_focused, "the Ask input has the keyboard");
     let _ = app.update(Message::Ask(AskMsg::Expand));
     assert_eq!(app.ask_view, AskView::Expanded);
-    // Esc: large to a card, a card put away — one step a press.
+    // Esc: large to a card, a card hidden to its pill — one step a press.
     let _ = app.update(esc_press());
     assert_eq!(app.ask_view, AskView::Compact);
     let _ = app.update(esc_press());
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden);
     assert!(app.code_focused, "the keyboard back with the code");
-    // ⇧⌘A from large puts it away too; Shrink only makes it a card.
+    // ⇧⌘A from large hides it too; Shrink only makes it a card.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let _ = app.update(Message::Ask(AskMsg::Shrink));
     assert_eq!(app.ask_view, AskView::Compact);
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let _ = app.update(Message::Ask(AskMsg::Toggle));
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden);
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let _ = app.update(Message::Ask(AskMsg::Hide));
+    assert_eq!(app.ask_view, AskView::Hidden);
     // Open, when open, leaves it as it is.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let _ = app.update(Message::Ask(AskMsg::Open));
@@ -61,7 +65,7 @@ fn esc_puts_away_the_nearest_thing_first() {
     assert!(app.active_viewer().unwrap().target_line.is_none());
     assert_eq!(app.ask_view, AskView::Compact);
     let _ = app.update(esc_press());
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden);
     // Large: before the find bar.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     app.proj.find.open = true;
@@ -121,10 +125,11 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
     assert!(titles.iter().any(|t| t == "View: Show Debug Panel"));
 }
 
-/// The card hangs under the chat field wherever the caret is, as the design
-/// has it; the large window is centred, wider than the card.
+/// The card stands in the window's bottom-right corner wherever the caret
+/// is — left of the tool strip, over the status bar — and on the debugger's
+/// panel when it shows; the large window is centred, wider than the card.
 #[test]
-fn the_card_hangs_under_the_field() {
+fn the_card_stands_in_the_corner() {
     let mut app = scanned_app("askfloat-dodge");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     let body: String = (0..400).map(|i| format!("// line {i}\n")).collect();
@@ -135,10 +140,9 @@ fn the_card_hangs_under_the_field() {
     let v = app.active_viewer_mut().unwrap();
     v.viewport_h = 700.0;
     v.scroll_y = 0.0;
-    let field = crate::ui::chat_field_rect(&app);
     let card = crate::ui::ask_place(&app).unwrap();
     // Near the top of the view, near its foot, scrolled away: the card
-    // stays where it is, under the field.
+    // stays where it is, in the corner.
     let rows = (700.0 / lh) as usize;
     for (caret, scroll) in [(2, 0.0), (rows - 2, 0.0), (2, 300.0 * lh)] {
         let v = app.active_viewer_mut().unwrap();
@@ -147,10 +151,28 @@ fn the_card_hangs_under_the_field() {
         assert_eq!(crate::ui::ask_place(&app), Some(card), "caret {caret}");
     }
     let middle = |left: f32, width: f32| left + width / 2.0;
+    let right = app.window_width - crate::ui::STRIP_W - 12.0;
     assert!(
-        (middle(card.left, card.width) - middle(field.x, field.width)).abs() < 1.0,
-        "{card:?} under {field:?}"
+        (card.left + card.width - right).abs() < 1.0,
+        "{card:?} by the tool strip"
     );
+    let corner = crate::ui::ask_corner_rect(&app);
+    assert!(
+        (corner.y + corner.height
+            - (app.window_height - crate::ui::STATUSBAR_H - crate::ui::ASK_MARGIN))
+            .abs()
+            < 1.0,
+        "{corner:?} over the status bar"
+    );
+    // The debugger's panel up: the card stands on it.
+    app.show_bottom = true;
+    app.bottom_height = 200.0;
+    let raised = crate::ui::ask_corner_rect(&app);
+    assert!(
+        raised.y + raised.height < corner.y + corner.height - 199.0,
+        "{raised:?}"
+    );
+    app.show_bottom = false;
     // Large: centred, wider than the card.
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let place = crate::ui::ask_place(&app).unwrap();
@@ -172,7 +194,7 @@ fn the_tour_shows_the_ask_card() {
     }
     assert_eq!(app.ask_view, AskView::Compact);
     let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden);
     let debug_step = crate::app::tutorial::steps(&app)
         .iter()
         .position(|s| s.title == "Debug")
@@ -180,6 +202,6 @@ fn the_tour_shows_the_ask_card() {
     while app.tutorial.is_some_and(|s| s < debug_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
     }
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden);
     assert!(app.show_bottom, "the Debug step shows the debugger's panel");
 }

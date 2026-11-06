@@ -574,11 +574,9 @@ impl App {
                 );
             }
             // Where the conversation is, and clearing it.
-            let ask = match self.ask_view {
-                AskView::Margin => ("Ask: Take Out of the Margin", AskMsg::Float),
-                _ => ("Ask: Keep in the Margin", AskMsg::KeepInMargin),
-            };
-            add(ask.0.into(), None, send(Message::Ask(ask.1)));
+            if self.ask_view.is_open() {
+                add("Ask: Hide".into(), None, send(Message::Ask(AskMsg::Hide)));
+            }
             if self.ask_view != AskView::Expanded {
                 add(
                     "Ask: Make Large".into(),

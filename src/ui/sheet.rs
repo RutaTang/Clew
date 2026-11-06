@@ -355,17 +355,13 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
         .padding([0, 10])
         .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
     };
-    let mut tabs = row![
+    row![
         tab("Notes", crate::MarginTab::Notes),
         tab("Calls", crate::MarginTab::Calls),
         tab("History", crate::MarginTab::History),
     ]
-    .spacing(2);
-    // The conversation, while it is kept in the margin.
-    if app.ask_view == crate::AskView::Margin {
-        tabs = tabs.push(tab("Ask", crate::MarginTab::Ask));
-    }
-    tabs.into()
+    .spacing(2)
+    .into()
 }
 
 /// The sheet's header: the open file's name and folder, the tools that act

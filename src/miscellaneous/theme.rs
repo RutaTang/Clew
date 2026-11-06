@@ -1758,6 +1758,19 @@ pub fn floating_card(_theme: &Theme) -> container::Style {
     }
 }
 
+/// The pill Ask hides to, in the window's corner: the floating card's
+/// surface, as round as it is tall.
+pub fn floating_pill(theme: &Theme) -> container::Style {
+    let card = floating_card(theme);
+    container::Style {
+        border: Border {
+            radius: 20.0.into(),
+            ..card.border
+        },
+        ..card
+    }
+}
+
 /// The microphone's level while it listens: a bar in the accent color on a
 /// faint track.
 pub fn level_meter(_theme: &Theme) -> progress_bar::Style {

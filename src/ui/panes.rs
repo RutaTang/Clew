@@ -1059,15 +1059,7 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
         return None;
     }
     let body: Element<'_, Message> = match app.margin_tab {
-        // The conversation, while it is kept here.
-        crate::MarginTab::Ask if super::askfloat::ask_in_margin(app) => {
-            let height = app.window_height
-                - crate::ui::TOOLBAR_H
-                - crate::ui::STATUSBAR_H
-                - crate::ui::sheet::sheet_header_height(app);
-            super::askfloat::ask_margin(app, height)
-        }
-        crate::MarginTab::Notes | crate::MarginTab::Ask => margin_notes(app),
+        crate::MarginTab::Notes => margin_notes(app),
         crate::MarginTab::Calls => margin_calls(app),
         crate::MarginTab::History => margin_history(app),
     };

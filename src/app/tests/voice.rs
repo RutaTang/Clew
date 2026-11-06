@@ -285,7 +285,7 @@ fn silence_and_failures_do_nothing_but_say_so() {
         Some(&HeardOutcome::Nothing)
     );
     assert!(app.proj.ask_input.is_empty());
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert!(!app.ask_view.is_open(), "nothing heard opens no card");
     // Nothing said for long enough: it stops listening on its own.
     app.voice.reset_for_test();
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));

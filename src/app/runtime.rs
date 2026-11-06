@@ -95,7 +95,7 @@ impl App {
             lsp_gen: std::collections::HashMap::new(),
             embed_available: embed::Config::available(),
             show_bottom: false,
-            ask_view: AskView::Closed,
+            ask_view: AskView::Hidden,
             voice: crate::app::voice::VoiceState::new(),
             debug: DebugState::default(),
             debug_hover_eval: false,
@@ -247,8 +247,9 @@ impl App {
             );
         }
         // The level meter and the pause that ends listening, read only while
-        // the microphone is open.
-        if self.voice.is_listening() {
+        // the microphone is open — and the moment the pill says what was
+        // heard, so it goes when the moment is over.
+        if self.voice.is_listening() || self.voice.heard_fresh() {
             subs.push(
                 iced::time::every(crate::app::voice::LISTEN_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),

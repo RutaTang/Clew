@@ -1068,11 +1068,9 @@ pub enum AskMsg {
     Expand,
     /// Make the large window a card in the corner again.
     Shrink,
-    /// Keep the conversation in the margin, as a tab of its own.
-    KeepInMargin,
-    /// Take it out of the margin: a card over the code again.
-    Float,
-    /// Put the Ask window away.
+    /// Hide the card to its pill in the corner, the conversation kept.
+    Hide,
+    /// Put Ask away: the pill goes too, until Ask is called again.
     Close,
     /// The Ask input box text changed.
     InputChanged(String),
@@ -2383,8 +2381,7 @@ impl AskMsg {
             | AskMsg::Open
             | AskMsg::Expand
             | AskMsg::Shrink
-            | AskMsg::KeepInMargin
-            | AskMsg::Float
+            | AskMsg::Hide
             | AskMsg::Close
             | AskMsg::InputChanged(..)
             | AskMsg::Submit

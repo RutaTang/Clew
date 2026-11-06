@@ -19,8 +19,6 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::row;
 
-use crate::VoiceMsg;
-use crate::app::voice::VoicePhase;
 use crate::keymap::{Action, MenuSection};
 
 /// Height of the top bar.
@@ -43,14 +41,10 @@ const TRAFFIC_W: f32 = 3.0 * 12.0 + 2.0 * 8.0;
 /// Width of back / forward: the room before them, and their gap.
 pub(crate) const NAV_W: f32 = NAV_PAD_L + 2.0 * ICON_BTN + 2.0;
 const NAV_PAD_L: f32 = 4.0;
-/// The chat field: widest it grows, its height, and the room kept clear
+/// The search field: widest it grows, its height, and the room kept clear
 /// either side of it.
 const FIELD_MAX_W: f32 = 460.0;
 const FIELD_H: f32 = 34.0;
-/// The field while listening: its red dot, and the design's gap between
-/// what it holds.
-const REC_DOT: f32 = 7.0;
-const LISTENING_GAP: f32 = 9.0;
 const FIELD_MARGIN: f32 = 14.0;
 /// Width of one of the window buttons of Windows and Linux.
 const WIN_BTN_W: f32 = 46.0;
@@ -90,10 +84,10 @@ fn right_cluster_w() -> f32 {
     }
 }
 
-/// Where the chat field is drawn, in window coordinates: centred in the
+/// Where the search field is drawn, in window coordinates: centred in the
 /// room between the left and right clusters, never wider than
 /// [`FIELD_MAX_W`].
-pub(crate) fn chat_field_rect(app: &App) -> iced::Rectangle {
+pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
     let left = left_cluster_w(app) + NAV_W;
     let area = (app.window_width - left - right_cluster_w()).max(0.0);
     let width = (area - 2.0 * FIELD_MARGIN).clamp(0.0, FIELD_MAX_W);
@@ -397,7 +391,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     .padding(iced::padding::left(NAV_PAD_L))
     .width(Length::Fixed(NAV_W));
 
-    let field = container(chat_field(app))
+    let field = container(search_field(app))
         .width(Fill)
         .align_x(iced::Center)
         .padding([0.0, FIELD_MARGIN]);
@@ -567,160 +561,50 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The chat field: the one place to talk to Clew. Typed or said, a question
-/// or something to do — Clew answers, and opens, jumps and runs what was
-/// asked for. A click opens the conversation; the microphone listens. While
-/// voice is busy the field says what it is doing, with a way to stop.
-fn chat_field(app: &App) -> Element<'_, Message> {
-    let rect = chat_field_rect(app);
-    let listening = app.voice.is_listening();
-    let busy = app.voice.is_busy() || app.voice.confirm.is_some();
-    let active = app.ask_view != AskView::Closed || busy;
-    let small = |label: &'static str, msg: Message, primary: bool| {
-        button(text(label).size(ts::SMALL))
-            .style(if primary {
-                theme::primary_button
-            } else {
-                theme::toolbar_button
-            })
-            .padding([2, 8])
-            .on_press(msg)
-    };
-    // The card opens over the field: what voice is doing is said on the
-    // card then, and the field under it keeps its plain face — no second
-    // set of the same controls hidden beneath the card.
-    let covered = super::askfloat::ask_is_card(app);
-    let face: Element<'_, Message> =
-        if let Some(title) = app.voice.confirm.as_ref().filter(|_| !covered) {
-            row![
-                text(format!("Run “{title}”?"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .width(Fill)
+/// The search field in the top bar: files, symbols and — typed after `>`
+/// — commands, in the finder it opens. Ask and voice are not here: they
+/// live in the window's corner ([`super::askfloat`]).
+fn search_field(app: &App) -> Element<'_, Message> {
+    let rect = search_field_rect(app);
+    let chord = app.keymap.chord(Action::OpenFile).caps();
+    let face = button(
+        row![
+            glyph::icon(Glyph::Search, theme::fg_muted(), 15.0),
+            container(ts::set_in(
+                text("Search files, symbols and commands")
+                    .font(crate::fonts::in_control(crate::fonts::UI))
+                    .color(theme::dim())
                     .wrapping(Wrapping::None),
-                small("Run", Message::Voice(VoiceMsg::Confirm), true),
-                small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
-            ]
-            .spacing(6)
-            .align_y(iced::Center)
-            .into()
-        } else {
-            match app.voice.phase {
-                // Listening: how loud, and how to stop — the microphone itself,
-                // lit, or Esc.
-                VoicePhase::Listening { level, .. } if !covered => row![
-                    container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
-                        container::Style {
-                            background: Some(theme::recording().into()),
-                            border: iced::border::rounded(REC_DOT / 2.0),
-                            ..container::Style::default()
-                        }
-                    }),
-                    ts::set_in(
-                        text("Listening…").color(theme::fg()),
-                        FIELD_H - 2.0,
-                        ts::INTER,
-                        ts::BASE,
-                    ),
-                    super::askfloat::level_bars(&[5.0, 9.0, 13.0, 8.0, 11.0, 6.0], level, false),
-                    space().width(Fill),
-                    keycap("Esc".to_string()),
-                ]
-                .spacing(LISTENING_GAP)
-                .align_y(iced::Center)
-                .into(),
-                VoicePhase::Transcribing { .. } if !covered => row![
-                    text("Working out what you said…")
-                        .size(ts::BASE)
-                        .color(theme::fg_muted())
-                        .width(Fill)
-                        .wrapping(Wrapping::None),
-                    small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
-                ]
-                .spacing(6)
-                .align_y(iced::Center)
-                .into(),
-                _ => {
-                    let chord = app.keymap.chord(Action::ToggleAsk).caps();
-                    button(
-                        row![
-                            glyph::icon(Glyph::Message, theme::accent(), 15.0),
-                            container(ts::set_in(
-                                text("Ask a question, or say what to do")
-                                    .font(crate::fonts::in_control(crate::fonts::UI))
-                                    .color(theme::dim())
-                                    .wrapping(Wrapping::None),
-                                FIELD_H - 2.0,
-                                ts::INTER,
-                                ts::BASE,
-                            ))
-                            .width(Fill)
-                            .clip(true),
-                            control_keycap(chord),
-                        ]
-                        .spacing(9)
-                        .height(Fill)
-                        .align_y(iced::Center),
-                    )
-                    .style(theme::field_face)
-                    .padding(0)
-                    .width(Fill)
-                    .height(Fill)
-                    .on_press(Message::Ask(AskMsg::Toggle))
-                    .into()
-                }
-            }
-        };
-    let chord = app.keymap.chord(Action::Voice).caps();
-    let mic = tip_at(
-        button(
-            container(glyph::icon(
-                Glyph::Mic,
-                if listening {
-                    crate::theme::active().on_accent
-                } else {
-                    theme::fg_muted()
-                },
-                15.0,
+                FIELD_H - 2.0,
+                ts::INTER,
+                ts::BASE,
             ))
             .width(Fill)
-            .height(Fill)
-            .align_x(iced::Center)
-            .align_y(iced::Center),
-        )
-        .style(move |t: &iced::Theme, status| {
-            if listening {
-                theme::round_button(true)(t, status)
-            } else {
-                theme::icon_button(false)(t, status)
-            }
-        })
-        .padding(0)
-        .width(Length::Fixed(26.0))
-        .height(Length::Fixed(26.0))
-        .on_press(Message::Voice(VoiceMsg::Toggle)),
-        if listening { "Stop listening" } else { "Talk" },
-        Some(chord),
-        tooltip::Position::Bottom,
-    );
-    // The design's 12 before and 4 after, inside the field's 1 px edge
-    // (which iced draws inside the box).
-    container(
-        row![face, mic]
-            .spacing(4)
-            .height(Fill)
-            .align_y(iced::Center),
+            .clip(true),
+            control_keycap(chord),
+        ]
+        .spacing(9)
+        .height(Fill)
+        .align_y(iced::Center),
     )
-    .padding(Padding {
-        top: 1.0,
-        right: 4.0 + 1.0,
-        bottom: 1.0,
-        left: 12.0 + 1.0,
-    })
-    .width(Length::Fixed(rect.width))
-    .height(Length::Fixed(FIELD_H))
-    .style(theme::field(active))
-    .into()
+    .style(theme::field_face)
+    .padding(0)
+    .width(Fill)
+    .height(Fill)
+    .on_press(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    // The design's 12 before and 6 after, inside the field's 1 px edge
+    // (which iced draws inside the box).
+    container(face)
+        .padding(Padding {
+            top: 1.0,
+            right: 6.0 + 1.0,
+            bottom: 1.0,
+            left: 12.0 + 1.0,
+        })
+        .width(Length::Fixed(rect.width))
+        .height(Length::Fixed(FIELD_H))
+        .style(theme::field(false))
+        .into()
 }
 
 // ---------------------------------------------------------------- tool strip
@@ -1573,7 +1457,7 @@ mod tests {
         let mut app = crate::app::tests::blank_app();
         app.window_width = 1400.0;
         app.show_left_sidebar = true;
-        let r = chat_field_rect(&app);
+        let r = search_field_rect(&app);
         assert_eq!(r.width, FIELD_MAX_W);
         let room_left = left_cluster_w(&app) + NAV_W;
         let room_right = app.window_width - right_cluster_w();
@@ -1582,6 +1466,6 @@ mod tests {
             "{r:?}"
         );
         app.window_width = 600.0;
-        assert!(chat_field_rect(&app).width < FIELD_MAX_W);
+        assert!(search_field_rect(&app).width < FIELD_MAX_W);
     }
 }

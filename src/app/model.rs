@@ -189,15 +189,14 @@ impl CitationIndex {
 }
 
 /// The reading panel's views (the margin beside the code): notes on what is
-/// read, the calls around the function the caret is in, its history — and
-/// the conversation with Clew, while it is kept there ([`AskView::Margin`]).
+/// read, the calls around the function the caret is in, and its history —
+/// the file's. Ask is the whole project's: it floats in the window's corner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MarginTab {
     #[default]
     Notes,
     Calls,
     History,
-    Ask,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -236,23 +235,23 @@ pub enum WalkMode {
 /// bottom-right corner, or large and centred over the dimmed window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AskView {
-    /// Put away: only its launcher shows, in the corner.
-    #[default]
+    /// Put away: nothing in the corner, but for voice's pill while it
+    /// hears. The shortcut, the voice key or the palette bring Ask back.
     Closed,
-    /// A card in the bottom-right corner, the code beside it in view.
+    /// Hidden to the pill in the bottom-right corner, the conversation kept.
+    #[default]
+    Hidden,
+    /// A card in the bottom-right corner, over the margin's corner: the code
+    /// above and beside it stays in view.
     Compact,
     /// Large and centred, the window dimmed behind it.
     Expanded,
-    /// Kept in the margin: the margin's Ask tab, beside the code. Where the
-    /// margin cannot show (no file open, the panes split, a narrow window),
-    /// a card again.
-    Margin,
 }
 
 impl AskView {
     /// Whether the conversation is on screen.
     pub fn is_open(self) -> bool {
-        self != AskView::Closed
+        matches!(self, AskView::Compact | AskView::Expanded)
     }
 }
 

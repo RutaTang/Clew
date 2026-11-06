@@ -15,7 +15,7 @@ use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
 use crate::glyph::{self, Glyph, WindowGlyph};
 use crate::viewer::Viewer;
-use crate::{App, AskView, Message, SidebarTab, TimeScope, TimeTravel, theme};
+use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
     GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,

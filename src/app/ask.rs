@@ -167,10 +167,10 @@ impl App {
     }
 
     /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, its input
-    /// focused — or, open in either size, put it away.
+    /// focused — or, open in either size, hide it to its pill.
     pub(crate) fn on_toggle_ask(&mut self) -> Task<Message> {
         if self.ask_view.is_open() {
-            self.close_ask();
+            self.hide_ask();
             return Task::none();
         }
         self.on_open_ask()
@@ -180,10 +180,6 @@ impl App {
     /// size) and give its input the keyboard.
     pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
         self.reveal_ask();
-        // Kept in the margin: its tab, where the input is.
-        if self.ask_view == AskView::Margin {
-            self.margin_tab = crate::MarginTab::Ask;
-        }
         self.code_focused = false;
         operation::focus(ui::ask_input_id())
     }
@@ -220,48 +216,29 @@ impl App {
         }
     }
 
-    /// Put the Ask window away, the keyboard back with the code; kept in
-    /// the margin, the margin shows its notes again.
+    /// Put Ask away — its pill too — the keyboard back with the code.
     pub(crate) fn close_ask(&mut self) {
         self.ask_view = AskView::Closed;
-        if self.margin_tab == crate::MarginTab::Ask {
-            self.margin_tab = crate::MarginTab::Notes;
-        }
         self.code_focused = true;
     }
 
-    /// Esc's step down for the Ask window: large to a card, a card (or the
-    /// conversation in the margin) put away. `false` when it is put away
-    /// already, for Esc to do what else it does.
+    /// Hide the card to its pill in the corner, the keyboard back with the
+    /// code; the conversation is kept, a click on the pill away.
+    pub(crate) fn hide_ask(&mut self) {
+        self.ask_view = AskView::Hidden;
+        self.code_focused = true;
+    }
+
+    /// Esc's step down for the Ask window: large to a card, a card hidden to
+    /// its pill. `false` when it is not open, for Esc to do what else it
+    /// does.
     pub(crate) fn step_ask_down(&mut self) -> bool {
         match self.ask_view {
             AskView::Expanded => self.ask_view = AskView::Compact,
-            AskView::Compact | AskView::Margin => self.close_ask(),
-            AskView::Closed => return false,
+            AskView::Compact => self.hide_ask(),
+            AskView::Hidden | AskView::Closed => return false,
         }
         true
-    }
-
-    /// Keep the conversation in the margin, its tab chosen, the margin shown
-    /// and the input given the keyboard.
-    pub(crate) fn keep_ask_in_margin(&mut self) -> Task<Message> {
-        self.ask_view = AskView::Margin;
-        self.margin_tab = crate::MarginTab::Ask;
-        self.show_right_panel = true;
-        self.code_focused = false;
-        operation::focus(ui::ask_input_id())
-    }
-
-    /// Take the conversation out of the margin: a card over the code again.
-    pub(crate) fn float_ask(&mut self) -> Task<Message> {
-        if self.ask_view == AskView::Margin {
-            self.ask_view = AskView::Compact;
-        }
-        if self.margin_tab == crate::MarginTab::Ask {
-            self.margin_tab = crate::MarginTab::Notes;
-        }
-        self.code_focused = false;
-        operation::focus(ui::ask_input_id())
     }
 
     pub(crate) fn on_ask_submit(&mut self) -> Task<Message> {
@@ -1330,8 +1307,10 @@ impl App {
                 }
                 Task::none()
             }
-            AskMsg::KeepInMargin => self.keep_ask_in_margin(),
-            AskMsg::Float => self.float_ask(),
+            AskMsg::Hide => {
+                self.hide_ask();
+                Task::none()
+            }
             AskMsg::Close => {
                 self.close_ask();
                 Task::none()

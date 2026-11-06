@@ -398,15 +398,9 @@ const SAID_SIZE: f32 = 11.0;
 const BUBBLE_SHARE: f32 = 0.82;
 
 /// The width of the conversation's text column: the card's, inside its
-/// 1 px edge, or the margin's while it is kept there; less the 16 either
-/// side.
+/// 1 px edge, less the 16 either side.
 fn conversation_width(app: &App) -> f32 {
-    let panel = if crate::ui::askfloat::ask_in_margin(app) {
-        app.right_width
-    } else {
-        crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width) - 2.0
-    };
-    panel - 32.0
+    crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width) - 2.0 - 32.0
 }
 /// Room for each of the composer's optional rows (the pinned code, an ACP
 /// agent's settings) over the input.
@@ -450,9 +444,35 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .into(),
             );
         }
+        // While voice listens: what can be said, and what comes of it.
+        if app.voice.is_listening() {
+            convo.push(
+                text("Try saying")
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .into(),
+            );
+            for (say, does) in crate::ui::askfloat::try_saying(app) {
+                convo.push(
+                    row![
+                        text(say)
+                            .size(ts::SMALL)
+                            .color(theme::fg())
+                            .width(Fill)
+                            .wrapping(Wrapping::None),
+                        container(text(does).size(ts::CAPTION).color(theme::fg_muted()))
+                            .padding([2, 8])
+                            .style(theme::chip),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .into(),
+                );
+            }
+        }
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
-        if !suggestions.is_empty() {
+        if !suggestions.is_empty() && !app.voice.is_listening() {
             convo.push(
                 text("Try asking")
                     .size(ts::CAPTION)
