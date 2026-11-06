@@ -257,6 +257,16 @@ pub fn with_lang<R>(lang: Lang, f: impl FnOnce() -> R) -> R {
 pub fn system() -> Lang {
     static SYSTEM: OnceLock<Lang> = OnceLock::new();
     *SYSTEM.get_or_init(|| {
+        // On macOS the preferred languages are clew's own choice once it
+        // has recorded one for its bundle (see `tell_macos`).
+        #[cfg(target_os = "macos")]
+        if let Some(languages) = bundle_id().and_then(|id| system_beneath_clews(&run_defaults, &id))
+        {
+            return languages
+                .iter()
+                .find_map(|language| Lang::parse(language))
+                .unwrap_or(Lang::En);
+        }
         sys_locale::get_locales()
             .find_map(|locale| Lang::parse(&locale))
             .unwrap_or(Lang::En)
@@ -295,35 +305,102 @@ pub fn apply_and_save(pref: LangPref) -> Result<(), String> {
 /// panel, alerts — in the languages its preferences for that app list
 /// (`AppleLanguages`). The choice is recorded for clew's own bundle there,
 /// so those parts follow it from the next launch, and removed for System,
-/// so they follow the system again. Off the UI thread: it runs `defaults`.
+/// so they follow the system again — but only when what is recorded is
+/// still clew's own: a language picked for clew in System Settings is the
+/// user's, and stays. Off the UI thread: it runs `defaults`.
 #[cfg(target_os = "macos")]
 fn tell_macos(pref: LangPref) {
-    use std::process::Command;
-    let Some(bundle) = crate::macos::install::installed_bundle() else {
-        return;
-    };
     std::thread::spawn(move || {
-        let plist = bundle.join("Contents/Info.plist");
-        let Ok(out) = Command::new("/usr/libexec/PlistBuddy")
-            .args(["-c", "Print :CFBundleIdentifier"])
-            .arg(&plist)
-            .output()
-        else {
-            return;
-        };
-        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !out.status.success() || id.is_empty() {
-            return;
+        if let Some(id) = bundle_id() {
+            record_for_macos(&run_defaults, &id, pref);
         }
-        let mut defaults = Command::new("/usr/bin/defaults");
-        match pref {
-            LangPref::System => defaults.args(["delete", &id, "AppleLanguages"]),
-            LangPref::Chosen(lang) => {
-                defaults.args(["write", &id, "AppleLanguages", "-array", lang.apple_code()])
-            }
-        };
-        let _ = defaults.output();
     });
+}
+
+/// The identifier of the app bundle clew runs from, if it runs from one.
+#[cfg(target_os = "macos")]
+fn bundle_id() -> Option<String> {
+    let bundle = crate::macos::install::installed_bundle()?;
+    let out = std::process::Command::new("/usr/libexec/PlistBuddy")
+        .args(["-c", "Print :CFBundleIdentifier"])
+        .arg(bundle.join("Contents/Info.plist"))
+        .output()
+        .ok()?;
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (out.status.success() && !id.is_empty()).then_some(id)
+}
+
+/// Run macOS's `defaults` with `args`: what it printed, if it succeeded.
+#[cfg(target_os = "macos")]
+fn run_defaults(args: &[&str]) -> Option<String> {
+    let out = std::process::Command::new("/usr/bin/defaults")
+        .args(args)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// A way to run `defaults`: [`run_defaults`] on macOS, a stand-in in tests.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+type Defaults<'a> = &'a dyn Fn(&[&str]) -> Option<String>;
+
+/// The key clew keeps beside `AppleLanguages` in its bundle's preferences:
+/// the language it wrote there itself.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+const WROTE: &str = "ClewAppleLanguages";
+
+/// The items of an array as `defaults read` prints it: `(\n    ko\n)`,
+/// an item quoted when it holds a dash (`"zh-Hans"`).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn defaults_array(printed: &str) -> Vec<String> {
+    let inner = printed.trim();
+    let inner = inner.strip_prefix('(').unwrap_or(inner);
+    let inner = inner.strip_suffix(')').unwrap_or(inner);
+    inner
+        .split([',', '\n'])
+        .map(|item| item.trim().trim_matches('"').to_string())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// The language clew wrote for its bundle `id`, when that is still what
+/// macOS keeps for it (not one picked since in System Settings).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn written_by_clew(defaults: Defaults, id: &str) -> Option<String> {
+    let wrote = defaults(&["read", id, WROTE])?.trim().to_string();
+    let kept = defaults_array(&defaults(&["read", id, "AppleLanguages"])?);
+    (kept == [wrote.as_str()]).then_some(wrote)
+}
+
+/// Record `pref` in the preferences of the bundle `id` (see
+/// [`tell_macos`]).
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn record_for_macos(defaults: Defaults, id: &str, pref: LangPref) {
+    match pref {
+        LangPref::System => {
+            if written_by_clew(defaults, id).is_some() {
+                defaults(&["delete", id, "AppleLanguages"]);
+            }
+            // What is kept now, if anything, is not clew's.
+            defaults(&["delete", id, WROTE]);
+        }
+        LangPref::Chosen(lang) => {
+            let code = lang.apple_code();
+            defaults(&["write", id, "AppleLanguages", "-array", code]);
+            defaults(&["write", id, WROTE, "-string", code]);
+        }
+    }
+}
+
+/// The system's own languages, when what macOS keeps for clew's bundle `id`
+/// is the language clew wrote there: the preferred languages a program
+/// reads are then that one, not the system's.
+#[cfg_attr(not(any(test, target_os = "macos")), allow(dead_code))]
+fn system_beneath_clews(defaults: Defaults, id: &str) -> Option<Vec<String>> {
+    written_by_clew(defaults, id)?;
+    defaults(&["read", "-g", "AppleLanguages"]).map(|printed| defaults_array(&printed))
 }
 
 /// The catalogs, as built into the program.
@@ -1179,6 +1256,67 @@ mod tests {
                 format(fr["cannot be read: {e}"], &[("e", &os)])
             );
         });
+    }
+
+    /// What clew records for its bundle on macOS is removed when System is
+    /// picked again, but a language picked for clew in System Settings is
+    /// the user's and stays; and while clew's own is recorded, the system's
+    /// languages are read past it.
+    #[test]
+    fn macos_keeps_only_clews_own_language_choice() {
+        use std::cell::RefCell;
+        let store: RefCell<HashMap<String, String>> = RefCell::new(HashMap::from([(
+            "-g AppleLanguages".to_string(),
+            "(\n    \"en-US\",\n    \"zh-Hans-CN\"\n)\n".to_string(),
+        )]));
+        let defaults = |args: &[&str]| -> Option<String> {
+            let mut store = store.borrow_mut();
+            match args {
+                ["read", rest @ ..] => store.get(&rest.join(" ")).cloned(),
+                ["delete", id, key] => store.remove(&format!("{id} {key}")).map(|_| String::new()),
+                ["write", id, key, "-array", value] => {
+                    let printed = format!("(\n    \"{value}\"\n)\n");
+                    store.insert(format!("{id} {key}"), printed);
+                    Some(String::new())
+                }
+                ["write", id, key, "-string", value] => {
+                    store.insert(format!("{id} {key}"), format!("{value}\n"));
+                    Some(String::new())
+                }
+                _ => None,
+            }
+        };
+        let id = "app.clew";
+        let kept = |store: &RefCell<HashMap<String, String>>| {
+            store.borrow().get("app.clew AppleLanguages").cloned()
+        };
+        assert_eq!(system_beneath_clews(&defaults, id), None);
+        record_for_macos(&defaults, id, LangPref::Chosen(Lang::Zh));
+        assert_eq!(written_by_clew(&defaults, id).as_deref(), Some("zh-Hans"));
+        assert_eq!(
+            system_beneath_clews(&defaults, id),
+            Some(vec!["en-US".to_string(), "zh-Hans-CN".to_string()])
+        );
+        record_for_macos(&defaults, id, LangPref::System);
+        assert_eq!(kept(&store), None);
+        // Picked in System Settings: not clew's, so it stays, and it is
+        // what the preferred languages are.
+        let french = "(\n    fr\n)\n".to_string();
+        store
+            .borrow_mut()
+            .insert("app.clew AppleLanguages".into(), french.clone());
+        record_for_macos(&defaults, id, LangPref::System);
+        assert_eq!(kept(&store), Some(french.clone()));
+        assert_eq!(system_beneath_clews(&defaults, id), None);
+        // Also when clew had written one before it was replaced there.
+        record_for_macos(&defaults, id, LangPref::Chosen(Lang::Ja));
+        store
+            .borrow_mut()
+            .insert("app.clew AppleLanguages".into(), french.clone());
+        assert_eq!(system_beneath_clews(&defaults, id), None);
+        record_for_macos(&defaults, id, LangPref::System);
+        assert_eq!(kept(&store), Some(french));
+        assert_eq!(defaults_array("(\n    ko\n)\n"), ["ko"]);
     }
 
     /// Every message the other crates write, and every program's message

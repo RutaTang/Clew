@@ -5020,9 +5020,11 @@ fn transfer_with(
     // given again. Either way progress counts from the start of the body.
     let from = range_from(url, headers)?;
     let rest = from > 0 && response.status().as_u16() == 206;
-    if rest {
-        resumes_at(url, response.headers(), from)?;
-    }
+    let slice = if rest {
+        resumes_at(url, response.headers(), from)?
+    } else {
+        false
+    };
     let (skip, cap) = match (from, rest) {
         (0, _) => (0, limits.max_bytes),
         (_, true) => (0, limits.max_bytes.saturating_sub(from)),
@@ -5045,7 +5047,7 @@ fn transfer_with(
     let mut progress = |done: u64, total: Option<u64>| {
         on_progress(offset + done, total.map(|total| offset + total));
     };
-    copy_capped(
+    let copied = copy_capped(
         url,
         &mut response.into_body().into_reader(),
         &mut Skip { left: skip, sink },
@@ -5056,7 +5058,14 @@ fn transfer_with(
         },
         total,
         &mut progress,
-    )
+    )?;
+    // A rest that stopped short of the end, as its `Content-Range` said it
+    // would: the body is not whole yet, and [`download_resuming`] asks
+    // again from where this left off, as after a dropped connection.
+    if slice {
+        return Err(format!("{url}: {CUT_SHORT}"));
+    }
+    Ok(copied)
 }
 
 /// Where the body asked for starts: the `N` of the caller's
@@ -5080,7 +5089,9 @@ fn range_from(url: &str, headers: &[(&str, &str)]) -> Result<u64, String> {
 /// Check that a 206 holds the body from byte `from` on, as asked: its
 /// `Content-Range` must start there, and the bytes must be the file's own,
 /// not a compressed form (a range of which is a range of something else).
-fn resumes_at(url: &str, headers: &ureq::http::HeaderMap, from: u64) -> Result<(), String> {
+/// Whether it ends before the body does (`bytes from-end/total`, `end`
+/// short of the last byte): a server may send a rest in parts.
+fn resumes_at(url: &str, headers: &ureq::http::HeaderMap, from: u64) -> Result<bool, String> {
     if let Some(encoding) = headers.get("content-encoding")
         && !encoding.as_bytes().eq_ignore_ascii_case(b"identity")
     {
@@ -5088,14 +5099,24 @@ fn resumes_at(url: &str, headers: &ureq::http::HeaderMap, from: u64) -> Result<(
             "{url}: the server sent the rest of the download compressed"
         ));
     }
-    let start = headers
+    let range = headers
         .get("content-range")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().strip_prefix("bytes "))
-        .and_then(|v| v.split_once('-'))
-        .and_then(|(start, _)| start.trim().parse::<u64>().ok());
+        .and_then(|v| v.split_once('-'));
+    let start = range.and_then(|(start, _)| start.trim().parse::<u64>().ok());
+    // `end/total`; a total of `*` (not known) says nothing of the end.
+    let short = range
+        .and_then(|(_, rest)| rest.split_once('/'))
+        .and_then(|(end, total)| {
+            Some((
+                end.trim().parse::<u64>().ok()?,
+                total.trim().parse::<u64>().ok()?,
+            ))
+        })
+        .is_some_and(|(end, total)| end.saturating_add(1) < total);
     match start {
-        Some(start) if start == from => Ok(()),
+        Some(start) if start == from => Ok(short),
         Some(start) => Err(format!(
             "{url}: the server sent the download from byte {start}, not {from}"
         )),
@@ -6000,6 +6021,38 @@ mod tests {
         assert_eq!(heads.len(), 2, "{heads:?}");
         assert_eq!(range_of(&heads[0]), None);
         assert_eq!(range_of(&heads[1]).as_deref(), Some("bytes=4-"));
+    }
+
+    /// A rest sent in parts — a 206 whose range ends before the body does —
+    /// is not taken for the whole: the next attempt asks for what is still
+    /// missing, and the body arrives whole.
+    #[test]
+    fn a_rest_sent_in_parts_is_asked_for_until_whole() {
+        let (url, heads) = serve_each(vec![
+            reply("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabcd"),
+            reply(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 4-6/10\r\n\
+                 Content-Length: 3\r\n\r\nefg",
+            ),
+            reply(
+                "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 7-9/10\r\n\
+                 Content-Length: 3\r\n\r\nhij",
+            ),
+        ]);
+        let mut sink = Vec::new();
+        let n = download_resuming(
+            &url,
+            &[],
+            RESUMABLE,
+            &AtomicBool::new(false),
+            &mut sink,
+            |_, _| {},
+        )
+        .unwrap();
+        assert_eq!((n, sink.as_slice()), (10, b"abcdefghij".as_slice()));
+        let heads: Vec<String> = heads.try_iter().collect();
+        assert_eq!(heads.len(), 3, "{heads:?}");
+        assert_eq!(range_of(&heads[2]).as_deref(), Some("bytes=7-"));
     }
 
     /// A server that ignores the range sends the whole body again: what the
