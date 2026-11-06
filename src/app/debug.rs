@@ -63,7 +63,22 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// The most children one variable shows: a list of a million is read a
+/// screenful at a time by no one.
+pub(crate) const MAX_VAR_CHILDREN: usize = 300;
+
 impl App {
+    /// The active pane's file, when its debugger runs it from source (a
+    /// Python, JavaScript, Ruby, PHP… script): what Debug runs with no
+    /// launch.json.
+    fn debuggable_script(&self) -> Option<PathBuf> {
+        let abs = &self.active_viewer()?.abs;
+        match dap::Lang::detect(None, abs)? {
+            dap::Lang::Native | dap::Lang::CSharp => None,
+            _ => Some(abs.clone()),
+        }
+    }
+
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
@@ -97,6 +112,21 @@ impl App {
         } else {
             let cfg = match read_launch_config(&root) {
                 Ok(cfg) => cfg,
+                // No launch.json: a script open in the active pane is run as
+                // it is, as editors do — Debug on a Python file only told the
+                // reader to write a config first. A program that must be
+                // built (native, .NET) still needs one, to name the binary.
+                Err(_)
+                    if !root.join(".clew").join("launch.json").exists()
+                        && let Some(script) = self.debuggable_script() =>
+                {
+                    crate::app::model::LaunchConfig {
+                        program: script,
+                        args: Vec::new(),
+                        cwd: root.clone(),
+                        type_hint: None,
+                    }
+                }
                 Err(e) => {
                     self.status = e;
                     return Task::none();
@@ -1205,6 +1235,48 @@ impl App {
     /// anything still being fetched for the stop we are leaving is now stale.
     pub(crate) fn bump_debug_stop(&mut self) {
         self.debug_stop += 1;
+        // What was open named values at the stop just left.
+        self.debug.open_vars.clear();
+        self.debug.var_children.clear();
+    }
+
+    /// Open or close the variable `reference` in the panel, reading its
+    /// children the first time it opens at this stop.
+    pub(crate) fn toggle_debug_var(&mut self, reference: i64) -> Task<Message> {
+        if self.debug.open_vars.remove(&reference) {
+            return Task::none();
+        }
+        self.debug.open_vars.insert(reference);
+        if self.debug.var_children.contains_key(&reference) {
+            return Task::none();
+        }
+        let stamp = self.debug_stamp();
+        let Some(client) = self
+            .debug
+            .session
+            .as_ref()
+            .filter(|s| s.status == DebugStatus::Stopped)
+            .and_then(|s| s.client.clone())
+        else {
+            return Task::none();
+        };
+        let (run, stop) = (self.debug_run, self.debug_stop);
+        Task::perform(
+            async move {
+                let mut vars = client.variables(reference).await.unwrap_or_default();
+                vars.truncate(MAX_VAR_CHILDREN);
+                vars
+            },
+            move |vars| {
+                Message::Debug(DebugMsg::VarChildren {
+                    stamp: stamp.clone(),
+                    run,
+                    stop,
+                    reference,
+                    vars,
+                })
+            },
+        )
     }
 
     /// Whether a DAP result tagged `(run, stop)` still describes where the
@@ -1358,6 +1430,9 @@ impl App {
                 self.bump_debug_stop();
                 self.show_paused_debug_session()
             }
+            // Telemetry is the adapter's own ("ptvsd", "debugpy"), never the
+            // program's: the protocol has it kept from the user.
+            dap::DapEvent::Output(o) if o.category == "telemetry" => Task::none(),
             dap::DapEvent::Output(o) => {
                 push_debug_output(session, o.category, o.text);
                 Task::none()
@@ -2402,6 +2477,19 @@ impl App {
                 } else {
                     tr!("Hover evaluation in the debuggee is off").into()
                 };
+                Task::none()
+            }
+            DebugMsg::ToggleVar(reference) => self.toggle_debug_var(reference),
+            DebugMsg::VarChildren {
+                run,
+                stop,
+                reference,
+                vars,
+                ..
+            } => {
+                if self.owns_debug_stop(run, stop) {
+                    self.debug.var_children.insert(reference, vars);
+                }
                 Task::none()
             }
             DebugMsg::WatchesEvaluated {

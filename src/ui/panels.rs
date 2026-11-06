@@ -183,19 +183,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::dim())
                 .into(),
         );
-        for v in &sc.vars {
-            var_rows.push(
-                row![
-                    text(v.name.clone()).size(ts::SMALL).color(theme::warning()),
-                    text(" = ").size(ts::SMALL).color(theme::dim()),
-                    text(v.value.clone())
-                        .size(ts::SMALL)
-                        .color(theme::fg())
-                        .wrapping(Wrapping::None),
-                ]
-                .into(),
-            );
-        }
+        push_var_rows(app, &sc.vars, 0, &mut var_rows);
     }
 
     // Program output.
@@ -285,10 +273,21 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
     let n = app.debug.trace.len();
     if n == 0 {
-        return text(tr!("Trace: no stops yet"))
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into();
+        // "Yet" only while the program can still stop: a run that ended
+        // without stopping has no stops, and never will.
+        let ended = app
+            .debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == crate::DebugStatus::Terminated);
+        return text(if ended {
+            tr!("Trace: no stops")
+        } else {
+            tr!("Trace: no stops yet")
+        })
+        .size(ts::CAPTION)
+        .color(theme::dim())
+        .into();
     }
     let count = if app.debug.trace_cut {
         trn!(
@@ -2025,4 +2024,75 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .height(Fill),
     ]
     .into()
+}
+
+/// How deep the variables panel opens values into values.
+const MAX_VAR_DEPTH: usize = 12;
+
+/// `vars` as the panel's rows, `depth` levels in: `name = value`, a value
+/// with children opening and closing on a click, its children under it
+/// once read. A group with no value of its own (debugpy's "class
+/// variables") says only its name: it was drawn "class variables =".
+fn push_var_rows<'a>(
+    app: &'a App,
+    vars: &'a [crate::dap::Variable],
+    depth: usize,
+    out: &mut Vec<Element<'a, Message>>,
+) {
+    for v in vars {
+        let reference = v.variables_reference;
+        let opens = reference > 0 && depth < MAX_VAR_DEPTH;
+        let open = opens && app.debug.open_vars.contains(&reference);
+        let marker: Element<'a, Message> = if opens {
+            glyph::icon(
+                if open {
+                    Glyph::ChevronDown
+                } else {
+                    Glyph::ChevronRight
+                },
+                theme::dim(),
+                10.0,
+            )
+        } else {
+            space().width(10).into()
+        };
+        let mut line = row![
+            space().width(depth as f32 * 12.0),
+            marker,
+            text(v.name.clone()).size(ts::SMALL).color(theme::warning()),
+        ]
+        .spacing(3)
+        .align_y(iced::Center);
+        if !v.value.is_empty() {
+            line = line
+                .push(text("=").size(ts::SMALL).color(theme::dim()))
+                .push(
+                    text(v.value.clone())
+                        .size(ts::SMALL)
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
+                );
+        }
+        out.push(if opens {
+            button(line)
+                .style(theme::list_row(false))
+                .padding(0)
+                .on_press(Message::Debug(DebugMsg::ToggleVar(reference)))
+                .into()
+        } else {
+            line.into()
+        });
+        if open {
+            match app.debug.var_children.get(&reference) {
+                Some(children) => push_var_rows(app, children, depth + 1, out),
+                None => out.push(
+                    row![
+                        space().width((depth + 1) as f32 * 12.0 + 13.0),
+                        text("…").size(ts::SMALL).color(theme::dim()),
+                    ]
+                    .into(),
+                ),
+            }
+        }
+    }
 }

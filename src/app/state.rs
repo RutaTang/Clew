@@ -231,6 +231,12 @@ pub struct DebugState {
     /// The run whose adapter rides the clew-server transport
     /// (`DebugMsg::DapStarted::proxied`): the one a lost transport ends.
     pub proxied_run: Option<u64>,
+    /// The variables open in the panel at the current stop, by their
+    /// `variablesReference`, and the children each was read to have. A
+    /// reference names a value only while the program stays where it
+    /// stopped, so both go with the stop (`App::bump_debug_stop`).
+    pub open_vars: std::collections::HashSet<i64>,
+    pub var_children: HashMap<i64, Vec<crate::dap::Variable>>,
 }
 
 /// The session a DAP event, an answer or a client belongs to: the run's own

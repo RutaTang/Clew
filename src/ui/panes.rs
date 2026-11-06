@@ -1410,6 +1410,19 @@ pub(crate) fn leaning_on(
             .filter(|s| s.callee == name && s.caller.as_deref() == Some(*caller))
             .count();
     }
+    // The calls at the top of its own file, in no function: Python's
+    // `if __name__ == "__main__": main()`, a script's own steps. They are
+    // not in the graph, which links functions, and a `main` so called read
+    // "0 references". Only a plain function's: a bare call is no method's.
+    if g.node(id).kind == "function"
+        && let Some(calls) = app.proj.calls_by_file.get(file)
+    {
+        sites += calls
+            .calls
+            .iter()
+            .filter(|s| s.callee == name && s.caller.is_none() && !s.method)
+            .count();
+    }
     Some(Leaning::References(sites))
 }
 

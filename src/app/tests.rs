@@ -5002,6 +5002,115 @@ fn stale_search_result_is_dropped() {
     );
 }
 
+/// Debug with no launch.json runs the script open in the active pane (it
+/// used to only say to write a config), while a program that must be built
+/// still needs one; and the adapter's telemetry ("ptvsd", "debugpy") stays
+/// out of the program's output, as the protocol has it.
+#[test]
+fn debug_runs_the_open_script_without_a_config_and_hides_telemetry() {
+    let mut app = scanned_app("debug-script");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    // A Rust file names no program to run.
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.start_debug();
+    assert!(app.debug.session.is_none());
+    assert!(app.status.contains("launch.json"), "{}", app.status);
+    assert!(
+        !app.status.contains(&*root.to_string_lossy()),
+        "the hint names the config by where it goes in the project: {}",
+        app.status
+    );
+
+    std::fs::write(root.join("app.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let _ = app.start_debug();
+    let session = app.debug.session.as_ref().expect("the script is debugged");
+    assert_eq!(session.program, root.join("app.py"));
+    assert_eq!(session.cwd, root);
+
+    let run = app.debug_run;
+    for (category, text) in [("telemetry", "ptvsd"), ("stdout", "hi\n")] {
+        let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+            stamp: app.transport_stamp(),
+            run,
+            event: dap::DapEvent::Output(dap::proto::Output {
+                category: category.into(),
+                text: text.into(),
+            }),
+        }));
+    }
+    let shown: String = app
+        .debug
+        .session
+        .as_ref()
+        .unwrap()
+        .output
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert!(shown.contains("hi"), "{shown:?}");
+    assert!(!shown.contains("ptvsd"), "{shown:?}");
+}
+
+/// A variable with children opens in the panel (it could not: debugpy's
+/// globals sat behind three value-less "… variables =" rows): its children
+/// are kept for the stop they were read at, and a reply for a stop already
+/// left is dropped, as is everything open once the program moves.
+#[test]
+fn debug_variables_open_into_their_children_for_the_stop() {
+    let mut app = scanned_app("debug-vars");
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    let child = |name: &str| crate::dap::Variable {
+        name: name.into(),
+        value: "1".into(),
+        type_name: None,
+        variables_reference: 0,
+    };
+    let (run, stop) = (app.debug_run, app.debug_stop);
+    let _ = app.update(Message::Debug(DebugMsg::ToggleVar(7)));
+    assert!(app.debug.open_vars.contains(&7));
+    let _ = app.update(Message::Debug(DebugMsg::VarChildren {
+        stamp: app.debug_stamp(),
+        run,
+        stop: stop.wrapping_sub(1),
+        reference: 7,
+        vars: vec![child("stale")],
+    }));
+    assert!(
+        app.debug.var_children.is_empty(),
+        "a past stop's children landed"
+    );
+    let _ = app.update(Message::Debug(DebugMsg::VarChildren {
+        stamp: app.debug_stamp(),
+        run,
+        stop,
+        reference: 7,
+        vars: vec![child("main")],
+    }));
+    assert_eq!(app.debug.var_children[&7][0].name, "main");
+    // Closed and opened again: no second read, the children are still there.
+    let _ = app.update(Message::Debug(DebugMsg::ToggleVar(7)));
+    assert!(!app.debug.open_vars.contains(&7));
+    let _ = app.update(Message::Debug(DebugMsg::ToggleVar(7)));
+    assert!(app.debug.var_children.contains_key(&7));
+    // The program moves on: what was open named values of the stop it left.
+    app.bump_debug_stop();
+    assert!(app.debug.open_vars.is_empty() && app.debug.var_children.is_empty());
+}
+
 /// A late event from a stopped debug run must not land on the next session.
 #[test]
 fn stale_debug_events_are_dropped() {
@@ -20580,6 +20689,13 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             stop: app.debug_stop,
             vals: Vec::new(),
+        }),
+        Message::Debug(DebugMsg::VarChildren {
+            stamp: s(),
+            run,
+            stop: app.debug_stop,
+            reference: 1,
+            vars: Vec::new(),
         }),
         Message::Debug(DebugMsg::Failed {
             stamp: s(),

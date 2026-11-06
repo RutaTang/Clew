@@ -1315,6 +1315,7 @@
  "Trace value at cursor": "Tracer la valeur sous le curseur",
  "Trace: 1 stop": "Trace : {n} arrêt",
  "Trace: 1 stop (cut short)": "Trace : {n} arrêt (tronquée)",
+ "Trace: no stops": "Trace : aucun arrêt",
  "Trace: no stops yet": "Trace : aucun arrêt pour l’instant",
  "Trace: {n} stops": "Trace : {n} arrêts",
  "Trace: {n} stops (cut short)": "Trace : {n} arrêts (tronquée)",

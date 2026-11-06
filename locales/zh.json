@@ -1315,6 +1315,7 @@
  "Trace value at cursor": "追踪光标处的值",
  "Trace: 1 stop": "执行轨迹：1 次暂停",
  "Trace: 1 stop (cut short)": "执行轨迹：1 次暂停（已截断）",
+ "Trace: no stops": "执行轨迹：没有暂停",
  "Trace: no stops yet": "执行轨迹：尚无暂停",
  "Trace: {n} stops": "执行轨迹：{n} 次暂停",
  "Trace: {n} stops (cut short)": "执行轨迹：{n} 次暂停（已截断）",

@@ -1633,6 +1633,17 @@ pub enum DebugMsg {
     /// Remove a watch expression by identity (its text), from both the watch
     /// list and the last stop's evaluated values.
     WatchRemoveExpr(String),
+    /// Open or close a variable in the panel: its children, by its DAP
+    /// `variablesReference`, read when first opened at a stop.
+    ToggleVar(i64),
+    /// A variable's children, read at stop `stop` of run `run`.
+    VarChildren {
+        stamp: Stamp,
+        run: u64,
+        stop: u64,
+        reference: i64,
+        vars: Vec<crate::dap::Variable>,
+    },
     /// Toggle evaluating the hovered identifier in the paused debuggee. Off by
     /// default: an evaluation can run code (property getters, `Debug`
     /// impls) in the program being debugged, so it is opt-in.
@@ -2500,6 +2511,7 @@ impl DebugMsg {
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
             | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
+            | DebugMsg::VarChildren { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
@@ -2515,6 +2527,7 @@ impl DebugMsg {
             | DebugMsg::WatchInput(..)
             | DebugMsg::WatchAdd
             | DebugMsg::WatchRemoveExpr(..)
+            | DebugMsg::ToggleVar(..)
             | DebugMsg::ToggleHoverEval
             | DebugMsg::AdapterInstalled { .. } => None,
         }

@@ -1315,6 +1315,7 @@
  "Trace value at cursor": "カーソル位置の値をトレース",
  "Trace: 1 stop": "トレース: 停止 1 回",
  "Trace: 1 stop (cut short)": "トレース: 停止 {n} 回（打ち切り）",
+ "Trace: no stops": "トレース: 停止なし",
  "Trace: no stops yet": "トレース: まだ停止していません",
  "Trace: {n} stops": "トレース: 停止 {n} 回",
  "Trace: {n} stops (cut short)": "トレース: 停止 {n} 回（打ち切り）",

@@ -1315,6 +1315,7 @@
  "Trace value at cursor": "커서 위치의 값 추적",
  "Trace: 1 stop": "실행 기록: 정지 1회",
  "Trace: 1 stop (cut short)": "실행 기록: 정지 1회 (중간에 끊김)",
+ "Trace: no stops": "실행 기록: 정지 없음",
  "Trace: no stops yet": "실행 기록: 아직 정지 없음",
  "Trace: {n} stops": "실행 기록: 정지 {n}회",
  "Trace: {n} stops (cut short)": "실행 기록: 정지 {n}회 (중간에 끊김)",

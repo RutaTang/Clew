@@ -1733,7 +1733,7 @@ pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
     let text = clew_core::statefile::read_capped(&path, 1024 * 1024).ok_or_else(|| {
         tr!(
             "Create {path} with {example}",
-            path = path.display(),
+            path = Path::new(".clew").join("launch.json").display(),
             example = r#"{"program": "path", "type": "python"}"#
         )
     })?;

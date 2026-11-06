@@ -168,7 +168,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     let said: Element<'_, Message> = if !app.status.is_empty() {
         // A status the back end wrote as it is (an error passed straight
         // through) in the reader's language too.
-        status_text(crate::i18n::message(&app.status)).into()
+        status_text(crate::i18n::message(&app.status))
+            .wrapping(iced::widget::text::Wrapping::None)
+            .into()
     } else if let Some(project) = app.proj.project.as_ref() {
         let files = project.files.len();
         let symbols = app.proj.symbol_index.len();
@@ -194,12 +196,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // The design's gap after where the code is read from, less the padding
     // of the button that says it — a row of its own, since the bar's own
     // spacing (the design's gap between everything else) is one for all.
-    let mut bar = row![
-        row![conn_indicator, said]
-            .spacing(STATUS_GAP - 8.0)
-            .align_y(iced::Center)
-    ]
-    .align_y(iced::Center);
+    //
+    // What Clew says takes the room the bar's other items leave, cut off at
+    // its end: a long message (a path, an error) laid out first took the
+    // whole bar, and the caret's place was wrapped down the window's edge a
+    // word a line.
+    let mut said_row = row![said].spacing(STATUS_GAP).align_y(iced::Center);
     // A prominent, always-visible progress chip while "Explain All" runs — the
     // pass is slow, so show how far along it is (the status text alone is easy
     // to miss / read as stuck). It is the one place the pass's progress shows:
@@ -249,9 +251,15 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 .padding([1, 4])
                 .on_press(Message::Explain(ExplainMsg::Cancel)),
         );
-        bar = bar.push(chip);
+        said_row = said_row.push(chip);
     }
-    bar = bar.push(space().width(Fill));
+    let mut bar = row![
+        row![conn_indicator, container(said_row).width(Fill).clip(true)]
+            .spacing(STATUS_GAP - 8.0)
+            .align_y(iced::Center)
+            .width(Fill)
+    ]
+    .align_y(iced::Center);
     if let Some(chip) = refresh_chip(app) {
         bar = bar.push(chip);
     }

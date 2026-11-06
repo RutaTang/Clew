@@ -5803,6 +5803,26 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     let mut sim = sim_elem(super::trace_control(&app));
     assert!(shows(&mut sim, "Trace: no stops yet"));
     drop(sim);
+    // A run that ended without stopping has no stops, not "yet".
+    app.debug.session = Some(crate::DebugSession {
+        client: None,
+        status: crate::DebugStatus::Terminated,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: root.join("app"),
+        args: Vec::new(),
+        cwd: root.clone(),
+        addr: None,
+    });
+    let mut sim = sim_elem(super::trace_control(&app));
+    assert!(shows(&mut sim, "Trace: no stops"));
+    assert!(!shows(&mut sim, "Trace: no stops yet"));
+    drop(sim);
+    app.debug.session = None;
     let frame = |name: &str, line: usize| crate::TraceFrame {
         name: name.into(),
         path: Some(root.join("src/lib.rs")),
@@ -7421,6 +7441,32 @@ fn the_raised_note_says_when_its_function_changed() {
         )),
     );
     assert!(shows(&mut sim_of(&app), "3 references"));
+    // A call at the top of its file, in no function (Python's `if __name__
+    // == "__main__": main()`), is a reference too: such a `main` read "0
+    // references". A method call of that name is not one.
+    let lib = root.join("src/lib.rs");
+    let top = |callee: &str, method, line| crate::projectcalls::CallSite {
+        caller: None,
+        callee: callee.into(),
+        method,
+        line,
+    };
+    app.proj.calls_by_file.insert(
+        lib.clone(),
+        std::sync::Arc::new(crate::projectcalls::FileCalls::new(
+            lib,
+            crate::highlight::Lang::Rust,
+            vec![
+                site("a", "origin", 7),
+                site("a", "origin", 8),
+                site("b", "origin", 11),
+                top("origin", false, 20),
+                top("origin", true, 21),
+            ],
+            &[],
+        )),
+    );
+    assert!(shows(&mut sim_of(&app), "4 references"));
 }
 
 /// The margin, with no note to show, says why, centered under a muted icon
