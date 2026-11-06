@@ -71,6 +71,18 @@ impl Lang {
         }
     }
 
+    /// The code macOS knows the language by, in an app's `AppleLanguages`.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    pub fn apple_code(self) -> &'static str {
+        match self {
+            Lang::En => "en",
+            Lang::Fr => "fr",
+            Lang::Zh => "zh-Hans",
+            Lang::Ko => "ko",
+            Lang::Ja => "ja",
+        }
+    }
+
     /// The language a code or a system locale names ("fr", "fr-FR",
     /// "fr_FR.UTF-8", "zh-Hans-CN", "ja-JP"), if one it speaks.
     pub fn parse(code: &str) -> Option<Lang> {
@@ -245,16 +257,57 @@ pub fn init() -> LangPref {
         .and_then(LangPref::parse)
         .unwrap_or(LangPref::System);
     set_pref(pref);
+    // macOS's own parts of the window follow it from the next launch, also
+    // when it was chosen in another copy of clew or in config.toml.
+    #[cfg(target_os = "macos")]
+    tell_macos(pref);
     pref
 }
 
 /// Speak what `pref` resolves to, and keep it for the next launch.
 pub fn apply_and_save(pref: LangPref) -> Result<(), String> {
     set_pref(pref);
+    #[cfg(target_os = "macos")]
+    tell_macos(pref);
     clew_core::globalconfig::set_keys(vec![(
         CONFIG_KEY.into(),
         toml::Value::String(pref.as_str().into()),
     )])
+}
+
+/// macOS draws parts of an app itself — the standard menu items, the Open
+/// panel, alerts — in the languages its preferences for that app list
+/// (`AppleLanguages`). The choice is recorded for clew's own bundle there,
+/// so those parts follow it from the next launch, and removed for System,
+/// so they follow the system again. Off the UI thread: it runs `defaults`.
+#[cfg(target_os = "macos")]
+fn tell_macos(pref: LangPref) {
+    use std::process::Command;
+    let Some(bundle) = crate::macos::install::installed_bundle() else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let plist = bundle.join("Contents/Info.plist");
+        let Ok(out) = Command::new("/usr/libexec/PlistBuddy")
+            .args(["-c", "Print :CFBundleIdentifier"])
+            .arg(&plist)
+            .output()
+        else {
+            return;
+        };
+        let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !out.status.success() || id.is_empty() {
+            return;
+        }
+        let mut defaults = Command::new("/usr/bin/defaults");
+        match pref {
+            LangPref::System => defaults.args(["delete", &id, "AppleLanguages"]),
+            LangPref::Chosen(lang) => {
+                defaults.args(["write", &id, "AppleLanguages", "-array", lang.apple_code()])
+            }
+        };
+        let _ = defaults.output();
+    });
 }
 
 /// The catalogs, as built into the program.

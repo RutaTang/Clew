@@ -1159,6 +1159,7 @@
  "The Lean server": "Lean 服务器",
  "The MCP server `{server}` wants to run {tool}": "MCP 服务器 `{server}` 想要运行 {tool}",
  "The More menu": "“更多”菜单",
+ "The Open panel and system alerts follow at the next launch.": "“打开”面板和系统提示将在下次启动时随之切换。",
  "The PHP version the language server assumes.": "语言服务器所假定的 PHP 版本。",
  "The Ruby that runs Ruby LSP.": "运行 Ruby LSP 所用的 Ruby。",
  "The TypeScript the language server runs.": "语言服务器运行的 TypeScript。",

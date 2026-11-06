@@ -1159,6 +1159,7 @@
  "The Lean server": "Le serveur Lean",
  "The MCP server `{server}` wants to run {tool}": "Le serveur MCP `{server}` veut exécuter {tool}",
  "The More menu": "Le menu Plus",
+ "The Open panel and system alerts follow at the next launch.": "Le panneau Ouvrir et les alertes système suivront au prochain lancement.",
  "The PHP version the language server assumes.": "La version de PHP que suppose le serveur de langage.",
  "The Ruby that runs Ruby LSP.": "Le Ruby qui exécute Ruby LSP.",
  "The TypeScript the language server runs.": "Le TypeScript exécuté par le serveur de langage.",

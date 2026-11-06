@@ -1159,6 +1159,7 @@
  "The Lean server": "Lean サーバー",
  "The MCP server `{server}` wants to run {tool}": "MCP サーバー `{server}` が {tool} を実行しようとしています",
  "The More menu": "「その他」メニュー",
+ "The Open panel and system alerts follow at the next launch.": "「開く」パネルとシステムの警告は、次回の起動から切り替わります。",
  "The PHP version the language server assumes.": "言語サーバーが前提とする PHP のバージョンです。",
  "The Ruby that runs Ruby LSP.": "Ruby LSP を実行する Ruby です。",
  "The TypeScript the language server runs.": "言語サーバーが実行する TypeScript です。",
