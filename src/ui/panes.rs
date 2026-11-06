@@ -1113,14 +1113,7 @@ fn margin_notes(app: &App) -> Element<'_, Message> {
             .zip(&ordinals)
             .any(|(sym, &o)| app.proj.explain.cache.contains_key(&function_node(sym, o)));
         if !any_note {
-            return compact_empty_state(
-                Glyph::Lightbulb,
-                if crate::keymap::MAC_KEYS {
-                    "Move the cursor into a function."
-                } else {
-                    "Move the cursor into a function."
-                },
-            );
+            return compact_empty_state(Glyph::Lightbulb, "Move the cursor into a function.");
         }
         return notes_beside_code(app, v, None, ordinals);
     };

@@ -562,14 +562,7 @@ fn reached_from_rows<'a>(
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.proj.explain.view.as_ref() else {
-        return compact_empty_state(
-            Glyph::Lightbulb,
-            if crate::keymap::MAC_KEYS {
-                "Move the cursor into a function."
-            } else {
-                "Move the cursor into a function."
-            },
-        );
+        return compact_empty_state(Glyph::Lightbulb, "Move the cursor into a function.");
     };
     // The note's head: what it is about, in the face it is written in (a
     // function's name as code), and what kind of thing that is.
