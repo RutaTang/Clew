@@ -77,7 +77,10 @@ impl App {
                     }
                     // The dimming stays as the target alone decides it.
                     Err(e) => {
-                        self.status = format!("What the build leaves out could not be read: {e}");
+                        self.status = tr!(
+                            "Could not read what the build leaves out: {error}",
+                            error = e
+                        );
                     }
                 }
                 Task::none()
@@ -153,7 +156,7 @@ impl App {
             },
             LanguagesMsg::Saved { result, .. } => {
                 if let Err(e) = result {
-                    self.status = format!("The language settings were not saved: {e}");
+                    self.status = tr!("Could not save the language settings: {error}", error = e);
                 }
                 Task::none()
             }
@@ -183,8 +186,10 @@ impl App {
                     .filter(|t| !t.is_empty())
                 {
                     if !lsp::langenv::is_go_tag(tag) {
-                        self.status =
-                            format!("{tag:?} is not a build tag: letters, digits, _ and . only");
+                        self.status = tr!(
+                            "{tag} is not a build tag: use only letters, digits, _ and .",
+                            tag = format!("{tag:?}")
+                        );
                         return Task::none();
                     }
                     if !go.tags.iter().any(|t| t == tag) {
@@ -224,7 +229,7 @@ impl App {
             }
             LangField::ServerCommand | LangField::ServerArgs => {
                 let Some(language) = self.proj.lang_drafts.server_language.clone() else {
-                    self.status = "Pick the language the server program is for".into();
+                    self.status = tr!("Pick the language the server program is for").into();
                     return Task::none();
                 };
                 let servers = next.servers.get_or_insert_with(Default::default);
@@ -299,7 +304,7 @@ impl App {
                     lsp::langopts::language_options(&root, &languages, &choices, Some(&config))
                 })
                 .await
-                .map_err(|_| "listing the language options failed".to_string())
+                .map_err(|_| tr!("listing the language options failed").to_string())
             },
             listed,
         )
@@ -332,7 +337,7 @@ impl App {
                     lsp::choices::save(host.as_deref(), &root, &next)
                 })
                 .await
-                .unwrap_or_else(|_| Err("the save failed".to_string()))
+                .unwrap_or_else(|_| Err(tr!("the save failed").to_string()))
             },
             move |result| {
                 Message::Languages(LanguagesMsg::Saved {
@@ -402,7 +407,7 @@ impl App {
                     clew_core::buildfacts::read(&root, &crates, &choices, config.as_ref())
                 })
                 .await
-                .map_err(|_| "reading the build facts failed".to_string())
+                .map_err(|_| tr!("reading the build facts failed").to_string())
             },
             loaded,
         )

@@ -119,11 +119,7 @@ pub(crate) mod preview_texts {
 
 /// "1 match", "2 matches".
 pub(crate) fn count_matches(n: usize) -> String {
-    if n == 1 {
-        "1 match".to_string()
-    } else {
-        format!("{n} matches")
-    }
+    trn!("1 match", "{n} matches", n)
 }
 
 /// The status line for a finished search: the match count (capped or not),
@@ -134,7 +130,7 @@ pub(crate) fn search_status(
     skipped_total: usize,
 ) -> String {
     let matches = if hits >= search::MAX_HITS {
-        format!("{hits}+ matches (capped)")
+        tr!("{count}+ matches (capped)", count = hits)
     } else {
         count_matches(hits)
     };
@@ -142,10 +138,13 @@ pub(crate) fn search_status(
         None => matches,
         Some(first) => {
             let n = skipped_total.max(skipped.len());
-            let files = if n == 1 { "file" } else { "files" };
-            format!(
-                "{matches} · {n} {files} not searched ({}: {})",
-                first.rel, first.reason
+            trn!(
+                "{matches} · 1 file not searched ({file}: {reason})",
+                "{matches} · {n} files not searched ({file}: {reason})",
+                n,
+                matches = matches,
+                file = first.rel,
+                reason = crate::i18n::lookup(&first.reason)
             )
         }
     }
@@ -192,8 +191,9 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = crate::keymap::local_keys(&format!(
-                    "No {lang} server ready (⌘T to search symbols)"
+                self.status = crate::keymap::local_keys(&tr!(
+                    "No {language} server ready (⌘T to search symbols)",
+                    language = lang
                 ));
                 return Task::none();
             }
@@ -258,11 +258,11 @@ impl App {
             // hid the rest. List them all in the Search sidebar to pick from,
             // the way references are shown.
             Ok(targets) if targets.len() > 1 => {
-                self.status = format!(
-                    "{} definitions — pick one in the Search list",
-                    targets.len()
+                self.status = tr!(
+                    "{count} definitions — pick one in the Search list",
+                    count = targets.len()
                 );
-                self.show_locations("(definitions)", targets)
+                self.show_locations(tr!("(definitions)"), targets)
             }
             Ok(targets) if !targets.is_empty() => {
                 let t = &targets[0];
@@ -274,11 +274,11 @@ impl App {
                 self.open_file(abs, Some(target_line), true)
             }
             Ok(_) => {
-                self.status = "No definition found".into();
+                self.status = tr!("No definition found").into();
                 Task::none()
             }
             Err(e) => {
-                self.status = format!("Definition failed: {e}");
+                self.status = tr!("Definition failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -290,15 +290,19 @@ impl App {
     ) -> Task<Message> {
         match result {
             Ok(refs) if !refs.is_empty() => {
-                self.status = format!("{} reference(s) — showing them in Search", refs.len());
-                self.show_locations("(references)", refs)
+                self.status = trn!(
+                    "1 reference — showing it in Search",
+                    "{n} references — showing them in Search",
+                    refs.len()
+                );
+                self.show_locations(tr!("(references)"), refs)
             }
             Ok(_) => {
-                self.status = "No references".into();
+                self.status = tr!("No references").into();
                 Task::none()
             }
             Err(e) => {
-                self.status = format!("References failed: {e}");
+                self.status = tr!("References failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -447,7 +451,7 @@ impl App {
         if self.connection.is_remote() {
             self.proj.search.running = false;
             self.proj.search.error = Some(
-                "Disconnected from the remote host — search will work again once reconnected"
+                tr!("Disconnected from the remote host — search will work again once reconnected")
                     .into(),
             );
             return Task::none();
@@ -462,7 +466,7 @@ impl App {
                 tokio::task::spawn_blocking(move || search::search_report(&root, files, opts))
                     .await
                     .unwrap_or_else(|_| search::SearchReport {
-                        error: Some("the search failed unexpectedly".into()),
+                        error: Some(tr!("the search failed unexpectedly").into()),
                         ..Default::default()
                     })
             },

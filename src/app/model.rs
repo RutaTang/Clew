@@ -939,23 +939,29 @@ impl InsightKind {
         })
     }
 
-    /// Menu label.
-    pub fn label(self) -> &'static str {
+    /// Its name, in English whatever the interface speaks: the command
+    /// palette runs it by this title.
+    pub fn name(self) -> &'static str {
         match self {
-            InsightKind::ExpandMacro => "Expand Macro",
-            InsightKind::GoalState => "Show Goal",
-            InsightKind::TypeAtPoint => "Show Type",
+            InsightKind::ExpandMacro => tr_noop!("Expand Macro"),
+            InsightKind::GoalState => tr_noop!("Show Goal"),
+            InsightKind::TypeAtPoint => tr_noop!("Show Type"),
         }
+    }
+
+    /// Menu label, in the reader's language.
+    pub fn label(self) -> &'static str {
+        crate::i18n::lookup(self.name())
     }
 
     /// What the popup says when the language has nothing to say there.
     pub fn nothing(self) -> &'static str {
         match self {
-            InsightKind::ExpandMacro => "No macro here, and nothing on this line expands.",
-            InsightKind::GoalState => {
-                "No goal here: the Lean server knows no proof state or expected type at this point."
-            }
-            InsightKind::TypeAtPoint => "The language server knows no type for this name.",
+            InsightKind::ExpandMacro => tr!("No macro here, and nothing on this line expands."),
+            InsightKind::GoalState => tr!(
+                "No goal here: the Lean server has no proof state or expected type at this point."
+            ),
+            InsightKind::TypeAtPoint => tr!("The language server has no type for this name."),
         }
     }
 }
@@ -984,14 +990,20 @@ pub struct Insight {
 }
 
 impl GotoKind {
-    /// Menu label for this navigation action.
-    pub fn label(self) -> &'static str {
+    /// Its name, in English whatever the interface speaks: the command
+    /// palette runs it by this title.
+    pub fn name(self) -> &'static str {
         match self {
-            GotoKind::Definition => "Go to Definition",
-            GotoKind::References => "Find References",
-            GotoKind::Implementation => "Go to Implementation",
-            GotoKind::TypeDefinition => "Go to Type Definition",
+            GotoKind::Definition => tr_noop!("Go to Definition"),
+            GotoKind::References => tr_noop!("Find References"),
+            GotoKind::Implementation => tr_noop!("Go to Implementation"),
+            GotoKind::TypeDefinition => tr_noop!("Go to Type Definition"),
         }
+    }
+
+    /// Menu label for this navigation action, in the reader's language.
+    pub fn label(self) -> &'static str {
+        crate::i18n::lookup(self.name())
     }
 
     pub(crate) fn method(self) -> &'static str {
@@ -1004,10 +1016,10 @@ impl GotoKind {
     }
     pub(crate) fn verb(self) -> &'static str {
         match self {
-            GotoKind::Definition => "Looking up definition",
-            GotoKind::References => "Finding references",
-            GotoKind::Implementation => "Finding implementations",
-            GotoKind::TypeDefinition => "Looking up type definition",
+            GotoKind::Definition => tr!("Looking up definition"),
+            GotoKind::References => tr!("Finding references"),
+            GotoKind::Implementation => tr!("Finding implementations"),
+            GotoKind::TypeDefinition => tr!("Looking up type definition"),
         }
     }
 }
@@ -1232,7 +1244,7 @@ impl LspSlot {
     /// update — rather than by locking its state again for every widget.
     pub fn label(&self, snapshot: Option<&LspSnapshot>) -> String {
         match self {
-            LspSlot::Starting => "starting…".into(),
+            LspSlot::Starting => tr!("starting…").into(),
             // A ready server that surfaced an error (e.g. rust-analyzer couldn't
             // load the workspace) shows it — otherwise it reads "ready" while
             // every go-to-def silently returns nothing. Else: live progress
@@ -1241,16 +1253,18 @@ impl LspSlot {
             LspSlot::Ready(_) => match snapshot {
                 Some(Ok(s)) => match &s.error {
                     Some(e) => format!("⚠ {}", lsp_error_summary(e)),
-                    None => s.progress.clone().unwrap_or_else(|| "ready".into()),
+                    None => s.progress.clone().unwrap_or_else(|| tr!("ready").into()),
                 },
-                Some(Err(_)) => "⚠ state unreadable after an internal error — restart it".into(),
-                None => "ready".into(),
+                Some(Err(_)) => {
+                    tr!("⚠ state unreadable after an internal error — restart it").into()
+                }
+                None => tr!("ready").into(),
             },
-            LspSlot::Failed(e) => format!("error: {e}"),
+            LspSlot::Failed(e) => tr!("error: {error}", error = e),
             LspSlot::Unsupported(e) | LspSlot::Declined(e) => e.clone(),
             // What the answer is about is the App's to say
             // (`App::lsp_awaiting`); the slot knows only that one is due.
-            LspSlot::AwaitingConsent => "waiting for your answer".into(),
+            LspSlot::AwaitingConsent => tr!("waiting for your answer").into(),
         }
     }
 }
@@ -1276,12 +1290,12 @@ pub enum Awaiting {
 impl std::fmt::Display for Awaiting {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Awaiting::Download => "download needed",
-            Awaiting::Build => "waiting for leave to build the project",
-            Awaiting::Approval => "waiting for approval of the project's settings",
-            Awaiting::Host => "checking with the host…",
-            Awaiting::Nothing => "not started",
-            Awaiting::Installing => "installing on the host…",
+            Awaiting::Download => tr!("download needed"),
+            Awaiting::Build => tr!("waiting for permission to build the project"),
+            Awaiting::Approval => tr!("waiting for approval of the project's settings"),
+            Awaiting::Host => tr!("checking with the host…"),
+            Awaiting::Nothing => tr!("not started"),
+            Awaiting::Installing => tr!("installing on the host…"),
         })
     }
 }
@@ -1539,17 +1553,21 @@ impl LspConsent {
                 .url
                 .rsplit('/')
                 .next()
-                .map(|f| format!("download {f}"))
-                .unwrap_or_else(|| "download a binary".into()),
-            LspProvision::Install(i) => format!("{} (requires {} on PATH)", i.describe, i.tool),
+                .map(|f| tr!("Download {file}", file = f))
+                .unwrap_or_else(|| tr!("Download a binary").into()),
+            LspProvision::Install(i) => tr!(
+                "{install} (requires {tool} on PATH)",
+                install = i.describe,
+                tool = i.tool
+            ),
             LspProvision::Remote { describe, .. } => {
-                format!("{} — on the remote host", shown(describe))
+                tr!("{install} — on the remote host", install = shown(describe))
             }
             LspProvision::DebugAdapter { install, .. } => install.describe(),
             // The question says it runs the project's own code; where is
             // the one thing left to say.
             LspProvision::Build { host, .. } => match host {
-                Some(_) => "On the remote host.".into(),
+                Some(_) => tr!("On the remote host.").into(),
                 None => String::new(),
             },
         }

@@ -35,17 +35,20 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = format!("No {lang} server ready");
+                self.status = tr!("No {language} server ready", language = lang);
                 return Task::none();
             }
         };
         if !client.call_hierarchy {
-            self.status = format!("Call hierarchy isn't supported for {lang}");
+            self.status = tr!(
+                "Call hierarchy isn't supported for {language}",
+                language = lang
+            );
             return Task::none();
         }
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
-        self.status = "Building call hierarchy…".into();
+        self.status = tr!("Building call hierarchy…").into();
         let direction = callgraph::Direction::Incoming;
         // Mint this request's identity; only the awaited prepare installs.
         self.call_token += 1;
@@ -74,7 +77,7 @@ impl App {
         items: Vec<lsp::client::CallItem>,
     ) -> Task<Message> {
         if items.is_empty() {
-            self.status = "No call hierarchy for the symbol under the cursor".into();
+            self.status = tr!("No call hierarchy for the symbol under the cursor").into();
             return Task::none();
         }
         // The new tree inherits the prepare request's token (already unique).

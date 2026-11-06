@@ -525,3 +525,126 @@ fn voice_settings_are_kept() {
     let _ = app.update(Message::Voice(VoiceMsg::SetLanguage(None)));
     assert_eq!(VoicePrefs::load().language, None);
 }
+
+/// A command said in the reader's language, as the palette shows it: with
+/// or without its category, the words that only say "do it" left out —
+/// and nothing more, nothing that puts away what it would show.
+#[test]
+fn a_command_is_heard_in_the_language_the_palette_shows() {
+    use crate::app::voice::said_as_shown;
+    use crate::i18n::Lang;
+    let zh = [
+        "调用图",
+        "视图：隐藏缩略图",
+        "视图：显示缩略图",
+        "打开文件夹…",
+    ];
+    assert_eq!(said_as_shown(Lang::Zh, "打开调用图", &zh), Some(0));
+    assert_eq!(said_as_shown(Lang::Zh, "请打开调用图。", &zh), Some(0));
+    assert_eq!(said_as_shown(Lang::Zh, "显示缩略图", &zh), Some(2));
+    assert_eq!(said_as_shown(Lang::Zh, "隐藏缩略图", &zh), Some(1));
+    assert_eq!(said_as_shown(Lang::Zh, "视图：隐藏缩略图", &zh), Some(1));
+    assert_eq!(said_as_shown(Lang::Zh, "打开文件夹", &zh), Some(3));
+    assert_eq!(
+        said_as_shown(Lang::Zh, "关闭缩略图", &zh),
+        None,
+        "close never shows it"
+    );
+    assert_eq!(
+        said_as_shown(Lang::Zh, "解释一下调用图", &zh),
+        None,
+        "a request, for Ask"
+    );
+    let fr = [
+        "Graphe d’appels",
+        "Affichage : Masquer la minimap",
+        "Atteindre la ligne…",
+    ];
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Ouvre le graphe d'appels.", &fr),
+        Some(0)
+    );
+    assert_eq!(said_as_shown(Lang::Fr, "Masquer la minimap", &fr), Some(1));
+    assert_eq!(said_as_shown(Lang::Fr, "Atteindre la ligne", &fr), Some(2));
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Pourquoi le graphe d'appels ?", &fr),
+        None
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ko, "호출 그래프 열어 줘", &["호출 그래프"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ko, "호출 그래프를 보여주세요", &["호출 그래프"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ja, "コールグラフを開いてください", &["コールグラフ"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ja, "コールグラフ", &["コールグラフ", "コールグラフ"]),
+        None,
+        "two fit: neither runs"
+    );
+    assert_eq!(
+        said_as_shown(Lang::En, "Call Graph", &["Call Graph"]),
+        None,
+        "English is the word matcher's"
+    );
+}
+
+/// The voice panel's command examples, in each language, run the commands
+/// they name: each catalog names a command as its palette shows it.
+#[test]
+fn each_languages_examples_run_what_they_say() {
+    use crate::i18n::{Lang, lookup, with_lang};
+    use crate::ui::TRY_SAYING;
+    for lang in Lang::ALL {
+        with_lang(lang, || {
+            let words = |example: &str| {
+                lookup(example)
+                    .trim_matches(['“', '”', '「', '」', '«', '»', ' ', '\u{a0}'])
+                    .to_string()
+            };
+            let (mut app, script, _) = voice_app(
+                &format!("voice-example-{}", lang.code()),
+                &words(TRY_SAYING[0].0),
+            );
+            say(&mut app, &script);
+            assert_eq!(
+                app.voice.heard.as_ref().map(|h| &h.outcome),
+                Some(&HeardOutcome::Ran("Call Graph".into())),
+                "{}: {:?}",
+                lang.code(),
+                words(TRY_SAYING[0].0)
+            );
+            let (mut app, script, _) = voice_app(
+                &format!("voice-example-debug-{}", lang.code()),
+                &words(TRY_SAYING[4].0),
+            );
+            say(&mut app, &script);
+            assert_eq!(
+                app.voice.heard.as_ref().map(|h| &h.outcome),
+                Some(&HeardOutcome::Confirm("Start Debugging".into())),
+                "{}: {:?}",
+                lang.code(),
+                words(TRY_SAYING[4].0)
+            );
+            // Hiding the minimap: what the palette offers while it shows.
+            app.show_minimap = true;
+            let commands = app.palette_commands();
+            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+            let said = words(TRY_SAYING[1].0);
+            let found = clew_voice::intent::command(&said, &titles)
+                .or_else(|| crate::app::voice::said_as_shown(lang, &said, &shown));
+            assert_eq!(
+                found.map(|i| titles[i]),
+                Some("View: Hide Minimap"),
+                "{}: {said:?}",
+                lang.code()
+            );
+        });
+    }
+}

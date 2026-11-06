@@ -406,7 +406,7 @@ fn answers_read_as_the_popup_shows_them() {
     });
     assert_eq!(
         full.markdown,
-        "```c\nN\n```\n\nexpands to\n\n```c\n10\n```\n\nfrom\n\n```c\n#define N 10\n```\n\nDefined at `a.h:2`.\n\n*Cut short: the expansion grew past what Clew follows.*"
+        "```c\nN\n```\n\nexpands to\n\n```c\n10\n```\n\nfrom this definition\n\n```c\n#define N 10\n```\n\nDefined at `a.h:2`.\n\n*Cut short: the expansion grew past clew's limit.*"
     );
     assert_eq!(full.defined, Some(("a.h".into(), 2)));
     let flag = c_answer(clew_protocol::MacroExpansion {

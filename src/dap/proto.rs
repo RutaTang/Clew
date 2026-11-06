@@ -10,6 +10,8 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
+use crate::{tr, trn};
+
 /// Why an expression is being evaluated — the `context` of a DAP `evaluate`
 /// request. Adapters decide from it what an evaluation may do, so it is part
 /// of the request's meaning, not a hint: an adapter that advertises
@@ -105,8 +107,8 @@ impl StackFrame {
         StackFrame {
             id: -1,
             name: match count {
-                Some(n) => format!("… {n} more frames not shown"),
-                None => "… more frames not shown".to_string(),
+                Some(n) => trn!("… 1 more frame not shown", "… {n} more frames not shown", n),
+                None => tr!("… more frames not shown").to_string(),
             },
             path: None,
             line: 0,

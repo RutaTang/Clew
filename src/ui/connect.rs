@@ -47,21 +47,23 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             .on_submit(Message::Settings(SettingsMsg::Saved))
     };
 
-    let provider = form::pick(&Provider::ALL[..], Some(app.settings.provider), |v| {
-        Message::Settings(SettingsMsg::ProviderPicked(v))
-    });
+    let provider = form::pick(
+        Provider::ALL.map(ProviderChoice),
+        Some(ProviderChoice(app.settings.provider)),
+        |v: ProviderChoice| Message::Settings(SettingsMsg::ProviderPicked(v.0)),
+    );
 
     // A key that came from the environment is NOT pre-filled (see
     // `SettingsDraft::key_from_env`), so the placeholder has to explain the
     // blank field — otherwise it reads as "clew lost my key" and the user
     // pastes it in, which is what stores it.
     let key_hint = if app.settings.key_from_env {
-        format!(
-            "using {} from your environment",
-            app.settings.provider.env_key()
+        tr!(
+            "Using {variable} from your environment",
+            variable = app.settings.provider.env_key()
         )
     } else {
-        "paste your API key".to_string()
+        tr!("Paste your API key").to_string()
     };
     let key = input(&key_hint, &app.settings.key, |v| {
         Message::Settings(SettingsMsg::KeyChanged(v))
@@ -80,11 +82,14 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
 
     // Embeddings (semantic search) — an OpenAI-compatible endpoint.
     let embed_hint = if app.settings.embed_key_from_env {
-        "using OPENAI_API_KEY from your environment"
+        tr!(
+            "Using {variable} from your environment",
+            variable = "OPENAI_API_KEY"
+        )
     } else {
-        "embedding API key"
+        tr!("Embedding API key").to_string()
     };
-    let embed_key = input(embed_hint, &app.settings.embed_key, |v| {
+    let embed_key = input(&embed_hint, &app.settings.embed_key, |v| {
         Message::Settings(SettingsMsg::EmbedKeyChanged(v))
     })
     .secure(true);
@@ -134,17 +139,17 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     );
 
     let page = app.settings.page;
-    let stored = || form::note(format!("Stored in {}", crate::llm::config_hint())).into();
+    let stored = || form::note(tr!("Stored in {path}", path = crate::llm::config_hint())).into();
     let body: Element<'_, Message> = match page {
         SettingsPage::Appearance => form::page(vec![form::group(
             "",
             None,
             None,
             vec![
-                form::item(crate::tr!("Language"), None, language),
-                form::item("Mode", None, mode),
-                form::item("Light theme", None, light_pick),
-                form::item("Dark theme", None, dark_pick),
+                form::item(tr!("Language"), None, language),
+                form::item(tr!("Mode"), None, mode),
+                form::item(tr!("Light theme"), None, light_pick),
+                form::item(tr!("Dark theme"), None, dark_pick),
             ],
         )]),
         SettingsPage::Updates => form::page(vec![form::group(
@@ -153,15 +158,15 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             None,
             vec![
                 form::toggle(
-                    "Check for updates automatically",
+                    tr!("Check for updates automatically"),
                     None,
                     app.update.auto_check,
                     |v| Message::Updater(UpdaterMsg::SetAuto(v)),
                 ),
                 form::item(
-                    "Version",
+                    tr!("Version"),
                     Some(format!("clew {}", crate::updater::current_version())),
-                    form::action("Check now", Some(Message::Updater(UpdaterMsg::Check))),
+                    form::action(tr!("Check now"), Some(Message::Updater(UpdaterMsg::Check))),
                 ),
             ],
         )]),
@@ -171,10 +176,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 None,
                 None,
                 vec![
-                    form::field("Provider", None, provider),
-                    form::field("API key", None, key),
-                    form::field("Model", None, model),
-                    form::field("Base URL", None, base),
+                    form::field(tr!("Provider"), None, provider),
+                    form::field(tr!("API key"), None, key),
+                    form::field(tr!("Model"), None, model),
+                    form::field(tr!("Base URL"), None, base),
                 ],
             ),
             stored(),
@@ -182,12 +187,12 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         SettingsPage::Embeddings => form::page(vec![
             form::group(
                 "",
-                Some("Any OpenAI-compatible /embeddings endpoint.".into()),
+                Some(tr!("Any OpenAI-compatible /embeddings endpoint.").into()),
                 None,
                 vec![
-                    form::field("API key", None, embed_key),
-                    form::field("Model", None, embed_model),
-                    form::field("Base URL", None, embed_base),
+                    form::field(tr!("API key"), None, embed_key),
+                    form::field(tr!("Model"), None, embed_model),
+                    form::field(tr!("Base URL"), None, embed_base),
                 ],
             ),
             stored(),
@@ -195,7 +200,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
         SettingsPage::Languages if app.proj.project.is_none() => form::page(vec![
-            form::note("Open a project to set up its languages.").into(),
+            form::note(tr!("Open a project to set up its languages.")).into(),
             installed_servers(app),
         ]),
         SettingsPage::Languages => languages_section(app),
@@ -203,14 +208,16 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     };
 
     let mut header = row![
-        text(page.title()).size(ts::TITLE).color(theme::fg()),
+        text(crate::i18n::lookup(page.title()))
+            .size(ts::TITLE)
+            .color(theme::fg()),
         space().width(Fill),
     ]
     .spacing(6)
     .align_y(iced::Center);
     if page == SettingsPage::Shortcuts && app.keymap.any_overridden() {
         header = header.push(
-            button(text("Reset all").size(ts::BODY))
+            button(text(tr!("Reset all")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([3, 12])
                 .on_press(Message::Window(WindowMsg::RebindResetAll)),
@@ -235,7 +242,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                     },
                     15.0
                 ),
-                text(p.title()).size(ts::BASE),
+                text(crate::i18n::lookup(p.title())).size(ts::BASE),
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -249,7 +256,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     let nav = container(
         iced::widget::Column::with_children(
             std::iter::once(
-                container(text("Settings").size(ts::TITLE).color(theme::fg()))
+                container(text(tr!("Settings")).size(ts::TITLE).color(theme::fg()))
                     .padding([2, 10])
                     .into(),
             )
@@ -304,6 +311,17 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     )
 }
 
+/// A provider as its picker lists it: its name, or clew-core's label for
+/// one that is not a brand ("Custom"), in the interface's language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProviderChoice(crate::llm::Provider);
+
+impl std::fmt::Display for ProviderChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::i18n::lookup(self.0.label()))
+    }
+}
+
 /// The glyph beside a page in Settings' list.
 fn settings_glyph(page: SettingsPage) -> Glyph {
     match page {
@@ -344,7 +362,9 @@ const RUST_TARGETS: &[&str] = &[
 ];
 
 /// What a pick list of targets or platforms calls "the host's own".
-const HOST_CHOICE: &str = "The host's";
+fn host_choice() -> &'static str {
+    tr!("Host default")
+}
 
 /// A server program as the view shows it: the program, and its arguments
 /// when they are the user's own.
@@ -357,7 +377,7 @@ fn program_line(choice: &clew_protocol::ServerChoice) -> String {
                 crate::app::languages::join_args(args)
             )
         }
-        Some(_) => format!("{} (no arguments)", choice.command),
+        Some(_) => tr!("{program} (no arguments)", program = choice.command),
         None => choice.command.clone(),
     }
 }
@@ -385,7 +405,7 @@ fn other_path<'a>(
     let mut line = row![
         draft_field(app, placeholder, field),
         form::action(
-            "Use",
+            tr!("Use"),
             (!app.proj.lang_drafts.field(field).trim().is_empty())
                 .then_some(Message::Languages(L::UseDraft(field)))
         ),
@@ -394,11 +414,11 @@ fn other_path<'a>(
     .align_y(iced::Center);
     if !app.connection.is_remote() {
         line = line.push(form::action(
-            "Browse…",
+            tr!("Browse…"),
             Some(Message::Languages(L::Browse(field))),
         ));
     }
-    form::field("Other", None, line)
+    form::field(tr!("Other"), None, line)
 }
 
 /// A choice that is on or off among several (a feature, a build tag).
@@ -413,9 +433,9 @@ fn chip<'a>(label: String, on: bool, msg: Message) -> Element<'a, Message> {
 /// What the project's `lsp.toml` sets that a choice here also sets.
 fn project_sets_note(sets: &[String]) -> Option<String> {
     (!sets.is_empty()).then(|| {
-        format!(
-            "Also set in .clew/lsp.toml: {}. Settings here win.",
-            sets.join(", ")
+        tr!(
+            "Also set in .clew/lsp.toml: {settings}. Settings here take precedence.",
+            settings = sets.join(", ")
         )
     })
 }
@@ -450,14 +470,14 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {
-            Some(choice) => format!("Your program: {}", program_line(choice)),
+            Some(choice) => tr!("Your program: {program}", program = program_line(choice)),
             None => app
                 .effective_server(language)
                 .map(|s| match s.command {
-                    Some(_) => format!("{} (the project's command)", s.server_name),
+                    Some(_) => tr!("{server} (the project's command)", server = s.server_name),
                     None => format!("{} {}", s.server_name, s.version),
                 })
-                .unwrap_or_else(|| "no server".into()),
+                .unwrap_or_else(|| tr!("no server").to_string()),
         };
         let (status, action) = app.lsp_row(language);
         let action: Element<'_, Message> = match action {
@@ -501,21 +521,22 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         Some(Ok(options)) => (Some(options), None),
         Some(Err(why)) => (
             None,
-            Some(format!(
-                "What the project offers could not be listed: {why}"
+            Some(tr!(
+                "Could not list the project's options: {error}",
+                error = why
             )),
         ),
         None => (
             None,
-            listed.then(|| "Looking at what the project offers…".to_string()),
+            listed.then(|| tr!("Checking the project's options…").to_string()),
         ),
     };
     parts.push(form::group(
-        "Language servers",
+        tr!("Language servers"),
         servers_about,
         listed.then(|| {
             form::action(
-                "Look again",
+                tr!("Refresh"),
                 Some(Message::Languages(crate::LanguagesMsg::Refresh)),
             )
             .into()
@@ -553,14 +574,16 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
         parts.push(path_choice_block(
             app,
             PathChoice {
-                title: "TypeScript and JavaScript",
-                about: "The TypeScript its server runs.",
-                automatic: "clew's TypeScript 5",
+                title: tr!("TypeScript and JavaScript"),
+                about: tr!("The TypeScript the language server runs."),
+                automatic: tr!("clew's built-in TypeScript 5"),
                 chosen: app.proj.lang_choices.typescript.as_deref(),
                 found: found("typescript"),
                 field: crate::LangField::TypeScriptPath,
-                placeholder: "Path to tsserver.js or its folder",
-                project_note: Some("Runs the project's own code. Only for projects you trust."),
+                placeholder: tr!("Path to tsserver.js or its folder"),
+                project_note: Some(tr!(
+                    "Runs the project's own code. Only for projects you trust."
+                )),
             },
             |c, path| c.typescript = path,
         ));
@@ -570,12 +593,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 title: "Java",
-                about: "The JDK its server reads the project with.",
-                automatic: "Automatic (JAVA_HOME or PATH)",
+                about: tr!("The JDK the language server uses."),
+                automatic: tr!("Automatic (JAVA_HOME or PATH)"),
                 chosen: app.proj.lang_choices.java.as_deref(),
                 found: found("java"),
                 field: crate::LangField::JavaHome,
-                placeholder: "A JDK's home folder",
+                placeholder: tr!("Path to a JDK home folder"),
                 project_note: None,
             },
             |c, path| c.java = path,
@@ -586,12 +609,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 title: "PHP",
-                about: "The version its server reads the project as.",
-                automatic: "The server's own default",
+                about: tr!("The PHP version the language server assumes."),
+                automatic: tr!("The server's default"),
                 chosen: app.proj.lang_choices.php.as_deref(),
                 found: found("php"),
                 field: crate::LangField::PhpVersion,
-                placeholder: "Another version, e.g. 8.2",
+                placeholder: tr!("Another version, e.g. 8.2"),
                 project_note: None,
             },
             |c, version| c.php = version,
@@ -602,12 +625,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 title: "C#",
-                about: "The solution its server loads.",
-                automatic: "Automatic",
+                about: tr!("The solution the language server loads."),
+                automatic: tr!("Automatic"),
                 chosen: app.proj.lang_choices.csharp.as_deref(),
                 found: found("csharp"),
                 field: crate::LangField::CSharpSolution,
-                placeholder: "A .sln or .slnx file",
+                placeholder: tr!("Path to a .sln or .slnx file"),
                 project_note: None,
             },
             |c, path| c.csharp = path,
@@ -618,12 +641,12 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             app,
             PathChoice {
                 title: "Zig",
-                about: "The compiler zls uses.",
-                automatic: "The zig zls finds on the PATH",
+                about: tr!("The compiler zls uses."),
+                automatic: tr!("The zig that zls finds on the PATH"),
                 chosen: app.proj.lang_choices.zig.as_deref(),
                 found: found("zig"),
                 field: crate::LangField::ZigPath,
-                placeholder: "Path or name of zig",
+                placeholder: tr!("Path or name of zig"),
                 project_note: None,
             },
             |c, path| c.zig = path,
@@ -650,7 +673,7 @@ pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
                     super::explain_view::human_size(srv.bytes)
                 )),
                 form::action(
-                    "Remove",
+                    tr!("Remove"),
                     Some(Message::Lsp(crate::LspMsg::Remove {
                         name: srv.name.clone(),
                         version: srv.version.clone(),
@@ -660,11 +683,11 @@ pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
         })
         .collect::<Vec<_>>();
     form::group(
-        "Downloaded servers",
+        tr!("Downloaded servers"),
         Some(if rows.is_empty() {
-            "None yet. They are shared by every project.".to_string()
+            tr!("No servers downloaded yet. They are shared by all projects.").to_string()
         } else {
-            "Shared by every project.".to_string()
+            tr!("Shared by all projects.").to_string()
         }),
         None,
         rows,
@@ -694,11 +717,14 @@ fn server_log(app: &App) -> Element<'_, Message> {
         let (why, color) = match (slot, unreadable) {
             (_, Some(poisoned)) => (poisoned.to_string(), theme::warning()),
             (Some(LspSlot::Ready(c)), None) if !c.alive() => (
-                "The server has stopped; restart it to see new output.".to_string(),
+                tr!("The server has stopped; restart it to see new output.").to_string(),
                 theme::dim(),
             ),
-            (Some(LspSlot::Ready(_)), None) => ("No output.".to_string(), theme::dim()),
-            _ => ("No server running for this file.".to_string(), theme::dim()),
+            (Some(LspSlot::Ready(_)), None) => (tr!("No output.").to_string(), theme::dim()),
+            _ => (
+                tr!("No server is running for this file.").to_string(),
+                theme::dim(),
+            ),
         };
         form::plain(text(why).size(ts::BODY).color(color))
     } else {
@@ -720,8 +746,8 @@ fn server_log(app: &App) -> Element<'_, Message> {
         )
     };
     form::group(
-        "Server log",
-        Some("The open file's server, newest last.".into()),
+        tr!("Server log"),
+        Some(tr!("Latest output from the current file's server.").into()),
         None,
         vec![row],
     )
@@ -741,22 +767,24 @@ fn python_block<'a>(
     if let Some(envs) = envs {
         let effect = &envs.in_effect;
         let who = match effect.source {
-            PythonSource::Chosen => "Your choice",
-            PythonSource::LspToml => "Named by the project's .clew/lsp.toml",
-            PythonSource::ProjectVenv => "Found in the project",
-            PythonSource::Activated => "Active where clew started",
-            PythonSource::Server => "None",
+            PythonSource::Chosen => tr!("Your choice"),
+            PythonSource::LspToml => tr!("Set in the project's .clew/lsp.toml"),
+            PythonSource::ProjectVenv => tr!("Found in the project"),
+            PythonSource::Activated => tr!("Active in the shell clew started from"),
+            PythonSource::Server => tr!("None"),
         };
         let mut in_use = column![text(who).size(ts::BASE).color(theme::fg())].spacing(2);
         if let Some(path) = &effect.interpreter {
             in_use = in_use.push(form::path(path.clone()));
         }
-        rows.push(form::field("In use", None, in_use));
+        rows.push(form::field(tr!("In use"), None, in_use));
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
-                text(format!(
-                    "Your choice {bad} cannot be used: it is gone, or it is a program of \
-                     the repository's own. The one above is used until you pick another."
+                text(tr!(
+                    "Your choice {path} can't be used: it no longer exists, or it is a \
+                     program inside the repository. The interpreter above is used until you \
+                     pick another.",
+                    path = bad
                 ))
                 .size(ts::SMALL)
                 .color(theme::warning())
@@ -764,21 +792,21 @@ fn python_block<'a>(
             ));
         }
         rows.push(form::choice(
-            "Automatic",
+            tr!("Automatic"),
             None,
             chosen.is_none(),
             Message::Languages(L::ChoosePython(None)),
         ));
         for candidate in &envs.candidates {
             let kind = match candidate.kind {
-                PythonEnvKind::Project => "Project",
-                PythonEnvKind::Activated => "Activated",
+                PythonEnvKind::Project => tr!("Project"),
+                PythonEnvKind::Activated => tr!("Activated"),
                 PythonEnvKind::Poetry => "Poetry",
                 PythonEnvKind::Pipenv => "Pipenv",
                 PythonEnvKind::Conda => "conda",
                 PythonEnvKind::Pyenv => "pyenv",
                 PythonEnvKind::Uv => "uv",
-                PythonEnvKind::System => "System",
+                PythonEnvKind::System => tr!("System"),
             };
             let label = match (&candidate.kind, &candidate.version) {
                 (PythonEnvKind::System, Some(version)) => format!("{kind} · Python {version}"),
@@ -798,7 +826,7 @@ fn python_block<'a>(
             && !envs.candidates.iter().any(|c| c.interpreter == other)
         {
             rows.push(form::choice(
-                "Your choice",
+                tr!("Your choice"),
                 Some(form::path(other.to_string()).into()),
                 true,
                 Message::Languages(L::ChoosePython(Some(other.to_string()))),
@@ -808,15 +836,15 @@ fn python_block<'a>(
     rows.push(other_path(
         app,
         if remote {
-            "Python path on the remote host"
+            tr!("Python path on the remote host")
         } else {
-            "Path to a Python interpreter"
+            tr!("Path to a Python interpreter")
         },
         F::PythonPath,
     ));
     form::group(
         "Python",
-        Some("The interpreter its server reads the project with.".into()),
+        Some(tr!("The interpreter the language server uses.").into()),
         None,
         rows,
     )
@@ -840,7 +868,7 @@ fn rust_block<'a>(
             .spacing(8)
     };
     let mut features = column![check(
-        "Every feature of every package",
+        tr!("All features of all packages"),
         rust.all_features,
         |r, on| r.all_features = on
     )]
@@ -874,7 +902,7 @@ fn rust_block<'a>(
                     false => format!("{}/{feature}", package.name),
                 };
                 let label = match package.default.contains(feature) {
-                    true => format!("{feature} (default)"),
+                    true => tr!("{feature} (default)", feature = feature),
                     false => feature.clone(),
                 };
                 chips.push(chip(
@@ -902,28 +930,28 @@ fn rust_block<'a>(
             features = features.push(Row::with_children(others).spacing(5).wrap());
         }
         features = features.push(check(
-            "Without the packages' default features",
+            tr!("Without default features"),
             rust.no_default_features,
             |r, on| r.no_default_features = on,
         ));
     }
-    let mut targets = vec![HOST_CHOICE.to_string()];
+    let mut targets = vec![host_choice().to_string()];
     targets.extend(options.into_iter().flat_map(|o| o.targets.iter().cloned()));
     targets.extend(RUST_TARGETS.iter().map(|t| t.to_string()));
     targets.extend(rust.target.iter().cloned());
     let mut seen = std::collections::HashSet::new();
     targets.retain(|t| seen.insert(t.clone()));
-    let selected = rust.target.clone().unwrap_or_else(|| HOST_CHOICE.into());
+    let selected = rust.target.clone().unwrap_or_else(|| host_choice().into());
     let target = column![
         form::pick(targets, Some(selected), move |t: String| {
             choose_with(choices, |c| {
-                c.rust.get_or_insert_default().target = (t != HOST_CHOICE).then_some(t)
+                c.rust.get_or_insert_default().target = (t != host_choice()).then_some(t)
             })
         }),
         row![
-            draft_field(app, "Another target triple", F::RustTarget),
+            draft_field(app, tr!("Another target triple"), F::RustTarget),
             form::action(
-                "Use",
+                tr!("Use"),
                 (!app.proj.lang_drafts.rust_target.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::RustTarget)))
             ),
@@ -935,13 +963,13 @@ fn rust_block<'a>(
     form::group(
         "Rust",
         about_with(
-            "What rust-analyzer checks the project with.",
+            tr!("What rust-analyzer checks the project with."),
             options.and_then(|o| project_sets_note(&o.project_sets)),
         ),
         None,
         vec![
-            form::field("Features", None, features),
-            form::field("Target", None, target),
+            form::field(tr!("Features"), None, features),
+            form::field(tr!("Target"), None, target),
         ],
     )
 }
@@ -960,7 +988,7 @@ fn go_block<'a>(
     all.retain(|t| seen.insert(t.clone()));
     let mut tags = column![].spacing(8);
     if all.is_empty() {
-        tags = tags.push(form::note("None in this project."));
+        tags = tags.push(form::note(tr!("No build tags in this project.")));
     } else {
         let chips: Vec<Element<'a, Message>> = all
             .into_iter()
@@ -982,9 +1010,9 @@ fn go_block<'a>(
     }
     tags = tags.push(
         row![
-            draft_field(app, "Another build tag", F::GoTag),
+            draft_field(app, tr!("Another build tag"), F::GoTag),
             form::action(
-                "Add",
+                tr!("Add"),
                 (!app.proj.lang_drafts.go_tag.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::GoTag)))
             ),
@@ -997,12 +1025,12 @@ fn go_block<'a>(
          known: &[&str],
          value: &Option<String>,
          set: fn(&mut clew_protocol::GoChoices, Option<String>)| {
-            let mut list = vec![HOST_CHOICE.to_string()];
+            let mut list = vec![host_choice().to_string()];
             list.extend(known.iter().map(|k| k.to_string()));
             list.extend(value.iter().cloned());
             let mut seen = std::collections::HashSet::new();
             list.retain(|t| seen.insert(t.clone()));
-            let selected = value.clone().unwrap_or_else(|| HOST_CHOICE.into());
+            let selected = value.clone().unwrap_or_else(|| host_choice().into());
             row![
                 text(label)
                     .size(ts::BODY)
@@ -1013,7 +1041,7 @@ fn go_block<'a>(
                     choose_with(choices, |c| {
                         set(
                             c.go.get_or_insert_default(),
-                            (v != HOST_CHOICE).then_some(v),
+                            (v != host_choice()).then_some(v),
                         )
                     })
                 }),
@@ -1036,13 +1064,13 @@ fn go_block<'a>(
     form::group(
         "Go",
         about_with(
-            "The build tags and platform gopls reads the project for.",
+            tr!("The build tags and platform gopls uses for the project."),
             options.and_then(|o| project_sets_note(&o.project_sets)),
         ),
         None,
         vec![
-            form::field("Build tags", None, tags),
-            form::field("Platform", None, platform),
+            form::field(tr!("Build tags"), None, tags),
+            form::field(tr!("Platform"), None, platform),
         ],
     )
 }
@@ -1054,8 +1082,8 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
     let remote = app.connection.is_remote();
     let c = choices.c.clone().unwrap_or_default();
     let mut rows = vec![form::choice(
-        "Automatic",
-        Some(form::note("The compile_commands.json clangd finds.").into()),
+        tr!("Automatic"),
+        Some(form::note(tr!("The compile_commands.json clangd finds.")).into()),
         c.compile_commands.is_none(),
         choose_with(choices, |c| {
             c.c.get_or_insert_default().compile_commands = None
@@ -1076,7 +1104,7 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
         && !found.contains(dir)
     {
         rows.push(form::choice(
-            "Your choice",
+            tr!("Your choice"),
             Some(form::path(dir.clone()).into()),
             true,
             choose_with(choices, |c| {
@@ -1087,16 +1115,16 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
     rows.push(other_path(
         app,
         if remote {
-            "compile_commands.json folder on the host"
+            tr!("compile_commands.json folder on the host")
         } else {
-            "Folder holding compile_commands.json"
+            tr!("Folder containing compile_commands.json")
         },
         F::CDatabase,
     ));
     let mut flags_row = row![
         draft_field(app, "-DDEBUG -Iinclude -std=c++20", F::CFlags),
         form::action(
-            "Use",
+            tr!("Use"),
             (!app.proj.lang_drafts.c_flags.trim().is_empty())
                 .then_some(Message::Languages(L::UseDraft(F::CFlags)))
         ),
@@ -1105,21 +1133,24 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
     .align_y(iced::Center);
     if !c.flags.is_empty() {
         flags_row = flags_row.push(form::action(
-            "Clear",
+            tr!("Clear"),
             Some(choose_with(choices, |c| {
                 c.c.get_or_insert_default().flags.clear()
             })),
         ));
     }
     let flags_about = match c.flags.is_empty() {
-        true => "For files the database does not cover.".to_string(),
-        false => format!("Now: {}", crate::app::languages::join_args(&c.flags)),
+        true => tr!("For files the database does not cover.").to_string(),
+        false => tr!(
+            "Current: {flags}",
+            flags = crate::app::languages::join_args(&c.flags)
+        ),
     };
-    rows.push(form::field("Flags", Some(flags_about), flags_row));
+    rows.push(form::field(tr!("Flags"), Some(flags_about), flags_row));
     form::group(
-        "C and C++",
+        tr!("C and C++"),
         about_with(
-            "The compilation database and flags clangd compiles with.",
+            tr!("The compilation database and flags clangd compiles with."),
             options.and_then(|o| project_sets_note(&o.project_sets)),
         ),
         None,
@@ -1161,7 +1192,7 @@ fn path_choice_block<'a>(
         ));
     }
     rows.push(form::choice(
-        "Automatic",
+        tr!("Automatic"),
         Some(form::note(choice.automatic).into()),
         choice.chosen.is_none(),
         choose_with(choices, |c| set(c, None)),
@@ -1178,7 +1209,7 @@ fn path_choice_block<'a>(
         && !choice.found.iter().any(|c| c.command == other)
     {
         rows.push(form::choice(
-            "Your choice",
+            tr!("Your choice"),
             Some(form::path(other.to_string()).into()),
             true,
             choose_with(choices, |c| set(c, Some(other.to_string()))),
@@ -1197,15 +1228,27 @@ fn toolchain_block<'a>(
 ) -> Element<'a, Message> {
     let choices = &app.proj.lang_choices;
     let (title, about, program) = match language {
-        "lean" => ("Lean", "The toolchain its server runs from.", "lake"),
-        "ruby" => ("Ruby", "The Ruby whose Ruby LSP runs.", "ruby-lsp"),
-        "erlang" => ("Erlang", "The language platform its server is.", "elp"),
+        "lean" => (
+            "Lean",
+            tr!("The toolchain the language server runs from."),
+            "lake",
+        ),
+        "ruby" => ("Ruby", tr!("The Ruby that runs Ruby LSP."), "ruby-lsp"),
+        "erlang" => (
+            "Erlang",
+            tr!("The Erlang Language Platform build to run."),
+            "elp",
+        ),
         "haskell" => (
             "Haskell",
-            "The language server it runs.",
+            tr!("The Haskell language server to run."),
             "haskell-language-server-wrapper",
         ),
-        _ => ("Dart", "The SDK its server runs from.", "dart"),
+        _ => (
+            "Dart",
+            tr!("The Dart SDK the language server runs from."),
+            "dart",
+        ),
     };
     let chosen = choices.servers.as_ref().and_then(|s| s.get(language));
     let set = |command: Option<String>| {
@@ -1228,14 +1271,14 @@ fn toolchain_block<'a>(
         })
     };
     let mut rows = vec![form::choice(
-        "Automatic",
-        Some(form::note(format!("The {program} found on the PATH")).into()),
+        tr!("Automatic"),
+        Some(form::note(tr!("The {program} found on the PATH", program = program)).into()),
         chosen.is_none(),
         set(None),
     )];
     for candidate in found {
         let label = match candidate.project {
-            true => format!("{} — the project's", candidate.name),
+            true => tr!("{name} — the project's", name = candidate.name),
             false => candidate.name.clone(),
         };
         rows.push(form::choice(
@@ -1251,14 +1294,17 @@ fn toolchain_block<'a>(
         && (choice.args.is_some() || !found.iter().any(|c| c.command == choice.command))
     {
         rows.push(form::choice(
-            "Your own program",
+            tr!("Your own program"),
             Some(form::path(program_line(choice)).into()),
             true,
             set(Some(choice.command.clone())),
         ));
     }
     let about = match found.is_empty() {
-        true => format!("{about} No other {program} found."),
+        true => format!(
+            "{about} {}",
+            tr!("No other {program} found.", program = program)
+        ),
         false => about.to_string(),
     };
     form::group(title, Some(about), None, rows)
@@ -1286,10 +1332,10 @@ fn servers_block(app: &App) -> Element<'_, Message> {
                 .spacing(2)
                 .width(Fill),
                 form::action(
-                    "Edit",
+                    tr!("Edit"),
                     Some(Message::Languages(L::ServerLanguage(language.clone())))
                 ),
-                form::action("Reset", Some(remove)),
+                form::action(tr!("Reset"), Some(remove)),
             ]
             .spacing(6)
             .align_y(iced::Center),
@@ -1301,19 +1347,19 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     languages.dedup();
     let ready = drafts.server_language.is_some();
     rows.push(form::field(
-        "Language",
+        tr!("Language"),
         None,
         form::pick(languages, drafts.server_language.clone(), |l: String| {
             Message::Languages(L::ServerLanguage(l))
         })
-        .placeholder("Choose…"),
+        .placeholder(tr!("Choose…")),
     ));
     let mut program = row![draft_field(
         app,
         if remote {
-            "Program on the host (path or name)"
+            tr!("Program on the host (path or name)")
         } else {
-            "Path or name"
+            tr!("Path or name")
         },
         F::ServerCommand
     )]
@@ -1321,18 +1367,18 @@ fn servers_block(app: &App) -> Element<'_, Message> {
     .align_y(iced::Center);
     if !remote {
         program = program.push(form::action(
-            "Browse…",
+            tr!("Browse…"),
             Some(Message::Languages(L::Browse(F::ServerCommand))),
         ));
     }
-    rows.push(form::field("Program", None, program));
+    rows.push(form::field(tr!("Program"), None, program));
     rows.push(form::field(
-        "Arguments",
+        tr!("Arguments"),
         None,
         row![
-            draft_field(app, "Optional", F::ServerArgs),
+            draft_field(app, tr!("Optional"), F::ServerArgs),
             form::action(
-                "Use",
+                tr!("Use"),
                 (ready && !drafts.server_command.trim().is_empty())
                     .then_some(Message::Languages(L::UseDraft(F::ServerCommand)))
             ),
@@ -1341,14 +1387,28 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         .align_y(iced::Center),
     ));
     form::group(
-        "Server programs",
+        tr!("Server programs"),
         Some(
-            "A program of your own for a language: another build, or a server clew does not know."
-                .into(),
+            tr!(
+                "Your own server program for a language: a different build, or a server clew \
+                 doesn't support."
+            )
+            .into(),
         ),
         None,
         rows,
     )
+}
+
+/// An MCP server's approval policy as its picker lists it: clew-core's
+/// label, in the interface's language.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ApproveChoice(clew_core::mcp::Approve);
+
+impl std::fmt::Display for ApproveChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::i18n::lookup(self.0.label()))
+    }
 }
 
 /// The settings' MCP servers and ACP agents: what is configured, how each
@@ -1368,27 +1428,29 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     let mut servers = Vec::new();
     for server in &draft.mcp {
         let (status, color) = match draft.statuses.get(&server.name) {
-            _ if !server.enabled => ("Off".to_string(), theme::dim()),
+            _ if !server.enabled => (tr!("Off").to_string(), theme::dim()),
             Some(Status::Connected { info, tools }) => (
-                format!(
-                    "Connected{} · {tools} tools",
-                    if info.name.is_empty() {
-                        String::new()
-                    } else {
-                        format!(" to {}", info.name)
-                    }
-                ),
+                if info.name.is_empty() {
+                    trn!("Connected · 1 tool", "Connected · {n} tools", *tools)
+                } else {
+                    trn!(
+                        "Connected to {server} · 1 tool",
+                        "Connected to {server} · {n} tools",
+                        *tools,
+                        server = info.name
+                    )
+                },
                 theme::success(),
             ),
-            Some(Status::Connecting) => ("Connecting…".to_string(), theme::dim()),
+            Some(Status::Connecting) => (tr!("Connecting…").to_string(), theme::dim()),
             Some(Status::Failed(why)) => (why.clone(), theme::danger()),
-            Some(Status::Idle) | None => ("Not connected yet".to_string(), theme::dim()),
+            Some(Status::Idle) | None => (tr!("Not connected yet").to_string(), theme::dim()),
         };
         let name = server.name.clone();
         let policy = pick_list(
-            &clew_core::mcp::Approve::ALL[..],
-            Some(server.approve),
-            move |a| Message::Integrations(M::McpApprove(name.clone(), a)),
+            clew_core::mcp::Approve::ALL.map(ApproveChoice),
+            Some(ApproveChoice(server.approve)),
+            move |a: ApproveChoice| Message::Integrations(M::McpApprove(name.clone(), a.0)),
         )
         .style(theme::pick)
         .menu_style(theme::pick_menu)
@@ -1406,23 +1468,23 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         if oauth {
             actions = actions.push(if draft.signed_in.contains(&server.name) {
                 small(
-                    "Sign out",
+                    tr!("Sign out"),
                     Message::Integrations(M::McpSignOut(server.name.clone())),
                 )
             } else {
                 small(
-                    "Sign in",
+                    tr!("Sign in"),
                     Message::Integrations(M::McpSignIn(server.name.clone())),
                 )
             });
         }
         actions = actions
             .push(small(
-                "Test",
+                tr!("Test"),
                 Message::Integrations(M::McpTest(server.name.clone())),
             ))
             .push(small(
-                "Remove",
+                tr!("Remove"),
                 Message::Integrations(M::McpRemove(server.name.clone())),
             ));
         let name = server.name.clone();
@@ -1453,33 +1515,33 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         ));
     }
     let add_mcp = form::group(
-        "Add an MCP server",
+        tr!("Add an MCP server"),
         None,
         None,
         vec![
             form::field(
-                "Name",
+                tr!("Name"),
                 None,
                 field(
-                    "e.g. github",
+                    tr!("e.g. github"),
                     &draft.new_mcp_name,
                     |v| Message::Integrations(M::McpName(v)),
                     Message::Integrations(M::McpAdd),
                 ),
             ),
             form::field(
-                "Command or URL",
-                Some("Or paste an mcpServers snippet.".into()),
+                tr!("Command or URL"),
+                Some(tr!("Or paste an mcpServers snippet.").into()),
                 field(
-                    "npx -y … or https://…",
+                    tr!("npx -y … or https://…"),
                     &draft.new_mcp_target,
                     |v| Message::Integrations(M::McpTarget(v)),
                     Message::Integrations(M::McpAdd),
                 ),
             ),
             form::field(
-                "Environment",
-                Some("Headers, for a URL.".into()),
+                tr!("Environment"),
+                Some(tr!("Environment variables, or headers for a URL.").into()),
                 field(
                     "KEY=value; Authorization: Bearer …",
                     &draft.new_mcp_extra,
@@ -1491,7 +1553,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
             form::plain(
                 row![
                     space().width(Fill),
-                    form::primary("Add server", Some(Message::Integrations(M::McpAdd))),
+                    form::primary(tr!("Add server"), Some(Message::Integrations(M::McpAdd))),
                 ]
                 .align_y(iced::Center),
             ),
@@ -1503,7 +1565,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         let name = agent.name.clone();
         let share = iced::widget::checkbox(agent.share_mcp)
             .style(theme::check)
-            .label("Share my MCP servers")
+            .label(tr!("Share my MCP servers"))
             .on_toggle(move |on| Message::Integrations(M::AcpShareMcp(name.clone(), on)))
             .text_size(ts::BODY)
             .size(15)
@@ -1521,7 +1583,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 .width(Fill),
                 share,
                 small(
-                    "Remove",
+                    tr!("Remove"),
                     Message::Integrations(M::AcpRemove(agent.name.clone()))
                 ),
             ]
@@ -1546,18 +1608,18 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         add_acp.push(form::plain(Row::with_children(presets).spacing(6).wrap()));
     }
     add_acp.push(form::field(
-        "Name",
+        tr!("Name"),
         None,
         field(
-            "e.g. my-agent",
+            tr!("e.g. my-agent"),
             &draft.new_acp_name,
             |v| Message::Integrations(M::AcpName(v)),
             Message::Integrations(M::AcpAdd),
         ),
     ));
     add_acp.push(form::field(
-        "Command",
-        Some("Starts it in ACP mode.".into()),
+        tr!("Command"),
+        Some(tr!("Starts the agent in ACP mode.").into()),
         field(
             "my-agent --acp",
             &draft.new_acp_command,
@@ -1568,7 +1630,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     add_acp.push(form::plain(
         row![
             space().width(Fill),
-            form::primary("Add agent", Some(Message::Integrations(M::AcpAdd))),
+            form::primary(tr!("Add agent"), Some(Message::Integrations(M::AcpAdd))),
         ]
         .align_y(iced::Center),
     ));
@@ -1591,24 +1653,30 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         );
     }
     parts.push(form::group(
-        "MCP servers",
+        tr!("MCP servers"),
         servers
             .is_empty()
-            .then(|| "None yet. Their tools are offered to Ask.".to_string()),
+            .then(|| tr!("No MCP servers yet. Their tools are available in Ask.").to_string()),
         None,
         servers,
     ));
     parts.push(add_mcp);
     parts.push(form::group(
-        "ACP agents",
+        tr!("ACP agents"),
         agents
             .is_empty()
-            .then(|| "None yet. An agent answers in Ask in clew's place.".to_string()),
+            .then(|| tr!("No agents yet. An agent can answer in Ask instead of clew.").to_string()),
         None,
         agents,
     ));
-    parts.push(form::group("Add an ACP agent", None, None, add_acp));
-    parts.push(form::note(format!("More options in {}", crate::llm::config_hint())).into());
+    parts.push(form::group(tr!("Add an ACP agent"), None, None, add_acp));
+    parts.push(
+        form::note(tr!(
+            "More options in {path}",
+            path = crate::llm::config_hint()
+        ))
+        .into(),
+    );
     form::page(parts)
 }
 
@@ -1633,7 +1701,9 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
 
     let title = row![
         glyph::icon(Glyph::Remote, theme::accent(), 18.0),
-        text("Connect to Remote").size(ts::TITLE).color(theme::fg()),
+        text(tr!("Connect to Remote"))
+            .size(ts::TITLE)
+            .color(theme::fg()),
         space().width(Fill),
         super::chrome::close_button(Message::Connect(ConnectMsg::Close)),
     ]
@@ -1646,14 +1716,14 @@ pub(crate) fn connect_modal(app: &App) -> Element<'_, Message> {
         ConnectStage::Connecting { label } => center(
             column![
                 glyph::icon(Glyph::Remote, theme::accent(), 34.0),
-                text(format!("Connecting to {label}…"))
+                text(tr!("Connecting to {host}…", host = label))
                     .size(ts::BASE)
                     .color(theme::fg()),
-                text("Preparing the host…")
+                text(tr!("Preparing the host…"))
                     .size(ts::SMALL)
                     .color(theme::dim()),
                 space().height(6),
-                button(text("Cancel").size(ts::BODY))
+                button(text(tr!("Cancel")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([4, 14])
                     .on_press(Message::Connect(ConnectMsg::Close)),
@@ -1716,7 +1786,7 @@ pub(crate) fn trust_host_prompt<'a>(
     };
     let fingerprint = container(
         column![
-            text(format!("{} key", key.kind))
+            text(tr!("{kind} key", kind = key.kind))
                 .size(ts::CAPTION)
                 .color(theme::dim()),
             text(key.fingerprint.as_str())
@@ -1734,25 +1804,27 @@ pub(crate) fn trust_host_prompt<'a>(
     let prompt = column![
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 16.0),
-            text("Unknown host key")
+            text(tr!("Unknown host key"))
                 .size(ts::SUBTITLE)
                 .color(theme::warning()),
         ]
         .spacing(8)
         .align_y(iced::Center),
-        para(format!(
-            "First connection to {host}. Trust it only if this matches the host's key."
+        para(tr!(
+            "First connection to {host}. Trust it only if this fingerprint matches the \
+             host's key.",
+            host = host
         )),
         fingerprint,
         row![
             space().width(Fill),
-            button(text("Cancel").size(ts::BODY))
+            button(text(tr!("Cancel")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([6, 14])
                 .on_press(Message::Connect(ConnectMsg::TrustCancel)),
             crate::ui::fresh::allow(
                 ready,
-                button(text("Trust and connect").size(ts::BODY))
+                button(text(tr!("Trust and connect")).size(ts::BODY))
                     .style(theme::primary_button)
                     .padding([6, 14])
                     .on_press_maybe(ready.then(|| {
@@ -1795,26 +1867,28 @@ pub(crate) fn host_key_changed_prompt<'a>(
     let prompt = column![
         row![
             glyph::icon(Glyph::Remote, theme::danger(), 16.0),
-            text("Host key changed")
+            text(tr!("Host key changed"))
                 .size(ts::SUBTITLE)
                 .color(theme::danger()),
         ]
         .spacing(8)
         .align_y(iced::Center),
         para(reason.to_string()),
-        para(format!(
-            "Forget the old key for {forget_host} and reconnect to {}? Only if you know why it changed.",
-            target.label()
+        para(tr!(
+            "Forget the old key for {host} and reconnect to {target}? Only do this if you \
+             know why the key changed.",
+            host = forget_host,
+            target = target.label()
         )),
         row![
             space().width(Fill),
-            button(text("Cancel").size(ts::BODY))
+            button(text(tr!("Cancel")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([6, 14])
                 .on_press(Message::Connect(ConnectMsg::TrustCancel)),
             crate::ui::fresh::allow(
                 ready,
-                button(text("Forget the old key").size(ts::BODY))
+                button(text(tr!("Forget the old key")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([6, 14])
                     .on_press_maybe(ready.then(|| {
@@ -1842,11 +1916,11 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let row: Element<'_, Message> = if held {
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 14.0),
-            text(format!("{host} holds your AI keys."))
+            text(tr!("{host} holds your AI keys.", host = host))
                 .size(ts::SMALL)
                 .color(theme::fg()),
             space().width(Fill),
-            button(text("Revoke").size(ts::SMALL))
+            button(text(tr!("Revoke")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
                 .on_press(Message::Connect(ConnectMsg::RevokeAiKeys)),
@@ -1855,7 +1929,7 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
         .align_y(iced::Center)
         .into()
     } else {
-        text(format!("{host} does not hold your AI keys."))
+        text(tr!("{host} does not hold your AI keys.", host = host))
             .size(ts::SMALL)
             .color(theme::dim())
             .into()
@@ -1896,7 +1970,7 @@ pub(crate) fn connect_picker<'a>(
 
     // Saved hosts: click a row to connect, × to forget.
     if !app.saved_connections.is_empty() {
-        head = head.push(section_header("SAVED HOSTS"));
+        head = head.push(section_header(tr!("Saved hosts")));
         let mut list = Column::new().spacing(2);
         for conn in &app.saved_connections {
             // By identity: the list is re-merged from disk whenever any
@@ -1950,43 +2024,55 @@ pub(crate) fn connect_picker<'a>(
 
     let identity = row![
         input(
-            "(optional) ~/.ssh/id_ed25519",
+            tr!("(optional) ~/.ssh/id_ed25519"),
             &ui.identity,
             ConnectField::Identity
         )
         .width(Fill),
-        form::action("Browse…", Some(Message::Connect(ConnectMsg::PickIdentity))),
+        form::action(
+            tr!("Browse…"),
+            Some(Message::Connect(ConnectMsg::PickIdentity))
+        ),
     ]
     .spacing(6);
 
-    col = col.push(section_header("NEW CONNECTION"));
+    col = col.push(section_header(tr!("New connection")));
     col = col.push(field(
-        "Name (optional)",
-        input("prod box", &ui.name, ConnectField::Name).into(),
+        tr!("Name (optional)"),
+        input(tr!("e.g. prod server"), &ui.name, ConnectField::Name).into(),
     ));
     col = col.push(
         row![
             field(
-                "Host",
-                input("192.168.1.10 or example.com", &ui.host, ConnectField::Host).into()
+                tr!("Host"),
+                input(
+                    tr!("192.168.1.10 or example.com"),
+                    &ui.host,
+                    ConnectField::Host
+                )
+                .into()
             )
             .width(Fill),
-            field("Port", input("22", &ui.port, ConnectField::Port).into()).width(80),
+            field(
+                tr!("Port"),
+                input("22", &ui.port, ConnectField::Port).into()
+            )
+            .width(80),
         ]
         .spacing(8),
     );
     col = col.push(field(
-        "User",
+        tr!("User"),
         input("root", &ui.user, ConnectField::User).into(),
     ));
-    col = col.push(field("Identity file", identity.into()));
+    col = col.push(field(tr!("Identity file"), identity.into()));
     // Per-host consent for AI keys. Off: keys stay on this machine and AI
     // calls run locally. On: this host's clew-server receives the keys and
     // runs Ask/Explain remotely.
     col = col.push(
         iced::widget::checkbox(ui.send_ai_keys)
             .style(theme::check)
-            .label("Send my AI keys to this host")
+            .label(tr!("Send my AI keys to this host"))
             .on_toggle(|v| Message::Connect(ConnectMsg::ToggleAiKeys(v)))
             .size(14)
             .text_size(ts::BODY)
@@ -1995,7 +2081,7 @@ pub(crate) fn connect_picker<'a>(
     col = col.push(
         row![
             space().width(Fill),
-            button(text("Connect").size(ts::BASE))
+            button(text(tr!("Connect")).size(ts::BASE))
                 .style(theme::primary_button)
                 .padding([6, 18])
                 .on_press(Message::Connect(ConnectMsg::Submit)),
@@ -2007,7 +2093,7 @@ pub(crate) fn connect_picker<'a>(
     if app.connection.is_remote() {
         col = col.push(row![
             space().width(Fill),
-            button(text("Disconnect (read local code)").size(ts::SMALL))
+            button(text(tr!("Disconnect and read local code")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
                 .on_press(Message::Connect(ConnectMsg::Disconnect)),
@@ -2027,8 +2113,7 @@ pub(crate) fn connect_picker<'a>(
 pub(crate) fn omitted_note(omitted: usize) -> Option<String> {
     match omitted {
         0 => None,
-        1 => Some("… and 1 more".into()),
-        n => Some(format!("… and {n} more")),
+        n => Some(trn!("… and 1 more", "… and {n} more", n)),
     }
 }
 
@@ -2059,9 +2144,9 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if browser.entries.is_empty() {
         let msg = if browser.loading {
-            "Loading…"
+            tr!("Loading…")
         } else {
-            "Empty folder."
+            tr!("Empty folder.")
         };
         rows.push(
             container(text(msg).size(ts::BODY).color(theme::dim()))
@@ -2131,7 +2216,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
 
     let footer = row![
         column![
-            text("Open this folder as the project")
+            text(tr!("Open this folder as the project"))
                 .size(ts::SMALL)
                 .color(theme::dim()),
             text(browser.cwd.clone())
@@ -2142,7 +2227,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
         ]
         .spacing(1)
         .width(Fill),
-        button(text("Open").size(ts::BASE))
+        button(text(tr!("Open")).size(ts::BASE))
             .style(theme::primary_button)
             .padding([6, 18])
             .on_press(Message::Connect(ConnectMsg::OpenHere)),
@@ -2170,14 +2255,14 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             .size(ts::BODY)
             .color(theme::warning())
             .into(),
-        None => form::note("Click a shortcut, then press new keys.").into(),
+        None => form::note(tr!("Click a shortcut, then press new keys.")).into(),
     };
     // Rebindable command rows.
     let mut cmds = Vec::new();
     for action in Action::ALL {
         let binding: Element<'_, Message> = if app.rebinding == Some(action) {
             container(
-                text("Press a shortcut… esc to cancel")
+                text(tr!("Press new keys… (Esc to cancel)"))
                     .size(ts::BODY)
                     .color(theme::accent()),
             )
@@ -2212,22 +2297,22 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
 
     // Read-only reading motions (not part of the customizable keymap).
     let motions: [(&str, &str); 16] = [
-        ("Move left / down / up / right", "h j k l   ← ↓ ↑ →"),
-        ("Word forward / back", "w   b"),
-        ("Line start / end", "0   $"),
-        ("File start / end", "gg   G"),
-        ("Go to definition", "gd"),
-        ("Find references", "gr"),
-        ("Go to implementation", "gi"),
-        ("Go to type definition", "gy"),
-        ("Call hierarchy", "gc"),
-        ("Expand macro / show goal / show type", "ge"),
-        ("Toggle fold", "za"),
-        ("Open all folds", "zR"),
-        ("Close all folds", "zM"),
-        ("Time Travel: older / newer commit", "⌘←   ⌘→"),
-        ("Next / previous field", "tab   ⇧tab"),
-        ("Close the top panel / clear selection", "esc"),
+        (tr!("Move left / down / up / right"), "h j k l   ← ↓ ↑ →"),
+        (tr!("Word forward / back"), "w   b"),
+        (tr!("Line start / end"), "0   $"),
+        (tr!("File start / end"), "gg   G"),
+        (tr!("Go to definition"), "gd"),
+        (tr!("Find references"), "gr"),
+        (tr!("Go to implementation"), "gi"),
+        (tr!("Go to type definition"), "gy"),
+        (tr!("Call hierarchy"), "gc"),
+        (tr!("Expand macro / show goal / show type"), "ge"),
+        (tr!("Toggle fold"), "za"),
+        (tr!("Open all folds"), "zR"),
+        (tr!("Close all folds"), "zM"),
+        (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
+        (tr!("Next / previous field"), "tab   ⇧tab"),
+        (tr!("Close the top panel / clear selection"), "esc"),
     ];
     let vim = motions
         .into_iter()
@@ -2245,9 +2330,14 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
 
     form::page(vec![
         notice,
-        form::group("Commands", None, None, cmds),
-        form::group("Reading motions", Some("Vim's, fixed.".into()), None, vim),
-        form::note(format!("Saved to {}", crate::llm::config_hint())).into(),
+        form::group(tr!("Commands"), None, None, cmds),
+        form::group(
+            tr!("Reading motions"),
+            Some(tr!("Vim-style keys. These can't be changed.").into()),
+            None,
+            vim,
+        ),
+        form::note(tr!("Saved to {path}", path = crate::llm::config_hint())).into(),
     ])
 }
 

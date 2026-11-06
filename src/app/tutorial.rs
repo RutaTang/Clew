@@ -132,12 +132,12 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
                 .to_string_lossy()
                 .into_owned()
         })
-        .unwrap_or_else(|| "this project".into());
+        .unwrap_or_else(|| tr!("this project").into());
     let demo_rel = demo_file(app);
     let file = demo_rel
         .as_deref()
         .and_then(|rel| rel.rsplit('/').next())
-        .unwrap_or("this file")
+        .unwrap_or(tr!("this file"))
         .to_string();
     let open_demo = demo_rel.map(|rel| Message::Editor(EditorMsg::OpenRel { rel, line: None }));
     let tab = |t: SidebarTab| Message::Window(WindowMsg::SidebarTabPicked(t));
@@ -145,14 +145,20 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     let mut v = vec![
         // -- Intro ----------------------------------------------------------
         TutStep::new(
-            "Welcome to clew",
-            &format!("A reader for code, not an editor. A quick tour of {project}."),
+            tr!("Welcome to clew"),
+            &tr!(
+                "A reader for code, not an editor. A quick tour of {project}.",
+                project = project
+            ),
             Anchor::Center,
         ),
         // -- Reading --------------------------------------------------------
         TutStep::new(
-            "The file tree",
-            &format!("Every file in {project}, minus what .gitignore hides."),
+            tr!("The file tree"),
+            &tr!(
+                "Every file in {project}, minus what .gitignore hides.",
+                project = project
+            ),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Files)),
@@ -160,8 +166,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
 
     v.push(
         TutStep::new(
-            "The reading view",
-            "Your code, read-only. Click a line to place the cursor.",
+            tr!("The reading view"),
+            tr!("Your code, read-only. Click a line to place the cursor."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
@@ -169,231 +175,227 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
 
     v.extend([
         TutStep::new(
-            "Move with the keyboard",
-            "h j k l move, w and b jump by word. g d goes to a definition, g r to references.",
+            tr!("Move with the keyboard"),
+            tr!("h j k l move, w and b jump by word. g d goes to a definition, g r to references."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         // -- The top bar's left cluster -------------------------------------
         TutStep::new(
-            "Navigate and retrace",
-            "Back and forward through where you have been. The line above the code shows how you got here.",
+            tr!("Navigate and retrace"),
+            tr!("Go back and forward through the places you've been. The line above the code shows how you got here."),
             Anchor::ToolbarLeft,
         ),
         // -- The margin beside the code, then the outline --------------------
         TutStep::new(
-            "Notes beside the code",
-            "clew's note on each function, beside it. Explain All fills them in.",
+            tr!("Notes beside the code"),
+            tr!("clew's note on each function sits beside it. Explain All fills them in."),
             Anchor::RightTop,
         ),
         TutStep::new(
-            "The outline",
-            &format!("Every function and type in {file}."
-            ),
+            tr!("The outline"),
+            &tr!("Every function and type in {file}.", file = file),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Notes)),
         TutStep::new(
-            "Reading notes",
-            "Mark symbols understood, or note them. They gather here.",
+            tr!("Reading notes"),
+            tr!("Mark symbols as understood, or add notes to them. They're all collected here."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Notes)),
         // -- Finding --------------------------------------------------------
         TutStep::new(
-            "Search the project",
-            "Full-text search across every file.",
+            tr!("Search the project"),
+            tr!("Full-text search across every file."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Search)),
         TutStep::new(
-            "Find by meaning",
-            "Search by what code does, not by its name.",
+            tr!("Find by meaning"),
+            tr!("Search by what code does, not by its name."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Semantic)),
         // -- Navigating -----------------------------------------------------
         TutStep::new(
-            "Your reading trail",
-            "Every jump you made, as a tree.",
+            tr!("Your reading trail"),
+            tr!("Every jump you made, as a tree."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Trail)),
         TutStep::new(
-            "Bookmarks",
-            "⌘D bookmarks the line you are on.",
+            tr!("Bookmarks"),
+            tr!("⌘D bookmarks the line you are on."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Marks)),
         TutStep::new(
-            "Guided walkthroughs",
-            "Pick a topic, and clew walks you through the files.",
+            tr!("Guided walkthroughs"),
+            tr!("Pick a topic, and clew walks you through the files."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Walk)),
         // -- Structure (per open file) --------------------------------------
         TutStep::new(
-            "Imports for this file",
-            &format!("What {file} imports, and what imports it."
-            ),
+            tr!("Imports for this file"),
+            &tr!("What {file} imports, and what imports it.", file = file),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Imports)),
         TutStep::new(
-            "Calls for this file",
-            "Who calls the symbol at the cursor, and what it calls.",
+            tr!("Calls for this file"),
+            tr!("Who calls the symbol at the cursor, and what it calls."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Calls)),
         TutStep::new(
-            "API docs",
-            &format!("The public API of {project}, read from the source."
-            ),
+            tr!("API docs"),
+            &tr!("The public API of {project}, read from the source.", project = project),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Docs)),
         // -- Working in the reader ------------------------------------------
         TutStep::new(
-            "Split and compare",
-            "⌘\\ splits the reader in two.",
+            tr!("Split and compare"),
+            tr!("⌘\\ splits the reader in two."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         TutStep::new(
-            "Why is this here?",
-            "Right-click a line, and clew explains it from git history.",
+            tr!("Why is this here?"),
+            tr!("Right-click a line, and clew explains it from git history."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         // -- Talking to clew: Ask, in the corner ----------------------------
         TutStep::new(
-            "Ask clew, or tell it what to do",
-            "Ask about the project, or tell clew what to do. It asks before running anything.",
+            tr!("Ask clew, or tell it what to do"),
+            tr!("Ask about the project, or tell clew what to do. It asks before running anything."),
             Anchor::AskCorner,
         )
         .demo(Message::Ask(AskMsg::Open)),
         // -- The file tools, over the code -----------------------------------
         TutStep::new(
-            "Tools for this file",
-            &format!("Explain, Skim, Diff and Time Travel for {file}."
-            ),
+            tr!("Tools for this file"),
+            &tr!("Explain, Skim, Diff and Time Travel for {file}.", file = file),
             Anchor::FileTools,
         )
         .demo_opt(open_demo.clone()),
         TutStep::new(
-            "Reading aids",
-            "Summaries, inlay hints and the minimap, on or off.",
+            tr!("Reading aids"),
+            tr!("Turn summaries, inlay hints and the minimap on or off."),
             Anchor::ViewMenu,
         )
         .demo_opt(open_demo.clone()),
         // -- The tool strip, top to bottom: one step per tool ----------------
         TutStep::new(
-            "The overview",
-            &format!("Tools for the whole project. First, an overview of {project}."
+            tr!("The overview"),
+            &tr!(
+                "Tools for the whole project. First, an overview of {project}.",
+                project = project
             ),
             Anchor::Strip(StripTool::Overview),
         )
         .demo(Message::Overview(OverviewMsg::Show)),
         TutStep::new(
-            "Project stats",
-            &format!("{project} by language and size."
-            ),
+            tr!("Project stats"),
+            &tr!("{project} by language and size.", project = project),
             Anchor::Strip(StripTool::Stats),
         )
         .demo(Message::Overview(OverviewMsg::ShowStats)),
         TutStep::new(
-            "Debug",
-            "Breakpoints, stepping, the stack and variables.",
+            tr!("Debug"),
+            tr!("Breakpoints, stepping, the stack and variables."),
             Anchor::Strip(StripTool::Debug),
         )
         .demo(Message::Window(WindowMsg::ShowDebugPanel)),
         TutStep::new(
-            "The call graph",
-            &format!("How functions across {project} call each other."
-            ),
+            tr!("The call graph"),
+            &tr!("How functions across {project} call each other.", project = project),
             Anchor::Strip(StripTool::CallGraph),
         ),
         TutStep::new(
-            "The import graph",
-            "How files depend on each other, cycles marked.",
+            tr!("The import graph"),
+            tr!("How files depend on each other, with cycles marked."),
             Anchor::Strip(StripTool::ImportGraph),
         ),
         TutStep::new(
-            "The type map",
-            "How the project's types relate.",
+            tr!("The type map"),
+            tr!("How the project's types relate."),
             Anchor::Strip(StripTool::TypeMap),
         ),
         TutStep::new(
-            "Project maps",
-            "Schemas, routes, supervision trees and more, read from the code.",
+            tr!("Project maps"),
+            tr!("Schemas, routes, supervision trees and more, read from the code."),
             Anchor::Strip(StripTool::ProjectMaps),
         ),
         TutStep::new(
-            "Settings",
-            "AI keys and reading preferences.",
+            tr!("Settings"),
+            tr!("AI keys and reading preferences."),
             Anchor::Strip(StripTool::Settings),
         ),
         // -- The ⋯ menu, opened: introduce each item top to bottom. These steps
         //    open the menu (see `apply_tutorial_demo`) so the spotlight lands on
         //    real rows, named by `ui::ToolsRow` — the list the menu is built from.
         TutStep::new(
-            "The more menu",
-            "Everything else lives here.",
+            tr!("The More menu"),
+            tr!("Everything else lives here."),
             Anchor::Strip(StripTool::More),
         ),
         TutStep::new(
-            "Explain All",
-            "AI summaries for every function, file and folder. Needs an AI key.",
+            tr!("Explain All"),
+            tr!("AI summaries for every function, file and folder. Needs an AI key."),
             menu_row(ToolsRow::ExplainAll),
         ),
         TutStep::new(
-            "Walkthrough",
-            "Guided tours through the code.",
+            tr!("Walkthrough"),
+            tr!("Guided tours through the code."),
             menu_row(ToolsRow::Walkthrough),
         ),
         TutStep::new(
-            "Glossary",
-            "The project's own terms, defined.",
+            tr!("Glossary"),
+            tr!("The project's own terms, defined."),
             menu_row(ToolsRow::Glossary),
         ),
         TutStep::new(
-            "Open a folder",
-            "Open another project. ⌘N opens it in a new window.",
+            tr!("Open a folder"),
+            tr!("Open another project. ⌘N opens it in a new window."),
             menu_row(ToolsRow::OpenFolder),
         ),
         TutStep::new(
-            "Read remote code",
-            "Read code on another machine over SSH.",
+            tr!("Read remote code"),
+            tr!("Read code on another machine over SSH."),
             menu_row(ToolsRow::OpenRemote),
         ),
         TutStep::new(
-            "Export notes",
-            "Your notes, bookmarks and trail as one Markdown file.",
+            tr!("Export notes"),
+            tr!("Your notes, bookmarks and trail as one Markdown file."),
             menu_row(ToolsRow::ExportNotes),
         ),
         TutStep::new(
-            "Set up the project",
-            "Language servers and explaining, again any time.",
+            tr!("Set up the project"),
+            tr!("Set up language servers and explanations again at any time."),
             menu_row(ToolsRow::SetUp),
         ),
         TutStep::new(
-            "Language servers",
-            "The servers behind definitions and references. Restart one here.",
+            tr!("Language servers"),
+            tr!("The servers behind definitions and references. Restart one here."),
             menu_row(ToolsRow::LspServers),
         ),
         TutStep::new(
-            "Keyboard shortcuts",
-            "Every command, and its keys.",
+            tr!("Keyboard shortcuts"),
+            tr!("Every command, and its keys."),
             menu_row(ToolsRow::Shortcuts),
         ),
         TutStep::new(
-            "This tour",
-            "Replay this tour any time.",
+            tr!("This tour"),
+            tr!("Replay this tour any time."),
             menu_row(ToolsRow::Tutorial),
         ),
         TutStep::new(
-            "That's clew",
-            "That's the tour. Go read some code. 🧵",
+            tr!("That's clew"),
+            tr!("That's the tour. Go read some code. 🧵"),
             Anchor::Center,
         ),
     ]);

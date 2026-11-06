@@ -63,6 +63,7 @@ use iced::futures::future::BoxFuture;
 use iced::{Element, Subscription, Task, Theme, keyboard, window};
 
 use crate::app::UnsavedEdits;
+use crate::tr_noop;
 use crate::{App, Message};
 use crate::{EditorMsg, SettingsMsg, UpdaterMsg, WindowMsg};
 
@@ -230,12 +231,13 @@ struct Question {
     lose: &'static str,
 }
 
-/// The buttons of a window's question.
-const KEEP_WINDOW: &str = "Keep Window Open";
-const CLOSE_ANYWAY: &str = "Close Anyway";
+/// The buttons of a window's question, in English: a [`Question`] carries
+/// them in the reader's language (`crate::i18n::lookup`).
+const KEEP_WINDOW: &str = tr_noop!("Keep Window Open");
+const CLOSE_ANYWAY: &str = tr_noop!("Close Anyway");
 /// The buttons of a quit's question.
-const CANCEL_QUIT: &str = "Cancel";
-const QUIT_ANYWAY: &str = "Quit Anyway";
+const CANCEL_QUIT: &str = tr_noop!("Cancel");
+const QUIT_ANYWAY: &str = tr_noop!("Quit Anyway");
 
 /// How a question's sheet ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,8 +676,8 @@ impl Clew {
         let question = Question {
             title,
             message,
-            keep: KEEP_WINDOW,
-            lose: CLOSE_ANYWAY,
+            keep: crate::i18n::lookup(KEEP_WINDOW),
+            lose: crate::i18n::lookup(CLOSE_ANYWAY),
         };
         let asked = Asked::new(self.ticket(), std::slice::from_ref(&lost), agreed);
         let task = self.ask_on(id, question, &asked, by);
@@ -912,8 +914,8 @@ impl Clew {
         let question = Question {
             title,
             message,
-            keep: CANCEL_QUIT,
-            lose: QUIT_ANYWAY,
+            keep: crate::i18n::lookup(CANCEL_QUIT),
+            lose: crate::i18n::lookup(QUIT_ANYWAY),
         };
         let asked = Asked::new(self.ticket(), &lost, agreed);
         let by = if self.terminating {
@@ -1264,6 +1266,9 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let before = crate::theme::revision();
             // Same for the keymap: a rebind lands in the acting window's copy.
             let keymap_before = clew.windows.get(&id).map(|app| app.keymap.stamp());
+            // And the language, which the menu bar is built in.
+            #[cfg(target_os = "macos")]
+            let lang_before = crate::i18n::current();
             let task = match clew.windows.get_mut(&id) {
                 Some(app) => app.update(msg).map(move |m| Shell::Window(id, m)),
                 // The window is gone; its async work is not. iced keeps
@@ -1286,6 +1291,16 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let keymap_after = clew.windows.get(&id).map(|app| app.keymap.stamp());
             if keymap_before.is_some() && keymap_after != keymap_before {
                 adopt_keymap(clew, id);
+            }
+            // The menu bar speaks the language it was built in: a language
+            // chosen in Settings rebuilds it.
+            #[cfg(target_os = "macos")]
+            {
+                if crate::i18n::current() != lang_before
+                    && let Some(app) = clew.windows.get(&id)
+                {
+                    crate::macos::menu::rebuild(&app.keymap);
+                }
             }
             let task = if crate::theme::revision() == before {
                 task

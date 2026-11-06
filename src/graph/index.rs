@@ -13,7 +13,7 @@ use crate::cache::{self, CachedCalls, CachedImport, CachedSymbol, FileCache};
 use crate::fs_scan::FileEntry;
 use crate::imports::RawImport;
 use crate::incremental::{Version, content_hash};
-use crate::{highlight, outline};
+use crate::{highlight, outline, trn};
 
 /// Caps keeping index build time bounded on huge repos — the ONE pair every
 /// parsing pass shares (the server's symbol snapshot, the type-structure
@@ -83,16 +83,19 @@ impl Indexed {
         }
         let mut parts = Vec::new();
         if self.over_cap > 0 {
-            parts.push(format!(
-                "{} more files not indexed (limit {MAX_INDEX_FILES})",
-                self.over_cap
+            parts.push(trn!(
+                "1 more file not indexed (limit {limit})",
+                "{n} more files not indexed (limit {limit})",
+                self.over_cap,
+                limit = MAX_INDEX_FILES
             ));
         }
         if self.too_large > 0 {
-            parts.push(format!(
-                "{} too large (over {} KiB)",
+            parts.push(trn!(
+                "1 file too large (over {size} KiB)",
+                "{n} files too large (over {size} KiB)",
                 self.too_large,
-                MAX_INDEX_FILE_BYTES / 1024
+                size = MAX_INDEX_FILE_BYTES / 1024
             ));
         }
         Some(parts.join("; "))

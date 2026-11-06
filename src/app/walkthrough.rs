@@ -40,7 +40,7 @@ impl App {
             scope_opt.as_deref(),
         );
         let seq = self.begin_walkthrough_generation(scope.clone());
-        self.status = "Generating walkthrough…".into();
+        self.status = tr!("Generating walkthrough…").into();
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
@@ -74,7 +74,7 @@ impl App {
             .clone()
             .unwrap_or_else(|| "program".to_string());
         let Some(plain) = walkthrough::from_trace(&root, &program, &self.debug.trace) else {
-            self.status = "The last run stopped nowhere in this project".into();
+            self.status = tr!("The last run never stopped inside this project").into();
             return Task::none();
         };
         let scope = format!("@trace {program}");
@@ -101,7 +101,7 @@ impl App {
             }
         }
         let prompt = walkthrough::trace_prompt(&project_name, &plain, &summaries);
-        self.status = "Narrating the run…".into();
+        self.status = tr!("Narrating the run…").into();
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
@@ -176,7 +176,7 @@ impl App {
         // The library row shown busy until the base (and so the tour's real
         // scope, `@diff <label>`) is known; the result names its own scope.
         let seq = self.begin_walkthrough_generation(DIFF_SCOPE_PENDING.to_string());
-        self.status = "Reviewing changes…".into();
+        self.status = tr!("Reviewing changes…").into();
         let ai = self.ai_client();
         let task_root = root;
         let stamp = self.stamp();
@@ -191,7 +191,7 @@ impl App {
                         .run::<Option<(String, String)>>(clew_protocol::GitOp::ReviewBase)
                         .await?
                         .ok_or_else(|| {
-                            "Nothing to review (need a branch vs main/master, or a prior commit)"
+                            tr!("Nothing to review: this needs a branch off main or master, or an earlier commit")
                                 .to_string()
                         })?;
                     scope = format!("@diff {label}");
@@ -293,7 +293,7 @@ impl App {
                     .retain(|s| self.resolve_walk_file(&s.file).is_some());
                 if wt.steps.is_empty() {
                     if awaited {
-                        self.status = "Walkthrough had no valid steps".into();
+                        self.status = tr!("The walkthrough had no valid steps").into();
                     }
                     return Task::none();
                 }
@@ -336,8 +336,10 @@ impl App {
                     match saved {
                         Ok(()) => true,
                         Err(e) => {
-                            self.status =
-                                format!("Could not save walkthrough: {e} — shown but not saved");
+                            self.status = tr!(
+                                "Could not save the walkthrough: {error} — it is shown but not saved",
+                                error = e
+                            );
                             false
                         }
                     }
@@ -354,7 +356,10 @@ impl App {
                     // them into this one — and do not cover up that it was
                     // not saved.
                     if saved {
-                        self.status = format!("Walkthrough “{scope}” finished in the background");
+                        self.status = tr!(
+                            "Walkthrough “{name}” finished in the background",
+                            name = crate::ui::scope_label(&scope)
+                        );
                     }
                     return Task::none();
                 }
@@ -379,7 +384,7 @@ impl App {
                 // generation once before surfacing the failure.
                 if e.starts_with("parse") && !self.proj.walk.retried {
                     self.proj.walk.retried = true;
-                    self.status = "Retrying walkthrough…".into();
+                    self.status = tr!("Retrying walkthrough…").into();
                     return if scope.starts_with("@diff") {
                         Task::done(Message::Walk(WalkMsg::GenerateDiff))
                     } else {
@@ -387,7 +392,7 @@ impl App {
                     };
                 }
                 self.proj.walk.retried = false;
-                self.status = format!("Walkthrough failed: {e}");
+                self.status = tr!("Walkthrough failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -429,7 +434,8 @@ impl App {
             // The tour could not be serialized, so there is nothing to send.
             // Saying so beats a silent no-op the user reads as saved.
             None => {
-                self.status = "Could not save walkthrough: it is not serializable".into();
+                self.status =
+                    tr!("Could not save the walkthrough: it could not be serialized").into();
                 false
             }
         }
@@ -456,7 +462,10 @@ impl App {
             self.proj.walk.library = merged;
             self.touch_project_state(walkthrough::LIBRARY_REL);
             if let Err(e) = saved {
-                self.status = format!("Could not save walkthrough: {e} — removed for this session");
+                self.status = tr!(
+                    "Could not save the deletion: {error} — the walkthrough is removed for this session only",
+                    error = e
+                );
             }
         } else if self.save_walkthrough_scope(&gone, None) {
             // Remotely: removed here once the change is on its way. Not
@@ -491,9 +500,9 @@ impl App {
             if last_run {
                 return Task::done(Message::Walk(WalkMsg::GenerateTrace));
             }
-            self.status = "This tour records a debug run — debug the program again to \
-                           record it anew"
-                .into();
+            self.status =
+                tr!("This tour records a debug run — debug the program again to record it anew")
+                    .into();
             return Task::none();
         }
         Task::done(Message::Walk(WalkMsg::Generate(scope)))
@@ -542,10 +551,10 @@ impl App {
         let (prepared, render) = self.prepare_segments(&step.narration);
         self.proj.walk.prepared = prepared;
         let Some(abs) = self.resolve_walk_file(&step.file) else {
-            self.set_walk_anchor_note(Some(format!(
-                "Walkthrough step {}: {} is not in this project",
-                i + 1,
-                step.file
+            self.set_walk_anchor_note(Some(tr!(
+                "Walkthrough step {step}: {file} is not in this project",
+                step = i + 1,
+                file = step.file
             )));
             return render;
         };

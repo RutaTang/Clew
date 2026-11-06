@@ -711,11 +711,13 @@ impl ThemePref {
         }
     }
 
+    /// Its name in Settings, in the reader's language: only ever shown
+    /// ([`ThemePref::as_str`] is what the config keeps).
     pub fn label(self) -> &'static str {
         match self {
-            ThemePref::Dark => "Dark",
-            ThemePref::Light => "Light",
-            ThemePref::System => "System",
+            ThemePref::Dark => crate::tr!("Dark"),
+            ThemePref::Light => crate::tr!("Light"),
+            ThemePref::System => crate::tr!("System"),
         }
     }
 

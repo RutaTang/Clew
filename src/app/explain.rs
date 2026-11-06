@@ -45,7 +45,7 @@ impl App {
         // gets here is a refresh or a re-explain racing it, which the running
         // pass covers.
         if self.proj.explain.running {
-            self.status = "Explain All is already running".into();
+            self.status = tr!("Explain All is already running").into();
             return Task::none();
         }
         let cfg = match self.require_llm() {
@@ -94,7 +94,7 @@ impl App {
         self.proj.explain.running = true;
         self.proj.explain.progress = Some((0, 0));
         self.proj.explain.failed = 0;
-        self.status = "Explaining project…".into();
+        self.status = tr!("Explaining project…").into();
         let stream = iced::stream::channel(256, move |output| {
             let gather_root = root.clone();
             let fetch_ai = ai.clone();
@@ -132,7 +132,9 @@ impl App {
                 })
                 .await
                 .unwrap_or_else(|_| {
-                    Err(ExplainFailure::Internal("while reading the project".into()))
+                    Err(ExplainFailure::Internal(
+                        tr!("while reading the project").into(),
+                    ))
                 });
                 explain_stream(output, gathered, reuse, waited, cfg, ai, stamp, generation).await;
             }
@@ -162,7 +164,7 @@ impl App {
         self.return_pass_sources();
         self.proj.explain.pass_automatic = false;
         self.proj.explain.pass_target = None;
-        self.status = "Explain cancelled".into();
+        self.status = tr!("Explain cancelled").into();
         // Nothing the pass paid for reaches this window (its progress carries
         // no summaries), so this saves only what this window changed before —
         // merged into what is on disk, never written over it: the derived
@@ -325,7 +327,10 @@ impl App {
     ) {
         let left_out = match saved {
             Err(e) => {
-                self.status = format!("Explanations kept for this session but not saved: {e}");
+                self.status = tr!(
+                    "Explanations kept for this session but not saved: {error}",
+                    error = e
+                );
                 // Nor is what came back adopted: it is not what the store
                 // holds (from a store this build cannot read, it is this
                 // window's changes alone).
@@ -339,9 +344,10 @@ impl App {
         // status says (a rejected key, say), never over it.
         if left_out > 0 && !self.proj.explain.cap_reported {
             self.proj.explain.cap_reported = true;
-            let note = format!(
-                "The explanation cache is over its size limit: {left_out} summaries are kept \
-                 for this session but not saved (a later Explain All pays for them again)"
+            let note = trn!(
+                "The explanation cache is over its size limit: 1 summary is kept for this session but not saved (a later Explain All pays for it again)",
+                "The explanation cache is over its size limit: {n} summaries are kept for this session but not saved (a later Explain All pays for them again)",
+                left_out
             );
             self.status = if self.status.is_empty() {
                 note
@@ -454,7 +460,7 @@ impl App {
         // could not read or can no longer explain.
         let n = self.proj.explain.cache.len();
         let mut status = if let Some(stopped) = &failures.stopped {
-            format!("Explain stopped: {}", stopped.describe())
+            tr!("Explain stopped: {reason}", reason = stopped.describe())
         } else if let Some(target) = reexplained.as_ref().filter(|_| failures.failed == 0) {
             let file = target.path();
             let not_read = tally.unread.iter().any(|p| p == file)
@@ -462,53 +468,75 @@ impl App {
             match tally.regenerated {
                 // Its file could not be read, or can no longer be explained:
                 // the note below says so.
-                0 if not_read => "Nothing re-explained".to_string(),
-                0 => "Nothing to re-explain: it is no longer part of the project".to_string(),
-                1 => "Re-explained".to_string(),
-                paid => format!("Re-explained, and the {} summaries that quote it", paid - 1),
+                0 if not_read => tr!("Nothing re-explained").to_string(),
+                0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
+                1 => tr!("Re-explained").to_string(),
+                paid => trn!(
+                    "Re-explained, and the summary that quotes it",
+                    "Re-explained, and the {n} summaries that quote it",
+                    paid - 1
+                ),
             }
         } else {
-            let mut status = format!("Explained {n} functions/files/folders");
+            let mut status = trn!(
+                "Explained 1 function, file or folder",
+                "Explained {n} functions, files and folders",
+                n
+            );
+            // Each clause after a " · " says one thing whole.
             if failures.failed > 0 {
                 let why: Vec<String> = failures.calls.iter().map(|f| f.describe()).collect();
-                status.push_str(&format!(
-                    " · {} failed: {}",
+                status.push_str(" · ");
+                status.push_str(&trn!(
+                    "1 failed: {reasons}",
+                    "{n} failed: {reasons}",
                     failures.failed,
-                    why.join("; ")
+                    reasons = why.join("; ")
                 ));
             }
             if tally.unquoted > 0 {
-                status.push_str(&format!(
-                    " · {} explained without the summaries that failed",
+                status.push_str(" · ");
+                status.push_str(&trn!(
+                    "1 explained without the summaries that failed",
+                    "{n} explained without the summaries that failed",
                     tally.unquoted
                 ));
             }
             if !tally.waiting.is_empty() {
-                status.push_str(&format!(
-                    " · {} left for the next refresh",
+                status.push_str(" · ");
+                status.push_str(&trn!(
+                    "1 left for the next refresh",
+                    "{n} left for the next refresh",
                     tally.waiting.len()
                 ));
             }
             let mut left = Vec::new();
             if tally.outdated > 0 {
-                left.push(format!(
-                    "{} written with an older prompt, kept",
+                left.push(trn!(
+                    "1 written with an older prompt, kept",
+                    "{n} written with an older prompt, kept",
                     tally.outdated
                 ));
             }
             if tally.unverified > 0 {
-                left.push(format!(
-                    "{} from an earlier clew, kept unchecked",
+                left.push(trn!(
+                    "1 from an earlier version of clew, kept unchecked",
+                    "{n} from an earlier version of clew, kept unchecked",
                     tally.unverified
                 ));
             }
             if tally.unexplained > 0 {
-                left.push(format!("{} not explained yet", tally.unexplained));
+                left.push(trn!(
+                    "1 not explained yet",
+                    "{n} not explained yet",
+                    tally.unexplained
+                ));
             }
             if !left.is_empty() {
-                status.push_str(&format!(
-                    " · {} — Refresh All brings them up to date",
-                    left.join(" · ")
+                status.push_str(" · ");
+                status.push_str(&tr!(
+                    "{list} — Refresh All brings them up to date",
+                    list = left.join(" · ")
                 ));
             }
             status
@@ -516,17 +544,14 @@ impl App {
         // Named where they hold something: a file that could not be read and
         // holds no summary loses nothing by it.
         let held: Vec<String> = tally.held.iter().map(|p| self.shown_path(p)).collect();
-        match held.len() {
-            0 => {}
-            1 => status.push_str(&format!(
-                " · 1 file could not be read ({}) — its summaries are kept until it can be",
-                held[0]
-            )),
-            files => status.push_str(&format!(
-                " · {files} files could not be read ({}) — their summaries are kept until they \
-                 can be",
-                some_of(&held)
-            )),
+        if !held.is_empty() {
+            status.push_str(" · ");
+            status.push_str(&trn!(
+                "1 file could not be read ({files}) — its summaries are kept until it can be",
+                "{n} files could not be read ({files}) — their summaries are kept until they can be",
+                held.len(),
+                files = some_of(&held)
+            ));
         }
         // Dropped only by a pass that ran to its end.
         if completed && let Some(note) = self.dropped_note(&tally.dropped) {
@@ -587,32 +612,33 @@ impl App {
         let size = |bytes: u64| crate::ui::human_size(bytes);
         match dropped {
             [] => None,
-            [(path, TooLarge(bytes))] => Some(format!(
-                "{} is too large to explain ({}) — its summaries are dropped",
-                self.shown_path(path),
-                size(*bytes)
+            [(path, TooLarge(bytes))] => Some(tr!(
+                "{file} is too large to explain ({size}) — its summaries are dropped",
+                file = self.shown_path(path),
+                size = size(*bytes)
             )),
-            [(path, Refused(why))] => Some(format!(
-                "{} {} — its summaries are dropped",
-                self.shown_path(path),
-                refusal_words(*why).0
-            )),
+            [(path, Refused(why))] => Some(refused_note(*why, &self.shown_path(path))),
             several => {
                 let named: Vec<String> = several
                     .iter()
                     .map(|(path, why)| match why {
                         TooLarge(bytes) => {
-                            format!("{} (too large, {})", self.shown_path(path), size(*bytes))
+                            tr!(
+                                "{file} (too large, {size})",
+                                file = self.shown_path(path),
+                                size = size(*bytes)
+                            )
                         }
                         Refused(why) => {
-                            format!("{} ({})", self.shown_path(path), refusal_words(*why).1)
+                            format!("{} ({})", self.shown_path(path), refusal_words(*why))
                         }
                     })
                     .collect();
-                Some(format!(
-                    "{} files can no longer be explained ({}) — their summaries are dropped",
+                Some(trn!(
+                    "1 file can no longer be explained ({files}) — its summaries are dropped",
+                    "{n} files can no longer be explained ({files}) — their summaries are dropped",
                     several.len(),
-                    some_of(&named)
+                    files = some_of(&named)
                 ))
             }
         }
@@ -680,7 +706,7 @@ impl App {
             return Task::none();
         }
         // Manual: bypass the 30s cooldown entirely.
-        self.status = "Refreshing…".into();
+        self.status = tr!("Refreshing…").into();
         self.begin_refresh(false)
     }
 
@@ -742,7 +768,7 @@ impl App {
                 Task::batch([show, Task::done(Message::Explain(ExplainMsg::Blocks(node)))])
             }
             None => {
-                self.status = "No function here to explain".into();
+                self.status = tr!("No function here to explain").into();
                 Task::none()
             }
         }
@@ -814,19 +840,21 @@ impl App {
             return ask_for_key;
         }
         if !self.proj.explain.cache.contains_key(&node) {
-            self.status =
-                "Nothing to re-explain yet — run Explain All from the ⋯ menu to explain the project first.".into();
+            self.status = tr!(
+                "Nothing to re-explain yet — run Explain All from the ⋯ menu to explain the project first."
+            )
+            .into();
             return Task::none();
         }
         // A second pass is refused while one runs (`start_explain_pass`):
         // said in this flow's own words, to ask again afterwards.
         if self.proj.explain.running {
-            self.status = "Explain All is running — re-explain once it finishes".into();
+            self.status = tr!("Explain All is running — re-explain once it finishes").into();
             return Task::none();
         }
         let pass = self.start_explain_pass(PassKind::Node(node));
         if self.proj.explain.running {
-            self.status = "Re-explaining…".into();
+            self.status = tr!("Re-explaining…").into();
         }
         pass
     }
@@ -857,7 +885,7 @@ impl App {
             Err(ask_for_key) => return ask_for_key,
         };
         if !self.proj.explain.blocks_in_flight.insert(node.clone()) {
-            self.status = "Explaining blocks… (already asked)".into();
+            self.status = tr!("Already explaining blocks…").into();
             return Task::none();
         }
         // Unique-name → summary map so the off-thread gather can attach callee
@@ -871,7 +899,7 @@ impl App {
                     .or_insert_with(|| Some(c.summary.clone()));
             }
         }
-        self.status = "Explaining blocks…".into();
+        self.status = tr!("Explaining blocks…").into();
         let ai = self.ai_client();
         // Remote: the function's source comes over the protocol, never from
         // a same-pathed local file.
@@ -897,24 +925,26 @@ impl App {
                                 Some((sig, body, callees)) => {
                                     Ok(explain::detail_prompt(&name, &sig, &body, &callees))
                                 }
-                                None => Err("function body not found".to_string()),
+                                None => Err(tr!("function body not found").to_string()),
                             }
                         }
-                        _ => Err("could not read the remote source".to_string()),
+                        _ => Err(tr!("could not read the remote source").to_string()),
                     },
                     None => tokio::task::spawn_blocking(move || {
                         let Some(root) = root else {
-                            return Err::<String, String>("no project open".to_string());
+                            return Err::<String, String>(tr!("no project open").to_string());
                         };
                         let Some((sig, body, callees)) =
                             gather_fn_detail_input(&root, file, &name, ordinal, &summaries)
                         else {
-                            return Err::<String, String>("function body not found".to_string());
+                            return Err::<String, String>(
+                                tr!("function body not found").to_string(),
+                            );
                         };
                         Ok(explain::detail_prompt(&name, &sig, &body, &callees))
                     })
                     .await
-                    .unwrap_or_else(|_| Err("task join failed".into())),
+                    .unwrap_or_else(|_| Err(tr!("task join failed").into())),
                 };
                 match prompt {
                     // A failed call says what failed and what to do, as a
@@ -965,7 +995,7 @@ impl App {
                     }
                     None => Task::none(),
                 };
-                self.status = "Explained blocks".into();
+                self.status = tr!("Explained blocks").into();
                 // Only swap the view if the user is still on this node.
                 if self.proj.explain.view.as_ref() == Some(&node) {
                     return Task::batch([persist, self.show_detail(node, md)]);
@@ -973,7 +1003,7 @@ impl App {
                 persist
             }
             Err(e) => {
-                self.status = format!("Block explanation failed: {e}");
+                self.status = tr!("Could not explain the blocks: {error}", error = e);
                 Task::none()
             }
         }
@@ -1092,13 +1122,32 @@ async fn run_saves(
 }
 
 /// What the status line says a file is that is not a plain UTF-8 text file
-/// of the project: in a sentence, and in a list. Each as what it is: a
-/// Latin-1 file and a link out of the project were both "not a text file".
-fn refusal_words(why: explain::Refusal) -> (&'static str, &'static str) {
+/// of the project, in a list. Each as what it is: a Latin-1 file and a link
+/// out of the project were both "not a text file".
+fn refusal_words(why: explain::Refusal) -> &'static str {
     match why {
-        explain::Refusal::NotUtf8 => ("is not UTF-8 text", "not UTF-8"),
-        explain::Refusal::NotPlainFile => ("is not a plain file", "not a plain file"),
-        explain::Refusal::OutsideProject => ("resolves outside the project", "outside the project"),
+        explain::Refusal::NotUtf8 => tr!("not UTF-8"),
+        explain::Refusal::NotPlainFile => tr!("not a plain file"),
+        explain::Refusal::OutsideProject => tr!("outside the project"),
+    }
+}
+
+/// The status line's note on the one file (`file`, as named there) whose
+/// summaries a pass drops because of `why`: a whole sentence for each.
+fn refused_note(why: explain::Refusal, file: &str) -> String {
+    match why {
+        explain::Refusal::NotUtf8 => tr!(
+            "{file} is not UTF-8 text — its summaries are dropped",
+            file = file
+        ),
+        explain::Refusal::NotPlainFile => tr!(
+            "{file} is not a plain file — its summaries are dropped",
+            file = file
+        ),
+        explain::Refusal::OutsideProject => tr!(
+            "{file} resolves outside the project — its summaries are dropped",
+            file = file
+        ),
     }
 }
 
@@ -1115,7 +1164,7 @@ fn some_of(names: &[String]) -> String {
         .join(", ");
     match names.len().saturating_sub(NAMED_FILES) {
         0 => shown,
-        more => format!("{shown} and {more} more"),
+        more => tr!("{files} and {more} more", files = shown, more = more),
     }
 }
 
@@ -1126,12 +1175,14 @@ fn some_of(names: &[String]) -> String {
 pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
     match cached {
         Some(c) if is_unchecked(c) => format!(
-            "*Written by an earlier version of clew, and not checked against the code \
-             since — Refresh All explains it again.*\n\n{}",
+            "*{}*\n\n{}",
+            tr!(
+                "Written by an earlier version of clew, and not checked against the code since — Refresh All explains it again."
+            ),
             c.summary
         ),
         Some(c) => c.summary.clone(),
-        None => "Not explained yet — run Explain All from the ⋯ menu.".to_string(),
+        None => tr!("Not explained yet — run Explain All from the ⋯ menu.").to_string(),
     }
 }
 
@@ -1141,8 +1192,9 @@ pub(crate) fn is_unchecked(cached: &explain::Cached) -> bool {
     cached.basis.is_some_and(|b| b.unchecked)
 }
 
-/// What marks such a summary wherever a short view shows it.
-pub(crate) const UNCHECKED_MARK: &str = "(unchecked)";
+/// What marks such a summary wherever a short view shows it (in the
+/// reader's language there).
+pub(crate) const UNCHECKED_MARK: &str = tr_noop!("(unchecked)");
 
 /// A summary as a short view shows it — the hover, the file banner, the
 /// outline, a list of results, callers or contents — trimmed, and marked
@@ -1151,7 +1203,7 @@ pub(crate) const UNCHECKED_MARK: &str = "(unchecked)";
 pub(crate) fn shown_summary(cached: &explain::Cached) -> std::borrow::Cow<'_, str> {
     let summary = cached.summary.trim();
     if is_unchecked(cached) {
-        format!("{UNCHECKED_MARK} {summary}").into()
+        format!("{} {summary}", crate::i18n::lookup(UNCHECKED_MARK)).into()
     } else {
         summary.into()
     }

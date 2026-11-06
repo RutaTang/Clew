@@ -21,6 +21,7 @@ use crate::{
     GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
     SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
 };
+use crate::{tr, tr_noop, trn};
 mod anchored;
 // A line of text on the design's baseline wherever it lands (`ts::set_in`).
 mod baseline;

@@ -59,13 +59,13 @@ pub(crate) const CALLS_REV_STALE: u64 = u64::MAX;
 
 /// What the status line says to do once a refinement was handed back to the
 /// name-based build (`App::drop_refinement`) with its servers still ready.
-pub(crate) const REFINE_AGAIN: &str = "refine it with LSP for exact edges";
+pub(crate) const REFINE_AGAIN: &str = tr_noop!("refine it with LSP for exact edges");
 
 /// Why a refinement is handed back when the project's index lands after it
 /// began: it read only what was indexed by then, and nothing notes what the
 /// index adds.
 pub(crate) const REFINED_BEFORE_INDEXED: &str =
-    "The project finished indexing after the refine began";
+    tr_noop!("The project finished indexing after the refine began");
 
 /// How long the refine holds the changed files of a language whose server is
 /// starting — restarted, or replacing one that died — before it hands the
@@ -94,9 +94,81 @@ pub(crate) const REFINE_LOAD_LIMIT: std::time::Duration = std::time::Duration::f
 /// "10 min".
 fn in_words(bound: std::time::Duration) -> String {
     match bound.as_secs() {
-        secs if secs >= 120 && secs.is_multiple_of(60) => format!("{} min", secs / 60),
-        secs => format!("{secs} s"),
+        secs if secs >= 120 && secs.is_multiple_of(60) => tr!("{n} min", n = secs / 60),
+        secs => tr!("{n} s", n = secs),
     }
+}
+
+/// What a server the refine waited for did not do in time
+/// (`App::refine_wait_verdict`).
+#[derive(Debug, Clone, Copy)]
+enum GaveUp {
+    /// It did not start within [`REFINE_WAIT_LIMIT`].
+    NotStarted,
+    /// It did not load the project within [`REFINE_LOAD_LIMIT`].
+    NotLoaded,
+    /// It reported nothing for [`REFINE_WAIT_LIMIT`] while loading the
+    /// project.
+    Silent,
+}
+
+impl GaveUp {
+    /// Why the refinement is handed back, for `lang`'s server: a sentence.
+    fn to_refine(self, lang: &str) -> String {
+        match self {
+            GaveUp::NotStarted => tr!(
+                "The {language} server did not start within {time} to refine the files that changed",
+                language = lang,
+                time = in_words(REFINE_WAIT_LIMIT)
+            ),
+            GaveUp::NotLoaded => tr!(
+                "The {language} server did not load the project within {time} to refine the files that changed",
+                language = lang,
+                time = in_words(REFINE_LOAD_LIMIT)
+            ),
+            GaveUp::Silent => tr!(
+                "The {language} server reported nothing for {time} while loading the project to refine the files that changed",
+                language = lang,
+                time = in_words(REFINE_WAIT_LIMIT)
+            ),
+        }
+    }
+
+    /// The same said before what the status already says (`status`), as a
+    /// full pass starts without the server.
+    fn before(self, lang: &str, status: &str) -> String {
+        match self {
+            GaveUp::NotStarted => tr!(
+                "The {language} server did not start within {time} — {status}",
+                language = lang,
+                time = in_words(REFINE_WAIT_LIMIT),
+                status = status
+            ),
+            GaveUp::NotLoaded => tr!(
+                "The {language} server did not load the project within {time} — {status}",
+                language = lang,
+                time = in_words(REFINE_LOAD_LIMIT),
+                status = status
+            ),
+            GaveUp::Silent => tr!(
+                "The {language} server reported nothing for {time} while loading the project — {status}",
+                language = lang,
+                time = in_words(REFINE_WAIT_LIMIT),
+                status = status
+            ),
+        }
+    }
+}
+
+/// "the {title} map did not hold together", for a project map from another
+/// process whose arrows name nodes it does not have. Made outside the async
+/// block that reports it, which must not hold the arguments' references
+/// across its awaits.
+fn map_not_whole(title: &str) -> String {
+    tr!(
+        "the {map} map did not hold together",
+        map = crate::i18n::lookup(title)
+    )
 }
 
 /// What the LSP refine can do with a language's server now
@@ -426,7 +498,7 @@ impl App {
                 self.proj.churn = None;
                 self.proj.churn_rev += 1;
                 if !e.contains("not a git repository") {
-                    self.status = format!("Couldn't read the change history: {e}");
+                    self.status = tr!("Couldn't read the change history: {error}", error = e);
                 }
             }
         }
@@ -550,7 +622,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || input.lay_out())
                     .await
-                    .map_err(|_| "laying out the map failed unexpectedly".to_string())
+                    .map_err(|_| tr!("laying out the map failed unexpectedly").to_string())
             },
             move |layout| {
                 Message::Graph(GraphMsg::GraphLaidOut {
@@ -586,7 +658,7 @@ impl App {
                 self.proj.graph_layout_rev = ui::next_layout_rev();
             }
             // What the map showed stays; the next change lays it out again.
-            Err(e) => self.status = format!("Couldn't lay out the map: {e}"),
+            Err(e) => self.status = tr!("Couldn't lay out the map: {error}", error = e),
         }
         Task::none()
     }
@@ -746,7 +818,7 @@ impl App {
                 // The second try worked: the status said it was under way.
                 if retried {
                     self.status =
-                        "Read tsconfig/jsconfig from the remote host on a second try".into();
+                        tr!("Read tsconfig/jsconfig from the remote host on a second try").into();
                 }
                 if self.proj.remote_ts_configs.as_deref() == Some(&configs) {
                     return Task::none();
@@ -766,25 +838,31 @@ impl App {
                 if !retried && self.remote_ts_configs_fetchable() {
                     let retry = self.fetch_remote_ts_configs_after(TS_CONFIGS_RETRY_BACKOFF);
                     self.proj.remote_ts_configs_retry = Some(self.proj.remote_ts_configs_gen);
-                    self.status = format!(
-                        "Could not read tsconfig/jsconfig from the remote host ({e}) — trying \
-                         once more"
+                    self.status = tr!(
+                        "Could not read tsconfig/jsconfig from the remote host ({error}) — trying once more",
+                        error = e
                     );
                     return retry;
                 }
-                let again = if retried {
-                    ", even on a second try"
-                } else {
-                    ""
+                let last_read = self.proj.remote_ts_configs.is_some();
+                self.status = match (retried, last_read) {
+                    (true, true) => tr!(
+                        "Could not read tsconfig/jsconfig from the remote host, even on a second try ({error}) — their `paths` aliases resolve as last read until a config changes",
+                        error = e
+                    ),
+                    (true, false) => tr!(
+                        "Could not read tsconfig/jsconfig from the remote host, even on a second try ({error}) — their `paths` aliases stay unresolved until a config changes",
+                        error = e
+                    ),
+                    (false, true) => tr!(
+                        "Could not read tsconfig/jsconfig from the remote host ({error}) — their `paths` aliases resolve as last read until a config changes",
+                        error = e
+                    ),
+                    (false, false) => tr!(
+                        "Could not read tsconfig/jsconfig from the remote host ({error}) — their `paths` aliases stay unresolved until a config changes",
+                        error = e
+                    ),
                 };
-                let then = if self.proj.remote_ts_configs.is_some() {
-                    "their `paths` aliases resolve as last read until a config changes"
-                } else {
-                    "their `paths` aliases stay unresolved until a config changes"
-                };
-                self.status = format!(
-                    "Could not read tsconfig/jsconfig from the remote host{again} ({e}) — {then}"
-                );
                 Task::none()
             }
         }
@@ -930,19 +1008,22 @@ impl App {
                 work.refresh_overview |= refresh_overview;
                 let mut failed = applied.map(Arc::unwrap_or_clone);
                 self.status = if retried {
-                    format!(
-                        "Could not update the import graph, even on a second try ({e}) — what \
-                         that update carried was dropped, and applies when its files next change"
+                    tr!(
+                        "Could not update the import graph, even on a second try ({error}) — what that update carried was dropped, and applies when its files next change",
+                        error = e
                     )
                 } else if let Some(batch) =
                     failed.take_if(|batch| batch.retry_before(&work.pending))
                 {
                     work.retry = Some(batch);
-                    format!("Could not update the import graph ({e}) — trying once more")
+                    tr!(
+                        "Could not update the import graph ({error}) — trying once more",
+                        error = e
+                    )
                 } else {
-                    format!(
-                        "Could not update the import graph ({e}) — the changes queued since \
-                         take its place"
+                    tr!(
+                        "Could not update the import graph ({error}) — the changes queued since take its place",
+                        error = e
                     )
                 };
                 let released = free_off_thread((work.resolver.take(), failed));
@@ -978,17 +1059,22 @@ impl App {
             // when it changes; everything else in the batch landed. The first
             // one's panic is named in short, the whole of it on stderr.
             let others = done.applied.unresolvable.len() - 1;
-            self.status = format!(
-                "Could not resolve the imports of {} ({panic}){} — left unresolved",
-                self.rel_of(first),
-                match others {
-                    0 => String::new(),
-                    1 => " and 1 other file".to_string(),
-                    n => format!(" and {n} other files"),
-                }
-            );
+            self.status = match others {
+                0 => tr!(
+                    "Could not resolve the imports of {file} ({panic}) — left unresolved",
+                    file = self.rel_of(first),
+                    panic = panic
+                ),
+                n => trn!(
+                    "Could not resolve the imports of {file} ({panic}) and 1 other file — left unresolved",
+                    "Could not resolve the imports of {file} ({panic}) and {n} other files — left unresolved",
+                    n,
+                    file = self.rel_of(first),
+                    panic = panic
+                ),
+            };
         } else if retried {
-            self.status = "Updated the import graph on a second try".into();
+            self.status = tr!("Updated the import graph on a second try").into();
         }
         if let Some(note) = ts_note {
             self.say_ts_cap_note(note);
@@ -1118,7 +1204,9 @@ impl App {
                         remote_scope(&imports.scope_map(), &scope_root)
                     })
                     .await
-                    .map_err(|_| "collecting the import scope failed unexpectedly".to_string())?;
+                    .map_err(|_| {
+                        tr!("collecting the import scope failed unexpectedly").to_string()
+                    })?;
                     // Every failure is reported — the transport, a refusal,
                     // and a graph whose indices do not hold together — rather
                     // than drawn as a project with no calls.
@@ -1186,7 +1274,7 @@ impl App {
                 })
                 .await
                 // A panicked build is a failure, not a project without calls.
-                .map_err(|_| "building the call graph failed unexpectedly".to_string())
+                .map_err(|_| tr!("building the call graph failed unexpectedly").to_string())
             },
             move |graph| {
                 Message::Graph(GraphMsg::ProjectCallsBuilt {
@@ -1258,9 +1346,7 @@ impl App {
                             // From another process: each map's arrows are
                             // checked before anything indexes with them.
                             match maps.iter().find(|m| !m.is_well_formed()) {
-                                Some(bad) => {
-                                    Err(format!("the {} map did not hold together", bad.title))
-                                }
+                                Some(bad) => Err(map_not_whole(&bad.title)),
                                 None => Ok(maps),
                             }
                         }
@@ -1285,7 +1371,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || clew_core::maps::build(&root, &files))
                     .await
-                    .map_err(|_| "reading the project's maps failed unexpectedly".to_string())
+                    .map_err(|_| tr!("reading the project's maps failed unexpectedly").to_string())
             },
             move |maps| {
                 Message::Graph(GraphMsg::MapsBuilt {
@@ -1381,7 +1467,7 @@ impl App {
             let why = if self.proj.indexing {
                 REFINED_BEFORE_INDEXED
             } else {
-                "Files changed on the remote host"
+                tr_noop!("Files changed on the remote host")
             };
             self.drop_refinement(why, REFINE_AGAIN);
         }
@@ -1389,10 +1475,11 @@ impl App {
 
     /// Hand the call graph back to the name-based build: the refine cannot
     /// keep it current, for the reason `why` gives — said in the status line
-    /// with `then`, what to do about it. Its pass is stopped and its edges
-    /// dropped; the graph on screen stays until a build replaces it, but is
-    /// no longer taken for one that landed (`built`), so the next use
-    /// rebuilds it.
+    /// with `then`, what to do about it — each in the reader's language
+    /// (English kept as a name, `tr_noop!`, is looked up here). Its pass is
+    /// stopped and its edges dropped; the graph on screen stays until a
+    /// build replaces it, but is no longer taken for one that landed
+    /// (`built`), so the next use rebuilds it.
     pub(crate) fn drop_refinement(&mut self, why: &str, then: &str) {
         self.abort_refine();
         let calls = &mut self.proj.project_calls;
@@ -1408,7 +1495,11 @@ impl App {
         calls.unrefined.clear();
         calls.unrefined_out.clear();
         calls.built = false;
-        self.status = format!("{why}: the call graph is name-based again — {then}");
+        self.status = tr!(
+            "{reason}: the call graph is name-based again — {next}",
+            reason = crate::i18n::lookup(why),
+            next = crate::i18n::lookup(then)
+        );
     }
 
     /// Note that `path` changed — edited, created or deleted — for the refine
@@ -1479,8 +1570,11 @@ impl App {
         }
         if let Some(lang) = down.first() {
             self.drop_refinement(
-                &format!("No {lang} server is ready to refine the files that changed"),
-                "refine it with LSP once one is",
+                &tr!(
+                    "No {language} server is ready to refine the files that changed",
+                    language = lang
+                ),
+                tr!("refine it with LSP once one is"),
             );
             return self.refresh_call_graph_in_use();
         }
@@ -1617,7 +1711,7 @@ impl App {
         let (wait, timer) = self.arm_refine_wait(starting.iter().copied(), None);
         self.proj.project_calls.refine_wait = Some(wait);
         if let Some(what) = self.refine_wait_note() {
-            self.status = format!("Waiting {what}");
+            self.status = tr!("Waiting {what}", what = what);
         }
         timer
     }
@@ -1632,24 +1726,15 @@ impl App {
         &self,
         wait: &crate::app::state::RefineWait,
         lang: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), GaveUp> {
         if !self.lsp_slot_loading(lang) {
-            return Err(format!(
-                "did not start within {}",
-                in_words(REFINE_WAIT_LIMIT)
-            ));
+            return Err(GaveUp::NotStarted);
         }
         if wait.since.elapsed() >= REFINE_LOAD_LIMIT {
-            return Err(format!(
-                "did not load the project within {}",
-                in_words(REFINE_LOAD_LIMIT)
-            ));
+            return Err(GaveUp::NotLoaded);
         }
         match (wait.heard.get(lang), self.lsp_reports(lang)) {
-            (Some(heard), Some(now)) if now <= *heard => Err(format!(
-                "reported nothing for {} while loading the project",
-                in_words(REFINE_WAIT_LIMIT)
-            )),
+            (Some(heard), Some(now)) if now <= *heard => Err(GaveUp::Silent),
             _ => Ok(()),
         }
     }
@@ -1688,10 +1773,7 @@ impl App {
             Some((*lang, why))
         });
         if let Some((lang, why)) = gave_up {
-            self.drop_refinement(
-                &format!("The {lang} server {why} to refine the files that changed"),
-                "refine it with LSP once it has",
-            );
+            self.drop_refinement(&why.to_refine(lang), tr!("refine it with LSP once it has"));
             return self.refresh_call_graph_in_use();
         }
         let (renewed, timer) = self.arm_refine_wait(late.iter().copied(), Some(held.since));
@@ -1722,7 +1804,7 @@ impl App {
             }
             Some((lang, why)) => {
                 let pass = self.start_full_refine(&loading);
-                self.status = format!("The {lang} server {why} — {}", self.status);
+                self.status = why.before(&lang, &self.status);
                 pass
             }
         }
@@ -1860,7 +1942,7 @@ impl App {
             // next `ensure_call_graph` retries rather than trusting it.
             Err(e) => {
                 self.proj.project_calls.rev = crate::app::graph::CALLS_REV_STALE;
-                self.status = format!("Couldn't build the call graph: {e}");
+                self.status = tr!("Couldn't build the call graph: {error}", error = e);
                 return Task::none();
             }
         };
@@ -1932,13 +2014,16 @@ impl App {
             let mut waiting: Vec<&str> = held.heard.keys().map(String::as_str).collect();
             waiting.sort_unstable();
             return Some(match waiting.as_slice() {
-                [] => "Waiting for its servers to load the project…".to_string(),
-                langs => format!("Waiting for {} to load the project…", langs.join(", ")),
+                [] => tr!("Waiting for its servers to load the project…").to_string(),
+                langs => tr!(
+                    "Waiting for {languages} to load the project…",
+                    languages = langs.join(", ")
+                ),
             });
         };
         Some(match total {
-            0 => "Refining the files that changed…".to_string(),
-            _ => format!("Refining {done}/{total}…"),
+            0 => tr!("Refining the files that changed…").to_string(),
+            _ => tr!("Refining {done}/{total}…", done = done, total = total),
         })
     }
 
@@ -1952,23 +2037,28 @@ impl App {
         if !calls.precise {
             return None;
         }
+        // Each part after a " · " says one thing whole.
         let mut label = match self.refined_languages().as_slice() {
-            [] => "● LSP-precise".to_string(),
-            covered => format!("● LSP-precise: {}", covered.join(", ")),
+            [] => tr!("● LSP-precise").to_string(),
+            covered => tr!("● LSP-precise: {languages}", languages = covered.join(", ")),
         };
         let left = self.languages_left_out();
         if !left.is_empty() {
-            label.push_str(&format!(" · {} left out", left.join(", ")));
+            label.push_str(" · ");
+            label.push_str(&tr!("{languages} left out", languages = left.join(", ")));
         }
         match calls.unrefined.len() {
             0 => {}
-            1 => label.push_str(" · 1 function unrefined"),
-            n => label.push_str(&format!(" · {n} functions unrefined")),
+            n => {
+                label.push_str(" · ");
+                label.push_str(&trn!("1 function unrefined", "{n} functions unrefined", n));
+            }
         }
         let waiting = self.refine_waiting_for();
         if !waiting.is_empty() {
             let names = waiting.into_iter().collect::<Vec<_>>().join(", ");
-            label.push_str(&format!(" · waiting for {names}"));
+            label.push_str(" · ");
+            label.push_str(&tr!("waiting for {languages}", languages = names));
         }
         Some(label)
     }
@@ -1979,35 +2069,44 @@ impl App {
         if !self.proj.project_calls.precise {
             return None;
         }
+        // Sentence by sentence, each whole.
         let mut summary = match self.refined_languages().as_slice() {
-            [] => "LSP-precise — exact caller/callee edges.".to_string(),
-            covered => format!(
-                "LSP-precise for {} — exact caller/callee edges.",
-                covered.join(", ")
+            [] => tr!("LSP-precise — exact caller/callee edges.").to_string(),
+            covered => tr!(
+                "LSP-precise for {languages} — exact caller/callee edges.",
+                languages = covered.join(", ")
             ),
         };
         let left = self.languages_left_out();
         if !left.is_empty() {
-            summary.push_str(&format!(
-                " Functions in {} are left out: no server was ready to refine them.",
-                left.join(", ")
+            summary.push(' ');
+            summary.push_str(&tr!(
+                "Functions in {languages} are left out: no server was ready to refine them.",
+                languages = left.join(", ")
             ));
         }
         // After a pass over changed files, the calls out of a function it
         // failed are missing too: it dropped every edge of the file.
         let calls = &self.proj.project_calls;
-        let missing = match calls.unrefined_out.is_empty() {
-            true => "calls into",
-            false => "calls into and out of",
-        };
+        let out_too = !calls.unrefined_out.is_empty();
         match calls.unrefined.len() {
             0 => {}
-            1 => summary.push_str(&format!(
-                " 1 function could not be refined: {missing} it may be missing."
-            )),
-            n => summary.push_str(&format!(
-                " {n} functions could not be refined: {missing} them may be missing."
-            )),
+            n => {
+                summary.push(' ');
+                summary.push_str(&if out_too {
+                    trn!(
+                        "1 function could not be refined: calls into and out of it may be missing.",
+                        "{n} functions could not be refined: calls into and out of them may be missing.",
+                        n
+                    )
+                } else {
+                    trn!(
+                        "1 function could not be refined: calls into it may be missing.",
+                        "{n} functions could not be refined: calls into them may be missing.",
+                        n
+                    )
+                });
+            }
         }
         Some(summary)
     }
@@ -2083,12 +2182,11 @@ impl App {
     /// ([`App::refine_project_calls`]), under one wait.
     fn hold_full_refine(&mut self, loading: &BTreeSet<String>) -> Task<Message> {
         let names = loading.iter().cloned().collect::<Vec<_>>().join(", ");
-        let servers = match loading.len() {
-            1 => "server",
-            _ => "servers",
-        };
-        self.status = format!(
-            "Waiting for the {names} {servers} to load the project before refining the call graph"
+        self.status = trn!(
+            "Waiting for the {names} server to load the project before refining the call graph",
+            "Waiting for the {names} servers to load the project before refining the call graph",
+            loading.len(),
+            names = names
         );
         if self.proj.project_calls.refine_full_wait.is_some() {
             return Task::none();
@@ -2105,12 +2203,13 @@ impl App {
         let mut clients = self.call_hierarchy_clients();
         clients.retain(|lang, _| !leave_out.contains(lang));
         if clients.is_empty() {
-            self.status = "No language server ready — open a file to start one, then retry".into();
+            self.status =
+                tr!("No language server ready — open a file to start one, then retry").into();
             return Task::none();
         }
         let all = self.refinable_defs(&clients);
         if all.is_empty() {
-            self.status = "No functions to refine for the ready server(s)".into();
+            self.status = tr!("No functions to refine for the servers that are ready").into();
             return Task::none();
         }
         // A full pass reads every function as it stands now: nothing noted
@@ -2181,11 +2280,19 @@ impl App {
                 // What it covers is said with it: the languages without a
                 // ready server are left out of its graph altogether.
                 let left = self.languages_left_out();
-                let note = match left.is_empty() {
-                    true => String::new(),
-                    false => format!(" ({} left out: no server ready)", left.join(", ")),
+                self.status = match left.is_empty() {
+                    true => trn!(
+                        "Refining 1 function with LSP…",
+                        "Refining {n} functions with LSP…",
+                        defs.len()
+                    ),
+                    false => trn!(
+                        "Refining 1 function with LSP… ({languages} left out: no server ready)",
+                        "Refining {n} functions with LSP… ({languages} left out: no server ready)",
+                        defs.len(),
+                        languages = left.join(", ")
+                    ),
                 };
-                self.status = format!("Refining {} functions with LSP…{note}", defs.len());
                 defs.len()
             }
             RefinePass::Incremental { .. } => 0,
@@ -2249,7 +2356,10 @@ impl App {
             // graph is handed back to the name-based build instead, and the
             // status says why.
             Err(e) => {
-                self.drop_refinement(&format!("The LSP refine failed ({e})"), REFINE_AGAIN);
+                self.drop_refinement(
+                    &tr!("The LSP refine failed ({error})", error = e),
+                    REFINE_AGAIN,
+                );
                 return self.refresh_call_graph_in_use();
             }
         };
@@ -2275,11 +2385,19 @@ impl App {
             .filter(|(file, _)| !restarted_lang(file))
             .min_by(|a, b| a.0.cmp(b.0))
         {
-            let lang = highlight::detect(file).unwrap_or("language");
-            let why = format!(
-                "The {lang} server stopped while refining {} ({why})",
-                self.rel_of(file)
-            );
+            let why = match highlight::detect(file) {
+                Some(lang) => tr!(
+                    "The {language} server stopped while refining {file} ({reason})",
+                    language = lang,
+                    file = self.rel_of(file),
+                    reason = why
+                ),
+                None => tr!(
+                    "The language server stopped while refining {file} ({reason})",
+                    file = self.rel_of(file),
+                    reason = why
+                ),
+            };
             let retired = free_off_thread(done);
             self.drop_refinement(&why, REFINE_AGAIN);
             return Task::batch([retired, self.refresh_call_graph_in_use()]);
@@ -2345,16 +2463,17 @@ impl App {
         (calls.rev, calls.index_rev) = calls.refine_read;
         calls.scope_rev = self.proj.import_scope_rev;
         calls.built = true;
-        let mut refined = String::from("Call graph refined with LSP");
+        let mut refined = tr!("Call graph refined with LSP").to_string();
         if !unanswering.is_empty() {
-            let (servers, were) = match unanswering.len() {
-                1 => ("server", "was"),
-                _ => ("servers", "were"),
-            };
+            let count = unanswering.len();
             let names = unanswering.into_iter().collect::<Vec<_>>().join(", ");
-            refined.push_str(&format!(
-                " — the {names} {servers} left {REFINE_BREAKER_TIMEOUTS} queries in a row \
-                 unanswered, and {were} asked no more"
+            refined.push_str(" — ");
+            refined.push_str(&trn!(
+                "the {names} server left {limit} queries in a row unanswered, and was asked no more",
+                "the {names} servers left {limit} queries in a row unanswered, and were asked no more",
+                count,
+                names = names,
+                limit = REFINE_BREAKER_TIMEOUTS
             ));
         }
         if let Some(note) = self.unrefined_note() {
@@ -2373,7 +2492,7 @@ impl App {
         let fold = self.fold_refine_pending();
         // Those held for a starting server are said to be, still.
         if let Some(what) = self.refine_wait_note() {
-            self.status = format!("{refined} — waiting {what}");
+            self.status = tr!("{done} — waiting {what}", done = refined, what = what);
         }
         Task::batch([retired, map, fold])
     }
@@ -2385,13 +2504,14 @@ impl App {
     fn unrefined_note(&self) -> Option<String> {
         let unrefined = &self.proj.project_calls.unrefined;
         let ((file, name, _), why) = unrefined.iter().min_by(|a, b| a.0.cmp(b.0))?;
-        let (count, more) = match unrefined.len() {
-            1 => ("1 function".to_string(), String::new()),
-            n => (format!("{n} functions"), format!(", and {} more", n - 1)),
-        };
-        Some(format!(
-            "{count} unrefined ({name} in {}: {why}{more})",
-            self.rel_of(file)
+        Some(trn!(
+            "1 function unrefined ({name} in {file}: {reason})",
+            "{n} functions unrefined ({name} in {file}: {reason}, and {more} more)",
+            unrefined.len(),
+            name = name,
+            file = self.rel_of(file),
+            reason = why,
+            more = unrefined.len().saturating_sub(1)
         ))
     }
 
@@ -2415,24 +2535,27 @@ impl App {
             .refine_waiting_for()
             .into_iter()
             .partition(|lang| self.lsp_slot_loading(lang));
-        let wait = |langs: &[&str], what: &str| {
-            let servers = if langs.len() == 1 {
-                "server"
-            } else {
-                "servers"
-            };
-            (!langs.is_empty()).then(|| format!("the {} {servers} to {what}", langs.join(", ")))
-        };
-        let waits: Vec<String> = [wait(&starting, "start"), wait(&loading, "load the project")]
-            .into_iter()
-            .flatten()
-            .collect();
-        (!waits.is_empty()).then(|| {
-            format!(
-                "for {} to refine the files that changed",
-                waits.join(" and ")
-            )
-        })
+        // Whole, for each of what it can wait on.
+        match (starting.as_slice(), loading.as_slice()) {
+            ([], []) => None,
+            (starting, []) => Some(trn!(
+                "for the {languages} server to start to refine the files that changed",
+                "for the {languages} servers to start to refine the files that changed",
+                starting.len(),
+                languages = starting.join(", ")
+            )),
+            ([], loading) => Some(trn!(
+                "for the {languages} server to load the project to refine the files that changed",
+                "for the {languages} servers to load the project to refine the files that changed",
+                loading.len(),
+                languages = loading.join(", ")
+            )),
+            (starting, loading) => Some(tr!(
+                "for servers to start ({starting}) and to load the project ({loading}) to refine the files that changed",
+                starting = starting.join(", "),
+                loading = loading.join(", ")
+            )),
+        }
     }
 }
 

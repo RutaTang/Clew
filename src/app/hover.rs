@@ -350,13 +350,14 @@ impl App {
             // Severity 1 is error (most severe) → lowest number sorts first.
             .min_by_key(|d| d.severity)
             .map(|d| {
-                let label = match d.severity {
-                    1 => "Error",
-                    2 => "Warning",
-                    3 => "Info",
-                    _ => "Hint",
-                };
-                format!("{label}: {}", d.message.trim())
+                // The server's message as it sent it, under our label.
+                let message = d.message.trim();
+                match d.severity {
+                    1 => tr!("Error: {message}", message = message),
+                    2 => tr!("Warning: {message}", message = message),
+                    3 => tr!("Info: {message}", message = message),
+                    _ => tr!("Hint: {message}", message = message),
+                }
             })
     }
 

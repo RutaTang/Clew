@@ -19,7 +19,9 @@ pub(crate) fn built_in_stored_space(
 ) -> Result<embed::Index, EmbedBuildFailed> {
     if stored != space {
         return Err(EmbedBuildFailed::new(
-            "embedding config changed while the index was building — not saved, build it again",
+            tr!(
+                "the embedding settings changed while the index was building — not saved, build it again"
+            ),
             index,
         ));
     }
@@ -36,7 +38,10 @@ pub(crate) fn merged_or_built(
 ) -> (embed::Index, Result<(), String>) {
     merged.unwrap_or_else(|e| {
         let built = Arc::try_unwrap(built).unwrap_or_else(|a| (*a).clone());
-        (built, Err(format!("the merge failed unexpectedly: {e}")))
+        (
+            built,
+            Err(tr!("the merge failed unexpectedly: {error}", error = e)),
+        )
     })
 }
 
@@ -81,12 +86,12 @@ impl App {
             return Task::none();
         }
         let Some(cfg) = embed::Config::load() else {
-            self.status = "Configure an embedding endpoint in Settings".into();
+            self.status = tr!("Configure an embedding endpoint in Settings").into();
             return Task::none();
         };
         self.drop_foreign_embed_index(&cfg);
         if self.proj.explain.cache.is_empty() {
-            self.status = "Run Explain All first — the index embeds the summaries".into();
+            self.status = tr!("Run Explain All first — the index embeds the summaries").into();
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -101,7 +106,7 @@ impl App {
         // `on_embeddings_built` puts it back.
         let existing = std::mem::take(&mut self.proj.embed_index);
         self.proj.building_embeddings = true;
-        self.status = "Building semantic index…".into();
+        self.status = tr!("Building semantic index…").into();
         let ai = self.ai_client();
         let stamp = self.stamp();
         // The space these vectors are being built in. The saved file is
@@ -181,7 +186,7 @@ impl App {
             Err(failed) => {
                 self.proj.building_embeddings = false;
                 let waiting = self.waiting_index_build();
-                self.status = format!("Index build failed: {}", failed.error);
+                self.status = tr!("Index build failed: {error}", error = failed.error);
                 // The index the build started from comes back with it: the
                 // window keeps what it had (nothing else fills the slot while
                 // a build runs), and the next build reuses it instead of
@@ -211,10 +216,16 @@ impl App {
             return waiting;
         };
         self.status = match saved {
-            Ok(()) => format!("Semantic index ready ({} items)", index.entries.len()),
-            Err(e) => format!(
-                "Semantic index ready ({} items) — not saved: {e}",
+            Ok(()) => trn!(
+                "Semantic index ready (1 item)",
+                "Semantic index ready ({n} items)",
                 index.entries.len()
+            ),
+            Err(e) => trn!(
+                "Semantic index ready (1 item) — not saved: {error}",
+                "Semantic index ready ({n} items) — not saved: {error}",
+                index.entries.len(),
+                error = e
             ),
         };
         self.proj.embed_index = index;
@@ -258,12 +269,13 @@ impl App {
             return Task::none();
         }
         let Some(cfg) = embed::Config::load() else {
-            self.status = "Configure an embedding endpoint in Settings".into();
+            self.status = tr!("Configure an embedding endpoint in Settings").into();
             return Task::none();
         };
         self.drop_foreign_embed_index(&cfg);
         if self.proj.embed_index.entries.is_empty() {
-            self.status = "Build the semantic index first (Semantic tab → Build index)".into();
+            self.status =
+                tr!("Build the semantic index first (Find by meaning → Build index)").into();
             return Task::none();
         }
         self.proj.searching_semantic = true;
@@ -323,7 +335,7 @@ impl App {
                 self.proj.embed_index = embed::Index::default();
             }
             self.proj.semantic_results.clear();
-            self.status = "Embedding settings changed — rebuild the index".into();
+            self.status = tr!("Embedding settings changed — rebuild the index").into();
             return Task::none();
         }
         // A query whose vector length differs from the index's is an error
@@ -334,12 +346,14 @@ impl App {
         }) {
             Ok(hits) => {
                 self.proj.semantic_results = hits;
-                self.status = format!(
-                    "{} semantic matches for “{query}”",
-                    self.proj.semantic_results.len()
+                self.status = trn!(
+                    "1 semantic match for “{query}”",
+                    "{n} semantic matches for “{query}”",
+                    self.proj.semantic_results.len(),
+                    query = query
                 );
             }
-            Err(e) => self.status = format!("Search failed: {e}"),
+            Err(e) => self.status = tr!("Search failed: {error}", error = e),
         }
         Task::none()
     }

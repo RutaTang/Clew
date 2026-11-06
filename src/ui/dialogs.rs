@@ -30,13 +30,16 @@ pub(crate) fn bp_condition_modal<'a>(
 ) -> Element<'a, Message> {
     let (path, line, draft) = edit;
     prompt_modal(Prompt {
-        title: format!("Break at {}:{} when…", rel_of(app, path), line),
-        placeholder: "e.g. i == 3",
+        title: tr!(
+            "Break at {location} when…",
+            location = format!("{}:{}", rel_of(app, path), line)
+        ),
+        placeholder: tr!("e.g. i == 3"),
         value: draft,
         input_id: bp_condition_input_id(),
         on_input: |v| Message::Debug(DebugMsg::BpConditionInput(v)),
         submit: Message::Debug(DebugMsg::BpConditionSet),
-        submit_label: "Set",
+        submit_label: tr!("Set"),
         cancel: Message::Debug(DebugMsg::BpConditionCancel),
     })
 }
@@ -45,13 +48,13 @@ pub(crate) fn bp_condition_modal<'a>(
 pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_, Message> {
     let (rel, line, draft) = edit;
     prompt_modal(Prompt {
-        title: format!("Note for {rel}:{line}"),
-        placeholder: "a short note to your future self…",
+        title: tr!("Note for {location}", location = format!("{rel}:{line}")),
+        placeholder: tr!("a short note to your future self…"),
         value: draft,
         input_id: note_input_id(),
         on_input: |v| Message::Reading(ReadingMsg::BookmarkNoteInput(v)),
         submit: Message::Reading(ReadingMsg::BookmarkNoteSave),
-        submit_label: "Save",
+        submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::BookmarkNoteCancel),
     })
 }
@@ -60,13 +63,13 @@ pub(crate) fn bookmark_note_modal(edit: &(String, usize, String)) -> Element<'_,
 pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_, Message> {
     let (rel, symbol, draft) = edit;
     prompt_modal(Prompt {
-        title: format!("Note on {symbol}  ·  {rel}"),
-        placeholder: "what you worked out about this symbol…",
+        title: tr!("Note on {symbol}  ·  {file}", symbol = symbol, file = rel),
+        placeholder: tr!("what you worked out about this symbol…"),
         value: draft,
         input_id: note_input_id(),
         on_input: |v| Message::Reading(ReadingMsg::NoteEditInput(v)),
         submit: Message::Reading(ReadingMsg::NoteEditSave),
-        submit_label: "Save",
+        submit_label: tr!("Save"),
         cancel: Message::Reading(ReadingMsg::NoteEditCancel),
     })
 }
@@ -96,7 +99,10 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
     }
     col = col.push(hairline());
     let body: Element<'_, Message> = if bw.loading {
-        text("Thinking…").size(ts::BODY).color(theme::dim()).into()
+        text(tr!("Thinking…"))
+            .size(ts::BODY)
+            .color(theme::dim())
+            .into()
     } else {
         Column::with_children(render_prepared(app, &bw.prepared))
             .spacing(8)
@@ -112,7 +118,7 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
         )
         .push(row![
             space().width(Fill),
-            button(text("Close").size(ts::BODY))
+            button(text(tr!("Close")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
                 .on_press(Message::TimeTravel(TimeTravelMsg::BlameWhyClose)),
@@ -135,7 +141,10 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
 /// points. "Asking…" until the answer lands.
 pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> Element<'a, Message> {
     let body: Element<'_, Message> = if insight.loading {
-        text("Asking…").size(ts::BODY).color(theme::dim()).into()
+        text(tr!("Asking…"))
+            .size(ts::BODY)
+            .color(theme::dim())
+            .into()
     } else {
         Column::with_children(render_prepared(app, &insight.prepared))
             .spacing(8)
@@ -145,14 +154,14 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
     let mut buttons = row![space().width(Fill)].spacing(8);
     if insight.defined.is_some() {
         buttons = buttons.push(
-            button(text("Open Definition").size(ts::BODY))
+            button(text(tr!("Open Definition")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
                 .on_press(Message::Hover(HoverMsg::InsightOpenDefinition)),
         );
     }
     buttons = buttons.push(
-        button(text("Close").size(ts::BODY))
+        button(text(tr!("Close")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([4, 12])
             .on_press(Message::Hover(HoverMsg::InsightClose)),
@@ -188,9 +197,9 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
 
 pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     let placeholder = match app.proj.finder.mode {
-        _ if app.proj.finder.bar => "Run a command or open a file",
-        FinderMode::Files => "Open a file  ·  > for a command, :123 for a line",
-        FinderMode::Symbols => "Go to a symbol",
+        _ if app.proj.finder.bar => tr!("Run a command or open a file"),
+        FinderMode::Files => tr!("Open a file  ·  > for a command, :123 for a line"),
+        FinderMode::Symbols => tr!("Go to a symbol"),
     };
     let glyph = match app.proj.finder.mode {
         FinderMode::Symbols if !app.proj.finder.is_commands() => Glyph::Cube,
@@ -228,7 +237,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     } else if let Some(n) = app.proj.finder.goto_line() {
         rows.push(
             container(
-                text(format!("↵  Go to line {n}"))
+                text(format!("↵  {}", tr!("Go to line {n}", n = n)))
                     .size(ts::BASE)
                     .color(theme::accent()),
             )
@@ -247,11 +256,11 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     }
     if rows.is_empty() {
         let hint = if app.proj.finder.is_commands() {
-            "No matching command"
+            tr!("No matching command")
         } else if app.proj.finder.mode == FinderMode::Symbols && app.proj.indexing {
-            "Indexing symbols…"
+            tr!("Indexing symbols…")
         } else {
-            "No matches"
+            tr!("No matches")
         };
         rows.push(
             container(text(hint).size(ts::BODY).color(theme::dim()))
@@ -265,7 +274,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     // the list (outside it, so row `i` still starts at `i * FINDER_ROW_H`).
     let cap_note: Element<'_, Message> = match index_cap_note(app) {
         Some(note) if app.proj.finder.mode == FinderMode::Symbols => {
-            text(format!("Index incomplete: {note}"))
+            text(tr!("Index incomplete: {note}", note = note))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into()
@@ -312,12 +321,16 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
 
 /// The palette's foot: how to move through it, open a result, and leave.
 fn finder_footer<'a>() -> Element<'a, Message> {
-    let enter = if crate::keymap::MAC_KEYS {
-        "Return to open"
-    } else {
-        "Enter to open"
-    };
-    let hint = |what: &'a str| {
+    // The keys by their names on the keyboard, never translated.
+    let enter = tr!(
+        "{key} to open",
+        key = if crate::keymap::MAC_KEYS {
+            "Return"
+        } else {
+            "Enter"
+        }
+    );
+    let hint = |what: String| {
         ts::set_in(
             text(what).color(theme::dim()),
             FINDER_FOOT_H,
@@ -326,9 +339,13 @@ fn finder_footer<'a>() -> Element<'a, Message> {
         )
     };
     container(
-        row![hint("↑ ↓ to move"), hint(enter), hint("Esc to close")]
-            .spacing(16)
-            .align_y(iced::Center),
+        row![
+            hint(tr!("{keys} to move", keys = "↑ ↓")),
+            hint(enter),
+            hint(tr!("{key} to close", key = "Esc"))
+        ]
+        .spacing(16)
+        .align_y(iced::Center),
     )
     .height(Length::Fixed(FINDER_FOOT_H))
     .align_y(iced::Center)
@@ -448,7 +465,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             Suggestion::GoToFile => (
                 Glyph::File,
                 theme::dim(),
-                "Go to File…".to_string(),
+                tr!("Go to File…").to_string(),
                 None,
                 Some(chord(crate::keymap::Action::OpenFile)),
             ),
@@ -458,7 +475,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 Glyph::Braces,
                 theme::dim(),
                 name.clone(),
-                Some(format!("{file} · line {line}")),
+                Some(tr!("{file} · line {line}", file = file, line = line)),
                 None,
             ),
             Suggestion::Command { title, recent } => (
@@ -468,7 +485,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                     _ => Glyph::Folder,
                 },
                 theme::dim(),
-                title.clone(),
+                crate::i18n::lookup(title).to_string(),
                 None,
                 app.palette
                     .iter()
@@ -503,7 +520,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             rows.push(bar_row(
                 Glyph::ChevronRight,
                 theme::dim(),
-                command.title.clone(),
+                crate::i18n::lookup(&command.title).to_string(),
                 None,
                 command.keys.clone(),
                 selected,
@@ -542,7 +559,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
 fn stale_finder_row<'a>(selected: bool) -> Element<'a, Message> {
     button(
         container(
-            text("— no longer in the project —")
+            text(tr!("— no longer in the project —"))
                 .size(ts::SMALL)
                 .color(theme::dim()),
         )
@@ -604,7 +621,7 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
         };
         rows.push(finder_row(
             row![
-                text(command.title.clone()).size(ts::READING),
+                text(crate::i18n::lookup(&command.title).to_string()).size(ts::READING),
                 space().width(Fill),
                 keys,
             ]

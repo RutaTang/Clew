@@ -22,6 +22,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tr;
+
 /// A generated tour: a title, its scope (empty = whole codebase, else the user's
 /// prompt), and the ordered steps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,8 +82,13 @@ fn legacy_path(root: &Path) -> PathBuf {
 /// the next save erases it. The state reader's own distinction
 /// ([`clew_core::statefile::read_checked`]), with its reason.
 fn read_existing(path: &Path) -> Result<Option<String>, String> {
-    clew_core::statefile::read_checked(path)
-        .map_err(|e| format!("{} could not be read: {e}", path.display()))
+    clew_core::statefile::read_checked(path).map_err(|e| {
+        tr!(
+            "{path} could not be read: {error}",
+            path = path.display(),
+            error = e
+        )
+    })
 }
 
 /// Load the saved library of walkthroughs: empty when there is none (a legacy
@@ -92,8 +99,12 @@ fn read_existing(path: &Path) -> Result<Option<String>, String> {
 pub fn load_library_checked(root: &Path) -> Result<Vec<Walkthrough>, String> {
     let path = library_path(root);
     if let Some(text) = read_existing(&path)? {
-        return from_text(&text)
-            .ok_or_else(|| format!("{} is not a valid walkthrough library", path.display()));
+        return from_text(&text).ok_or_else(|| {
+            tr!(
+                "{path} is not a valid walkthrough library",
+                path = path.display()
+            )
+        });
     }
     let legacy = legacy_path(root);
     match read_existing(&legacy)? {
@@ -168,8 +179,9 @@ pub fn edit_library(
         Err(e) => {
             let mut merged = fallback.to_vec();
             change(&mut merged);
-            let err = std::io::Error::other(format!(
-                "cannot lock the walkthrough library ({e}) — left untouched"
+            let err = std::io::Error::other(tr!(
+                "cannot lock the walkthrough library ({error}) — left untouched",
+                error = e
             ));
             return (merged, Err(err));
         }
@@ -180,8 +192,10 @@ pub fn edit_library(
     if let Err(e) = clew_core::statefile::settle_pending_edit(&library_path(root)) {
         let mut merged = fallback.to_vec();
         change(&mut merged);
-        let err = std::io::Error::other(format!(
-            "cannot settle a pending remote edit of the walkthrough library ({e}) — left untouched"
+        let err = std::io::Error::other(tr!(
+            "cannot settle a pending remote edit of the walkthrough library ({error}) — left \
+             untouched",
+            error = e
         ));
         return (merged, Err(err));
     }
@@ -194,7 +208,7 @@ pub fn edit_library(
         Err(why) => {
             let mut merged = fallback.to_vec();
             change(&mut merged);
-            let err = std::io::Error::other(format!("{why} — left untouched"));
+            let err = std::io::Error::other(tr!("{error} — left untouched", error = why));
             (merged, Err(err))
         }
     }
@@ -316,16 +330,27 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
             .iter()
             .find_map(|f| in_project(f).map(|rel| (crate::short_frame_name(&f.name), rel, f.line)));
         let reason = if stop.reason.is_empty() {
-            "stopped".to_string()
+            tr!("stopped")
         } else {
-            stop.reason.clone()
+            crate::i18n::lookup(&stop.reason)
         };
         let narration = match caller {
-            Some((caller, caller_rel, line)) => format!(
+            Some((caller, caller_rel, line)) => tr!(
                 "**Stop {ordinal}** ({reason}) in `{name}`, called from `{caller}` \
-                 (`{caller_rel}:{line}`)."
+                 (`{caller_file}:{line}`).",
+                ordinal = ordinal,
+                reason = reason,
+                name = name,
+                caller = caller,
+                caller_file = caller_rel,
+                line = line
             ),
-            None => format!("**Stop {ordinal}** ({reason}) in `{name}`, at the top of the stack."),
+            None => tr!(
+                "**Stop {ordinal}** ({reason}) in `{name}`, at the top of the stack.",
+                ordinal = ordinal,
+                reason = reason,
+                name = name
+            ),
         };
         steps.push(Step {
             title: name.clone(),
@@ -340,7 +365,7 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
         return None;
     }
     Some(Walkthrough {
-        title: format!("Run: {program}"),
+        title: tr!("Run: {program}", program = program),
         scope: String::new(),
         steps,
     })
@@ -499,15 +524,17 @@ pub fn prompt(
 /// Parse the planner's response into a walkthrough, tolerating a code fence or
 /// stray prose around the JSON object.
 pub fn parse(response: &str) -> Result<Walkthrough, String> {
-    let start = response.find('{').ok_or("no JSON object in the response")?;
+    let start = response
+        .find('{')
+        .ok_or(tr!("no JSON object in the response"))?;
     let end = response
         .rfind('}')
-        .ok_or("no JSON object in the response")?;
+        .ok_or(tr!("no JSON object in the response"))?;
     if end < start {
-        return Err("malformed JSON in the response".into());
+        return Err(tr!("malformed JSON in the response").into());
     }
-    let mut wt: Walkthrough =
-        serde_json::from_str(&response[start..=end]).map_err(|e| format!("parse: {e}"))?;
+    let mut wt: Walkthrough = serde_json::from_str(&response[start..=end])
+        .map_err(|e| tr!("could not parse the response: {error}", error = e))?;
     // Paths are project-relative; `./src/x.rs` names `src/x.rs`. Anything that
     // could escape the root (absolute, `..`) is dropped here, as on load.
     wt.steps.retain_mut(|s| {
@@ -515,7 +542,7 @@ pub fn parse(response: &str) -> Result<Walkthrough, String> {
         !s.file.is_empty() && clew_core::statefile::safe_rel(&s.file)
     });
     if wt.steps.is_empty() {
-        return Err("the walkthrough had no usable steps".into());
+        return Err(tr!("the walkthrough had no usable steps").into());
     }
     Ok(wt)
 }
@@ -574,13 +601,18 @@ impl Anchor {
     pub fn note(self, step_no: usize, step: &Step) -> Option<String> {
         let symbol = step.symbol.as_deref().map(str::trim).unwrap_or_default();
         match self {
-            Anchor::NotFound => Some(format!(
-                "Walkthrough step {step_no}: location not found — “{symbol}” is not in {}",
-                step.file
+            Anchor::NotFound => Some(tr!(
+                "Walkthrough step {step}: location not found — “{symbol}” is not in {file}",
+                step = step_no,
+                symbol = symbol,
+                file = step.file
             )),
-            Anchor::Fallback(line) => Some(format!(
-                "Walkthrough step {step_no}: “{symbol}” is not in {} — showing line {line}",
-                step.file
+            Anchor::Fallback(line) => Some(tr!(
+                "Walkthrough step {step}: “{symbol}” is not in {file} — showing line {line}",
+                step = step_no,
+                symbol = symbol,
+                file = step.file,
+                line = line
             )),
             Anchor::Symbol(_) | Anchor::Line(_) | Anchor::File => None,
         }

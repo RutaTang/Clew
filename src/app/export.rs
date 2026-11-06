@@ -33,15 +33,25 @@ pub(crate) struct Export<'a> {
 /// `__init__` or a `*ptr` reads as written.
 pub(crate) fn render(x: &Export<'_>) -> String {
     let mut out = String::new();
-    out.push_str(&format!("# {} — reading notes\n\n", md(x.project)));
-    out.push_str("Exported from clew.\n\n");
+    out.push_str(&format!(
+        "# {}\n\n",
+        tr!("{project} — reading notes", project = md(x.project))
+    ));
+    out.push_str(&format!("{}\n\n", tr!("Exported from clew.")));
 
-    out.push_str(&format!("## Notes ({})\n\n", x.notes.len()));
+    out.push_str(&format!(
+        "## {}\n\n",
+        tr!("Notes ({count})", count = x.notes.len())
+    ));
     if x.notes.is_empty() {
-        out.push_str("_No notes._\n");
+        out.push_str(&format!("_{}_\n", tr!("No notes.")));
     }
     for n in x.notes {
-        let mark = if n.understood { " ✓ understood" } else { "" };
+        let mark = if n.understood {
+            format!(" ✓ {}", tr!("understood"))
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
             "- `{}` · `{}`{mark}\n",
             code(&n.rel),
@@ -53,9 +63,12 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     out.push('\n');
 
-    out.push_str(&format!("## Bookmarks ({})\n\n", x.bookmarks.len()));
+    out.push_str(&format!(
+        "## {}\n\n",
+        tr!("Bookmarks ({count})", count = x.bookmarks.len())
+    ));
     if x.bookmarks.is_empty() {
-        out.push_str("_No bookmarks._\n");
+        out.push_str(&format!("_{}_\n", tr!("No bookmarks.")));
     }
     for b in x.bookmarks {
         let preview = code(b.preview.trim());
@@ -72,9 +85,12 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     out.push('\n');
 
-    out.push_str(&format!("## Reading trail ({})\n\n", x.trail.len()));
+    out.push_str(&format!(
+        "## {}\n\n",
+        tr!("Reading trail ({count})", count = x.trail.len())
+    ));
     if x.trail.is_empty() {
-        out.push_str("_No trail._\n");
+        out.push_str(&format!("_{}_\n", tr!("No trail.")));
     }
     // A straight run of visits is one list; it nests only where the trail
     // forks — where the reader went back and took another way — and each
@@ -107,7 +123,11 @@ pub(crate) fn render(x: &Export<'_>) -> String {
             .as_deref()
             .map(|l| format!(" — `{}`", code(l)))
             .unwrap_or_default();
-        let here = if v.is_current { " ← here" } else { "" };
+        let here = if v.is_current {
+            format!(" ← {}", tr!("here"))
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
             "{}- {branch}`{at}`{label}{here}\n",
             "  ".repeat(indent)
@@ -115,15 +135,21 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
     out.push('\n');
 
-    out.push_str(&format!("## Walkthroughs ({})\n\n", x.tours.len()));
+    out.push_str(&format!(
+        "## {}\n\n",
+        tr!("Walkthroughs ({count})", count = x.tours.len())
+    ));
     if x.tours.is_empty() {
-        out.push_str("_No walkthroughs._\n\n");
+        out.push_str(&format!("_{}_\n\n", tr!("No walkthroughs.")));
     }
     for t in x.tours {
         out.push_str(&format!("### {}\n\n", md(t.title.trim())));
         let scope = t.scope.trim();
         if !scope.is_empty() {
-            out.push_str(&format!("_Scope: {}_\n\n", md(scope)));
+            out.push_str(&format!(
+                "_{}_\n\n",
+                tr!("Scope: {scope}", scope = md(scope))
+            ));
         }
         for (i, s) in t.steps.iter().enumerate() {
             let mut at = code(&s.file);
@@ -147,9 +173,12 @@ pub(crate) fn render(x: &Export<'_>) -> String {
     }
 
     let terms = x.glossary.terms();
-    out.push_str(&format!("## Glossary ({})\n\n", terms.len()));
+    out.push_str(&format!(
+        "## {}\n\n",
+        tr!("Glossary ({count})", count = terms.len())
+    ));
     if terms.is_empty() {
-        out.push_str("_No terms._\n");
+        out.push_str(&format!("_{}_\n", tr!("No terms.")));
     }
     for t in terms {
         out.push_str(&format!(
@@ -215,7 +244,7 @@ impl App {
         match message {
             ExportMsg::Start => {
                 let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
-                    self.status = "Open a project to export its reading notes".into();
+                    self.status = tr!("Open a project to export its reading notes").into();
                     return Task::none();
                 };
                 // The glossary is built from the docs index, which is only
@@ -240,8 +269,8 @@ impl App {
             ExportMsg::Ready { path, waited, .. } => self.export_when_ready(path, waited),
             ExportMsg::Written { path, result, .. } => {
                 self.status = match result {
-                    Ok(()) => format!("Exported reading notes to {}", path.display()),
-                    Err(e) => format!("Export failed: {e}"),
+                    Ok(()) => tr!("Exported reading notes to {path}", path = path.display()),
+                    Err(e) => tr!("Export failed: {error}", error = e),
                 };
                 Task::none()
             }
@@ -257,7 +286,7 @@ impl App {
         }
         if self.docs_loading() && waited < DOCS_WAITS {
             if waited == 0 {
-                self.status = "Exporting — waiting for the docs index…".into();
+                self.status = tr!("Exporting — waiting for the docs index…").into();
             }
             let stamp = self.stamp();
             // Created where it is polled: a timer needs the runtime's context.
@@ -283,7 +312,7 @@ impl App {
                     std::fs::write(&write_path, markdown.as_bytes()).map_err(|e| e.to_string())
                 })
                 .await
-                .unwrap_or_else(|e| Err(format!("the write failed unexpectedly: {e}")));
+                .unwrap_or_else(|e| Err(tr!("the write failed unexpectedly: {error}", error = e)));
                 (path, result)
             },
             move |(path, result)| {

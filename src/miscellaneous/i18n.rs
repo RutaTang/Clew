@@ -307,7 +307,7 @@ pub(crate) fn parse_catalog(text: &str) -> Catalog {
 /// [`tr!`](crate::tr); this takes English decided at run time — a command's
 /// title, kept in English as its name — whose every value is marked with
 /// [`tr_noop!`](crate::tr_noop) where it is written.
-pub fn lookup<'a>(english: &'a str) -> &'a str {
+pub fn lookup(english: &str) -> &str {
     match current() {
         Lang::En => english,
         lang => catalog(lang).get(english).copied().unwrap_or(english),
@@ -356,6 +356,57 @@ pub fn is_one(n: i64) -> bool {
     match current() {
         Lang::Fr => n == 0 || n == 1,
         _ => n == 1,
+    }
+}
+
+/// A whole number as the reader writes it, its thousands set apart:
+/// "1,858"; in French "1 858", with a narrow no-break space.
+pub fn number(n: u64) -> String {
+    let mark = match current() {
+        Lang::Fr => '\u{202f}',
+        _ => ',',
+    };
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 * 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(mark);
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// `x` with `places` decimals, its decimal mark the reader's: "2.5"; in
+/// French "2,5".
+pub fn decimal(x: f64, places: usize) -> String {
+    let text = format!("{x:.places$}");
+    match current() {
+        Lang::Fr => text.replace('.', ","),
+        _ => text,
+    }
+}
+
+/// How long ago `time` was, at `now` (unix seconds), as a reader says it:
+/// "just now", "5 minutes ago", "3 days ago", "2 years ago".
+pub fn ago(time: i64, now: i64) -> String {
+    const MIN: i64 = 60;
+    const HOUR: i64 = 60 * MIN;
+    const DAY: i64 = 24 * HOUR;
+    let d = now - time;
+    if d < MIN {
+        return crate::tr!("just now").to_string();
+    }
+    if d < HOUR {
+        crate::trn!("1 minute ago", "{n} minutes ago", d / MIN)
+    } else if d < DAY {
+        crate::trn!("1 hour ago", "{n} hours ago", d / HOUR)
+    } else if d < 30 * DAY {
+        crate::trn!("1 day ago", "{n} days ago", d / DAY)
+    } else if d < 365 * DAY {
+        crate::trn!("1 month ago", "{n} months ago", d / (30 * DAY))
+    } else {
+        crate::trn!("1 year ago", "{n} years ago", d / (365 * DAY))
     }
 }
 
@@ -552,7 +603,11 @@ mod tests {
     #[test]
     fn every_language_translates_every_text() {
         let keys = source_keys();
-        assert!(!keys.is_empty(), "the source scan found no keys");
+        assert!(
+            keys.len() > 100,
+            "the source scan found {} keys",
+            keys.len()
+        );
         for lang in Lang::ALL.into_iter().filter(|l| *l != Lang::En) {
             let catalog = catalog_entries(lang);
             let missing: Vec<&String> = keys
@@ -568,6 +623,86 @@ mod tests {
                 &missing[..missing.len().min(15)]
             );
         }
+    }
+
+    /// What other crates write and the app shows through `lookup` is
+    /// listed in `extern_text`, word for word — so the catalogs carry it.
+    #[test]
+    fn other_crates_labels_are_listed() {
+        let listed: BTreeSet<&str> = crate::miscellaneous::extern_text::all()
+            .into_iter()
+            .collect();
+        let mut written: Vec<String> = Vec::new();
+        for m in clew_voice::models::MODELS {
+            written.push(m.name.into());
+            written.push(m.about.into());
+        }
+        written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
+        written.push(clew_core::llm::Provider::Custom.label().into());
+        written.extend(
+            clew_core::outline::EntryKind::ALL
+                .iter()
+                .map(|k| k.label().to_string()),
+        );
+        // Each project map's title and description, as clew-core's source
+        // gives them to `MapBuilder::new`.
+        let core = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("crates/clew-core/src");
+        let mut maps = 0;
+        for entry in std::fs::read_dir(core.join("maps")).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap();
+            let text = text.split("#[cfg(test)]").next().unwrap();
+            for call in text.split("MapBuilder::new(").skip(1) {
+                let mut rest = call;
+                for field in 0..3 {
+                    let Some(open) = rest.trim_start().strip_prefix('"') else {
+                        break;
+                    };
+                    let (value, after) = literal(open).expect("a string");
+                    if field > 0 {
+                        written.push(value);
+                    }
+                    rest = after.trim_start().strip_prefix(',').unwrap_or(after);
+                }
+                maps += 1;
+            }
+        }
+        assert!(maps > 30, "found {maps} maps");
+        // Notices shown as clew-core wrote them.
+        let notice = std::fs::read_to_string(core.join("debugadapter.rs")).unwrap();
+        let start = "const ZIG_BACKEND_NOTICE: &str = \"";
+        let at = notice.find(start).expect("the Zig notice") + start.len();
+        written.push(literal(&notice[at..]).unwrap().0);
+        let search = std::fs::read_to_string(core.join("search.rs")).unwrap();
+        assert!(search.contains(
+            "\"not a regular file inside the project (a link, or moved since the scan)\""
+        ));
+        assert!(search.contains("format!(\"larger than {} MB\", cap / (1024 * 1024))"));
+        assert_eq!(clew_core::search::MAX_SEARCH_FILE_BYTES / (1024 * 1024), 64);
+        let missing: Vec<&String> = written
+            .iter()
+            .filter(|w| !listed.contains(w.as_str()))
+            .collect();
+        assert!(missing.is_empty(), "not in extern_text: {missing:?}");
+    }
+
+    /// Numbers are written as the reader writes them: thousands apart,
+    /// the decimal mark theirs; and time gone by in their words.
+    #[test]
+    fn numbers_and_times_are_written_as_the_reader_writes_them() {
+        assert_eq!(number(1_858), "1,858");
+        assert_eq!(number(999), "999");
+        assert_eq!(number(1_234_567), "1,234,567");
+        assert_eq!(decimal(2.25, 1), "2.2");
+        with_lang(Lang::Fr, || {
+            assert_eq!(number(1_858), "1\u{202f}858");
+            assert_eq!(decimal(2.5, 1), "2,5");
+        });
+        with_lang(Lang::Ja, || assert_eq!(number(1_858), "1,858"));
+        let now = 1_800_000_000;
+        assert_eq!(ago(now - 5, now), "just now");
+        assert_eq!(ago(now - 60, now), "1 minute ago");
+        assert_eq!(ago(now - 3 * 86_400, now), "3 days ago");
+        assert_eq!(ago(now - 400 * 86_400, now), "1 year ago");
     }
 
     /// No catalog keeps text the program no longer shows.

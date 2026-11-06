@@ -146,31 +146,75 @@ impl UnsavedEdits {
         self.why() == Some(Why::Unconfirmed) && self.given_up() == 0
     }
 
+    /// The stores the pending ones changed, as a list: "bookmarks and
+    /// notes".
+    fn store_list(&self) -> String {
+        match self.stores.as_slice() {
+            [] => tr!("project state").to_string(),
+            stores => and_list(
+                &stores
+                    .iter()
+                    .map(|s| crate::i18n::lookup(s).to_string())
+                    .collect::<Vec<_>>(),
+            ),
+        }
+    }
+
     /// "3 changes to bookmarks and notes in me@host:/srv/app": the pending
     /// ones.
     fn describe(&self) -> String {
-        let stores = match self.stores.as_slice() {
-            [] => "project state".to_string(),
-            stores => and_list(&stores.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
-        };
-        format!(
-            "{} to {stores} in {}",
-            changes(self.pending()),
-            self.project
+        trn!(
+            "1 change to {stores} in {project}",
+            "{n} changes to {stores} in {project}",
+            self.pending(),
+            stores = self.store_list(),
+            project = self.project
         )
     }
 
-    /// Why the pending ones are not saved, after [`Self::describe`]: "could
-    /// not be sent to the host" — or, when they are not all alike, how many
-    /// for each reason.
+    /// The sentence saying what the pending ones are and why they are not
+    /// saved: "1 change to notes in me@host:/srv/app could not be sent to
+    /// the host." — or, when they are not all alike, how many for each
+    /// reason.
     fn fate(&self) -> String {
-        let n = self.pending();
+        let (n, stores, project) = (self.pending(), self.store_list(), &self.project);
         match self.why() {
-            Some(Why::Unsent) => "could not be sent to the host".to_string(),
-            Some(Why::Unconfirmed) => format!("{} not confirmed by the host", were(n)),
-            Some(Why::Failed) => "could not be saved by the host".to_string(),
-            Some(Why::Waiting) => format!("{} waiting for an earlier change", is(n)),
-            None => format!("are not saved to the host: {}", self.breakdown()),
+            Some(Why::Unsent) => trn!(
+                "1 change to {stores} in {project} could not be sent to the host.",
+                "{n} changes to {stores} in {project} could not be sent to the host.",
+                n,
+                stores = stores,
+                project = project
+            ),
+            Some(Why::Unconfirmed) => trn!(
+                "1 change to {stores} in {project} was not confirmed by the host.",
+                "{n} changes to {stores} in {project} were not confirmed by the host.",
+                n,
+                stores = stores,
+                project = project
+            ),
+            Some(Why::Failed) => trn!(
+                "1 change to {stores} in {project} could not be saved by the host.",
+                "{n} changes to {stores} in {project} could not be saved by the host.",
+                n,
+                stores = stores,
+                project = project
+            ),
+            Some(Why::Waiting) => trn!(
+                "1 change to {stores} in {project} is waiting for an earlier change.",
+                "{n} changes to {stores} in {project} are waiting for an earlier change.",
+                n,
+                stores = stores,
+                project = project
+            ),
+            None => trn!(
+                "1 change to {stores} in {project} is not saved to the host: {reasons}.",
+                "{n} changes to {stores} in {project} are not saved to the host: {reasons}.",
+                n,
+                stores = stores,
+                project = project,
+                reasons = self.breakdown()
+            ),
         }
     }
 
@@ -180,19 +224,32 @@ impl UnsavedEdits {
     fn breakdown(&self) -> String {
         let mut parts = Vec::new();
         if self.unsent > 0 {
-            parts.push(format!("{} could not be sent", self.unsent));
+            parts.push(trn!(
+                "1 could not be sent",
+                "{n} could not be sent",
+                self.unsent
+            ));
         }
         if self.unconfirmed > 0 {
-            let n = self.unconfirmed;
-            parts.push(format!("{n} {} sent but not confirmed", were(n)));
+            parts.push(trn!(
+                "1 was sent but not confirmed",
+                "{n} were sent but not confirmed",
+                self.unconfirmed
+            ));
         }
         if self.failed > 0 {
-            parts.push(format!("{} could not be saved by the host", self.failed));
+            parts.push(trn!(
+                "1 could not be saved by the host",
+                "{n} could not be saved by the host",
+                self.failed
+            ));
         }
         if self.waiting > 0 {
-            let n = self.waiting;
-            let waits = if n == 1 { "waits" } else { "wait" };
-            parts.push(format!("{n} {waits} for an earlier change to be saved"));
+            parts.push(trn!(
+                "1 waits for an earlier change to be saved",
+                "{n} wait for an earlier change to be saved",
+                self.waiting
+            ));
         }
         and_list(&parts)
     }
@@ -201,15 +258,44 @@ impl UnsavedEdits {
     /// changes to notes in me@host:/srv/app could not be sent" — or, when
     /// they are not all alike, how many for each reason.
     pub(crate) fn line(&self) -> String {
-        let n = self.pending();
+        let (n, stores, project) = (self.pending(), self.store_list(), &self.project);
         match self.why() {
-            Some(Why::Unsent) => format!("{} could not be sent", self.describe()),
-            Some(Why::Unconfirmed) => {
-                format!("{} {} sent but not confirmed", self.describe(), were(n))
-            }
-            Some(Why::Failed) => format!("{} could not be saved by the host", self.describe()),
-            Some(Why::Waiting) => format!("{} {} not sent yet", self.describe(), is(n)),
-            None => format!("{}: {}", self.describe(), self.breakdown()),
+            Some(Why::Unsent) => trn!(
+                "1 change to {stores} in {project} could not be sent",
+                "{n} changes to {stores} in {project} could not be sent",
+                n,
+                stores = stores,
+                project = project
+            ),
+            Some(Why::Unconfirmed) => trn!(
+                "1 change to {stores} in {project} was sent but not confirmed",
+                "{n} changes to {stores} in {project} were sent but not confirmed",
+                n,
+                stores = stores,
+                project = project
+            ),
+            Some(Why::Failed) => trn!(
+                "1 change to {stores} in {project} could not be saved by the host",
+                "{n} changes to {stores} in {project} could not be saved by the host",
+                n,
+                stores = stores,
+                project = project
+            ),
+            Some(Why::Waiting) => trn!(
+                "1 change to {stores} in {project} is not sent yet",
+                "{n} changes to {stores} in {project} are not sent yet",
+                n,
+                stores = stores,
+                project = project
+            ),
+            None => trn!(
+                "1 change to {stores} in {project}: {reasons}",
+                "{n} changes to {stores} in {project}: {reasons}",
+                n,
+                stores = stores,
+                project = project,
+                reasons = self.breakdown()
+            ),
         }
     }
 
@@ -218,34 +304,91 @@ impl UnsavedEdits {
     /// the project when nothing else names it.
     pub(crate) fn lost_sentence(&self, with_project: bool) -> String {
         let n = self.given_up();
-        let project = if with_project {
-            format!(" in {}", self.project)
-        } else {
-            String::new()
-        };
-        format!(
-            "The host could not save {}{project}: {} lost.",
-            lost_list(&self.lost, self.lost_more),
-            they_are(n)
-        )
-    }
-
-    /// Whether some of them may yet be saved, sent before the host went
-    /// quiet: closing loses them only perhaps.
-    fn may_be_lost(&self) -> &'static str {
-        if self.unconfirmed > 0 {
-            "may be"
-        } else {
-            "are"
+        let project = &self.project;
+        match (lost_list(&self.lost, self.lost_more), with_project) {
+            (Some(entries), false) => trn!(
+                "The host could not save the change to {entries}: it is lost.",
+                "The host could not save the changes to {entries}: they are lost.",
+                n,
+                entries = entries
+            ),
+            (Some(entries), true) => trn!(
+                "The host could not save the change to {entries} in {project}: it is lost.",
+                "The host could not save the changes to {entries} in {project}: they are lost.",
+                n,
+                entries = entries,
+                project = project
+            ),
+            (None, false) => trn!(
+                "The host could not save 1 change: it is lost.",
+                "The host could not save {n} changes: they are lost.",
+                n
+            ),
+            (None, true) => trn!(
+                "The host could not save 1 change in {project}: it is lost.",
+                "The host could not save {n} changes in {project}: they are lost.",
+                n,
+                project = project
+            ),
         }
     }
-}
 
-/// "1 change", "3 changes".
-fn changes(n: usize) -> String {
-    match n {
-        1 => "1 change".to_string(),
-        n => format!("{n} changes"),
+    /// A quit's line for the edits given up in this window: "the change to
+    /// the walkthrough “tour” in you@other:/x: the host could not save it,
+    /// and it is lost".
+    fn lost_line(&self) -> String {
+        let n = self.given_up();
+        let project = &self.project;
+        match lost_list(&self.lost, self.lost_more) {
+            Some(entries) => trn!(
+                "the change to {entries} in {project}: the host could not save it, and it is lost",
+                "the changes to {entries} in {project}: the host could not save them, and they are lost",
+                n,
+                entries = entries,
+                project = project
+            ),
+            None => trn!(
+                "1 change in {project}: the host could not save it, and it is lost",
+                "{n} changes in {project}: the host could not save them, and they are lost",
+                n,
+                project = project
+            ),
+        }
+    }
+
+    /// What closing — or quitting, when `quitting` — does to the pending
+    /// ones: "Close, and it is lost." — or "may be", when some were sent
+    /// before the host went quiet and may yet be saved.
+    fn lose(&self, quitting: bool) -> String {
+        let n = self.pending();
+        match (quitting, self.unconfirmed > 0) {
+            (false, true) => trn!(
+                "Close, and it may be lost.",
+                "Close, and they may be lost.",
+                n
+            ),
+            (false, false) => trn!("Close, and it is lost.", "Close, and they are lost.", n),
+            (true, true) => trn!(
+                "Quit, and it may be lost.",
+                "Quit, and they may be lost.",
+                n
+            ),
+            (true, false) => trn!("Quit, and it is lost.", "Quit, and they are lost.", n),
+        }
+    }
+
+    /// The message of the question closing — or quitting, when `quitting`
+    /// — this window alone asks: what is pending and why, and what is given
+    /// up.
+    fn message(&self, quitting: bool) -> String {
+        let mut message = Vec::new();
+        if self.pending() > 0 {
+            message.push(format!("{} {}", self.fate(), self.lose(quitting)));
+        }
+        if self.given_up() > 0 {
+            message.push(self.lost_sentence(self.pending() == 0));
+        }
+        message.join(" ")
     }
 }
 
@@ -254,7 +397,12 @@ fn and_list(items: &[String]) -> String {
     match items {
         [] => String::new(),
         [one] => one.clone(),
-        [init @ .., last] => format!("{} and {last}", init.join(", ")),
+        [first, middle @ .., last] => {
+            let list = middle.iter().fold(first.clone(), |list, item| {
+                tr!("{list}, {item}", list = list, item = item)
+            });
+            tr!("{list} and {last}", list = list, last = last)
+        }
     }
 }
 
@@ -263,25 +411,20 @@ fn and_list(items: &[String]) -> String {
 const LOST_NAMED: usize = 3;
 
 /// Edits given up, by the entries they change (see [`entry_name`]), and
-/// `uncounted` more given up past those names: "the change to the bookmark
-/// at a.rs:1", "the changes to the note on f in lib.rs, the walkthrough
-/// “parsing” and 2 more" — "3 changes" when none is named.
-fn lost_list(names: &[String], uncounted: usize) -> String {
+/// `uncounted` more given up past those names: "the bookmark at a.rs:1",
+/// "the note on f in lib.rs, the walkthrough “parsing” and 2 more" —
+/// `None` when none is named.
+fn lost_list(names: &[String], uncounted: usize) -> Option<String> {
     if names.is_empty() {
-        return changes(uncounted);
+        return None;
     }
     let (named, more) = names.split_at(names.len().min(LOST_NAMED));
     let more = more.len() + uncounted;
     let mut items = named.to_vec();
     if more > 0 {
-        items.push(format!("{more} more"));
+        items.push(trn!("1 more", "{n} more", more));
     }
-    let changes = if names.len() + uncounted == 1 {
-        "change"
-    } else {
-        "changes"
-    };
-    format!("the {changes} to {}", and_list(&items))
+    Some(and_list(&items))
 }
 
 /// The entry journaled edit `edit` changes, as the user knows it: "the
@@ -299,19 +442,27 @@ pub(crate) fn entry_name(edit: &RemoteEdit) -> String {
     };
     match edit.rel.as_str() {
         rel if rel == bookmarks::REL => match (field("rel"), field("line")) {
-            (Some(file), Some(line)) => format!("the bookmark at {file}:{line}"),
-            _ => "a bookmark".to_string(),
+            (Some(file), Some(line)) => {
+                tr!("the bookmark at {file}:{line}", file = file, line = line)
+            }
+            _ => tr!("a bookmark").to_string(),
         },
         rel if rel == notes::REL => match (field("rel"), field("symbol")) {
-            (Some(file), Some(symbol)) => format!("the note on {symbol} in {file}"),
-            _ => "a note".to_string(),
+            (Some(file), Some(symbol)) => {
+                tr!(
+                    "the note on {symbol} in {file}",
+                    symbol = symbol,
+                    file = file
+                )
+            }
+            _ => tr!("a note").to_string(),
         },
         rel if rel == walkthrough::LIBRARY_REL => match field("scope") {
-            Some(scope) => format!("the walkthrough “{}”", shortened(&scope)),
-            None => "a walkthrough".to_string(),
+            Some(scope) => tr!("the walkthrough “{name}”", name = shortened(&scope)),
+            None => tr!("a walkthrough").to_string(),
         },
-        "reading.toml" => "the reading target".to_string(),
-        rel => format!("an entry of .clew/{rel}"),
+        "reading.toml" => tr!("the reading target").to_string(),
+        rel => tr!("an entry in .clew/{rel}", rel = rel),
     }
 }
 
@@ -451,18 +602,96 @@ fn superseded_at(journal: &[RemoteEdit]) -> Option<usize> {
 /// The status line while `what`, an edit of `.clew/<rel>` the host could not
 /// save this time (`message`), waits to be tried again.
 pub(crate) fn retrying_status(rel: &str, what: &str, message: &str) -> String {
-    format!("{NOT_SAVED}{rel} yet: the change to {what} ({message}) — retrying")
+    fill(
+        RETRYING,
+        &[
+            ("rel", &rel as &dyn std::fmt::Display),
+            ("what", &what),
+            ("message", &message),
+        ],
+    )
 }
 
-/// How the status line begins when it says an edit of the journal is not
-/// saved: tried again ([`retrying_status`]), or lost (`App::edit_not_saved`).
-pub(crate) const NOT_SAVED: &str = "Could not save .clew/";
+/// The status line when `what`, an edit of `.clew/<rel>`, left the journal
+/// unsaved (`message`, the host's reason): refused, or out of tries.
+pub(crate) fn lost_status(rel: &str, what: &str, message: &str) -> String {
+    fill(
+        LOST,
+        &[
+            ("rel", &rel as &dyn std::fmt::Display),
+            ("what", &what),
+            ("message", &message),
+        ],
+    )
+}
 
-/// The prefix of the status line while a close waits for the host.
-const CLOSING_WAITS: &str = "Closing — waiting for the host to confirm ";
+/// What the status line says while an edit of the journal is tried again
+/// ([`retrying_status`]).
+const RETRYING: &str =
+    tr_noop!("Could not save .clew/{rel} yet: the change to {what} ({message}) — retrying");
 
-/// The prefix of the status line while a quit waits for the hosts.
-const QUITTING_WAITS: &str = "Quitting — waiting for the host to confirm ";
+/// What the status line says when an edit of the journal is lost
+/// ([`lost_status`]).
+const LOST: &str = tr_noop!("Could not save .clew/{rel}: the change to {what} is lost ({message})");
+
+/// Whether the status line says an edit of the journal is not saved: tried
+/// again ([`retrying_status`]), or lost ([`lost_status`]) — in whichever
+/// language it was said.
+fn says_not_saved(status: &str) -> bool {
+    [RETRYING, LOST]
+        .into_iter()
+        .any(|template| fills(crate::i18n::lookup(template), status))
+}
+
+/// The status line while a close waits for the host, by how many changes:
+/// one, or more.
+const CLOSING_WAITS: [&str; 2] = [
+    tr_noop!("Closing — waiting for the host to confirm 1 change…"),
+    tr_noop!("Closing — waiting for the host to confirm {n} changes…"),
+];
+
+/// The status line while a quit waits for the hosts, by how many changes.
+const QUITTING_WAITS: [&str; 2] = [
+    tr_noop!("Quitting — waiting for the host to confirm 1 change…"),
+    tr_noop!("Quitting — waiting for the host to confirm {n} changes…"),
+];
+
+/// `template`, kept in English, in the language spoken, with each `{name}`
+/// filled in from `args`.
+fn fill(template: &str, args: &[(&str, &dyn std::fmt::Display)]) -> String {
+    crate::i18n::format(crate::i18n::lookup(template), args)
+}
+
+/// Whether `text` reads as `template` filled in: its words in their places,
+/// whatever each `{name}` became.
+fn fills(template: &str, text: &str) -> bool {
+    let mut words = Vec::new();
+    let mut rest = template;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}') else {
+            break;
+        };
+        words.push(&rest[..open]);
+        rest = &rest[open + close + 1..];
+    }
+    words.push(rest);
+    let Some((first, others)) = words.split_first() else {
+        return false;
+    };
+    let Some(mut text) = text.strip_prefix(first) else {
+        return false;
+    };
+    let Some((last, middle)) = others.split_last() else {
+        return text.is_empty();
+    };
+    for word in middle {
+        let Some(at) = text.find(word) else {
+            return false;
+        };
+        text = &text[at + word.len()..];
+    }
+    text.ends_with(last)
+}
 
 /// A journaled edit the server answered without applying it
 /// ([`App::retry_remote_edit`], [`App::give_up_remote_edit`]).
@@ -494,49 +723,31 @@ pub(crate) enum Fate {
     GivenUp,
 }
 
-/// "it is" for one change, "they are" for more.
-fn they_are(count: usize) -> &'static str {
-    if count == 1 { "it is" } else { "they are" }
-}
-
-/// "it" for one change, "they" for more.
-fn they(count: usize) -> &'static str {
-    if count == 1 { "it" } else { "they" }
-}
-
-/// "it" for one change, "them" for more.
-fn them(count: usize) -> &'static str {
-    if count == 1 { "it" } else { "them" }
-}
-
-/// "was" for one change, "were" for more.
-fn were(count: usize) -> &'static str {
-    if count == 1 { "was" } else { "were" }
-}
-
-/// "is" for one change, "are" for more.
-fn is(count: usize) -> &'static str {
-    if count == 1 { "is" } else { "are" }
-}
-
-/// A question's title: how many changes are not saved to `hosts` — or,
-/// when every one was sent and waits for an answer, not confirmed.
-fn question_title(count: usize, confirming: bool, hosts: &str) -> String {
-    match (count, confirming) {
-        (1, true) => "A change is not confirmed by the host".to_string(),
-        (n, true) => format!("{n} changes are not confirmed by {hosts}"),
-        (1, false) => "A change is not saved to the host".to_string(),
-        (n, false) => format!("{n} changes are not saved to {hosts}"),
-    }
-}
-
-/// What giving up the pending edits of `lost` does to them.
-fn lose(lost: &UnsavedEdits) -> String {
-    let n = lost.pending();
-    match lost.why() {
-        Some(Why::Unconfirmed) => format!("{} may be lost", they(n)),
-        Some(Why::Unsent | Why::Failed | Why::Waiting) => format!("{} lost", they_are(n)),
-        None => format!("they {} lost", lost.may_be_lost()),
+/// A question's title: how many changes are not saved to the host — or to
+/// their hosts, when `several` windows hold them — or, when every one was
+/// sent and waits for an answer, not confirmed.
+fn question_title(count: usize, confirming: bool, several: bool) -> String {
+    match (confirming, several) {
+        (true, false) => trn!(
+            "A change is not confirmed by the host",
+            "{n} changes are not confirmed by the host",
+            count
+        ),
+        (true, true) => trn!(
+            "A change is not confirmed by the host",
+            "{n} changes are not confirmed by their hosts",
+            count
+        ),
+        (false, false) => trn!(
+            "A change is not saved to the host",
+            "{n} changes are not saved to the host",
+            count
+        ),
+        (false, true) => trn!(
+            "A change is not saved to the host",
+            "{n} changes are not saved to their hosts",
+            count
+        ),
     }
 }
 
@@ -545,20 +756,8 @@ fn lose(lost: &UnsavedEdits) -> String {
 /// reason, in one question — how many for each reason when they differ,
 /// and the ones given up by what they changed.
 pub(crate) fn close_question(lost: &UnsavedEdits) -> (String, String) {
-    let title = question_title(lost.count, lost.all_unconfirmed(), "the host");
-    let mut message = Vec::new();
-    if lost.pending() > 0 {
-        message.push(format!(
-            "{} {}. Close, and {}.",
-            lost.describe(),
-            lost.fate(),
-            lose(lost)
-        ));
-    }
-    if lost.given_up() > 0 {
-        message.push(lost.lost_sentence(lost.pending() == 0));
-    }
-    (title, message.join(" "))
+    let title = question_title(lost.count, lost.all_unconfirmed(), false);
+    (title, lost.message(false))
 }
 
 /// The title and message of the question a quit asks when windows hold
@@ -568,22 +767,10 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
     let total: usize = lost.iter().map(|l| l.count).sum();
     let confirming = !lost.is_empty() && lost.iter().all(UnsavedEdits::all_unconfirmed);
     if let [one] = lost {
-        let title = question_title(total, confirming, "the host");
-        let mut message = Vec::new();
-        if one.pending() > 0 {
-            message.push(format!(
-                "{} {}. Quit, and {}.",
-                one.describe(),
-                one.fate(),
-                lose(one)
-            ));
-        }
-        if one.given_up() > 0 {
-            message.push(one.lost_sentence(one.pending() == 0));
-        }
-        return (title, message.join(" "));
+        let title = question_title(total, confirming, false);
+        return (title, one.message(true));
     }
-    let title = question_title(total, confirming, "their hosts");
+    let title = question_title(total, confirming, true);
     let given_up = lost.iter().any(|l| l.given_up() > 0);
     let all = |why: Why| !given_up && lost.iter().all(|l| l.why() == Some(why));
     let list = || {
@@ -594,16 +781,19 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
     };
     if all(Why::Unconfirmed) {
         let message = format!(
-            "Not confirmed by their hosts yet:\n\n{}\n\nQuit, and they may be lost.",
-            list()
+            "{}\n\n{}\n\n{}",
+            tr!("Not confirmed by their hosts yet:"),
+            list(),
+            tr!("Quit, and they may be lost.")
         );
         return (title, message);
     }
     if all(Why::Unsent) {
-        let they_are = they_are(total);
         let message = format!(
-            "Not sent to their hosts:\n\n{}\n\nQuit, and {they_are} lost.",
-            list()
+            "{}\n\n{}\n\n{}",
+            tr!("Not sent to their hosts:"),
+            list(),
+            trn!("Quit, and it is lost.", "Quit, and they are lost.", total)
         );
         return (title, message);
     }
@@ -613,29 +803,22 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
         .filter(|l| l.pending() > 0)
         .map(|l| format!("• {}", l.line()))
         .collect();
-    lines.extend(lost.iter().filter(|l| l.given_up() > 0).map(|l| {
-        let n = l.given_up();
-        format!(
-            "• {} in {}: the host could not save {}, and {} lost",
-            lost_list(&l.lost, l.lost_more),
-            l.project,
-            them(n),
-            they_are(n)
-        )
-    }));
-    let end = if lost.iter().all(|l| l.pending() == 0) {
-        "Quit anyway?".to_string()
-    } else {
-        let others = if given_up { "the others" } else { "they" };
-        let may_be = if lost.iter().any(|l| l.unconfirmed > 0) {
-            "may be"
-        } else {
-            "are"
-        };
-        format!("Quit, and {others} {may_be} lost.")
+    lines.extend(
+        lost.iter()
+            .filter(|l| l.given_up() > 0)
+            .map(|l| format!("• {}", l.lost_line())),
+    );
+    let may_be = lost.iter().any(|l| l.unconfirmed > 0);
+    let end = match (lost.iter().all(|l| l.pending() == 0), given_up, may_be) {
+        (true, _, _) => tr!("Quit anyway?"),
+        (false, true, true) => tr!("Quit, and the others may be lost."),
+        (false, true, false) => tr!("Quit, and the others are lost."),
+        (false, false, true) => tr!("Quit, and they may be lost."),
+        (false, false, false) => tr!("Quit, and they are lost."),
     };
     let message = format!(
-        "These changes are not saved to their hosts:\n\n{}\n\n{end}",
+        "{}\n\n{}\n\n{end}",
+        tr!("These changes are not saved to their hosts:"),
         lines.join("\n")
     );
     (title, message)
@@ -845,9 +1028,11 @@ impl App {
             .filter(|e| e.rel == rel)
             .count();
         if waiting >= EDIT_JOURNAL_CAP {
-            self.status = format!(
-                "Not changed: {waiting} earlier changes to .clew/{rel} are still waiting for \
-                 the server to confirm them — try again once they are saved"
+            self.status = tr!(
+                "Not changed: {n} earlier changes to .clew/{rel} are still waiting for the \
+                 server to confirm them — try again once they are saved",
+                n = waiting,
+                rel = rel
             );
             return false;
         }
@@ -1183,12 +1368,17 @@ impl App {
     pub(crate) fn show_waiting(&mut self, quitting: bool, agreed: &HashSet<String>) {
         self.waiting_said = true;
         let sent = self.awaited(agreed).len();
-        let waits = if quitting {
+        let [one, other] = if quitting {
             QUITTING_WAITS
         } else {
             CLOSING_WAITS
         };
-        self.status = format!("{waits}{}…", changes(sent));
+        let waits = if crate::i18n::is_one(sent as i64) {
+            one
+        } else {
+            other
+        };
+        self.status = fill(waits, &[("n", &sent as &dyn std::fmt::Display)]);
     }
 
     /// The wait goes on, and the host has answered some of it: the status
@@ -1200,7 +1390,7 @@ impl App {
     /// and again once what it said since is taken back: silent, it gave no
     /// reason why clew had not gone.
     pub(crate) fn update_waiting(&mut self, quitting: bool, agreed: &HashSet<String>) {
-        let first = !self.waiting_said && !self.status.starts_with(NOT_SAVED);
+        let first = !self.waiting_said && !says_not_saved(&self.status);
         if self.shows_waiting() || first || self.status.is_empty() {
             self.show_waiting(quitting, agreed);
         }
@@ -1217,7 +1407,10 @@ impl App {
 
     /// Whether the status line says a close, or a quit, waits for the host.
     fn shows_waiting(&self) -> bool {
-        self.status.starts_with(CLOSING_WAITS) || self.status.starts_with(QUITTING_WAITS)
+        CLOSING_WAITS
+            .into_iter()
+            .chain(QUITTING_WAITS)
+            .any(|waits| fills(crate::i18n::lookup(waits), &self.status))
     }
 
     /// The open project as the user knows it: its path, after its host's
@@ -1539,12 +1732,14 @@ impl App {
 }
 
 /// How a mergeable store is named to the user.
+/// Kept in English, as the questions' tests name them; said in the
+/// language spoken where it is shown ([`UnsavedEdits::store_list`]).
 fn store_name(rel: &str) -> &'static str {
     match rel {
-        _ if rel == bookmarks::REL => "bookmarks",
-        _ if rel == notes::REL => "notes",
-        _ if rel == walkthrough::LIBRARY_REL => "walkthroughs",
-        "reading.toml" => "reading preferences",
-        _ => "project state",
+        _ if rel == bookmarks::REL => tr_noop!("bookmarks"),
+        _ if rel == notes::REL => tr_noop!("notes"),
+        _ if rel == walkthrough::LIBRARY_REL => tr_noop!("walkthroughs"),
+        "reading.toml" => tr_noop!("reading preferences"),
+        _ => tr_noop!("project state"),
     }
 }

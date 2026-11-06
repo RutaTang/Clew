@@ -108,7 +108,7 @@ impl App {
             Some(_) if !missing.is_empty() => {
                 self.proj.explain.svg_gen += 1;
                 let generation = self.proj.explain.svg_gen;
-                self.status = "Rendering math & diagrams…".into();
+                self.status = tr!("Rendering math & diagrams…").into();
                 let stamp = self.stamp();
                 // Kept to report the batch if its task itself fails: an empty
                 // batch (`unwrap_or_default`) read as "Rendered math &
@@ -185,11 +185,19 @@ impl App {
         }
         if generation == self.proj.explain.svg_gen {
             self.status = match first_reason {
-                None => "Rendered math & diagrams".into(),
-                Some(reason) if rendered == 0 => {
-                    format!("Could not render math & diagrams: all {failed} failed ({reason})")
-                }
-                Some(reason) => format!("Rendered {rendered} · {failed} failed ({reason})"),
+                None => tr!("Rendered math & diagrams").into(),
+                Some(reason) if rendered == 0 => trn!(
+                    "Could not render math & diagrams: 1 failed ({reason})",
+                    "Could not render math & diagrams: all {n} failed ({reason})",
+                    failed,
+                    reason = reason
+                ),
+                Some(reason) => tr!(
+                    "Rendered {rendered} · {failed} failed ({reason})",
+                    rendered = rendered,
+                    failed = failed,
+                    reason = reason
+                ),
             };
         }
         Task::none()
@@ -225,7 +233,7 @@ impl App {
             // is itself forbidden. It rejects exactly what `linkify_citations`
             // never emits: empty, absolute, and any `.`/`..` component.
             if !clew_core::statefile::safe_rel(rel) {
-                self.status = format!("Refused a link outside the project: {url}");
+                self.status = tr!("Refused a link outside the project: {url}", url = url);
                 return Task::none();
             }
             let abs = root.join(rel);
@@ -239,8 +247,10 @@ impl App {
             // the read that follows resolves it again, so a component swapped
             // in between stays open — the same residual `.clew` documents.
             if self.local_project_state() && !clew_core::fs_scan::is_inside(&root, &abs) {
-                self.status =
-                    format!("Couldn't open {rel}: a symlink, or not a file inside the project");
+                self.status = tr!(
+                    "Couldn't open {file}: a symlink, or not a file inside the project",
+                    file = rel
+                );
                 return Task::none();
             }
             return self.open_file(abs, line, true);
@@ -261,7 +271,7 @@ impl App {
             self.proj.glossary.showing = false;
             return self.open_file(abs, line, true);
         }
-        self.status = format!("Couldn't resolve link: {url}");
+        self.status = tr!("Couldn't resolve link: {url}", url = url);
         Task::none()
     }
 
@@ -465,7 +475,7 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
         && !url.contains(['\n', '\r', '\0'])
         && url.len() < 8192;
     if !plain {
-        return Err(format!("Refused to open link: {url}"));
+        return Err(tr!("Refused to open link: {url}", url = url));
     }
     // By absolute path where the system ships one, and else found on the
     // absolute directories of PATH: a bare name is resolved through PATH,
@@ -479,8 +489,12 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
         } else {
             "xdg-open"
         };
-        clew_core::linerpc::resolve_program(name)
-            .ok_or_else(|| format!("Couldn't open the link: {name} was not found"))?
+        clew_core::linerpc::resolve_program(name).ok_or_else(|| {
+            tr!(
+                "Couldn't open the link: {program} was not found",
+                program = name
+            )
+        })?
     };
     // The opener not starting is a failure to report, not a no-op: the click
     // otherwise looks broken with no explanation.
@@ -488,7 +502,7 @@ pub(crate) fn open_in_browser(url: &str) -> Result<(), String> {
     open.arg(url).stdin(std::process::Stdio::null());
     spawn_reaped(open)
         .map(|_| ())
-        .map_err(|e| format!("Couldn't open the link: {e}"))
+        .map_err(|e| tr!("Couldn't open the link: {error}", error = e))
 }
 
 /// Start `cmd` without waiting for it, and reap it when it exits (on a
@@ -521,7 +535,7 @@ pub(crate) async fn run_render_batch(
                 .into_iter()
                 .map(|key| SvgFailure {
                     key,
-                    reason: format!("the render task failed: {e}"),
+                    reason: tr!("the render task failed: {error}", error = e),
                 })
                 .collect(),
         })

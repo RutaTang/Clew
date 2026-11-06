@@ -319,7 +319,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         chrome_tip(
             icon_button(Glyph::Menu, theme::fg_muted(), app.show_app_menu)
                 .on_press(Message::Window(WindowMsg::ToggleAppMenu)),
-            "Menu",
+            tr!("Menu"),
             None,
         )
     };
@@ -334,7 +334,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             false,
         )
         .on_press(Message::Window(WindowMsg::ToggleLeftSidebar)),
-        "Toggle sidebar",
+        tr!("Toggle sidebar"),
         None,
     );
     let left = container(
@@ -372,7 +372,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                     app.proj.history.can_back(),
                     Message::Reading(ReadingMsg::GoBack)
                 ),
-                "Back",
+                tr!("Back"),
                 caps(Action::GoBack),
             ),
             chrome_tip(
@@ -381,7 +381,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                     app.proj.history.can_forward(),
                     Message::Reading(ReadingMsg::GoForward)
                 ),
-                "Forward",
+                tr!("Forward"),
                 caps(Action::GoForward),
             ),
         ]
@@ -518,15 +518,15 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
         )
     };
     let (max_glyph, max_label) = if app.maximized {
-        (WindowGlyph::Restore, "Restore")
+        (WindowGlyph::Restore, tr!("Restore"))
     } else {
-        (WindowGlyph::Maximize, "Maximize")
+        (WindowGlyph::Maximize, tr!("Maximize"))
     };
     row![
         key(
             WindowGlyph::Minimize,
             false,
-            "Minimize",
+            tr!("Minimize"),
             Message::Window(WindowMsg::Minimize)
         ),
         key(
@@ -538,7 +538,7 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
         key(
             WindowGlyph::Close,
             true,
-            "Close",
+            tr!("Close"),
             Message::Window(WindowMsg::Close)
         ),
     ]
@@ -556,7 +556,7 @@ fn search_field(app: &App) -> Element<'_, Message> {
         row![
             glyph::icon(Glyph::Search, theme::fg_muted(), 15.0),
             container(ts::set_in(
-                text("Search files, symbols and commands")
+                text(tr!("Search files, symbols and commands"))
                     .font(crate::fonts::in_control(crate::fonts::UI))
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
@@ -668,55 +668,55 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         let (glyph, label, shortcut, msg) = match tool {
             StripTool::Overview => (
                 Glyph::Overview,
-                "Overview",
+                tr!("Overview"),
                 None,
                 Message::Overview(OverviewMsg::Show),
             ),
             StripTool::Stats => (
                 Glyph::Stats,
-                "Stats",
+                tr!("Stats"),
                 None,
                 Message::Overview(OverviewMsg::ShowStats),
             ),
             StripTool::Debug => (
                 Glyph::Debug,
-                "Debug",
+                tr!("Debug"),
                 caps(Action::StartDebug),
                 Message::Debug(DebugMsg::Start),
             ),
             StripTool::CallGraph => (
                 Glyph::Network,
-                "Call Graph",
+                tr!("Call Graph"),
                 caps(Action::CallGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
             ),
             StripTool::ImportGraph => (
                 Glyph::ImportGraph,
-                "Import Graph",
+                tr!("Import Graph"),
                 caps(Action::ImportGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
             ),
             StripTool::TypeMap => (
                 Glyph::TypeMap,
-                "Type Map",
+                tr!("Type Map"),
                 caps(Action::TypeGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
             ),
             StripTool::ProjectMaps => (
                 Glyph::ProjectMaps,
-                "Project Maps",
+                tr!("Project Maps"),
                 caps(Action::ProjectMaps),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
             ),
             StripTool::More => (
                 Glyph::More,
-                "More",
+                tr!("More"),
                 None,
                 Message::Window(WindowMsg::ToggleToolsMenu),
             ),
             StripTool::Settings => (
                 Glyph::Settings,
-                "Settings",
+                tr!("Settings"),
                 Some(crate::keymap::local_keys("⌘,")),
                 Message::Settings(SettingsMsg::Open),
             ),
@@ -808,8 +808,10 @@ pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 10] = [
 pub(crate) const TOOLS_MENU_SEPARATORS: [usize; 2] = [3, 5];
 /// The [`TOOLS_MENU_ROWS`] positions a heading stands over, and what it
 /// says: the group of rows it names.
-pub(crate) const TOOLS_MENU_HEADINGS: [(usize, &str); 2] =
-    [(0, "Understand the project"), (3, "Open")];
+pub(crate) const TOOLS_MENU_HEADINGS: [(usize, &str); 2] = [
+    (0, tr_noop!("Understand the project")),
+    (3, tr_noop!("Open")),
+];
 
 impl ToolsRow {
     /// This row's position in [`TOOLS_MENU_ROWS`] (0 = top).
@@ -956,7 +958,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             items.push(menu_separator());
         }
         if let Some(&(_, heading)) = TOOLS_MENU_HEADINGS.iter().find(|&&(h, _)| h == i) {
-            items.push(menu_heading(heading));
+            items.push(menu_heading(crate::i18n::lookup(heading)));
         }
         let item = match r {
             // While a pass runs the row cancels it — the bottom-up pass is
@@ -965,9 +967,13 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             ToolsRow::ExplainAll if app.proj.explain.running => {
                 let label = match app.proj.explain.progress {
                     Some((done, total)) if total > 0 => {
-                        format!("Cancel explaining ({done}/{total})")
+                        tr!(
+                            "Cancel explaining ({done}/{total})",
+                            done = done,
+                            total = total
+                        )
                     }
-                    _ => "Cancel explaining".to_string(),
+                    _ => tr!("Cancel explaining").to_string(),
                 };
                 menu_item(
                     Some(Glyph::Close),
@@ -978,7 +984,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             }
             ToolsRow::ExplainAll => menu_item(
                 Some(Glyph::TextLines),
-                "Explain All".into(),
+                tr!("Explain All").into(),
                 slot(),
                 // Asking first what it costs (the setup sheet).
                 Some(if app.llm_available {
@@ -989,7 +995,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             ),
             ToolsRow::Walkthrough => menu_item(
                 Some(Glyph::ListOrdered),
-                "Walkthrough".into(),
+                tr!("Walkthrough").into(),
                 slot(),
                 Some(Message::Window(WindowMsg::SidebarTabPicked(
                     SidebarTab::Walk,
@@ -997,31 +1003,31 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             ),
             ToolsRow::Glossary => menu_item(
                 Some(Glyph::Book),
-                "Glossary".into(),
+                tr!("Glossary").into(),
                 slot(),
                 has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
             ),
             ToolsRow::OpenFolder => menu_item(
                 Some(Glyph::FolderOpen),
-                "Open Folder…".into(),
+                tr!("Open Folder…").into(),
                 slot(),
                 Some(Message::Project(ProjectMsg::OpenFolderPressed)),
             ),
             ToolsRow::OpenRemote => menu_item(
                 Some(Glyph::Servers),
-                "Open Remote…".into(),
+                tr!("Open Remote…").into(),
                 slot(),
                 Some(Message::Connect(ConnectMsg::Open)),
             ),
             ToolsRow::ExportNotes => menu_item(
                 Some(Glyph::Export),
-                "Export Notes…".into(),
+                tr!("Export Notes…").into(),
                 slot(),
                 has_project.then_some(Message::Export(ExportMsg::Start)),
             ),
             ToolsRow::SetUp => menu_item(
                 Some(Glyph::Settings),
-                "Set Up Project…".into(),
+                tr!("Set Up Project…").into(),
                 slot(),
                 has_project.then_some(Message::Project(ProjectMsg::SetupShow(
                     crate::app::setup::SetupMode::Manage,
@@ -1029,13 +1035,13 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             ),
             ToolsRow::LspServers => menu_item(
                 Some(Glyph::Plug),
-                "Language Servers".into(),
+                tr!("Language Servers").into(),
                 slot(),
                 Some(Message::Lsp(LspMsg::TogglePanel)),
             ),
             ToolsRow::Shortcuts => menu_item(
                 Some(Glyph::Shortcuts),
-                "Keyboard Shortcuts".into(),
+                tr!("Keyboard Shortcuts").into(),
                 slot(),
                 Some(Message::Window(WindowMsg::OpenShortcuts)),
             ),
@@ -1043,7 +1049,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             // (the menu keeps its shape) but is inert.
             ToolsRow::Tutorial => menu_item(
                 Some(Glyph::Help),
-                "Tutorial".into(),
+                tr!("Tutorial").into(),
                 slot(),
                 has_project.then_some(Message::Tutorial(TutorialMsg::Start)),
             ),
@@ -1161,22 +1167,30 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
         .iter()
         .map(|&r| {
             let (glyph, label, on) = match r {
-                ViewRow::OutlineSummaries => {
-                    (Glyph::Note, "Outline summaries", app.show_inline_summaries)
-                }
-                ViewRow::FileSummary => (Glyph::Info, "File summary", app.show_file_banner),
+                ViewRow::OutlineSummaries => (
+                    Glyph::Note,
+                    tr!("Outline summaries"),
+                    app.show_inline_summaries,
+                ),
+                ViewRow::FileSummary => (Glyph::Info, tr!("File summary"), app.show_file_banner),
                 ViewRow::Blocks => (
                     Glyph::List,
-                    "Explanation in blocks",
+                    tr!("Explanation in blocks"),
                     app.proj.explain.showing_detail,
                 ),
-                ViewRow::InlayHints => (Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints),
-                ViewRow::InlineBlame => (Glyph::TimeTravel, "Inline blame", app.show_inline_blame),
-                ViewRow::IndentGuides => {
-                    (Glyph::TextLines, "Indent guides", app.show_indent_guides)
-                }
-                ViewRow::Minimap => (Glyph::Minimap, "Minimap", app.show_minimap),
-                ViewRow::Margin => (Glyph::PanelRight, "Margin", app.show_right_panel),
+                ViewRow::InlayHints => (Glyph::Lightbulb, tr!("Inlay hints"), app.show_inlay_hints),
+                ViewRow::InlineBlame => (
+                    Glyph::TimeTravel,
+                    tr!("Inline blame"),
+                    app.show_inline_blame,
+                ),
+                ViewRow::IndentGuides => (
+                    Glyph::TextLines,
+                    tr!("Indent guides"),
+                    app.show_indent_guides,
+                ),
+                ViewRow::Minimap => (Glyph::Minimap, tr!("Minimap"), app.show_minimap),
+                ViewRow::Margin => (Glyph::PanelRight, tr!("Margin"), app.show_right_panel),
             };
             // Blocks are a function's: with no function explained, the row
             // is there, inert.
@@ -1218,19 +1232,19 @@ fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message
     vec![
         (
             Glyph::Folder,
-            "Open Folder…",
+            tr!("Open Folder…"),
             None,
             Message::Project(ProjectMsg::OpenFolderPressed),
         ),
         (
             Glyph::Remote,
-            "Open Remote…",
+            tr!("Open Remote…"),
             None,
             Message::Connect(ConnectMsg::Open),
         ),
         (
             Glyph::Settings,
-            "Settings…",
+            tr!("Settings…"),
             Some(crate::keymap::local_keys("⌘,")),
             Message::Settings(SettingsMsg::Open),
         ),
@@ -1281,7 +1295,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
             }
             items.push(menu_item(
                 None,
-                placed.title.to_string(),
+                crate::i18n::lookup(placed.title).to_string(),
                 menu_chord(app, action),
                 Some(Message::Editor(EditorMsg::RunAction(action))),
             ));
@@ -1290,7 +1304,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     items.push(menu_separator());
     items.push(menu_item(
         Some(Glyph::Close),
-        "Close Window".into(),
+        tr!("Close Window").into(),
         slot(),
         Some(Message::Window(WindowMsg::Close)),
     ));
@@ -1332,7 +1346,7 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     container(mark).width(18),
-                    text(t.to_string()).size(ts::BODY)
+                    text(super::statusbar::target_label(&t)).size(ts::BODY)
                 ]
                 .align_y(iced::Center),
             )

@@ -36,7 +36,7 @@ impl App {
                         app.pending_open = Some(path);
                         app.request_open(root)
                     } else {
-                        app.status = format!("No such path: {}", arg.display());
+                        app.status = tr!("No such path: {path}", path = arg.display());
                         Task::none()
                     }
                 }
@@ -158,7 +158,7 @@ impl App {
             pending_g: false,
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
-            status: "Open a folder to start reading".to_string(),
+            status: tr!("Open a folder to start reading").to_string(),
             waiting_said: false,
             main_window: None,
             tutorial: None,
@@ -687,15 +687,15 @@ impl App {
             WindowMsg::RebindReset(action) => {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {
-                    self.keymap_notice = Some(format!(
-                        "Its default is used by “{}” now — rebind that first",
-                        other.label()
+                    self.keymap_notice = Some(tr!(
+                        "Its default is used by “{action}” now — rebind that first",
+                        action = crate::i18n::lookup(other.label())
                     ));
                     return Task::none();
                 }
                 self.keymap_notice = None;
                 if let Err(e) = self.keymap.save() {
-                    self.status = format!("Could not save shortcuts: {e}");
+                    self.status = tr!("Could not save shortcuts: {error}", error = e);
                 }
                 Task::none()
             }
@@ -704,7 +704,7 @@ impl App {
                 self.rebinding = None;
                 self.keymap_notice = None;
                 if let Err(e) = self.keymap.save() {
-                    self.status = format!("Could not save shortcuts: {e}");
+                    self.status = tr!("Could not save shortcuts: {error}", error = e);
                 }
                 Task::none()
             }

@@ -176,7 +176,7 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
                 .padding(8),
             row![
                 space().width(Fill),
-                button(text("Cancel").size(ts::BODY))
+                button(text(tr!("Cancel")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([4, 12])
                     .on_press(p.cancel.clone()),
@@ -251,7 +251,7 @@ pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
             .height(CLOSE_SIDE)
             .padding(0)
             .on_press(msg),
-        "Close",
+        tr!("Close"),
         Some("Esc".to_string()),
     )
 }

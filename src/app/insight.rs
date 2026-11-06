@@ -58,11 +58,11 @@ impl App {
         self.insight_seq += 1;
         let token = self.insight_seq;
         let title = match (kind, word) {
-            (InsightKind::ExpandMacro, Some(w)) => format!("Expansion of {w}"),
-            (InsightKind::ExpandMacro, None) => format!("Line {} expanded", line + 1),
-            (InsightKind::GoalState, _) => format!("Goal at line {}", line + 1),
-            (InsightKind::TypeAtPoint, Some(w)) => format!("Type of {w}"),
-            (InsightKind::TypeAtPoint, None) => format!("Type at line {}", line + 1),
+            (InsightKind::ExpandMacro, Some(w)) => tr!("Expansion of {name}", name = w),
+            (InsightKind::ExpandMacro, None) => tr!("Line {line} expanded", line = line + 1),
+            (InsightKind::GoalState, _) => tr!("Goal at line {line}", line = line + 1),
+            (InsightKind::TypeAtPoint, Some(w)) => tr!("Type of {name}", name = w),
+            (InsightKind::TypeAtPoint, None) => tr!("Type at line {line}", line = line + 1),
         };
         self.proj.insight = Some(Insight {
             token,
@@ -119,7 +119,7 @@ impl App {
                         clew_core::cmacro::expand_in_project(&root, &rel, line, column, &target)
                     })
                     .await
-                    .map_err(|_| "expanding the macro failed unexpectedly".to_string())?
+                    .map_err(|_| tr!("expanding the macro failed unexpectedly").to_string())?
                     .map(|e| e.map(c_answer))
                 },
                 done,
@@ -128,7 +128,7 @@ impl App {
         // The rest is the language server's to say.
         let server = match kind {
             InsightKind::ExpandMacro => "rust-analyzer",
-            InsightKind::GoalState => "The Lean server",
+            InsightKind::GoalState => tr!("The Lean server"),
             InsightKind::TypeAtPoint => "haskell-language-server",
         };
         let client = match self.proj.link.lsp.get(lang) {
@@ -136,16 +136,18 @@ impl App {
             Some(LspSlot::Starting | LspSlot::AwaitingConsent) => {
                 return self.on_insight_answered(
                     token,
-                    Err(format!(
-                        "{server} is still starting — ask again once it is ready"
+                    Err(tr!(
+                        "{server} is still starting — ask again once it is ready",
+                        server = server
                     )),
                 );
             }
             _ => {
                 return self.on_insight_answered(
                     token,
-                    Err(format!(
-                        "{server} is not running — start it from the language servers panel"
+                    Err(tr!(
+                        "{server} is not running — start it from the language servers panel",
+                        server = server
                     )),
                 );
             }
@@ -191,7 +193,10 @@ impl App {
         let (markdown, defined) = match result {
             Ok(Some(answer)) => (answer.markdown, answer.defined),
             Ok(None) => (format!("*{}*", kind.nothing()), None),
-            Err(e) => (format!("*Couldn't ask: {e}*"), None),
+            Err(e) => (
+                format!("*{}*", tr!("Couldn't ask: {error}", error = e)),
+                None,
+            ),
         };
         let (prepared, task) = self.prepare_segments(&markdown);
         if let Some(open) = self.proj.insight.as_mut() {
@@ -220,8 +225,8 @@ pub(crate) fn rust_answer(m: ExpandedMacro) -> InsightAnswer {
         // As rust-analyzer names it: `twice!` for a call, the derive's
         // name for a derive.
         markdown: format!(
-            "`{}` expands to\n\n```rust\n{}\n```",
-            m.name,
+            "{}\n\n```rust\n{}\n```",
+            tr!("{name} expands to", name = format!("`{}`", m.name)),
             m.expansion.trim_end()
         ),
         defined: None,
@@ -232,19 +237,34 @@ pub(crate) fn rust_answer(m: ExpandedMacro) -> InsightAnswer {
 /// `#define` and where it is.
 pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
     let mut md = format!(
-        "```c\n{}\n```\n\nexpands to\n\n```c\n{}\n```",
-        e.invocation, e.expanded
+        "```c\n{}\n```\n\n{}\n\n```c\n{}\n```",
+        e.invocation,
+        tr!("expands to"),
+        e.expanded
     );
     if !e.definition.is_empty() {
-        md.push_str(&format!("\n\nfrom\n\n```c\n{}\n```", e.definition));
+        md.push_str(&format!(
+            "\n\n{}\n\n```c\n{}\n```",
+            tr!("from this definition"),
+            e.definition
+        ));
     }
     if !e.file.is_empty() {
-        md.push_str(&format!("\n\nDefined at `{}:{}`.", e.file, e.line));
+        md.push_str(&format!(
+            "\n\n{}",
+            tr!(
+                "Defined at {location}.",
+                location = format!("`{}:{}`", e.file, e.line)
+            )
+        ));
     } else if !e.name.is_empty() {
-        md.push_str("\n\nDefined by the compile command.");
+        md.push_str(&format!("\n\n{}", tr!("Defined by the compile command.")));
     }
     if e.truncated {
-        md.push_str("\n\n*Cut short: the expansion grew past what Clew follows.*");
+        md.push_str(&format!(
+            "\n\n*{}*",
+            tr!("Cut short: the expansion grew past clew's limit.")
+        ));
     }
     InsightAnswer {
         markdown: md,
@@ -256,7 +276,7 @@ pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
 pub(crate) fn lean_answer(goal: LeanGoal) -> InsightAnswer {
     let markdown = match goal {
         LeanGoal::Tactic(goals) if goals.is_empty() => {
-            "*No goals: the proof is complete here.*".to_string()
+            format!("*{}*", tr!("No goals: the proof is complete here."))
         }
         LeanGoal::Tactic(goals) => {
             let n = goals.len();
@@ -265,12 +285,15 @@ pub(crate) fn lean_answer(goal: LeanGoal) -> InsightAnswer {
                 .enumerate()
                 .map(|(i, g)| match n {
                     1 => format!("```lean\n{g}\n```"),
-                    _ => format!("**Goal {} of {n}**\n\n```lean\n{g}\n```", i + 1),
+                    _ => format!(
+                        "**{}**\n\n```lean\n{g}\n```",
+                        tr!("Goal {i} of {n}", i = i + 1, n = n)
+                    ),
                 })
                 .collect::<Vec<_>>()
                 .join("\n\n")
         }
-        LeanGoal::Term(goal) => format!("Expected type\n\n```lean\n{goal}\n```"),
+        LeanGoal::Term(goal) => format!("{}\n\n```lean\n{goal}\n```", tr!("Expected type")),
     };
     InsightAnswer {
         markdown,
@@ -288,7 +311,10 @@ pub(crate) fn haskell_answer(hover: &str) -> Option<InsightAnswer> {
         .here
         .filter(|h| !parts.signature.ends_with(&format!(":: {h}")))
     {
-        markdown.push_str(&format!("\n\nHere: `{here}`"));
+        markdown.push_str(&format!(
+            "\n\n{}",
+            tr!("Here: {here}", here = format!("`{here}`"))
+        ));
     }
     if !parts.prose.is_empty() {
         markdown.push_str("\n\n");

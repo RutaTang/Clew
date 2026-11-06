@@ -338,7 +338,7 @@ impl App {
             return Task::none();
         }
         let Some(chord) = keymap::Chord::from_event(key, modifiers) else {
-            self.keymap_notice = Some("Unsupported key".into());
+            self.keymap_notice = Some(tr!("This key can't be used in a shortcut").into());
             return Task::none();
         };
         self.capture_chord(action, chord)
@@ -349,21 +349,21 @@ impl App {
     fn capture_chord(&mut self, action: keymap::Action, chord: keymap::Chord) -> Task<Message> {
         if !chord.is_command() {
             self.keymap_notice = Some(if keymap::MAC_KEYS {
-                "Shortcut must include ⌘, ⌥, or ⌃".into()
+                tr!("A shortcut must include ⌘, ⌥ or ⌃").into()
             } else {
-                "Shortcut must include Ctrl or Alt".into()
+                tr!("A shortcut must include Ctrl or Alt").into()
             });
             return Task::none();
         }
         if let Some(other) = self.keymap.conflict(&chord, action) {
-            self.keymap_notice = Some(format!("Already used by “{}”", other.label()));
+            self.keymap_notice = Some(tr!("Already used by “{name}”", name = other.label()));
             return Task::none();
         }
         self.keymap.rebind(action, chord);
         self.rebinding = None;
         self.keymap_notice = None;
         if let Err(e) = self.keymap.save() {
-            self.status = format!("Could not save shortcuts: {e}");
+            self.status = tr!("Could not save shortcuts: {error}", error = e);
         }
         Task::none()
     }

@@ -5,7 +5,7 @@ use iced::widget::{Row, button, column, container, row, scrollable, space, text}
 use iced::{Element, Fill, Length};
 
 use super::{Backdrop, CONFIRM_PAD, DIALOG_W, NOTES_MAX_W, Placement, human_size, modal, slot, ts};
-use crate::{App, Message, UpdatePhase, theme};
+use crate::{App, Message, UpdatePhase, theme, tr};
 use crate::{ContentMsg, UpdaterMsg};
 
 /// Height of the update banner. Fixed, so the regions below it (and the
@@ -32,13 +32,17 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
     let bar: Row<'_, Message> = match &app.update.phase {
         UpdatePhase::Idle => row![
             dot(),
-            text(format!("clew {version} is available"))
+            text(tr!("clew {version} is available", version = version))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),
-            action_button("What's new", Message::Updater(UpdaterMsg::ShowNotes), false),
             action_button(
-                "Update now",
+                tr!("What's new"),
+                Message::Updater(UpdaterMsg::ShowNotes),
+                false
+            ),
+            action_button(
+                tr!("Update now"),
                 Message::Updater(UpdaterMsg::InstallStart),
                 true
             ),
@@ -47,12 +51,17 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
         UpdatePhase::Downloading => {
             let (done, total) = app.update.progress.unwrap_or((0, None));
             let label = match total {
-                Some(t) if t > 0 => format!(
-                    "Downloading clew {version}…  {} / {}",
-                    human_size(done),
-                    human_size(t)
+                Some(t) if t > 0 => tr!(
+                    "Downloading clew {version}…  {done} / {total}",
+                    version = version,
+                    done = human_size(done),
+                    total = human_size(t)
                 ),
-                _ => format!("Downloading clew {version}…  {}", human_size(done)),
+                _ => tr!(
+                    "Downloading clew {version}…  {done}",
+                    version = version,
+                    done = human_size(done)
+                ),
             };
             let meter: Element<'_, Message> = match total {
                 Some(t) if t > 0 => super::meter::eased_bar(
@@ -70,7 +79,7 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
                 space().width(Fill),
                 meter,
                 action_button(
-                    "Cancel",
+                    tr!("Cancel"),
                     Message::Updater(UpdaterMsg::CancelDownload),
                     false
                 ),
@@ -78,18 +87,22 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
         }
         UpdatePhase::Installing => row![
             dot(),
-            text("Installing update… clew will relaunch")
+            text(tr!("Installing update… clew will relaunch"))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),
         ],
         UpdatePhase::Failed(e) => row![
             text("⚠").size(ts::BODY).color(theme::warn()),
-            text(format!("Update failed: {e}"))
+            text(tr!("Update failed: {error}", error = e))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),
-            action_button("Retry", Message::Updater(UpdaterMsg::InstallStart), true),
+            action_button(
+                tr!("Retry"),
+                Message::Updater(UpdaterMsg::InstallStart),
+                true
+            ),
             dismiss_button(),
         ],
     };
@@ -113,7 +126,7 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
     let version = update.version;
 
     let notes: Element<'_, Message> = if update.notes.is_empty() {
-        text("No release notes.")
+        text(tr!("No release notes."))
             .size(ts::BASE)
             .color(theme::fg_muted())
             .into()
@@ -132,7 +145,7 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
         UpdatePhase::Downloading | UpdatePhase::Installing
     );
     let update_now = {
-        let b = button(text("Update now").size(ts::BASE))
+        let b = button(text(tr!("Update now")).size(ts::BASE))
             .style(theme::primary_button)
             .padding([6, 16]);
         if busy {
@@ -147,11 +160,13 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
             text(format!("clew {version}"))
                 .size(ts::TITLE)
                 .color(theme::fg_bright()),
-            text("What's new").size(ts::BODY).color(theme::fg_muted()),
+            text(tr!("What's new"))
+                .size(ts::BODY)
+                .color(theme::fg_muted()),
             container(notes).height(Length::Fixed(360.0)),
             row![
                 space().width(Fill),
-                button(text("Later").size(ts::BASE))
+                button(text(tr!("Later")).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(Message::Updater(UpdaterMsg::CloseNotes)),

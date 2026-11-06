@@ -33,9 +33,9 @@ impl TermKind {
     /// The section title on the Glossary page.
     pub(crate) fn heading(self) -> &'static str {
         match self {
-            TermKind::Type => "Types",
-            TermKind::Module => "Modules",
-            TermKind::Acronym => "Acronyms",
+            TermKind::Type => tr!("Types"),
+            TermKind::Module => tr!("Modules"),
+            TermKind::Acronym => tr!("Acronyms"),
         }
     }
 }
@@ -83,13 +83,26 @@ pub(crate) fn imports_on(line: &str) -> bool {
 }
 
 /// The badge of a folder's term.
-pub(crate) const FOLDER_BADGE: &str = "folder";
+pub(crate) const FOLDER_BADGE: &str = tr_noop!("folder");
+/// The badge of a module's term (a file's), and of an acronym's.
+pub(crate) const MODULE_BADGE: &str = tr_noop!("module");
+pub(crate) const ACRONYM_BADGE: &str = tr_noop!("acronym");
 
 impl Term {
     /// Whether the term names a folder (defined by its explanation), which
     /// is shown, not opened as a file.
     pub(crate) fn is_folder(&self) -> bool {
         self.badge == FOLDER_BADGE
+    }
+
+    /// The badge as the Glossary page shows it: a word of clew's own
+    /// (module, acronym, folder) in the reader's language; a declaration's
+    /// kind (`struct`, `enum`) as the code spells it.
+    pub(crate) fn shown_badge(&self) -> &str {
+        match self.badge.as_str() {
+            MODULE_BADGE | ACRONYM_BADGE | FOLDER_BADGE => crate::i18n::lookup(&self.badge),
+            _ => &self.badge,
+        }
     }
 
     /// Where the term is defined: `rel:line`, or `rel/` for a folder.
@@ -144,7 +157,7 @@ impl Glossary {
                 terms.push(Term {
                     name: crate::ui::module_label(&file.rel),
                     kind: TermKind::Module,
-                    badge: "module".into(),
+                    badge: MODULE_BADGE.into(),
                     rel: file.rel.clone(),
                     line: 1,
                     definition,
@@ -155,7 +168,7 @@ impl Glossary {
                 terms.push(Term {
                     name: abbr,
                     kind: TermKind::Acronym,
-                    badge: "acronym".into(),
+                    badge: ACRONYM_BADGE.into(),
                     rel: file.rel.clone(),
                     line: 1,
                     definition: long,
@@ -188,7 +201,7 @@ impl Glossary {
                     continue;
                 };
                 let (name, badge) = match node {
-                    explain::Node::File(_) => (crate::ui::module_label(&rel), "module"),
+                    explain::Node::File(_) => (crate::ui::module_label(&rel), MODULE_BADGE),
                     _ => (rel.clone(), FOLDER_BADGE),
                 };
                 terms.push(Term {
@@ -295,7 +308,7 @@ fn collect_items(
         out.push(Term {
             name: abbr,
             kind: TermKind::Acronym,
-            badge: "acronym".into(),
+            badge: ACRONYM_BADGE.into(),
             rel: rel.to_string(),
             line: item.line,
             definition: long,
@@ -588,7 +601,7 @@ impl App {
         match message {
             GlossaryMsg::Open => {
                 if self.proj.project.is_none() {
-                    self.status = "Open a project to see its glossary".into();
+                    self.status = tr!("Open a project to see its glossary").into();
                     return Task::none();
                 }
                 self.proj.glossary.showing = true;

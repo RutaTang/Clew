@@ -48,11 +48,11 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         }
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
-            "No file open",
+            tr!("No file open"),
             if crate::keymap::MAC_KEYS {
-                "Pick a file from the tree, or press ⌘P."
+                tr!("Pick a file from the tree, or press ⌘P.")
             } else {
-                "Pick a file from the tree, or press Ctrl+P."
+                tr!("Pick a file from the tree, or press Ctrl+P.")
             },
             None,
         ))
@@ -130,7 +130,12 @@ pub(crate) fn time_travel_view<'a>(
     // never goes blank on entry.
     let code: Element<'a, Message> = match tt.viewer.as_ref().or(live) {
         Some(hv) => time_travel_code(app, tt, hv),
-        None => center(text("Loading revision…").size(ts::BASE).color(theme::dim())).into(),
+        None => center(
+            text(tr!("Loading revision…"))
+                .size(ts::BASE)
+                .color(theme::dim()),
+        )
+        .into(),
     };
     // The story sits in a slot that is always there (zero-size until it is
     // asked for): pushed in ahead of the code, it moved the historical view's
@@ -176,7 +181,7 @@ pub(crate) fn time_travel_banner<'a>(
         });
     let exit = button(
         row![
-            text("Exit").size(ts::SMALL).color(theme::fg_muted()),
+            text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()),
             keycap
         ]
         .spacing(6)
@@ -189,7 +194,7 @@ pub(crate) fn time_travel_banner<'a>(
     let Some(c) = commit else {
         let head = row![
             glyph::icon(Glyph::TimeTravel, theme::accent(), 15.0),
-            text("Time Travel").size(ts::BODY).color(theme::fg()),
+            text(tr!("Time Travel")).size(ts::BODY).color(theme::fg()),
             space().width(Fill),
             exit,
         ]
@@ -216,7 +221,7 @@ pub(crate) fn time_travel_banner<'a>(
         text(format!(
             "{}  ·  {}",
             c.author,
-            crate::git::relative_time(c.time, now)
+            crate::i18n::ago(c.time, now)
         ))
         .size(ts::SMALL)
         .color(theme::dim()),
@@ -232,7 +237,7 @@ pub(crate) fn time_travel_banner<'a>(
         .wrapping(Wrapping::Word);
 
     let why: Element<'a, Message> = if tt.why_loading {
-        text("Summarizing…")
+        text(tr!("Summarizing…"))
             .size(ts::SMALL)
             .color(theme::dim())
             .into()
@@ -243,11 +248,15 @@ pub(crate) fn time_travel_banner<'a>(
             .wrapping(Wrapping::Word)
             .into()
     } else {
-        button(text("What & why?").size(ts::SMALL).color(theme::accent()))
-            .style(theme::toolbar_button)
-            .padding([2, 8])
-            .on_press(Message::TimeTravel(TimeTravelMsg::Why))
-            .into()
+        button(
+            text(tr!("What & why?"))
+                .size(ts::SMALL)
+                .color(theme::accent()),
+        )
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(Message::TimeTravel(TimeTravelMsg::Why))
+        .into()
     };
 
     container(column![head, subject, why].spacing(5))
@@ -335,11 +344,11 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     let scope_label = match &tt.scope {
         TimeScope::Symbol { name, kind, .. } => format!("{} {name}", short_kind(kind)),
-        TimeScope::File => "whole file".to_string(),
+        TimeScope::File => tr!("whole file").to_string(),
     };
     // Clicking toggles between the whole file and the block under the caret.
     let scope_btn = button(
-        text(format!("scope: {scope_label}  ⇄"))
+        text(format!("{}  ⇄", tr!("Scope: {scope}", scope = scope_label)))
             .size(ts::SMALL)
             .color(theme::fg_muted()),
     )
@@ -349,12 +358,15 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
-            text("Story…").size(ts::SMALL).color(theme::dim()).into()
+            text(tr!("Writing the story…"))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into()
         } else {
             let label = if tt.story.is_some() {
-                "Hide story"
+                tr!("Hide story")
             } else {
-                "Story"
+                tr!("Story")
             };
             let color = if tt.story.is_some() {
                 theme::fg_muted()
@@ -375,13 +387,13 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
         row![
             chrome_tip(
                 step(Glyph::ArrowLeft, older),
-                "Older commit",
+                tr!("Older commit"),
                 Some(crate::keymap::local_keys("⌘←"))
             ),
             sl,
             chrome_tip(
                 step(Glyph::ArrowRight, newer),
-                "Newer commit",
+                tr!("Newer commit"),
                 Some(crate::keymap::local_keys("⌘→"))
             ),
             text(format!("{} / {}", tt.idx + 1, n))
@@ -406,16 +418,16 @@ pub(crate) fn time_travel_story<'a>(
     tt: &'a TimeTravel,
     story: &'a [crate::PreparedSeg],
 ) -> Element<'a, Message> {
-    let name = tt.scope.symbol_name().unwrap_or("this block");
+    let name = tt.scope.symbol_name().unwrap_or(tr!("this block"));
     let header = row![
         column![
-            text(format!("Story of {name}"))
+            text(tr!("Story of {name}", name = name))
                 .size(ts::BODY)
                 .color(theme::accent()),
             // `git log -L` only follows the block's CURRENT lines, so earlier
             // rewrites may not be attributed — say so, so it's not read as a full
             // biography.
-            text("from the commits that touched these lines")
+            text(tr!("From the commits that touched these lines"))
                 .size(ts::CAPTION)
                 .color(theme::dim()),
         ]
@@ -453,11 +465,11 @@ pub(crate) fn diff_view<'a>(
 
     let header = container(
         row![
-            text(format!("{}  ·  vs HEAD", d.rel))
+            text(tr!("{file}  ·  vs HEAD", file = d.rel))
                 .size(ts::BODY)
                 .color(theme::accent()),
             space().width(Fill),
-            button(text("✕ close").size(ts::SMALL))
+            button(text(format!("✕ {}", tr!("Close"))).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(Message::Editor(EditorMsg::ToggleDiff)),
@@ -477,7 +489,7 @@ pub(crate) fn diff_view<'a>(
         return column![
             header,
             center(
-                text(format!("No uncommitted changes in {}", d.rel))
+                text(tr!("No uncommitted changes in {file}", file = d.rel))
                     .size(ts::BASE)
                     .color(theme::dim()),
             )
@@ -542,10 +554,14 @@ pub(crate) fn diff_view<'a>(
     }
     if d.lines.len() > MAX_DIFF_ROWS {
         rows.push(
-            text(format!("… {} more lines", d.lines.len() - MAX_DIFF_ROWS))
-                .size(ts::SMALL)
-                .color(theme::dim())
-                .into(),
+            text(trn!(
+                "… 1 more line",
+                "… {n} more lines",
+                d.lines.len() - MAX_DIFF_ROWS
+            ))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .into(),
         );
     }
 
@@ -653,7 +669,7 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         )
     };
 
-    let input = text_input("Find in file…", &app.proj.find.query)
+    let input = text_input(tr!("Find in file…"), &app.proj.find.query)
         .style(theme::input)
         .id(find_input_id())
         .on_input(|v| Message::Editor(EditorMsg::FindQueryChanged(v)))
@@ -732,19 +748,19 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
     let (subtitle, primary, secondary): (String, (&str, Message), (&str, Message)) =
         if app.connection.is_remote() {
             (
-                format!("connected to {}", app.connection.label()),
-                ("Browse folders…", Message::Connect(ConnectMsg::Open)),
-                ("Disconnect", Message::Connect(ConnectMsg::Disconnect)),
+                tr!("Connected to {host}", host = app.connection.label()),
+                (tr!("Browse folders…"), Message::Connect(ConnectMsg::Open)),
+                (tr!("Disconnect"), Message::Connect(ConnectMsg::Disconnect)),
             )
         } else {
             (
                 // "clew" = the thread that guides you out of the labyrinth.
-                "Find the thread through your codebase".to_string(),
+                tr!("Find the thread through your codebase").to_string(),
                 (
-                    "Open Folder…",
+                    tr!("Open Folder…"),
                     Message::Project(ProjectMsg::OpenFolderPressed),
                 ),
-                ("Open Remote…", Message::Connect(ConnectMsg::Open)),
+                (tr!("Open Remote…"), Message::Connect(ConnectMsg::Open)),
             )
         };
 
@@ -921,9 +937,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
                 Some(&v.rel),
             )? {
                 CfgReason::Target(target) => {
-                    format!("not built for {}", super::statusbar::target_name(&target))
+                    tr!(
+                        "not built for {target}",
+                        target = super::statusbar::target_name(&target)
+                    )
                 }
-                CfgReason::Features => "not built with these features".to_string(),
+                CfgReason::Features => tr!("not built with these features").to_string(),
             },
         )
     })
@@ -1114,7 +1133,7 @@ fn margin_notes(app: &App) -> Element<'_, Message> {
             .zip(&ordinals)
             .any(|(sym, &o)| app.proj.explain.cache.contains_key(&function_node(sym, o)));
         if !any_note {
-            return compact_empty_state(Glyph::Lightbulb, "Move the cursor into a function.");
+            return compact_empty_state(Glyph::Lightbulb, tr!("Move the cursor into a function."));
         }
         return notes_beside_code(app, v, None, ordinals);
     };
@@ -1163,7 +1182,7 @@ fn notes_beside_code<'a>(
             notes.push((
                 0.0,
                 ACTIVE_NOTE_H,
-                active_note(app, name, "file".into(), NoteOf::File),
+                active_note(app, name, tr!("file").into(), NoteOf::File),
             ));
         }
         for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
@@ -1195,7 +1214,11 @@ fn notes_beside_code<'a>(
             if !is_active && cached.is_none() {
                 continue;
             }
-            let meta = format!("{} · line {}", short_kind(&sym.kind), sym.line);
+            let meta = tr!(
+                "{kind} · line {line}",
+                kind = short_kind(&sym.kind),
+                line = sym.line
+            );
             let note = if is_active {
                 active_note(
                     app,
@@ -1341,10 +1364,8 @@ impl Leaning {
     /// What the note says: "21 references", "1 caller".
     pub(crate) fn label(self) -> String {
         match self {
-            Leaning::References(1) => "1 reference".to_string(),
-            Leaning::References(n) => format!("{n} references"),
-            Leaning::Callers(1) => "1 caller".to_string(),
-            Leaning::Callers(n) => format!("{n} callers"),
+            Leaning::References(n) => trn!("1 reference", "{n} references", n),
+            Leaning::Callers(n) => trn!("1 caller", "{n} callers", n),
         }
     }
 }
@@ -1419,15 +1440,27 @@ pub(crate) fn short_date(time: i64, now: i64) -> String {
         let y = yoe + era * 400 + i64::from(m <= 2);
         (y, m, d)
     }
+    // The months' short names, in the reader's language where shown.
     const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        tr_noop!("Jan"),
+        tr_noop!("Feb"),
+        tr_noop!("Mar"),
+        tr_noop!("Apr"),
+        tr_noop!("May"),
+        tr_noop!("Jun"),
+        tr_noop!("Jul"),
+        tr_noop!("Aug"),
+        tr_noop!("Sep"),
+        tr_noop!("Oct"),
+        tr_noop!("Nov"),
+        tr_noop!("Dec"),
     ];
     let (y, m, d) = civil(time);
-    let month = MONTHS[(m - 1) as usize];
+    let month = crate::i18n::lookup(MONTHS[(m - 1) as usize]);
     if y == civil(now).0 {
-        format!("{month} {d}")
+        tr!("{month} {day}", month = month, day = d)
     } else {
-        format!("{month} {d}, {y}")
+        tr!("{month} {day}, {year}", month = month, day = d, year = y)
     }
 }
 
@@ -1478,14 +1511,14 @@ fn active_note<'a>(
         (NoteOf::File, Some(v)) => (None, last_changed(v, 1, usize::MAX)),
         _ => (None, None),
     };
-    let calls_label = leaning.map_or_else(|| "Calls".to_string(), Leaning::label);
+    let calls_label = leaning.map_or_else(|| tr!("Calls").to_string(), Leaning::label);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let history_label = match changed {
         Some(Some(time)) => short_date(time, now),
-        Some(None) => "Uncommitted".to_string(),
-        None => "History".to_string(),
+        Some(None) => tr!("Uncommitted").to_string(),
+        None => tr!("History").to_string(),
     };
     let actions = row![
         action(
@@ -1502,11 +1535,12 @@ fn active_note<'a>(
         ),
         action(
             Glyph::Message,
-            "Ask".into(),
+            tr!("Ask").into(),
             true,
-            Message::Ask(AskMsg::Suggested(format!(
-                "What does `{name}` in {} do, and why is it written this way?",
-                app.active_viewer().map_or("", |v| v.rel.as_str())
+            Message::Ask(AskMsg::Suggested(tr!(
+                "What does `{name}` in {file} do, and why is it written this way?",
+                name = name,
+                file = app.active_viewer().map_or("", |v| v.rel.as_str())
             ))),
         ),
     ]
@@ -1566,13 +1600,13 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
         .as_ref()
         .filter(|n| matches!(n, crate::explain::Node::Function { .. }));
     let Some(node) = node else {
-        return compact_empty_state(Glyph::CallGraph, "Move the cursor into a function.");
+        return compact_empty_state(Glyph::CallGraph, tr!("Move the cursor into a function."));
     };
     let rows = call_flow_rows(app, node);
     let open = button(
         row![
             glyph::icon(Glyph::CallGraph, theme::fg_muted(), 14.0),
-            text("Open the call hierarchy").size(ts::BODY),
+            text(tr!("Open the call hierarchy")).size(ts::BODY),
         ]
         .spacing(8)
         .align_y(iced::Center),
@@ -1627,28 +1661,28 @@ fn margin_history(app: &App) -> Element<'_, Message> {
     if in_function {
         rows = rows.push(row_of(
             Glyph::TimeTravel,
-            "This function through time",
-            "Scrub its history, commit by commit.",
+            tr!("This function through time"),
+            tr!("Scrub its history, commit by commit."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
     rows = rows
         .push(row_of(
             Glyph::TimeTravel,
-            "This file through time",
-            "Scrub the whole file back through its commits.",
+            tr!("This file through time"),
+            tr!("Scrub the whole file back through its commits."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
         ))
         .push(row_of(
             Glyph::Info,
-            "Why is this line here?",
-            "The commits that shaped the caret's line, explained.",
+            tr!("Why is this line here?"),
+            tr!("The commits that shaped the current line, explained."),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         ))
         .push(row_of(
             Glyph::Diff,
-            "Changes since the last commit",
-            "What is new in this file, in the reader.",
+            tr!("Changes since the last commit"),
+            tr!("See what's new in this file."),
             Message::Editor(EditorMsg::ToggleDiff),
         ));
     container(rows)
@@ -1692,10 +1726,13 @@ pub(crate) fn outline_note_for(query: Option<Result<(), crate::highlight::QueryE
     use crate::highlight::QueryError;
     match query {
         Some(Err(QueryError::Invalid(e))) => {
-            format!("Outline unavailable: the outline query does not compile ({e}).")
+            tr!(
+                "Outline unavailable: the outline query does not compile ({error}).",
+                error = e
+            )
         }
-        Some(Err(QueryError::Unsupported)) | None => "No outline for this language.".into(),
-        Some(Ok(())) => "No symbols in this file.".into(),
+        Some(Err(QueryError::Unsupported)) | None => tr!("No outline for this language.").into(),
+        Some(Ok(())) => tr!("No symbols in this file.").into(),
     }
 }
 
@@ -1899,10 +1936,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // progress lives only in the status bar, so it isn't duplicated here.
     let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
     let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
-    let header_content: Element<'_, Message> = text(format!("{done}/{total} understood"))
-        .size(ts::SMALL)
-        .color(theme::fg_muted())
-        .into();
+    let header_content: Element<'_, Message> =
+        text(tr!("{done}/{total} understood", done = done, total = total))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .into();
     let header = container(header_content).padding(Padding {
         top: 2.0,
         right: 10.0,

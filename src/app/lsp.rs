@@ -38,7 +38,10 @@ pub(crate) fn pretty_init_options(options: Option<&serde_json::Value>) -> Option
             .map(|(i, _)| i)
             .unwrap_or(text.len());
         text.truncate(cut);
-        text.push_str("\n… truncated for display — the approval covers the whole file's options");
+        text.push('\n');
+        text.push_str(tr!(
+            "… truncated for display — the approval covers the whole file's options"
+        ));
     }
     Some(text)
 }
@@ -222,7 +225,7 @@ impl App {
         let Some(server) = self.effective_server(language) else {
             self.proj.link.lsp.insert(
                 language.to_string(),
-                LspSlot::Unsupported("no server for this language".into()),
+                LspSlot::Unsupported(tr!("no server for this language").into()),
             );
             return Task::none();
         };
@@ -330,7 +333,7 @@ impl App {
                     }))
                 })
                 .await
-                .unwrap_or_else(|e| Err(format!("staging the command failed: {e}")))
+                .unwrap_or_else(|e| Err(tr!("staging the command failed: {error}", error = e)))
             },
             move |result| {
                 Message::Lsp(LspMsg::Staged {
@@ -816,7 +819,10 @@ impl App {
                     .lsp
                     .insert(c.language.clone(), LspSlot::AwaitingConsent);
                 if self.server.is_up() {
-                    self.status = format!("Installing {} on the remote host…", c.server_name);
+                    self.status = tr!(
+                        "Installing {name} on the remote host…",
+                        name = c.server_name
+                    );
                     // Back verbatim: the consent covers the install the user
                     // saw, and the server runs no other.
                     let sent = self.send_to_server(clew_protocol::Request::LspInstall {
@@ -875,8 +881,8 @@ impl App {
         let cancel = guard.flag();
         self.proj.link.lsp_installs.insert(language.clone(), guard);
         self.status = match &local {
-            LocalInstall::Download(_) => format!("Downloading {server_name}…"),
-            LocalInstall::Toolchain(_) => format!("Installing {server_name}…"),
+            LocalInstall::Download(_) => tr!("Downloading {name}…", name = server_name),
+            LocalInstall::Toolchain(_) => tr!("Installing {name}…", name = server_name),
         };
         Task::perform(
             async move {
@@ -926,7 +932,7 @@ impl App {
         if self.proj.project.as_ref().map(|p| &p.root) != Some(&root)
             || self.connection.approval_host().map(str::to_string) != host
         {
-            self.status = "The project changed — nothing was allowed".into();
+            self.status = tr!("The project changed — nothing was allowed").into();
             return Task::none();
         }
         if let Err(e) = self
@@ -935,10 +941,13 @@ impl App {
         {
             // Nothing was recorded (see `on_lsp_command_allowed`): a slot that
             // says so, rather than the same question again.
-            self.status = format!("Could not record the leave to build: {e}");
+            self.status = tr!("Could not save permission to build: {error}", error = e);
             self.proj.link.lsp.insert(
                 language.to_string(),
-                LspSlot::Failed(format!("could not record the leave to build: {e}")),
+                LspSlot::Failed(tr!(
+                    "could not save permission to build: {error}",
+                    error = e
+                )),
             );
             return Task::none();
         }
@@ -971,7 +980,7 @@ impl App {
         if self.proj.project.as_ref().map(|p| &p.root) != Some(&c.root)
             || self.connection.approval_host().map(str::to_string) != c.host
         {
-            self.status = "The project changed — nothing was approved".into();
+            self.status = tr!("The project changed — nothing was approved").into();
             return Task::none();
         }
         if let Err(e) = self
@@ -983,10 +992,10 @@ impl App {
             // memory. Falling through to `ensure_lsp` then re-raised the very
             // same modal, and the loop had no exit but closing the project.
             // Report it in the slot instead, which offers a deliberate Retry.
-            self.status = format!("Could not record the approval: {e}");
+            self.status = tr!("Could not record the approval: {error}", error = e);
             self.proj.link.lsp.insert(
                 c.language.clone(),
-                LspSlot::Failed(format!("could not record the approval: {e}")),
+                LspSlot::Failed(tr!("could not record the approval: {error}", error = e)),
             );
             return Task::none();
         }
@@ -1238,7 +1247,7 @@ impl App {
     pub fn lsp_row(&self, language: &str) -> (String, Option<(&'static str, Message)>) {
         let restart = || {
             Some((
-                "Restart",
+                tr!("Restart"),
                 Message::Lsp(LspMsg::Restart(language.to_string())),
             ))
         };
@@ -1253,7 +1262,7 @@ impl App {
             // read "ready": that lie is what stops the user from restarting a
             // server whose every request now fails.
             Some(LspSlot::Ready(c)) if !c.alive() => {
-                ("stopped · restarts on open".into(), restart())
+                (tr!("stopped · restarts on open").into(), restart())
             }
             // Progress, or the server's complaint — including a state clew
             // can no longer read — from this update's snapshot.
@@ -1261,22 +1270,22 @@ impl App {
                 slot.label(self.proj.link.lsp_snapshots.get(language)),
                 restart(),
             ),
-            Some(LspSlot::Starting) => ("starting…".into(), None),
-            Some(LspSlot::Failed(e)) => (format!("error: {e}"), provision("Retry")),
+            Some(LspSlot::Starting) => (tr!("starting…").into(), None),
+            Some(LspSlot::Failed(e)) => (tr!("error: {error}", error = e), provision(tr!("Retry"))),
             Some(LspSlot::Unsupported(e)) => (e.clone(), None),
             // A "no" is not for good: without a way to ask again, the
             // language had no server until the project was reopened.
-            Some(LspSlot::Declined(e)) => (e.clone(), provision("Ask again")),
+            Some(LspSlot::Declined(e)) => (e.clone(), provision(tr!("Ask again"))),
             // The question waiting may be leave to build, or the project's
             // command, rather than an install: nothing to download, and no
             // button that reads so.
             Some(LspSlot::AwaitingConsent) => match self.lsp_awaiting(language) {
-                Awaiting::Download => ("download pending".into(), provision("Download")),
+                Awaiting::Download => (tr!("download pending").into(), provision(tr!("Download"))),
                 // Nothing on screen to answer — the host's word lost with a
                 // link, a question that went with it — or not yet: asked
                 // again, the start resolves afresh.
                 waiting @ (Awaiting::Host | Awaiting::Nothing) => {
-                    (waiting.to_string(), provision("Ask again"))
+                    (waiting.to_string(), provision(tr!("Ask again")))
                 }
                 other => (other.to_string(), None),
             },
@@ -1285,16 +1294,19 @@ impl App {
             // the listing the panel last ran off the UI thread
             // (`refresh_server_panel`), never from probing here per frame.
             None => match self.lsp_located.get(language) {
-                Some(LocatedKind::Ready) => {
-                    ("installed · starts on open".into(), provision("Start"))
-                }
+                Some(LocatedKind::Ready) => (
+                    tr!("installed · starts on open").into(),
+                    provision(tr!("Start")),
+                ),
                 Some(LocatedKind::NeedsDownload) => {
-                    ("not downloaded".into(), provision("Download"))
+                    (tr!("not downloaded").into(), provision(tr!("Download")))
                 }
-                Some(LocatedKind::NeedsInstall) => ("not installed".into(), provision("Install")),
+                Some(LocatedKind::NeedsInstall) => {
+                    (tr!("not installed").into(), provision(tr!("Install")))
+                }
                 Some(LocatedKind::Unsupported(m)) => (m.clone(), None),
-                Some(LocatedKind::NoServer) => ("no server".into(), None),
-                None => ("checking…".into(), None),
+                Some(LocatedKind::NoServer) => (tr!("no server").into(), None),
+                None => (tr!("checking…").into(), None),
             },
         }
     }
@@ -1338,9 +1350,9 @@ impl App {
                             // A remote project's servers run on the remote
                             // host; this machine's store says nothing about it.
                             let kind = match server {
-                                Some(_) if !local => {
-                                    LocatedKind::Unsupported("managed on the remote host".into())
-                                }
+                                Some(_) if !local => LocatedKind::Unsupported(
+                                    tr!("managed on the remote host").into(),
+                                ),
                                 Some(server) => match lsp::store::locate(&server) {
                                     lsp::store::Located::Ready(_)
                                     | lsp::store::Located::RepoCommand(_) => LocatedKind::Ready,
@@ -1403,7 +1415,7 @@ impl App {
         }
         // Deleting an install is a recursive remove of a large tree: on the
         // blocking pool, with the panel re-listed when it is done.
-        self.status = format!("Removing {name} {version}…");
+        self.status = tr!("Removing {name} {version}…", name = name, version = version);
         Task::perform(
             {
                 let (name, version) = (name.clone(), version.clone());
@@ -1458,7 +1470,11 @@ impl App {
                         open_task
                     }
                     Err(e) => {
-                        self.status = format!("{language} server failed: {e}");
+                        self.status = tr!(
+                            "{language} server failed: {error}",
+                            language = language,
+                            error = e
+                        );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
                         Task::none()
                     }
@@ -1469,12 +1485,12 @@ impl App {
                     // A declined debug-adapter install is not a language
                     // server: there is no LSP slot to mark.
                     if let LspProvision::DebugAdapter { install, .. } = &c.provision {
-                        self.status = format!("{} not installed", install.name());
+                        self.status = tr!("{name} not installed", name = install.name());
                         return Task::none();
                     }
                     let declined = match c.provision {
-                        LspProvision::Build { .. } => "not allowed to build this project",
-                        _ => "server download declined",
+                        LspProvision::Build { .. } => tr!("not allowed to build this project"),
+                        _ => tr!("server download declined"),
                     };
                     self.proj
                         .link
@@ -1491,14 +1507,14 @@ impl App {
                     // command, about `initialize` options, or about both, and
                     // a slot that always said "command" left the user of an
                     // options-only config looking for one that is not there.
-                    let what = match c.command.is_some() {
-                        true => "command",
-                        false => "initialize options",
+                    let declined = match c.command.is_some() {
+                        true => tr!("project's language-server command declined"),
+                        false => tr!("project's language-server initialize options declined"),
                     };
-                    self.proj.link.lsp.insert(
-                        c.language,
-                        LspSlot::Declined(format!("project's language-server {what} declined")),
-                    );
+                    self.proj
+                        .link
+                        .lsp
+                        .insert(c.language, LspSlot::Declined(declined.into()));
                 }
                 Task::none()
             }
@@ -1518,11 +1534,15 @@ impl App {
                 self.proj.link.lsp_installs.remove(&language);
                 match result {
                     Ok(exe) => {
-                        self.status = format!("{language} server installed");
+                        self.status = tr!("{language} server installed", language = language);
                         self.start_lsp_with(&language, exe)
                     }
                     Err(e) => {
-                        self.status = format!("{language} server download failed: {e}");
+                        self.status = tr!(
+                            "{language} server download failed: {error}",
+                            language = language,
+                            error = e
+                        );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
                         Task::none()
                     }
@@ -1574,8 +1594,8 @@ impl App {
                 result,
             } => {
                 self.status = match result {
-                    Ok(()) => format!("Removed {name} {version}"),
-                    Err(e) => format!("Remove failed: {e}"),
+                    Ok(()) => tr!("Removed {name} {version}", name = name, version = version),
+                    Err(e) => tr!("Remove failed: {error}", error = e),
                 };
                 self.refresh_server_panel()
             }

@@ -42,6 +42,7 @@ use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::proto::{Breakpoint, DapEvent, EvalContext, Output, Scope, StackFrame, Variable};
+use crate::{tr, trn};
 
 /// How the adapter speaks DAP: over its own stdio, or over a loopback TCP
 /// port it announces on its stdout once it listens (js-debug, dlv).
@@ -127,8 +128,13 @@ impl DapClient {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        let spawn_failed =
-            |e: std::io::Error| format!("failed to launch adapter {}: {e}", adapter.display());
+        let spawn_failed = |e: std::io::Error| {
+            tr!(
+                "could not start the debug adapter {path}: {error}",
+                path = adapter.display(),
+                error = e
+            )
+        };
         match transport {
             Transport::Stdio => {
                 command.stdin(std::process::Stdio::piped());
@@ -231,8 +237,9 @@ impl DapClient {
     /// announced ([`Self::tcp_addr`]) — dialled exactly, never re-derived.
     pub async fn connect_tcp_addr(addr: SocketAddr) -> Result<(DapClient, DapEvents), String> {
         if !addr.ip().is_loopback() {
-            return Err(format!(
-                "refusing to open a debug session on {addr}: only a loopback adapter is used"
+            return Err(tr!(
+                "refusing to open a debug session on {addr}: only a loopback adapter is used",
+                addr = addr
             ));
         }
         let stream = connect_retry(addr, None, CONNECT_TIMEOUT).await?;
@@ -323,9 +330,12 @@ impl DapClient {
             .call(command, arguments, timeout)
             .await
             .map_err(|e| match e {
-                CallError::NotRunning => "debug adapter not running".to_string(),
-                CallError::Closed => "debug adapter closed".to_string(),
-                CallError::TimedOut => format!("debug adapter did not answer '{command}' in time"),
+                CallError::NotRunning => tr!("debug adapter not running").to_string(),
+                CallError::Closed => tr!("debug adapter closed").to_string(),
+                CallError::TimedOut => tr!(
+                    "debug adapter did not answer '{command}' in time",
+                    command = command
+                ),
                 CallError::Failed(failure) => failure.message,
             })
     }
@@ -664,7 +674,16 @@ impl EventSink {
             let n = std::mem::take(&mut self.dropped);
             self.queue(DapEvent::Output(Output {
                 category: "console".into(),
-                text: format!("[clew] {n} bytes of output dropped — the debuggee outran the UI\n"),
+                text: format!(
+                    "{}\n",
+                    trn!(
+                        "[clew] 1 byte of output dropped — the program wrote faster than it \
+                         could be shown",
+                        "[clew] {n} bytes of output dropped — the program wrote faster than it \
+                         could be shown",
+                        n
+                    )
+                ),
             }))?;
         }
         self.queue(event)
@@ -712,7 +731,13 @@ fn truncate_chunk(text: String) -> String {
     // costing 64 MiB while every byte count here saw 64 KiB.
     let mut out = String::with_capacity(cut + 64);
     out.push_str(&text[..cut]);
-    out.push_str(&format!("\n[clew] …{dropped} bytes truncated\n"));
+    out.push('\n');
+    out.push_str(&trn!(
+        "[clew] …1 byte truncated",
+        "[clew] …{n} bytes truncated",
+        dropped
+    ));
+    out.push('\n');
     out
 }
 
@@ -806,7 +831,7 @@ impl framing::Protocol for DapWire {
                         value
                             .get("message")
                             .and_then(Value::as_str)
-                            .unwrap_or("request failed"),
+                            .unwrap_or(tr!("request failed")),
                     ))
                 };
                 Handled::Response { id, result }
@@ -829,10 +854,21 @@ impl framing::Protocol for DapWire {
     fn frame_error(&mut self, error: &FrameError) {
         let text = if error.is_fatal() {
             format!(
-                "[clew] the debug adapter's output broke framing ({error}) — ending the session\n"
+                "{}\n",
+                tr!(
+                    "[clew] the debug adapter's output broke framing ({error}) — ending the \
+                     session",
+                    error = error
+                )
             )
         } else {
-            format!("[clew] skipped a malformed message from the debug adapter ({error})\n")
+            format!(
+                "{}\n",
+                tr!(
+                    "[clew] skipped a malformed message from the debug adapter ({error})",
+                    error = error
+                )
+            )
         };
         self.console(text);
     }
@@ -840,9 +876,12 @@ impl framing::Protocol for DapWire {
     fn ended(&mut self, reason: &EndReason) -> String {
         match reason {
             EndReason::Broken(error) => {
-                format!("the connection to the debug adapter broke: {error}")
+                tr!(
+                    "the connection to the debug adapter broke: {error}",
+                    error = error
+                )
             }
-            _ => "debug adapter stopped".to_string(),
+            _ => tr!("debug adapter stopped").to_string(),
         }
     }
 }

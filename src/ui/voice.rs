@@ -12,13 +12,14 @@ use crate::VoiceMsg;
 use crate::app::voice::LANGUAGES;
 use clew_voice::models::{MODELS, Model};
 
-/// A language as the picker lists it.
+/// A language as the picker lists it: its English name (`LANGUAGES`),
+/// shown in the interface's language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LanguageChoice(Option<&'static str>, &'static str);
 
 impl std::fmt::Display for LanguageChoice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.1)
+        f.write_str(crate::i18n::lookup(self.1))
     }
 }
 
@@ -42,11 +43,14 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
                 super::meter::PROGRESS,
             ))
             .width(70),
-            text(format!("{:.0}%", share * 100.0))
-                .size(ts::SMALL)
-                .color(theme::dim()),
+            text(tr!(
+                "{percent}%",
+                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
+            ))
+            .size(ts::SMALL)
+            .color(theme::dim()),
             form::action(
-                "Cancel",
+                tr!("Cancel"),
                 Some(Message::Voice(VoiceMsg::CancelDownload(model.id)))
             ),
         ]
@@ -55,9 +59,11 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
         .into()
     } else if installed {
         row![
-            text("Downloaded").size(ts::SMALL).color(theme::success()),
+            text(tr!("Downloaded"))
+                .size(ts::SMALL)
+                .color(theme::success()),
             form::action(
-                "Remove",
+                tr!("Remove"),
                 Some(Message::Voice(VoiceMsg::RemoveModel(model.id)))
             ),
         ]
@@ -65,7 +71,7 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
         .align_y(iced::Center)
         .into()
     } else {
-        let label = format!("Download ({} MB)", model.size_mb);
+        let label = tr!("Download ({size} MB)", size = model.size_mb);
         let msg = Some(Message::Voice(VoiceMsg::Download(model.id)));
         if picked {
             form::primary(&label, msg).into()
@@ -74,13 +80,13 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
         }
     };
     let detail = column![
-        text(model.about)
+        text(crate::i18n::lookup(model.about))
             .size(ts::SMALL)
             .color(theme::dim())
             .wrapping(Wrapping::WordOrGlyph),
     ];
     let mut rows = column![form::choice_with(
-        model.name,
+        crate::i18n::lookup(model.name),
         Some(detail.into()),
         picked,
         Message::Voice(VoiceMsg::PickModel(model.id)),
@@ -113,7 +119,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
             .find(|c| c.0 == app.voice.prefs.language.as_deref())
             .copied();
         listening.push(form::item(
-            "Language",
+            tr!("Language"),
             None,
             form::pick(choices, selected, |c: LanguageChoice| {
                 Message::Voice(VoiceMsg::SetLanguage(c.0))
@@ -121,27 +127,34 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         ));
     }
     listening.push(form::toggle(
-        "Run commands it hears",
+        tr!("Run spoken commands"),
         None,
         app.voice.prefs.run_commands,
         |v| Message::Voice(VoiceMsg::SetRunCommands(v)),
     ));
     listening.push(form::toggle(
-        "Ask questions as soon as they are heard",
+        tr!("Send spoken questions to Ask right away"),
         None,
         app.voice.prefs.send_questions,
         |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
     ));
     let mut parts = vec![
-        form::note(format!(
-            "Press {chord} and speak. Speech stays on this computer."
+        form::note(tr!(
+            "Press {chord} and speak. Speech stays on this computer.",
+            chord = chord
         ))
         .into(),
-        form::group("Model", None, None, models),
-        form::group("Listening", None, None, listening),
+        form::group(tr!("Model"), None, None, models),
+        form::group(tr!("Listening"), None, None, listening),
     ];
     if let Some(store) = &app.voice.store {
-        parts.push(form::note(format!("Models are kept in {}", store.dir().display())).into());
+        parts.push(
+            form::note(tr!(
+                "Models are stored in {path}",
+                path = store.dir().display()
+            ))
+            .into(),
+        );
     }
     form::page(parts)
 }

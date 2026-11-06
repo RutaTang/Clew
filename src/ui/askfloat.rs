@@ -226,7 +226,11 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
         .width(Length::Fixed(26.0))
         .height(Length::Fixed(26.0))
         .on_press(Message::Voice(VoiceMsg::Toggle)),
-        if listening { "Stop listening" } else { "Talk" },
+        if listening {
+            tr!("Stop listening")
+        } else {
+            tr!("Talk")
+        },
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );
@@ -236,7 +240,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             let turns = app.proj.ask_turns.len();
             let mut face = row![
                 glyph::icon(Glyph::Message, theme::accent(), 15.0),
-                text("Ask")
+                text(tr!("Ask"))
                     .size(ts::BASE)
                     .font(crate::fonts::UI_MEDIUM)
                     .color(theme::fg()),
@@ -245,13 +249,9 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             .align_y(iced::Center);
             if turns > 0 {
                 face = face.push(
-                    text(if turns == 1 {
-                        "1 answer".to_string()
-                    } else {
-                        format!("{turns} answers")
-                    })
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
+                    text(trn!("1 answer", "{n} answers", turns))
+                        .size(ts::SMALL)
+                        .color(theme::dim()),
                 );
             }
             tip_at(
@@ -259,7 +259,7 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
                     .style(theme::toolbar_button)
                     .padding([4, 6])
                     .on_press(Message::Ask(AskMsg::Open)),
-                "Ask",
+                tr!("Ask"),
                 Some(app.keymap.chord(crate::keymap::Action::ToggleAsk).caps()),
                 tooltip::Position::Top,
             )
@@ -298,11 +298,14 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     if let Some(title) = &app.voice.confirm {
         return Some(
             row![
-                text(format!("Run “{title}”?"))
-                    .size(ts::BASE)
-                    .color(theme::fg()),
-                small("Run", Message::Voice(VoiceMsg::Confirm), true),
-                small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
+                text(tr!(
+                    "Run “{command}”?",
+                    command = crate::i18n::lookup(title)
+                ))
+                .size(ts::BASE)
+                .color(theme::fg()),
+                small(tr!("Run"), Message::Voice(VoiceMsg::Confirm), true),
+                small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
             ]
             .spacing(6)
             .padding(Padding {
@@ -324,7 +327,7 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
                             ..container::Style::default()
                         }
                     }),
-                    text("Listening…").size(ts::BASE).color(theme::fg()),
+                    text(tr!("Listening…")).size(ts::BASE).color(theme::fg()),
                     super::meter::level_meter(&PILL_BARS, level),
                     keycap("Esc".to_string()),
                 ]
@@ -340,10 +343,10 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
         VoicePhase::Transcribing { .. } => {
             return Some(
                 row![
-                    text("Working out what you said…")
+                    text(tr!("Working out what you said…"))
                         .size(ts::BASE)
                         .color(theme::fg_muted()),
-                    small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
+                    small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
                 ]
                 .spacing(6)
                 .padding(Padding {
@@ -364,13 +367,13 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
         HeardOutcome::Ran(title) => (
             Glyph::Check,
             theme::success(),
-            format!("→ {title}"),
+            format!("→ {}", crate::i18n::lookup(title)),
             theme::dim(),
         ),
         HeardOutcome::Confirm(title) => (
             Glyph::Check,
             theme::dim(),
-            format!("{title}?"),
+            tr!("{command}?", command = crate::i18n::lookup(title)),
             theme::dim(),
         ),
         // A question opened the card, which says it.
@@ -378,7 +381,7 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
         HeardOutcome::Nothing => (
             Glyph::Mic,
             theme::dim(),
-            "Didn't catch that".to_string(),
+            tr!("Didn't catch that").to_string(),
             theme::dim(),
         ),
         HeardOutcome::Failed(e) => (Glyph::Info, theme::warn(), e.clone(), theme::warn()),
@@ -412,17 +415,28 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
 /// Side of the dot that says the microphone is open.
 const REC_DOT: f32 = 7.0;
 
-/// What can be said, and what comes of it: shown while voice listens.
-const TRY_SAYING: [(&str, &str); 5] = [
-    ("“Open the call graph”", "Clew runs it"),
-    ("“Hide the minimap”", "Clew runs it"),
+/// What can be said, and what comes of it: shown while voice listens, in
+/// the reader's language. A command said is matched by its English title
+/// or by the title the palette shows (`app::voice::said_as_shown`), so each
+/// language's examples name a command as its palette does; a question goes
+/// to Ask, which takes it in any language.
+pub(crate) const TRY_SAYING: [(&str, &str); 5] = [
+    (tr_noop!("“Open the call graph”"), tr_noop!("Clew runs it")),
+    (tr_noop!("“Hide the minimap”"), tr_noop!("Clew runs it")),
     (
-        "“Take me to where the config is parsed”",
-        "Clew finds it and takes you there",
+        tr_noop!("“Take me to where the config is parsed”"),
+        tr_noop!("Clew finds it and takes you there"),
     ),
-    ("“Why is this function here?”", "Clew answers"),
-    ("“Start debugging”", "Clew asks you first"),
+    (tr_noop!("“Why is this function here?”"), CLEW_ANSWERS),
+    (
+        tr_noop!("“Start debugging”"),
+        tr_noop!("Clew asks you first"),
+    ),
 ];
+
+/// What a question said aloud comes to: the row of [`TRY_SAYING`] the
+/// question about the caret's function takes the place of.
+const CLEW_ANSWERS: &str = tr_noop!("Clew answers");
 
 /// What can be said while voice listens, as the empty card shows it: the
 /// question among them made about the function the caret is in.
@@ -431,8 +445,11 @@ pub(crate) fn try_saying(app: &App) -> Vec<(String, &'static str)> {
     TRY_SAYING
         .iter()
         .map(|&(say, does)| match (&about, does) {
-            (Some(about), "Clew answers") => (about.clone(), does),
-            _ => (say.to_string(), does),
+            (Some(about), CLEW_ANSWERS) => (about.clone(), crate::i18n::lookup(does)),
+            _ => (
+                crate::i18n::lookup(say).to_string(),
+                crate::i18n::lookup(does),
+            ),
         })
         .collect()
 }
@@ -459,9 +476,26 @@ fn question_about(app: &App) -> Option<String> {
                 .take(sym.end_line + 1 - sym.line)
                 .find_map(string_edit)
         });
+    // A sentence of its own for each edit, the characters named in the
+    // reader's language.
     Some(match edit {
-        Some((verb, what)) => format!("“Why does {name} {verb} {what}?”"),
-        None => format!("“Why is {name} written this way?”"),
+        Some((verb, what)) => {
+            let what = crate::i18n::lookup(what);
+            match verb {
+                "split on" => tr!(
+                    "“Why does {name} split on {what}?”",
+                    name = name,
+                    what = what
+                ),
+                "trim" => tr!("“Why does {name} trim {what}?”", name = name, what = what),
+                _ => tr!(
+                    "“Why does {name} replace {what}?”",
+                    name = name,
+                    what = what
+                ),
+            }
+        }
+        None => tr!("“Why is {name} written this way?”", name = name),
     })
 }
 
@@ -488,17 +522,18 @@ fn string_edit(line: &str) -> Option<(&'static str, &'static str)> {
 fn character_name(literal: &str) -> Option<&'static str> {
     let unquote = |q: char| literal.strip_prefix(q).and_then(|s| s.strip_suffix(q));
     let inner = unquote('\'').or_else(|| unquote('"'))?;
+    // Kept in English: `question_about` says it in the reader's language.
     Some(match inner {
-        "\\\\" => "backslashes",
-        "/" => "slashes",
-        " " => "spaces",
-        "\\t" => "tabs",
-        "\\n" => "newlines",
-        "." => "dots",
-        ":" => "colons",
-        ";" => "semicolons",
-        "-" => "dashes",
-        "_" => "underscores",
+        "\\\\" => tr_noop!("backslashes"),
+        "/" => tr_noop!("slashes"),
+        " " => tr_noop!("spaces"),
+        "\\t" => tr_noop!("tabs"),
+        "\\n" => tr_noop!("newlines"),
+        "." => tr_noop!("dots"),
+        ":" => tr_noop!("colons"),
+        ";" => tr_noop!("semicolons"),
+        "-" => tr_noop!("dashes"),
+        "_" => tr_noop!("underscores"),
         _ => return None,
     })
 }
@@ -584,9 +619,9 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
         let on = match &app.proj.explain.view {
             Some(crate::explain::Node::Function { file, name: f, .. }) if *file == v.abs => {
-                format!("Reading {name} · {f}")
+                tr!("Reading {file} · {function}", file = name, function = f)
             }
-            _ => format!("Reading {name}"),
+            _ => tr!("Reading {file}", file = name),
         };
         header = header.push(
             container(ts::set_in(
@@ -604,26 +639,26 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
     header = header
         .push(header_button(
             Glyph::Plus,
-            "New session",
+            tr!("New session"),
             Message::Ask(AskMsg::NewSession),
         ))
         .push(header_button(
             Glyph::ChevronDown,
-            "Hide (Esc)",
+            tr!("Hide (Esc)"),
             Message::Ask(AskMsg::Hide),
         ))
         .push(if large {
             header_button(
                 Glyph::Shrink,
-                "Make small (Esc)",
+                tr!("Shrink (Esc)"),
                 Message::Ask(AskMsg::Shrink),
             )
         } else {
-            header_button(Glyph::Expand, "Make large", Message::Ask(AskMsg::Expand))
+            header_button(Glyph::Expand, tr!("Expand"), Message::Ask(AskMsg::Expand))
         })
         .push(header_button(
             Glyph::Close,
-            "Put away",
+            tr!("Close Ask"),
             Message::Ask(AskMsg::Close),
         ));
     let card: Element<'_, Message> = column![
@@ -683,14 +718,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         .project
         .as_ref()
         .and_then(|p| p.root.file_name())
-        .map_or_else(
-            || "this project".to_string(),
-            |n| n.to_string_lossy().into_owned(),
-        );
+        .map(|n| n.to_string_lossy().into_owned());
     let new = button(
         row![
             glyph::icon(Glyph::Plus, theme::accent(), 14.0),
-            text("New session").size(ts::BASE).color(theme::fg()),
+            text(tr!("New session")).size(ts::BASE).color(theme::fg()),
         ]
         .spacing(9)
         .align_y(iced::Center),
@@ -703,7 +735,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     let search = container(
         row![
             glyph::icon(Glyph::Search, theme::fg_muted(), 14.0),
-            text_input("Search sessions", &app.ask_sessions_query)
+            text_input(tr!("Search sessions"), &app.ask_sessions_query)
                 .id(crate::ui::ask_sessions_search_id())
                 .on_input(|q| Message::Ask(AskMsg::SessionsQuery(q)))
                 .on_submit(Message::Ask(AskMsg::OpenFirstFound))
@@ -722,13 +754,9 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         let current = app.proj.ask_session == Some(session.id);
         let questions = session.turns.len();
         let meta = format!(
-            "{} · {questions} {}",
+            "{} · {}",
             when(session.updated, now),
-            if questions == 1 {
-                "question"
-            } else {
-                "questions"
-            }
+            trn!("1 question", "{n} questions", questions)
         );
         let dot =
             container(space().width(6).height(6)).style(move |_: &iced::Theme| container::Style {
@@ -739,10 +767,13 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         let pick = button(
             row![dot, {
                 let mut lines = column![
-                    text(cut_short(&session.title, 36))
-                        .size(ts::BASE)
-                        .color(theme::fg())
-                        .wrapping(Wrapping::None),
+                    text(cut_short(
+                        crate::app::ask_sessions::shown_title(&session.title),
+                        36
+                    ))
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
                 ]
                 .spacing(1)
                 .width(Fill);
@@ -779,7 +810,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                     .height(Length::Fixed(24.0))
                     .padding(0)
                     .on_press(Message::Ask(AskMsg::DeleteSession(session.id))),
-                "Forget this session",
+                tr!("Forget this session"),
                 None,
                 tooltip::Position::Right,
             ));
@@ -792,11 +823,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
             .into()
     };
     let body: Element<'_, Message> = if app.proj.ask_sessions.is_empty() {
-        note("Nothing asked yet: a session is kept once Clew has answered in it.".into())
+        note(tr!("No sessions yet. A session is saved once Clew has answered in it.").into())
     } else if found.is_empty() {
-        note(format!(
-            "No session has “{}” in it.",
-            app.ask_sessions_query.trim()
+        note(tr!(
+            "No sessions match “{query}”.",
+            query = app.ask_sessions_query.trim()
         ))
     } else {
         scrollable(list)
@@ -805,12 +836,12 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
             .into()
     };
     let heading = if app.ask_sessions_query.trim().is_empty() {
-        format!("Sessions in {project}")
-    } else {
-        match found.len() {
-            1 => "1 session found".to_string(),
-            n => format!("{n} sessions found"),
+        match &project {
+            Some(project) => tr!("Sessions in {project}", project = project),
+            None => tr!("Sessions in this project").to_string(),
         }
+    } else {
+        trn!("1 session found", "{n} sessions found", found.len())
     };
     // Searching is worth it once there is more than one to look through.
     let top = if app.proj.ask_sessions.len() > 1 {
@@ -856,11 +887,14 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
     if let Some(title) = &app.voice.confirm {
         return Some(
             row![
-                text(format!("Run “{title}”?"))
-                    .size(ts::SMALL)
-                    .color(theme::fg()),
-                small("Run", Message::Voice(VoiceMsg::Confirm), true),
-                small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
+                text(tr!(
+                    "Run “{command}”?",
+                    command = crate::i18n::lookup(title)
+                ))
+                .size(ts::SMALL)
+                .color(theme::fg()),
+                small(tr!("Run"), Message::Voice(VoiceMsg::Confirm), true),
+                small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
             ]
             .spacing(6)
             .align_y(iced::Center)
@@ -872,7 +906,7 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
         VoicePhase::Listening { level, .. } => Some(
             row![
                 text("●").size(ts::SMALL).color(theme::danger()),
-                text("Listening").size(ts::SMALL).color(theme::fg()),
+                text(tr!("Listening")).size(ts::SMALL).color(theme::fg()),
                 container(super::meter::eased_bar(
                     level,
                     64.0,
@@ -881,7 +915,7 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
                     super::meter::LEVEL,
                 ))
                 .width(64),
-                small("Done", Message::Voice(VoiceMsg::Stop), true),
+                small(tr!("Done"), Message::Voice(VoiceMsg::Stop), true),
             ]
             .spacing(6)
             .align_y(iced::Center)
@@ -889,10 +923,10 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
         ),
         VoicePhase::Transcribing { .. } => Some(
             row![
-                text("Working out what you said…")
+                text(tr!("Working out what you said…"))
                     .size(ts::SMALL)
                     .color(theme::dim()),
-                small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
+                small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
             ]
             .spacing(6)
             .align_y(iced::Center)
@@ -909,10 +943,19 @@ pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
         None => {
             let heard = app.voice.heard.as_ref()?;
             let (said, color) = match &heard.outcome {
-                HeardOutcome::Ran(title) => (format!("→ {title}"), theme::fg_muted()),
-                HeardOutcome::Confirm(title) => (format!("→ {title}?"), theme::fg_muted()),
-                HeardOutcome::Asked => ("→ asked".to_string(), theme::fg_muted()),
-                HeardOutcome::Nothing => ("Didn't catch that".to_string(), theme::dim()),
+                HeardOutcome::Ran(title) => (
+                    format!("→ {}", crate::i18n::lookup(title)),
+                    theme::fg_muted(),
+                ),
+                HeardOutcome::Confirm(title) => (
+                    format!(
+                        "→ {}",
+                        tr!("{command}?", command = crate::i18n::lookup(title))
+                    ),
+                    theme::fg_muted(),
+                ),
+                HeardOutcome::Asked => (format!("→ {}", tr!("asked")), theme::fg_muted()),
+                HeardOutcome::Nothing => (tr!("Didn't catch that").to_string(), theme::dim()),
                 HeardOutcome::Failed(e) => (e.clone(), theme::warn()),
             };
             let mut line = row![].spacing(6).align_y(iced::Center);

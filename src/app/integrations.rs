@@ -271,7 +271,7 @@ pub(crate) fn split_command_line(line: &str) -> Result<Vec<String>, String> {
                     match chars.next() {
                         Some('\'') => break,
                         Some(c) => word.push(c),
-                        None => return Err("a ' is not closed".into()),
+                        None => return Err(tr!("a ' is not closed").into()),
                     }
                 }
             }
@@ -286,10 +286,10 @@ pub(crate) fn split_command_line(line: &str) -> Result<Vec<String>, String> {
                                 word.push('\\');
                                 word.push(c);
                             }
-                            None => return Err("a \" is not closed".into()),
+                            None => return Err(tr!("a \" is not closed").into()),
                         },
                         Some(c) => word.push(c),
-                        None => return Err("a \" is not closed".into()),
+                        None => return Err(tr!("a \" is not closed").into()),
                     }
                 }
             }
@@ -323,10 +323,10 @@ pub(crate) fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
         .map(|(i, entry)| {
             let at = entry
                 .find(['=', ':'])
-                .ok_or_else(|| format!("entry {} is not KEY=value (or Name: value)", i + 1))?;
+                .ok_or_else(|| tr!("entry {n} is not KEY=value (or Name: value)", n = i + 1))?;
             let (key, value) = (entry[..at].trim(), entry[at + 1..].trim());
             if key.is_empty() {
-                return Err(format!("entry {} has no name", i + 1));
+                return Err(tr!("entry {n} has no name", n = i + 1));
             }
             Ok((key.to_string(), value.to_string()))
         })
@@ -338,21 +338,25 @@ pub(crate) fn parse_pairs(text: &str) -> Result<Vec<(String, String)>, String> {
 /// push the one that matters out of view — and the card says so whenever
 /// anything was left out.
 fn args_preview(args: &serde_json::Value) -> String {
-    const WARNING: &str = "decline if you cannot tell what this does";
     let mut cut = false;
     let text = match args {
-        serde_json::Value::Object(map) if map.is_empty() => "(no arguments)".to_string(),
+        serde_json::Value::Object(map) if map.is_empty() => tr!("(no arguments)").to_string(),
         args => serde_json::to_string_pretty(&shorten_strings(args, &mut cut)).unwrap_or_default(),
     };
     let total = text.chars().count();
     if total > MAX_DETAIL_CHARS {
         let shown: String = text.chars().take(MAX_DETAIL_CHARS).collect();
-        format!(
-            "{shown}\n… {} more characters not shown — {WARNING}",
+        let more = trn!(
+            "… 1 more character not shown — decline if you cannot tell what this does",
+            "… {n} more characters not shown — decline if you cannot tell what this does",
             total - MAX_DETAIL_CHARS
-        )
+        );
+        format!("{shown}\n{more}")
     } else if cut {
-        format!("{text}\n(parts of the arguments are not shown — {WARNING})")
+        let parts = tr!(
+            "(parts of the arguments are not shown — decline if you cannot tell what this does)"
+        );
+        format!("{text}\n{parts}")
     } else {
         text
     }
@@ -370,9 +374,12 @@ fn shorten_strings(value: &serde_json::Value, cut: &mut bool) -> serde_json::Val
             let (head, tail) = (MAX_ARG_CHARS * 2 / 3, MAX_ARG_CHARS / 3);
             let start: String = s.chars().take(head).collect();
             let end: String = s.chars().skip(count - tail).collect();
-            Value::String(format!(
-                "{start} … ({} characters not shown) … {end}",
-                count - head - tail
+            Value::String(trn!(
+                "{start} … (1 character not shown) … {end}",
+                "{start} … ({n} characters not shown) … {end}",
+                count - head - tail,
+                start = start,
+                end = end
             ))
         }
         Value::Array(items) => {
@@ -393,7 +400,7 @@ impl App {
     fn mcp_servers(&mut self) -> Vec<mcp::ServerConfig> {
         let (servers, errors) = mcp::config::load();
         if let Some(error) = errors.first() {
-            self.status = format!("{error} — fix it in config.toml");
+            self.status = tr!("{error} — fix it in config.toml", error = error);
         }
         servers.into_iter().filter(|s| s.enabled).collect()
     }
@@ -410,10 +417,10 @@ impl App {
         self.proj.inflight.ask_gather = Some(token);
         self.proj.asking = true;
         self.reveal_ask();
-        self.status = format!(
-            "Reaching {} MCP server{}…",
-            servers.len(),
-            if servers.len() == 1 { "" } else { "s" }
+        self.status = trn!(
+            "Reaching 1 MCP server…",
+            "Reaching {n} MCP servers…",
+            servers.len()
         );
         let stamp = self.stamp();
         Task::perform(
@@ -483,15 +490,24 @@ impl App {
             }
         }
         self.status = if failed.is_empty() {
-            format!("{} MCP tools available to this answer", tools.len())
+            trn!(
+                "1 MCP tool available for this answer",
+                "{n} MCP tools available for this answer",
+                tools.len()
+            )
         } else {
-            format!("Asking without MCP server {}", failed.join(", "))
+            trn!(
+                "Asking without MCP server {servers}",
+                "Asking without MCP servers {servers}",
+                failed.len(),
+                servers = failed.join(", ")
+            )
         };
         if !self.server.is_up() {
             if self.proj.ask_input.trim().is_empty() {
                 self.proj.ask_input = question;
             }
-            self.status = "clew-server went away — ask again once it is back".into();
+            self.status = tr!("clew-server went away — ask again once it is back").into();
             return Task::none();
         }
         self.start_agent_turn(question, tools, map)
@@ -555,31 +571,34 @@ impl App {
             turn.extras.approvals.push(Approval {
                 key: ApprovalKey::Mcp { call },
                 mark: None,
-                title: format!(
-                    "The MCP server `{}` wants to run {}",
-                    target.server.name,
-                    target.tool.display_name()
+                title: tr!(
+                    "The MCP server `{server}` wants to run {tool}",
+                    server = target.server.name,
+                    tool = target.tool.display_name()
                 ),
                 detail: args_preview(&args),
                 options: vec![
                     ApprovalOption {
                         id: "once".into(),
-                        label: "Allow".into(),
+                        label: tr!("Allow").into(),
                         allows: true,
                     },
                     ApprovalOption {
                         id: "always".into(),
-                        label: format!("Always allow {}", target.tool.name),
+                        label: tr!("Always allow {tool}", tool = target.tool.name),
                         allows: true,
                     },
                     ApprovalOption {
                         id: "deny".into(),
-                        label: "Deny".into(),
+                        label: tr!("Deny").into(),
                         allows: false,
                     },
                 ],
             });
-            self.status = format!("{label} waits for your approval in the Ask panel");
+            self.status = tr!(
+                "{label} is waiting for your approval in the Ask panel",
+                label = label
+            );
             self.proj.link.mcp_pending.insert(
                 (stream, call),
                 PendingCall {
@@ -729,7 +748,8 @@ impl App {
                     // The turn went on without it: running it now would act
                     // for nothing.
                     self.set_step_state(stream, &id, StepState::Failed);
-                    self.status = "That call waited too long — the agent went on without it".into();
+                    self.status =
+                        tr!("That call waited too long — the agent went on without it").into();
                     return Task::none();
                 }
                 if option == "deny" {
@@ -748,9 +768,15 @@ impl App {
                     let (server, tool) = (target.server.name.clone(), target.tool.name.clone());
                     match mcp::config::allow_tool(&server, &tool) {
                         Ok(()) => {
-                            self.status = format!("{tool} of `{server}` will no longer ask");
+                            self.status = tr!(
+                                "{tool} from `{server}` will no longer ask for approval",
+                                tool = tool,
+                                server = server
+                            );
                         }
-                        Err(e) => self.status = format!("Could not remember the approval: {e}"),
+                        Err(e) => {
+                            self.status = tr!("Could not save the approval: {error}", error = e);
+                        }
                     }
                     // This turn's later calls of the tool need not ask either.
                     if let Some(tools) = self.proj.link.agent_tools.get_mut(&stream) {
@@ -890,15 +916,18 @@ impl App {
     /// Ask the ACP agent `name` the question.
     pub(crate) fn start_acp_ask(&mut self, name: String, question: String) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
-            self.status = "Open a project to ask an agent about it".into();
+            self.status = tr!("Open a project to ask an agent about it").into();
             return Task::none();
         };
         if self.connection.is_remote() {
-            self.status = "ACP agents work on local projects only".into();
+            self.status = tr!("ACP agents work on local projects only").into();
             return Task::none();
         }
         let Some(config) = self.acp_agents.iter().find(|a| a.name == name).cloned() else {
-            self.status = format!("No ACP agent `{name}` is configured any more — pick another");
+            self.status = tr!(
+                "No ACP agent `{name}` is configured any more — pick another",
+                name = name
+            );
             self.ask_agent = None;
             return Task::none();
         };
@@ -954,7 +983,7 @@ impl App {
                     // Starting already: the question goes once it is up.
                     Task::none()
                 } else {
-                    self.status = format!("Starting {label}…");
+                    self.status = tr!("Starting {label}…", label = label);
                     self.start_acp_agent(config, root)
                 }
             }
@@ -1132,7 +1161,7 @@ impl App {
         };
         match result {
             Ok((agent, session)) => {
-                self.status = format!("{} is ready", agent.info().display_name());
+                self.status = tr!("{label} is ready", label = agent.info().display_name());
                 link.label = agent.info().display_name().to_string();
                 link.options = agent.options(&session);
                 link.agent = Some(agent);
@@ -1143,13 +1172,15 @@ impl App {
                 let pending = link.pending.take();
                 let label = link.label.clone();
                 self.proj.acp = None;
-                self.status = format!("{label} could not start: {why}");
+                self.status = tr!(
+                    "{label} could not start: {error}",
+                    label = label,
+                    error = why
+                );
                 match pending {
                     Some((stream, _)) => self.on_ask_stream_ended(
                         stream,
-                        clew_protocol::StreamOutcome::Failed(format!(
-                            "{label} could not start: {why}"
-                        )),
+                        clew_protocol::StreamOutcome::Failed(self.status.clone()),
                     ),
                     None => Task::none(),
                 }
@@ -1176,8 +1207,9 @@ impl App {
                 match pending {
                     Some((stream, _)) => self.on_ask_stream_ended(
                         stream,
-                        clew_protocol::StreamOutcome::Failed(format!(
-                            "the agent could not open a conversation: {why}"
+                        clew_protocol::StreamOutcome::Failed(tr!(
+                            "the agent could not open a conversation: {error}",
+                            error = why
                         )),
                     ),
                     None => Task::none(),
@@ -1266,8 +1298,9 @@ impl App {
             return match pending {
                 Some((stream, _)) => self.on_ask_stream_ended(
                     stream,
-                    clew_protocol::StreamOutcome::Failed(format!(
-                        "{label} did not stop its last answer"
+                    clew_protocol::StreamOutcome::Failed(tr!(
+                        "{label} did not stop its last answer",
+                        label = label
                     )),
                 ),
                 None => Task::none(),
@@ -1277,7 +1310,10 @@ impl App {
         link.pending = pending;
         link.chosen = chosen;
         self.proj.acp = Some(link);
-        self.status = format!("{label} did not stop its last answer — starting it again");
+        self.status = tr!(
+            "{label} did not stop its last answer — starting it again",
+            label = label
+        );
         self.start_acp_agent(config, root)
     }
 
@@ -1304,7 +1340,7 @@ impl App {
                     .map(|a| a.stderr_tail())
                     .unwrap_or_default();
                 self.proj.acp = None;
-                self.status = format!("{label} exited ({why})");
+                self.status = tr!("{label} exited ({error})", label = label, error = why);
                 let detail = if tail.is_empty() {
                     String::new()
                 } else {
@@ -1313,9 +1349,7 @@ impl App {
                 return match turn {
                     Some(stream) => self.on_ask_stream_ended(
                         stream,
-                        clew_protocol::StreamOutcome::Failed(format!(
-                            "{label} exited ({why}){detail}"
-                        )),
+                        clew_protocol::StreamOutcome::Failed(format!("{}{detail}", self.status)),
                     ),
                     None => Task::none(),
                 };
@@ -1329,10 +1363,10 @@ impl App {
                 return Task::none();
             }
             acp::AgentEvent::FileWritten { path } => {
-                self.status = format!(
-                    "{} wrote {}",
-                    link.label,
-                    rel_of(&path).unwrap_or_else(|| path.display().to_string())
+                self.status = tr!(
+                    "{label} wrote {file}",
+                    label = link.label,
+                    file = rel_of(&path).unwrap_or_else(|| path.display().to_string())
                 );
                 return Task::none();
             }
@@ -1414,7 +1448,7 @@ impl App {
                 Task::none()
             }
             acp::AgentEvent::ToolCall { call, .. } => {
-                let mut title = call.title.clone().unwrap_or_else(|| "a tool".into());
+                let mut title = call.title.clone().unwrap_or_else(|| tr!("a tool").into());
                 if let Some(summary) = &call.summary {
                     title = format!("{title} — {summary}");
                 }
@@ -1461,7 +1495,7 @@ impl App {
                             .insert(call.id.clone(), turn.steps.len());
                         turn.steps.push(AgentStep {
                             tool: call.kind.clone().unwrap_or_else(|| "other".into()),
-                            title: call.title.clone().unwrap_or_else(|| "a tool".into()),
+                            title: call.title.clone().unwrap_or_else(|| tr!("a tool").into()),
                             refs: refs_of(&call.locations),
                             state: state_of(call.status),
                         });
@@ -1483,10 +1517,10 @@ impl App {
                     .tool
                     .title
                     .clone()
-                    .unwrap_or_else(|| "use a tool".into());
+                    .unwrap_or_else(|| tr!("use a tool").into());
                 let mut detail = String::new();
                 if let Some(kind) = &request.tool.kind {
-                    detail.push_str(&format!("kind: {kind}"));
+                    detail.push_str(&tr!("kind: {kind}", kind = kind));
                 }
                 for (path, line) in request.tool.locations.iter().flatten() {
                     detail.push_str(&format!(
@@ -1517,14 +1551,17 @@ impl App {
                 turn.extras.approvals.push(Approval {
                     key: ApprovalKey::Acp { id: request.id },
                     mark: None,
-                    title: format!("{label} asks to {what}"),
+                    title: tr!("{label} asks to {what}", label = label, what = what),
                     detail: detail.trim().to_string(),
                     options,
                 });
                 if let (Some(added), Some(link)) = (added, self.proj.acp.as_mut()) {
                     link.declines.insert(request.id, added);
                 }
-                self.status = format!("{label} waits for your answer in the Ask panel");
+                self.status = tr!(
+                    "{label} is waiting for your answer in the Ask panel",
+                    label = label
+                );
                 Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()])
             }
             _ => Task::none(),
@@ -1564,21 +1601,20 @@ impl App {
                 }
             }
             let note = match &result {
-                Ok(acp::StopReason::MaxTokens) => Some("*(the agent ran out of tokens)*"),
+                Ok(acp::StopReason::MaxTokens) => Some(tr!("the agent ran out of tokens")),
                 Ok(acp::StopReason::MaxTurnRequests) => {
-                    Some("*(the agent reached its step limit)*")
+                    Some(tr!("the agent reached its step limit"))
                 }
                 _ => None,
             };
             if let Some(note) = note {
-                turn.answer_md.push_str("\n\n");
-                turn.answer_md.push_str(note);
+                turn.answer_md.push_str(&format!("\n\n*({note})*"));
             }
         }
         let outcome = match result {
             Ok(acp::StopReason::Cancelled) => StreamOutcome::Stopped,
             Ok(acp::StopReason::Refusal) => {
-                StreamOutcome::Failed("the agent declined to answer".into())
+                StreamOutcome::Failed(tr!("the agent declined to answer").into())
             }
             Ok(_) => StreamOutcome::Done,
             Err(why) => StreamOutcome::Failed(why),
@@ -1644,7 +1680,9 @@ impl App {
                 link.chosen.retain(|(o, _)| *o != option);
                 link.chosen.push((option, value));
             }
-            Err(why) => self.status = format!("The agent did not take the setting: {why}"),
+            Err(why) => {
+                self.status = tr!("The agent did not accept the setting: {error}", error = why);
+            }
         }
         Task::none()
     }
@@ -1657,14 +1695,14 @@ impl App {
         self.ask_agent = agent.clone();
         let value = toml::Value::String(agent.clone().unwrap_or_default());
         if let Err(e) = clew_core::globalconfig::set_keys(vec![("ask_agent".into(), value)]) {
-            self.status = format!("Could not remember the choice: {e}");
+            self.status = tr!("Could not save the choice: {error}", error = e);
         } else {
             self.status = match agent
                 .as_deref()
                 .and_then(|n| self.acp_agents.iter().find(|a| a.name == n))
             {
-                Some(config) => format!("Questions go to {}", acp_label(config)),
-                None => "Questions go to clew's own agent".into(),
+                Some(config) => tr!("Questions go to {label}", label = acp_label(config)),
+                None => tr!("Questions go to clew's own agent").into(),
             };
         }
         Task::none()
@@ -1737,7 +1775,8 @@ impl App {
             IntegrationsMsg::McpAdd => self.add_mcp_from_form(),
             IntegrationsMsg::McpRemove(name) => {
                 mcp::hub::Hub::global().forget(&name);
-                mcp::config::remove(&name).map(|()| Some(format!("Removed MCP server `{name}`")))
+                mcp::config::remove(&name)
+                    .map(|()| Some(tr!("Removed MCP server `{name}`", name = name)))
             }
             IntegrationsMsg::McpEnable(name, on) => {
                 mcp::hub::Hub::global().forget(&name);
@@ -1754,7 +1793,7 @@ impl App {
                 draft
                     .statuses
                     .insert(name.clone(), mcp::hub::Status::Connecting);
-                draft.note = Some(format!("Connecting to `{name}`…"));
+                draft.note = Some(tr!("Connecting to `{name}`…", name = name));
                 let mut config = config;
                 config.enabled = true;
                 return Task::perform(
@@ -1766,7 +1805,7 @@ impl App {
                             .into_iter()
                             .next()
                             .map(|g| g.outcome.map(|(c, tools)| (c.info().clone(), tools.len())))
-                            .unwrap_or_else(|| Err("nothing to connect to".into()));
+                            .unwrap_or_else(|| Err(tr!("nothing to connect to").into()));
                         (config.name, outcome)
                     },
                     |(name, outcome)| {
@@ -1775,17 +1814,24 @@ impl App {
                 );
             }
             IntegrationsMsg::McpTested { name, outcome } => Ok(Some(match outcome {
-                Ok((info, tools)) => format!(
-                    "`{name}` works: {} {} (MCP {}), {tools} tools",
-                    if info.name.is_empty() {
-                        "the server"
-                    } else {
-                        &info.name
-                    },
-                    info.version,
-                    info.era.version()
+                Ok((info, tools)) if info.name.is_empty() => trn!(
+                    "`{name}` works: version {version} (MCP {protocol}), 1 tool",
+                    "`{name}` works: version {version} (MCP {protocol}), {n} tools",
+                    tools,
+                    name = name,
+                    version = info.version,
+                    protocol = info.era.version()
                 ),
-                Err(why) => format!("`{name}` failed: {why}"),
+                Ok((info, tools)) => trn!(
+                    "`{name}` works: {server} {version} (MCP {protocol}), 1 tool",
+                    "`{name}` works: {server} {version} (MCP {protocol}), {n} tools",
+                    tools,
+                    name = name,
+                    server = info.name,
+                    version = info.version,
+                    protocol = info.era.version()
+                ),
+                Err(why) => tr!("`{name}` failed: {error}", name = name, error = why),
             })),
             IntegrationsMsg::McpSignIn(name) => {
                 let Some(url) =
@@ -1800,9 +1846,10 @@ impl App {
                 else {
                     return Task::none();
                 };
-                draft.note = Some(format!(
-                    "Signing in to `{name}` — finish in your browser (within {} minutes)…",
-                    mcp::oauth::SIGN_IN_TIMEOUT.as_secs() / 60
+                draft.note = Some(tr!(
+                    "Signing in to `{name}` — finish in your browser (within {minutes} minutes)…",
+                    name = name,
+                    minutes = mcp::oauth::SIGN_IN_TIMEOUT.as_secs() / 60
                 ));
                 let client = mcp::config::oauth_client(&name);
                 return Task::perform(
@@ -1813,7 +1860,7 @@ impl App {
                             })
                         })
                         .await
-                        .unwrap_or_else(|_| Err("the sign-in failed unexpectedly".into()));
+                        .unwrap_or_else(|_| Err(tr!("the sign-in failed unexpectedly").into()));
                         (name, result)
                     },
                     |(name, result)| {
@@ -1824,11 +1871,16 @@ impl App {
             IntegrationsMsg::McpSignedIn { name, result } => match result {
                 Ok(()) => {
                     mcp::hub::Hub::global().forget(&name);
-                    Ok(Some(format!(
-                        "Signed in to `{name}` — Test it, or just ask"
+                    Ok(Some(tr!(
+                        "Signed in to `{name}` — Test it, or just ask",
+                        name = name
                     )))
                 }
-                Err(why) => Ok(Some(format!("Signing in to `{name}` failed: {why}"))),
+                Err(why) => Ok(Some(tr!(
+                    "Signing in to `{name}` failed: {error}",
+                    name = name,
+                    error = why
+                ))),
             },
             IntegrationsMsg::McpSignOut(name) => {
                 match draft
@@ -1844,14 +1896,14 @@ impl App {
                         // which may take its whole timeout, and this thread
                         // serves every window.
                         let url = url.clone();
-                        draft.note = Some(format!("Signing out of `{name}`…"));
+                        draft.note = Some(tr!("Signing out of `{name}`…", name = name));
                         return Task::perform(
                             async move {
                                 let result =
                                     tokio::task::spawn_blocking(move || mcp::oauth::sign_out(&url))
                                         .await
                                         .unwrap_or_else(|_| {
-                                            Err("the sign-out failed unexpectedly".into())
+                                            Err(tr!("the sign-out failed unexpectedly").into())
                                         });
                                 (name, result)
                             },
@@ -1870,19 +1922,24 @@ impl App {
                 // A connection made while the store still held the sign-in
                 // carries it: dropped again now that it does not.
                 mcp::hub::Hub::global().forget(&name);
-                result.map(|()| Some(format!("Signed out of `{name}`")))
+                result.map(|()| Some(tr!("Signed out of `{name}`", name = name)))
             }
             IntegrationsMsg::AcpAdd => self.add_acp_from_form(),
             IntegrationsMsg::AcpPreset(index) => match acp::config::PRESETS.get(index) {
-                Some(preset) => acp::config::save(&preset.config())
-                    .map(|()| Some(format!("Added {} — pick it in the Ask panel", preset.label))),
+                Some(preset) => acp::config::save(&preset.config()).map(|()| {
+                    Some(tr!(
+                        "Added {label} — pick it in the Ask panel",
+                        label = preset.label
+                    ))
+                }),
                 None => Ok(None),
             },
             IntegrationsMsg::AcpRemove(name) => {
                 if self.proj.acp.as_ref().is_some_and(|l| l.name == name) {
                     closing = self.end_acp_agent();
                 }
-                acp::config::remove(&name).map(|()| Some(format!("Removed agent `{name}`")))
+                acp::config::remove(&name)
+                    .map(|()| Some(tr!("Removed agent `{name}`", name = name)))
             }
             IntegrationsMsg::AcpShareMcp(name, share) => {
                 match self
@@ -1911,7 +1968,9 @@ impl App {
                     self.settings.integrations.note = note;
                 }
             }
-            Err(e) => self.settings.integrations.note = Some(format!("Not saved: {e}")),
+            Err(e) => {
+                self.settings.integrations.note = Some(tr!("Not saved: {error}", error = e));
+            }
         }
         self.refresh_integrations();
         closing
@@ -1923,16 +1982,16 @@ impl App {
         let draft = &mut self.settings.integrations;
         let target = draft.new_mcp_target.trim().to_string();
         if target.is_empty() {
-            return Err("give a command, a URL, or a JSON snippet".into());
+            return Err(tr!("give a command, a URL, or a JSON snippet").into());
         }
         let servers = if target.starts_with('{') {
             mcp::config::from_json(&target)?
         } else {
             let name = draft.new_mcp_name.trim();
             if !mcp::config::valid_name(name) {
-                return Err(format!(
-                    "give the server a name: letters, digits, - and _ (at most {})",
-                    mcp::config::MAX_NAME_LEN
+                return Err(tr!(
+                    "give the server a name: letters, digits, - and _ (at most {n} characters)",
+                    n = mcp::config::MAX_NAME_LEN
                 ));
             }
             let extra = parse_pairs(&draft.new_mcp_extra)?;
@@ -1945,7 +2004,7 @@ impl App {
             } else {
                 let mut words = split_command_line(&target)?;
                 if words.is_empty() {
-                    return Err("an empty command".into());
+                    return Err(tr!("an empty command").into());
                 }
                 let program = words.remove(0);
                 mcp::Transport::Stdio(clew_core::linerpc::Launch {
@@ -1968,9 +2027,9 @@ impl App {
             if let mcp::Transport::Stdio(launch) = &server.transport
                 && clew_core::linerpc::resolve_program(&launch.program).is_none()
             {
-                return Err(format!(
-                    "`{}` is not found on your PATH — give its full path",
-                    launch.program
+                return Err(tr!(
+                    "`{program}` is not found on your PATH — give its full path",
+                    program = launch.program
                 ));
             }
         }
@@ -1982,7 +2041,12 @@ impl App {
         draft.new_mcp_target.clear();
         draft.new_mcp_extra.clear();
         let names: Vec<&str> = servers.iter().map(|s| s.name.as_str()).collect();
-        Ok(Some(format!("Added MCP server {}", names.join(", "))))
+        Ok(Some(trn!(
+            "Added MCP server {names}",
+            "Added MCP servers {names}",
+            names.len(),
+            names = names.join(", ")
+        )))
     }
 
     /// Add the ACP agent the form describes.
@@ -1990,16 +2054,17 @@ impl App {
         let draft = &mut self.settings.integrations;
         let name = draft.new_acp_name.trim().to_string();
         if !mcp::config::valid_name(&name) {
-            return Err("give the agent a name: letters, digits, - and _".into());
+            return Err(tr!("give the agent a name: letters, digits, - and _").into());
         }
         let mut words = split_command_line(draft.new_acp_command.trim())?;
         if words.is_empty() {
-            return Err("give the command that starts the agent in ACP mode".into());
+            return Err(tr!("give the command that starts the agent in ACP mode").into());
         }
         let program = words.remove(0);
         if clew_core::linerpc::resolve_program(&program).is_none() {
-            return Err(format!(
-                "`{program}` is not found on your PATH — give its full path"
+            return Err(tr!(
+                "`{program}` is not found on your PATH — give its full path",
+                program = program
             ));
         }
         acp::config::save(&acp::AgentConfig {
@@ -2014,8 +2079,9 @@ impl App {
         })?;
         draft.new_acp_name.clear();
         draft.new_acp_command.clear();
-        Ok(Some(format!(
-            "Added agent `{name}` — pick it in the Ask panel"
+        Ok(Some(tr!(
+            "Added agent `{name}` — pick it in the Ask panel",
+            name = name
         )))
     }
 }
@@ -2041,7 +2107,7 @@ pub(crate) fn with_a_decline(
     }
     options.push(ApprovalOption {
         id: id.clone(),
-        label: "Decline".into(),
+        label: tr!("Decline").into(),
         allows: false,
     });
     (options, Some(id))

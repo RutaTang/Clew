@@ -32,7 +32,10 @@ impl App {
         match self.llm_config() {
             Some(cfg) => Ok(cfg),
             None => {
-                self.status = format!("Add an API key in Settings ({})", llm::config_hint());
+                self.status = tr!(
+                    "Add an API key in Settings ({path})",
+                    path = llm::config_hint()
+                );
                 Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
                     SettingsPage::LanguageModel,
                 ))))
@@ -159,24 +162,32 @@ impl App {
                     self.proj.embed_index = embed::Index::default();
                 }
                 self.status = if !kept.is_empty() {
-                    format!(
-                        "Settings saved — {} changed in another window and was kept",
-                        kept.join(", ")
+                    trn!(
+                        "Settings saved — {fields} was changed in another window, so it was kept",
+                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        kept.len(),
+                        fields = kept.join(", ")
                     )
                 } else if self.llm_available {
-                    format!("Settings saved ({})", cfg.provider.label())
+                    tr!(
+                        "Settings saved ({provider})",
+                        provider = crate::i18n::lookup(cfg.provider.label())
+                    )
                 } else {
-                    "Saved — add an API key to enable Explain".into()
+                    tr!("Settings saved — add an API key to use Explain").to_string()
                 };
                 if dropped {
-                    self.status
-                        .push_str(" — semantic index dropped (new embedding space); rebuild it");
+                    self.status = tr!(
+                        "{status} — the semantic index was cleared because the embedding \
+                         settings changed; rebuild it",
+                        status = self.status
+                    );
                 }
                 // The server holds a copy for server-endpoint AI calls (Ask's
                 // agent turns) — keep it in step with the new settings.
                 self.send_ai_config();
             }
-            Err(e) => self.status = format!("Save failed: {e}"),
+            Err(e) => self.status = tr!("Could not save settings: {error}", error = e),
         }
         Task::none()
     }
@@ -255,7 +266,7 @@ impl App {
         self.theme_pref = pref;
         theme::apply_pref(pref);
         self.restyle_svgs();
-        self.status = format!("Appearance: {}", pref.label());
+        self.status = tr!("Appearance: {mode}", mode = pref.label());
         self.persist_theme();
     }
 
@@ -264,7 +275,7 @@ impl App {
     /// looks like success until the next launch reverts it.
     pub(crate) fn persist_theme(&mut self) {
         if let Err(e) = theme::save(self.theme_pref) {
-            self.status = format!("Could not save the appearance setting: {e}");
+            self.status = tr!("Could not save the appearance setting: {error}", error = e);
         }
     }
 
@@ -314,11 +325,11 @@ impl App {
                     self.status = tr!("Could not save the language: {error}", error = e);
                 }
                 // Every window speaks it: the others are told to draw again
-                // (as for an appearance change), and the menu bar — the
-                // system's, built with the words it had — is built again.
+                // (as for an appearance change; the shell also builds the
+                // macOS menu bar again), and the server that makes this
+                // window's AI calls is told which language to answer in.
                 theme::redraw_everywhere();
-                #[cfg(target_os = "macos")]
-                crate::macos::menu::rebuild(&self.keymap);
+                self.send_ai_config();
                 Task::none()
             }
             SettingsMsg::SetThemeVariant { id, is_light } => {
@@ -328,6 +339,9 @@ impl App {
             SettingsMsg::ThemeResynced => {
                 self.theme_pref = theme::current_pref();
                 self.restyle_svgs();
+                // It may have been the language another window chose: this
+                // window's server answers in it too.
+                self.send_ai_config();
                 Task::none()
             }
             SettingsMsg::SystemAppearanceChanged => {

@@ -2326,7 +2326,7 @@ fn the_unknown_host_prompt_shows_the_fingerprint_and_trust_names_it() {
     assert!(sim.find("Unknown host key").is_ok());
     assert!(sim.find("ED25519 key").is_ok());
     assert!(sim.find("SHA256:Ed25519PrintForTests").is_ok());
-    assert!(shows(&mut sim, "Trust it only if this matches"));
+    assert!(shows(&mut sim, "Trust it only if this fingerprint matches"));
     let sent = click(sim, "Trust and connect");
     assert!(
         matches!(sent.as_slice(), [Message::Connect(ConnectMsg::TrustHost { fingerprint })]
@@ -5051,11 +5051,11 @@ fn a_failed_render_shows_its_source_not_a_placeholder() {
         );
         assert!(sim.find(r"\alpha").is_ok(), "the pending inline math's TeX");
         assert!(
-            sim.find("⚠ this equation could not be rendered — its source:")
+            sim.find("⚠ Could not render this equation. Its source:")
                 .is_ok()
         );
         assert!(
-            sim.find("⚠ this diagram could not be rendered — its source:")
+            sim.find("⚠ Could not render this diagram. Its source:")
                 .is_ok()
         );
         assert!(!shows(&mut sim, "rendering"), "a placeholder is on screen");
@@ -5415,12 +5415,12 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
     let mut sim = sim_elem(
         iced::widget::Column::with_children(super::call_flow_rows(&app, &node("main"))).into(),
     );
-    assert!(shows(&mut sim, "an entry point: main"));
+    assert!(shows(&mut sim, "Entry point: main"));
     drop(sim);
     let mut sim = sim_elem(
         iced::widget::Column::with_children(super::call_flow_rows(&app, &node("alone"))).into(),
     );
-    assert!(shows(&mut sim, "no entry point reaches this"));
+    assert!(shows(&mut sim, "No entry point reaches this"));
     drop(sim);
     let mut sim = sim_elem(
         iced::widget::Column::with_children(super::call_flow_rows(&app, &node("test_work"))).into(),
@@ -5587,7 +5587,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
         },
     ]);
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "Database schema · 2 nodes · 1 arrows"));
+    assert!(shows(&mut sim, "Database schema · 2 nodes · 1 arrow"));
     assert!(shows(&mut sim, "an arrow is a foreign key"));
     assert!(shows(&mut sim, "TABLE"));
     assert!(shows(&mut sim, "db/schema.sql:7"));
@@ -5596,7 +5596,7 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
     drop(sim);
     app.proj.maps_selected = Some("routes".into());
     let mut sim = sim_elem(super::project_maps_body(&app));
-    assert!(shows(&mut sim, "Routes · 1 nodes · 0 arrows"));
+    assert!(shows(&mut sim, "Routes · 1 node · 0 arrows"));
     assert!(shows(&mut sim, "GET /users"));
     drop(sim);
     assert!(super::map_picker(&app).is_some());
@@ -5680,7 +5680,7 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
     assert!(shows(&mut sim, "Customer"));
     assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
     assert!(shows(&mut sim, "BASE TYPES (MOST SUBTYPES)"));
-    assert!(shows(&mut sim, "1 subtypes"));
+    assert!(shows(&mut sim, "1 subtype"));
     assert!(shows(&mut sim, "MOST DEPENDENCIES (NAMING OTHERS)"));
     assert!(shows(&mut sim, "→ 2"), "Order names two");
     drop(sim);
@@ -5714,7 +5714,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     assert_eq!(super::scope_label("@trace app"), "Debug run (app)");
     assert_eq!(super::scope_label("@trace"), "Debug run");
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "trace: no stops yet"));
+    assert!(shows(&mut sim, "Trace: no stops yet"));
     drop(sim);
     let frame = |name: &str, line: usize| crate::TraceFrame {
         name: name.into(),
@@ -5737,7 +5737,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     ];
     app.debug.trace_rev += 1;
     let mut sim = sim_elem(super::trace_control(&app));
-    assert!(shows(&mut sim, "trace: 3 stops"));
+    assert!(shows(&mut sim, "Trace: 3 stops"));
     let _ = sim.click("Walk this run");
     let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
@@ -5876,7 +5876,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
     }
     assert!(shows(&mut sim_elem(super::flow_tab(&app)), "changed"));
     let mut sim = sim_elem(super::flow_tab(&app));
-    let _ = sim.click("trace again");
+    let _ = sim.click("Trace again");
     let sent: Vec<Message> = sent_by(sim).into_iter().collect();
     assert!(
         sent.iter()
@@ -6397,7 +6397,7 @@ fn time_travel_shows_the_commit_being_read() {
     assert!(shows(&mut sim, "Ada"));
     assert!(shows(&mut sim, "Teach the parser about raw strings"));
     assert!(shows(&mut sim, "Exit"));
-    assert!(shows(&mut sim, "scope: whole file"));
+    assert!(shows(&mut sim, "Scope: whole file"));
     assert!(
         !shows(&mut sim, "Loading revision…"),
         "the live file stays on screen until the revision loads"
@@ -6690,18 +6690,18 @@ fn the_languages_section_offers_each_languages_build_choices() {
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
         "What rust-analyzer checks the project with. \
-         Also set in .clew/lsp.toml: cargo.features. Settings here win.",
+         Also set in .clew/lsp.toml: cargo.features. Settings here take precedence.",
         "Features",
         "Target",
         "cli:",
         "tls (default)",
-        "The build tags and platform gopls reads the project for.",
+        "The build tags and platform gopls uses for the project.",
         "e2e",
         "GOOS",
         "The compilation database and flags clangd compiles with.",
         "Automatic",
         "/p/build",
-        "The toolchain its server runs from.",
+        "The toolchain the language server runs from.",
         "The lake found on the PATH",
         "elan — the project's",
         "Server programs",
@@ -6765,7 +6765,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
         "TypeScript and JavaScript",
-        "clew's TypeScript 5",
+        "clew's built-in TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
         "Zig",
         "zvm · Zig 0.13.0",
@@ -6842,12 +6842,12 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
         "PHP 8.2 — composer.json's floor",
         "C#",
         "src/App.sln",
-        "The Ruby whose Ruby LSP runs.",
+        "The Ruby that runs Ruby LSP.",
         "rbenv · Ruby 3.3.0",
         "The ruby-lsp found on the PATH",
-        "The language platform its server is.",
+        "The Erlang Language Platform build to run.",
         "The elp found on the PATH",
-        "The language server it runs.",
+        "The Haskell language server to run.",
         "The haskell-language-server-wrapper found on the PATH",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
@@ -7297,11 +7297,11 @@ fn an_empty_ask_shows_questions_not_instructions() {
         let mut sim = sim_elem(super::ask_panel(&app, 560.0));
         assert!(!shows(&mut sim, "Ask a question about this codebase"));
         assert!(!shows(&mut sim, "Run “Explain All”"));
-        assert!(shows(&mut sim, "Answers are grounded once"));
+        assert!(shows(&mut sim, "For grounded answers, run"));
     }
     app.proj.project = None;
     let mut sim = sim_elem(super::ask_panel(&app, 560.0));
-    assert!(!shows(&mut sim, "Answers are grounded once"));
+    assert!(!shows(&mut sim, "For grounded answers, run"));
 }
 
 /// The palette's rows show each command and its keys, a cap per key; a
@@ -7536,10 +7536,7 @@ fn the_card_names_its_session_and_lists_the_others() {
         );
     }
     app.ask_sessions_query = "kubernetes".into();
-    assert!(shows(
-        &mut sim_of(&app),
-        "No session has “kubernetes” in it."
-    ));
+    assert!(shows(&mut sim_of(&app), "No sessions match “kubernetes”."));
 }
 
 /// What voice is doing shows in Ask's corner, never in the field at the

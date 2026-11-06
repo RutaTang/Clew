@@ -344,18 +344,21 @@ impl App {
                 ))
             })
         else {
-            self.status = "Put the cursor on an identifier to trace it".into();
+            self.status = tr!("Put the cursor on an identifier to trace it").into();
             return Task::none();
         };
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = format!("No {lang} server ready — a value trace needs one");
+                self.status = tr!(
+                    "No {language} server ready — a value trace needs one",
+                    language = lang
+                );
                 return Task::none();
             }
         };
         let character = viewer::Col(start).to_offset(&source_line, client.encoding);
-        self.status = format!("Tracing `{word}`…");
+        self.status = tr!("Tracing `{name}`…", name = word);
         self.flow_token += 1;
         let token = self.flow_token;
         self.proj.flow_pending = Some(token);
@@ -406,7 +409,7 @@ impl App {
         let (defs, refs) = match result {
             Ok(found) => found,
             Err(e) => {
-                self.status = format!("Trace failed: {e}");
+                self.status = tr!("Trace failed: {error}", error = e);
                 self.proj.flow = None;
                 return Task::none();
             }
@@ -448,17 +451,26 @@ impl App {
         // Definitions and references share the cap: the note counts both.
         let total = defs.len() + refs.len();
         if total > MAX_FLOW_NODES {
-            tree.note = Some(format!(
-                "{total} occurrences; the first {MAX_FLOW_NODES} are shown"
+            tree.note = Some(tr!(
+                "{total} occurrences; the first {shown} are shown",
+                total = total,
+                shown = MAX_FLOW_NODES
             ));
         } else if !local && !to_read.is_empty() {
-            tree.note = Some(format!(
-                "{} occurrences in files not open here are listed by location only; open a \
+            tree.note = Some(trn!(
+                "1 occurrence in a file not open here is listed by location only; open the \
+                 file to classify its line",
+                "{n} occurrences in files not open here are listed by location only; open a \
                  file to classify its lines",
                 to_read.len()
             ));
         }
-        self.status = format!("`{symbol}`: {n} occurrences");
+        self.status = trn!(
+            "`{symbol}`: 1 occurrence",
+            "`{symbol}`: {n} occurrences",
+            n,
+            symbol = symbol
+        );
         if to_read.is_empty() || !local {
             return Task::none();
         }
@@ -551,7 +563,7 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = format!("No {lang} server ready");
+                self.status = tr!("No {language} server ready", language = lang);
                 return Task::none();
             }
         };
@@ -583,7 +595,11 @@ impl App {
             node.loading = true;
         }
         let stamp = self.stamp();
-        self.status = format!("Following `{symbol}` into `{callee}`…");
+        self.status = tr!(
+            "Following `{symbol}` into `{callee}`…",
+            symbol = symbol,
+            callee = callee
+        );
         Task::perform(
             async move {
                 let defs = client
@@ -592,7 +608,7 @@ impl App {
                 let declared = defs
                     .into_iter()
                     .next()
-                    .ok_or_else(|| format!("no definition of `{callee}` found"))?;
+                    .ok_or_else(|| tr!("no definition of `{callee}` found", callee = callee))?;
                 // The declaration from the callee's name on, over the lines
                 // its parameter list may wrap onto.
                 let sig_lines: Vec<String> =
@@ -619,19 +635,27 @@ impl App {
                         None => Vec::new(),
                     };
                 let Some(first) = sig_lines.first() else {
-                    return Err(format!(
-                        "open {} to follow into `{callee}`",
-                        declared
+                    return Err(tr!(
+                        "open {file} to follow into `{callee}`",
+                        file = declared
                             .path
                             .file_name()
                             .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default()
+                            .unwrap_or_default(),
+                        callee = callee
                     ));
                 };
                 let name_col = raw_col(first, declared.character, client.encoding);
-                let (param, offset, param_col) =
-                    crate::flow::parameter_in(&sig_lines, name_col, argument, lang)
-                        .ok_or_else(|| format!("`{callee}` has no parameter {}", argument + 1))?;
+                let (param, offset, param_col) = crate::flow::parameter_in(
+                    &sig_lines, name_col, argument, lang,
+                )
+                .ok_or_else(|| {
+                    tr!(
+                        "`{callee}` has no parameter {number}",
+                        callee = callee,
+                        number = argument + 1
+                    )
+                })?;
                 let param_text = sig_lines[offset].clone();
                 let param_line = declared.line + offset;
                 let param_character = raw_character(&param_text, param_col, client.encoding);
@@ -701,7 +725,7 @@ impl App {
                 if let Some(node) = self.proj.flow.as_mut().and_then(|t| t.node_mut(id)) {
                     node.loading = false;
                 }
-                self.status = format!("Couldn't follow the value: {e}");
+                self.status = tr!("Couldn't follow the value: {error}", error = e);
                 return Task::none();
             }
         };
@@ -744,7 +768,12 @@ impl App {
         if let Some(tree) = self.proj.flow.as_mut() {
             tree.set_children(id, children);
         }
-        self.status = format!("`{}`: {n} occurrences", followed.symbol);
+        self.status = trn!(
+            "`{symbol}`: 1 occurrence",
+            "`{symbol}`: {n} occurrences",
+            n,
+            symbol = followed.symbol
+        );
         Task::none()
     }
 
@@ -851,11 +880,13 @@ impl App {
             .iter()
             .position(|p| p.as_ref().is_some_and(|v| v.abs == path))
         else {
-            self.status = format!(
-                "Open {} to trace `{symbol}` again",
-                path.file_name()
+            self.status = tr!(
+                "Open {file} to trace `{symbol}` again",
+                file = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                symbol = symbol
             );
             return Task::none();
         };
@@ -880,7 +911,7 @@ impl App {
         match found {
             Some((l, c)) => self.flow_at(pane, l, c),
             None => {
-                self.status = format!("`{symbol}` is no longer in that file");
+                self.status = tr!("`{symbol}` is no longer in that file", symbol = symbol);
                 Task::none()
             }
         }
@@ -898,12 +929,12 @@ impl App {
                 // A past revision on screen: its names are not the live
                 // file's, and the trace ran from the hidden live caret.
                 if ui::time_travel_pane(self).is_some() {
-                    self.status = "Leave time travel to trace values".into();
+                    self.status = tr!("Leave time travel to trace values").into();
                     return Task::none();
                 }
                 let pane = self.proj.active;
                 let Some((line, col)) = self.active_viewer().and_then(|v| v.caret) else {
-                    self.status = "Put the cursor on a name to trace its value".into();
+                    self.status = tr!("Put the cursor on a name to trace its value").into();
                     return Task::none();
                 };
                 self.flow_at(pane, line, col)

@@ -2692,7 +2692,12 @@ fn a_file_outside_the_project_takes_no_bookmark_or_note() {
         symbol: "helper".into(),
     }));
     assert!(app.proj.reading_note_edit.is_none());
-    assert!(app.status.starts_with("Notes are kept"), "{}", app.status);
+    assert!(
+        app.status
+            .starts_with("Only the project's files can have notes"),
+        "{}",
+        app.status
+    );
     let _ = app.update(Message::Reading(ReadingMsg::NoteToggleUnderstood {
         rel,
         symbol: "helper".into(),
@@ -3387,7 +3392,7 @@ fn a_server_that_builds_the_project_asks_before_it_starts() {
         "the question names what it runs, for this project"
     );
     assert!(
-        app.lsp_row("rust").0.contains("leave to build"),
+        app.lsp_row("rust").0.contains("permission to build"),
         "the panel must not read as a download: {:?}",
         app.lsp_row("rust").0
     );
@@ -3416,7 +3421,7 @@ fn a_server_that_builds_the_project_asks_before_it_starts() {
     assert!(asked(&app), "a fresh start asks again");
     assert_eq!(
         app.lsp_status("rust").as_deref(),
-        Some("waiting for leave to build the project"),
+        Some("waiting for permission to build the project"),
         "the status bar must not read as a download"
     );
     let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
@@ -6652,7 +6657,7 @@ fn a_remote_debug_adapter_is_killed_once_however_the_run_ends() {
     };
     let (seen, status) = remote_debug_run("dap-remote-launch", unparsable, answers, "");
     assert_eq!(seen, ["kill"]);
-    assert!(status.contains("bad launch config"), "{status}");
+    assert!(status.contains("invalid launch configuration"), "{status}");
 
     let (seen, status) = remote_debug_run(
         "dap-remote-reply",
@@ -11737,7 +11742,11 @@ fn a_panicked_merge_or_a_moved_config_hands_the_build_back() {
         ..space.clone()
     };
     let failed = built_in_stored_space(built, &space, &moved).unwrap_err();
-    assert!(failed.error.contains("config changed"), "{}", failed.error);
+    assert!(
+        failed.error.contains("settings changed"),
+        "{}",
+        failed.error
+    );
     let back = failed.previous.take().expect("the build comes back");
     assert_eq!(back.entries.len(), 1, "the build was dropped");
 }
@@ -12326,7 +12335,11 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         result: Err("boom".into()),
     }));
     assert!(!tt(&app).1, "a failed story left its spinner up");
-    assert!(app.status.contains("Story failed"), "{}", app.status);
+    assert!(
+        app.status.contains("Couldn't write the story"),
+        "{}",
+        app.status
+    );
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::StoryDone {
         stamp: app.stamp(),
@@ -14118,7 +14131,7 @@ async fn a_refine_begun_before_the_index_landed_gives_way_to_it() {
     );
     assert!(app.status.contains("finished indexing"), "{}", app.status);
     assert!(
-        app.status.contains("1 too large"),
+        app.status.contains("1 file too large"),
         "the refinement's hand-back hid the index's cap note: {}",
         app.status
     );
@@ -17959,7 +17972,8 @@ fn a_failed_stats_or_overview_cache_write_is_reported() {
         "the report itself was lost"
     );
     assert!(
-        app.status.starts_with("Code statistics ready — not cached"),
+        app.status
+            .starts_with("Code statistics ready, but not cached"),
         "{}",
         app.status
     );
@@ -17982,7 +17996,7 @@ fn a_failed_stats_or_overview_cache_write_is_reported() {
     );
     assert!(
         app.status
-            .starts_with("Architecture overview ready — not cached"),
+            .starts_with("Architecture overview ready, but not cached"),
         "{}",
         app.status
     );
@@ -18027,7 +18041,7 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
         result: Err("rate limited".into()),
     }));
     assert!(!app.proj.overview.generating);
-    assert_eq!(app.status, "Overview failed: rate limited");
+    assert_eq!(app.status, "Could not generate the overview: rate limited");
 
     app.proj.searching_semantic = true;
     app.proj.semantic_seq = 5;
@@ -18636,7 +18650,7 @@ fn a_blame_git_could_not_answer_is_reported_not_painted_empty() {
     }));
     assert_eq!(
         app.status,
-        "git blame of src/lib.rs: git did not finish within 90s and was stopped"
+        "Couldn't read git blame for src/lib.rs: git did not finish within 90s and was stopped"
     );
     assert!(
         app.active_viewer().unwrap().git.is_none(),
@@ -20807,7 +20821,7 @@ async fn a_process_feed_nobody_reads_stops_the_process() {
     );
     assert!(!app.server.lsp_procs.contains_key("rust"));
     assert!(
-        app.status.contains("rust") && app.status.contains("stopped"),
+        app.status.contains("rust") && app.status.contains("Stopped"),
         "{}",
         app.status
     );
@@ -21916,7 +21930,7 @@ fn summaries_from_an_earlier_clew_are_kept_marked_not_billed() {
         "a refresh billed what it could not check"
     );
     assert!(
-        app.status.contains("7 from an earlier clew"),
+        app.status.contains("7 from an earlier version of clew"),
         "{}",
         app.status
     );
@@ -22461,7 +22475,7 @@ fn a_remote_project_past_one_reply_is_explained_over_several() {
     for node in helper_nodes(&root) {
         assert!(app.proj.explain.cache.contains_key(&node), "{node:?}");
     }
-    assert_eq!(app.status, "Explained 7 functions/files/folders");
+    assert_eq!(app.status, "Explained 7 functions, files and folders");
 }
 
 /// A file grown too large to explain is said to be, with its size, and what
@@ -22492,7 +22506,7 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
     assert_eq!(
         app.status,
-        "Explained 4 functions/files/folders · src/util/helper.rs is too large to explain \
+        "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
          (2.3 MB) — its summaries are dropped"
     );
     assert_eq!(
@@ -22512,7 +22526,7 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
 
     let batches = explain_remotely_within(&mut app, &mut rx, &host, limits, |_| false);
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
-    assert_eq!(app.status, "Explained 4 functions/files/folders");
+    assert_eq!(app.status, "Explained 4 functions, files and folders");
     assert_eq!(provider.calls(), 11);
 }
 
@@ -22560,7 +22574,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     assert_eq!(
         app.status,
         format!(
-            "Explained 4 functions/files/folders · src/util/helper.rs is too large to explain \
+            "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
              ({size}) — its summaries are dropped"
         )
     );
@@ -22781,10 +22795,10 @@ fn a_file_that_cannot_be_explained_and_held_nothing_is_not_named() {
     app.llm_config_cache = Some(Some(provider.config.clone()));
     let explicit = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, explicit, explain_and_save);
-    assert_eq!(app.status, "Explained 4 functions/files/folders");
+    assert_eq!(app.status, "Explained 4 functions, files and folders");
     let refresh = save_watched(&mut app, &root, "src/lib.rs", TOP);
     drive(&mut app, refresh, explain_and_save);
-    assert_eq!(app.status, "Explained 4 functions/files/folders");
+    assert_eq!(app.status, "Explained 4 functions, files and folders");
     assert!(
         !app.proj
             .explain
@@ -23077,7 +23091,7 @@ fn a_walkthrough_whose_call_failed_says_what_failed() {
     });
     assert!(
         app.status
-            .starts_with("Block explanation failed: the provider rejected the API key (")
+            .starts_with("Could not explain the blocks: the provider rejected the API key (")
             && app.status.ends_with("— check it in Settings"),
         "{}",
         app.status
@@ -23183,7 +23197,7 @@ fn a_prompt_refused_for_its_length_freezes_nothing_that_quotes_it() {
     assert_ne!(app.proj.explain.cache[&top].summary, before.summary);
     assert!(
         app.status.starts_with(
-            "Explained 7 functions/files/folders · 1 failed: the prompt is too long for the \
+            "Explained 7 functions, files and folders · 1 failed: the prompt is too long for the \
              model ("
         ) && app
             .status
@@ -23966,7 +23980,7 @@ fn a_refused_remote_blame_clears_the_gutter_and_says_why() {
     );
     assert_eq!(
         app.status,
-        "git blame of src/lib.rs: git did not finish within 90s"
+        "Couldn't read git blame for src/lib.rs: git did not finish within 90s"
     );
     assert!(
         app.active_viewer().unwrap().git.is_none(),
@@ -27610,7 +27624,7 @@ fn a_history_still_loading_gives_way_only_to_a_request_it_would_undo() {
         assert_eq!(
             app.status,
             if gives_way {
-                "Stopped loading the history of notes.txt — you went on in this one"
+                "Stopped loading the history of notes.txt — you kept working in this one"
             } else {
                 "Loading history…"
             },
@@ -27777,7 +27791,7 @@ fn a_rescope_still_loading_gives_way_to_a_step_an_exit_or_a_jump() {
         assert_eq!(
             app.status,
             if act == "⌘←" {
-                "Scope unchanged — you went on before the new scope loaded"
+                "Scope unchanged — you moved on before the new scope loaded"
             } else {
                 ""
             },
@@ -27904,7 +27918,7 @@ fn a_scope_toggle_still_loading_stands_with_a_summary_and_says_when_it_gives_way
             }
         }
         assert_eq!(
-            app.status, "Scope unchanged — you went on before the new scope loaded",
+            app.status, "Scope unchanged — you moved on before the new scope loaded",
             "{act}: the scope toggle stood, or gave way without a word"
         );
         let _ = app.update(lib_history(&app, asked));

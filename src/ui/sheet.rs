@@ -176,7 +176,11 @@ fn title_w(app: &App, v: &Viewer) -> f32 {
         w += 8.0 + text_width(&folder, ts::BODY, crate::fonts::UI);
     }
     if v.md.is_some() {
-        let label = if v.show_source { "Rendered" } else { "Source" };
+        let label = if v.show_source {
+            tr!("Rendered")
+        } else {
+            tr!("Source")
+        };
         w += 8.0 + file_tool_w(label);
     }
     let _ = app;
@@ -185,7 +189,12 @@ fn title_w(app: &App, v: &Viewer) -> f32 {
 
 /// Width of the View menu's button.
 fn view_button_w() -> f32 {
-    VIEW_PAD.x() + 14.0 + 6.0 + text_width("View", ts::BODY, FILE_TOOL_FONT) + 6.0 + VIEW_CHEVRON
+    VIEW_PAD.x()
+        + 14.0
+        + 6.0
+        + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
+        + 6.0
+        + VIEW_CHEVRON
 }
 
 /// The View menu's button: the design's 9 before what it holds, 8 after,
@@ -208,7 +217,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
     }
     let v = app.active_viewer()?;
     let after_title = sheet_content_left(app) + HEADER_PAD_X + title_w(app, v) + TITLE_GAP;
-    let tools = ["Explain", "Skim", "Diff", "Time Travel"]
+    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
         .iter()
         .map(|l| file_tool_w(l))
         .sum::<f32>();
@@ -356,9 +365,9 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
         .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
     };
     row![
-        tab("Notes", crate::MarginTab::Notes),
-        tab("Calls", crate::MarginTab::Calls),
-        tab("History", crate::MarginTab::History),
+        tab(tr!("Notes"), crate::MarginTab::Notes),
+        tab(tr!("Calls"), crate::MarginTab::Calls),
+        tab(tr!("History"), crate::MarginTab::History),
     ]
     .spacing(2)
     .into()
@@ -400,9 +409,9 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // A markdown file reads rendered or as its source.
     if v.md.is_some() {
         let (glyph, label) = if v.show_source {
-            (Glyph::Overview, "Rendered")
+            (Glyph::Overview, tr!("Rendered"))
         } else {
-            (Glyph::Note, "Source")
+            (Glyph::Note, tr!("Source"))
         };
         title = title.push(file_tool(
             glyph,
@@ -428,7 +437,9 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         row![
             glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
             ts::set_in(
-                text("View").font(FILE_TOOL_FONT).color(theme::fg_muted()),
+                text(tr!("View"))
+                    .font(FILE_TOOL_FONT)
+                    .color(theme::fg_muted()),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -444,28 +455,28 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     let tools = row![
         file_tool(
             Glyph::TextLines,
-            "Explain",
+            tr!("Explain"),
             false,
             None,
             Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
         ),
         file_tool(
             Glyph::Skim,
-            "Skim",
+            tr!("Skim"),
             false,
             None,
             Message::Editor(EditorMsg::SkimFile),
         ),
         file_tool(
             Glyph::Diff,
-            "Diff",
+            tr!("Diff"),
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
         ),
         file_tool(
             Glyph::TimeTravel,
-            "Time Travel",
+            tr!("Time Travel"),
             time_travel,
             caps(Action::TimeTravel),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),

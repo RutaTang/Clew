@@ -436,7 +436,7 @@ pub(crate) async fn refine_stream(
     let result = std::panic::AssertUnwindSafe(run)
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err("the pass panicked".to_string()));
+        .unwrap_or_else(|_| Err(tr!("the pass panicked").to_string()));
     let _ = output
         .send(Message::Graph(GraphMsg::ProjectCallsRefined {
             stamp,
@@ -468,7 +468,7 @@ async fn refine_pass(
         mut edges,
     } = tokio::task::spawn_blocking(move || pass.plan())
         .await
-        .map_err(|_| "listing the project's functions panicked".to_string())?;
+        .map_err(|_| tr!("listing the project's functions panicked").to_string())?;
     let query_defs: Vec<&projectcalls::Def> = query.iter().map(|&i| &defs[i]).collect();
 
     // File lines, read once, for locating each function name's column. A
@@ -524,11 +524,14 @@ async fn refine_pass(
             // sits there — nothing, mostly — and read as called by nothing.
             // The next pass asks for it again.
             if let Some((rel, why)) = host.unread.first() {
-                let why = why.as_ref().map(|why| format!(": {why}"));
-                return Err(format!(
-                    "could not read {rel} from the remote host{}",
-                    why.unwrap_or_default()
-                ));
+                return Err(match why {
+                    Some(why) => tr!(
+                        "could not read {file} from the remote host: {reason}",
+                        file = rel,
+                        reason = why
+                    ),
+                    None => tr!("could not read {file} from the remote host", file = rel),
+                });
             }
             for (rel, text) in host.files {
                 file_lines.insert(root.join(&rel), text.lines().map(str::to_string).collect());
@@ -591,7 +594,10 @@ async fn refine_pass(
         }
         if let Some(why) = unreadable.get(&d.file) {
             let key = keys.key(&d.file, &d.name, d.line);
-            unrefined.insert(key, format!("the remote host could not read it: {why}"));
+            unrefined.insert(
+                key,
+                tr!("the remote host could not read it: {reason}", reason = why),
+            );
             continue;
         }
         let Some(lang) = highlight::detect(&d.file) else {
@@ -776,7 +782,7 @@ async fn refine_pass(
         }
     })
     .await
-    .map_err(|_| "assembling the refined graph panicked".to_string())
+    .map_err(|_| tr!("assembling the refined graph panicked").to_string())
 }
 
 /// How one function's query went, in the refine pass ([`refine_pass`]).
@@ -1137,7 +1143,7 @@ fn project_folder_is_there(root: &Path) -> Result<(), ExplainFailure> {
     match std::fs::metadata(root) {
         Ok(meta) if meta.is_dir() => Ok(()),
         Ok(_) => Err(ExplainFailure::ProjectUnreadable(
-            "it is not a folder".into(),
+            tr!("it is not a folder").into(),
         )),
         Err(e) => Err(ExplainFailure::ProjectUnreadable(first_line(
             &e.to_string(),
@@ -1725,9 +1731,10 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
 pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
     let path = root.join(".clew").join("launch.json");
     let text = clew_core::statefile::read_capped(&path, 1024 * 1024).ok_or_else(|| {
-        format!(
-            "Create {} with {{\"program\": \"path\", \"type\": \"python\"}}",
-            path.display()
+        tr!(
+            "Create {path} with {example}",
+            path = path.display(),
+            example = r#"{"program": "path", "type": "python"}"#
         )
     })?;
     parse_launch_config(root, &text)
@@ -1742,7 +1749,7 @@ pub(crate) fn parse_launch_config(root: &Path, text: &str) -> Result<LaunchConfi
     let program = v
         .get("program")
         .and_then(|p| p.as_str())
-        .ok_or("launch.json needs a \"program\" field")?;
+        .ok_or(tr!("launch.json needs a \"program\" field"))?;
     let args = v
         .get("args")
         .and_then(|a| a.as_array())
@@ -1831,27 +1838,26 @@ fn generate_svgs_with(
                     .insert(r.key, richmd::prepare_svg(&svg, is_math));
                 continue;
             }
-            render::Guarded::Done(None) => format!("could not parse this {}", noun(r.kind)),
-            render::Guarded::Crashed(what) => {
-                format!("the {} renderer crashed: {what}", noun(r.kind))
+            render::Guarded::Done(None) if is_math => tr!("could not parse this equation").into(),
+            render::Guarded::Done(None) => tr!("could not parse this diagram").into(),
+            render::Guarded::Crashed(what) if is_math => {
+                tr!("the equation renderer crashed: {error}", error = what)
             }
-            render::Guarded::TimedOut => format!(
-                "the {} renderer did not finish within {}s and was given up on",
-                noun(r.kind),
-                render::RENDER_DEADLINE.as_secs()
+            render::Guarded::Crashed(what) => {
+                tr!("the diagram renderer crashed: {error}", error = what)
+            }
+            render::Guarded::TimedOut if is_math => tr!(
+                "the equation renderer timed out after {seconds} seconds",
+                seconds = render::RENDER_DEADLINE.as_secs()
+            ),
+            render::Guarded::TimedOut => tr!(
+                "the diagram renderer timed out after {seconds} seconds",
+                seconds = render::RENDER_DEADLINE.as_secs()
             ),
         };
         batch.failed.push(SvgFailure { key: r.key, reason });
     }
     batch
-}
-
-fn noun(kind: &str) -> &'static str {
-    if kind == "math" {
-        "equation"
-    } else {
-        "diagram"
-    }
 }
 
 /// A semantic-index build that produced no index, and the index it started
@@ -1918,7 +1924,11 @@ pub(crate) async fn build_embeddings(
         Err(e) => return Err(EmbedBuildFailed::new(e, existing)),
     };
     if vecs.len() != pending.len() {
-        let error = format!("asked for {} embeddings, got {}", pending.len(), vecs.len());
+        let error = tr!(
+            "asked for {asked} embeddings, got {got}",
+            asked = pending.len(),
+            got = vecs.len()
+        );
         return Err(EmbedBuildFailed::new(error, existing));
     }
     // Reused vectors of another length than the fresh ones, by their place
@@ -1942,7 +1952,7 @@ pub(crate) async fn build_embeddings(
                 again
             }
             Ok(_) => {
-                let error = "the embedding endpoint changed its vector length mid-build";
+                let error = tr!("the embedding endpoint changed its vector length mid-build");
                 return Err(EmbedBuildFailed::new(error, existing));
             }
             Err(e) => return Err(EmbedBuildFailed::new(e, existing)),
@@ -2117,50 +2127,69 @@ impl ExplainFailure {
             ExplainFailure::Rejected {
                 what: Rejection::Key,
                 detail,
-            } => format!("the provider rejected the API key ({detail}) — check it in Settings"),
+            } => tr!(
+                "the provider rejected the API key ({detail}) — check it in Settings",
+                detail = detail
+            ),
             ExplainFailure::Rejected {
                 what: Rejection::Length,
                 detail,
-            } => format!(
+            } => tr!(
                 "the prompt is too long for the model ({detail}) — a model with a larger \
-                 context window can explain it"
+                 context window can explain it",
+                detail = detail
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Model(model),
                 detail,
-            } => format!(
+            } => tr!(
                 "the provider has no model `{model}` at this endpoint ({detail}) — check the \
-                 model and endpoint in Settings"
+                 model and endpoint in Settings",
+                model = model,
+                detail = detail
             ),
             ExplainFailure::Rejected {
                 what: Rejection::Endpoint,
                 detail,
-            } => format!("the endpoint was not found ({detail}) — check the base URL in Settings"),
+            } => tr!(
+                "the endpoint was not found ({detail}) — check the base URL in Settings",
+                detail = detail
+            ),
             ExplainFailure::Rejected {
                 what: Rejection::Request,
                 detail,
-            } => format!(
-                "the request was refused ({detail}) — check the model and endpoint in Settings"
+            } => tr!(
+                "the request was refused ({detail}) — check the model and endpoint in Settings",
+                detail = detail
             ),
             ExplainFailure::Unavailable(detail) => {
-                format!("the provider was unavailable ({detail}) — try again later")
+                tr!(
+                    "the provider was unavailable ({detail}) — try again later",
+                    detail = detail
+                )
             }
             ExplainFailure::Network(detail) => {
-                format!("the connection failed ({detail}) — check the network and try again")
+                tr!(
+                    "the connection failed ({detail}) — check the network and try again",
+                    detail = detail
+                )
             }
-            ExplainFailure::Unusable(detail) => format!(
+            ExplainFailure::Unusable(detail) => tr!(
                 "the provider's answer could not be used ({detail}) — check the model and \
-                 endpoint in Settings"
+                 endpoint in Settings",
+                detail = detail
             ),
             ExplainFailure::Cancelled => {
-                "its calls were cancelled — run it again to finish".to_string()
+                tr!("its calls were cancelled — run it again to finish").to_string()
             }
-            ExplainFailure::Internal(detail) => format!(
-                "clew failed internally ({detail}) — try again, and report it if it happens again"
+            ExplainFailure::Internal(detail) => tr!(
+                "clew failed internally ({detail}) — try again, and report it if it happens again",
+                detail = detail
             ),
-            ExplainFailure::ProjectUnreadable(detail) => format!(
+            ExplainFailure::ProjectUnreadable(detail) => tr!(
                 "the project folder could not be read ({detail}) — nothing was changed; check \
-                 that it is still there"
+                 that it is still there",
+                detail = detail
             ),
         }
     }
@@ -2367,7 +2396,7 @@ where
         return Err(CallFailed {
             why: ExplainFailure::Rejected {
                 what: Rejection::Length,
-                detail: "refused for its length earlier in this session".into(),
+                detail: tr!("refused for its length earlier in this session").into(),
             },
             gateway: false,
         });
@@ -2404,10 +2433,11 @@ pub(crate) struct ExplainOutcome {
 }
 
 impl ExplainOutcome {
-    /// A pass that broke before it could finish (`what` it was doing): it
-    /// holds nothing, so its caller changes nothing by it (`stopped`).
-    fn broke(what: &str) -> ExplainOutcome {
-        ExplainOutcome::stopped(ExplainFailure::Internal(format!("while {what}")))
+    /// A pass that broke before it could finish (`doing` what — "while
+    /// scheduling the pass"): it holds nothing, so its caller changes
+    /// nothing by it (`stopped`).
+    fn broke(doing: &str) -> ExplainOutcome {
+        ExplainOutcome::stopped(ExplainFailure::Internal(doing.to_string()))
     }
 
     /// A pass that stopped before it started, for `why`: it holds nothing,
@@ -2489,7 +2519,7 @@ where
     })
     .await
     else {
-        return ExplainOutcome::broke("scheduling the pass");
+        return ExplainOutcome::broke(tr!("while scheduling the pass"));
     };
     let total = pass.total();
     let pass = Arc::new(Mutex::new(pass));
@@ -2525,7 +2555,7 @@ where
             Ok(Some(jobs)) => jobs,
             Ok(None) => break,
             Err(_) => {
-                let failure = ExplainFailure::Internal("while rendering prompts".into());
+                let failure = ExplainFailure::Internal(tr!("while rendering prompts").into());
                 failures.stopped = Some(failure);
                 break;
             }
@@ -2666,7 +2696,7 @@ fn explain_outcome(
     let tally = pass.tally();
     let written = written.unwrap_or_else(|| {
         failures.stopped.get_or_insert_with(|| {
-            ExplainFailure::Internal("while listing what the pass changed".into())
+            ExplainFailure::Internal(tr!("while listing what the pass changed").into())
         });
         pass.inserted()
     });
@@ -3038,7 +3068,7 @@ fn bridge_streams(
 /// Native picker for a project folder (Open Folder), in a sheet on `window`.
 pub(crate) fn pick_folder(window: Option<iced::window::Id>) -> Task<Option<PathBuf>> {
     picker(window, |dialog| {
-        dialog.set_title("Open a project folder").pick_folder()
+        dialog.set_title(tr!("Open a project folder")).pick_folder()
     })
 }
 
@@ -3046,7 +3076,9 @@ pub(crate) fn pick_folder(window: Option<iced::window::Id>) -> Task<Option<PathB
 /// in a sheet on `window`.
 pub(crate) fn pick_file(window: Option<iced::window::Id>) -> Task<Option<PathBuf>> {
     picker(window, |dialog| {
-        dialog.set_title("Choose an SSH private key").pick_file()
+        dialog
+            .set_title(tr!("Choose an SSH private key"))
+            .pick_file()
     })
 }
 
@@ -3059,7 +3091,7 @@ pub(crate) fn save_markdown(
 ) -> Task<Option<PathBuf>> {
     picker(window, move |dialog| {
         let dialog = dialog
-            .set_title("Export reading notes")
+            .set_title(tr!("Export reading notes"))
             .set_file_name(file_name)
             .add_filter("Markdown", &["md"]);
         match folder {
@@ -3121,7 +3153,8 @@ pub(crate) async fn load_file(
             && !clew_core::fs_scan::is_inside(&root, &read_path)
         {
             return Err(
-                "cannot read: missing, a symlink, or not a file inside the project".to_string(),
+                tr!("cannot read: missing, a symlink, or not a file inside the project")
+                    .to_string(),
             );
         }
         read_text_file(&read_path)
@@ -3150,12 +3183,12 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
     // the message below has to name every case it folds together (this
     // replaces the OS error text a missing file used to produce).
     let file = clew_core::statefile::open_plain(path)
-        .ok_or_else(|| "cannot read: missing, a symlink, or not a regular file".to_string())?;
+        .ok_or_else(|| tr!("cannot read: missing, a symlink, or not a regular file").to_string())?;
     let too_large = |n: u64| {
-        format!(
-            "file too large ({:.1} MB, limit {} MB)",
-            n as f64 / (1024.0 * 1024.0),
-            MAX_FILE_BYTES / (1024 * 1024)
+        tr!(
+            "file too large ({size} MB, limit {limit} MB)",
+            size = crate::i18n::decimal(n as f64 / (1024.0 * 1024.0), 1),
+            limit = MAX_FILE_BYTES / (1024 * 1024)
         )
     };
     // fstat on the handle we will read, not on the name.
@@ -3173,7 +3206,7 @@ pub(crate) fn read_text_file(path: &Path) -> Result<String, String> {
         return Err(too_large(bytes.len() as u64));
     }
     if bytes.iter().take(8192).any(|&b| b == 0) {
-        return Err("binary file".to_string());
+        return Err(tr!("binary file").to_string());
     }
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -4202,7 +4235,7 @@ mod pass_tests {
         );
         assert!(failed[1].1.contains("could not parse"), "{failed:?}");
         assert!(
-            failed[2].0 == 5 && failed[2].1.contains("did not finish"),
+            failed[2].0 == 5 && failed[2].1.contains("timed out"),
             "{failed:?}"
         );
     }

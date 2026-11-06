@@ -262,7 +262,7 @@ impl App {
         // (the retrieval path, beside a running agent turn) or report a
         // missing index that is not missing. The question stays in the input.
         if self.ask_stream_active() {
-            self.status = "Still answering — wait, or press Stop".into();
+            self.status = tr!("Still answering — wait, or press Stop").into();
             return Task::none();
         }
         // An ACP agent brings its own model: no key of clew's is needed.
@@ -303,9 +303,9 @@ impl App {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op.
             self.status = if self.proj.explain.running || self.proj.building_embeddings {
-                "Building the semantic index — ask again when it's ready".into()
+                tr!("Building the semantic index — ask again when it's ready").into()
             } else {
-                "Build the semantic index first (FIND tab → Build index)".into()
+                tr!("Build the semantic index first (Find by meaning → Build index)").into()
             };
             return Task::none();
         }
@@ -409,7 +409,7 @@ impl App {
             {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status = "The index changed — ask again when it's ready".into();
+                self.status = tr!("The index changed — ask again when it's ready").into();
                 return Task::none();
             }
         }
@@ -418,7 +418,7 @@ impl App {
             Err(e) => {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status = format!("Ask failed: {e}");
+                self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
         };
@@ -448,7 +448,7 @@ impl App {
             Err(e) => {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status = format!("Ask failed: {e}");
+                self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
         };
@@ -618,7 +618,7 @@ impl App {
         if messages.is_empty() {
             self.proj.asking = false;
             self.return_question(pending.question);
-            self.status = "Ask failed: the question's context could not be assembled".into();
+            self.status = tr!("Ask failed: the question's context could not be assembled").into();
             return Task::none();
         }
         let cfg = match self.require_llm() {
@@ -702,7 +702,7 @@ impl App {
                 return self.on_ask_stream_ended(
                     stream_id,
                     clew_protocol::StreamOutcome::Failed(
-                        "the question could not be sent to clew-server".into(),
+                        tr!("the question could not be sent to clew-server").into(),
                     ),
                 );
             }
@@ -881,7 +881,7 @@ impl App {
             return self.on_ask_stream_ended(
                 stream_id,
                 clew_protocol::StreamOutcome::Failed(
-                    "the question could not be sent to clew-server".into(),
+                    tr!("the question could not be sent to clew-server").into(),
                 ),
             );
         }
@@ -994,12 +994,15 @@ impl App {
         let empty_reason = match &outcome {
             StreamOutcome::Done => None,
             StreamOutcome::Stopped => {
-                self.status = "Answer stopped".into();
-                Some("*Stopped before any answer was written.*".to_string())
+                self.status = tr!("Answer stopped").into();
+                Some(format!(
+                    "*{}*",
+                    tr!("Stopped before any answer was written.")
+                ))
             }
             StreamOutcome::Failed(e) => {
-                self.status = format!("Ask failed: {e}");
-                Some(format!("*Couldn't answer: {e}*"))
+                self.status = tr!("Ask failed: {error}", error = e);
+                Some(format!("*{}*", tr!("Couldn't answer: {error}", error = e)))
             }
         };
         // Finalize the turn: ended with no text, show why; then render the
@@ -1100,8 +1103,9 @@ impl App {
             // over. It only appends turns, so `idx` still names this one.
             if self.proj.asking {
                 self.proj.ask_turns.remove(idx);
-                self.status = format!(
-                    "Agent mode unavailable ({reason}) — answering from the semantic index"
+                self.status = tr!(
+                    "Agent mode unavailable ({reason}) — answering from the semantic index",
+                    reason = reason
                 );
                 return fallback;
             }
@@ -1165,7 +1169,7 @@ impl App {
         let pending_retrieval = self.proj.inflight.ask_retrieval.take().is_some();
         let pending_context = self.proj.inflight.ask_context.take().is_some();
         if pending_retrieval || pending_context {
-            self.status = "Question cancelled".into();
+            self.status = tr!("Question cancelled").into();
         }
         self.proj.asking = false;
         closed
@@ -1193,11 +1197,11 @@ impl App {
                 }
                 self.reveal_ask();
                 self.code_focused = false; // the Ask input takes focus
-                self.status = "Added selection to Ask — ask your question".into();
+                self.status = tr!("Added the selection to Ask — now ask your question").into();
                 operation::focus(ui::ask_input_id())
             }
             None => {
-                self.status = "Select some code first, then Add to Ask".into();
+                self.status = tr!("Select some code first, then choose Add to Ask").into();
                 Task::none()
             }
         }
@@ -1259,27 +1263,27 @@ impl App {
     pub fn suggested_questions(&self) -> Vec<String> {
         let mut qs: Vec<String> = Vec::new();
         if !self.proj.ask_pins.is_empty() {
-            qs.push("Explain the attached code.".into());
-            qs.push("Why is the attached code written this way?".into());
+            qs.push(tr!("Explain the attached code.").into());
+            qs.push(tr!("Why is the attached code written this way?").into());
         }
         match self.cursor_target() {
             Some(explain::Node::Function { name, .. }) => {
-                qs.push(format!("What calls `{name}`?"));
-                qs.push(format!("What are the edge cases in `{name}`?"));
-                qs.push(format!("How does `{name}` handle errors?"));
+                qs.push(tr!("What calls `{name}`?", name = name));
+                qs.push(tr!("What are the edge cases in `{name}`?", name = name));
+                qs.push(tr!("How does `{name}` handle errors?", name = name));
             }
             Some(explain::Node::File(p)) => {
                 let f = p
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("this file");
-                qs.push(format!("What is the role of `{f}`?"));
-                qs.push(format!("What are the key types in `{f}`?"));
+                    .unwrap_or(tr!("this file"));
+                qs.push(tr!("What is the role of `{file}`?", file = f));
+                qs.push(tr!("What are the key types in `{file}`?", file = f));
             }
             _ => {}
         }
-        qs.push("What is the entry point of this codebase?".into());
-        qs.push("How does data flow through the app?".into());
+        qs.push(tr!("What is the entry point of this codebase?").into());
+        qs.push(tr!("How does data flow through the app?").into());
         qs.truncate(4);
         qs
     }

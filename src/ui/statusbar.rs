@@ -52,25 +52,17 @@ fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget
 fn sync_state(app: &App) -> Option<&'static str> {
     app.proj.project.as_ref()?;
     Some(if app.scanning {
-        "Scanning…"
+        tr!("Scanning…")
     } else if app.proj.indexing {
-        "Indexing…"
+        tr!("Indexing…")
     } else {
-        "Up to date"
+        tr!("Up to date")
     })
 }
 
-/// `n` with its thousands set apart, as a reader writes it: 1,858.
+/// `n` with its thousands set apart, as the reader writes it: 1,858.
 pub(crate) fn thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
+    crate::i18n::number(n as u64)
 }
 
 /// The platform a file's branches are read for, as the reader says it: its
@@ -100,6 +92,19 @@ pub(crate) fn target_name(target: &crate::inactive::Target) -> String {
     format!("{system} ({arch})")
 }
 
+/// A reading target as its picker lists it: its label, the machine's own
+/// ("Host (linux)", clew-core's) in the reader's language.
+pub(crate) fn target_label(target: &crate::inactive::Target) -> String {
+    match target
+        .label
+        .strip_prefix("Host (")
+        .and_then(|rest| rest.strip_suffix(')'))
+    {
+        Some(os) => tr!("Host ({os})", os = os),
+        None => target.label.clone(),
+    }
+}
+
 /// The status bar: one quiet line along the window's foot. On the left,
 /// where the code is read from and what Clew is doing; on the right, the
 /// open file — its language and language server, its problems, the caret,
@@ -108,6 +113,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // Where code is read from — the one place local vs remote shows. Click
     // it to manage connections / switch hosts.
     let remote = app.connection.is_remote();
+    // Where the code is read from: this machine, or the host by its name.
+    let place = if remote {
+        app.connection.label()
+    } else {
+        tr!("Local").to_string()
+    };
     let dot =
         container(space().width(6).height(6)).style(move |_: &iced::Theme| container::Style {
             background: Some(
@@ -126,8 +137,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             row![
                 dot,
                 text(match sync_state(app) {
-                    Some(state) => format!("{} · {state}", app.connection.label()),
-                    None => app.connection.label().to_string(),
+                    Some(state) => format!("{place} · {state}"),
+                    None => place,
                 })
                 .size(ts::SMALL)
                 .color(if remote {
@@ -144,7 +155,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .on_press(Message::Connect(ConnectMsg::Open)),
         // The design's tooltip bubble.
         container(
-            text("Connect to a remote host")
+            text(tr!("Connect to a remote host"))
                 .size(ts::SMALL)
                 .color(theme::tip_text()),
         )
@@ -159,16 +170,19 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     } else if let Some(project) = app.proj.project.as_ref() {
         let files = project.files.len();
         let symbols = app.proj.symbol_index.len();
-        let mut counts = format!(
-            "{} file{}",
-            thousands(files),
-            if files == 1 { "" } else { "s" }
+        let mut counts = trn!(
+            "{count} file",
+            "{count} files",
+            files,
+            count = thousands(files)
         );
         if symbols > 0 {
-            counts.push_str(&format!(
-                " · {} symbol{}",
-                thousands(symbols),
-                if symbols == 1 { "" } else { "s" }
+            counts.push_str(" · ");
+            counts.push_str(&trn!(
+                "{count} symbol",
+                "{count} symbols",
+                symbols,
+                count = thousands(symbols)
             ));
         }
         status_text(counts).into()
@@ -190,8 +204,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // the refresh chip stays out of the way meanwhile (see `refresh_chip`).
     if app.proj.explain.running {
         let label = match app.proj.explain.progress {
-            Some((done, total)) if total > 0 => format!("Explaining {done}/{total}"),
-            _ => "Explaining…".to_string(),
+            Some((done, total)) if total > 0 => {
+                tr!("Explaining {done}/{total}", done = done, total = total)
+            }
+            _ => tr!("Explaining…").to_string(),
         };
         let mut chip = row![
             glyph::icon(Glyph::Sparkle, theme::accent(), 11.0),
@@ -215,9 +231,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // Failures never hide behind the counter: a running tally in warn red.
         if app.proj.explain.failed > 0 {
             chip = chip.push(
-                text(format!("· {} failed", app.proj.explain.failed))
-                    .size(ts::SMALL)
-                    .color(theme::warn()),
+                text(format!(
+                    "· {}",
+                    trn!("1 failed", "{n} failed", app.proj.explain.failed)
+                ))
+                .size(ts::SMALL)
+                .color(theme::warn()),
             );
         }
         // A cancel control right on the always-visible chip, so a long pass can
@@ -252,10 +271,11 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         let lines = tt
             .viewer
             .as_ref()
-            .map(|v| format!("  ·  {} lines", v.lines.len()))
+            .map(|v| format!("  ·  {}", trn!("1 line", "{n} lines", v.lines.len())))
             .unwrap_or_default();
         bar = bar.push(status_text(format!(
-            "Time Travel  ·  {short}  ·  {}/{}{}{}",
+            "{}  ·  {short}  ·  {}/{}{}{}",
+            tr!("Time Travel"),
             tt.idx + 1,
             tt.commits.len(),
             scope,
@@ -265,7 +285,7 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         let lang = v
             .lang_key
             .and_then(crate::highlight::lang_name)
-            .unwrap_or("Plain text");
+            .unwrap_or(tr!("Plain text"));
         // Language-server status for this file's language, when relevant —
         // from the snapshot this update took (so a state clew cannot read
         // shows as a problem, not as "ready").
@@ -325,7 +345,11 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         }
         // 1-based line/column of the last click, when there is one.
         if let Some((l, c)) = v.caret {
-            bar = bar.push(status_text(format!("Line {}, Column {}", l + 1, c + 1)));
+            bar = bar.push(status_text(tr!(
+                "Line {line}, Column {column}",
+                line = l + 1,
+                column = c + 1
+            )));
         }
     }
     // For a file whose dimming depends on the platform (Rust's `#[cfg]`, Go's
@@ -342,9 +366,9 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         let picker = button(
             row![
                 ts::set_in(
-                    text(format!(
-                        "Reading for {}",
-                        target_name(&app.proj.reading_target)
+                    text(tr!(
+                        "Reading for {target}",
+                        target = target_name(&app.proj.reading_target)
                     ))
                     .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
                     .color(theme::fg()),
@@ -390,9 +414,17 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
     }
     // (label, colour, clickable). A running pass is shown but not clickable.
     let (label, color, enabled) = if app.proj.overview.generating {
-        ("↻ Refreshing overview…".to_string(), theme::accent(), false)
+        (
+            format!("↻ {}", tr!("Refreshing overview…")),
+            theme::accent(),
+            false,
+        )
     } else if app.proj.building_embeddings {
-        ("↻ Refreshing index…".to_string(), theme::accent(), false)
+        (
+            format!("↻ {}", tr!("Refreshing index…")),
+            theme::accent(),
+            false,
+        )
     } else if app.proj.refresh_pending {
         // Seconds left before the auto pass fires (click to skip the wait).
         let secs = app
@@ -405,9 +437,13 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
                     + 1
             })
             .unwrap_or(0);
-        (format!("↻ Update queued · {secs}s"), theme::accent(), true)
+        (
+            format!("↻ {}", tr!("Update queued · {seconds}s", seconds = secs)),
+            theme::accent(),
+            true,
+        )
     } else {
-        ("↻ Up to date".to_string(), theme::dim(), true)
+        (format!("↻ {}", tr!("Up to date")), theme::dim(), true)
     };
     let mut b = button(text(label).size(ts::SMALL).color(color))
         .style(theme::icon_button(false))

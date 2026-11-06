@@ -100,6 +100,8 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$CLEW_BIN"   "$APP/Contents/MacOS/clew"
 cp "$SERVER_BIN" "$APP/Contents/MacOS/clew-server"
 cp assets/clew.icns       "$APP/Contents/Resources/clew.icns"
+# The languages clew speaks, each with the microphone prompt in its words.
+cp -R assets/lproj/. "$APP/Contents/Resources/"
 
 # License notices travel with the binaries: the bundled font's license and the
 # texts it refers to, and every Rust crate compiled into clew and clew-server.

@@ -42,45 +42,53 @@ pub(crate) fn graph_modal_frame<'a>(
         header = header.push(if graph_spin {
             icon_btn(
                 Glyph::Pause,
-                "Stop spinning",
+                tr!("Stop spinning"),
                 Message::Graph(GraphMsg::ToggleSpin),
             )
         } else {
-            icon_btn(Glyph::Play, "Spin", Message::Graph(GraphMsg::ToggleSpin))
+            icon_btn(
+                Glyph::Play,
+                tr!("Spin"),
+                Message::Graph(GraphMsg::ToggleSpin),
+            )
         });
     }
     if graph_mode {
         header = header.push(if graph_3d {
             icon_btn(
                 Glyph::Plane,
-                "Flatten to 2D",
+                tr!("Flatten to 2D"),
                 Message::Graph(GraphMsg::Toggle3D),
             )
         } else {
             icon_btn(
                 Glyph::Cube,
-                "Show in 3D",
+                tr!("Show in 3D"),
                 Message::Graph(GraphMsg::Toggle3D),
             )
         });
         // Heat: colour by how often each file changed, instead of by language.
         header = header.push(chrome_tip(
             button(
-                text(if graph_heat { "Heat ●" } else { "Heat" })
-                    .size(ts::SMALL)
-                    .color(if graph_heat {
-                        theme::danger()
-                    } else {
-                        theme::fg_muted()
-                    }),
+                text(if graph_heat {
+                    format!("{} ●", tr!("Heat"))
+                } else {
+                    tr!("Heat").to_string()
+                })
+                .size(ts::SMALL)
+                .color(if graph_heat {
+                    theme::danger()
+                } else {
+                    theme::fg_muted()
+                }),
             )
             .style(theme::toolbar_button)
             .padding([4, 8])
             .on_press(Message::Graph(GraphMsg::ToggleHeat)),
             if graph_heat {
-                "Colour by language"
+                tr!("Colour by language")
             } else {
-                "Colour by change frequency (commits in the recent history)"
+                tr!("Colour by change frequency (commits in the recent history)")
             },
             None,
         ));
@@ -89,19 +97,19 @@ pub(crate) fn graph_modal_frame<'a>(
         .push(if graph_mode {
             icon_btn(
                 Glyph::List,
-                "List view",
+                tr!("List view"),
                 Message::Graph(GraphMsg::OverlayViewToggle),
             )
         } else {
             icon_btn(
                 Glyph::Graph,
-                "Map view",
+                tr!("Map view"),
                 Message::Graph(GraphMsg::OverlayViewToggle),
             )
         })
         .push(icon_btn(
             Glyph::Close,
-            "Close",
+            tr!("Close"),
             Message::Graph(GraphMsg::CloseOverlay),
         ));
     let panel = container(column![header, body].spacing(12))
@@ -119,10 +127,10 @@ pub(crate) fn graph_modal_frame<'a>(
 
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
     let title = match overlay {
-        crate::Overlay::ProjectImports => "Project Import Graph",
-        crate::Overlay::ProjectCalls => "Project Call Graph",
-        crate::Overlay::ProjectTypes => "Project Type Map",
-        crate::Overlay::ProjectMaps => "Project Maps",
+        crate::Overlay::ProjectImports => tr!("Project Import Graph"),
+        crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
+        crate::Overlay::ProjectTypes => tr!("Project Type Map"),
+        crate::Overlay::ProjectMaps => tr!("Project Maps"),
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
@@ -134,7 +142,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         } else if let Some(precise) = app.precise_label() {
             text(precise).size(ts::SMALL).color(theme::accent()).into()
         } else {
-            button(text("Refine with LSP").size(ts::SMALL))
+            button(text(tr!("Refine with LSP")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
                 .on_press(Message::Graph(GraphMsg::RefineProjectCalls))
@@ -142,7 +150,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         }),
         crate::Overlay::ProjectImports => None,
         crate::Overlay::ProjectTypes => app.docs_loading().then(|| {
-            text("Building the API index…")
+            text(tr!("Building the API index…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into()
@@ -183,14 +191,14 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
     let empty_msg = if app.proj.project_calls.building {
-        "Building call graph…"
+        tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
-        "Indexing the project…"
+        tr!("Indexing the project…")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
-        "Laying out the map…"
+        tr!("Laying out the map…")
     } else {
-        "Nothing to show."
+        tr!("Nothing to show.")
     };
     let Some(layout) = &app.proj.graph_layout else {
         return hint(empty_msg);
@@ -1871,11 +1879,11 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         // not a finding: say it is being built rather than "nothing found".
         let work = &app.proj.import_work;
         let msg = if app.scanning || app.proj.indexing {
-            "Indexing the project…"
+            tr!("Indexing the project…")
         } else if work.running || !work.pending.is_empty() {
-            "Resolving imports…"
+            tr!("Resolving imports…")
         } else {
-            "No imports found in this project."
+            tr!("No imports found in this project.")
         };
         return container(text(msg).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -1887,13 +1895,23 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
-        text(format!(
-            "{} files · {} internal edges · {} external packages · {} cycles",
-            ranks.files,
-            ranks.internal_edges,
-            ranks.externals.len(),
-            app.proj.import_cycles.len(),
-        ))
+        text(
+            [
+                trn!("1 file", "{n} files", ranks.files),
+                trn!(
+                    "1 internal edge",
+                    "{n} internal edges",
+                    ranks.internal_edges
+                ),
+                trn!(
+                    "1 external package",
+                    "{n} external packages",
+                    ranks.externals.len()
+                ),
+                trn!("1 cycle", "{n} cycles", app.proj.import_cycles.len()),
+            ]
+            .join(" · "),
+        )
         .size(ts::BODY)
         .color(theme::accent())
         .into(),
@@ -1901,7 +1919,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
 
     // Cycles — a real structural smell worth surfacing first.
     if !app.proj.import_cycles.is_empty() {
-        rows.push(section_header("IMPORT CYCLES"));
+        rows.push(section_header(tr!("Import cycles")));
         for cycle in &app.proj.import_cycles {
             let names: Vec<String> = cycle
                 .iter()
@@ -1926,13 +1944,13 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     }
 
     // Most depended-on (highest fan-in) — the architectural hubs.
-    rows.push(section_header("MOST DEPENDED-ON (fan-in)"));
+    rows.push(section_header(tr!("Most depended-on (fan-in)")));
     for file in &ranks.by_fan_in {
         rows.push(import_file_row(app, file));
     }
 
     // Most dependencies (highest fan-out).
-    rows.push(section_header("MOST DEPENDENCIES (fan-out)"));
+    rows.push(section_header(tr!("Most dependencies (fan-out)")));
     for file in &ranks.by_fan_out {
         rows.push(import_file_row(app, file));
     }
@@ -1941,7 +1959,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
 
     // External packages the project pulls in.
     if !ranks.externals.is_empty() {
-        rows.push(section_header("EXTERNAL PACKAGES"));
+        rows.push(section_header(tr!("External packages")));
         rows.push(
             container(
                 text(ranks.externals.join("  ·  "))
@@ -2038,11 +2056,11 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         // (the graph is linked from its symbol index), is not a finding: only
         // a build over the whole index says there are no functions.
         let msg = if app.proj.project_calls.building {
-            "Building call graph…"
+            tr!("Building call graph…")
         } else if app.scanning || app.proj.indexing {
-            "Indexing the project…"
+            tr!("Indexing the project…")
         } else {
-            "No functions found in this project."
+            tr!("No functions found in this project.")
         };
         return container(text(msg).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -2052,9 +2070,9 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} functions · {} call edges",
-            g.node_count(),
-            g.edge_count(),
+            "{} · {}",
+            trn!("1 function", "{n} functions", g.node_count()),
+            trn!("1 call edge", "{n} call edges", g.edge_count()),
         ))
         .size(ts::BODY)
         .color(theme::accent())
@@ -2062,7 +2080,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     );
     rows.push(
         text(app.precise_summary().unwrap_or_else(|| {
-            "Name-based & approximate — Refine with LSP for exact edges.".to_string()
+            tr!("Name-based & approximate — Refine with LSP for exact edges.").to_string()
         }))
         .size(ts::CAPTION)
         .color(theme::dim())
@@ -2079,35 +2097,41 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 
     // Most-called functions (hubs), unique names only so the counts mean something.
     if !summary.hubs.is_empty() {
-        rows.push(section_header("MOST CALLED (unique names)"));
+        rows.push(section_header(tr!("Most called (unique names)")));
         for &(id, callers) in &summary.hubs {
-            rows.push(call_symbol_row(app, id, format!("{callers} callers")));
+            rows.push(call_symbol_row(
+                app,
+                id,
+                trn!("1 caller", "{n} callers", callers),
+            ));
         }
     }
 
     let visits = trace_visits(app, g);
     if !visits.is_empty() {
-        rows.push(section_header("EXECUTED (the last debug run stopped here)"));
+        rows.push(section_header(tr!(
+            "Executed (the last debug run stopped here)"
+        )));
         for &(id, stops) in visits.iter().take(40) {
-            rows.push(call_symbol_row(
-                app,
-                id,
-                format!("{stops} {}", if stops == 1 { "stop" } else { "stops" }),
-            ));
+            rows.push(call_symbol_row(app, id, trn!("1 stop", "{n} stops", stops)));
         }
     }
 
     if !summary.entries.is_empty() {
-        rows.push(section_header(
-            "ENTRY POINTS (main, routes, commands, handlers)",
-        ));
+        rows.push(section_header(tr!(
+            "Entry points (main, routes, commands, handlers)"
+        )));
         for &(id, kind) in summary.entries.iter().take(40) {
-            rows.push(call_symbol_row(app, id, kind.to_string()));
+            rows.push(call_symbol_row(
+                app,
+                id,
+                crate::i18n::lookup(kind).to_string(),
+            ));
         }
         if summary.entries.len() > 40 {
             rows.push(
                 container(
-                    text(format!("… and {} more", summary.entries.len() - 40))
+                    text(tr!("… and {n} more", n = summary.entries.len() - 40))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
@@ -2120,14 +2144,14 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     rows.extend(churn_rows(app));
 
     let uncalled = &summary.uncalled;
-    rows.push(section_header("UNCALLED (possibly dead)"));
+    rows.push(section_header(tr!("Uncalled (possibly dead)")));
     for &(id, out) in uncalled.iter().take(60) {
         rows.push(call_symbol_row(app, id, format!("→{out}")));
     }
     if uncalled.len() > 60 {
         rows.push(
             container(
-                text(format!("… and {} more", uncalled.len() - 60))
+                text(tr!("… and {n} more", n = uncalled.len() - 60))
                     .size(ts::CAPTION)
                     .color(theme::dim()),
             )
@@ -2151,11 +2175,11 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.type_graph;
     if g.is_empty() {
         let msg = if app.docs_loading() {
-            "Building the API index…"
+            tr!("Building the API index…")
         } else if app.scanning || app.proj.indexing {
-            "Indexing the project…"
+            tr!("Indexing the project…")
         } else {
-            "No types found in this project."
+            tr!("No types found in this project.")
         };
         return container(text(msg).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -2164,10 +2188,10 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} types · {} relations · {} inherit",
-            g.node_count(),
-            g.edge_count(),
-            g.inherits_count(),
+            "{} · {} · {}",
+            trn!("1 type", "{n} types", g.node_count()),
+            trn!("1 relation", "{n} relations", g.edge_count()),
+            trn!("1 inherits", "{n} inherit", g.inherits_count()),
         ))
         .size(ts::BODY)
         .color(theme::accent())
@@ -2176,21 +2200,25 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     const TOP: usize = 12;
     let referenced = g.most_referenced(TOP);
     if !referenced.is_empty() {
-        rows.push(section_header("MOST REFERENCED (named by others)"));
+        rows.push(section_header(tr!("Most referenced (named by others)")));
         for id in referenced {
             rows.push(type_row(app, id, format!("{} ←", g.fan_in(id))));
         }
     }
     let derived = g.most_derived(TOP);
     if !derived.is_empty() {
-        rows.push(section_header("BASE TYPES (most subtypes)"));
+        rows.push(section_header(tr!("Base types (most subtypes)")));
         for id in derived {
-            rows.push(type_row(app, id, format!("{} subtypes", g.subtypes(id))));
+            rows.push(type_row(
+                app,
+                id,
+                trn!("1 subtype", "{n} subtypes", g.subtypes(id)),
+            ));
         }
     }
     let dependent = g.most_dependent(TOP);
     if !dependent.is_empty() {
-        rows.push(section_header("MOST DEPENDENCIES (naming others)"));
+        rows.push(section_header(tr!("Most dependencies (naming others)")));
         for id in dependent {
             rows.push(type_row(app, id, format!("→ {}", g.fan_out(id))));
         }
@@ -2213,7 +2241,8 @@ pub(crate) struct MapChoice {
 
 impl std::fmt::Display for MapChoice {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(out, "{} ({})", self.title, self.nodes)
+        // The title, from clew-core, in the reader's language.
+        write!(out, "{} ({})", crate::i18n::lookup(&self.title), self.nodes)
     }
 }
 
@@ -2233,7 +2262,7 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         .and_then(|i| choices.get(i).cloned());
     match choices.len() {
         0 => app.proj.maps_building.then(|| {
-            text("Reading the project's maps…")
+            text(tr!("Reading the project's maps…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into()
@@ -2265,11 +2294,11 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     };
     let Some(at) = app.selected_map_index() else {
         return hint(if let Some(e) = &app.proj.maps_error {
-            format!("Couldn't read the project's maps: {e}")
+            tr!("Couldn't read the project's maps: {error}", error = e)
         } else if app.proj.maps_building || app.scanning {
-            "Reading the project's maps…".into()
+            tr!("Reading the project's maps…").into()
         } else {
-            "No maps for this project.".into()
+            tr!("No maps for this project.").into()
         });
     };
     let root = app
@@ -2281,22 +2310,24 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     let map = &app.proj.maps[at];
     let mut rows: Vec<Element<'_, Message>> = vec![
         text(format!(
-            "{} · {} nodes · {} arrows",
-            map.title,
-            map.nodes.len(),
-            map.edges.len()
+            "{} · {} · {}",
+            crate::i18n::lookup(&map.title),
+            trn!("1 node", "{n} nodes", map.nodes.len()),
+            trn!("1 arrow", "{n} arrows", map.edges.len())
         ))
         .size(ts::BODY)
         .color(theme::accent())
         .into(),
-        text(map.description.clone())
+        // Its line on how to read it, from clew-core: in the reader's
+        // language where the catalog has it.
+        text(crate::i18n::lookup(&map.description).to_string())
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
     ];
     if let Some(e) = &app.proj.maps_error {
         rows.push(
-            text(format!("The last read failed: {e}"))
+            text(tr!("The last read failed: {error}", error = e))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
@@ -2318,7 +2349,8 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     }
     let mut listed = 0;
     'kinds: for kind in kinds {
-        rows.push(section_header(kind));
+        // A kind of node, as clew-core names it ("table", "route").
+        rows.push(section_header(crate::i18n::lookup(kind)));
         for (i, n) in map.nodes.iter().enumerate().filter(|(_, n)| n.kind == kind) {
             if listed == MAP_LIST_MAX {
                 break 'kinds;
@@ -2373,8 +2405,9 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     }
     if listed < map.nodes.len() {
         rows.push(
-            text(format!(
-                "{} more — the graph view shows every node",
+            text(trn!(
+                "1 more — the graph view shows every node",
+                "{n} more — the graph view shows every node",
                 map.nodes.len() - listed
             ))
             .size(ts::CAPTION)
@@ -2517,10 +2550,10 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let Some(churn) = app.proj.churn.as_deref() else {
         if app.proj.churn_loading {
-            rows.push(section_header("MOST CHANGED"));
+            rows.push(section_header(tr!("Most changed")));
             rows.push(
                 container(
-                    text("Reading the change history…")
+                    text(tr!("Reading the change history…"))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
@@ -2533,8 +2566,9 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
     if churn.top.is_empty() {
         return rows;
     }
-    rows.push(section_header(&format!(
-        "MOST CHANGED (last {} commits)",
+    rows.push(section_header(&trn!(
+        "Most changed (last commit)",
+        "Most changed (last {n} commits)",
         churn.commits
     )));
     let now = std::time::SystemTime::now()
@@ -2555,10 +2589,9 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
         }
         line = line.push(space().width(Fill)).push(
             text(format!(
-                "{} {} · {}",
-                f.commits,
-                if f.commits == 1 { "commit" } else { "commits" },
-                crate::git::relative_time(f.last, now)
+                "{} · {}",
+                trn!("1 commit", "{n} commits", f.commits),
+                crate::i18n::ago(f.last, now)
             ))
             .size(ts::CAPTION)
             .color(heat_color(

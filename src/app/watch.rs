@@ -296,7 +296,7 @@ impl App {
                     self.note_refine_change(&path);
                     self.proj.import_work.pending.remove(path.clone());
                     if self.proj.panes.iter().flatten().any(|v| v.abs == path) {
-                        self.status = format!("{} was deleted on disk", self.rel_of(&path));
+                        self.status = tr!("{file} was deleted on disk", file = self.rel_of(&path));
                     }
                 }
             }
@@ -371,10 +371,12 @@ impl App {
         if !structural && touched.iter().any(|p| highlight::detect(p) == Some("rust")) {
             tasks.push(self.request_structure_build());
         }
-        if refreshed == 1 {
-            self.status = "Refreshed a file changed on disk".to_string();
-        } else if refreshed > 1 {
-            self.status = format!("Refreshed {refreshed} files changed on disk");
+        if refreshed > 0 {
+            self.status = trn!(
+                "Refreshed a file changed on disk",
+                "Refreshed {n} files changed on disk",
+                refreshed
+            );
         }
         // A source file changed → the understanding (explanations →
         // index → overview) may be stale. Auto-refresh it, throttled to
@@ -655,12 +657,13 @@ impl App {
         self.proj.import_work.refresh_overview = true;
         let graph_task = self.schedule_imports();
         if changed_while_closed > 0 {
-            self.status = format!(
-                "{changed_while_closed} file{} changed since last session",
-                if changed_while_closed == 1 { "" } else { "s" }
+            self.status = trn!(
+                "1 file changed since the last session",
+                "{n} files changed since the last session",
+                changed_while_closed
             );
         } else if let Some(p) = &self.proj.project {
-            self.status = format!("{} files · {} symbols", p.files.len(), self.symbol_count());
+            self.status = crate::app::project::size_status(p.files.len(), self.symbol_count());
         }
         let structure_task = self.request_structure_build();
         // A refine started before the index landed read only the few files

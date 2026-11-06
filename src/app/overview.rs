@@ -156,7 +156,7 @@ impl App {
             Err(ask_for_key) => return ask_for_key,
         };
         if self.proj.explain.cache.is_empty() {
-            self.status = "Run Explain All first".into();
+            self.status = tr!("Run Explain All first").into();
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -172,7 +172,7 @@ impl App {
         // Don't force the overview into view: a chained/background
         // regeneration must not interrupt someone reading code. The
         // manual entry points are already on the overview page.
-        self.status = "Generating architecture overview…".into();
+        self.status = tr!("Generating architecture overview…").into();
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
@@ -218,13 +218,16 @@ impl App {
                 self.set_overview_map();
                 self.proj.overview.prompt_hash = Some(prompt_hash);
                 self.status = match saved {
-                    Ok(()) => "Architecture overview ready".into(),
-                    Err(e) => format!("Architecture overview ready — not cached: {e}"),
+                    Ok(()) => tr!("Architecture overview ready").into(),
+                    Err(e) => tr!(
+                        "Architecture overview ready, but not cached: {error}",
+                        error = e
+                    ),
                 };
                 task
             }
             Err(e) => {
-                self.status = format!("Overview failed: {e}");
+                self.status = tr!("Could not generate the overview: {error}", error = e);
                 Task::none()
             }
         }
@@ -247,7 +250,7 @@ impl App {
         self.proj.stats.rev = rev;
         let stamp = self.stamp();
         if self.proj.stats.report.is_none() {
-            self.status = "Computing code statistics…".into();
+            self.status = tr!("Computing code statistics…").into();
         }
         // Remote project: the walk happens where the files live — this
         // machine's disk at the same path is another project's data.
@@ -282,7 +285,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || stats::compute(&compute_root))
                     .await
-                    .map_err(|_| "the statistics run failed unexpectedly".to_string())
+                    .map_err(|_| tr!("the statistics run failed unexpectedly").to_string())
             },
             move |report| {
                 Message::Overview(OverviewMsg::StatsDone {
@@ -316,7 +319,7 @@ impl App {
             Err(e) => {
                 self.proj.stats.building = false;
                 self.proj.stats.rev = crate::app::overview::STATS_REV_STALE;
-                self.status = format!("Couldn't compute code statistics: {e}");
+                self.status = tr!("Couldn't compute code statistics: {error}", error = e);
                 return Task::none();
             }
         };
@@ -336,8 +339,8 @@ impl App {
         // A cache write that failed costs the next launch a recompute; say so
         // rather than claim the report was kept.
         self.status = match saved {
-            Ok(()) => "Code statistics ready".into(),
-            Err(e) => format!("Code statistics ready — not cached: {e}"),
+            Ok(()) => tr!("Code statistics ready").into(),
+            Err(e) => tr!("Code statistics ready, but not cached: {error}", error = e),
         };
         Task::none()
     }

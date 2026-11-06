@@ -799,16 +799,17 @@ impl SettingsPage {
         SettingsPage::Shortcuts,
     ];
 
+    /// The page's title, in English: shown through `crate::i18n::lookup`.
     pub fn title(self) -> &'static str {
         match self {
-            SettingsPage::Appearance => "Appearance",
-            SettingsPage::Updates => "Updates",
-            SettingsPage::LanguageModel => "Language model",
-            SettingsPage::Embeddings => "Embeddings",
-            SettingsPage::Voice => "Voice",
-            SettingsPage::Integrations => "Integrations",
-            SettingsPage::Languages => "Languages",
-            SettingsPage::Shortcuts => "Keyboard shortcuts",
+            SettingsPage::Appearance => tr_noop!("Appearance"),
+            SettingsPage::Updates => tr_noop!("Updates"),
+            SettingsPage::LanguageModel => tr_noop!("Language model"),
+            SettingsPage::Embeddings => tr_noop!("Embeddings"),
+            SettingsPage::Voice => tr_noop!("Voice"),
+            SettingsPage::Integrations => tr_noop!("Integrations"),
+            SettingsPage::Languages => tr_noop!("Languages"),
+            SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
         }
     }
 }

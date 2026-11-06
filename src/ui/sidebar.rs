@@ -47,17 +47,17 @@ pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
 /// A view's name, as its tab's tooltip says it.
 pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
     match tab {
-        SidebarTab::Files => "Files",
-        SidebarTab::Search => "Search text",
-        SidebarTab::Semantic => "Find by meaning",
-        SidebarTab::Marks => "Marks",
-        SidebarTab::Trail => "Reading trail",
-        SidebarTab::Calls => "Calls",
-        SidebarTab::Flow => "Value flow",
-        SidebarTab::Imports => "Imports",
-        SidebarTab::Walk => "Walkthroughs",
-        SidebarTab::Notes => "Reading notes",
-        SidebarTab::Docs => "API docs",
+        SidebarTab::Files => tr!("Files"),
+        SidebarTab::Search => tr!("Search text"),
+        SidebarTab::Semantic => tr!("Find by meaning"),
+        SidebarTab::Marks => tr!("Bookmarks"),
+        SidebarTab::Trail => tr!("Reading trail"),
+        SidebarTab::Calls => tr!("Calls"),
+        SidebarTab::Flow => tr!("Value flow"),
+        SidebarTab::Imports => tr!("Imports"),
+        SidebarTab::Walk => tr!("Walkthroughs"),
+        SidebarTab::Notes => tr!("Reading notes"),
+        SidebarTab::Docs => tr!("API docs"),
     }
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                         .on_press(Message::Window(WindowMsg::SidebarTabPicked(
                             SidebarTab::Files,
                         ))),
-                    "Back to the files",
+                    tr!("Back to the files"),
                     None,
                     tooltip::Position::Bottom,
                 ),
@@ -150,7 +150,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     row![
                         glyph::icon(Glyph::Filter, theme::dim(), 13.0),
                         ts::field_in(
-                            text_input("Filter files", &app.file_filter)
+                            text_input(tr!("Filter files"), &app.file_filter)
                                 .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
                                 .style(theme::bare_input),
                             FILTER_H - 2.0,
@@ -220,7 +220,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
     // A quick action to review the current branch/PR changes as a narrated tour.
     let mut actions = column![
-        button(text("\u{2387} Review branch changes").size(ts::SMALL))
+        button(text(format!("\u{2387} {}", tr!("Review branch changes"))).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
@@ -233,13 +233,12 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
         actions = actions.push(
             button(
                 text(format!(
-                    "\u{25B6} Walk the last run ({} {})",
-                    app.debug.trace.len(),
-                    if app.debug.trace.len() == 1 {
-                        "stop"
-                    } else {
-                        "stops"
-                    }
+                    "\u{25B6} {}",
+                    trn!(
+                        "Walk the last run (1 stop)",
+                        "Walk the last run ({n} stops)",
+                        app.debug.trace.len()
+                    )
                 ))
                 .size(ts::SMALL),
             )
@@ -289,25 +288,17 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
 /// a debug run, or the user's feature prompt.
 pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
-        "Whole codebase".to_string()
+        tr!("Whole codebase").to_string()
     } else if let Some(rest) = scope.strip_prefix("@trace") {
-        format!(
-            "Debug run{}",
-            if rest.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", rest.trim())
-            }
-        )
+        match rest.trim() {
+            "" => tr!("Debug run").to_string(),
+            program => tr!("Debug run ({program})", program = program),
+        }
     } else if let Some(rest) = scope.strip_prefix("@diff") {
-        format!(
-            "Change review{}",
-            if rest.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", rest.trim())
-            }
-        )
+        match rest.trim() {
+            "" => tr!("Change review").to_string(),
+            label => tr!("Change review ({label})", label = label),
+        }
     } else {
         scope.to_string()
     }
@@ -326,14 +317,15 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             .padding([2, 10])
             .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
     };
-    let toggle = container(row![seg("Search", is_search), seg("Walk", !is_search)].spacing(1))
-        .padding(2)
-        .style(theme::trough);
+    let toggle =
+        container(row![seg(tr!("Search"), is_search), seg(tr!("Walk"), !is_search)].spacing(1))
+            .padding(2)
+            .style(theme::trough);
 
     let placeholder = if is_search {
-        "Search walkthroughs…"
+        tr!("Search walkthroughs…")
     } else {
-        "A feature, or empty for all"
+        tr!("A feature, or leave empty for all")
     };
     let mut input = text_input(placeholder, &app.walk_ui.input)
         .style(theme::input)
@@ -347,7 +339,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let mut field = row![input].spacing(6).align_y(iced::Center);
     if !is_search {
         field = field.push(
-            button(text("Generate").size(ts::SMALL))
+            button(text(tr!("Generate")).size(ts::SMALL))
                 .style(theme::secondary_button)
                 .padding([5, 10])
                 .on_press(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone()))),
@@ -388,10 +380,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
 
     if app.proj.walk.library.is_empty() && pending_new.is_none() {
-        return empty_state(Glyph::Compass, "No walkthroughs yet", "", None);
+        return empty_state(Glyph::Compass, tr!("No walkthroughs yet"), "", None);
     }
     if visible.is_empty() && pending_new.is_none() {
-        return empty_state(Glyph::Search, "No matches", "", None);
+        return empty_state(Glyph::Search, tr!("No matches"), "", None);
     }
 
     // The current step of the open tour (for highlighting the expanded steps).
@@ -410,7 +402,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             container(
                 column![
                     text(label).size(ts::BASE).color(theme::fg()),
-                    text("Generating…").size(ts::CAPTION).color(theme::accent()),
+                    text(tr!("Generating…"))
+                        .size(ts::CAPTION)
+                        .color(theme::accent()),
                 ]
                 .spacing(1),
             )
@@ -423,7 +417,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         let is_open = app.proj.walk.open.as_deref() == Some(wt.scope.as_str());
         let busy = gen_scope == Some(wt.scope.as_str());
         let (subtitle, sub_color) = if busy {
-            ("Generating…".to_string(), theme::accent())
+            (tr!("Generating…").to_string(), theme::accent())
         } else {
             (scope_label(&wt.scope), theme::dim())
         };
@@ -616,19 +610,19 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         // No action button here: the open/connect actions live in the centered
         // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
-            empty_state(Glyph::Search, "Scanning…", "", None)
+            empty_state(Glyph::Search, tr!("Scanning…"), "", None)
         } else if app.connection.is_remote() {
             empty_state(
                 Glyph::Remote,
-                "No folder open",
-                "Browse the host to open a folder.",
+                tr!("No folder open"),
+                tr!("Browse the host to open a folder."),
                 None,
             )
         } else {
             empty_state(
                 Glyph::Folder,
-                "No folder open",
-                "Open a folder to start reading.",
+                tr!("No folder open"),
+                tr!("Open a folder to start reading."),
                 None,
             )
         };
@@ -641,7 +635,7 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     } else {
         filtered_file_rows(&mut rows, project, filter, app);
         if rows.is_empty() {
-            return empty_state(Glyph::Filter, "No matching files", "", None);
+            return empty_state(Glyph::Filter, tr!("No matching files"), "", None);
         }
     }
     scrollable(
@@ -732,7 +726,7 @@ const SIDEBAR_GAP: f32 = 12.0;
 
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
-pub(crate) const TRACKED_IGNORED_MARK: &str = "tracked · ignored";
+pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked · ignored");
 
 pub(crate) fn append_tree_rows<'a>(
     rows: &mut Vec<Element<'a, Message>>,
@@ -798,7 +792,7 @@ pub(crate) fn append_tree_rows<'a>(
         // A file git tracks although the ignore rules would hide it: listed
         // (what the repository contains is never invisible), and said so.
         let mark: Element<'_, Message> = if app.proj.tracked_ignored.contains(&rel) {
-            text(TRACKED_IGNORED_MARK)
+            text(crate::i18n::lookup(TRACKED_IGNORED_MARK))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .wrapping(Wrapping::None)
@@ -963,7 +957,7 @@ pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
 pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
-    let input = text_input("Search in project…", &app.proj.search.query)
+    let input = text_input(tr!("Search in project…"), &app.proj.search.query)
         .style(theme::input)
         .id(search_input_id())
         .on_input(|v| Message::Nav(NavMsg::SearchQueryChanged(v)))
@@ -988,13 +982,16 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     .spacing(4);
 
     // Include / exclude glob filters.
-    let include = text_input("files to include (e.g. src/**)", &app.proj.search.include)
-        .style(theme::input)
-        .on_input(|v| Message::Nav(NavMsg::SearchIncludeChanged(v)))
-        .on_submit(Message::Nav(NavMsg::SearchSubmitted))
-        .size(ts::BODY)
-        .padding(5);
-    let exclude = text_input("files to exclude", &app.proj.search.exclude)
+    let include = text_input(
+        tr!("files to include (e.g. src/**)"),
+        &app.proj.search.include,
+    )
+    .style(theme::input)
+    .on_input(|v| Message::Nav(NavMsg::SearchIncludeChanged(v)))
+    .on_submit(Message::Nav(NavMsg::SearchSubmitted))
+    .size(ts::BODY)
+    .padding(5);
+    let exclude = text_input(tr!("files to exclude"), &app.proj.search.exclude)
         .style(theme::input)
         .on_input(|v| Message::Nav(NavMsg::SearchExcludeChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
@@ -1004,11 +1001,11 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     let status_line = if let Some(err) = &app.proj.search.error {
         Some((err.clone(), theme::danger()))
     } else if app.proj.search.running {
-        Some(("Searching…".to_string(), theme::dim()))
+        Some((tr!("Searching…").to_string(), theme::dim()))
     } else if app.proj.search.ran {
         let n = app.proj.search.hits.len();
         let msg = if n >= crate::search::MAX_HITS {
-            format!("{n}+ matches (capped)")
+            tr!("{n}+ matches (capped)", n = n)
         } else {
             crate::app::count_matches(n)
         };
@@ -1094,13 +1091,15 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
     if visits.is_empty() {
-        return empty_state(Glyph::Minimap, "No reading trail yet", "", None);
+        return empty_state(Glyph::Minimap, tr!("No reading trail yet"), "", None);
     }
 
     let header = row![
-        text("Reading trail").size(ts::SMALL).color(theme::dim()),
+        text(tr!("Reading trail"))
+            .size(ts::SMALL)
+            .color(theme::dim()),
         space().width(Fill),
-        button(text("Clear").size(ts::CAPTION).color(theme::dim()))
+        button(text(tr!("Clear")).size(ts::CAPTION).color(theme::dim()))
             .style(theme::list_row(false))
             .padding([1, 6])
             .on_press(Message::Reading(ReadingMsg::HistoryClear)),
@@ -1213,11 +1212,11 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
     if app.proj.bookmarks.is_empty() {
         return empty_state(
             Glyph::Bookmark,
-            "No bookmarks yet",
+            tr!("No bookmarks yet"),
             if crate::keymap::MAC_KEYS {
-                "Press ⌘D to mark the current line."
+                tr!("Press ⌘D to bookmark the current line.")
             } else {
-                "Press Ctrl+D to mark the current line."
+                tr!("Press Ctrl+D to bookmark the current line.")
             },
             None,
         );
@@ -1350,10 +1349,10 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         })
     };
     column![
-        label("In this file"),
+        label(tr!("In this file")),
         container(outline_content(app)).height(Length::FillPortion(1)),
         hairline(),
-        label("All notes"),
+        label(tr!("All notes")),
         container(notes_list(app)).height(Length::FillPortion(1)),
     ]
     .into()
@@ -1362,7 +1361,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 /// Every reading note in the project, file by file.
 fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
-        return empty_state(Glyph::Note, "No reading notes yet", "", None);
+        return empty_state(Glyph::Note, tr!("No reading notes yet"), "", None);
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -1393,7 +1392,7 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
-            None => text("detached")
+            None => text(tr!("detached"))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
@@ -1524,7 +1523,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let n = app.proj.embed_index.entries.len();
 
-    let input = text_input("Ask by meaning…", &app.proj.semantic_query)
+    let input = text_input(tr!("Search by meaning…"), &app.proj.semantic_query)
         .style(theme::input)
         .on_input(|v| Message::Semantic(SemanticMsg::QueryChanged(v)))
         .on_submit(Message::Semantic(SemanticMsg::Search))
@@ -1532,11 +1531,11 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .padding(7);
 
     let build_label = if app.proj.building_embeddings {
-        "Building…"
+        tr!("Building…")
     } else if n == 0 {
-        "Build index"
+        tr!("Build index")
     } else {
-        "Rebuild"
+        tr!("Rebuild")
     };
     let mut build = button(text(build_label).size(ts::SMALL))
         .style(theme::toolbar_button)
@@ -1547,15 +1546,15 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
     let info = text(if app.proj.building_embeddings {
-        "Building the index…".to_string()
+        tr!("Building the index…").to_string()
     } else if n > 0 {
-        format!("{n} indexed")
+        trn!("1 indexed", "{n} indexed", n)
     } else if app.proj.explain.cache.is_empty() {
-        "Run Explain All to enable semantic search.".to_string()
+        tr!("Run Explain All to enable semantic search.").to_string()
     } else if !app.embed_available {
-        "Set an embedding provider in Settings.".to_string()
+        tr!("Set an embedding provider in Settings.").to_string()
     } else {
-        "Preparing the index…".to_string()
+        tr!("Preparing the index…").to_string()
     })
     .size(ts::CAPTION)
     .color(theme::dim());
@@ -1568,7 +1567,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     );
     if app.proj.searching_semantic {
         rows.push(
-            text("Searching…")
+            text(tr!("Searching…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into(),
@@ -1597,9 +1596,12 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
                             .color(theme::accent())
                             .wrapping(Wrapping::None),
                         space().width(Fill),
-                        text(format!("{:.0}%", score * 100.0))
-                            .size(ts::CAPTION)
-                            .color(theme::dim()),
+                        text(tr!(
+                            "{percent}%",
+                            percent = crate::i18n::decimal(f64::from(*score) * 100.0, 0)
+                        ))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
                     ]
                     .align_y(iced::Center),
                     text(short).size(ts::CAPTION).color(theme::dim()),

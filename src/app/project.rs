@@ -11,14 +11,67 @@ use crate::*;
 /// The status line for a project just scanned: its size, and what the walk
 /// skipped or added when it did (see `fs_scan::ScanReport::summary`).
 pub(crate) fn scan_status(files: usize, truncated: bool, report: &fs_scan::ScanReport) -> String {
-    let size = format!(
-        "{files} files{}",
-        if truncated { " (truncated)" } else { "" }
-    );
-    match report.summary() {
+    let size = if truncated {
+        trn!("1 file (truncated)", "{n} files (truncated)", files)
+    } else {
+        trn!("1 file", "{n} files", files)
+    };
+    match scan_summary(report) {
         Some(summary) => format!("{size} — {summary}"),
         None => size,
     }
+}
+
+/// One line describing what a scan skipped or added, in the language
+/// spoken, or `None` when it was a plain walk — what
+/// `fs_scan::ScanReport::summary` says in English.
+fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
+    let mut parts = Vec::new();
+    if report.non_utf8 > 0 {
+        parts.push(trn!(
+            "1 entry skipped (name is not UTF-8)",
+            "{n} entries skipped (name is not UTF-8)",
+            report.non_utf8
+        ));
+    }
+    if report.walk_errors > 0 {
+        parts.push(match &report.first_error {
+            Some(error) => trn!(
+                "1 unreadable entry (first: {error})",
+                "{n} unreadable entries (first: {error})",
+                report.walk_errors,
+                error = error
+            ),
+            None => trn!(
+                "1 unreadable entry",
+                "{n} unreadable entries",
+                report.walk_errors
+            ),
+        });
+    }
+    if !report.tracked_ignored.is_empty() {
+        parts.push(trn!(
+            "1 tracked file shown despite .gitignore or a build-directory name",
+            "{n} tracked files shown despite .gitignore or a build-directory name",
+            report.tracked_ignored.len()
+        ));
+    }
+    if let Some(error) = &report.tracked_error {
+        parts.push(tr!(
+            "git could not list the tracked files, so ignored ones may be missing ({error})",
+            error = error
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The status line for a project's file set: "120 files · 1042 symbols".
+pub(crate) fn size_status(files: usize, symbols: usize) -> String {
+    format!(
+        "{} · {}",
+        trn!("1 file", "{n} files", files),
+        trn!("1 symbol", "{n} symbols", symbols)
+    )
 }
 
 /// The languages among `files` that clew ships a server for, sorted — which
@@ -64,7 +117,7 @@ async fn scan_off_thread(root: PathBuf) -> (ScanResult, fs_scan::ScanReport) {
                 },
                 fs_scan::ScanReport {
                     walk_errors: 1,
-                    first_error: Some(format!("the scan stopped unexpectedly: {e}")),
+                    first_error: Some(tr!("the scan stopped unexpectedly: {error}", error = e)),
                     ..Default::default()
                 },
             )
@@ -96,7 +149,7 @@ impl App {
 
     pub(crate) fn start_scan(&mut self, root: PathBuf) -> Task<Message> {
         self.scanning = true;
-        self.status = format!("Scanning {}…", root.display());
+        self.status = tr!("Scanning {path}…", path = root.display());
         // Preferred: let clew-server scan and return the tree (its `Tree` reply
         // builds the project via `handle_server_reply`).
         if self.server.is_up() {
@@ -109,7 +162,7 @@ impl App {
             // to have there. Park the request for the reconnect instead.
             if self.connection.is_remote() {
                 self.pending_scan_root = Some(root);
-                self.status = "Lost the remote host — reopening once reconnected…".into();
+                self.status = tr!("Lost the remote host — reopening once reconnected…").into();
                 return Task::none();
             }
         } else {
@@ -194,9 +247,10 @@ impl App {
         };
         if self.connection.is_remote() {
             self.scanning = false;
-            self.status = format!(
-                "Could not open {} on the remote host: {message}",
-                root.display()
+            self.status = tr!(
+                "Could not open {path} on the remote host: {error}",
+                path = root.display(),
+                error = message
             );
             // The host left this project for the one it could not open, and
             // stopped the installs it ran for it (`request_open_project`):
@@ -235,9 +289,10 @@ impl App {
                 .collect();
             return Task::batch(again);
         }
-        let why = format!(
-            "clew-server could not open {} ({message}) — scanning it here",
-            root.display()
+        let why = tr!(
+            "clew-server could not open {path} ({error}) — scanning it here",
+            path = root.display(),
+            error = message
         );
         self.server.close();
         self.handshake_failure = Some(why.clone());
@@ -296,7 +351,7 @@ impl App {
         if let Err(e) = self.trust.update(|t| t.trust_root(host.as_deref(), &root)) {
             self.pending_open = None;
             self.setup = None;
-            self.status = format!("Cannot record consent: {e}");
+            self.status = tr!("Cannot record consent: {error}", error = e);
             return Task::none();
         }
         // What else the sheet had ticked: the leave to build now, the rest
@@ -526,7 +581,7 @@ impl App {
             .flatten()
             .any(|draft| !draft.trim().is_empty())
         {
-            discarded.push("Unsaved note was discarded with the previous project".to_string());
+            discarded.push(tr!("Unsaved note was discarded with the previous project").to_string());
         }
         // Anything still marked dirty is a change this client holds and the
         // remote never received. Leaving the project discards it, so say so
@@ -535,9 +590,9 @@ impl App {
         if !left.remote_state_dirty.is_empty() {
             let mut lost: Vec<&str> = left.remote_state_dirty.iter().map(String::as_str).collect();
             lost.sort_unstable();
-            discarded.push(format!(
-                "Unsaved remote state was discarded: {}",
-                lost.join(", ")
+            discarded.push(tr!(
+                "Unsaved remote state was discarded: {files}",
+                files = lost.join(", ")
             ));
         }
         if discarded.is_empty() {
@@ -647,7 +702,7 @@ impl App {
             // Nothing was read: the stored trail is still on disk, and what
             // is in memory is only this session's visits.
             self.proj.inflight.state_unread = true;
-            problems.push(format!("the project's saved state ({why})"));
+            problems.push(tr!("the project's saved state ({error})", error = why));
         }
 
         if let Some(loaded) = state.history {
@@ -773,9 +828,9 @@ impl App {
         }
 
         if !problems.is_empty() {
-            self.status = format!(
-                "Left untouched, could not read: {} — fix or remove the file to use it",
-                problems.join("; ")
+            self.status = tr!(
+                "Left untouched, could not read: {problems} — fix or remove the file to use it",
+                problems = problems.join("; ")
             );
         }
         // What the setup sheet asked for, now that the explanations it
@@ -817,13 +872,10 @@ impl App {
         // resolved to a since-moved file) may now resolve differently.
         let cycles = self.reresolve_import_graph();
         if let Some(p) = &self.proj.project {
-            self.status = match report.summary() {
-                Some(summary) => format!(
-                    "{} files · {} symbols — {summary}",
-                    p.files.len(),
-                    self.symbol_count()
-                ),
-                None => format!("{} files · {} symbols", p.files.len(), self.symbol_count()),
+            let size = size_status(p.files.len(), self.symbol_count());
+            self.status = match scan_summary(&report) {
+                Some(summary) => format!("{size} — {summary}"),
+                None => size,
             };
         }
         // This is the first point at which a created or deleted Rust file
@@ -1006,7 +1058,7 @@ pub(crate) fn read_or_unread(
     read: Result<LoadedProjectState, tokio::task::JoinError>,
 ) -> LoadedProjectState {
     read.unwrap_or_else(|e| {
-        LoadedProjectState::unread(format!("the read failed unexpectedly: {e}"))
+        LoadedProjectState::unread(tr!("the read failed unexpectedly: {error}", error = e))
     })
 }
 
@@ -1048,7 +1100,7 @@ impl App {
                 self.pending_consent = None;
                 self.pending_open = None;
                 self.setup = None;
-                self.status = "Project not opened".to_string();
+                self.status = tr!("Project not opened").to_string();
                 Task::none()
             }
             ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),

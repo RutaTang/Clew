@@ -11,6 +11,7 @@ use crate::app::message::{Message, ProjectMsg};
 use crate::app::setup::{ProjectSetup, SetupMode, explain_line, servers_line};
 use crate::app::state::App;
 use crate::theme;
+use crate::tr;
 
 /// Room under a tick for what it takes, lined up with its label.
 const DETAIL_INDENT: f32 = 26.0;
@@ -36,16 +37,16 @@ pub(crate) fn setup_sheet<'a>(
     let explain_says = explain_line(app.llm_available, calls.flatten(), app.embed_available);
 
     let title = match mode {
-        SetupMode::Open => format!("Open {name}"),
-        SetupMode::Manage => format!("Set up {name}"),
-        SetupMode::Explain => format!("Explain {name}?"),
+        SetupMode::Open => tr!("Open {name}", name = name),
+        SetupMode::Manage => tr!("Set up {name}", name = name),
+        SetupMode::Explain => tr!("Explain {name}?", name = name),
     };
     let mut body = column![text(title).size(ts::TITLE).color(theme::fg())].spacing(14);
 
     if mode == SetupMode::Open {
         body = body.push(
             row![
-                text("clew keeps its data in")
+                text(tr!("clew's data folder:"))
                     .size(ts::BODY)
                     .color(theme::dim()),
                 text(format!("{}/.clew", root.display()))
@@ -92,19 +93,24 @@ pub(crate) fn setup_sheet<'a>(
             match servers {
                 None => {
                     body = body.push(choice(
-                        "Language servers",
+                        tr!("Language servers"),
                         false,
                         None,
-                        "Looking at the project…".into(),
+                        tr!("Checking the project…").into(),
                     ))
                 }
                 Some([]) if mode == SetupMode::Open => {}
                 Some([]) => {
-                    body = body.push(choice("Language servers", false, None, "Ready.".into()))
+                    body = body.push(choice(
+                        tr!("Language servers"),
+                        false,
+                        None,
+                        tr!("Ready.").into(),
+                    ))
                 }
                 Some(list) => {
                     body = body.push(choice(
-                        "Language servers",
+                        tr!("Language servers"),
                         setup.is_some_and(|s| s.servers),
                         Some(|on| Message::Project(ProjectMsg::SetupServers(on))),
                         servers_line(list),
@@ -114,7 +120,7 @@ pub(crate) fn setup_sheet<'a>(
             let can_explain =
                 app.llm_available && !matches!(census.map(|c| c.calls), Some(Some(0)));
             body = body.push(choice(
-                "Explain the project",
+                tr!("Explain the project"),
                 setup.is_some_and(|s| s.explain),
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
@@ -128,27 +134,27 @@ pub(crate) fn setup_sheet<'a>(
     let (decline, accept, accept_msg, gated) = match mode {
         SetupMode::Open => (
             Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
-            "Open",
+            tr!("Open"),
             Message::Project(ProjectMsg::ConsentAllowed(root.to_path_buf())),
             true,
         ),
         SetupMode::Manage => (
             Message::Project(ProjectMsg::SetupClose),
-            "Apply",
+            tr!("Apply"),
             Message::Project(ProjectMsg::SetupApply),
             false,
         ),
         SetupMode::Explain => (
             Message::Project(ProjectMsg::SetupClose),
-            "Explain",
+            tr!("Explain"),
             Message::Project(ProjectMsg::SetupApply),
             false,
         ),
     };
     let decline_label = if mode == SetupMode::Open {
-        "Not now"
+        tr!("Not now")
     } else {
-        "Cancel"
+        tr!("Cancel")
     };
     // Something to do: a first open always opens; Apply needs a tick that
     // does something; Explain, something left to explain.

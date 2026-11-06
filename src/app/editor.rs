@@ -16,7 +16,11 @@ pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
     // The sheet's header names the file: the status line says something
     // only when there is something to say about it.
     match lang_key.and_then(highlight::highlight_error) {
-        Some(e) => format!("{rel} — shown without highlighting: {e}"),
+        Some(e) => tr!(
+            "{file} — shown without highlighting: {error}",
+            file = rel,
+            error = e
+        ),
         None => String::new(),
     }
 }
@@ -159,7 +163,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|other| other.abs == open.abs && *pending == Some(other.req))
                 });
-        if !still_coming && self.status == format!("Loading {}…", self.rel_of(&open.abs)) {
+        if !still_coming && self.status == tr!("Loading {file}…", file = self.rel_of(&open.abs)) {
             self.status.clear();
         }
     }
@@ -286,7 +290,7 @@ impl App {
                     abs,
                     target: line,
                 });
-                self.status = format!("Loading {rel}…");
+                self.status = tr!("Loading {file}…", file = rel);
                 return Task::none();
             }
         }
@@ -296,7 +300,10 @@ impl App {
         // show (and index) the wrong project.
         if self.connection.is_remote() {
             self.proj.link.pane_pending[pane] = None;
-            self.status = format!("Disconnected from the remote host — cannot open {rel}");
+            self.status = tr!(
+                "Disconnected from the remote host — cannot open {file}",
+                file = rel
+            );
             return Task::none();
         }
         // Fallback: server not up — read + highlight locally. The token comes
@@ -310,7 +317,7 @@ impl App {
             abs: abs.clone(),
             target: line,
         });
-        self.status = format!("Loading {rel}…");
+        self.status = tr!("Loading {file}…", file = rel);
         let stamp = self.stamp();
         // A file of the project is read only if it really is one (see
         // `load_file`); one outside it by its path is a dependency's source.
@@ -511,7 +518,7 @@ impl App {
                                 .map_err(|e| e.to_string())
                         })
                         .await
-                        .unwrap_or_else(|e| Err(format!("the git task failed: {e}")))
+                        .unwrap_or_else(|e| Err(tr!("the git task failed: {error}", error = e)))
                     },
                     move |info| {
                         Message::Editor(EditorMsg::GitInfoLoaded {
@@ -543,7 +550,7 @@ impl App {
         // Purely lexical, so it is identical for local and remote and never
         // probes this machine's disk at a remote path.
         if !clew_core::statefile::safe_rel(&rel) {
-            self.status = format!("Refused a path outside the project: {rel}");
+            self.status = tr!("Refused a path outside the project: {file}", file = rel);
             return Task::none();
         }
         let abs = project.root.join(&rel);
@@ -1060,7 +1067,11 @@ impl App {
         let info = match info {
             Ok(info) => info,
             Err(e) => {
-                self.status = format!("git blame of {}: {e}", self.rel_of(&abs));
+                self.status = tr!(
+                    "Couldn't read git blame for {file}: {error}",
+                    file = self.rel_of(&abs),
+                    error = e
+                );
                 None
             }
         };
@@ -1098,7 +1109,7 @@ impl App {
         // its reply finds no pending request and is dropped, instead of
         // opening the view the user just asked to turn off.
         if self.proj.diff_pending.take().is_some() {
-            self.status = "Diff cancelled".into();
+            self.status = tr!("Diff cancelled").into();
             return Task::none();
         }
         // Toggle off if already showing this file's diff.
@@ -1120,7 +1131,7 @@ impl App {
         let rel = self.rel_of(&abs);
         let req = self.mint_request_id();
         self.proj.diff_pending = Some((req, abs.clone()));
-        self.status = format!("Computing the diff of {rel}…");
+        self.status = tr!("Computing the diff of {file}…", file = rel);
         let stamp = self.stamp();
         Task::perform(
             async move {
@@ -1159,16 +1170,22 @@ impl App {
         }
         self.proj.diff_pending = None;
         match result {
-            Err(e) => self.status = format!("Couldn't compute the diff of {rel}: {e}"),
+            Err(e) => {
+                self.status = tr!(
+                    "Couldn't compute the diff of {file}: {error}",
+                    file = rel,
+                    error = e
+                )
+            }
             Ok(None) => {
-                self.status = format!("No diff for {rel} — it is not tracked by git");
+                self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
             }
             Ok(Some(lines)) => {
                 // Show the diff only if the active pane still shows that file —
                 // a slow diff must not display against another file.
                 if self.active_viewer().is_some_and(|v| v.abs == abs) {
                     if lines.is_empty() {
-                        self.status = format!("{rel} has no changes against HEAD");
+                        self.status = tr!("{file} has no changes against HEAD", file = rel);
                     } else {
                         self.status.clear();
                     }
@@ -1271,7 +1288,7 @@ impl App {
             return Task::none();
         };
         let n = text.lines().count();
-        self.status = format!("Copied {n} line{}", if n == 1 { "" } else { "s" });
+        self.status = trn!("Copied 1 line", "Copied {n} lines", n);
         iced::clipboard::write(text)
     }
 
@@ -1604,7 +1621,7 @@ impl App {
             return None;
         }
         let text = if b.uncommitted {
-            "· Uncommitted change".to_string()
+            format!("· {}", tr!("Uncommitted change"))
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1617,7 +1634,7 @@ impl App {
             format!(
                 "{}, {} · {}",
                 b.author,
-                git::relative_time(b.time, now),
+                crate::i18n::ago(b.time, now),
                 summary
             )
         };

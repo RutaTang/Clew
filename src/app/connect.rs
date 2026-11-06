@@ -86,7 +86,7 @@ impl App {
         let user = ui.user.trim().to_string();
         if host.is_empty() || user.is_empty() {
             if let Some(ui) = &mut self.connect {
-                ui.stage = ConnectStage::Error("Host and user are required.".into());
+                ui.stage = ConnectStage::Error(tr!("Host and user are required.").into());
             }
             return Task::none();
         }
@@ -124,7 +124,7 @@ impl App {
     pub(crate) fn remember_connection(&mut self, conn: connect::SavedConnection) {
         match connect::upsert(conn) {
             Ok(merged) => self.saved_connections = merged,
-            Err(e) => self.status = format!("Cannot save connections: {e}"),
+            Err(e) => self.status = tr!("Cannot save connections: {error}", error = e),
         }
     }
 
@@ -133,7 +133,7 @@ impl App {
     /// subscription brings up the new transport, which hands back a fresh channel
     /// via `ServerMsg::Connected`. The Connect modal, if open, moves to "connecting".
     pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) -> Task<Message> {
-        let headline = format!("Connecting to {}…", target.label());
+        let headline = tr!("Connecting to {host}…", host = target.label());
         self.connect_to_saying(target, headline)
     }
 
@@ -353,9 +353,11 @@ impl App {
             Ok(removed) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let headline = format!(
-                    "Forgot {host}'s old key{} — connecting",
-                    if removed == 1 { "" } else { "s" }
+                let headline = trn!(
+                    "Forgot {host}'s old key — connecting…",
+                    "Forgot {host}'s old keys — connecting…",
+                    removed,
+                    host = host
                 );
                 let task = self.reconnect_saying(target, headline);
                 self.remote_ai_opt_in = opt_in;
@@ -363,7 +365,10 @@ impl App {
             }
             Err(e) => {
                 if let Some(ui) = &mut self.connect {
-                    ui.stage = ConnectStage::Error(format!("The old key was not forgotten: {e}"));
+                    ui.stage = ConnectStage::Error(tr!(
+                        "The old key was not forgotten: {error}",
+                        error = e
+                    ));
                 }
                 Task::none()
             }
@@ -401,17 +406,17 @@ impl App {
         };
         let recorded = match host_field {
             Some(host_field) => connect::trust_host_key(&key, &host_field),
-            None => Err("this connection names no single host to trust".into()),
+            None => Err(tr!("this connection names no single host to trust").into()),
         };
         match recorded {
             Ok(path) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let headline = format!(
-                    "Trusted {} key {} (recorded in {}) — connecting…",
-                    key.kind,
-                    key.fingerprint,
-                    path.display()
+                let headline = tr!(
+                    "Trusted {kind} key {fingerprint} (recorded in {path}) — connecting…",
+                    kind = key.kind,
+                    fingerprint = key.fingerprint,
+                    path = path.display()
                 );
                 let task = self.reconnect_saying(target, headline);
                 self.remote_ai_opt_in = opt_in;
@@ -419,7 +424,10 @@ impl App {
             }
             Err(e) => {
                 if let Some(ui) = &mut self.connect {
-                    ui.stage = ConnectStage::Error(format!("The host key was not trusted: {e}"));
+                    ui.stage = ConnectStage::Error(tr!(
+                        "The host key was not trusted: {error}",
+                        error = e
+                    ));
                 }
                 Task::none()
             }
@@ -477,7 +485,7 @@ impl App {
         {
             ui.send_ai_keys = false;
         }
-        self.status = "This host no longer holds your AI keys".into();
+        self.status = tr!("This host no longer holds your AI keys").into();
         Task::none()
     }
 }
@@ -559,7 +567,7 @@ impl App {
                 // it had deleted.
                 match connect::remove(&user_host, port) {
                     Ok(merged) => self.saved_connections = merged,
-                    Err(e) => self.status = format!("Cannot save connections: {e}"),
+                    Err(e) => self.status = tr!("Cannot save connections: {error}", error = e),
                 }
                 Task::none()
             }

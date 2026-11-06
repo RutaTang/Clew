@@ -26,7 +26,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let title = container(
         row![
             glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
-            text("Debug").size(ts::SMALL).color(theme::fg_bright()),
+            text(tr!("Debug")).size(ts::SMALL).color(theme::fg_bright()),
         ]
         .spacing(6)
         .align_y(iced::Center),
@@ -51,7 +51,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = if app.debug.session.is_some() {
         debug_panel(app)
     } else {
-        empty_state(Glyph::Debug, "No debug session", "", None)
+        empty_state(Glyph::Debug, tr!("No debug session"), "", None)
     };
 
     container(column![tabs, hairline(), content].height(Fill))
@@ -68,10 +68,10 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         return space().into();
     };
     let (status_txt, status_color) = match session.status {
-        DebugStatus::Launching => ("launching…", theme::dim()),
-        DebugStatus::Running => ("running", theme::success()),
-        DebugStatus::Stopped => ("stopped", theme::warning()),
-        DebugStatus::Terminated => ("terminated", theme::dim()),
+        DebugStatus::Launching => (tr!("launching…"), theme::dim()),
+        DebugStatus::Running => (tr!("running"), theme::success()),
+        DebugStatus::Stopped => (tr!("stopped"), theme::warning()),
+        DebugStatus::Terminated => (tr!("terminated"), theme::dim()),
     };
     let stopped = session.status == DebugStatus::Stopped;
 
@@ -86,30 +86,30 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     };
     let controls = row![
         ctrl(
-            "▶ Continue",
+            tr!("▶ Continue"),
             Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
             stopped
         ),
         ctrl(
-            "⤼ Over",
+            tr!("⤼ Over"),
             Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
             stopped
         ),
         ctrl(
-            "⤓ In",
+            tr!("⤓ In"),
             Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
             stopped
         ),
         ctrl(
-            "⤒ Out",
+            tr!("⤒ Out"),
             Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
             stopped
         ),
-        ctrl("■ Stop", Message::Debug(DebugMsg::Stop), true),
+        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true),
     ]
     .spacing(4);
     let header = row![
-        text("Debug").size(ts::BASE).color(theme::fg()),
+        text(tr!("Debug")).size(ts::BASE).color(theme::fg()),
         text(status_txt).size(ts::SMALL).color(status_color),
         space().width(Fill),
         trace_control(app),
@@ -121,7 +121,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![
-        text("CALL STACK")
+        text(tr!("CALL STACK"))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
@@ -159,7 +159,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Variables — each scope with its name = value rows.
     let mut var_rows: Vec<Element<'_, Message>> = vec![
-        text("VARIABLES")
+        text(tr!("VARIABLES"))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
@@ -187,8 +187,12 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     }
 
     // Program output.
-    let mut out_rows: Vec<Element<'_, Message>> =
-        vec![text("OUTPUT").size(ts::CAPTION).color(theme::dim()).into()];
+    let mut out_rows: Vec<Element<'_, Message>> = vec![
+        text(tr!("OUTPUT"))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    ];
     for (cat, txt) in &session.output {
         let color = if cat == "stderr" {
             theme::danger()
@@ -205,10 +209,14 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     }
 
     // Watch — expressions re-evaluated each stop, with an add box + remove.
-    let mut watch_rows: Vec<Element<'_, Message>> =
-        vec![text("WATCH").size(ts::CAPTION).color(theme::dim()).into()];
+    let mut watch_rows: Vec<Element<'_, Message>> = vec![
+        text(tr!("WATCH"))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    ];
     watch_rows.push(
-        text_input("Add watch…", &app.debug.watch_input)
+        text_input(tr!("Add watch…"), &app.debug.watch_input)
             .style(theme::input)
             .on_input(|v| Message::Debug(DebugMsg::WatchInput(v)))
             .on_submit(Message::Debug(DebugMsg::WatchAdd))
@@ -265,19 +273,23 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
     let n = app.debug.trace.len();
     if n == 0 {
-        return text("trace: no stops yet")
+        return text(tr!("Trace: no stops yet"))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into();
     }
-    let count = format!(
-        "trace: {n} {}{}",
-        if n == 1 { "stop" } else { "stops" },
-        if app.debug.trace_cut { " (cut)" } else { "" }
-    );
+    let count = if app.debug.trace_cut {
+        trn!(
+            "Trace: 1 stop (cut short)",
+            "Trace: {n} stops (cut short)",
+            n
+        )
+    } else {
+        trn!("Trace: 1 stop", "Trace: {n} stops", n)
+    };
     row![
         text(count).size(ts::CAPTION).color(theme::dim()),
-        button(text("Walk this run").size(ts::SMALL))
+        button(text(tr!("Walk this run")).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([2, 8])
             .on_press(Message::Walk(WalkMsg::GenerateTrace)),
@@ -299,13 +311,13 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     tooltip(
         iced::widget::checkbox(app.debug_hover_eval)
             .style(theme::check)
-            .label("Evaluate on hover")
+            .label(tr!("Evaluate on hover"))
             .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
             .size(14)
             .text_size(ts::SMALL)
             .spacing(6),
         container(
-            text("May run the program's own code.")
+            text(tr!("May run the program's own code."))
                 .size(ts::SMALL)
                 .color(theme::fg()),
         )
@@ -427,9 +439,9 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             && app.proj.ask_pins.is_empty()
         {
             convo.push(
-                text(
-                    "Answers are grounded once “Explain All” has run, or in code you “Add to Ask”.",
-                )
+                text(tr!(
+                    "For grounded answers, run “Explain All” or add code with “Add to Ask”."
+                ))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
@@ -438,7 +450,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         // While voice listens: what can be said, and what comes of it.
         if app.voice.is_listening() {
             convo.push(
-                text("Try saying")
+                text(tr!("Try saying"))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
@@ -465,7 +477,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         let suggestions = app.suggested_questions();
         if !suggestions.is_empty() && !app.voice.is_listening() {
             convo.push(
-                text("Try asking")
+                text(tr!("Try asking"))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
@@ -501,7 +513,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 row![
                     glyph::icon(Glyph::Mic, theme::dim(), SAID_SIZE),
                     ts::set_in(
-                        text("Said").color(theme::dim()),
+                        text(tr!("Said")).color(theme::dim()),
                         ts::INTER.normal(SAID_SIZE),
                         ts::INTER,
                         SAID_SIZE,
@@ -544,7 +556,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         );
         if let Some(agent) = &turn.extras.agent {
             convo.push(
-                text(format!("asked {agent}"))
+                text(tr!("Asked {agent}", agent = agent))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
@@ -612,11 +624,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
                 let label = if !turn.extras.approvals.is_empty() {
-                    "Waiting for your answer…"
+                    tr!("Waiting for your answer…")
                 } else if turn.steps.is_empty() {
-                    "Thinking…"
+                    tr!("Thinking…")
                 } else {
-                    "Exploring…"
+                    tr!("Exploring…")
                 };
                 convo.push(text(label).size(ts::BODY).color(theme::dim()).into());
             } else {
@@ -631,7 +643,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
         if !turn.sources.is_empty() {
-            convo.push(text("Sources").size(ts::CAPTION).color(theme::dim()).into());
+            convo.push(
+                text(tr!("Sources"))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .into(),
+            );
             let chips: Vec<Element<'_, Message>> = turn
                 .sources
                 .iter()
@@ -642,7 +659,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     }
     // Retrieval phase (before the answer turn exists) shows a spinner line.
     if app.proj.asking {
-        convo.push(text("Thinking…").size(ts::BODY).color(theme::dim()).into());
+        convo.push(
+            text(tr!("Thinking…"))
+                .size(ts::BODY)
+                .color(theme::dim())
+                .into(),
+        );
     }
     let conversation = scrollable(Column::with_children(convo).spacing(14).width(Fill))
         .id(ask_scroll_id())
@@ -712,11 +734,15 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             // own that is there with no count to show — the gap over the
             // card — so one more coming moves nothing of it.
             let count: Element<'_, Message> = if more > 0 {
-                text(format!("{more} more waiting after this one"))
-                    .size(ts::CAPTION)
-                    .line_height(ts::normal_line(ts::CAPTION))
-                    .color(theme::dim())
-                    .into()
+                text(trn!(
+                    "1 more waiting after this one",
+                    "{n} more waiting after this one",
+                    more
+                ))
+                .size(ts::CAPTION)
+                .line_height(ts::normal_line(ts::CAPTION))
+                .color(theme::dim())
+                .into()
             } else {
                 space().into()
             };
@@ -777,21 +803,21 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .as_deref()
         .and_then(|n| app.acp_agents.iter().find(|a| a.name == n))
     {
-        Some(agent) => format!(
-            "Ask {} about this codebase…",
-            crate::app::integrations::acp_label(agent)
+        Some(agent) => tr!(
+            "Ask {agent} about this codebase…",
+            agent = crate::app::integrations::acp_label(agent)
         ),
         // Once there is a conversation, what is typed is a reply — and, in
         // the large window, where there is room to say it, the microphone's
         // key as another way to give it.
         None if !app.proj.ask_turns.is_empty() && app.ask_view == crate::AskView::Expanded => {
-            format!(
-                "Reply, or press {} to talk",
-                app.keymap.chord(crate::keymap::Action::Voice).caps()
+            tr!(
+                "Reply, or press {keys} to talk",
+                keys = app.keymap.chord(crate::keymap::Action::Voice).caps()
             )
         }
-        None if !app.proj.ask_turns.is_empty() => "Reply…".to_string(),
-        None => "Ask about this codebase…".to_string(),
+        None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
+        None => tr!("Ask about this codebase…").to_string(),
     };
     let input = ts::field_in(
         text_input(&placeholder, &app.proj.ask_input)
@@ -831,7 +857,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
-    let ask_btn = super::toolbar::tip_at(ask_btn, "Ask", None, tooltip::Position::Top);
+    let ask_btn = super::toolbar::tip_at(ask_btn, tr!("Ask"), None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed.
     let listening = app.voice.is_listening();
     let talk = super::toolbar::tip_at(
@@ -845,7 +871,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         )
         .style(theme::round_button(false))
         .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
-        if listening { "Stop listening" } else { "Talk" },
+        if listening {
+            tr!("Stop listening")
+        } else {
+            tr!("Talk")
+        },
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );
@@ -935,7 +965,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // as it went, and a press held on Stop as the answer ended asked the
     // question typed meanwhile, let go of over Ask.
     let stop: Element<'_, Message> = if streaming {
-        button(text("Stop").size(ts::BASE))
+        button(text(tr!("Stop")).size(ts::BASE))
             .style(theme::toolbar_button)
             .padding([5, 12])
             .on_press(Message::Ask(AskMsg::Stop))
@@ -952,7 +982,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let keep_listening = row![
         track,
         iced::widget::mouse_area(ts::set_in(
-            text("Keep listening").color(theme::fg_muted()),
+            text(tr!("Keep listening")).color(theme::fg_muted()),
             super::form::SWITCH_H,
             ts::INTER,
             KEEP_LISTENING_SIZE,
@@ -1193,15 +1223,22 @@ pub(crate) fn approval_card<'a>(
     // for them (`App::on_answers_page`), and its buttons are drawn anew.
     if pages > 1 {
         buttons.push(
-            button(text(format!("More answers ({} of {pages})", page + 1)).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([3, 10])
-                .on_press(Message::Ask(AskMsg::AnswersPage {
-                    stream,
-                    key: approval.key,
-                    page: (page + 1) % pages,
-                }))
-                .into(),
+            button(
+                text(tr!(
+                    "More answers ({page} of {pages})",
+                    page = page + 1,
+                    pages = pages
+                ))
+                .size(ts::SMALL),
+            )
+            .style(theme::toolbar_button)
+            .padding([3, 10])
+            .on_press(Message::Ask(AskMsg::AnswersPage {
+                stream,
+                key: approval.key,
+                page: (page + 1) % pages,
+            }))
+            .into(),
         );
     }
     // A yes and a no sit beside the question; more answers than that, a
@@ -1411,7 +1448,7 @@ fn agent_step_chip<'a>(
     let clickable = target.is_some();
     let show: Element<'a, Message> = if clickable {
         ts::set_in(
-            text("Show").color(theme::accent()),
+            text(tr!("Show")).color(theme::accent()),
             STEP_ROW_H,
             ts::INTER,
             ts::SMALL,
@@ -1491,7 +1528,7 @@ fn tree_head<'a>(
 
 /// Expand every node of a tree.
 fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
-    button(text("Expand all").size(ts::SMALL))
+    button(text(tr!("Expand all")).size(ts::SMALL))
         .style(theme::toolbar_button)
         .padding([2, 7])
         .on_press(msg)
@@ -1522,18 +1559,18 @@ fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a
 /// row unfolds into the callee's parameter and ITS occurrences.
 pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.flow else {
-        return empty_state(Glyph::Search, "No value trace yet", "", None);
+        return empty_state(Glyph::Search, tr!("No value trace yet"), "", None);
     };
     let pending = app.proj.flow_pending == Some(tree.token);
     let header = tree_head(
         &tree.symbol,
         Some(if pending {
-            "tracing…".to_string()
+            tr!("tracing…").to_string()
         } else {
-            format!("{} places", tree.node_count())
+            trn!("1 place", "{n} places", tree.node_count())
         }),
         vec![
-            button(text("Clear").size(ts::SMALL))
+            button(text(tr!("Clear")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 7])
                 .on_press(Message::Flow(crate::FlowMsg::Clear))
@@ -1547,11 +1584,11 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
         rows.push(
             container(
                 row![
-                    text("A traced file changed.")
+                    text(tr!("A traced file changed."))
                         .size(ts::CAPTION)
                         .color(theme::warning())
                         .width(Fill),
-                    button(text("trace again").size(ts::SMALL))
+                    button(text(tr!("Trace again")).size(ts::SMALL))
                         .style(theme::toolbar_button)
                         .padding([2, 7])
                         .on_press(Message::Flow(crate::FlowMsg::Retrace)),
@@ -1632,7 +1669,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
     };
     let where_ = format!("{}:{}", node.rel, node.line + 1);
     let changed: Element<'_, Message> = if node.changed {
-        text("changed")
+        text(tr!("changed"))
             .size(ts::CAPTION)
             .color(theme::warning())
             .into()
@@ -1649,7 +1686,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         text(if node.classified {
             node.text.clone()
         } else {
-            "(line not read)".to_string()
+            tr!("(line not read)").to_string()
         })
         .size(ts::SMALL)
         .font(crate::fonts::CODE)
@@ -1685,7 +1722,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
 /// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.call_graph else {
-        return empty_state(Glyph::CallGraph, "No call hierarchy yet", "", None);
+        return empty_state(Glyph::CallGraph, tr!("No call hierarchy yet"), "", None);
     };
 
     use crate::graph::callgraph::Direction;
@@ -1696,7 +1733,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         Some(direction_switch(
             [Direction::Incoming, Direction::Outgoing].map(|d| {
                 (
-                    d.label(),
+                    crate::i18n::lookup(d.label()),
                     tree.direction == d,
                     Message::Calls(CallsMsg::Direction),
                 )
@@ -1794,7 +1831,10 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     // position, iced rebuilt it at the top, and the reader lost their place.
     let stale: Element<'_, Message> = if tree.stale {
         tree_banner(
-            "⟳ code changed — press gc to refresh".into(),
+            format!(
+                "⟳ {}",
+                tr!("Code changed — press {keys} to refresh", keys = "gc")
+            ),
             theme::warning(),
         )
     } else {
@@ -1819,14 +1859,16 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.import_tree else {
         return container(
             column![
-                text("No file focused.").size(ts::BODY).color(theme::dim()),
+                text(tr!("No file focused."))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
                 space().height(6),
-                text("Open a source file to see what it")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-                text("imports and what imports it.")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
+                text(tr!(
+                    "Open a source file to see what it imports and what imports it."
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::Word),
             ]
             .spacing(2),
         )
@@ -1841,7 +1883,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         vec![expand_all(Message::Graph(GraphMsg::ImportExpandAll))],
         Some(direction_switch([Dir::Imports, Dir::Importers].map(|d| {
             (
-                d.label(),
+                crate::i18n::lookup(d.label()),
                 tree.direction == d,
                 Message::Graph(GraphMsg::ImportDirection),
             )
@@ -1902,7 +1944,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                     space().width(6),
-                    text("ext").size(ts::CAPTION).color(theme::dim()),
+                    text(tr!("ext")).size(ts::CAPTION).color(theme::dim()),
                 ]
                 .align_y(iced::Center),
             )
@@ -1943,14 +1985,14 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     let cycles: Element<'_, Message> = match app.proj.import_cycles.len() {
         0 => slot(),
         n => tree_banner(
-            format!("⚠ {n} import cycle{}", if n == 1 { "" } else { "s" }),
+            format!("⚠ {}", trn!("1 import cycle", "{n} import cycles", n)),
             theme::warning(),
         ),
     };
     // The graph under this tree is built from the symbol index; files the
     // index had to leave out have no edges here, so say which were left out.
     let capped: Element<'_, Message> = match index_cap_note(app) {
-        Some(note) => tree_banner(format!("Index incomplete: {note}"), theme::dim()),
+        Some(note) => tree_banner(tr!("Index incomplete: {note}", note = note), theme::dim()),
         None => slot(),
     };
     column![

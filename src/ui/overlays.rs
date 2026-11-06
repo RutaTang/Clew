@@ -103,21 +103,21 @@ pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
         items.push(item(kind.label(), Message::Hover(HoverMsg::Insight)));
     }
     items.extend([
-        item("View docs", Message::Docs(DocsMsg::ViewFromMenu)),
-        item("Call Hierarchy", Message::Calls(CallsMsg::FromMenu)),
-        item("Trace Value", Message::Flow(crate::FlowMsg::FromMenu)),
-        item("Explain", Message::Explain(ExplainMsg::FromMenu)),
-        item("Add to Ask", Message::Ask(AskMsg::AboutSelection)),
+        item(tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
+        item(tr!("Call Hierarchy"), Message::Calls(CallsMsg::FromMenu)),
+        item(tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu)),
+        item(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
+        item(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
         item(
-            "Why is this here?",
+            tr!("Why is this here?"),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         ),
         item(
-            "Toggle Breakpoint",
+            tr!("Toggle Breakpoint"),
             Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
         ),
         item(
-            "Conditional Breakpoint…",
+            tr!("Conditional Breakpoint…"),
             Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
         ),
     ]);

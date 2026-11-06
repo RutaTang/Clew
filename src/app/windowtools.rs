@@ -174,7 +174,7 @@ impl App {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.push_window_step(stream, "Listed the window's commands", None);
+                self.push_window_step(stream, tr!("Listed the window's commands"), None);
                 self.window_tool_result(
                     stream,
                     call,
@@ -256,7 +256,7 @@ impl App {
         };
         self.push_window_step(
             stream,
-            &format!("Opened `{at}`"),
+            &tr!("Opened `{file}`", file = at),
             Some((rel, line.unwrap_or(1))),
         );
         self.window_tool_result(stream, call, format!("Opened {at} for the user."), false);
@@ -318,7 +318,11 @@ impl App {
                 others.join("\n")
             ));
         }
-        self.push_window_step(stream, &format!("Went to `{name}`"), Some((rel, line)));
+        self.push_window_step(
+            stream,
+            &tr!("Went to `{name}`", name = name),
+            Some((rel, line)),
+        );
         self.window_tool_result(stream, call, content, false);
         self.open_file(abs, Some(line), true)
     }
@@ -347,9 +351,11 @@ impl App {
             return Task::none();
         };
         let title = command.title.clone();
+        // What the user reads: the title as the palette shows it.
+        let shown = command.shown().to_string();
         let (mark, does) = command.cost();
         if !command.costly() {
-            self.push_window_step(stream, &format!("Ran {title}"), None);
+            self.push_window_step(stream, &tr!("Ran {command}", command = shown), None);
             self.window_tool_result(stream, call, format!("Ran “{title}”."), false);
             return self.run_palette(&title);
         }
@@ -367,24 +373,27 @@ impl App {
             .insert(format!("window:{call}"), turn.steps.len());
         turn.steps.push(AgentStep {
             tool: "window".into(),
-            title: format!("Run {title}"),
+            title: tr!("Run {command}", command = shown),
             refs: Vec::new(),
             state: StepState::Waiting,
         });
         turn.extras.approvals.push(Approval {
             key: ApprovalKey::Window { call },
             mark: Some(mark),
-            title: format!("{title}?"),
-            detail: format!("{does} Clew asks before anything that runs code or costs money."),
+            title: tr!("Run “{command}”?", command = shown),
+            detail: tr!(
+                "{effect} Clew asks before anything that runs code or costs money.",
+                effect = does
+            ),
             options: vec![
                 ApprovalOption {
                     id: "once".into(),
-                    label: "Run it".into(),
+                    label: tr!("Run it").into(),
                     allows: true,
                 },
                 ApprovalOption {
                     id: "deny".into(),
-                    label: "Don't".into(),
+                    label: tr!("Don't run").into(),
                     allows: false,
                 },
             ],
@@ -396,7 +405,10 @@ impl App {
                 deadline: call_deadline(),
             },
         );
-        self.status = format!("The agent wants to run “{title}” — answer it in Ask");
+        self.status = tr!(
+            "The agent wants to run “{command}” — answer it in Ask",
+            command = shown
+        );
         self.reveal_ask();
         Task::batch([self.settle_waiting_answers(), self.ask_to_bottom()])
     }
@@ -414,7 +426,7 @@ impl App {
         let id = format!("window:{call}");
         if std::time::Instant::now() >= pending.deadline {
             self.set_step_state(stream, &id, StepState::Failed);
-            self.status = "That command waited too long — the agent went on without it".into();
+            self.status = tr!("That command waited too long — the agent went on without it").into();
             return Task::none();
         }
         if !allowed {

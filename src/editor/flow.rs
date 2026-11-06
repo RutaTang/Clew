@@ -12,6 +12,8 @@
 //! punctuation out of argument numbering. A line the heuristics misread is
 //! still shown — as a plain read, with its text — so nothing is hidden.
 
+use crate::tr;
+
 /// What a line does with the traced value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Role {
@@ -48,14 +50,14 @@ impl Role {
     /// The section heading the FLOW tab files the role under.
     pub fn heading(self) -> &'static str {
         match self {
-            Role::Declared => "DECLARED",
-            Role::Assigned => "ASSIGNED",
-            Role::Parameter => "PARAMETER",
-            Role::Passed => "PASSED TO",
-            Role::Returned => "RETURNED",
-            Role::Branched => "BRANCHED ON",
-            Role::Member => "MEMBER ACCESS",
-            Role::Read => "READ",
+            Role::Declared => tr!("DECLARED"),
+            Role::Assigned => tr!("ASSIGNED"),
+            Role::Parameter => tr!("PARAMETER"),
+            Role::Passed => tr!("PASSED TO"),
+            Role::Returned => tr!("RETURNED"),
+            Role::Branched => tr!("BRANCHED ON"),
+            Role::Member => tr!("MEMBER ACCESS"),
+            Role::Read => tr!("READ"),
         }
     }
 
@@ -210,7 +212,7 @@ pub fn classify(line: &str, col: usize, word: &str) -> Use {
     if declared_here {
         return Use {
             role: Role::Assigned,
-            detail: "declared".into(),
+            detail: tr!("declared").into(),
             argument: None,
             callee: None,
         };
@@ -277,7 +279,7 @@ fn assigned_from(rhs: &str) -> String {
         .starts_with(|c: char| c.is_ascii_digit() || c == '"' || c == '\'' || c == '[' || c == '{')
         || matches!(first, "true" | "false" | "None" | "null" | "nil")
     {
-        return "a literal".into();
+        return tr!("a literal").into();
     }
     if first.is_empty() {
         return String::new();

@@ -296,7 +296,7 @@ impl App {
         if self.connection.is_remote() {
             self.pending_scan_root = None;
             self.scanning = false;
-            self.status = format!("{reason} — use Connect to reconnect.");
+            self.status = tr!("{reason} — use Connect to reconnect.", reason = reason);
             self.handshake_failure = Some(self.status.clone());
             return Task::none();
         }
@@ -367,8 +367,11 @@ impl App {
         self.conn_respawn = true;
         let dropped = self.drop_connection_state();
         self.status = match reason {
-            Some(why) => format!("clew-server disconnected ({why}) — reconnecting…"),
-            None => "clew-server disconnected — reconnecting…".into(),
+            Some(why) => tr!(
+                "clew-server disconnected ({why}) — reconnecting…",
+                why = why
+            ),
+            None => tr!("clew-server disconnected — reconnecting…").into(),
         };
         dropped
     }
@@ -494,7 +497,7 @@ impl App {
         let closed = Task::batch(cut.into_iter().map(|stream| {
             self.on_ask_stream_ended(
                 stream,
-                clew_protocol::StreamOutcome::Failed("server disconnected".into()),
+                clew_protocol::StreamOutcome::Failed(tr!("server disconnected").into()),
             )
         }));
         self.proj.asking = false;
@@ -592,7 +595,7 @@ impl App {
             // refresh sent nothing while it did.
             let _ = self.end_awaited(
                 id,
-                Some("not sent again: clew-server took no request".into()),
+                Some(tr!("not sent again: clew-server took no request").into()),
             );
             return Task::none();
         };
@@ -651,9 +654,10 @@ impl App {
             Ok(()) => true,
             Err(SendError::NoServer) => false,
             Err(SendError::Full) => {
-                self.status =
-                    "clew-server is not taking requests (its queue is full) — one was dropped"
-                        .into();
+                self.status = tr!(
+                    "clew-server is not taking requests (its queue is full) — a request was dropped"
+                )
+                .into();
                 false
             }
         }
@@ -680,10 +684,7 @@ impl App {
         let crate::app::remote_state::Unapplied {
             rel, what, last, ..
         } = edit;
-        self.status = format!(
-            "{}{rel}: the change to {what} is lost ({message})",
-            crate::app::remote_state::NOT_SAVED
-        );
+        self.status = crate::app::remote_state::lost_status(&rel, &what, message);
         if last
             && let Some(root) = self
                 .proj
@@ -1317,11 +1318,13 @@ impl App {
                             .collect();
                         self.server.lsp_procs.retain(|_, p| *p != proc);
                         self.status = match languages.first() {
-                            Some(lang) => format!(
-                                "The {lang} language server's output was not being read — stopped it (it restarts on next use)"
+                            Some(lang) => tr!(
+                                "Stopped the {lang} language server: its output was not being read. It restarts on next use.",
+                                lang = lang
                             ),
                             None => {
-                                "A proxied process's output was not being read — stopped it".into()
+                                tr!("Stopped a proxied process: its output was not being read.")
+                                    .into()
                             }
                         };
                     }
@@ -1353,11 +1356,14 @@ impl App {
                     // whose every request fails.
                     self.reset_lsp(&language);
                     self.status = match code {
-                        Some(c) => format!(
-                            "{language} language server exited (code {c}). It restarts on the next request."
+                        Some(c) => tr!(
+                            "{language} language server exited (code {code}). It restarts on the next request.",
+                            language = language,
+                            code = c
                         ),
-                        None => format!(
-                            "{language} language server exited. It restarts on the next request."
+                        None => tr!(
+                            "{language} language server exited. It restarts on the next request.",
+                            language = language
                         ),
                     };
                 }
@@ -1398,10 +1404,11 @@ impl App {
                 fingerprint,
             } => {
                 if protocol != clew_protocol::PROTOCOL_VERSION {
-                    return self.on_handshake_failed(format!(
-                        "clew-server speaks protocol v{protocol}, this clew speaks v{} — \
+                    return self.on_handshake_failed(tr!(
+                        "clew-server speaks protocol v{server}, this clew speaks v{client} — \
                          update the server (local: rebuild; remote: it redeploys on reconnect)",
-                        clew_protocol::PROTOCOL_VERSION
+                        server = protocol,
+                        client = clew_protocol::PROTOCOL_VERSION
                     ));
                 }
                 // Same version number, different protocol BUILD (a wire change
@@ -1409,11 +1416,11 @@ impl App {
                 // frames would deserialize wrongly or not at all. Refuse now,
                 // as one clear error, instead of a session of silent drops.
                 if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
-                    return self.on_handshake_failed(format!(
-                        "clew-server was built from different protocol sources (server {}, \
-                         this clew {}) — rebuild the server (remote: reconnect to redeploy)",
-                        fingerprint,
-                        clew_protocol::SCHEMA_FINGERPRINT
+                    return self.on_handshake_failed(tr!(
+                        "clew-server was built from different protocol sources (server {server}, \
+                         this clew {client}) — rebuild the server (remote: reconnect to redeploy)",
+                        server = fingerprint,
+                        client = clew_protocol::SCHEMA_FINGERPRINT
                     ));
                 }
                 // The handshake is internal — don't surface version jargon in
@@ -1787,10 +1794,12 @@ impl App {
                 // A partial listing says so: the entries past the server's
                 // cap (files — directories are listed first) are not shown.
                 if omitted > 0 {
-                    self.status = format!(
-                        "{path}: showing {} of {} entries",
-                        entries.len(),
-                        entries.len() + omitted
+                    self.status = trn!(
+                        "{path}: showing {shown} of 1 entry",
+                        "{path}: showing {shown} of {n} entries",
+                        entries.len() + omitted,
+                        path = path,
+                        shown = entries.len()
                     );
                 }
                 if let Some(ConnectStage::Browsing(b)) = self.connect.as_mut().map(|u| &mut u.stage)

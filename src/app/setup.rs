@@ -17,6 +17,7 @@ use clew_core::{fs_scan, highlight, lsp, outline};
 use crate::app::message::{Message, ProjectMsg};
 use crate::app::model::LspSlot;
 use crate::app::state::App;
+use crate::{tr, trn};
 
 /// What the sheet is for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,16 +209,20 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
             let mut takes: Vec<String> = Vec::new();
             match &s.fetch {
                 Fetch::Nothing => {}
-                Fetch::Download => takes.push("download".into()),
-                Fetch::Install(tool) => takes.push(format!("install with {tool}")),
+                Fetch::Download => takes.push(tr!("download").into()),
+                Fetch::Install(tool) => takes.push(tr!("install with {tool}", tool = tool)),
             }
             if s.builds {
-                takes.push("builds the project, running its code".into());
+                takes.push(tr!("builds the project, running its code").into());
             }
             if takes.is_empty() {
                 s.name.clone()
             } else {
-                format!("{}: {}", s.name, takes.join(", "))
+                tr!(
+                    "{server}: {needs}",
+                    server = s.name,
+                    needs = takes.join(", ")
+                )
             }
         })
         .collect::<Vec<_>>()
@@ -233,32 +238,31 @@ pub(crate) fn about(n: usize) -> String {
         let unit = 10usize.pow((n as f64).log10().floor() as u32 - 1);
         (n + unit / 2) / unit * unit
     };
-    let digits = rounded.to_string();
-    let mut out = String::new();
-    for (i, c) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(',');
-        }
-        out.push(c);
-    }
-    out
+    crate::i18n::number(rounded as u64)
 }
 
 /// What explaining costs, as the sheet says it: `calls` from the look at
 /// the project (`None` while it looks, `Some(None)` where it cannot be
 /// told), and whether the search index is built after.
 pub(crate) fn explain_line(llm: bool, calls: Option<Option<usize>>, index: bool) -> String {
-    let index = if index {
-        " Also builds the search index."
-    } else {
-        ""
-    };
     match calls {
-        _ if !llm => "Needs an AI key in Settings.".into(),
-        None => "Counting…".into(),
-        Some(Some(0)) => "Nothing left to explain.".into(),
-        Some(Some(n)) => format!("About {} AI calls.{index}", about(n)),
-        Some(None) => format!("Paid AI calls.{index}"),
+        _ if !llm => tr!("Needs an AI key in Settings.").into(),
+        None => tr!("Counting…").into(),
+        Some(Some(0)) => tr!("Nothing left to explain.").into(),
+        Some(Some(n)) if index => trn!(
+            "About {count} AI call. Also builds the search index.",
+            "About {count} AI calls. Also builds the search index.",
+            n,
+            count = about(n)
+        ),
+        Some(Some(n)) => trn!(
+            "About {count} AI call.",
+            "About {count} AI calls.",
+            n,
+            count = about(n)
+        ),
+        Some(None) if index => tr!("Paid AI calls. Also builds the search index.").into(),
+        Some(None) => tr!("Paid AI calls.").into(),
     }
 }
 
@@ -343,7 +347,7 @@ impl App {
                 .trust
                 .update(|t| t.trust_build(host.as_deref(), root, &server.name))
             {
-                self.status = format!("Could not record the leave to build: {e}");
+                self.status = tr!("Could not record permission to build: {error}", error = e);
             }
         }
     }
@@ -486,7 +490,11 @@ impl App {
                 }
             }
             Err(e) => {
-                self.status = format!("{language} server download failed: {e}");
+                self.status = tr!(
+                    "Could not download the {language} server: {error}",
+                    language = highlight::lang_name(&language).unwrap_or(&language),
+                    error = e
+                );
                 self.proj.link.lsp.insert(language, LspSlot::Failed(e));
                 Task::none()
             }

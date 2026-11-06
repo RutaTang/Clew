@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::model::AskTurn;
 use crate::{App, Message};
+use crate::{tr, tr_noop};
 
 /// The file the sessions are kept in, in the project's derived directory.
 const FILE: &str = "ask-sessions.json";
@@ -25,6 +26,10 @@ const VERSION: u32 = 1;
 pub(crate) const MAX_SESSIONS: usize = 50;
 /// The longest a session's name grows, in characters.
 const TITLE_CHARS: usize = 48;
+/// The name of a session whose first question has no words: kept in
+/// English, as the session is, and shown in the reader's language
+/// ([`shown_title`]).
+const UNTITLED: &str = tr_noop!("Untitled");
 
 /// One question of a session and its answer, as kept.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,12 +62,22 @@ struct SessionsFile {
 /// A session's name for its first question: its first line, cut short.
 pub(crate) fn title_of(question: &str) -> String {
     let line = question.lines().map(str::trim).find(|l| !l.is_empty());
-    let line = line.unwrap_or("Untitled");
+    let line = line.unwrap_or(UNTITLED);
     if line.chars().count() <= TITLE_CHARS {
         return line.to_string();
     }
     let cut: String = line.chars().take(TITLE_CHARS - 1).collect();
     format!("{}…", cut.trim_end())
+}
+
+/// A session's name as the menu and the card show it: as kept, but for
+/// [`UNTITLED`], said in the reader's language.
+pub(crate) fn shown_title(title: &str) -> &str {
+    if title == UNTITLED {
+        crate::i18n::lookup(UNTITLED)
+    } else {
+        title
+    }
 }
 
 /// Now, in seconds since the epoch.
@@ -77,9 +92,9 @@ pub(crate) fn now() -> i64 {
 pub(crate) fn when(updated: i64, now: i64) -> String {
     let ago = (now - updated).max(0);
     match ago {
-        0..60 => "just now".to_string(),
-        60..3_600 => format!("{} min ago", ago / 60),
-        3_600..86_400 => format!("{} h ago", ago / 3_600),
+        0..60 => tr!("just now").to_string(),
+        60..3_600 => tr!("{n} min ago", n = ago / 60),
+        3_600..86_400 => tr!("{n} h ago", n = ago / 3_600),
         _ => crate::ui::short_date(updated, now),
     }
 }
@@ -273,7 +288,7 @@ impl App {
         if let Some(dir) = self.proj.derived_dir.clone()
             && let Err(e) = save(&dir, &self.proj.ask_sessions)
         {
-            self.status = format!("Could not keep Ask's sessions: {e}");
+            self.status = tr!("Could not save Ask sessions: {error}", error = e);
         }
     }
 
@@ -364,15 +379,16 @@ impl App {
             .collect()
     }
 
-    /// The name of the session on screen: "New session" until something
-    /// has been asked in it.
+    /// The name of the session on screen, as the card shows it: "New
+    /// session" until something has been asked in it.
     pub(crate) fn ask_session_title(&self) -> String {
         self.proj
             .ask_session
             .and_then(|id| self.proj.ask_sessions.iter().find(|s| s.id == id))
             .map(|s| s.title.clone())
             .or_else(|| self.proj.ask_turns.first().map(|t| title_of(&t.question)))
-            .unwrap_or_else(|| "New session".to_string())
+            .map(|title| shown_title(&title).to_string())
+            .unwrap_or_else(|| tr!("New session").to_string())
     }
 }
 
