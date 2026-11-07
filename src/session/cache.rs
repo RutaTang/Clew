@@ -72,7 +72,11 @@ use crate::incremental::Version;
 /// 15: each call site's receiver type and each method's class are kept
 /// ([`CachedCalls::receivers`], [`CachedCalls::owners`]), which narrow a
 /// method call to its class's method; an older entry has neither.
-pub(crate) const CACHE_VERSION: u32 = 15;
+/// 16: a receiver is typed only as what it is exactly — built by a
+/// constructor that is the whole expression, or any value in Go and Rust —
+/// and a name bound again to what cannot be told is untyped; an older entry
+/// kept types that narrowed a call off the override or the builder it made.
+pub(crate) const CACHE_VERSION: u32 = 16;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

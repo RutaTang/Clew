@@ -1043,6 +1043,10 @@ fn walk(
     out: &mut Vec<CallSite>,
 ) {
     let mut stack: Vec<WalkItem> = vec![(root, None, None, None)];
+    // What each function's names are bound to, read once as far as its
+    // calls reach (`Bindings`): reading the function's text again for
+    // every call made the walk quadratic in a long function.
+    let mut bindings: HashMap<(usize, String), Bindings> = HashMap::new();
     while let Some((node, parent, before, enclosing)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
@@ -1064,7 +1068,9 @@ fn walk(
             && let Some((callee, method)) = callee_name(node, parent, src, lang)
         {
             let receiver = match &current {
-                Some((_, from)) if method => receiver_of(node, &callee, *from, src, lang),
+                Some((_, from)) if method => {
+                    receiver_of(node, &callee, *from, src, lang, &mut bindings)
+                }
                 _ => None,
             };
             out.push(CallSite {
@@ -1506,21 +1512,39 @@ fn last_identifier(text: &str) -> Option<String> {
 
 /// What the receiver of the method call `call` (calling `callee`) is known
 /// to be ([`CallSite::receiver`]): looked for in the source of the calling
-/// function before the call, from `from`.
-fn receiver_of(call: Node, callee: &str, from: usize, src: &str, lang: Lang) -> Option<Receiver> {
+/// function before the call, from `from`. Only a type it is known to be
+/// exactly: a type it is declared as may hold a subclass, whose override is
+/// the method called — so `self`, `this` and a declared or annotated
+/// receiver say nothing in a language with inheritance (Go and Rust have
+/// none, and a Rust trait's own methods have no owner to narrow to).
+fn receiver_of(
+    call: Node,
+    callee: &str,
+    from: usize,
+    src: &str,
+    lang: Lang,
+    bindings: &mut HashMap<(usize, String), Bindings>,
+) -> Option<Receiver> {
     let receiver = receiver_text(node_text(call, src), callee)?.trim();
     if matches!(
         receiver,
         "self" | "this" | "$this" | "Self" | "cls" | "static"
     ) {
-        return Some(Receiver::Own);
+        return (lang == Lang::Rust).then_some(Receiver::Own);
     }
     if !is_plain_name(receiver) {
         return None;
     }
-    let before = src.get(from..call.start_byte())?;
-    if let Some(ty) = bound_type(before, receiver, lang) {
-        return Some(Receiver::Type(ty));
+    let scan = bindings
+        .entry((from, receiver.to_string()))
+        .or_insert_with(|| Bindings::from(from));
+    scan.read_to(call.start_byte(), receiver, src, lang);
+    match scan.said() {
+        Said::Type(ty, exact) => {
+            return (exact || matches!(lang, Lang::Go | Lang::Rust)).then_some(Receiver::Type(ty));
+        }
+        Said::Unknown => return None,
+        Said::Nothing => {}
     }
     // A type as the receiver: its own (static) method. Not in Go, where an
     // exported name is as likely a variable.
@@ -1530,8 +1554,12 @@ fn receiver_of(call: Node, callee: &str, from: usize, src: &str, lang: Lang) -> 
 
 /// The receiver expression of a call written `receiver<sep>name(…)`: what
 /// precedes the first `.name`, `->name`, `?.name` or `::name` standing as a
-/// whole name in `call`'s text.
+/// whole name in `call`'s text. `None` for an empty name (a call tree-sitter
+/// recovered from half-typed code), which every position would match.
 fn receiver_text<'a>(call: &'a str, name: &str) -> Option<&'a str> {
+    if name.is_empty() {
+        return None;
+    }
     let word = |c: char| c == '_' || c.is_alphanumeric();
     let mut at = 0;
     while let Some(found) = call[at..].find(name) {
@@ -1557,62 +1585,196 @@ fn is_plain_name(text: &str) -> bool {
         && text.chars().all(|c| c == '_' || c.is_alphanumeric())
 }
 
-/// The type `name` is bound to in `scope` (a function's source up to a
-/// call in it), when every binding there says the same: built by a
-/// constructor (`name = Cart()`, `name := &Cart{}`, `let name =
-/// Cart::new()`, `name = new Cart()`, `name = Cart.new`), declared with it
-/// (`Cart name = …`, `Cart* name;`, `(Cart name)`), or annotated with it
-/// (`name: Cart`, Go's `name *Cart`). `None` when nothing says, or two
-/// bindings disagree.
-fn bound_type(scope: &str, name: &str, lang: Lang) -> Option<String> {
-    let word = |c: char| c == '_' || c.is_alphanumeric();
-    let mut found: Option<String> = None;
-    let mut at = 0;
-    while let Some(i) = scope[at..].find(name) {
-        let start = at + i;
-        let end = start + name.len();
-        at = end;
-        let head = &scope[..start];
-        if head.ends_with(|c: char| word(c) || matches!(c, '.' | '$' | '@' | '>' | ':'))
-            || scope[end..].starts_with(word)
-        {
-            continue; // part of a longer name, or a member of something else
-        }
-        let after = scope[end..].trim_start_matches([' ', '\t']);
-        let ty = if let Some(rest) = after.strip_prefix(":=") {
-            constructed_type(rest, lang)
-        } else if after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>") {
-            constructed_type(&after[1..], lang)
-        } else if let Some(rest) = after.strip_prefix(':').filter(|r| !r.starts_with(':')) {
-            leading_type(rest, lang)
-        } else {
-            None
-        };
-        // A declaration names the type before the name: `Cart cart = …`.
-        let declared = || {
-            let ends = after.starts_with(['=', ';', ',', ')']) && !after.starts_with("==");
-            ends.then(|| trailing_type(head)).flatten()
-        };
-        // Go writes the type after the name: `(c *Cart)`, `var c Cart`.
-        let go_typed = || {
-            let opens = head.trim_end().ends_with(['(', ',']) || head.trim_end().ends_with("var");
-            (lang == Lang::Go && opens)
-                .then(|| leading_type(after, lang))
-                .flatten()
-        };
-        let Some(ty) = ty.or_else(declared).or_else(go_typed) else {
-            continue;
-        };
-        match &found {
-            Some(seen) if *seen != ty => return None,
-            _ => found = Some(ty),
+/// What one name's bindings in one function say, read up to a point of it:
+/// grown as later calls in the function need more, so each occurrence of
+/// the name is read once.
+pub(crate) struct Bindings {
+    /// Read up to here (a byte offset in the file).
+    upto: usize,
+    /// Where the function starts: a declaration's type is looked for back
+    /// to here.
+    from: usize,
+    /// The type every binding read so far says, and whether exactly.
+    typed: Option<(String, bool)>,
+    /// Two bindings disagreed, or one said nothing that can be known.
+    unknown: bool,
+}
+
+/// What a name's bindings say ([`Bindings::said`]).
+#[derive(Debug, PartialEq)]
+enum Said {
+    /// Bound to this type — exactly (built), or as declared.
+    Type(String, bool),
+    /// Bound to something that cannot be told.
+    Unknown,
+    /// Not bound in the function (a parameter with no type, a global).
+    Nothing,
+}
+
+impl Bindings {
+    fn from(from: usize) -> Self {
+        Self {
+            upto: from,
+            from,
+            typed: None,
+            unknown: false,
         }
     }
-    found
+
+    /// Read `name`'s occurrences up to `to` in `src`.
+    fn read_to(&mut self, to: usize, name: &str, src: &str, lang: Lang) {
+        if to <= self.upto || self.unknown {
+            self.upto = self.upto.max(to);
+            return;
+        }
+        let Some(scope) = src.get(self.from..to) else {
+            return;
+        };
+        let word = |c: char| c == '_' || c.is_alphanumeric();
+        let mut at = self.upto - self.from;
+        while let Some(i) = scope[at..].find(name) {
+            let start = at + i;
+            let end = start + name.len();
+            at = end;
+            let head = &scope[..start];
+            if head.ends_with(|c: char| word(c) || matches!(c, '.' | '$' | '@' | '>' | ':'))
+                || scope[end..].starts_with(word)
+            {
+                continue; // part of a longer name, or a member of something else
+            }
+            match binding_at(head, &scope[end..], lang) {
+                Binding::Not => {}
+                Binding::Unknown => {
+                    self.unknown = true;
+                    break;
+                }
+                Binding::Typed(ty, exact) => match &self.typed {
+                    Some((seen, _)) if *seen != ty => {
+                        self.unknown = true;
+                        break;
+                    }
+                    // Built and declared alike: as exact as either says.
+                    Some((_, was)) => self.typed = Some((ty, exact || *was)),
+                    None => self.typed = Some((ty, exact)),
+                },
+            }
+        }
+        self.upto = to;
+    }
+
+    fn said(&self) -> Said {
+        match &self.typed {
+            _ if self.unknown => Said::Unknown,
+            Some((ty, exact)) => Said::Type(ty.clone(), *exact),
+            None => Said::Nothing,
+        }
+    }
+}
+
+/// What an occurrence of a name says it is bound to.
+#[derive(Debug, PartialEq)]
+enum Binding {
+    /// It is not bound here: a use of it.
+    Not,
+    /// Bound to this type: exactly (`true`, built by a constructor), or as
+    /// declared or annotated (`false`).
+    Typed(String, bool),
+    /// Bound to what cannot be told: a function's result, a loop's or a
+    /// closure's parameter, one of several unpacked.
+    Unknown,
+}
+
+/// What an occurrence of a name, with `head` before it in its function and
+/// `after` after it, says it is bound to: built by a constructor (`name =
+/// Cart()`, `name := &Cart{}`, `let name = Cart::new()`, `name = new
+/// Cart()`, `name = Cart.new`), declared with it (`Cart name = …`, `Cart*
+/// name;`, `(Cart name)`), or annotated with it (`name: Cart`, Go's `name
+/// *Cart`) — or bound to what cannot be told.
+fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
+    let after = after.trim_start_matches([' ', '\t']);
+    let before = head.trim_end();
+    let ends_with_word = |w: &str| {
+        before.ends_with(w)
+            && !before[..before.len() - w.len()]
+                .ends_with(|c: char| c == '_' || c.is_alphanumeric())
+    };
+    // A loop's, a closure's, a `with`'s or an `except`'s name, or one of
+    // several unpacked: bound to what this cannot tell.
+    if after.starts_with("=>")
+        || before.ends_with('|')
+        || (after.starts_with('|') && !after.starts_with("||"))
+        || ["for", "lambda", "as", "foreach"]
+            .iter()
+            .any(|w| ends_with_word(w))
+        || (["const", "let", "var", "val"]
+            .iter()
+            .any(|w| ends_with_word(w))
+            && (after.starts_with("of ") || after.starts_with("in ")))
+        || (before.ends_with(',') && after.starts_with('=') && !after.starts_with("=="))
+    {
+        return Binding::Unknown;
+    }
+    let assigned = if let Some(rest) = after.strip_prefix(":=") {
+        Some(rest)
+    } else if after.starts_with('=') && !after.starts_with("==") {
+        Some(&after[1..])
+    } else {
+        None
+    };
+    if let Some(rhs) = assigned {
+        return match constructed_type(rhs, lang) {
+            Some(ty) => Binding::Typed(ty, true),
+            // A declaration with a value of no known type still says its
+            // own: `Cart cart = make();`.
+            None => match trailing_type(head) {
+                Some(ty) if declares(head, lang) => Binding::Typed(ty, false),
+                _ => Binding::Unknown,
+            },
+        };
+    }
+    if let Some(rest) = after.strip_prefix(':').filter(|r| !r.starts_with(':')) {
+        // An annotation; a Rust trait object or `impl Trait` names no type
+        // its methods are owned by.
+        let text = rest.trim_start().trim_start_matches(['&', '*']);
+        let text = text.strip_prefix("mut ").unwrap_or(text).trim_start();
+        if text.starts_with("dyn ") || text.starts_with("impl ") {
+            return Binding::Unknown;
+        }
+        return match leading_type(rest, lang) {
+            Some(ty) => Binding::Typed(ty, false),
+            None => Binding::Not,
+        };
+    }
+    // A declaration names the type before the name: `Cart cart;`.
+    if after.starts_with([';', ',', ')'])
+        && declares(head, lang)
+        && let Some(ty) = trailing_type(head)
+    {
+        return Binding::Typed(ty, false);
+    }
+    // Go writes the type after the name: `(c *Cart)`, `var c Cart`.
+    if lang == Lang::Go
+        && (before.ends_with(['(', ',']) || ends_with_word("var"))
+        && let Some(ty) = leading_type(after, lang)
+    {
+        return Binding::Typed(ty, false);
+    }
+    Binding::Not
+}
+
+/// Whether `head` ends with a declaration's type, as a C-like language
+/// writes one before the name (`Cart`, `final Cart`, `List<Cart>`).
+fn declares(head: &str, lang: Lang) -> bool {
+    !matches!(lang, Lang::Python | Lang::Ruby | Lang::Go | Lang::Rust)
+        && trailing_type(head).is_some()
 }
 
 /// The type a constructor expression builds: `Cart(…)`, `Cart { … }`,
-/// `Cart::new(…)`, `new Cart(…)`, `&Cart{…}`, `Cart.new`, `Cart<T>(…)`.
+/// `Cart::new(…)`, `new Cart(…)`, `&Cart{…}`, `Cart.new`, `Cart<T>(…)`,
+/// `models.Cart(…)` — when it is the whole expression: what is called or
+/// read off it (`Cart(p).load()`) is of a type of its own. A function of a
+/// type other than `new` (`Config::builder()`) returns what it returns, and
+/// `Shape::Circle(c)` is a value of `Shape`, not a `Circle`.
 fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
     let mut rhs = rhs.trim_start();
     for prefix in ["new ", "&mut ", "&"] {
@@ -1635,14 +1797,53 @@ fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
         &['(', '{', '<']
     };
     let ty = match segments.as_slice() {
-        // `Cart(…)`, `Cart { … }`, `Cart<T>(…)`.
+        // `Cart::new(…)`, `Cart.new`: the type before its constructor.
+        [.., ty, "new"] if lang != Lang::Go && typed(ty) => *ty,
+        // `Type::Variant(…)`, `Type::make(…)`, `Outer.Inner(…)`: a value of
+        // the type before it, what a function returns, or a type this
+        // cannot place. (In Go, `pkg.Cart{…}`, whose package is any name.)
+        [.., before, _] if lang != Lang::Go && typed(before) => return None,
+        // `Cart(…)`, `Cart { … }`, `Cart<T>(…)`, `models.Cart(…)`.
         [.., last] if typed(last) && rest.starts_with(opens) => *last,
-        // `Cart::new(…)`, `Cart.new`, `mod::Cart::with(…)`: the type before
-        // the function.
-        [.., ty, _] if lang != Lang::Go && typed(ty) => *ty,
         _ => return None,
     };
-    Some(ty.to_string())
+    whole_expression(rest).then(|| ty.to_string())
+}
+
+/// Whether what follows a constructor's name — its generic arguments, its
+/// arguments or fields, or nothing — ends the expression: nothing is called
+/// or read off the value it builds. Text that ends before its brackets
+/// close (a binding read up to a call inside it) is taken as whole.
+fn whole_expression(rest: &str) -> bool {
+    let mut rest = rest.trim_start();
+    for (open, close) in [('<', '>'), ('(', ')'), ('{', '}')] {
+        if !rest.starts_with(open) {
+            continue;
+        }
+        let mut depth = 0usize;
+        let mut end = None;
+        for (i, c) in rest.char_indices() {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(i + c.len_utf8());
+                    break;
+                }
+            }
+        }
+        match end {
+            Some(end) => rest = rest[end..].trim_start(),
+            None => return true,
+        }
+    }
+    let rest = rest.strip_prefix('?').unwrap_or(rest);
+    !(rest.starts_with('.')
+        || rest.starts_with("->")
+        || rest.starts_with('[')
+        || rest.starts_with('(')
+        || rest.starts_with("::"))
 }
 
 /// The type an annotation starts with: `Cart`, `&mut Cart`, `*Cart`.
@@ -2988,14 +3189,33 @@ def main():
             receiver("a.py", "def f():\n    c = Cart()\n    c.total()\n", "total"),
             cart
         );
+        // Declared or annotated, or the class's own: it may be a subclass,
+        // whose override is the method called.
         assert_eq!(
             receiver("a.py", "def f(c: Cart):\n    c.total()\n", "total"),
-            cart
+            None
         );
         assert_eq!(
             receiver(
                 "a.py",
                 "class A:\n    def f(self):\n        self.total()\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "A.java",
+                "class A {\n  void f() {\n    Cart c = make();\n    c.total();\n  }\n}\n",
+                "total"
+            ),
+            None
+        );
+        // In Rust, with no inheritance, the impl's own type.
+        assert_eq!(
+            receiver(
+                "a.rs",
+                "struct A;\nimpl A {\n    fn f(&self) {\n        self.total();\n    }\n}\n",
                 "total"
             ),
             Some(Receiver::Own)
@@ -3011,6 +3231,11 @@ def main():
         assert_eq!(
             receiver("a.rs", "fn f(c: &mut Cart) {\n    c.total();\n}\n", "total"),
             cart
+        );
+        // A trait object is any type implementing it.
+        assert_eq!(
+            receiver("a.rs", "fn f(c: &dyn Cart) {\n    c.total();\n}\n", "total"),
+            None
         );
         assert_eq!(
             receiver(
@@ -3103,6 +3328,134 @@ def main():
             ),
             None
         );
+        // What a type's function other than `new` returns, a variant of an
+        // enum, and what is called off a value built: of types of their own.
+        assert_eq!(
+            receiver(
+                "a.rs",
+                "fn f() {\n    let b = Config::builder();\n    b.port(80);\n}\n",
+                "port"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.rs",
+                "fn f(c: Circle) {\n    let s = Shape::Circle(c);\n    s.area();\n}\n",
+                "area"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f(p):\n    x = Config(p).load()\n    x.run()\n",
+                "run"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.ts",
+                "function f(p) {\n  const x = new Config(p).load();\n  x.run();\n}\n",
+                "run"
+            ),
+            None
+        );
+        // Built once, then bound again to what cannot be told: a function's
+        // result, a closure's parameter, a loop's.
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f():\n    s = Shape()\n    s = make_circle()\n    s.area()\n",
+                "area"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.ts",
+                "function f(orders) {\n  const cart = new Cart();\n  orders.forEach(cart => cart.total());\n}\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f(carts):\n    c = Cart()\n    for c in carts:\n        c.total()\n",
+                "total"
+            ),
+            None
+        );
+    }
+
+    /// A call tree-sitter recovered from half-typed code can name nothing:
+    /// no receiver is looked for, where every position matched the empty
+    /// name and the search never moved on.
+    #[test]
+    fn an_empty_callee_has_no_receiver() {
+        assert_eq!(receiver_text("x.(y)", ""), None);
+        assert_eq!(receiver_text("cart.total()", "total"), Some("cart"));
+    }
+
+    /// A method that overrides another is called where its base's is, on
+    /// `self` or on a value typed as the base: the base's caller is the
+    /// override's too.
+    #[test]
+    fn an_override_keeps_its_bases_callers() {
+        let src = "\
+class Shape:
+    def describe(self):
+        return self.area()
+
+    def area(self):
+        raise NotImplementedError
+
+class Circle(Shape):
+    def area(self):
+        return 3.14
+
+def show(s: Shape):
+    s.area()
+";
+        let files = [("/p/shapes.py", src)];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &HashMap::new());
+        // `Shape.area` is the file's first `area`, `Circle.area` its second.
+        assert_eq!(
+            callers_named(&g, "/p/shapes.py", "area", 1),
+            ["describe@2", "show@12"]
+        );
+    }
+
+    /// The bindings of a receiver are read once in a function, however many
+    /// calls are made on it: read again for every call, a long generated
+    /// function took the time of its length times its calls.
+    #[test]
+    fn a_long_functions_receivers_are_read_once() {
+        let mut src = String::from("def f():\n    r = Runner()\n");
+        for _ in 0..20_000 {
+            src.push_str("    r.step(a, b, c)\n");
+        }
+        let started = std::time::Instant::now();
+        let calls: Vec<CallSite> = FileCalls::read(Path::new("gen.py"), &src)
+            .unwrap()
+            .calls
+            .into_iter()
+            .filter(|c| c.callee == "step")
+            .collect();
+        let took = started.elapsed();
+        assert_eq!(calls.len(), 20_000);
+        assert!(
+            calls
+                .iter()
+                .all(|c| c.receiver == Some(Receiver::Type("Runner".into())))
+        );
+        assert!(took < std::time::Duration::from_secs(5), "{took:?}");
     }
 
     /// A known type with no method of the name — one it inherits — keeps
