@@ -8174,6 +8174,46 @@ fn the_unexplained_note_follows_a_language_switch() {
 }
 
 /// What voice could not do is said in the reader's language: on the card,
+/// Smart Turn in Voice settings: its download says its size; once it is
+/// here, Remove; what went wrong with it is said under it — and that it
+/// cannot run without `clew-speak` beside Clew.
+#[test]
+fn smart_turn_is_offered_in_voice_settings() {
+    use crate::VoiceMsg;
+    let mut app = reader_app();
+    let dir = crate::app::tests::test_dir("ui-smart-turn");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "Smart Turn"));
+    assert!(shows(&mut sim, "a pause to think is waited through"));
+    assert!(matches!(
+        click(sim, "Download (9 MB)").as_slice(),
+        [Message::Voice(VoiceMsg::DownloadTurn)]
+    ));
+    std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+    std::fs::File::create(clew_voice::turn::path(&store))
+        .unwrap()
+        .set_len(clew_voice::turn::MODEL.bytes)
+        .unwrap();
+    app.voice.turn.error = Some("the model failed: it broke".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the model failed: it broke"));
+    assert!(!shows(&mut sim, "Download (9 MB)"));
+    assert!(matches!(
+        click(sim, "Remove").as_slice(),
+        [Message::Voice(VoiceMsg::RemoveTurn)]
+    ));
+    app.voice.turn.judges = None;
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(
+        &mut sim,
+        "clew-speak, which runs it, is not installed beside Clew"
+    ));
+    let _ = std::fs::remove_dir_all(store.dir());
+}
+
 /// on the pill, and under a model in Settings.
 #[test]
 fn voice_failures_are_said_in_the_readers_language() {

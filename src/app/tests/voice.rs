@@ -31,6 +31,9 @@ impl Listening for FakeMic {
     fn silence_after_speech(&self) -> Option<f32> {
         self.0.lock().unwrap().silence
     }
+    fn recent(&self, _seconds: f32, _rate: u32) -> Vec<f32> {
+        spoken()
+    }
     fn full(&self) -> bool {
         self.0.lock().unwrap().full
     }
@@ -1291,4 +1294,265 @@ fn a_model_on_its_way_is_neither_downloaded_twice_nor_passed_over() {
         "{}",
         other.status
     );
+}
+
+// ---- Smart Turn: when the speaker has finished ---------------------------
+
+/// A judge that answers what the test says it will, in order, and keeps
+/// how much audio each judgement was given.
+#[derive(Default)]
+struct FakeJudge {
+    answers: Mutex<Vec<Result<f32, String>>>,
+    asked: Mutex<Vec<usize>>,
+    warmed: Mutex<usize>,
+    stopped: Mutex<usize>,
+}
+
+impl crate::app::turn::Judging for FakeJudge {
+    fn warm(&self, _file: &std::path::Path) -> Result<(), String> {
+        *self.warmed.lock().unwrap() += 1;
+        Ok(())
+    }
+    fn judge(&self, _file: &std::path::Path, samples: &[f32]) -> Result<f32, String> {
+        self.asked.lock().unwrap().push(samples.len());
+        let mut answers = self.answers.lock().unwrap();
+        if answers.is_empty() {
+            Err("not answered".into())
+        } else {
+            answers.remove(0)
+        }
+    }
+    fn stop(&self) {
+        *self.stopped.lock().unwrap() += 1;
+    }
+}
+
+/// [`voice_app`] with Smart Turn: its model "downloaded" (a file of its
+/// size), judged by a judge that answers `answers`; and listening begun.
+fn turn_app(
+    tag: &str,
+    answers: Vec<Result<f32, String>>,
+    model: bool,
+) -> (App, Arc<Mutex<MicScript>>, Arc<FakeJudge>) {
+    let (mut app, script, _) = voice_app(tag, "open settings");
+    if model {
+        let store = app.voice.store.clone().unwrap();
+        std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+        std::fs::File::create(clew_voice::turn::path(&store))
+            .unwrap()
+            .set_len(clew_voice::turn::MODEL.bytes)
+            .unwrap();
+    }
+    let judge = Arc::new(FakeJudge {
+        answers: Mutex::new(answers),
+        ..FakeJudge::default()
+    });
+    app.voice.turn.judges = Some(judge.clone());
+    app.voice.reset_for_test();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    (app, script, judge)
+}
+
+/// The microphone has been quiet `quiet` seconds since speech: a tick.
+fn quiet_for(app: &mut App, script: &Arc<Mutex<MicScript>>, quiet: f32) -> Task<Message> {
+    script.lock().unwrap().silence = Some(quiet);
+    app.update(Message::Voice(VoiceMsg::Tick))
+}
+
+fn transcribing(app: &App) -> bool {
+    matches!(app.voice.phase, VoicePhase::Transcribing { .. })
+}
+
+/// A turn that sounds finished ends listening at its first short pause,
+/// long before the pause listening waits out without the model; the model
+/// hears the last of what was said.
+#[test]
+fn a_finished_turn_ends_listening_at_its_first_pause() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-finished", vec![Ok(0.9)], true);
+    assert!(
+        quiet_for(&mut app, &script, 0.1).units() == 0,
+        "too short to judge"
+    );
+    assert!(judge.asked.lock().unwrap().is_empty());
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    assert!(app.voice.is_listening(), "listening while it is judged");
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(*judge.asked.lock().unwrap(), [spoken().len()]);
+    assert!(transcribing(&app), "a finished turn ends listening");
+    assert!(script.lock().unwrap().stopped);
+    const { assert!(JUDGE_AFTER < END_SILENCE) };
+}
+
+/// A turn that sounds unfinished — a pause to think — is waited through,
+/// past the pause that ends listening without the model, up to its own.
+#[test]
+fn an_unfinished_turn_is_waited_through() {
+    use crate::app::turn::{HOLD_FOR, JUDGE_AFTER};
+    let (mut app, script, _) = turn_app("turn-unfinished", vec![Ok(0.1)], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.1);
+    assert!(app.voice.is_listening(), "an unfinished turn is waited for");
+    let _ = quiet_for(&mut app, &script, HOLD_FOR - 0.1);
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, HOLD_FOR);
+    assert!(transcribing(&app), "and not for ever");
+}
+
+/// Speech coming back is a pause of its own when it stops again: judged
+/// afresh. A judgement of the pause before it, landing late, changes
+/// nothing.
+#[test]
+fn each_pause_is_judged_afresh() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-afresh", vec![Ok(0.95), Ok(0.1), Ok(0.9)], true);
+    // A pause judged finished — but speech comes back before the answer.
+    let late = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    let _ = quiet_for(&mut app, &script, 0.02);
+    for message in run_task(late) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening(), "a judgement of a pause gone by");
+    // The next pause: unfinished, then speech, then a finished one.
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, 0.02);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(judge.asked.lock().unwrap().len(), 3, "once a pause");
+    assert!(transcribing(&app));
+}
+
+/// A pause is judged once, however many ticks it lasts.
+#[test]
+fn a_pause_is_judged_once() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-once", vec![Ok(0.2)], true);
+    let first = quiet_for(&mut app, &script, JUDGE_AFTER + 0.01);
+    let second = quiet_for(&mut app, &script, JUDGE_AFTER + 0.07);
+    assert_eq!(second.units(), 0, "not asked again while it is judged");
+    for message in run_task(first) {
+        let _ = app.update(message);
+    }
+    let third = quiet_for(&mut app, &script, JUDGE_AFTER + 0.2);
+    assert_eq!(third.units(), 0, "nor once it has been");
+    assert_eq!(judge.asked.lock().unwrap().len(), 1);
+}
+
+/// Without the model, or when it cannot answer, a pause ends listening as
+/// it always has; what went wrong is kept for Settings to show.
+#[test]
+fn without_a_judgement_a_pause_ends_as_before() {
+    use crate::app::turn::JUDGE_AFTER;
+    // Not downloaded: nothing is asked.
+    let (mut app, script, judge) = turn_app("turn-none", vec![Ok(0.9)], false);
+    assert_eq!(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05).units(), 0);
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.01);
+    assert!(transcribing(&app));
+    assert!(judge.asked.lock().unwrap().is_empty());
+    assert_eq!(*judge.warmed.lock().unwrap(), 0, "no model to load");
+    // It fails: the pause is waited out as without it.
+    let (mut app, script, _) = turn_app("turn-fails", vec![Err("it broke".into())], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let _ = quiet_for(&mut app, &script, END_SILENCE - 0.1);
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.01);
+    assert!(transcribing(&app));
+    assert_eq!(app.voice.turn.error.as_deref(), Some("it broke"));
+    // No `clew-speak` to run it: as without the model.
+    let (mut app, script, _) = turn_app("turn-no-program", vec![Ok(0.9)], true);
+    app.voice.turn.judges = None;
+    assert_eq!(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05).units(), 0);
+    assert!(app.voice.is_listening());
+}
+
+/// Listening loads the model meanwhile, so the first pause is judged at
+/// once.
+#[test]
+fn listening_loads_the_model() {
+    let (_app, _script, judge) = turn_app("turn-warm", Vec::new(), true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while *judge.warmed.lock().unwrap() == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(*judge.warmed.lock().unwrap(), 1);
+}
+
+/// A download of Smart Turn that is not it, held to its own cap.
+fn junk_turn_fetch(
+    _url: &str,
+    max_bytes: u64,
+    _cancel: &AtomicBool,
+    sink: &mut dyn std::io::Write,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
+    assert_eq!(
+        max_bytes,
+        clew_voice::turn::MODEL.bytes,
+        "the model's own cap"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    sink.write_all(b"not the model")
+        .map_err(|e| e.to_string())?;
+    progress(13, Some(13));
+    Ok(13)
+}
+
+/// Smart Turn is downloaded checked against its size and checksum, and
+/// removed with what runs it let go first.
+#[test]
+fn smart_turn_downloads_verified_and_is_removed() {
+    let (mut app, _script, judge) = turn_app("turn-download", Vec::new(), false);
+    let store = app.voice.store.clone().unwrap();
+    app.voice.fetch = junk_turn_fetch;
+    let task = app.update(Message::Voice(VoiceMsg::DownloadTurn));
+    assert!(app.voice.turn.download.is_some());
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.turn.download.is_none());
+    let error = app.voice.turn.error.clone().unwrap();
+    assert!(
+        error.contains("does not match the published smart-turn-v3.2-cpu.onnx"),
+        "{error}"
+    );
+    assert!(!clew_voice::turn::installed(&store));
+    // Cancelled: whatever it says after is nobody's.
+    let task = app.update(Message::Voice(VoiceMsg::DownloadTurn));
+    assert!(app.voice.turn.error.is_none(), "a new try clears it");
+    let _ = app.update(Message::Voice(VoiceMsg::CancelTurnDownload));
+    let before = app.status.clone();
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.status, before, "a cancelled download says nothing");
+    // Removed: the model let go of first.
+    std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+    std::fs::File::create(clew_voice::turn::path(&store))
+        .unwrap()
+        .set_len(clew_voice::turn::MODEL.bytes)
+        .unwrap();
+    assert!(clew_voice::turn::installed(&store));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveTurn));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(!clew_voice::turn::installed(&store));
+    assert_eq!(*judge.stopped.lock().unwrap(), 1);
+    assert!(app.status.contains("removed"), "{}", app.status);
 }

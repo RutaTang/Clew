@@ -163,31 +163,11 @@ impl std::fmt::Display for SpeedChoice {
 fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, Message>> {
     let installed = app.speech_installed(model);
     let state: Element<'a, Message> = if let Some(d) = app.voice.speech.downloads.get(model.id) {
-        let total = d.total.unwrap_or(model.bytes()).max(1);
-        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
-        row![
-            container(super::meter::eased_bar(
-                share,
-                70.0,
-                4.0,
-                theme::progress,
-                super::meter::PROGRESS,
-            ))
-            .width(70),
-            text(tr!(
-                "{percent}%",
-                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim()),
-            form::action(
-                tr!("Cancel"),
-                Some(Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)))
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        getting(
+            d.done,
+            d.total.unwrap_or(model.bytes()),
+            Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)),
+        )
     } else if installed {
         row![
             form::action(
@@ -255,6 +235,76 @@ fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, M
     rows
 }
 
+/// A download under way: how far it is, and its Cancel.
+fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
+    let share = (done as f32 / total.max(1) as f32).clamp(0.0, 1.0);
+    row![
+        container(super::meter::eased_bar(
+            share,
+            70.0,
+            4.0,
+            theme::progress,
+            super::meter::PROGRESS,
+        ))
+        .width(70),
+        text(tr!(
+            "{percent}%",
+            percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
+        ))
+        .size(ts::SMALL)
+        .color(theme::dim()),
+        form::action(tr!("Cancel"), Some(cancel)),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
+/// Smart Turn's rows: what it does and its license, and at its right
+/// whether it is here — Remove — its download, or getting it; and what
+/// last went wrong with it.
+fn turn_rows(app: &App) -> Vec<Element<'_, Message>> {
+    use clew_voice::turn::{self as smart, MODEL};
+    let installed = app.voice.store.as_ref().is_some_and(smart::installed);
+    let state: Element<'_, Message> = if let Some(d) = &app.voice.turn.download {
+        getting(
+            d.done,
+            d.total.unwrap_or(MODEL.bytes),
+            Message::Voice(VoiceMsg::CancelTurnDownload),
+        )
+    } else if installed {
+        form::action(tr!("Remove"), Some(Message::Voice(VoiceMsg::RemoveTurn))).into()
+    } else {
+        form::action(
+            &tr!("Download ({size} MB)", size = MODEL.size_mb()),
+            Some(Message::Voice(VoiceMsg::DownloadTurn)),
+        )
+        .into()
+    };
+    let about = tr!(
+        "Hears when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through. {license} license.",
+        license = MODEL.license
+    );
+    let mut rows = vec![form::item(MODEL.name, Some(about), state)];
+    let warning = |said: String| {
+        form::plain(
+            text(said)
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph),
+        )
+    };
+    if installed && app.voice.turn.judges.is_none() {
+        rows.push(warning(
+            tr!("clew-speak, which runs it, is not installed beside Clew").into(),
+        ));
+    }
+    if let Some(e) = &app.voice.turn.error {
+        rows.push(warning(crate::i18n::message(e)));
+    }
+    rows
+}
+
 /// How Clew answers aloud: whether it does, how fast, and the models it
 /// speaks with.
 fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
@@ -317,6 +367,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         app.voice.prefs.send_questions,
         |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
     ));
+    listening.extend(turn_rows(app));
     let mut parts = vec![
         form::note(tr!(
             "Press {chord} and speak. Speech stays on this computer.",

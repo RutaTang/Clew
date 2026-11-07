@@ -19,12 +19,18 @@
 //! → {"audio":{"id":1,"pcm":"<base64: 16-bit little-endian samples>"}}
 //! ```
 //!
+//! It also makes embeddings (`clew-speak embed <model dir>`, [`embed`]) and
+//! hears when a speaker has finished (`clew-speak turn <model file>`,
+//! [`turn`]).
+//!
 //! A request that cannot be met is answered `{"failed":{"id":1,"error":…}}`;
 //! a model that cannot be loaded, `{"error":…}` before it exits. It exits
 //! when stdin closes.
 
 mod embed;
+mod mel;
 mod runtime;
+mod turn;
 
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -102,6 +108,13 @@ fn main() {
             std::process::exit(2);
         };
         std::process::exit(embed::run(Path::new(&dir)));
+    }
+    if first.as_deref() == Some("turn") {
+        let Some(file) = args.next() else {
+            eprintln!("usage: clew-speak turn <model file>");
+            std::process::exit(2);
+        };
+        std::process::exit(turn::run(Path::new(&file)));
     }
     let (Some(family), Some(dir)) = (first.as_deref().and_then(Family::parse), args.next()) else {
         eprintln!("usage: clew-speak supertonic|kokoro <model dir>");

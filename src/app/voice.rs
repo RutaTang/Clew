@@ -47,6 +47,9 @@ pub(crate) trait Listening: Send {
     /// Seconds of quiet since the speaker last spoke; `None` before any
     /// speech.
     fn silence_after_speech(&self) -> Option<f32>;
+    /// The last `seconds` heard, at `rate`: what Smart Turn judges a pause
+    /// by ([`crate::app::turn`]).
+    fn recent(&self, seconds: f32, rate: u32) -> Vec<f32>;
     /// Whether it has heard all it may keep.
     fn full(&self) -> bool;
     /// A failure since it started (the device went away).
@@ -61,6 +64,9 @@ impl Listening for Recorder {
     }
     fn silence_after_speech(&self) -> Option<f32> {
         Recorder::silence_after_speech(self)
+    }
+    fn recent(&self, seconds: f32, rate: u32) -> Vec<f32> {
+        Recorder::recent(self, seconds, rate)
     }
     fn full(&self) -> bool {
         Recorder::full(self)
@@ -450,6 +456,8 @@ pub(crate) struct VoiceState {
     pub(crate) fetch: Fetch,
     /// Clew's answers, read aloud.
     pub speech: crate::app::speech::Speech,
+    /// Smart Turn: when the speaker has finished.
+    pub(crate) turn: crate::app::turn::TurnState,
 }
 
 /// How long the pill in the corner says what was last heard.
@@ -486,6 +494,7 @@ impl VoiceState {
             transcriber: ENGINE.clone(),
             fetch: fetch_over_net,
             speech: crate::app::speech::Speech::new(),
+            turn: crate::app::turn::TurnState::new(),
         }
     }
 
@@ -497,6 +506,11 @@ impl VoiceState {
 
     pub(crate) fn is_listening(&self) -> bool {
         matches!(self.phase, VoicePhase::Listening { .. })
+    }
+
+    /// The microphone, while it listens.
+    pub(crate) fn listening_now(&self) -> Option<&dyn Listening> {
+        self.listening.as_ref().map(|(l, _)| l.as_ref())
     }
 
     /// Back to idle, as before anything was said — the key's last press
@@ -529,6 +543,25 @@ pub enum VoiceMsg {
     Cancel,
     /// While listening: read the level and look for the pause that ends it.
     Tick,
+    /// What Smart Turn said of pause `pause` of listening `listen`: how
+    /// likely it is that the speaker has finished, or why it could not say.
+    Judged {
+        listen: u64,
+        pause: u64,
+        result: Result<f32, String>,
+    },
+    /// Download Smart Turn (the button that says its size).
+    DownloadTurn,
+    CancelTurnDownload,
+    TurnDownloadProgress {
+        done: u64,
+        total: Option<u64>,
+    },
+    TurnDownloaded(Result<(), String>),
+    /// Delete Smart Turn.
+    RemoveTurn,
+    /// Smart Turn deleted, or why it could not be.
+    TurnRemoved(Result<(), String>),
     /// What a run heard: its words, or why there are none.
     Transcribed {
         token: u64,
@@ -812,6 +845,17 @@ impl App {
                 Task::none()
             }
             VoiceMsg::Tick => self.on_voice_tick(),
+            VoiceMsg::Judged {
+                listen,
+                pause,
+                result,
+            } => self.on_judged(listen, pause, result),
+            message @ (VoiceMsg::DownloadTurn
+            | VoiceMsg::CancelTurnDownload
+            | VoiceMsg::TurnDownloadProgress { .. }
+            | VoiceMsg::TurnDownloaded(_)
+            | VoiceMsg::RemoveTurn
+            | VoiceMsg::TurnRemoved(_)) => self.on_turn_settings(message),
             VoiceMsg::Transcribed { token, result } => self.on_transcribed(token, result),
             VoiceMsg::Confirm => match self.voice.confirm.take() {
                 Some(title) => {
@@ -1014,6 +1058,7 @@ impl App {
                     since: Instant::now(),
                     level: 0.0,
                 };
+                self.turn_listening_began();
                 self.voice.heard = None;
                 self.status = match &self.voice.confirm {
                     Some(title) => tr!(
@@ -1049,13 +1094,21 @@ impl App {
         }
         let level = listening.level();
         self.voice.phase = VoicePhase::Listening { since, level };
-        let ended = listening.full()
-            || listening
-                .silence_after_speech()
-                .is_some_and(|quiet| quiet >= END_SILENCE);
-        if ended {
+        let full = listening.full();
+        let quiet = listening.silence_after_speech();
+        // The pause ends listening — at once when Smart Turn hears a turn
+        // finished, later when it hears one that is not, after
+        // [`END_SILENCE`] without it.
+        let (paused, judge) = self.pause_ends(quiet);
+        if full || paused {
             return self.stop_listening();
         }
+        if quiet.is_some() {
+            return judge;
+        }
+        let Some((listening, _)) = self.voice.listening.as_ref() else {
+            return Task::none();
+        };
         if listening.silence_after_speech().is_none()
             && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
         {

@@ -132,6 +132,19 @@ impl Recorder {
         audio::trailing_silence(&levels)
     }
 
+    /// The last `seconds` of what it has heard, at `rate`: what a model
+    /// that hears the end of an utterance is given, while listening goes on.
+    pub fn recent(&self, seconds: f32, rate: u32) -> Vec<f32> {
+        let tail: Vec<f32> = {
+            let Ok(samples) = self.shared.samples.lock() else {
+                return Vec::new();
+            };
+            let keep = ((seconds.max(0.0) * self.rate as f32) as usize).min(samples.len());
+            samples[samples.len() - keep..].to_vec()
+        };
+        audio::resample(&tail, self.rate, rate)
+    }
+
     /// Whether it has heard all it may keep.
     pub fn full(&self) -> bool {
         self.shared.full.load(Ordering::Relaxed)

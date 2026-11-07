@@ -426,6 +426,9 @@ impl crate::app::voice::Listening for Quiet {
     fn silence_after_speech(&self) -> Option<f32> {
         None
     }
+    fn recent(&self, _seconds: f32, _rate: u32) -> Vec<f32> {
+        Vec::new()
+    }
     fn full(&self) -> bool {
         false
     }

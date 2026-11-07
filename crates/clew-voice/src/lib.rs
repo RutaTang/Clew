@@ -19,6 +19,7 @@ pub mod playback;
 pub mod say;
 pub mod speaker;
 pub mod speech;
+pub mod turn;
 #[cfg(test)]
 mod wav;
 pub mod whisper;
