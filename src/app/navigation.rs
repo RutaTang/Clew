@@ -23,12 +23,104 @@ use crate::*;
 /// index's: a file the pane will open must be one the preview can read, and it
 /// is the number the server's own reference preview uses (`agent_lsp.rs`).
 pub(crate) fn read_location_previews(
-    targets: Vec<(usize, PathBuf, usize)>,
+    targets: Vec<(usize, PathBuf, usize, usize)>,
+    enc: viewer::PositionEncoding,
 ) -> Vec<(usize, String)> {
-    read_location_lines(targets)
+    let at: HashMap<usize, usize> = targets.iter().map(|&(i, _, _, ch)| (i, ch)).collect();
+    let lines = targets
         .into_iter()
-        .map(|(i, line)| (i, line.trim().to_string()))
+        .map(|(i, path, line, _)| (i, path, line))
+        .collect();
+    read_location_lines(lines)
+        .into_iter()
+        .map(|(i, line)| {
+            let preview = location_preview(&line, at.get(&i).copied(), enc);
+            (i, preview)
+        })
         .collect()
+}
+
+/// A result's preview in its language's colours, as `(text, style)` spans:
+/// the line highlighted on its own (its file is not read for it), and an
+/// ellipsis the preview was cut with left uncoloured, as no part of the
+/// code. Plain, as one span, where the language is unknown.
+pub(crate) fn preview_spans(
+    preview: &str,
+    lang: Option<&'static str>,
+) -> Vec<(String, Option<u8>)> {
+    let shown = highlight::line_in_order(preview);
+    let (lead, rest) = match shown.strip_prefix('…') {
+        Some(rest) => ("…", rest),
+        None => ("", &*shown),
+    };
+    let (code, tail) = match rest.strip_suffix('…') {
+        Some(code) => (code, "…"),
+        None => (rest, ""),
+    };
+    let mut out: Vec<(String, Option<u8>)> = Vec::new();
+    if !lead.is_empty() {
+        out.push((lead.to_string(), None));
+    }
+    match highlight::highlight_lines(code, lang).into_iter().next() {
+        Some(line) => out.extend(line.spans),
+        None if !code.is_empty() => out.push((code.to_string(), None)),
+        None => {}
+    }
+    if !tail.is_empty() {
+        out.push((tail.to_string(), None));
+    }
+    // Drawn only as the text it is: a span set the highlighter changed
+    // (a tab widened, a control replaced) is left for the plain preview.
+    let same = out.iter().map(|(t, _)| t.as_str()).collect::<String>() == *shown;
+    if same {
+        out
+    } else {
+        vec![(shown.into_owned(), None)]
+    }
+}
+
+/// The identifier around byte `at` of `line` (`at` on it, or just past
+/// it): what a definitions or references request was asked about.
+pub(crate) fn word_at_byte(line: &str, at: usize) -> Option<String> {
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let at = at.min(line.len());
+    if !line.is_char_boundary(at) {
+        return None;
+    }
+    let start = line[..at]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| word(c))
+        .last()
+        .map_or(at, |(i, _)| i);
+    let end = line[at..]
+        .char_indices()
+        .find(|&(_, c)| !word(c))
+        .map_or(line.len(), |(i, _)| at + i);
+    (end > start).then(|| line[start..end].to_string())
+}
+
+/// A location's line as the Search list shows it: as a search hit's is, from
+/// just before the place it points at, so a hit far along a long line is not
+/// cut off past the list's edge. `character` is in the server's `enc` units.
+pub(crate) fn location_preview(
+    line: &str,
+    character: Option<usize>,
+    enc: viewer::PositionEncoding,
+) -> String {
+    let at = character.map(|ch| {
+        let mut units = 0;
+        line.char_indices()
+            .find(|&(_, c)| {
+                let past = units >= ch;
+                units += enc.units(c);
+                past
+            })
+            .map_or(line.len(), |(i, _)| i)
+    });
+    clew_core::search::preview_around(line, at)
+        .trim_end()
+        .to_string()
 }
 
 /// [`read_location_previews`], each line as the file has it: untrimmed, so a
@@ -117,6 +209,11 @@ pub(crate) mod preview_texts {
     }
 }
 
+/// "1 match", "2 matches".
+pub(crate) fn count_matches(n: usize) -> String {
+    trn!("1 match", "{n} matches", n)
+}
+
 /// The status line for a finished search: the match count (capped or not),
 /// and — when files could not be searched — how many, naming the first.
 pub(crate) fn search_status(
@@ -125,21 +222,37 @@ pub(crate) fn search_status(
     skipped_total: usize,
 ) -> String {
     let matches = if hits >= search::MAX_HITS {
-        format!("{hits}+ matches (capped)")
+        tr!("{count}+ matches (capped)", count = hits)
     } else {
-        format!("{hits} matches")
+        count_matches(hits)
     };
     match skipped.first() {
         None => matches,
         Some(first) => {
             let n = skipped_total.max(skipped.len());
-            let files = if n == 1 { "file" } else { "files" };
-            format!(
-                "{matches} · {n} {files} not searched ({}: {})",
-                first.rel, first.reason
+            trn!(
+                "{matches} · 1 file not searched ({file}: {reason})",
+                "{matches} · {n} files not searched ({file}: {reason})",
+                n,
+                matches = matches,
+                file = first.rel,
+                reason = crate::i18n::lookup(&first.reason)
             )
         }
     }
+}
+
+/// How long typing in the search sidebar must pause before it searches.
+pub(crate) const LIVE_SEARCH_PAUSE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The kinds of symbol a reading-trail stop is named for, and re-anchored
+/// to as edits move it: functions, and the types a jump lands on (Go to
+/// Type Definition). A class read as `cart.py:6` in the trail.
+pub(crate) fn names_trail_stops(kind: &str) -> bool {
+    matches!(
+        kind,
+        "function" | "method" | "class" | "struct" | "enum" | "trait" | "interface" | "type"
+    )
 }
 
 impl App {
@@ -183,14 +296,19 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = crate::keymap::local_keys(&format!(
-                    "No {lang} server ready (⌘T to search symbols)"
+                self.status = crate::keymap::local_keys(&tr!(
+                    "No {language} server ready (⌘T to search symbols)",
+                    language = lang
                 ));
                 return Task::none();
             }
         };
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
+        self.proj.nav_term = word_at_byte(
+            &source_line,
+            viewer::Col(col).to_offset(&source_line, viewer::PositionEncoding::Utf8),
+        );
         self.status = format!("{}…", kind.verb());
         let is_references = matches!(kind, GotoKind::References);
         // Mint this request's identity: references paint the Search sidebar
@@ -210,9 +328,11 @@ impl App {
             // dropped search reply can no longer clear it either.
             self.proj.link.pending_search = None;
             self.proj.search.running = false;
+            self.proj.refs_encoding = client.encoding;
             self.proj.search_seq
         } else {
             self.proj.goto_seq += 1;
+            self.proj.goto_encoding = client.encoding;
             self.proj.goto_seq
         };
         let stamp = self.stamp();
@@ -249,11 +369,11 @@ impl App {
             // hid the rest. List them all in the Search sidebar to pick from,
             // the way references are shown.
             Ok(targets) if targets.len() > 1 => {
-                self.status = format!(
-                    "{} definitions — pick one in the Search list",
-                    targets.len()
+                self.status = tr!(
+                    "{count} definitions — pick one in the Search list",
+                    count = targets.len()
                 );
-                self.show_locations("(definitions)", targets)
+                self.show_locations(tr!("(definitions)"), targets, self.proj.goto_encoding)
             }
             Ok(targets) if !targets.is_empty() => {
                 let t = &targets[0];
@@ -262,14 +382,19 @@ impl App {
                 // Clear the "Looking up definition…" progress; the jump itself
                 // is the feedback (otherwise the status stays stuck on it).
                 self.status.clear();
+                self.proj.landing = Some((
+                    abs.clone(),
+                    t.line,
+                    crate::app::state::LandingAt::Char(t.character, self.proj.goto_encoding),
+                ));
                 self.open_file(abs, Some(target_line), true)
             }
             Ok(_) => {
-                self.status = "No definition found".into();
+                self.status = tr!("No definition found").into();
                 Task::none()
             }
             Err(e) => {
-                self.status = format!("Definition failed: {e}");
+                self.status = tr!("Definition failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -281,15 +406,19 @@ impl App {
     ) -> Task<Message> {
         match result {
             Ok(refs) if !refs.is_empty() => {
-                self.status = format!("{} reference(s) — showing them in Search", refs.len());
-                self.show_locations("(references)", refs)
+                self.status = trn!(
+                    "1 reference — showing it in Search",
+                    "{n} references — showing them in Search",
+                    refs.len()
+                );
+                self.show_locations(tr!("(references)"), refs, self.proj.refs_encoding)
             }
             Ok(_) => {
-                self.status = "No references".into();
+                self.status = tr!("No references").into();
                 Task::none()
             }
             Err(e) => {
-                self.status = format!("References failed: {e}");
+                self.status = tr!("References failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -307,13 +436,14 @@ impl App {
         &mut self,
         label: &str,
         targets: Vec<lsp::client::Target>,
+        enc: viewer::PositionEncoding,
     ) -> Task<Message> {
         // Painting the sidebar supersedes whatever it was waiting for — a
         // server-side text search included (see `goto_request`).
         self.proj.search_seq += 1;
         self.proj.link.pending_search = None;
         let seq = self.proj.search_seq;
-        let mut to_read: Vec<(usize, PathBuf, usize)> = Vec::new();
+        let mut to_read: Vec<(usize, PathBuf, usize, usize)> = Vec::new();
         let hits: Vec<SearchHit> = targets
             .into_iter()
             .take(search::MAX_HITS)
@@ -330,9 +460,9 @@ impl App {
                     .flatten()
                     .find(|v| v.abs == t.path)
                     .filter(|v| t.line < v.lines.len())
-                    .map(|v| v.line_text(t.line + 1).trim().to_string());
+                    .map(|v| location_preview(&v.line_text(t.line + 1), Some(t.character), enc));
                 if from_pane.is_none() {
-                    to_read.push((i, t.path.clone(), t.line));
+                    to_read.push((i, t.path.clone(), t.line, t.character));
                 }
                 SearchHit {
                     abs: t.path,
@@ -342,7 +472,12 @@ impl App {
                 }
             })
             .collect();
-        self.proj.search.query = label.to_string();
+        self.proj.search.listing = Some(label.to_string());
+        self.proj.search.matcher = self
+            .proj
+            .nav_term
+            .as_deref()
+            .and_then(search::PreviewMatcher::of_name);
         self.proj.search.ran = true;
         self.proj.search.running = false;
         self.proj.search.error = None;
@@ -356,13 +491,16 @@ impl App {
         // local source of truth; this machine's disk at the remote's path is a
         // different machine's code, and showing ITS line next to a remote hit
         // is worse than showing none.
+        // Coloured with the lines they show now; again once the rest are
+        // read (`LocationPreviews`).
+        let styled = self.style_search_previews();
         if to_read.is_empty() || !self.local_project_state() {
-            return Task::none();
+            return styled;
         }
         let stamp = self.stamp();
-        Task::perform(
+        let read = Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || read_location_previews(to_read))
+                tokio::task::spawn_blocking(move || read_location_previews(to_read, enc))
                     .await
                     .unwrap_or_default()
             },
@@ -373,10 +511,64 @@ impl App {
                     previews,
                 })
             },
-        )
+        );
+        Task::batch([styled, read])
     }
 
     /// Kick off a project search from the current query and options.
+    /// Search as the reader types: once typing pauses for
+    /// [`LIVE_SEARCH_PAUSE`], with what the query then is. It ran only on
+    /// Enter, so a query typed and left showed nothing. A query of one
+    /// character, which matches most of a project, waits for Enter; a query
+    /// cleared clears the results at once.
+    fn search_when_typing_pauses(&mut self) -> Task<Message> {
+        self.proj.search.typed += 1;
+        let typed = self.proj.search.typed;
+        let query = self.proj.search.query.trim();
+        if query.is_empty() {
+            return self.run_search();
+        }
+        if query.chars().count() < 2 {
+            // What is listed is a longer query's: backspaced from "ab" to
+            // "a", the sidebar went on showing "ab"'s matches under "a".
+            self.clear_search_results();
+            return Task::none();
+        }
+        let stamp = self.stamp();
+        // Made inside the task: a timer needs the runtime, which the update
+        // that asks for it is not running on.
+        Task::perform(
+            async { tokio::time::sleep(LIVE_SEARCH_PAUSE).await },
+            move |()| {
+                Message::Nav(NavMsg::SearchSettled {
+                    stamp: stamp.clone(),
+                    typed,
+                })
+            },
+        )
+    }
+
+    /// Drop what the Search sidebar lists, and any search still running
+    /// for it: none of it is for the query as it now stands.
+    fn clear_search_results(&mut self) {
+        // Every submission supersedes both search paths, including clearing
+        // the query or falling back after a server request could not be sent.
+        self.proj.search_seq += 1;
+        self.proj.link.pending_search = None;
+        self.proj.search.hits.clear();
+        self.proj.search.error = None;
+        self.proj.search.skipped.clear();
+        self.proj.search.running = false;
+        self.proj.search.ran = false;
+        self.proj.search.listing = None;
+        self.proj.search.matcher = None;
+        self.proj.search.styled.clear();
+        // Nor is the count the status line still gives for them.
+        if let Some(said) = self.proj.search.said.take() {
+            self.settle_status(&[&said]);
+        }
+    }
+
     pub(crate) fn run_search(&mut self) -> Task<Message> {
         let Some((root, files)) = self
             .proj
@@ -386,16 +578,12 @@ impl App {
         else {
             return Task::none();
         };
-        // Every submission supersedes both search paths, including clearing
-        // the query or falling back after a server request could not be sent.
-        self.proj.search_seq += 1;
-        self.proj.link.pending_search = None;
-        self.proj.search.hits.clear();
-        self.proj.search.error = None;
-        self.proj.search.skipped.clear();
+        // A pause still being waited for would search again for what this
+        // search is already for: Enter, or an option toggled, mid-pause ran
+        // the same search twice.
+        self.proj.search.typed += 1;
+        self.clear_search_results();
         if self.proj.search.query.trim().is_empty() {
-            self.proj.search.running = false;
-            self.proj.search.ran = false;
             return Task::none();
         }
         self.proj.search.running = true;
@@ -409,6 +597,7 @@ impl App {
             include: self.proj.search.include.clone(),
             exclude: self.proj.search.exclude.clone(),
         };
+        self.proj.search.matcher = search::PreviewMatcher::of_search(&opts);
 
         // Preferred path: run the search on the clew-server over the protocol.
         // Results come back as `Event::SearchResults` (see `handle_server_event`).
@@ -438,7 +627,7 @@ impl App {
         if self.connection.is_remote() {
             self.proj.search.running = false;
             self.proj.search.error = Some(
-                "Disconnected from the remote host — search will work again once reconnected"
+                tr!("Disconnected from the remote host — search will work again once reconnected")
                     .into(),
             );
             return Task::none();
@@ -453,7 +642,7 @@ impl App {
                 tokio::task::spawn_blocking(move || search::search_report(&root, files, opts))
                     .await
                     .unwrap_or_else(|_| search::SearchReport {
-                        error: Some("the search failed unexpectedly".into()),
+                        error: Some(tr!("the search failed unexpectedly").into()),
                         ..Default::default()
                     })
             },
@@ -475,15 +664,58 @@ impl App {
         &mut self,
         report: search::SearchReport,
         skipped_total: usize,
-    ) {
+    ) -> Task<Message> {
         self.proj.search.running = false;
         self.proj.search.error = report.error.clone();
         self.status = match &report.error {
             Some(e) => e.clone(),
             None => search_status(report.hits.len(), &report.skipped, skipped_total),
         };
+        self.proj.search.said = Some(self.status.clone());
         self.proj.search.hits = report.hits;
         self.proj.search.skipped = report.skipped;
+        self.style_search_previews()
+    }
+
+    /// Colour the Search sidebar's previews, each in its file's language,
+    /// off this thread: a line is highlighted on its own, and two thousand
+    /// of them took a noticeable while. The list is drawn plain until they
+    /// arrive. A list changed meanwhile asks again, and only the colouring
+    /// last asked for is taken.
+    pub(crate) fn style_search_previews(&mut self) -> Task<Message> {
+        self.proj.search.styled_gen += 1;
+        self.proj.search.styled.clear();
+        let generation = self.proj.search.styled_gen;
+        let previews: Vec<(Option<&'static str>, String)> = self
+            .proj
+            .search
+            .hits
+            .iter()
+            .map(|h| (highlight::detect(&h.abs), h.preview.clone()))
+            .collect();
+        if previews.is_empty() {
+            return Task::none();
+        }
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    previews
+                        .iter()
+                        .map(|(lang, preview)| preview_spans(preview, *lang))
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default()
+            },
+            move |styled| {
+                Message::Nav(NavMsg::PreviewsStyled {
+                    stamp: stamp.clone(),
+                    generation,
+                    styled,
+                })
+            },
+        )
     }
 
     pub(crate) fn refresh_finder(&mut self) {
@@ -503,7 +735,8 @@ impl App {
             FinderMode::Files => {
                 if let Some(p) = &self.proj.project {
                     let files = p.files.clone();
-                    self.proj.finder.refresh_files(&files);
+                    let symbols = self.fresh_symbol_index();
+                    self.proj.finder.refresh_files(&files, &symbols);
                 }
             }
             FinderMode::Symbols => {
@@ -562,6 +795,11 @@ impl App {
             }
             return Task::none();
         }
+        // `:` with no line number yet: nothing to go to (it opened the
+        // first file of the project).
+        if self.proj.finder.is_line_query() {
+            return Task::none();
+        }
         match self
             .proj
             .finder
@@ -593,13 +831,18 @@ impl App {
         self.proj.finder.open = false;
         match self.proj.finder.mode {
             FinderMode::Files => {
-                let Some(entry) = self
-                    .proj
-                    .project
-                    .as_ref()
-                    .and_then(|p| p.files.get(idx))
-                    .cloned()
-                else {
+                let Some(files) = self.proj.project.as_ref().map(|p| &p.files) else {
+                    return Task::none();
+                };
+                // Past the files, the symbols the query named.
+                if let Some(symbol) = idx.checked_sub(files.len()) {
+                    let Some(entry) = self.proj.symbol_index.get(symbol).cloned() else {
+                        return Task::none();
+                    };
+                    self.land_on_name(&entry.abs, entry.line, entry.name);
+                    return self.open_file(entry.abs, Some(entry.line), true);
+                }
+                let Some(entry) = files.get(idx).cloned() else {
                     return Task::none();
                 };
                 self.open_file(entry.abs, None, true)
@@ -608,9 +851,19 @@ impl App {
                 let Some(entry) = self.proj.symbol_index.get(idx).cloned() else {
                     return Task::none();
                 };
+                self.land_on_name(&entry.abs, entry.line, entry.name);
                 self.open_file(entry.abs, Some(entry.line), true)
             }
         }
+    }
+
+    /// A jump to the symbol `name` on `line1` of `abs` lands on its name.
+    fn land_on_name(&mut self, abs: &Path, line1: usize, name: String) {
+        self.proj.landing = Some((
+            abs.to_path_buf(),
+            line1.saturating_sub(1),
+            crate::app::state::LandingAt::Name(name),
+        ));
     }
 
     /// The function/method defined exactly at `(file, line1)`, if any — recorded
@@ -620,10 +873,7 @@ impl App {
             .symbol_index_by_file
             .get(file)?
             .iter()
-            .find_map(|s| {
-                (s.line == line1 && matches!(s.kind.as_str(), "function" | "method"))
-                    .then(|| s.name.clone())
-            })
+            .find_map(|s| (s.line == line1 && names_trail_stops(&s.kind)).then(|| s.name.clone()))
     }
 
     /// Whether `(file, name)` is a test function, per the symbol index.
@@ -676,6 +926,7 @@ impl App {
         &self,
         caller_file: &Path,
         caller: &str,
+        caller_line: usize,
         callee: &str,
     ) -> Option<usize> {
         let lang = crate::highlight::detect(caller_file)?;
@@ -715,7 +966,13 @@ impl App {
             })?;
         projectcalls::calls_of(&source, lang)
             .into_iter()
-            .filter(|cs| cs.callee == callee && cs.caller.as_deref() == Some(caller))
+            // The first call after the caller's definition: a same-name
+            // function earlier in the file holds calls of its own.
+            .filter(|cs| {
+                cs.callee == callee
+                    && cs.caller.as_deref() == Some(caller)
+                    && cs.line >= caller_line
+            })
             .map(|cs| cs.line)
             .min()
     }
@@ -728,7 +985,14 @@ impl App {
         match message {
             NavMsg::SearchQueryChanged(query) => {
                 self.proj.search.query = query;
-                Task::none()
+                self.search_when_typing_pauses()
+            }
+            NavMsg::SearchSettled { typed, .. } => {
+                if typed == self.proj.search.typed {
+                    self.run_search()
+                } else {
+                    Task::none()
+                }
             }
             NavMsg::SearchToggle(opt) => {
                 match opt {
@@ -745,18 +1009,18 @@ impl App {
             }
             NavMsg::SearchIncludeChanged(s) => {
                 self.proj.search.include = s;
-                Task::none()
+                self.search_when_typing_pauses()
             }
             NavMsg::SearchExcludeChanged(s) => {
                 self.proj.search.exclude = s;
-                Task::none()
+                self.search_when_typing_pauses()
             }
             NavMsg::SearchSubmitted => self.run_search(),
             NavMsg::SearchDone { seq, result, .. } => {
                 // Only the latest submission may paint the Search sidebar.
                 if seq == self.proj.search_seq {
                     let skipped_total = result.skipped.len();
-                    self.apply_search_result(result, skipped_total);
+                    return self.apply_search_result(result, skipped_total);
                 }
                 Task::none()
             }
@@ -771,8 +1035,11 @@ impl App {
                 self.refresh_finder();
                 Task::none()
             }
-            NavMsg::FinderPick { abs, line } => {
+            NavMsg::FinderPick { abs, line, name } => {
                 self.proj.finder.open = false;
+                if let (Some(line), Some(name)) = (line, name) {
+                    self.land_on_name(&abs, line, name);
+                }
                 self.open_file(abs, line, true)
             }
             NavMsg::FinderConfirm => self.on_finder_confirm(),
@@ -804,23 +1071,30 @@ impl App {
                         }
                     }
                     self.proj.search.running = false;
+                    // Coloured again with the lines they now show.
+                    return self.style_search_previews();
+                }
+                Task::none()
+            }
+            NavMsg::PreviewsStyled {
+                generation, styled, ..
+            } => {
+                let search = &mut self.proj.search;
+                if generation == search.styled_gen && styled.len() == search.hits.len() {
+                    search.styled = styled;
                 }
                 Task::none()
             }
             NavMsg::JumpToCall {
                 caller_file,
                 caller,
+                caller_line,
                 callee,
             } => {
                 let line = self
-                    .call_site_line(&caller_file, &caller, &callee)
-                    .or_else(|| {
-                        self.proj
-                            .symbol_index_by_file
-                            .get(&caller_file)
-                            .and_then(|syms| syms.iter().find(|s| s.name == caller).map(|s| s.line))
-                    });
-                self.open_file(caller_file, line, true)
+                    .call_site_line(&caller_file, &caller, caller_line, &callee)
+                    .unwrap_or(caller_line);
+                self.open_file(caller_file, Some(line), true)
             }
         }
     }
@@ -879,20 +1153,32 @@ mod tests {
         });
 
         assert_eq!(
-            app.call_site_line(&plain, "caller", "callee"),
+            app.call_site_line(&plain, "caller", 1, "callee"),
             Some(2),
             "an ordinary in-project caller must still resolve"
         );
         assert_eq!(
-            app.call_site_line(&link, "caller", "callee"),
+            app.call_site_line(&link, "caller", 1, "callee"),
             None,
             "a symlink pointing out of the project was followed"
         );
         assert_eq!(
-            app.call_site_line(&big, "caller", "callee"),
+            app.call_site_line(&big, "caller", 1, "callee"),
             None,
             "a file past the index cap was read whole on the update loop"
         );
+
+        // Two same-name callers in one file (`Item.total`, `Cart.total`):
+        // each row jumps to its own function's call, by where it is defined.
+        let twins = dir.join("src/cart.py");
+        std::fs::write(
+            &twins,
+            "class Item:\n    def total(self):\n        return helper(1)\n\n\
+             class Cart:\n    def total(self):\n        return helper(2)\n",
+        )
+        .unwrap();
+        assert_eq!(app.call_site_line(&twins, "total", 2, "helper"), Some(3));
+        assert_eq!(app.call_site_line(&twins, "total", 6, "helper"), Some(7));
 
         for d in [&dir, &outside_dir] {
             let _ = std::fs::remove_dir_all(d);
@@ -967,6 +1253,7 @@ mod location_tests {
                 target(&big, 1),
                 target(&outside, 0),
             ],
+            viewer::PositionEncoding::Utf16,
         );
         // Nothing was read on the update loop: the list is on screen at once,
         // and the previews arrive from the blocking pool.
@@ -989,7 +1276,11 @@ mod location_tests {
         );
 
         // Previews for a list the sidebar has since replaced are dropped.
-        let stale = app.show_locations("(references)", vec![target(&plain, 0)]);
+        let stale = app.show_locations(
+            "(references)",
+            vec![target(&plain, 0)],
+            viewer::PositionEncoding::Utf16,
+        );
         app.proj.search_seq += 1; // a newer search took the sidebar
         app.proj.search.hits[0].preview = String::new();
         for msg in run_task(stale) {

@@ -88,7 +88,7 @@ impl App {
                 // longer documents as current.
                 None => {
                     self.proj.docs.page = None;
-                    self.status = format!("“{name}” is no longer in {rel}");
+                    self.status = tr!("“{name}” is no longer in {file}", name = name, file = rel);
                 }
             }
         }
@@ -97,8 +97,8 @@ impl App {
             match find_doc_by_name(&self.proj.docs.files, &name)
                 .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
             {
-                Some(page) => self.show_doc_page(page),
-                None => self.status = format!("No docs for “{name}”"),
+                Some(page) => self.show_found_docs(page, &name),
+                None => self.status = tr!("No docs for “{name}”", name = name),
             }
         }
         // An open type map is drawn from this index: rebuild and redraw it.
@@ -182,17 +182,25 @@ impl App {
             // answer now instead of leaving the request outstanding forever.
             if !self.docs_loading() {
                 self.proj.link.pending_docs_view = None;
-                self.status = format!("No docs for “{name}”");
+                self.status = tr!("No docs for “{name}”", name = name);
             }
             return;
         }
         if let Some(page) = find_doc_by_name(&self.proj.docs.files, name)
             .map(|(rel, item)| page_for_item(rel, item, self.docs_view.show_all))
         {
-            self.show_doc_page(page);
+            self.show_found_docs(page, name);
         } else {
-            self.status = format!("No docs for “{name}”");
+            self.status = tr!("No docs for “{name}”", name = name);
         }
+    }
+
+    /// "View docs" found `name`: its page, and the status line saying so.
+    /// It said nothing, so a failed try before it ("No definition found")
+    /// stood beside the page it had just opened.
+    fn show_found_docs(&mut self, page: DocPage, name: &str) {
+        self.show_doc_page(page);
+        self.status = tr!("Docs for “{name}”", name = name);
     }
 
     pub(crate) fn on_view_docs_from_menu(&mut self) -> Task<Message> {
@@ -216,7 +224,10 @@ impl App {
         // built — so it is sent to `view_docs_for`, which rebuilds and resolves
         // the name against the answer.
         if self.docs_fresh() && find_doc_by_name(&self.proj.docs.files, &word).is_none() {
-            self.status = format!("No doc entry for “{word}” — showing its definition");
+            self.status = tr!(
+                "No docs for “{name}”. Showing its definition instead.",
+                name = word
+            );
             return self.goto_definition(menu.pane, menu.line, menu.col);
         }
         self.view_docs_for(&word);

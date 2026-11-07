@@ -167,10 +167,10 @@ impl App {
     }
 
     /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, its input
-    /// focused — or, open in either size, put it away.
+    /// focused — or, open in either size, hide it to its pill.
     pub(crate) fn on_toggle_ask(&mut self) -> Task<Message> {
         if self.ask_view.is_open() {
-            self.close_ask();
+            self.hide_ask();
             return Task::none();
         }
         self.on_open_ask()
@@ -180,10 +180,6 @@ impl App {
     /// size) and give its input the keyboard.
     pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
         self.reveal_ask();
-        // Kept in the margin: its tab, where the input is.
-        if self.ask_view == AskView::Margin {
-            self.margin_tab = crate::MarginTab::Ask;
-        }
         self.code_focused = false;
         operation::focus(ui::ask_input_id())
     }
@@ -220,48 +216,39 @@ impl App {
         }
     }
 
-    /// Put the Ask window away, the keyboard back with the code; kept in
-    /// the margin, the margin shows its notes again.
+    /// Put Ask away — its pill too — the keyboard back with the code.
     pub(crate) fn close_ask(&mut self) {
+        self.ask_sessions_menu = false;
+        self.ask_sessions_query.clear();
         self.ask_view = AskView::Closed;
-        if self.margin_tab == crate::MarginTab::Ask {
-            self.margin_tab = crate::MarginTab::Notes;
-        }
         self.code_focused = true;
     }
 
-    /// Esc's step down for the Ask window: large to a card, a card (or the
-    /// conversation in the margin) put away. `false` when it is put away
-    /// already, for Esc to do what else it does.
+    /// Hide the card to its pill in the corner, the keyboard back with the
+    /// code; the conversation is kept, a click on the pill away.
+    pub(crate) fn hide_ask(&mut self) {
+        self.ask_sessions_menu = false;
+        self.ask_sessions_query.clear();
+        self.ask_view = AskView::Hidden;
+        self.code_focused = true;
+    }
+
+    /// Esc's step down for the Ask window: large to a card, a card hidden to
+    /// its pill. `false` when it is not open, for Esc to do what else it
+    /// does.
     pub(crate) fn step_ask_down(&mut self) -> bool {
+        // The menu of sessions first, over the card it opened on.
+        if self.ask_sessions_menu {
+            self.ask_sessions_menu = false;
+            self.ask_sessions_query.clear();
+            return true;
+        }
         match self.ask_view {
             AskView::Expanded => self.ask_view = AskView::Compact,
-            AskView::Compact | AskView::Margin => self.close_ask(),
-            AskView::Closed => return false,
+            AskView::Compact => self.hide_ask(),
+            AskView::Hidden | AskView::Closed => return false,
         }
         true
-    }
-
-    /// Keep the conversation in the margin, its tab chosen, the margin shown
-    /// and the input given the keyboard.
-    pub(crate) fn keep_ask_in_margin(&mut self) -> Task<Message> {
-        self.ask_view = AskView::Margin;
-        self.margin_tab = crate::MarginTab::Ask;
-        self.show_right_panel = true;
-        self.code_focused = false;
-        operation::focus(ui::ask_input_id())
-    }
-
-    /// Take the conversation out of the margin: a card over the code again.
-    pub(crate) fn float_ask(&mut self) -> Task<Message> {
-        if self.ask_view == AskView::Margin {
-            self.ask_view = AskView::Compact;
-        }
-        if self.margin_tab == crate::MarginTab::Ask {
-            self.margin_tab = crate::MarginTab::Notes;
-        }
-        self.code_focused = false;
-        operation::focus(ui::ask_input_id())
     }
 
     pub(crate) fn on_ask_submit(&mut self) -> Task<Message> {
@@ -275,9 +262,21 @@ impl App {
         // (the retrieval path, beside a running agent turn) or report a
         // missing index that is not missing. The question stays in the input.
         if self.ask_stream_active() {
-            self.status = "An answer is still being written — wait for it, or press Stop".into();
+            self.status = tr!("Still answering — wait, or press Stop").into();
             return Task::none();
         }
+        // "… now ask your question" has been heeded: it stayed in the status
+        // line under the answer.
+        let heeded: Vec<String> =
+            std::iter::once(tr!("Added the selection to Ask — now ask your question").to_string())
+                .chain(self.proj.ask_pins.iter().map(|p| {
+                    tr!(
+                        "Added line {line} to Ask — now ask your question",
+                        line = p.line
+                    )
+                }))
+                .collect();
+        self.settle_status(&heeded.iter().map(String::as_str).collect::<Vec<_>>());
         // An ACP agent brings its own model: no key of clew's is needed.
         if let Some(agent) = self.ask_agent.clone() {
             return self.start_acp_ask(agent, question);
@@ -316,10 +315,9 @@ impl App {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op.
             self.status = if self.proj.explain.running || self.proj.building_embeddings {
-                "Ask needs the semantic index — it's building now (finish Explain All), then re-ask"
-                    .into()
+                tr!("Building the semantic index — ask again when it's ready").into()
             } else {
-                "Build the semantic index first (FIND tab → Build index)".into()
+                tr!("Build the semantic index first (Find by meaning → Build index)").into()
             };
             return Task::none();
         }
@@ -423,9 +421,7 @@ impl App {
             {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status =
-                    "Ask's embedding index or configuration changed — retry the question once the index is ready"
-                        .into();
+                self.status = tr!("The index changed — ask again when it's ready").into();
                 return Task::none();
             }
         }
@@ -434,7 +430,7 @@ impl App {
             Err(e) => {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status = format!("Ask failed: {e}");
+                self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
         };
@@ -464,7 +460,7 @@ impl App {
             Err(e) => {
                 self.proj.asking = false;
                 self.return_question(question);
-                self.status = format!("Ask failed: {e}");
+                self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
         };
@@ -634,7 +630,7 @@ impl App {
         if messages.is_empty() {
             self.proj.asking = false;
             self.return_question(pending.question);
-            self.status = "Ask failed: the question's context could not be assembled".into();
+            self.status = tr!("Ask failed: the question's context could not be assembled").into();
             return Task::none();
         }
         let cfg = match self.require_llm() {
@@ -718,7 +714,7 @@ impl App {
                 return self.on_ask_stream_ended(
                     stream_id,
                     clew_protocol::StreamOutcome::Failed(
-                        "the question could not be sent to clew-server".into(),
+                        tr!("the question could not be sent to clew-server").into(),
                     ),
                 );
             }
@@ -897,7 +893,7 @@ impl App {
             return self.on_ask_stream_ended(
                 stream_id,
                 clew_protocol::StreamOutcome::Failed(
-                    "the question could not be sent to clew-server".into(),
+                    tr!("the question could not be sent to clew-server").into(),
                 ),
             );
         }
@@ -1010,12 +1006,15 @@ impl App {
         let empty_reason = match &outcome {
             StreamOutcome::Done => None,
             StreamOutcome::Stopped => {
-                self.status = "Answer stopped".into();
-                Some("*Stopped before any answer was written.*".to_string())
+                self.status = tr!("Answer stopped").into();
+                Some(format!(
+                    "*{}*",
+                    tr!("Stopped before any answer was written.")
+                ))
             }
             StreamOutcome::Failed(e) => {
-                self.status = format!("Ask failed: {e}");
-                Some(format!("*Couldn't answer: {e}*"))
+                self.status = tr!("Ask failed: {error}", error = e);
+                Some(format!("*{}*", tr!("Couldn't answer: {error}", error = e)))
             }
         };
         // Finalize the turn: ended with no text, show why; then render the
@@ -1032,6 +1031,8 @@ impl App {
         };
         let (prepared, task) = self.prepare_segments(&md);
         self.proj.ask_turns[idx].answer = prepared;
+        // Answered: the session is kept as it now stands.
+        self.keep_ask_session();
         let to_bottom = operation::scroll_to(
             ui::ask_scroll_id(),
             AbsoluteOffset {
@@ -1114,8 +1115,9 @@ impl App {
             // over. It only appends turns, so `idx` still names this one.
             if self.proj.asking {
                 self.proj.ask_turns.remove(idx);
-                self.status = format!(
-                    "Agent mode unavailable ({reason}) — answering from the semantic index"
+                self.status = tr!(
+                    "Agent mode unavailable ({reason}) — answering from the semantic index",
+                    reason = reason
                 );
                 return fallback;
             }
@@ -1179,7 +1181,7 @@ impl App {
         let pending_retrieval = self.proj.inflight.ask_retrieval.take().is_some();
         let pending_context = self.proj.inflight.ask_context.take().is_some();
         if pending_retrieval || pending_context {
-            self.status = "Question cancelled".into();
+            self.status = tr!("Question cancelled").into();
         }
         self.proj.asking = false;
         closed
@@ -1187,14 +1189,28 @@ impl App {
 
     pub(crate) fn on_ask_about_selection(&mut self) -> Task<Message> {
         // Add the right-clicked pane's selection (or the active pane's) as a
-        // context chip, open the panel, and focus the input.
-        let pane = self
-            .proj
-            .context_menu
-            .take()
-            .map(|m| m.pane)
-            .unwrap_or(self.proj.active);
-        match self.selection_pin(pane) {
+        // context chip, open the panel, and focus the input. With nothing
+        // selected, the line right-clicked is what is meant: the menu said
+        // "Select some code first" over the very line it was opened on.
+        let menu = self.proj.context_menu.take();
+        let pane = menu.as_ref().map_or(self.proj.active, |m| m.pane);
+        let (pin, said) = match self.selection_pin(pane) {
+            Some(pin) => (
+                Some(pin),
+                tr!("Added the selection to Ask — now ask your question").to_string(),
+            ),
+            None => match menu.and_then(|m| self.line_pin(m.pane, m.line)) {
+                Some(pin) => {
+                    let said = tr!(
+                        "Added line {line} to Ask — now ask your question",
+                        line = pin.line
+                    );
+                    (Some(pin), said)
+                }
+                None => (None, String::new()),
+            },
+        };
+        match pin {
             Some(pin) => {
                 // Skip an exact duplicate (same file, line and code).
                 let dup = self
@@ -1207,11 +1223,11 @@ impl App {
                 }
                 self.reveal_ask();
                 self.code_focused = false; // the Ask input takes focus
-                self.status = "Added selection to Ask — ask your question".into();
+                self.status = said;
                 operation::focus(ui::ask_input_id())
             }
             None => {
-                self.status = "Select some code first, then Add to Ask".into();
+                self.status = tr!("Select some code first, then choose Add to Ask").into();
                 Task::none()
             }
         }
@@ -1273,32 +1289,48 @@ impl App {
     pub fn suggested_questions(&self) -> Vec<String> {
         let mut qs: Vec<String> = Vec::new();
         if !self.proj.ask_pins.is_empty() {
-            qs.push("Explain the attached code.".into());
-            qs.push("Why is the attached code written this way?".into());
+            qs.push(tr!("Explain the attached code.").into());
+            qs.push(tr!("Why is the attached code written this way?").into());
         }
         match self.cursor_target() {
             Some(explain::Node::Function { name, .. }) => {
-                qs.push(format!("What calls `{name}`?"));
-                qs.push(format!("What are the edge cases in `{name}`?"));
-                qs.push(format!("How does `{name}` handle errors?"));
+                qs.push(tr!("What calls `{name}`?", name = name));
+                qs.push(tr!("What are the edge cases in `{name}`?", name = name));
+                qs.push(tr!("How does `{name}` handle errors?", name = name));
             }
             Some(explain::Node::File(p)) => {
                 let f = p
                     .file_name()
                     .and_then(|s| s.to_str())
-                    .unwrap_or("this file");
-                qs.push(format!("What is the role of `{f}`?"));
-                qs.push(format!("What are the key types in `{f}`?"));
+                    .unwrap_or(tr!("this file"));
+                qs.push(tr!("What is the role of `{file}`?", file = f));
+                qs.push(tr!("What are the key types in `{file}`?", file = f));
             }
             _ => {}
         }
-        qs.push("What is the entry point of this codebase?".into());
-        qs.push("How does data flow through the app?".into());
+        qs.push(tr!("What is the entry point of this codebase?").into());
+        qs.push(tr!("How does data flow through the app?").into());
         qs.truncate(4);
         qs
     }
 
     /// Capture a pane's current text selection as a pinnable Ask context block.
+    /// The chip for line `line` (0-based) of `pane`'s file, as it reads;
+    /// `None` for a blank line, which says nothing to ask about.
+    fn line_pin(&self, pane: usize, line: usize) -> Option<AskPin> {
+        let v = self.proj.panes.get(pane).and_then(Option::as_ref)?;
+        let code = v.source_line(line)?.trim_end().to_string();
+        if code.trim().is_empty() {
+            return None;
+        }
+        Some(AskPin {
+            rel: v.rel.clone(),
+            file: v.abs.clone(),
+            line: line + 1,
+            code,
+        })
+    }
+
     pub(crate) fn selection_pin(&self, pane: usize) -> Option<AskPin> {
         let v = self.proj.panes.get(pane).and_then(Option::as_ref)?;
         let code = v.selected_text()?;
@@ -1330,8 +1362,35 @@ impl App {
                 }
                 Task::none()
             }
-            AskMsg::KeepInMargin => self.keep_ask_in_margin(),
-            AskMsg::Float => self.float_ask(),
+            AskMsg::Hide => {
+                self.hide_ask();
+                Task::none()
+            }
+            AskMsg::NewSession => self.new_ask_session(),
+            AskMsg::SessionsMenu(open) => {
+                self.ask_sessions_menu = open;
+                self.ask_sessions_query.clear();
+                if open {
+                    // Typing goes to its search at once.
+                    self.code_focused = false;
+                    operation::focus(ui::ask_sessions_search_id())
+                } else {
+                    Task::none()
+                }
+            }
+            AskMsg::SessionsQuery(query) => {
+                self.ask_sessions_query = query;
+                Task::none()
+            }
+            AskMsg::OpenFirstFound => match self.found_ask_sessions().first() {
+                Some((session, _)) => {
+                    let id = session.id;
+                    self.switch_ask_session(id)
+                }
+                None => Task::none(),
+            },
+            AskMsg::SwitchSession(id) => self.switch_ask_session(id),
+            AskMsg::DeleteSession(id) => self.delete_ask_session(id),
             AskMsg::Close => {
                 self.close_ask();
                 Task::none()
@@ -1379,6 +1438,10 @@ impl App {
                 let stop = self.stop_ask_streams();
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();
+                // Cleared, the session goes from the menu too.
+                if let Some(id) = self.proj.ask_session.take() {
+                    let _ = self.delete_ask_session(id);
+                }
                 // A new conversation with the ACP agent, too: its session
                 // holds the old one.
                 // Its settings go with it; the user's choices among them

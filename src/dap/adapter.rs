@@ -22,6 +22,7 @@ use serde_json::Value;
 pub use clew_core::debugadapter::AdapterInstall;
 
 use super::client::Transport;
+use crate::tr_noop;
 
 /// A resolved adapter ready to spawn, plus the launch request for the program.
 pub struct Adapter {
@@ -112,7 +113,7 @@ impl Lang {
 
     pub fn label(self) -> &'static str {
         match self {
-            Lang::Native => "native (lldb)",
+            Lang::Native => tr_noop!("native (lldb)"),
             Lang::Python => "Python (debugpy)",
             Lang::Go => "Go (delve)",
             Lang::Dart => "Dart",
@@ -120,7 +121,7 @@ impl Lang {
             Lang::Ruby => "Ruby (rdbg)",
             Lang::CSharp => "C# (netcoredbg)",
             Lang::Php => "PHP (Xdebug)",
-            Lang::Erlang => "Erlang (OTP interpreter)",
+            Lang::Erlang => tr_noop!("Erlang (OTP interpreter)"),
             Lang::Java => "Java (JDWP)",
             Lang::Haskell => "Haskell (GHCi)",
         }

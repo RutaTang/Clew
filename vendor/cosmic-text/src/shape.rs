@@ -829,7 +829,25 @@ impl ShapeSpan {
         }
 
         let mut start_word = 0;
-        for (end_lb, _) in unicode_linebreak::linebreaks(span) {
+        // clew patch: Korean is broken between words, as Korean is set
+        // (CSS's `word-break: keep-all`): never inside a run of Hangul and
+        // the letters and digits written against it, where UAX #14 allows a
+        // break before every syllable. Chinese and Japanese, which are set
+        // without spaces, still break between characters.
+        let keeps_together = |at: usize| {
+            let before = span[..at].chars().next_back();
+            let after = span[at..].chars().next();
+            match (before, after) {
+                (Some(b), Some(a)) => {
+                    (is_hangul(b) && (is_hangul(a) || a.is_alphanumeric()))
+                        || (is_hangul(a) && b.is_alphanumeric())
+                }
+                _ => false,
+            }
+        };
+        for (end_lb, _) in
+            unicode_linebreak::linebreaks(span).filter(|&(at, _)| !keeps_together(at))
+        {
             let mut start_lb = end_lb;
             for (i, c) in span[start_word..end_lb].char_indices().rev() {
                 // TODO: Not all whitespace characters are linebreakable, e.g. 00A0 (No-break
@@ -1743,4 +1761,16 @@ impl ShapeLine {
         scratch.cached_visual_lines = cached_visual_lines;
         scratch.glyph_sets = cached_glyph_sets;
     }
+}
+
+/// clew patch: whether `c` is Hangul — a syllable or a jamo, of any block.
+fn is_hangul(c: char) -> bool {
+    matches!(
+        c,
+        '\u{1100}'..='\u{11FF}'
+            | '\u{3130}'..='\u{318F}'
+            | '\u{A960}'..='\u{A97F}'
+            | '\u{AC00}'..='\u{D7A3}'
+            | '\u{D7B0}'..='\u{D7FF}'
+    )
 }

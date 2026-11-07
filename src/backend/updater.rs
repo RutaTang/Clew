@@ -16,6 +16,7 @@ use iced::futures::SinkExt;
 
 use crate::Message;
 use crate::UpdaterMsg;
+use crate::tr;
 use clew_core::update::{self, Version};
 
 /// The version this binary was built as (the `clew` package version — not
@@ -127,27 +128,31 @@ pub fn auto_check_enabled() -> bool {
 /// an alert closed without choosing leaves the question open for the next
 /// launch (and checks nothing now).
 pub fn consent_task() -> Task<Message> {
-    const YES: &str = "Check Automatically";
-    const NO: &str = "Don't Check";
+    // The buttons' words are also how the answer is told apart: the alert
+    // hands back the label pressed.
+    let yes: &'static str = tr!("Check Automatically");
+    let no: &'static str = tr!("Don't Check");
+    let title = tr!("Check for clew updates automatically?");
+    let description = tr!(
+        "clew can ask GitHub for a newer release each time it starts. Nothing about \
+         your projects is sent. You can change this later in Settings, and check \
+         manually from the clew menu at any time."
+    );
     Task::perform(
-        async {
+        async move {
             rfd::AsyncMessageDialog::new()
                 .set_level(rfd::MessageLevel::Info)
-                .set_title("Check for clew updates automatically?")
-                .set_description(
-                    "clew can ask GitHub for a newer release each time it starts. \
-                     Nothing about your projects is sent. You can change this later in \
-                     Settings, and check by hand from the clew menu at any time.",
-                )
-                .set_buttons(rfd::MessageButtons::OkCancelCustom(YES.into(), NO.into()))
+                .set_title(title)
+                .set_description(description)
+                .set_buttons(rfd::MessageButtons::OkCancelCustom(yes.into(), no.into()))
                 .show()
                 .await
         },
-        |answer| match answer {
-            rfd::MessageDialogResult::Custom(label) if label == YES => {
+        move |answer| match answer {
+            rfd::MessageDialogResult::Custom(label) if label == yes => {
                 Message::Updater(UpdaterMsg::SetAuto(true))
             }
-            rfd::MessageDialogResult::Custom(label) if label == NO => {
+            rfd::MessageDialogResult::Custom(label) if label == no => {
                 Message::Updater(UpdaterMsg::SetAuto(false))
             }
             _ => Message::Noop,
@@ -192,7 +197,10 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
         return Ok(());
     }
     if !url.starts_with("https://") {
-        return Err(format!("refusing a non-https update download: {url}"));
+        return Err(tr!(
+            "refusing a non-HTTPS update download: {url}",
+            url = url
+        ));
     }
     if overridden {
         return Ok(());
@@ -203,8 +211,9 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
         host == "github.com" && path.starts_with("/RutaTang/Clew/releases/download/")
     });
     if !release_asset {
-        return Err(format!(
-            "refusing an update download from outside clew's GitHub releases: {url}"
+        return Err(tr!(
+            "refusing an update download from outside clew's GitHub releases: {url}",
+            url = url
         ));
     }
     Ok(())
@@ -285,10 +294,10 @@ pub fn create_private_dir(parent: &Path, prefix: &str) -> Result<PathBuf, String
         match builder.create(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("could not prepare the update: {e}")),
+            Err(e) => return Err(tr!("could not prepare the update: {error}", error = e)),
         }
     }
-    Err("could not create a private directory for the update".into())
+    Err(tr!("could not create a private directory for the update").into())
 }
 
 /// Creates and returns where THIS download attempt writes its DMG.
@@ -337,7 +346,7 @@ fn updates_dir() -> Result<PathBuf, String> {
 /// [`updates_dir`] for the data root `root` — `None` when there is none.
 fn updates_dir_under(root: Option<PathBuf>) -> Result<PathBuf, String> {
     root.map(|root| root.join("updates"))
-        .ok_or_else(|| "no data directory to download the update into".to_string())
+        .ok_or_else(|| tr!("no data directory to download the update into").to_string())
 }
 
 /// Drop a download's private directory once its bytes are of no further use.
@@ -613,7 +622,7 @@ pub fn install_task(dmg: PathBuf, expected: Version, reopen: Option<PathBuf>) ->
             {
                 let _ = (expected, reopen);
                 discard_download(&dmg);
-                Err("self-install is only supported on macOS".to_string())
+                Err(tr!("self-install is only supported on macOS").to_string())
             }
         },
         |v| Message::Updater(UpdaterMsg::Installed(v)),

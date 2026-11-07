@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::tr;
+
 /// Which server the client talks to. Used as the subscription identity, so it is
 /// hashable: equal targets keep the same transport, a changed target restarts it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -170,7 +172,7 @@ impl ConnTarget {
     /// Short label for the status-bar indicator.
     pub fn label(&self) -> String {
         match self {
-            ConnTarget::Local => "Local".to_string(),
+            ConnTarget::Local => tr!("Local").to_string(),
             ConnTarget::Ssh { label, .. } => label.clone(),
         }
     }
@@ -212,7 +214,7 @@ pub fn parse_port(text: &str) -> Result<u16, String> {
     }
     match text.parse::<u16>() {
         Ok(port) if port != 0 => Ok(port),
-        _ => Err(format!("“{text}” is not a port number (1–65535).")),
+        _ => Err(tr!("“{text}” is not a port number (1–65535).", text = text)),
     }
 }
 
@@ -237,30 +239,42 @@ impl SavedConnection {
     /// the second line: a clear message instead of a confusing ssh error, and
     /// no `-oProxyCommand=…` typed into a field is ever an option anywhere.
     pub fn validate(&self) -> Result<(), String> {
-        let plain = |what: &str, v: &str| -> Result<(), String> {
-            if v.is_empty() {
-                return Err(format!("The {what} is required."));
-            }
-            if v.starts_with('-') {
-                return Err(format!("The {what} cannot start with “-”."));
-            }
-            if v.chars()
+        // The host's field, or the user's.
+        let plain = |host: bool, v: &str| -> Result<(), String> {
+            let refusal = if v.is_empty() {
+                if host {
+                    tr!("The host is required.")
+                } else {
+                    tr!("The user is required.")
+                }
+            } else if v.starts_with('-') {
+                if host {
+                    tr!("The host cannot start with “-”.")
+                } else {
+                    tr!("The user cannot start with “-”.")
+                }
+            } else if v
+                .chars()
                 .any(|c| c.is_whitespace() || c.is_control() || c == '@')
             {
-                return Err(format!(
-                    "The {what} cannot contain spaces, control characters or “@”."
-                ));
-            }
-            Ok(())
+                if host {
+                    tr!("The host cannot contain spaces, control characters or “@”.")
+                } else {
+                    tr!("The user cannot contain spaces, control characters or “@”.")
+                }
+            } else {
+                return Ok(());
+            };
+            Err(refusal.into())
         };
-        plain("host", self.host.trim())?;
-        plain("user", self.user.trim())?;
+        plain(true, self.host.trim())?;
+        plain(false, self.user.trim())?;
         if self.port == 0 {
-            return Err("The port must be between 1 and 65535.".into());
+            return Err(tr!("The port must be between 1 and 65535.").into());
         }
         let identity = self.identity.trim();
         if identity.starts_with('-') || identity.chars().any(char::is_control) {
-            return Err("The identity file path is not a usable path.".into());
+            return Err(tr!("The identity file path is not a usable path.").into());
         }
         Ok(())
     }
@@ -371,24 +385,42 @@ pub fn load_checked() -> Result<Vec<SavedConnection>, String> {
     };
     match std::fs::symlink_metadata(&path) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(format!("cannot read {}: {e}", path.display())),
+        Err(e) => {
+            return Err(tr!(
+                "cannot read {path}: {error}",
+                path = path.display(),
+                error = e
+            ));
+        }
         Ok(_) => {}
     }
     let file = clew_core::statefile::open_plain(&path)
-        .ok_or_else(|| format!("{} is not a plain file", path.display()))?;
+        .ok_or_else(|| tr!("{path} is not a plain file", path = path.display()))?;
     let mut text = String::new();
     file.take(MAX_STORE_BYTES + 1)
         .read_to_string(&mut text)
-        .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        .map_err(|e| {
+            tr!(
+                "cannot read {path}: {error}",
+                path = path.display(),
+                error = e
+            )
+        })?;
     if text.len() as u64 > MAX_STORE_BYTES {
-        return Err(format!(
-            "{} is too large to be a connection list",
-            path.display()
+        return Err(tr!(
+            "{path} is too large to be a connection list",
+            path = path.display()
         ));
     }
     toml::from_str::<Store>(&text)
         .map(|s| s.connections)
-        .map_err(|e| format!("{} could not be parsed: {e}", path.display()))
+        .map_err(|e| {
+            tr!(
+                "{path} could not be parsed: {error}",
+                path = path.display(),
+                error = e
+            )
+        })
 }
 
 /// Persist the connection list wholesale, creating the data directory if
@@ -397,7 +429,7 @@ pub fn load_checked() -> Result<Vec<SavedConnection>, String> {
 /// or [`remove`] instead. Written atomically (temp + rename), so a second clew
 /// process can never observe a half-written file.
 pub fn save(connections: &[SavedConnection]) -> Result<(), String> {
-    let path = store_path().ok_or("no data directory")?;
+    let path = store_path().ok_or(tr!("no data directory"))?;
     let store = Store {
         connections: connections.to_vec(),
     };
@@ -434,18 +466,23 @@ fn edit(change: impl FnOnce(&mut Vec<SavedConnection>)) -> Result<Vec<SavedConne
     // Poisoning only means an earlier caller panicked; the list is re-read from
     // disk here regardless, so there is no corrupt state to inherit.
     let _serialized = SAVE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let path = store_path().ok_or("no data directory")?;
+    let path = store_path().ok_or(tr!("no data directory"))?;
     let _exclusive = clew_core::statefile::lock(&path).map_err(|e| {
-        format!(
-            "cannot lock {}: {e} — the connection list was not changed",
-            path.display()
+        tr!(
+            "cannot lock {path}: {error} — the connection list was not changed",
+            path = path.display(),
+            error = e
         )
     })?;
     // A file that exists but cannot be used is left exactly as it is: writing
     // "what we could read (nothing) + this change" over it would erase every
     // host in it.
-    let mut merged = load_checked()
-        .map_err(|e| format!("{e} — not overwriting it; fix or remove the file, then try again"))?;
+    let mut merged = load_checked().map_err(|e| {
+        tr!(
+            "{error} — not overwriting it; fix or remove the file, then try again",
+            error = e
+        )
+    })?;
     change(&mut merged);
     save(&merged)?;
     Ok(merged)
@@ -535,11 +572,9 @@ impl SshSettings {
             match key {
                 "hostname" => hostname = Some(trimmed.to_string()),
                 "port" => {
-                    port = Some(
-                        trimmed
-                            .parse::<u16>()
-                            .map_err(|_| format!("ssh reported port {trimmed:?}"))?,
-                    );
+                    port = Some(trimmed.parse::<u16>().map_err(|_| {
+                        tr!("ssh reported port {port}", port = format!("{trimmed:?}"))
+                    })?);
                 }
                 "hostkeyalias" if !trimmed.is_empty() => alias = Some(trimmed.to_string()),
                 "proxyjump" if !matches!(trimmed, "" | "none") => {
@@ -554,10 +589,10 @@ impl SshSettings {
         }
         let hostname = hostname
             .filter(|h| !h.is_empty() && !h.chars().any(|c| c.is_whitespace() || c.is_control()))
-            .ok_or("ssh reported no usable host name")?;
+            .ok_or(tr!("ssh reported no usable host name"))?;
         Ok(SshSettings {
             hostname,
-            port: port.ok_or("ssh reported no port")?,
+            port: port.ok_or(tr!("ssh reported no port"))?,
             host_key_alias: alias,
             proxy,
             user_known_hosts: known.flatten(),
@@ -954,8 +989,9 @@ pub fn trust_host_key(key: &ScannedHostKey, host_field: &str) -> Result<PathBuf,
         || !may_record_as(host_field, recorded_as)
         || parse_key_line(&key.line, recorded_as).is_none()
     {
-        return Err(format!(
-            "the key offered is not a key line for {host_field}; nothing was recorded"
+        return Err(tr!(
+            "the key offered is not a key line for {host}; nothing was recorded",
+            host = host_field
         ));
     }
     edit_known_hosts(|current| {
@@ -986,7 +1022,10 @@ pub fn trust_host_key(key: &ScannedHostKey, host_field: &str) -> Result<PathBuf,
 /// and `~/.ssh/known_hosts` is never touched.
 pub fn forget_host_key(host_field: &str) -> Result<usize, String> {
     if !plain_host_field(host_field) {
-        return Err(format!("{host_field:?} is not a single host name"));
+        return Err(tr!(
+            "{host} is not a single host name",
+            host = format!("{host_field:?}")
+        ));
     }
     let mut removed = 0;
     edit_known_hosts(|current| {
@@ -1015,22 +1054,34 @@ pub fn forget_host_key(host_field: &str) -> Result<usize, String> {
 /// (empty when there is no file yet) and returns the text to write — atomically
 /// — or `None` to leave the file as it is. Returns the file's path.
 fn edit_known_hosts(change: impl FnOnce(&str) -> Option<String>) -> Result<PathBuf, String> {
-    let path = known_hosts_path()
-        .ok_or("clew has no data directory it can hand to ssh, so it cannot remember host keys")?;
+    let path = known_hosts_path().ok_or(tr!(
+        "clew has no data directory it can hand to ssh, so it cannot remember host keys"
+    ))?;
     let _serialized = KNOWN_HOSTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _exclusive = clew_core::statefile::lock(&path)
-        .map_err(|e| format!("cannot lock {}: {e}", path.display()))?;
+    let _exclusive = clew_core::statefile::lock(&path).map_err(|e| {
+        tr!(
+            "cannot lock {path}: {error}",
+            path = path.display(),
+            error = e
+        )
+    })?;
     let current = clew_core::statefile::read_capped_checked(&path, MAX_KNOWN_HOSTS_BYTES)
         .map_err(|e| {
-            format!(
-                "{} could not be read ({e}) — left untouched",
-                path.display()
+            tr!(
+                "{path} could not be read ({error}) — left untouched",
+                path = path.display(),
+                error = e
             )
         })?
         .unwrap_or_default();
     if let Some(next) = change(&current) {
-        clew_core::statefile::write_atomic(&path, next.as_bytes())
-            .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+        clew_core::statefile::write_atomic(&path, next.as_bytes()).map_err(|e| {
+            tr!(
+                "cannot write {path}: {error}",
+                path = path.display(),
+                error = e
+            )
+        })?;
     }
     Ok(path)
 }

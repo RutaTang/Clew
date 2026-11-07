@@ -498,7 +498,7 @@ impl Server {
             Request::Hello {
                 protocol,
                 fingerprint,
-                ..
+                locale,
             } => {
                 if protocol != PROTOCOL_VERSION {
                     self.hello_ok = false;
@@ -528,6 +528,7 @@ impl Server {
                     ));
                 }
                 self.hello_ok = true;
+                clew_core::lsp::client::set_locale(locale);
                 Some(Event::Ready {
                     protocol: PROTOCOL_VERSION,
                     fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
@@ -1614,7 +1615,16 @@ impl Server {
             // The work running on a key taken back or replaced stops with
             // it: each piece holds a copy of the key it started with, and a
             // turn went on spending on a revoked key for as long as it ran.
-            Request::SetAiConfig { chat, embed } => {
+            Request::SetAiConfig {
+                chat,
+                embed,
+                locale,
+            } => {
+                // The reader's language: what the models here write for
+                // them is written in it, and the language servers started
+                // from now on are told it.
+                llm::set_reply_language(chat.as_ref().and_then(|c| c.reply_language.as_deref()));
+                clew_core::lsp::client::set_locale(locale);
                 let chat = chat.map(|c| llm::Config {
                     provider: llm::Provider::from_slug(&c.provider),
                     api_key: c.api_key,
@@ -2399,6 +2409,7 @@ mod tests {
             let hello = Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: None,
             };
             assert!(matches!(
                 rt.block_on(server.handle(0, hello)),
@@ -2462,6 +2473,7 @@ mod tests {
             let hello = Request::Hello {
                 protocol: clew_protocol::PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: None,
             };
             assert!(matches!(
                 server.handle(0, hello).await,
@@ -2504,6 +2516,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         server.root = Some(root.clone());
@@ -2583,6 +2596,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let config = |model: &str| Request::SetAiConfig {
@@ -2591,8 +2605,10 @@ mod tests {
                 api_key: "k".into(),
                 model: model.into(),
                 base_url: base.clone(),
+                reply_language: None,
             }),
             embed: None,
+            locale: None,
         };
         assert!(server.handle(1, config("m")).await.is_none());
         let chat = Request::ChatStream {
@@ -2629,6 +2645,7 @@ mod tests {
         let revoke = Request::SetAiConfig {
             chat: None,
             embed: None,
+            locale: None,
         };
         assert!(server.handle(4, revoke).await.is_none());
         let outcome = tokio::time::timeout(Duration::from_secs(5), async {
@@ -2684,6 +2701,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let config = Request::SetAiConfig {
@@ -2692,8 +2710,10 @@ mod tests {
                 api_key: "k".into(),
                 model: "m".into(),
                 base_url: base,
+                reply_language: None,
             }),
             embed: None,
+            locale: None,
         };
         assert!(server.handle(1, config).await.is_none());
         let budget = server.output_budget();
@@ -2765,6 +2785,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let config = Request::SetAiConfig {
@@ -2774,6 +2795,7 @@ mod tests {
                 model: "m".into(),
                 base_url: base,
             }),
+            locale: None,
         };
         assert!(server.handle(1, config).await.is_none());
         let embed = Request::Embed {
@@ -2835,6 +2857,7 @@ mod tests {
         let hello = Request::Hello {
             protocol: clew_protocol::PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         };
         assert!(server.handle(0, hello).await.is_some());
         let agents = server.agents.clone();

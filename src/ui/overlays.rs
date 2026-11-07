@@ -1,13 +1,10 @@
-//! Hover tooltip, context menu, server-panel modal; shared text/path helpers.
+//! Hover tooltip and context menu; shared text/path helpers.
 
 use super::*;
-// Explicit macro imports shadow the glob from `super`, disambiguating
-// iced's column!/row! from the prelude macros of the same name.
-use iced::widget::{column, row};
 
 /// Gap between the pointer and the hover peek below (or above) it.
 const PEEK_GAP: f32 = 10.0;
-/// Width of the right-click menu.
+/// Width of the right-click menu as designed: wider where a row needs it.
 const MENU_W: f32 = 210.0;
 
 pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
@@ -86,16 +83,8 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
 pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
     use crate::GotoKind;
 
-    let item = |label: &'static str, msg: Message| {
-        button(text(label).size(ts::BASE))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12])
-            .on_press(msg)
-    };
-    let goto = |kind: GotoKind| item(kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
-
-    let mut items = vec![
+    let goto = |kind: GotoKind| (kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
+    let mut rows = vec![
         goto(GotoKind::Definition),
         goto(GotoKind::References),
         goto(GotoKind::Implementation),
@@ -103,29 +92,46 @@ pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
     ];
     // The language's own action, for a file whose language has one.
     if let Some(kind) = menu.insight {
-        items.push(item(kind.label(), Message::Hover(HoverMsg::Insight)));
+        rows.push((kind.label(), Message::Hover(HoverMsg::Insight)));
     }
-    items.extend([
-        item("View docs", Message::Docs(DocsMsg::ViewFromMenu)),
-        item("Call Hierarchy", Message::Calls(CallsMsg::FromMenu)),
-        item("Trace Value", Message::Flow(crate::FlowMsg::FromMenu)),
-        item("Explain", Message::Explain(ExplainMsg::FromMenu)),
-        item("Add to Ask", Message::Ask(AskMsg::AboutSelection)),
-        item(
-            "Why is this here?",
+    rows.extend([
+        (tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
+        (tr!("Call Hierarchy"), Message::Calls(CallsMsg::FromMenu)),
+        (tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu)),
+        (tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
+        (tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
+        (
+            tr!("Why is this here?"),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         ),
-        item(
-            "Toggle Breakpoint",
+        (
+            tr!("Toggle Breakpoint"),
             Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
         ),
-        item(
-            "Conditional Breakpoint…",
+        (
+            tr!("Conditional Breakpoint…"),
             Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
         ),
     ]);
-    let panel = container(Column::with_children(items.into_iter().map(Element::from)).spacing(1))
-        .width(MENU_W)
+    // As designed, or as wide as its longest row in the reader's language,
+    // so none wraps.
+    let width = rows
+        .iter()
+        .map(|(label, _)| {
+            super::sheet::text_width(label, ts::BASE, crate::fonts::UI) + 2.0 * 12.0 + 2.0 * 4.0
+        })
+        .fold(MENU_W, f32::max)
+        .ceil();
+    let items = rows.into_iter().map(|(label, msg)| {
+        button(text(label).size(ts::BASE).wrapping(Wrapping::None))
+            .style(theme::list_row(false))
+            .width(Fill)
+            .padding([5, 12])
+            .on_press(msg)
+            .into()
+    });
+    let panel = container(Column::with_children(items).spacing(1))
+        .width(width)
         .padding(4)
         .style(theme::modal_panel);
 
@@ -141,178 +147,6 @@ pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
 }
 
 // ---------------------------------------------------------------- server panel
-
-pub(crate) fn server_panel_modal(app: &App) -> Element<'_, Message> {
-    use crate::LspSlot;
-
-    // Languages relevant to this project (present in it, or installed/running).
-    let languages = app.managed_languages();
-
-    let mut rows: Vec<Element<'_, Message>> = Vec::new();
-    rows.push(section_header("SERVERS FOR THIS PROJECT"));
-    if languages.is_empty() {
-        rows.push(
-            container(
-                text("No supported languages detected in this project.")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-            )
-            .padding([2, 8])
-            .into(),
-        );
-    }
-    for lang in &languages {
-        let (status, action) = app.lsp_row(lang);
-        let server_name = crate::lsp::registry::default_for_language(lang)
-            .map(|s| s.name.to_string())
-            .unwrap_or_else(|| "custom".into());
-
-        let action_el: Element<'_, Message> = match action {
-            Some((label, msg)) => button(text(label).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(msg)
-                .into(),
-            None => slot(),
-        };
-
-        rows.push(
-            row![
-                text(lang.clone()).size(ts::BODY).width(70),
-                text(server_name)
-                    .size(ts::BODY)
-                    .color(theme::accent())
-                    .width(140),
-                text(status).size(ts::SMALL).color(theme::dim()).width(Fill),
-                action_el,
-            ]
-            .spacing(8)
-            .align_y(iced::Center)
-            .padding([3, 8])
-            .into(),
-        );
-    }
-
-    rows.push(section_header("INSTALLED (global, shared across projects)"));
-    if app.installed_servers.is_empty() {
-        rows.push(
-            container(
-                text("Nothing downloaded yet.")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-            )
-            .padding([2, 8])
-            .into(),
-        );
-    }
-    for srv in &app.installed_servers {
-        rows.push(
-            row![
-                text(&srv.name).size(ts::BODY).width(150),
-                text(&srv.version)
-                    .size(ts::SMALL)
-                    .color(theme::dim())
-                    .width(120),
-                text(human_size(srv.bytes))
-                    .size(ts::SMALL)
-                    .color(theme::dim())
-                    .width(Fill),
-                button(text("Remove").size(ts::SMALL))
-                    .style(theme::toolbar_button)
-                    .padding([2, 8])
-                    .on_press(Message::Lsp(LspMsg::Remove {
-                        name: srv.name.clone(),
-                        version: srv.version.clone(),
-                    })),
-            ]
-            .spacing(8)
-            .align_y(iced::Center)
-            .padding([3, 8])
-            .into(),
-        );
-    }
-
-    // Log of the active file's language server, if it is running: its newest
-    // lines, which the app copies from the server only when the log moved
-    // (`App::sync_lsp_log`) — never per repaint.
-    let slot_state = app
-        .active_viewer()
-        .and_then(|v| v.lang_key)
-        .and_then(|l| app.proj.link.lsp.get(l));
-    let (logs, unreadable): (&[String], _) = match &app.proj.link.lsp_log {
-        Some(tail) => match &tail.lines {
-            Ok(lines) => (lines, None),
-            // A poisoned state is not an empty log: say what happened.
-            Err(poisoned) => (&[], Some(*poisoned)),
-        },
-        None => (&[], None),
-    };
-    rows.push(section_header("SERVER LOG"));
-    let log_lines: Vec<Element<'_, Message>> = logs
-        .iter()
-        .rev()
-        .map(|line| {
-            text(line.as_str())
-                .size(ts::SMALL)
-                .font(crate::fonts::CODE)
-                .color(theme::dim())
-                .wrapping(Wrapping::None)
-                .into()
-        })
-        .collect();
-    let log_view = if log_lines.is_empty() {
-        // A server that is not running has no log to show — say which, so an
-        // empty box is never mistaken for a quiet but healthy server.
-        let (why, color) = match (slot_state, unreadable) {
-            (_, Some(poisoned)) => (poisoned.to_string(), theme::warning()),
-            (Some(LspSlot::Ready(c)), None) if !c.alive() => (
-                "The server has stopped; restart it to see new output.".to_string(),
-                theme::dim(),
-            ),
-            (Some(LspSlot::Ready(_)), None) => ("No output.".to_string(), theme::dim()),
-            _ => ("No server running for this file.".to_string(), theme::dim()),
-        };
-        container(text(why).size(ts::SMALL).color(color)).padding([2, 8])
-    } else {
-        container(
-            scrollable(Column::with_children(log_lines).spacing(1))
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(160),
-        )
-        .padding([2, 8])
-    };
-    rows.push(log_view.into());
-
-    let panel = container(
-        column![
-            row![
-                text("Language Servers").size(ts::TITLE).color(theme::fg()),
-                space().width(Fill),
-                button(text("Close").size(ts::BODY))
-                    .style(theme::toolbar_button)
-                    .padding([3, 12])
-                    .on_press(Message::Lsp(LspMsg::TogglePanel)),
-            ]
-            .align_y(iced::Center),
-            scrollable(Column::with_children(rows).spacing(2).width(Fill))
-                .direction(thin_scroll())
-                .style(theme::overlay_scrollbar)
-                .height(iced::Length::Fill),
-        ]
-        .spacing(12),
-    )
-    .width(SERVER_PANEL_W)
-    .max_height(SERVER_PANEL_MAX_H)
-    .padding(MODAL_PAD)
-    .style(theme::modal_panel);
-
-    modal(
-        panel,
-        Placement::Center,
-        Backdrop::Dim(Some(Message::Lsp(LspMsg::TogglePanel))),
-    )
-}
 
 // ------------------------------------------------------------ text helpers
 

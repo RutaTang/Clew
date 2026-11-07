@@ -1,0 +1,2 @@
+/* What macOS shows when Clew first asks to use the microphone. */
+"NSMicrophoneUsageDescription" = "음성 키나 마이크 버튼을 누르면 Clew가 듣기 시작합니다. 명령을 말하거나 코드에 대해 질문할 수 있습니다. 말한 내용은 이 Mac에서 텍스트로 변환되며 외부로 전송되지 않습니다.";

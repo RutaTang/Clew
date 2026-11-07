@@ -16,6 +16,7 @@
 use std::time::Duration;
 
 use crate::richmd::KIND_ATTR;
+use crate::tr;
 
 /// Longest TeX source rendered: far past any real equation.
 const MAX_TEX_BYTES: usize = 16 * 1024;
@@ -139,7 +140,7 @@ pub fn run_guarded<T: Send + 'static>(
             let _ = tx.send(outcome);
         });
     if let Err(e) = spawned {
-        return Guarded::Crashed(format!("no render thread: {e}"));
+        return Guarded::Crashed(tr!("no render thread: {error}", error = e));
     }
     match rx.recv_timeout(deadline) {
         Ok(Ok(value)) => Guarded::Done(value),
@@ -148,14 +149,14 @@ pub fn run_guarded<T: Send + 'static>(
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "unknown error".into());
+                .unwrap_or_else(|| tr!("unknown error").into());
             Guarded::Crashed(what.chars().take(120).collect())
         }
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Guarded::TimedOut,
         // The thread ended without reporting: only an abort does that, and
         // an abort takes this process with it — kept for completeness.
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            Guarded::Crashed("the renderer stopped".into())
+            Guarded::Crashed(tr!("the renderer stopped").into())
         }
     }
 }

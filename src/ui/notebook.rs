@@ -50,9 +50,9 @@ pub(crate) fn notebook_pane<'a>(
         !with_outputs.is_empty() && with_outputs.iter().all(|i| v.nb_expanded.contains(i));
     let mut strip = row![
         text(format!(
-            "{} cells · {} with output · {}",
-            doc.cells.len(),
-            with_outputs.len(),
+            "{} · {} · {}",
+            trn!("1 cell", "{n} cells", doc.cells.len()),
+            trn!("1 with output", "{n} with output", with_outputs.len()),
             doc.language
         ))
         .size(ts::SMALL)
@@ -69,9 +69,9 @@ pub(crate) fn notebook_pane<'a>(
     });
     if !with_outputs.is_empty() {
         let label = if all_expanded {
-            "Collapse all outputs"
+            tr!("Collapse all outputs")
         } else {
-            "Expand all outputs"
+            tr!("Expand all outputs")
         };
         strip = strip.push(
             button(text(label).size(ts::SMALL).color(theme::fg_muted()))
@@ -144,10 +144,11 @@ fn cell_view<'a>(
     }
     if !cell.outputs.is_empty() {
         let expanded = v.nb_expanded.contains(&index);
+        let count = tr!("output ({n})", n = cell.outputs.len());
         let label = if expanded {
-            format!("▾ output ({})", cell.outputs.len())
+            format!("▾ {count}")
         } else {
-            format!("▸ output ({})", cell.outputs.len())
+            format!("▸ {count}")
         };
         parts.push(
             button(text(label).size(ts::SMALL).color(theme::fg_muted()))
@@ -238,10 +239,13 @@ fn output_view(output: &crate::NbOutput) -> Element<'_, Message> {
         )
         .width(Fill)
         .into(),
-        crate::NbOutput::Placeholder(label) => text(format!("⧉ {label} (not rendered)"))
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .into(),
+        crate::NbOutput::Placeholder(label) => text(format!(
+            "⧉ {}",
+            tr!("{output} (not rendered)", output = label)
+        ))
+        .size(ts::SMALL)
+        .color(theme::dim())
+        .into(),
     }
 }
 

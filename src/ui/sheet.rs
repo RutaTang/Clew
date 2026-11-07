@@ -167,25 +167,14 @@ const TOOLS_RULE_W: f32 = 9.0;
 const HEADER_PAD_X: f32 = 20.0;
 const HEADER_PAD_RIGHT: f32 = 16.0;
 
-/// Width of the header's title: the file's name, its folder, and, for a
-/// markdown file, the switch between it rendered and its source.
-fn title_w(app: &App, v: &Viewer) -> f32 {
-    let (name, folder) = title_parts(v);
-    let mut w = text_width(&name, ts::EMPHASIS, TITLE_FONT);
-    if !folder.is_empty() {
-        w += 8.0 + text_width(&folder, ts::BODY, crate::fonts::UI);
-    }
-    if v.md.is_some() {
-        let label = if v.show_source { "Rendered" } else { "Source" };
-        w += 8.0 + file_tool_w(label);
-    }
-    let _ = app;
-    w
-}
-
 /// Width of the View menu's button.
 fn view_button_w() -> f32 {
-    VIEW_PAD.x() + 14.0 + 6.0 + text_width("View", ts::BODY, FILE_TOOL_FONT) + 6.0 + VIEW_CHEVRON
+    VIEW_PAD.x()
+        + 14.0
+        + 6.0
+        + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
+        + 6.0
+        + VIEW_CHEVRON
 }
 
 /// The View menu's button: the design's 9 before what it holds, 8 after,
@@ -200,20 +189,20 @@ const VIEW_CHEVRON: f32 = 10.0;
 
 /// Where the header's file tools are drawn (Explain through View), in
 /// window coordinates — at the header's right end, as the header lays them
-/// out, or just after the file's name when it is too long for that; `None`
-/// while the header is not drawn.
+/// out: a title too long for the room left is cut, not the tools (whose
+/// words are longer in some languages than in English); `None` while the
+/// header is not drawn.
 pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
     if !header_shows(app) {
         return None;
     }
-    let v = app.active_viewer()?;
-    let after_title = sheet_content_left(app) + HEADER_PAD_X + title_w(app, v) + TITLE_GAP;
-    let tools = ["Explain", "Skim", "Diff", "Time Travel"]
+    let row_left = sheet_content_left(app) + HEADER_PAD_X;
+    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
         .iter()
         .map(|l| file_tool_w(l))
         .sum::<f32>();
     let width = tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING;
-    let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(after_title);
+    let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
         y: body_top(app) + 1.0,
@@ -318,7 +307,10 @@ fn file_tool<'a>(
         row![
             glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
             ts::set_in(
-                text(label).font(FILE_TOOL_FONT).color(tint),
+                text(label)
+                    .font(FILE_TOOL_FONT)
+                    .color(tint)
+                    .wrapping(Wrapping::None),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -342,11 +334,14 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
     let tab = |label: &'static str, this: crate::MarginTab| {
         let chosen = app.margin_tab == this;
         button(ts::set_in(
-            text(label).font(FILE_TOOL_FONT).color(if chosen {
-                theme::fg()
-            } else {
-                theme::fg_muted()
-            }),
+            text(label)
+                .font(FILE_TOOL_FONT)
+                .color(if chosen {
+                    theme::fg()
+                } else {
+                    theme::fg_muted()
+                })
+                .wrapping(Wrapping::None),
             MARGIN_TAB_H,
             ts::INTER,
             ts::BODY,
@@ -355,17 +350,13 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
         .padding([0, 10])
         .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
     };
-    let mut tabs = row![
-        tab("Notes", crate::MarginTab::Notes),
-        tab("Calls", crate::MarginTab::Calls),
-        tab("History", crate::MarginTab::History),
+    row![
+        tab(tr!("Notes"), crate::MarginTab::Notes),
+        tab(tr!("Calls"), crate::MarginTab::Calls),
+        tab(tr!("History"), crate::MarginTab::History),
     ]
-    .spacing(2);
-    // The conversation, while it is kept in the margin.
-    if app.ask_view == crate::AskView::Margin {
-        tabs = tabs.push(tab("Ask", crate::MarginTab::Ask));
-    }
-    tabs.into()
+    .spacing(2)
+    .into()
 }
 
 /// The sheet's header: the open file's name and folder, the tools that act
@@ -404,9 +395,9 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // A markdown file reads rendered or as its source.
     if v.md.is_some() {
         let (glyph, label) = if v.show_source {
-            (Glyph::Overview, "Rendered")
+            (Glyph::Overview, tr!("Rendered"))
         } else {
-            (Glyph::Note, "Source")
+            (Glyph::Note, tr!("Source"))
         };
         title = title.push(file_tool(
             glyph,
@@ -432,7 +423,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         row![
             glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
             ts::set_in(
-                text("View").font(FILE_TOOL_FONT).color(theme::fg_muted()),
+                text(tr!("View"))
+                    .font(FILE_TOOL_FONT)
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::None),
                 HEADER_CONTROL_H,
                 ts::INTER,
                 ts::BODY,
@@ -448,28 +442,28 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     let tools = row![
         file_tool(
             Glyph::TextLines,
-            "Explain",
+            tr!("Explain"),
             false,
             None,
             Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
         ),
         file_tool(
             Glyph::Skim,
-            "Skim",
-            false,
+            tr!("Skim"),
+            v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
         ),
         file_tool(
             Glyph::Diff,
-            "Diff",
+            tr!("Diff"),
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
         ),
         file_tool(
             Glyph::TimeTravel,
-            "Time Travel",
+            tr!("Time Travel"),
             time_travel,
             caps(Action::TimeTravel),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
@@ -482,7 +476,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // The tools at the row's right end, as the design has them: the room
     // the title leaves goes between the two.
     let first = container(
-        row![title, space().width(Fill), tools]
+        row![container(title).width(Fill).clip(true), tools]
             .spacing(TITLE_GAP / 2.0)
             .align_y(iced::Center),
     )
@@ -527,30 +521,22 @@ fn trail_row(app: &App) -> Element<'_, Message> {
     let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
         .spacing(6)
         .align_y(iced::Center);
-    for (i, (id, loc, label)) in stops.into_iter().enumerate() {
+    // Where the reader is now: the function the caret is in, when it is in
+    // one of the current stop's file's.
+    let here = match (app.cursor_target(), stops.last()) {
+        (Some(crate::explain::Node::Function { file, name, .. }), Some((_, loc, _)))
+            if file == loc.path =>
+        {
+            Some(name)
+        }
+        _ => None,
+    };
+    let names = trail_names(&stops, here);
+    for (i, ((id, loc, _), name)) in stops.into_iter().zip(names).enumerate() {
         if i > 0 {
             line = line.push(glyph::icon(Glyph::ChevronRight, theme::dim(), 11.0));
         }
         let current = i == last;
-        // Where the reader is now: the function the caret is in, when it is
-        // in one of this file's.
-        let here = match app.cursor_target() {
-            Some(crate::explain::Node::Function { file, name, .. })
-                if current && file == loc.path =>
-            {
-                Some(name)
-            }
-            _ => None,
-        };
-        let name = match (here, label) {
-            (Some(here), _) => here,
-            (None, Some(label)) => label.to_string(),
-            (None, None) => loc
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        };
         line = line.push(
             button(ts::set_in(
                 text(name)
@@ -589,9 +575,81 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         .into()
 }
 
+/// What each trail stop is called: the function it was in, else its file's
+/// name — with its line when a stop beside it has the same name, which two
+/// visits to one file outside any function otherwise read as ("cart.py ›
+/// cart.py"). `here` names the current (last) stop when the caret is in a
+/// function of its file.
+fn trail_names(
+    stops: &[(usize, &crate::history::Loc, Option<&str>)],
+    here: Option<String>,
+) -> Vec<String> {
+    let last = stops.len().saturating_sub(1);
+    let mut here = here;
+    let mut names: Vec<(String, bool)> = stops
+        .iter()
+        .enumerate()
+        .map(
+            |(i, (_, loc, label))| match (here.take_if(|_| i == last), label) {
+                (Some(here), _) => (here, true),
+                (None, Some(label)) => (label.to_string(), true),
+                (None, None) => (
+                    loc.path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                    false,
+                ),
+            },
+        )
+        .collect();
+    let twins: Vec<bool> = (0..names.len())
+        .map(|i| {
+            let same = |j: usize| names.get(j).is_some_and(|(n, _)| *n == names[i].0);
+            !names[i].1 && ((i > 0 && same(i - 1)) || same(i + 1))
+        })
+        .collect();
+    for (i, twin) in twins.into_iter().enumerate() {
+        if twin && let Some(line) = stops[i].1.line {
+            names[i].0 = format!("{}:{line}", names[i].0);
+        }
+    }
+    names.into_iter().map(|(n, _)| n).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Two stops beside each other in one file, outside any function, are
+    /// told apart by their lines; a named stop and a lone file are not.
+    #[test]
+    fn neighbouring_stops_in_one_file_show_their_lines() {
+        let loc = |p: &str, line| crate::history::Loc {
+            path: std::path::PathBuf::from(p),
+            line,
+        };
+        let (a18, a1, b) = (
+            loc("src/cart.py", Some(18)),
+            loc("src/cart.py", Some(1)),
+            loc("src/main.py", Some(4)),
+        );
+        let stops = vec![
+            (0, &b, None),
+            (1, &a18, Some("subtotal")),
+            (2, &a18, None),
+            (3, &a1, None),
+        ];
+        assert_eq!(
+            trail_names(&stops, None),
+            ["main.py", "subtotal", "cart.py:18", "cart.py:1"]
+        );
+        // The caret in a function names the current stop.
+        assert_eq!(
+            trail_names(&stops, Some("total".into())),
+            ["main.py", "subtotal", "cart.py", "total"]
+        );
+    }
 
     /// The divider over the margin's edge, held by its middle and not yet
     /// moved, leaves the margin as wide as it was; moved, the margin follows.

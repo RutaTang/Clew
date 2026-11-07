@@ -1165,6 +1165,25 @@ impl<'a, Message> CodeView<'a, Message> {
         n
     }
 
+    /// The leading spaces of `line`, or `None` when it is blank (nothing
+    /// but spaces) or out of range.
+    fn indent_of(&self, line: usize) -> Option<usize> {
+        let l = self.lines.get(line)?;
+        let mut n = 0;
+        for (frag, _) in &l.spans {
+            for c in frag.chars() {
+                if c == ' ' {
+                    n += 1;
+                } else if c.is_whitespace() {
+                    continue;
+                } else {
+                    return Some(n);
+                }
+            }
+        }
+        None
+    }
+
     /// The minimap band rectangle pinned to the right of the viewport, or `None`
     /// when there is no minimap callback or the file is too short to warrant one.
     fn minimap_band(&self, viewport: &Rectangle) -> Option<Rectangle> {
@@ -1210,6 +1229,17 @@ impl<'a, Message> CodeView<'a, Message> {
     /// such lines; `layout` takes the max with the MEASURED right edge of every
     /// line drawn so far (see `State::measured`), which is exact for what the
     /// reader can actually scroll to.
+    /// Columns between a line's end and its inline blame: a gap of two, past
+    /// the `⋯` of a folded line — drawn two columns out, the blame ran into
+    /// the cue ("None: ⋯Tester, 4 hours ago").
+    fn blame_lead_cols(&self, line: usize) -> usize {
+        if self.is_collapsed(line) {
+            COLLAPSED_CUE_COLS + 2
+        } else {
+            2
+        }
+    }
+
     fn visual_max_cols(&self, char_width: f32) -> usize {
         let summary = self.annotation_summary();
         let mut cols = self
@@ -1225,7 +1255,7 @@ impl<'a, Message> CodeView<'a, Message> {
             0
         };
         if let Some((line, annotation)) = &self.blame {
-            let anno = 2 + annotation.chars().count();
+            let anno = self.blame_lead_cols(*line) + annotation.chars().count();
             cols = cols.max(visual_line_cols(self.lines, self.inlay_hints, *line) + anno + band);
         }
         cols
@@ -1973,6 +2003,10 @@ where
         } else {
             (((viewport.y + sticky_h - bounds.y) / lh).ceil() as usize).max(first)
         };
+        // The file's indent width, read once a draw from its first lines.
+        let indent_step = self.indent_guides.then(|| {
+            indent_step((0..self.lines.len().min(INDENT_SAMPLE_LINES)).map(|l| self.indent_of(l)))
+        });
         for row in first..last {
             if row < first_shown_row {
                 continue;
@@ -2072,11 +2106,12 @@ where
             }
 
             // Indentation guides: a faint vertical line at each enclosing
-            // indent level (columns 4, 8, … strictly inside this line's indent).
-            if self.indent_guides {
-                let ind = self.line_indent(i);
-                let mut level = 4;
-                while level < ind {
+            // indent level — columns 0, step, 2·step, … strictly inside this
+            // line's indent (`guide_levels`), a blank line inside a block
+            // carrying its block's.
+            if let Some(step) = indent_step {
+                let ind = guide_indent(|l| self.indent_of(l), i, self.lines.len());
+                for level in (0..ind).step_by(step) {
                     renderer.fill_quad(
                         renderer::Quad {
                             bounds: Rectangle {
@@ -2089,7 +2124,6 @@ where
                         },
                         theme::with_alpha(theme::dim(), 0.45),
                     );
-                    level += 4;
                 }
             }
 
@@ -2326,7 +2360,9 @@ where
                             font: crate::fonts::UI_MEDIUM,
                             align_x: text::Alignment::Left,
                             align_y: iced::alignment::Vertical::Top,
-                            shaping: text::Shaping::Basic,
+                            // Its note is in the reader's language: a
+                            // script the UI font lacks falls back.
+                            shaping: text::Shaping::Auto,
                             wrapping: text::Wrapping::None,
                         })
                     });
@@ -2400,9 +2436,10 @@ where
                 if let Some((bl, annotation)) = &self.blame
                     && *bl == i
                 {
-                    let end_x = text_x0 + text_w + 2.0 * cw;
+                    let lead = self.blame_lead_cols(i);
+                    let end_x = text_x0 + text_w + lead as f32 * cw;
                     right = right
-                        .max(text_w + (2 + estimated_cols(annotation)) as f32 * cw + band_room);
+                        .max(text_w + (lead + estimated_cols(annotation)) as f32 * cw + band_room);
                     renderer.fill_text(
                         text::Text {
                             content: annotation.clone(),
@@ -2930,12 +2967,95 @@ impl<'a, Message: 'a> From<CodeView<'a, Message>> for Element<'a, Message> {
     }
 }
 
+/// How many of a file's first lines [`indent_step`] reads.
+const INDENT_SAMPLE_LINES: usize = 2000;
+/// How far a blank line looks for code above and below it
+/// ([`guide_indent`]).
+const GUIDE_BLANK_REACH: usize = 64;
+
+/// The columns one level of indentation takes in a file, from the indents
+/// of its lines (`None` for a blank one): the step its indent most often
+/// grows by from one line of code to the next — 2 in a file indented by
+/// two, where guides every 4 columns marked every other level. 4 when
+/// nothing is indented.
+pub(crate) fn indent_step(indents: impl Iterator<Item = Option<usize>>) -> usize {
+    let mut grew_by = [0usize; 9];
+    let mut prev: Option<usize> = None;
+    for ind in indents.flatten() {
+        if let Some(p) = prev
+            && ind > p
+            && ind - p < grew_by.len()
+        {
+            grew_by[ind - p] += 1;
+        }
+        prev = Some(ind);
+    }
+    // A step of one is alignment (a continued argument), not a level.
+    (2..grew_by.len())
+        .filter(|&s| grew_by[s] > 0)
+        .max_by_key(|&s| (grew_by[s], std::cmp::Reverse(s)))
+        .unwrap_or(4)
+}
+
+/// The indent line `i`'s guides stop at: its own, or for a blank line the
+/// block it sits in — the lesser of the code above and below it — so the
+/// guides run through a blank line in a function rather than break at it.
+pub(crate) fn guide_indent(
+    indent_of: impl Fn(usize) -> Option<usize>,
+    i: usize,
+    len: usize,
+) -> usize {
+    if let Some(ind) = indent_of(i) {
+        return ind;
+    }
+    let above = (i.saturating_sub(GUIDE_BLANK_REACH)..i)
+        .rev()
+        .find_map(&indent_of);
+    let below = (i + 1..len.min(i + 1 + GUIDE_BLANK_REACH)).find_map(&indent_of);
+    match (above, below) {
+        (Some(a), Some(b)) => a.min(b),
+        _ => 0,
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     /// The minimap draws bars at least 2px apart with a gap between them —
     /// a long file used to fill the band solid — and a short file's rows
     /// each get their own bar.
+    /// A file indented by two has a guide at every level; one indented
+    /// by four, every four columns; alignment by one is not a level.
+    #[test]
+    fn the_indent_step_is_the_files_own() {
+        let step = |lines: &[Option<usize>]| super::indent_step(lines.iter().copied());
+        assert_eq!(step(&[Some(0), Some(2), Some(4), Some(2), Some(0)]), 2);
+        assert_eq!(step(&[Some(0), Some(4), None, Some(8), Some(4)]), 4);
+        assert_eq!(step(&[Some(0), Some(4), Some(5), Some(4), Some(8)]), 4);
+        assert_eq!(step(&[Some(0), Some(0)]), 4, "nothing indented");
+        assert_eq!(step(&[]), 4);
+    }
+
+    /// A blank line in a block keeps the block's guides; one between two
+    /// top-level definitions has none; code keeps its own indent.
+    #[test]
+    fn a_blank_line_carries_its_blocks_guides() {
+        // def f():      0
+        //     a = 1     4
+        //               blank, in f
+        //     return a  4
+        //               blank, between f and g
+        // def g():      0
+        let lines = [Some(0), Some(4), None, Some(4), None, Some(0)];
+        let at = |i| super::guide_indent(|l| lines.get(l).copied().flatten(), i, lines.len());
+        assert_eq!(at(1), 4);
+        assert_eq!(at(2), 4);
+        assert_eq!(at(4), 0);
+        assert_eq!(at(5), 0);
+        // Its guides: one, at column 0 — the first level is drawn too.
+        assert_eq!((0..at(2)).step_by(4).collect::<Vec<_>>(), [0]);
+    }
+
     #[test]
     fn minimap_bars_keep_a_gap_between_them() {
         // A long file: half a pixel a row; every fourth row, 1.2px bars.
@@ -4145,6 +4265,79 @@ mod font_tests {
                 "{text:?} at {at:?} is clipped to {clip:?}, not its row"
             );
         }
+    }
+
+    /// A folded line's blame starts past its `⋯`, with the gap a line that
+    /// is not folded has: drawn two columns past the line's end, it ran into
+    /// the cue ("None: ⋯Tester, 4 hours ago").
+    #[test]
+    fn a_folded_lines_blame_clears_the_fold_cue() {
+        use iced::advanced::Widget;
+        use iced::advanced::widget::Tree;
+        // The code face the app draws with, whatever this machine has: in
+        // another face two lines of one length may not measure alike.
+        crate::fonts::load();
+        let source = "def add():\n    return 1\n\ndef sub():\n    return 2\n";
+        let lines = crate::highlight::plain_lines(source);
+        let headers: std::collections::HashSet<usize> = [0, 3].into();
+        let collapsed: std::collections::HashSet<usize> = [0].into();
+        let visible = [0usize, 2, 3, 4];
+        let draw = |line: usize| {
+            let mut view = crate::codeview::CodeView::new(
+                &lines,
+                5,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| (),
+                |_| (),
+                |_, _| (),
+            )
+            .folds(Some(&visible), &headers, &collapsed)
+            .blame(Some((line, "someone, 3 days ago".to_string())));
+            let widget: &mut dyn Widget<(), iced::Theme, Recorder> = &mut view;
+            let mut tree = Tree::new(&*widget);
+            let mut renderer = Recorder::default();
+            let node = widget.layout(
+                &mut tree,
+                &renderer,
+                &iced::advanced::layout::Limits::new(
+                    iced::Size::ZERO,
+                    iced::Size::new(800.0, f32::INFINITY),
+                ),
+            );
+            widget.draw(
+                &tree,
+                &mut renderer,
+                &iced::Theme::Dark,
+                &iced::advanced::renderer::Style::default(),
+                iced::advanced::Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &iced::Rectangle::new(iced::Point::ORIGIN, iced::Size::new(800.0, 400.0)),
+            );
+            renderer.boxes
+        };
+        let x_of = |boxes: &[(String, iced::Point, iced::Rectangle)], what: &str| {
+            boxes
+                .iter()
+                .find(|(text, ..)| text == what)
+                .map(|(_, at, clip)| (at.x, clip.x + clip.width))
+                .unwrap_or_else(|| panic!("{what:?} is not drawn"))
+        };
+        // `def add():` folded, `def sub():` not: the same length of line.
+        let folded = draw(0);
+        let (cue_x, cue_end) = x_of(&folded, "⋯");
+        // The cue's box is two columns wide.
+        let column = (cue_end - cue_x) / 2.0;
+        let (folded_blame, _) = x_of(&folded, "someone, 3 days ago");
+        assert!(
+            folded_blame - cue_end >= column - 0.5,
+            "the blame at {folded_blame} runs into the cue ending at {cue_end}"
+        );
+        // Not folded, it keeps its place: two columns past the line's end,
+        // where the cue would have begun one column out.
+        let (open_blame, _) = x_of(&draw(3), "someone, 3 days ago");
+        assert!((open_blame - (cue_x + column)).abs() < 0.5, "{open_blame}");
     }
 
     /// A15: the inline blame names people and quotes commit summaries, which

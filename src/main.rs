@@ -48,7 +48,7 @@ pub(crate) use session::{bookmarks, cache, finder, history, notes, reading};
 mod backend;
 pub(crate) use backend::{connect, langenv, server, sources, updater, watch};
 mod miscellaneous;
-pub(crate) use miscellaneous::{fonts, glyph, icons, keymap, resize, stats, theme};
+pub(crate) use miscellaneous::{fonts, glyph, i18n, icons, keymap, resize, stats, theme};
 
 mod app;
 mod shell;
@@ -65,7 +65,7 @@ pub use app::state::{
     App, AvailableUpdate, DEFAULT_FONT_SIZE, DebugState, DocsState, DocsView, EditIds,
     ExplainState, ImportWork, InFlight, LostEdits, OverviewState, PaneOpen, PendingAnchor,
     PendingAsk, ProjectCallsState, ProjectLink, ProjectSession, RemoteEdit, SettingsDraft,
-    StatsState, SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
+    SettingsPage, StatsState, SupersededOpen, UpdatePhase, UpdateState, WalkState, WalkUi,
 };
 pub(crate) use app::tasks::*;
 pub use app::voice::VoiceMsg;

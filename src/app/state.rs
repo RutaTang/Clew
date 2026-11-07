@@ -12,6 +12,15 @@ use crate::*;
 /// project cancels every task named here by construction — there is no
 /// hand-maintained list of what to stop, and a field added here is dropped
 /// (and its task aborted) without anyone having to remember a teardown site.
+/// Where on its line a jump lands (`landing`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum LandingAt {
+    /// The character a language server named, in its position encoding.
+    Char(usize, crate::viewer::PositionEncoding),
+    /// The first place the line spells this name as a word.
+    Name(String),
+}
+
 #[derive(Default, Debug)]
 pub struct InFlight {
     /// The Ask answer streaming from the provider on THIS machine (the client
@@ -191,6 +200,11 @@ pub struct DebugState {
     /// Why the program last stopped (the adapter's reason), for the stop
     /// the trace records once its stack arrives.
     pub pending_reason: String,
+    /// What the debugger last put on the status line about the run —
+    /// "Debugger running…", "Stopped: breakpoint" — taken down when the run
+    /// ends: it went on saying "Debugger running…" over a program that had
+    /// exited.
+    pub said: Option<String>,
     /// Watch expressions (persist across stops/sessions).
     pub watches: Vec<String>,
     /// The add-watch input box.
@@ -222,6 +236,12 @@ pub struct DebugState {
     /// The run whose adapter rides the clew-server transport
     /// (`DebugMsg::DapStarted::proxied`): the one a lost transport ends.
     pub proxied_run: Option<u64>,
+    /// The variables open in the panel at the current stop, by their
+    /// `variablesReference`, and the children each was read to have. A
+    /// reference names a value only while the program stays where it
+    /// stopped, so both go with the stop (`App::bump_debug_stop`).
+    pub open_vars: std::collections::HashSet<i64>,
+    pub var_children: HashMap<i64, Vec<crate::dap::Variable>>,
 }
 
 /// The session a DAP event, an answer or a client belongs to: the run's own
@@ -754,23 +774,68 @@ pub struct SettingsDraft {
     pub key_from_env: bool,
     /// As `key_from_env`, for the embeddings endpoint (`OPENAI_API_KEY`).
     pub embed_key_from_env: bool,
-    /// The appearance captured when the modal opened: (mode, light-theme id,
-    /// dark-theme id). Theme changes in the modal preview live but only commit on
-    /// Save; Close restores this snapshot. Set in `on_open_settings`.
-    pub theme_snapshot: (theme::ThemePref, &'static str, &'static str),
-    /// The two AI configs as the modal pre-filled them, so Save can write only
-    /// the fields the user actually changed.
+    /// The two AI configs as the modal pre-filled them, so a save writes only
+    /// the fields the user actually changed — and closing with none changed
+    /// writes nothing.
     ///
-    /// The form is read from storage when the modal OPENS and written back on
-    /// Save, and Save is also the only way to commit a theme change — so a
-    /// window whose modal had been open since before another window stored an
-    /// API key wrote its own stale blank over that key, and pushed
-    /// `chat: None` to its server on top. Comparing against this snapshot
-    /// inside the config lock (`llm::Config::save_from`) is what tells "the
-    /// user cleared this field" apart from "the user never touched it".
+    /// The form is read from storage when the modal OPENS and written back
+    /// as it closes — so a window whose modal had been open since before
+    /// another window stored an API key wrote its own stale blank over that
+    /// key, and pushed `chat: None` to its server on top. Comparing against
+    /// this snapshot inside the config lock (`llm::Config::save_from`) is
+    /// what tells "the user cleared this field" apart from "the user never
+    /// touched it".
     pub ai_snapshot: (llm::Config, embed::Config),
+    /// A save of the AI fields failed since Settings opened, its reason said
+    /// in the status bar: the next Close closes, saved or not (see
+    /// `App::close_settings`).
+    pub save_failed: bool,
     /// The MCP servers and ACP agents section of the modal.
     pub integrations: crate::app::integrations::IntegrationsDraft,
+    /// The page Settings shows: one feature's settings at a time.
+    pub page: SettingsPage,
+}
+
+/// The pages of Settings, one for each feature, in the order its list shows
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsPage {
+    #[default]
+    Appearance,
+    Updates,
+    LanguageModel,
+    Embeddings,
+    Voice,
+    Integrations,
+    Languages,
+    Shortcuts,
+}
+
+impl SettingsPage {
+    pub const ALL: [SettingsPage; 8] = [
+        SettingsPage::Appearance,
+        SettingsPage::Updates,
+        SettingsPage::LanguageModel,
+        SettingsPage::Embeddings,
+        SettingsPage::Voice,
+        SettingsPage::Integrations,
+        SettingsPage::Languages,
+        SettingsPage::Shortcuts,
+    ];
+
+    /// The page's title, in English: shown through `crate::i18n::lookup`.
+    pub fn title(self) -> &'static str {
+        match self {
+            SettingsPage::Appearance => tr_noop!("Appearance"),
+            SettingsPage::Updates => tr_noop!("Updates"),
+            SettingsPage::LanguageModel => tr_noop!("Language model"),
+            SettingsPage::Embeddings => tr_noop!("Embeddings"),
+            SettingsPage::Voice => tr_noop!("Voice"),
+            SettingsPage::Integrations => tr_noop!("Integrations"),
+            SettingsPage::Languages => tr_noop!("Languages"),
+            SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
+        }
+    }
 }
 
 impl Default for SettingsDraft {
@@ -786,7 +851,6 @@ impl Default for SettingsDraft {
             embed_base_url: String::new(),
             key_from_env: false,
             embed_key_from_env: false,
-            theme_snapshot: (theme::ThemePref::System, "", ""),
             // Replaced with what was read from storage the moment the modal
             // opens; nothing saves from a modal that was never opened.
             ai_snapshot: (
@@ -798,7 +862,9 @@ impl Default for SettingsDraft {
                 ),
                 embed::Config::from_parts(String::new(), String::new(), String::new()),
             ),
+            save_failed: false,
             integrations: Default::default(),
+            page: SettingsPage::Appearance,
         }
     }
 }
@@ -919,8 +985,13 @@ pub struct App {
     /// (set when the CLI argument is a file path).
     pub pending_open: Option<PathBuf>,
     /// Project root awaiting the user's consent to create `.clew`.
-    /// While `Some`, the consent modal is shown.
+    /// While `Some`, the setup sheet asks it (`setup`).
     pub pending_consent: Option<PathBuf>,
+    /// The setup sheet on screen, if any (see `crate::app::setup`).
+    pub setup: Option<crate::app::setup::ProjectSetup>,
+    /// What a first open's sheet asked for, waiting for the project to be
+    /// open and its state loaded.
+    pub pending_setup: Option<crate::app::setup::SetupIntent>,
     /// Workspace trust, loaded from clew's global data directory: which project
     /// roots may be opened, and which repo-specified language-server commands
     /// may run. Deliberately not stored in the project — see `trust`.
@@ -967,6 +1038,15 @@ pub struct App {
     /// server subscription: changing it restarts the transport against the new
     /// target, which is how an in-app Connect switches between local and remote.
     pub connection: connect::ConnTarget,
+    /// The local project this window had open when it switched to a remote
+    /// host: "Disconnect and read local code" opens it again. Going remote
+    /// closes it, and a connect that failed left the window empty, the
+    /// project it was reading a folder pick away.
+    pub left_local: Option<std::path::PathBuf>,
+    /// The Escape now reaching the key handler has done its work already —
+    /// it cleared the Files filter (`WindowMsg::FileFilterEscaped`) — and is
+    /// to do nothing more. Any key press consumes it.
+    pub escape_taken: bool,
     /// Whether the user granted THIS remote connection the right to hold the
     /// AI API keys and run AI calls server-side (the per-host opt-in from the
     /// Connect form). Always reset to false on a transport switch; without
@@ -1058,6 +1138,10 @@ pub struct App {
     pub show_bottom: bool,
     /// Where the floating Ask window is.
     pub ask_view: AskView,
+    /// The menu of Ask's sessions, open under the card's title.
+    pub ask_sessions_menu: bool,
+    /// What the menu's search looks for; cleared as the menu closes.
+    pub ask_sessions_query: String,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
     /// The debugger (DAP): the active session plus breakpoints and watches that
@@ -1081,6 +1165,8 @@ pub struct App {
     /// The interactive tutorial: the current step index while a tour is running,
     /// `None` when idle (see `crate::app::tutorial`).
     pub tutorial: Option<usize>,
+    /// The layout the running tour began from, given back when it ends.
+    pub(crate) tutorial_layout: Option<crate::app::tutorial::TourLayout>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
     /// The app menu of Windows and Linux (the ☰ in the top bar) is open.
@@ -1091,8 +1177,6 @@ pub struct App {
     pub file_filter: String,
     /// The customizable command keymap (loaded from the global config).
     pub keymap: keymap::Keymap,
-    /// Whether the "Keyboard Shortcuts" modal is open.
-    pub show_shortcuts: bool,
     /// The action currently awaiting a new chord (capture mode), if any.
     pub rebinding: Option<keymap::Action>,
     /// Transient message in the shortcuts modal (conflict / invalid key).
@@ -1189,11 +1273,13 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
-    /// The status line has said, in the wait a close or a quit is in, that
-    /// the window waits for its host (`App::show_waiting`): said once, it is
-    /// not said again over what the line says since, unless that is taken
-    /// back (`App::update_waiting`). Cleared as the wait ends.
-    pub waiting_said: bool,
+    /// What the status line said last, in the wait a close or a quit is in,
+    /// of the window waiting for its host (`App::show_waiting`): said once,
+    /// it is not said again over what the line says since, unless that is
+    /// taken back (`App::update_waiting`). The line still says it while it
+    /// holds these words, in whatever language they were said. Cleared as
+    /// the wait ends.
+    pub waiting_said: Option<String>,
     /// The main window's id, set once it is opened (daemon mode opens windows
     /// explicitly). Used to target window operations at the right window.
     pub main_window: Option<iced::window::Id>,
@@ -1686,6 +1772,11 @@ pub struct ProjectSession {
     /// toggle while it loads cancels it (clears this), so its reply is
     /// dropped instead of opening the view the user just turned off.
     pub diff_pending: Option<(u64, PathBuf)>,
+    /// A diff on screen being recomputed because its file changed on disk:
+    /// the request's stamp. Kept apart from `diff_pending`, so a press of
+    /// Diff meanwhile still closes the view rather than cancelling a load
+    /// the reader never asked for.
+    pub diff_refresh: Option<u64>,
     /// Per file, the newest blame request (local `git::try_info` pass or
     /// server `GitInfo`, one id space). A `GitInfoLoaded` paints only when it is
     /// still the newest request for its file.
@@ -1775,6 +1866,20 @@ pub struct ProjectSession {
     /// Monotone go-to-definition counter, same pattern as `search_seq`: a
     /// `DefinitionResult` from a superseded request must not jump the editor.
     pub goto_seq: u64,
+    /// The position encoding of the server a go-to-definition was last
+    /// asked of: the one its answer's character is counted in.
+    pub goto_encoding: crate::viewer::PositionEncoding,
+    /// The same for the last references request: the encoding its
+    /// locations' characters are counted in.
+    pub refs_encoding: crate::viewer::PositionEncoding,
+    /// The name a definition or references request was asked about — the
+    /// word under the caret — which the list of its places marks in each
+    /// line (`SearchState::matcher`).
+    pub nav_term: Option<String>,
+    /// Where the last jump to a definition or a symbol lands on its line:
+    /// the file, its 0-based line, and the place there. The caret goes on
+    /// the name, not the line's first column.
+    pub landing: Option<(PathBuf, usize, LandingAt)>,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
     /// The token of the `CallsMsg::Prepared` currently awaited, if any.
@@ -1836,6 +1941,11 @@ pub struct ProjectSession {
     /// turn it becomes is marked so. Typing in the input makes it typed.
     pub ask_spoken: bool,
     pub ask_turns: Vec<AskTurn>,
+    /// The project's Ask sessions, newest first, kept in its derived
+    /// directory (`app::ask_sessions`).
+    pub ask_sessions: Vec<crate::app::ask_sessions::AskSession>,
+    /// The session on screen, once something has been asked in it.
+    pub ask_session: Option<u64>,
     pub asking: bool,
     /// Code selections pinned as context, shown as chips above the input. They
     /// persist across turns until removed.
@@ -1955,6 +2065,10 @@ pub struct ProjectSession {
     /// tried again, to that one, which the same words speak for
     /// (`App::take_back_retrying`).
     pub remote_edit_retrying: Option<(String, String)>,
+    /// The words the status line said last of a journaled edit lost
+    /// (`remote_state::lost_status`): it still says so while it holds them,
+    /// in whatever language they were said.
+    pub remote_edit_lost_said: Option<String>,
     // -- Work in flight ----------------------------------------------------------
     /// Work in flight for this project, beyond the busy flags the views read
     /// (see [`InFlight`]).
@@ -2023,6 +2137,7 @@ impl Default for ProjectSession {
             context_menu: Default::default(),
             diff: Default::default(),
             diff_pending: Default::default(),
+            diff_refresh: None,
             git_latest: Default::default(),
             blame_why: Default::default(),
             insight: Default::default(),
@@ -2050,6 +2165,10 @@ impl Default for ProjectSession {
             search: Default::default(),
             search_seq: Default::default(),
             goto_seq: Default::default(),
+            goto_encoding: crate::viewer::PositionEncoding::Utf16,
+            refs_encoding: crate::viewer::PositionEncoding::Utf16,
+            nav_term: None,
+            landing: None,
             call_graph: Default::default(),
             call_pending: Default::default(),
             flow: None,
@@ -2072,6 +2191,8 @@ impl Default for ProjectSession {
             ask_input: Default::default(),
             ask_spoken: false,
             ask_turns: Default::default(),
+            ask_sessions: Default::default(),
+            ask_session: None,
             asking: Default::default(),
             ask_pins: Default::default(),
             acp: Default::default(),
@@ -2094,6 +2215,7 @@ impl Default for ProjectSession {
             remote_edit_ids: Default::default(),
             remote_edits_lost: Default::default(),
             remote_edit_retrying: Default::default(),
+            remote_edit_lost_said: Default::default(),
             inflight: Default::default(),
             link: Default::default(),
         }
@@ -2281,6 +2403,10 @@ pub struct PaneOpen {
     /// The file, and the 1-based line to show.
     pub abs: PathBuf,
     pub target: Option<usize>,
+    /// What the status line said of it ("Loading {file}…"): taken back with
+    /// the load while the line still says it, in whatever language it was
+    /// said.
+    pub said: String,
 }
 
 /// An open that going into the history of the file on screen superseded in
@@ -2326,6 +2452,10 @@ pub struct TimeStart {
     /// (`App::on_time_travel_ready`). Any other start's history starts a
     /// session of its own, from its live file.
     pub rescope: bool,
+    /// What the status line said as it began ("Loading history…"): taken
+    /// back as the start ends while the line still says it, in whatever
+    /// language it was said.
+    pub said: String,
 }
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;

@@ -696,17 +696,22 @@ impl Agent {
             return Ok(());
         }
         Err(AcpError::NeedsLogin(match methods.first() {
+            // Two messages, not one with "no arguments" put in: each is
+            // then whole, and said whole in the reader's language.
+            Some(AuthMethod {
+                terminal: Some(args),
+                name,
+                ..
+            }) if args.is_empty() => {
+                format!("{name} — run the agent's command in a terminal, then ask again")
+            }
             Some(AuthMethod {
                 terminal: Some(args),
                 name,
                 ..
             }) => format!(
                 "{name} — run the agent's command with {} in a terminal, then ask again",
-                if args.is_empty() {
-                    "no arguments".to_string()
-                } else {
-                    args.join(" ")
-                }
+                args.join(" ")
             ),
             _ => "sign in with the agent's own command in a terminal, then ask again".into(),
         }))

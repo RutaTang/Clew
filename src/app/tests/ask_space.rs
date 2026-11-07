@@ -53,12 +53,7 @@ fn assert_retrieval_rejected(app: &App) {
     assert!(app.proj.inflight.ask_context.is_none());
     assert!(app.proj.ask_turns.is_empty());
     assert_eq!(app.proj.ask_input, "what is Point?");
-    assert!(
-        app.status
-            .contains("embedding index or configuration changed"),
-        "{}",
-        app.status
-    );
+    assert!(app.status.contains("The index changed"), "{}", app.status);
 }
 
 #[test]
@@ -127,7 +122,7 @@ fn ask_reports_a_same_space_index_build_as_a_retry_instead_of_empty_context() {
     assert!(app.proj.embed_index.entries.is_empty());
     assert!(run_task(retrieve(&mut app, stream, Some(space))).is_empty());
     assert_retrieval_rejected(&app);
-    assert!(app.status.contains("index is ready"));
+    assert!(app.status.contains("when it's ready"));
 }
 
 #[test]

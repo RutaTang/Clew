@@ -285,7 +285,7 @@ fn silence_and_failures_do_nothing_but_say_so() {
         Some(&HeardOutcome::Nothing)
     );
     assert!(app.proj.ask_input.is_empty());
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert!(!app.ask_view.is_open(), "nothing heard opens no card");
     // Nothing said for long enough: it stops listening on its own.
     app.voice.reset_for_test();
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
@@ -394,6 +394,96 @@ fn failing_fetch(
     Err("HTTP 403 Forbidden".into())
 }
 
+/// Gets a megabyte and a half of a model, then loses the connection — the
+/// error naming the signed address a CDN served it from, as Clew's own
+/// transport does.
+fn dropping_fetch(
+    _url: &str,
+    _max_bytes: u64,
+    _cancel: &AtomicBool,
+    sink: &mut dyn std::io::Write,
+    _progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
+    sink.write_all(&vec![0u8; 1_500_000])
+        .map_err(|e| e.to_string())?;
+    Err(
+        "https://us.aws.cdn.hf.co/xet-bridge-us/641ab5/32b578?Expires=1793944821\
+         &Policy=eyJTdGF0ZW1lbnQiOlt7&Signature=MEUCIFr4ga: the connection closed before \
+         all bytes were read (1500000 of 147951465)"
+            .into(),
+    )
+}
+
+/// A download that fails part-way says how far it got and why, in words —
+/// not the address it failed at — and what it said goes once Settings,
+/// where it is said, is closed.
+#[test]
+fn a_failed_download_says_why_briefly_until_settings_closes() {
+    let mut app = scanned_app("voice-download-dropped");
+    own_store(&mut app, "voice-download-dropped");
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    app.voice.fetch = dropping_fetch;
+    let task = app.update(Message::Voice(VoiceMsg::Download("base.en")));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let size = clew_voice::models::find("base.en").unwrap().size_mb;
+    let error = app.voice.download_errors.get("base.en").cloned().unwrap();
+    assert_eq!(
+        error,
+        format!("Stopped at 1 of {size} MB: the connection closed")
+    );
+    assert!(!app.status.contains("https://"), "{}", app.status);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(
+        app.voice.download_errors.is_empty(),
+        "closing Settings keeps it"
+    );
+}
+
+/// A failed download says why in the reader's language, how far it got
+/// in those words too, and the address it failed at cut to its host — a
+/// proxy it went through still said.
+#[test]
+fn a_failed_download_says_why_in_the_readers_language() {
+    use crate::app::voice::download_failure;
+    use crate::i18n::{Lang, with_lang};
+    let model = clew_voice::models::find("base.en").unwrap();
+    let signed = "https://us.aws.cdn.hf.co/xet-bridge-us/641ab5/32b578?Expires=1793944821\
+                  &Signature=MEUCIFr4ga";
+    with_lang(Lang::Fr, || {
+        assert_eq!(
+            download_failure(
+                &format!("{signed}: the transfer took too long — giving up"),
+                704_000_000,
+                model
+            ),
+            format!(
+                "Interrompu à 704 sur {} Mo\u{a0}: us.aws.cdn.hf.co\u{a0}: le transfert a \
+                 pris trop de temps — abandon",
+                model.size_mb
+            )
+        );
+        let said = download_failure(
+            &format!("{signed} (through the proxy http://p:3128): connection refused"),
+            0,
+            model,
+        );
+        assert!(
+            said.starts_with("us.aws.cdn.hf.co (via le proxy http://p:3128)\u{a0}: "),
+            "{said}"
+        );
+    });
+    assert_eq!(
+        download_failure(&format!("{signed}: HTTP 404 Not Found"), 0, model),
+        "us.aws.cdn.hf.co: HTTP 404 Not Found"
+    );
+    assert_eq!(
+        download_failure("the download was closed", 0, model),
+        "the download was closed"
+    );
+}
+
 /// A download that is not the model as published is refused and leaves
 /// nothing behind; one that fails says why; Cancel stops one.
 #[test]
@@ -453,6 +543,40 @@ fn model_downloads_are_verified() {
     assert!(!app.voice.installed(model));
 }
 
+/// A model downloaded is the one the voice key hears with — not the one
+/// chosen before, which may not be on this computer — and that is kept.
+#[test]
+fn a_downloaded_model_is_the_one_the_voice_key_uses() {
+    // A data directory of its own: config.toml is everyone's.
+    let data = test_dir("voice-downloaded-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, script, _) = voice_app("voice-downloaded", "hello");
+    let store = app.voice.store.clone().unwrap();
+    let small = app.voice.prefs.model();
+    assert_eq!(small.id, "small-q5_1", "the first one chosen");
+    std::fs::remove_file(store.path(small)).unwrap();
+    // Tiny is downloaded (the transfer itself is left out).
+    app.voice.fetch = junk_fetch;
+    let _ = app.update(Message::Voice(VoiceMsg::Download("tiny.en")));
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::Downloaded {
+        id: "tiny.en",
+        result: Ok(store.path(tiny)),
+    }));
+    assert!(app.status.contains("is ready"), "{}", app.status);
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    assert_eq!(VoicePrefs::load().model, "tiny.en", "kept");
+    // And the voice key listens with it, as the status says.
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    assert!(!app.settings.open);
+}
+
 /// The voice settings are kept in config.toml, and read back.
 #[test]
 fn voice_settings_are_kept() {
@@ -477,4 +601,153 @@ fn voice_settings_are_kept() {
     assert_eq!(app.voice.prefs.model, "large-v3-turbo-q5_0");
     let _ = app.update(Message::Voice(VoiceMsg::SetLanguage(None)));
     assert_eq!(VoicePrefs::load().language, None);
+}
+
+/// A command said in the reader's language, as the palette shows it: with
+/// or without its category, the words that only say "do it" left out —
+/// and nothing more, nothing that puts away what it would show.
+#[test]
+fn a_command_is_heard_in_the_language_the_palette_shows() {
+    use crate::app::voice::said_as_shown;
+    use crate::i18n::Lang;
+    let zh = [
+        "调用图",
+        "视图：隐藏缩略图",
+        "视图：显示缩略图",
+        "打开文件夹…",
+    ];
+    assert_eq!(said_as_shown(Lang::Zh, "打开调用图", &zh), Some(0));
+    assert_eq!(said_as_shown(Lang::Zh, "请打开调用图。", &zh), Some(0));
+    assert_eq!(said_as_shown(Lang::Zh, "显示缩略图", &zh), Some(2));
+    assert_eq!(said_as_shown(Lang::Zh, "隐藏缩略图", &zh), Some(1));
+    assert_eq!(said_as_shown(Lang::Zh, "视图：隐藏缩略图", &zh), Some(1));
+    assert_eq!(said_as_shown(Lang::Zh, "打开文件夹", &zh), Some(3));
+    assert_eq!(
+        said_as_shown(Lang::Zh, "关闭缩略图", &zh),
+        None,
+        "close never shows it"
+    );
+    assert_eq!(
+        said_as_shown(Lang::Zh, "解释一下调用图", &zh),
+        None,
+        "a request, for Ask"
+    );
+    let fr = [
+        "Graphe d’appels",
+        "Affichage : Masquer la minimap",
+        "Atteindre la ligne…",
+    ];
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Ouvre le graphe d'appels.", &fr),
+        Some(0)
+    );
+    assert_eq!(said_as_shown(Lang::Fr, "Masquer la minimap", &fr), Some(1));
+    // Said formally, or to a group: the longer word is the one left out
+    // ("ouvrez", not "ouvre" and a "z").
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Ouvrez le graphe d'appels", &fr),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(
+            Lang::Fr,
+            "Affichez le graphe d'appels, s'il vous plaît",
+            &fr
+        ),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Allez aux paramètres", &["Paramètres"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(
+            Lang::Fr,
+            "Ouvrez une nouvelle fenêtre",
+            &["Nouvelle fenêtre"]
+        ),
+        Some(0)
+    );
+    assert_eq!(said_as_shown(Lang::Fr, "Atteindre la ligne", &fr), Some(2));
+    assert_eq!(
+        said_as_shown(Lang::Fr, "Pourquoi le graphe d'appels ?", &fr),
+        None
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ko, "호출 그래프 열어 줘", &["호출 그래프"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ko, "호출 그래프를 보여주세요", &["호출 그래프"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ja, "コールグラフを開いてください", &["コールグラフ"]),
+        Some(0)
+    );
+    assert_eq!(
+        said_as_shown(Lang::Ja, "コールグラフ", &["コールグラフ", "コールグラフ"]),
+        None,
+        "two fit: neither runs"
+    );
+    assert_eq!(
+        said_as_shown(Lang::En, "Call Graph", &["Call Graph"]),
+        None,
+        "English is the word matcher's"
+    );
+}
+
+/// The voice panel's command examples, in each language, run the commands
+/// they name: each catalog names a command as its palette shows it.
+#[test]
+fn each_languages_examples_run_what_they_say() {
+    use crate::i18n::{Lang, lookup, with_lang};
+    use crate::ui::TRY_SAYING;
+    for lang in Lang::ALL {
+        with_lang(lang, || {
+            let words = |example: &str| {
+                lookup(example)
+                    .trim_matches(['“', '”', '「', '」', '«', '»', ' ', '\u{a0}'])
+                    .to_string()
+            };
+            let (mut app, script, _) = voice_app(
+                &format!("voice-example-{}", lang.code()),
+                &words(TRY_SAYING[0].0),
+            );
+            say(&mut app, &script);
+            assert_eq!(
+                app.voice.heard.as_ref().map(|h| &h.outcome),
+                Some(&HeardOutcome::Ran("Call Graph".into())),
+                "{}: {:?}",
+                lang.code(),
+                words(TRY_SAYING[0].0)
+            );
+            let (mut app, script, _) = voice_app(
+                &format!("voice-example-debug-{}", lang.code()),
+                &words(TRY_SAYING[4].0),
+            );
+            say(&mut app, &script);
+            assert_eq!(
+                app.voice.heard.as_ref().map(|h| &h.outcome),
+                Some(&HeardOutcome::Confirm("Start Debugging".into())),
+                "{}: {:?}",
+                lang.code(),
+                words(TRY_SAYING[4].0)
+            );
+            // Hiding the minimap: what the palette offers while it shows.
+            app.show_minimap = true;
+            let commands = app.palette_commands();
+            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+            let said = words(TRY_SAYING[1].0);
+            let found = clew_voice::intent::command(&said, &titles)
+                .or_else(|| crate::app::voice::said_as_shown(lang, &said, &shown));
+            assert_eq!(
+                found.map(|i| titles[i]),
+                Some("View: Hide Minimap"),
+                "{}: {said:?}",
+                lang.code()
+            );
+        });
+    }
 }

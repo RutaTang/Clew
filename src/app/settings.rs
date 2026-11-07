@@ -32,8 +32,13 @@ impl App {
         match self.llm_config() {
             Some(cfg) => Ok(cfg),
             None => {
-                self.status = format!("Add an API key in Settings ({})", llm::config_hint());
-                Err(Task::done(Message::Settings(SettingsMsg::Open)))
+                self.status = tr!(
+                    "Add an API key in Settings ({path})",
+                    path = llm::config_hint()
+                );
+                Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
+                    SettingsPage::LanguageModel,
+                ))))
             }
         }
     }
@@ -83,13 +88,7 @@ impl App {
                 self.settings.embed_base_url.clone(),
             ),
         );
-        // Capture the stored appearance so theme changes can preview live and
-        // revert on Close-without-Save (see `restore_theme_snapshot`).
-        self.settings.theme_snapshot = (
-            self.theme_pref,
-            theme::current_light().id,
-            theme::current_dark().id,
-        );
+        self.settings.save_failed = false;
         self.settings.integrations.note = None;
         self.refresh_integrations();
         self.settings.open = true;
@@ -107,15 +106,6 @@ impl App {
         // as the modal opened, which another window may have overtaken, while
         // this is what the config says one instant before we change it.
         let space_before = embed::stored_space();
-        // Commit the previewed appearance (applied live but not persisted while
-        // the modal was open) and refresh the snapshot so Close won't revert it.
-        // A failed write is appended to whatever the AI half reports below.
-        let theme_saved = theme::save(self.theme_pref);
-        self.settings.theme_snapshot = (
-            self.theme_pref,
-            theme::current_light().id,
-            theme::current_dark().id,
-        );
         let cfg = llm::Config::from_parts(
             self.settings.provider,
             self.settings.key.clone(),
@@ -129,11 +119,11 @@ impl App {
         );
         // Written as an EDIT of what the modal was opened with, not as a
         // wholesale replacement of both sections: this form's values are as
-        // old as the modal, and Save is also the only way to commit a theme
-        // change, so a Save the user believed only changed the theme wrote a
-        // stale blank over an API key another window had stored in between —
-        // and `send_ai_config` below then revoked it on the server too. A
-        // field another writer has changed since is kept, and named.
+        // old as the modal, so a save the user believed changed something
+        // else wrote a stale blank over an API key another window had stored
+        // in between — and `send_ai_config` below then revoked it on the
+        // server too. A field another writer has changed since is kept, and
+        // named.
         let saved = cfg
             .save_from(&self.settings.ai_snapshot.0)
             .and_then(|mut kept| {
@@ -150,6 +140,8 @@ impl App {
                 self.invalidate_llm_config();
                 self.embed_available = embed::Config::available();
                 self.settings.open = false;
+                // Said where the model is picked; read there, it is done.
+                self.voice.download_errors.clear();
                 self.code_focused = true;
                 // A changed embedding space makes every vector held in memory
                 // unusable, and keeping them is worse than losing them: FIND
@@ -170,47 +162,133 @@ impl App {
                 if dropped {
                     self.proj.embed_index = embed::Index::default();
                 }
-                self.status = if !kept.is_empty() {
-                    format!(
-                        "Settings saved — {} changed in another window and was kept",
-                        kept.join(", ")
+                // The fields kept, by the names their pages give them (the
+                // chat model's and the embeddings' API key are both "API
+                // key": named once), not by their keys in config.toml.
+                let mut fields: Vec<&str> = Vec::new();
+                for key in &kept {
+                    let field = saved_field_name(key);
+                    if !fields.contains(&field) {
+                        fields.push(field);
+                    }
+                }
+                self.status = if !fields.is_empty() {
+                    trn!(
+                        "Settings saved — {fields} was changed in another window, so it was kept",
+                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        fields.len(),
+                        fields = fields.join(", ")
                     )
                 } else if self.llm_available {
-                    format!("Settings saved ({})", cfg.provider.label())
+                    tr!(
+                        "Settings saved ({provider})",
+                        provider = crate::i18n::lookup(cfg.provider.label())
+                    )
                 } else {
-                    "Saved — add an API key to enable Explain".into()
+                    tr!("Settings saved — add an API key to use Explain").to_string()
                 };
                 if dropped {
-                    self.status
-                        .push_str(" — semantic index dropped (new embedding space); rebuild it");
+                    self.status = tr!(
+                        "{status} — the semantic index was cleared because the embedding \
+                         settings changed; rebuild it",
+                        status = self.status
+                    );
                 }
                 // The server holds a copy for server-endpoint AI calls (Ask's
                 // agent turns) — keep it in step with the new settings.
                 self.send_ai_config();
             }
-            Err(e) => self.status = format!("Save failed: {e}"),
-        }
-        if let Err(e) = theme_saved {
-            self.status
-                .push_str(&format!(" — the appearance setting was not saved: {e}"));
+            Err(e) => {
+                self.status = tr!("Could not save settings: {error}", error = e);
+                self.settings.save_failed = true;
+            }
         }
         Task::none()
     }
 
-    /// Apply a new appearance preference: switch the palette, re-color any cached
-    /// diagrams so an open explanation follows the change, and persist it.
+    /// Whether Settings shows the keyboard shortcuts: keys and menu chords
+    /// are the page's then, not the app's behind it.
+    pub(crate) fn shortcuts_shown(&self) -> bool {
+        self.settings.open && self.settings.page == SettingsPage::Shortcuts
+    }
+
+    /// Keep the language servers' listing and log current while Settings
+    /// shows its Languages page (`server_panel`): listed afresh when the
+    /// page comes up, and no longer followed once it goes.
+    pub(crate) fn sync_server_listing(&mut self) -> Task<Message> {
+        let showing = self.settings.open && self.settings.page == SettingsPage::Languages;
+        let was = self.server_panel;
+        self.server_panel = showing;
+        if showing && !was {
+            self.refresh_server_panel()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Whether the AI fields differ from what the form was filled with:
+    /// closing then saves them, and with none changed writes nothing.
+    pub(crate) fn settings_drafts_changed(&self) -> bool {
+        let (chat, embedding) = &self.settings.ai_snapshot;
+        let now = llm::Config::from_parts(
+            self.settings.provider,
+            self.settings.key.clone(),
+            self.settings.model.clone(),
+            self.settings.base_url.clone(),
+        );
+        let embed_now = embed::Config::from_parts(
+            self.settings.embed_key.clone(),
+            self.settings.embed_model.clone(),
+            self.settings.embed_base_url.clone(),
+        );
+        now.provider != chat.provider
+            || now.api_key != chat.api_key
+            || now.model != chat.model
+            || now.base_url != chat.base_url
+            || embed_now.api_key != embedding.api_key
+            || embed_now.model != embedding.model
+            || embed_now.base_url != embedding.base_url
+    }
+
+    /// Put Settings away, keeping what was changed in it: the AI fields
+    /// saved when they were edited (a failed save leaves it open, its
+    /// reason in the status bar); the appearance, the voice and the
+    /// languages were saved as they changed.
     ///
-    /// While the Settings modal is open the change is a live preview only —
-    /// persistence is deferred to Save (Close reverts). Elsewhere (menu bar,
-    /// shortcut) it commits immediately.
+    /// A save that fails again, its failure already said, closes all the
+    /// same, the reason left in the status bar. Held open each time,
+    /// Settings could not be left — by ×, Esc or a click outside — while
+    /// `config.toml` could not be written (a typo in it, its lock held),
+    /// until the file was fixed outside clew.
+    pub(crate) fn close_settings(&mut self) -> Task<Message> {
+        if self.settings_drafts_changed() {
+            let said = self.settings.save_failed;
+            let _ = self.on_settings_saved();
+            if self.settings.open && !said {
+                return Task::none();
+            }
+        }
+        self.settings.open = false;
+        self.rebinding = None;
+        self.keymap_notice = None;
+        // A model's failed download is said under it, in here; once
+        // Settings is closed it has been read, and it goes.
+        self.voice.download_errors.clear();
+        // Back to reading, as the finder's close does: the motions the
+        // form took from the code are the code's again.
+        self.code_focused = true;
+        self.sync_server_listing()
+    }
+
+    /// Apply a new appearance preference: switch the palette, re-color any cached
+    /// diagrams so an open explanation follows the change, and persist it —
+    /// from Settings as from the menu bar: Settings saves as it changes.
     pub(crate) fn set_theme(&mut self, pref: theme::ThemePref) {
         self.theme_pref = pref;
         theme::apply_pref(pref);
         self.restyle_svgs();
-        self.status = format!("Appearance: {}", pref.label());
-        if !self.settings.open {
-            self.persist_theme();
-        }
+        self.status = tr!("Appearance: {mode}", mode = pref.label());
+        self.persist_theme();
     }
 
     /// Write the appearance settings to `config.toml`, saying so when that
@@ -218,7 +296,7 @@ impl App {
     /// looks like success until the next launch reverts it.
     pub(crate) fn persist_theme(&mut self) {
         if let Err(e) = theme::save(self.theme_pref) {
-            self.status = format!("Could not save the appearance setting: {e}");
+            self.status = tr!("Could not save the appearance setting: {error}", error = e);
         }
     }
 
@@ -241,9 +319,8 @@ impl App {
         }
     }
 
-    /// Apply a light- or dark-theme selection and re-color cached diagrams.
-    /// Like [`Self::set_theme`], persistence is deferred to Save while the
-    /// Settings modal is open (these pickers only live there).
+    /// Apply a light- or dark-theme selection, re-color cached diagrams and
+    /// persist it, as [`Self::set_theme`] does.
     pub(crate) fn set_theme_variant(&mut self, id: &str, is_light: bool) {
         if is_light {
             theme::set_light_theme(id);
@@ -251,26 +328,19 @@ impl App {
             theme::set_dark_theme(id);
         }
         self.restyle_svgs();
-        if !self.settings.open {
-            self.persist_theme();
-        }
+        self.persist_theme();
     }
+}
 
-    /// Restore the appearance captured when the Settings modal opened. Used when
-    /// it closes without saving, so a previewed theme reverts to the stored one.
-    /// Runtime-only: the stored config already holds the snapshot (a preview
-    /// never persisted), so this just re-points the live palette at it.
-    pub(crate) fn restore_theme_snapshot(&mut self) {
-        let (pref, light, dark) = self.settings.theme_snapshot;
-        theme::set_light_theme(light);
-        theme::set_dark_theme(dark);
-        self.theme_pref = pref;
-        theme::apply_pref(pref);
-        self.restyle_svgs();
-        // Drop the "Appearance: …" note left by the discarded preview.
-        if self.status.starts_with("Appearance:") {
-            self.status.clear();
-        }
+/// A field of the `[llm]` or `[embedding]` section of config.toml, by the
+/// name its Settings page gives it.
+fn saved_field_name(key: &str) -> &str {
+    match key {
+        "provider" => tr!("Provider"),
+        "api_key" => tr!("API key"),
+        "model" => tr!("Model"),
+        "base_url" => tr!("Base URL"),
+        other => other,
     }
 }
 
@@ -283,6 +353,18 @@ impl App {
                 self.set_theme(pref);
                 Task::none()
             }
+            SettingsMsg::SetLanguage(pref) => {
+                if let Err(e) = crate::i18n::apply_and_save(pref) {
+                    self.status = tr!("Could not save the language: {error}", error = e);
+                }
+                // Every window speaks it: the others are told to draw again
+                // (as for an appearance change; the shell also builds the
+                // macOS menu bar again), and the server that makes this
+                // window's AI calls is told which language to answer in.
+                theme::redraw_everywhere();
+                self.send_ai_config();
+                self.respeak_explanation()
+            }
             SettingsMsg::SetThemeVariant { id, is_light } => {
                 self.set_theme_variant(id, is_light);
                 Task::none()
@@ -290,7 +372,10 @@ impl App {
             SettingsMsg::ThemeResynced => {
                 self.theme_pref = theme::current_pref();
                 self.restyle_svgs();
-                Task::none()
+                // It may have been the language another window chose: this
+                // window's server answers in it too.
+                self.send_ai_config();
+                self.respeak_explanation()
             }
             SettingsMsg::SystemAppearanceChanged => {
                 // Only follow the OS when the preference is System; re-color
@@ -310,22 +395,47 @@ impl App {
                 self.settings.embed_base_url = s;
                 Task::none()
             }
-            SettingsMsg::Open => self.on_open_settings(),
-            SettingsMsg::Close => {
-                // Closing without Save discards any previewed theme change.
-                self.restore_theme_snapshot();
-                self.settings.open = false;
-                // Back to reading, as the finder's close does: the motions
-                // the form took from the code are the code's again.
-                self.code_focused = true;
-                Task::none()
+            SettingsMsg::Open => {
+                let opened = self.on_open_settings();
+                Task::batch([opened, self.sync_server_listing()])
             }
+            SettingsMsg::OpenAt(page) => {
+                self.settings.page = page;
+                let opened = self.on_open_settings();
+                Task::batch([opened, self.sync_server_listing()])
+            }
+            SettingsMsg::Page(page) => {
+                self.settings.page = page;
+                // A shortcut half rebound stays with the page it was on.
+                self.rebinding = None;
+                self.keymap_notice = None;
+                self.sync_server_listing()
+            }
+            SettingsMsg::Close => self.close_settings(),
             SettingsMsg::ProviderPicked(p) => {
-                // Switching provider resets model/base_url to that provider's
-                // defaults (the user can still edit them).
+                // The drop-down sends the provider already picked too: that
+                // changes nothing. It used to put the provider's defaults over
+                // a model and base URL of the user's own, which closing
+                // Settings then saved.
+                if p == self.settings.provider {
+                    return Task::none();
+                }
                 self.settings.provider = p;
-                self.settings.model = p.default_model().to_string();
-                self.settings.base_url = p.default_base_url().to_string();
+                // Back to the provider Settings opened on: its model and base
+                // URL as they were then, so a wrong pick undone costs nothing.
+                // Another provider: its defaults (the user can still edit
+                // them).
+                let (model, base_url) = match &self.settings.ai_snapshot.0 {
+                    opened if opened.provider == p => {
+                        (opened.model.clone(), opened.base_url.clone())
+                    }
+                    _ => (
+                        p.default_model().to_string(),
+                        p.default_base_url().to_string(),
+                    ),
+                };
+                self.settings.model = model;
+                self.settings.base_url = base_url;
                 Task::none()
             }
             SettingsMsg::KeyChanged(s) => {
@@ -439,5 +549,133 @@ mod tests {
 
         drop(_env);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The provider drop-down sends the provider already picked as well:
+    /// picking it again changes nothing, and going back to it after a wrong
+    /// pick brings back its model and base URL. Both used to put the
+    /// provider's defaults over a model and gateway of the user's own — and
+    /// Settings has no Cancel: closing it saved them.
+    #[test]
+    fn picking_the_provider_again_keeps_the_users_model_and_base_url() {
+        use crate::app::tests::{blank_app, data_dir_override, test_dir};
+        let dir = test_dir("settings-provider-again");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = data_dir_override(&dir);
+        let config = "[llm]\nprovider = \"anthropic\"\napi_key = \"sk\"\n\
+                      model = \"claude-x-custom\"\nbase_url = \"https://gateway.corp/v1\"\n";
+        std::fs::write(dir.join("config.toml"), config).unwrap();
+        let mut app = blank_app();
+        let _ = app.update(Message::Settings(SettingsMsg::Open));
+        let users = |app: &App| (app.settings.model.clone(), app.settings.base_url.clone());
+        let own = (
+            "claude-x-custom".to_string(),
+            "https://gateway.corp/v1".to_string(),
+        );
+        assert_eq!(users(&app), own);
+
+        let pick = |app: &mut App, p| {
+            let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(p)));
+        };
+        pick(&mut app, llm::Provider::Anthropic);
+        assert_eq!(users(&app), own, "picked again");
+        pick(&mut app, llm::Provider::OpenAI);
+        assert_eq!(
+            app.settings.model,
+            llm::Provider::OpenAI.default_model(),
+            "another provider starts from its defaults"
+        );
+        pick(&mut app, llm::Provider::Anthropic);
+        assert_eq!(users(&app), own, "a wrong pick undone");
+        assert!(!app.settings_drafts_changed());
+        let _ = app.update(Message::Settings(SettingsMsg::Close));
+        assert!(!app.settings.open);
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            config,
+            "nothing changed, nothing written"
+        );
+    }
+
+    /// A save that keeps fields another window changed names them as their
+    /// pages do, each name once, in the reader's language. It named their
+    /// keys in config.toml: "api_key, api_key".
+    #[test]
+    fn a_save_names_the_fields_it_kept_as_settings_does() {
+        use crate::app::tests::{blank_app, data_dir_override, test_dir};
+        use crate::i18n::{Lang, with_lang};
+        let config = |chat: &str, embedding: &str| {
+            format!(
+                "[llm]\nprovider = \"anthropic\"\napi_key = \"{chat}\"\nmodel = \"m\"\n\
+                 base_url = \"https://gateway.corp/v1\"\n\n[embedding]\napi_key = \"{embedding}\"\n\
+                 model = \"e\"\nbase_url = \"https://api.openai.com/v1\"\n"
+            )
+        };
+        for lang in [Lang::En, Lang::Fr] {
+            let dir = test_dir(&format!("settings-kept-named-{}", lang.code()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let _env = data_dir_override(&dir);
+            std::fs::write(dir.join("config.toml"), config("sk-a", "ek-a")).unwrap();
+            let mut app = blank_app();
+            let _ = app.update(Message::Settings(SettingsMsg::Open));
+            // Another window stores both keys meanwhile.
+            std::fs::write(dir.join("config.toml"), config("sk-b", "ek-b")).unwrap();
+            app.settings.model = "m2".into();
+            with_lang(lang, || {
+                let _ = app.on_settings_saved();
+                let field = crate::i18n::lookup("API key");
+                assert_eq!(
+                    app.status,
+                    trn!(
+                        "Settings saved — {fields} was changed in another window, so it was kept",
+                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        1,
+                        fields = field
+                    ),
+                    "{lang:?}"
+                );
+            });
+        }
+    }
+
+    /// A save that fails — `config.toml` holds a typo — keeps Settings open
+    /// once, its reason said, so what was typed is not lost unseen; closing
+    /// again closes. Every way out used to repeat the failed save, and
+    /// Settings could not be left until the file was fixed outside clew.
+    #[test]
+    fn settings_close_after_a_failed_save_has_been_said() {
+        use crate::app::tests::{blank_app, data_dir_override, test_dir};
+        let dir = test_dir("settings-save-fails");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = data_dir_override(&dir);
+        let broken = "[llm\napi_key = \"sk\"\n";
+        std::fs::write(dir.join("config.toml"), broken).unwrap();
+        let mut app = blank_app();
+        for _ in 0..2 {
+            let _ = app.update(Message::Settings(SettingsMsg::Open));
+            app.settings.key = "pasted".into();
+            let _ = app.update(Message::Settings(SettingsMsg::Close));
+            assert!(app.settings.open, "the failure is said first");
+            assert!(
+                app.status.contains("Could not save settings"),
+                "{}",
+                app.status
+            );
+            let _ = app.update(Message::Settings(SettingsMsg::Close));
+            assert!(!app.settings.open, "Settings cannot be left");
+            assert!(
+                app.status.contains("Could not save settings"),
+                "{}",
+                app.status
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("config.toml")).unwrap(),
+            broken,
+            "the user's bytes are theirs to fix"
+        );
     }
 }

@@ -1,0 +1,2 @@
+/* What macOS shows when Clew first asks to use the microphone. */
+"NSMicrophoneUsageDescription" = "按下语音键或麦克风按钮时，Clew 会开始聆听，你可以说出一条命令，或就代码提问。你说的话只在这台 Mac 上转成文字，不会传到别处。";

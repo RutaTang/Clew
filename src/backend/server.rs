@@ -75,6 +75,7 @@ use tokio::process::{Child, ChildStdin, ChildStdout};
 use crate::Message;
 use crate::ServerMsg;
 use crate::connect::ConnTarget;
+use crate::tr;
 
 /// Name of the backend binary, looked up next to the running clew executable
 /// (both live in the same `target/<profile>/` dir) and then on `PATH`.
@@ -328,14 +329,14 @@ where
             .await
             .map_err(|e| e.to_string())?;
         if n == 0 {
-            let shown = if noise.is_empty() {
-                String::new()
+            return Err(if noise.is_empty() {
+                tr!("the connection closed before clew-server started").to_string()
             } else {
-                format!(" (it printed: {})", noise.join(" | "))
-            };
-            return Err(format!(
-                "the connection closed before clew-server started{shown}"
-            ));
+                tr!(
+                    "the connection closed before clew-server started (it printed: {output})",
+                    output = noise.join(" | ")
+                )
+            });
         }
         let text = String::from_utf8_lossy(&buf);
         let line = text.trim_end_matches(['\n', '\r']);
@@ -347,9 +348,9 @@ where
         }
         seen += n;
         if seen > MAX_PRE_MARKER_BYTES {
-            return Err(format!(
-                "the remote shell printed more than {} KiB before clew-server started",
-                MAX_PRE_MARKER_BYTES / 1024
+            return Err(tr!(
+                "the remote shell printed more than {size} KiB before clew-server started",
+                size = MAX_PRE_MARKER_BYTES / 1024
             ));
         }
         if noise.len() < 3 && !line.trim().is_empty() {
@@ -600,19 +601,23 @@ async fn resolve_settings(
         cmd,
         None,
         RESOLVE_TIMEOUT,
-        "reading the ssh configuration",
+        tr!("reading the ssh configuration"),
         label,
     )
     .await
     .map_err(|f| f.reason)?;
     if !out.success {
-        return Err(format!(
-            "`ssh -G` could not read the ssh configuration: {}",
-            last_line(&out.stderr)
+        return Err(tr!(
+            "`ssh -G` could not read the ssh configuration: {error}",
+            error = last_line(&out.stderr)
         ));
     }
-    crate::connect::SshSettings::parse(&out.stdout, |p| Path::new(p).exists())
-        .map_err(|e| format!("`ssh -G` printed something clew cannot read: {e}"))
+    crate::connect::SshSettings::parse(&out.stdout, |p| Path::new(p).exists()).map_err(|e| {
+        tr!(
+            "`ssh -G` printed something clew cannot read: {error}",
+            error = e
+        )
+    })
 }
 
 /// What a finished short command produced (bounded).
@@ -664,7 +669,7 @@ async fn run_bounded(
     .kill_on_drop(true);
     let mut child = cmd
         .spawn()
-        .map_err(|e| Failure::new(FailureKind::Other, format!("could not run ssh: {e}")))?;
+        .map_err(|e| Failure::new(FailureKind::Other, ssh_spawn_error(&e)))?;
     let stdin = child.stdin.take();
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -695,9 +700,11 @@ async fn run_bounded(
     let (written, out, err, status) = tokio::time::timeout(limit, work).await.map_err(|_| {
         Failure::new(
             FailureKind::Timeout,
-            format!(
-                "{label}: {step} did not finish within {} s",
-                limit.as_secs()
+            tr!(
+                "{label}: {step} did not finish within {seconds} s",
+                label = label,
+                step = step,
+                seconds = limit.as_secs()
             ),
         )
     })?;
@@ -712,7 +719,12 @@ async fn run_bounded(
     if let (Err(e), true) = (written, status.success()) {
         return Err(Failure::new(
             FailureKind::Deploy,
-            format!("{label}: {step}: the upload was cut short ({e})"),
+            tr!(
+                "{label}: {step}: the upload was cut short ({error})",
+                label = label,
+                step = step,
+                error = e
+            ),
         ));
     }
     Ok(captured)
@@ -744,39 +756,50 @@ fn ssh_failure(step: &str, ssh: &Ssh, out: &Captured) -> Failure {
         if err.contains("host key is known for") || err.contains("Host key verification failed") {
             return Failure::new(
                 FailureKind::HostKeyUnknown,
-                format!(
+                tr!(
                     "{label}'s host key is not known yet, and clew does not accept an unknown \
-                     key blindly."
+                     key blindly.",
+                    label = label
                 ),
             );
         }
         if err.contains("Permission denied") || err.contains("Too many authentication failures") {
             return Failure::new(
                 FailureKind::Auth,
-                format!(
-                    "{label} refused the login ({}). clew cannot type a password when it was \
-                     not started from a terminal: use key-based login (a key in ssh-agent — \
-                     `ssh-add` — or an identity file).",
-                    last_line(err)
+                tr!(
+                    "{label} refused the login ({error}). clew cannot type a password when it \
+                     was not started from a terminal: use key-based login (a key in ssh-agent \
+                     — `ssh-add` — or an identity file).",
+                    label = label,
+                    error = last_line(err)
                 ),
             );
         }
         return Failure::new(
             FailureKind::Unreachable,
-            format!("Could not reach {label}: {}", last_line(err)),
+            tr!(
+                "Could not reach {label}: {error}",
+                label = label,
+                error = last_line(err)
+            ),
         );
     }
     let detail = if last_line(err).is_empty() {
-        format!(
-            "exit status {}",
-            out.code.map_or("?".into(), |c| c.to_string())
+        tr!(
+            "exit status {code}",
+            code = out.code.map_or("?".into(), |c| c.to_string())
         )
     } else {
         last_line(err).to_string()
     };
     Failure::new(
         FailureKind::Other,
-        format!("{label}: {step} failed: {detail}"),
+        tr!(
+            "{label}: {step} failed: {detail}",
+            label = label,
+            step = step,
+            detail = detail
+        ),
     )
 }
 
@@ -872,34 +895,50 @@ fn changed_key_failure(ssh: &Ssh, stderr: &str) -> Failure {
                 .map(|(host, port)| crate::connect::known_hosts_pattern(&host, port))
         })
         .unwrap_or_else(|| label.to_string());
-    let mut reason = format!(
-        "{label}'s host key has CHANGED since the last connection. That is what a \
-         man-in-the-middle looks like (or the host was reinstalled), so clew will not connect."
+    let mut reason = tr!(
+        "{label}'s host key has CHANGED since the last connection. Someone may be \
+         intercepting the connection (or the host was reinstalled), so clew will not connect.",
+        label = label
     );
     if let Some((kind, print)) = &report.presented {
-        reason.push_str(&format!(" It now presents {kind} {print}."));
+        reason.push(' ');
+        reason.push_str(&tr!(
+            "It now presents {kind} {fingerprint}.",
+            kind = kind,
+            fingerprint = print
+        ));
     }
     let mut forget_host = None;
     for (file, line) in &report.offending {
         let remove = shell_command(&["ssh-keygen", "-f", file, "-R", &name]);
         if ssh.clew_known_hosts.as_deref() == Some(Path::new(file)) {
-            reason.push_str(&format!(
-                " The key on record ({file}:{line}) is one you trusted in clew. If you know why \
+            reason.push(' ');
+            reason.push_str(&tr!(
+                "The key on record ({file}:{line}) is one you trusted in clew. If you know why \
                  it changed, forget it — `{remove}` — then connect again and check the new \
-                 key's fingerprint before trusting it."
+                 key's fingerprint before trusting it.",
+                file = file,
+                line = line,
+                remove = remove
             ));
             forget_host = Some(name.clone());
         } else {
-            reason.push_str(&format!(
-                " The key on record is in {file}:{line}. If you know why it changed, remove \
-                 it — `{remove}` — and connect again."
+            reason.push(' ');
+            reason.push_str(&tr!(
+                "The key on record is in {file}:{line}. If you know why it changed, remove \
+                 it — `{remove}` — and connect again.",
+                file = file,
+                line = line,
+                remove = remove
             ));
         }
     }
     if report.offending.is_empty() {
         let remove = shell_command(&["ssh-keygen", "-R", &name]);
-        reason.push_str(&format!(
-            " If you know why it changed, remove the old key — `{remove}` — and connect again."
+        reason.push(' ');
+        reason.push_str(&tr!(
+            "If you know why it changed, remove the old key — `{remove}` — and connect again.",
+            remove = remove
         ));
     }
     Failure {
@@ -990,32 +1029,47 @@ async fn describe_unknown_host(
 ) -> (String, Option<crate::connect::ScannedHostKey>) {
     use crate::connect::{known_hosts_pattern, ssh_destination, ssh_host_port, ssh_port};
     let label = ssh.label.as_str();
-    let refused = format!(
-        "{label}'s host key is not known yet, and clew does not accept an unknown key blindly."
+    let refused = tr!(
+        "{label}'s host key is not known yet, and clew does not accept an unknown key blindly.",
+        label = label
     );
-    let check = "Check it against a fingerprint you trust (from the host's administrator, or \
-                 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the host)";
+    // What the host's administrator can run on it to show its key.
+    let print_key = "ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub";
     // Offered only where a trusted key would be read back — clew's file is
     // among the ones these calls consult — and for a connection that names
     // one host (the app trusts for exactly that one).
     let for_host = ssh_host_port(&ssh.target).map(|(host, port)| known_hosts_pattern(&host, port));
     let why_not = match (&ssh.settings, &ssh.clew_known_hosts, &for_host) {
         (Ok(settings), Some(_), Some(for_host)) => match &settings.proxy {
-            Some((option, value)) => format!(
+            Some((option, value)) => tr!(
                 "{label} is reached through {option} {value}, so clew cannot fetch the key it \
-                 presents to show you here."
+                 presents to show you here.",
+                label = label,
+                option = option,
+                value = value
             ),
             None => match scan_host_key_with(settings, for_host, keyscan, keygen).await {
                 Some(key) => {
                     let reason = format!(
-                        "{refused} It presents {} {}. {check} before trusting it.",
-                        key.kind, key.fingerprint
+                        "{refused} {} {}",
+                        tr!(
+                            "It presents {kind} {fingerprint}.",
+                            kind = key.kind,
+                            fingerprint = key.fingerprint
+                        ),
+                        tr!(
+                            "Check it against a fingerprint you trust (from the host's \
+                             administrator, or `{command}` on the host) before trusting it.",
+                            command = print_key
+                        )
                     );
                     return (reason, Some(key));
                 }
-                None => format!(
-                    "clew could not fetch the key {label} presents ({}:{}).",
-                    settings.hostname, settings.port
+                None => tr!(
+                    "clew could not fetch the key {label} presents ({host}:{port}).",
+                    label = label,
+                    host = settings.hostname,
+                    port = settings.port
                 ),
             },
         },
@@ -1042,8 +1096,14 @@ async fn describe_unknown_host(
         format!(" {why_not}")
     };
     let reason = format!(
-        "{refused}{why_not} {check}, then trust it by connecting once in Terminal — \
-         `{command}` — and answering yes. Then connect again here."
+        "{refused}{why_not} {}",
+        tr!(
+            "Check it against a fingerprint you trust (from the host's administrator, or \
+             `{command}` on the host), then trust it by connecting once in Terminal — \
+             `{ssh}` — and answering yes. Then connect again here.",
+            command = print_key,
+            ssh = command
+        )
     );
     (reason, None)
 }
@@ -1096,10 +1156,11 @@ fn upload_bytes(verified: clew_core::server_dist::VerifiedServer) -> Result<Vec<
     use clew_core::lsp::registry::Sha256;
     let actual = Sha256::of(&verified.bytes);
     if Sha256::parse(&verified.sha256) != Some(actual) {
-        return Err(format!(
-            "the clew-server bytes do not match their verified digest (verified {}, now {actual}); \
-             not deploying them",
-            verified.sha256
+        return Err(tr!(
+            "the clew-server bytes do not match their verified digest (verified {verified}, now \
+             {actual}); not deploying them",
+            verified = verified.sha256,
+            actual = actual
         ));
     }
     Ok(verified.bytes)
@@ -1129,7 +1190,10 @@ fn remote_layout() -> Result<RemoteLayout, Failure> {
     {
         return Err(Failure::new(
             FailureKind::Other,
-            format!("this build's server directory name {dir:?} is not a plain token"),
+            tr!(
+                "this build's server directory name {name} is not a plain token",
+                name = format!("{dir:?}")
+            ),
         ));
     }
     Ok(RemoteLayout {
@@ -1147,7 +1211,7 @@ fn sh_c(script: &str) -> Result<String, Failure> {
     if script.contains('\'') {
         return Err(Failure::new(
             FailureKind::Other,
-            "internal error: a remote script contains a single quote",
+            tr!("internal error: a remote script contains a single quote"),
         ));
     }
     Ok(format!("sh -c '{script}'"))
@@ -1215,6 +1279,16 @@ fn verify_script(layout: &RemoteLayout) -> String {
     )
 }
 
+/// Why `ssh` could not be started, in words: a machine without OpenSSH
+/// was told "No such file or directory (os error 2)".
+fn ssh_spawn_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        tr!("ssh is not installed here — install OpenSSH's client to connect to a host").into()
+    } else {
+        tr!("could not run ssh: {error}", error = e)
+    }
+}
+
 /// A token for temp names and markers: this process's id plus 64 bits from a
 /// per-process random hasher. Unique, not secret — it only has to never
 /// collide with another upload or appear in a login shell's output by chance.
@@ -1246,12 +1320,12 @@ where
         ssh.command(&sh_c(&probe_script(layout))?),
         None,
         PROBE_TIMEOUT,
-        "probing the host",
+        tr!("probing the host"),
         label,
     )
     .await?;
     if !probe.success {
-        return Err(ssh_failure("probing the host", ssh, &probe));
+        return Err(ssh_failure(tr!("probing the host"), ssh, &probe));
     }
     if probe.stdout.lines().any(|l| l.trim() == layout.probe_line) {
         return Ok(());
@@ -1263,12 +1337,12 @@ where
         ssh.command("uname -sm"),
         None,
         STEP_TIMEOUT,
-        "detecting the platform",
+        tr!("detecting the platform"),
         label,
     )
     .await?;
     if !uname.success {
-        return Err(ssh_failure("detecting the platform", ssh, &uname));
+        return Err(ssh_failure(tr!("detecting the platform"), ssh, &uname));
     }
     // The last line: a login shell may print before the command runs (see
     // the module docs), and the whole output then named no platform.
@@ -1281,17 +1355,27 @@ where
     .map_err(|_| {
         Failure::new(
             FailureKind::Timeout,
-            format!(
-                "fetching clew-server for {label} did not finish within {} minutes",
-                DOWNLOAD_TIMEOUT.as_secs() / 60
+            tr!(
+                "fetching clew-server for {label} did not finish within {minutes} minutes",
+                label = label,
+                minutes = DOWNLOAD_TIMEOUT.as_secs() / 60
             ),
         )
     })?
-    .map_err(|e| Failure::new(FailureKind::Deploy, format!("fetching clew-server: {e}")))?
     .map_err(|e| {
         Failure::new(
             FailureKind::Deploy,
-            format!("No clew-server for {label}: {e}"),
+            tr!("fetching clew-server: {error}", error = e),
+        )
+    })?
+    .map_err(|e| {
+        Failure::new(
+            FailureKind::Deploy,
+            tr!(
+                "No clew-server for {label}: {error}",
+                label = label,
+                error = e
+            ),
         )
     })?;
 
@@ -1303,19 +1387,20 @@ where
         ))?),
         Some(&bytes),
         DEPLOY_TIMEOUT,
-        "installing clew-server",
+        tr!("installing clew-server"),
         label,
     )
     .await?;
     if !installed.success {
-        let failure = ssh_failure("installing clew-server", ssh, &installed);
+        let failure = ssh_failure(tr!("installing clew-server"), ssh, &installed);
         return Err(match failure.kind {
             FailureKind::Other => Failure::new(
                 FailureKind::Deploy,
-                format!(
+                tr!(
                     "Could not install clew-server on {label} (is the home directory \
-                     writable, with space to spare?): {}",
-                    last_line(&installed.stderr)
+                     writable, with space to spare?): {error}",
+                    label = label,
+                    error = last_line(&installed.stderr)
                 ),
             ),
             _ => failure,
@@ -1332,7 +1417,7 @@ where
         ssh.command(&sh_c(&verify_script(layout))?),
         None,
         STEP_TIMEOUT,
-        "checking the deployed clew-server",
+        tr!("checking the deployed clew-server"),
         label,
     )
     .await?;
@@ -1341,24 +1426,30 @@ where
     }
     if check.code == Some(255) {
         return Err(ssh_failure(
-            "checking the deployed clew-server",
+            tr!("checking the deployed clew-server"),
             ssh,
             &check,
         ));
     }
     Err(Failure::new(
         FailureKind::Protocol,
-        format!(
-            "the clew-server deployed to {label} did not pass the protocol check (wanted \
-             '{}', got: {}){}",
-            layout.probe_line,
-            last_line(&check.stdout),
-            if check.success {
-                ""
-            } else {
-                " — is the home directory mounted noexec?"
-            }
-        ),
+        if check.success {
+            tr!(
+                "the clew-server deployed to {label} did not pass the protocol check (wanted \
+                 '{wanted}', got: {got})",
+                label = label,
+                wanted = layout.probe_line,
+                got = last_line(&check.stdout)
+            )
+        } else {
+            tr!(
+                "the clew-server deployed to {label} did not pass the protocol check (wanted \
+                 '{wanted}', got: {got}) — is the home directory mounted noexec?",
+                label = label,
+                wanted = layout.probe_line,
+                got = last_line(&check.stdout)
+            )
+        },
     ))
 }
 
@@ -1604,7 +1695,7 @@ fn start_local(server: Option<&Path>) -> Result<Transport, Failure> {
     let Some(path) = server else {
         return Err(Failure::new(
             FailureKind::NoServer,
-            "No clew-server binary was found beside clew or on PATH; working without it.",
+            tr!("No clew-server binary was found beside clew or on PATH; working without it."),
         ));
     };
     let mut cmd = clew_core::spawn::tokio_command(path);
@@ -1612,7 +1703,11 @@ fn start_local(server: Option<&Path>) -> Result<Transport, Failure> {
     Transport::spawn(cmd, "clew-server").map_err(|e| {
         Failure::new(
             FailureKind::NoServer,
-            format!("Could not start {}: {e}", path.display()),
+            tr!(
+                "Could not start {path}: {error}",
+                path = path.display(),
+                error = e
+            ),
         )
     })
 }
@@ -1627,7 +1722,12 @@ async fn start_remote(ssh: &Ssh) -> Result<Transport, Failure> {
         ssh.command(&sh_c(&start_script(&layout, &marker))?),
         "clew-server (remote)",
     )
-    .map_err(|e| Failure::new(FailureKind::Other, format!("could not run ssh: {e}")))?;
+    .map_err(|e| {
+        Failure::new(
+            FailureKind::Other,
+            tr!("could not run ssh: {error}", error = e),
+        )
+    })?;
     match tokio::time::timeout(
         START_TIMEOUT,
         skip_to_marker(&mut transport.stdout, &marker),
@@ -1644,15 +1744,19 @@ async fn start_remote(ssh: &Ssh) -> Result<Transport, Failure> {
             };
             Err(Failure::new(
                 FailureKind::Exited,
-                format!("clew-server on {} did not start: {detail}", ssh.label),
+                tr!(
+                    "clew-server on {label} did not start: {detail}",
+                    label = ssh.label,
+                    detail = detail
+                ),
             ))
         }
         Err(_) => Err(Failure::new(
             FailureKind::Timeout,
-            format!(
-                "clew-server on {} did not start within {} s",
-                ssh.label,
-                START_TIMEOUT.as_secs()
+            tr!(
+                "clew-server on {label} did not start within {seconds} s",
+                label = ssh.label,
+                seconds = START_TIMEOUT.as_secs()
             ),
         )),
     }
@@ -1747,10 +1851,12 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                 loop {
                     let (count, last) = failures(&target);
                     if count >= MAX_ATTEMPTS {
-                        let reason = format!(
-                            "Stopped reconnecting to {} after {count} failed attempts. Last \
-                             error: {last}",
-                            target.label()
+                        let reason = tr!(
+                            "Stopped reconnecting to {label} after {count} failed attempts. \
+                             Last error: {last}",
+                            label = target.label(),
+                            count = count,
+                            last = last
                         );
                         let _ = output
                             .send(Message::Server(ServerMsg::Unavailable { conn, reason }))
@@ -1826,9 +1932,9 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                     {
                         Ok(next) => next,
                         Err(_) => {
-                            ended_because = Some(format!(
-                                "clew-server did not answer within {} s",
-                                FIRST_FRAME_TIMEOUT.as_secs()
+                            ended_because = Some(tr!(
+                                "clew-server did not answer within {seconds} s",
+                                seconds = FIRST_FRAME_TIMEOUT.as_secs()
                             ));
                             break;
                         }
@@ -1859,8 +1965,10 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                             // (the reconnect handshake names it).
                             Err(e) => {
                                 eprintln!("[clew] unparseable server frame ({e}) — disconnecting");
-                                ended_because =
-                                    Some(format!("clew-server sent a malformed frame ({e})"));
+                                ended_because = Some(tr!(
+                                    "clew-server sent a malformed frame ({error})",
+                                    error = e
+                                ));
                                 break;
                             }
                         }
@@ -1889,10 +1997,11 @@ fn run_transport(key: ConnKey, launcher: Launcher) -> impl Stream<Item = Message
                         transport.stderr.last(3)
                     };
                     let why = ended_because.clone().unwrap_or_else(|| match uptime {
-                        None => "clew-server exited before it answered".into(),
-                        Some(up) => {
-                            format!("clew-server exited {} s after it answered", up.as_secs())
-                        }
+                        None => tr!("clew-server exited before it answered").into(),
+                        Some(up) => tr!(
+                            "clew-server exited {seconds} s after it answered",
+                            seconds = up.as_secs()
+                        ),
                     });
                     let reason = if tail.is_empty() {
                         why
@@ -2286,6 +2395,20 @@ exit 3
 
     /// A step that hangs is killed at its timeout rather than hanging the
     /// connection forever.
+    #[tokio::test]
+    async fn a_missing_ssh_is_said_in_words() {
+        let missing = std::env::temp_dir().join(format!("clew-no-ssh-{}", unique_token()));
+        let cmd = clew_core::spawn::tokio_command(missing);
+        let out = run_bounded(cmd, None, Duration::from_secs(5), "probe", "host").await;
+        match out {
+            Err(f) => {
+                assert!(f.reason.contains("ssh is not installed"), "{}", f.reason);
+                assert!(!f.reason.contains("os error"), "{}", f.reason);
+            }
+            Ok(_) => panic!("a missing program cannot run"),
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_hanging_remote_command_times_out() {

@@ -29,6 +29,7 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
             "src",
             "server/src",
             "assets/licenses",
+            "assets/lproj/fr.lproj",
             "bin",
             "target/debug",
             "cargo-home",
@@ -69,6 +70,7 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
             "clew.icns",
             "NERDFONT-LICENSE.md",
             "licenses/license",
+            "lproj/fr.lproj/InfoPlist.strings",
             "Info.plist.template",
         ] {
             std::fs::write(root.join("assets").join(name), "fixture").unwrap();
@@ -122,6 +124,11 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
             ));
             assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
         }
+        // Each language's strings travel in the bundle's resources.
+        assert!(
+            root.join("dist/Clew.app/Contents/Resources/fr.lproj/InfoPlist.strings")
+                .is_file()
+        );
         assert!(
             std::fs::read_to_string(root.join("target/debug/clew"))
                 .unwrap()

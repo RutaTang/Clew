@@ -66,8 +66,25 @@ pub struct CallSite {
     /// globally-unique project function — that's how `.get()` on a std type used
     /// to be mis-attributed to a project `get`.
     pub method: bool,
+    /// What a method call's receiver is known to be, where the code says:
+    /// the caller's own class (`self.f()`, `this.f()`), or a type — a
+    /// variable built by its constructor in the caller (`cart = Cart()`,
+    /// `let c = Cart::new()`, `c := &Cart{}`), declared or annotated with it
+    /// (`Cart c`, `c: Cart`), or the type itself (`Cart.create()`). `None`
+    /// when unknown: the call then links to every method of the name.
+    pub receiver: Option<Receiver>,
     /// 1-based line of the call.
     pub line: usize,
+}
+
+/// The type a method call's receiver is known to be (see
+/// [`CallSite::receiver`]).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Receiver {
+    /// The class the calling method belongs to: `self`, `this`, `$this`.
+    Own,
+    /// A type, by its name as its definition gives it.
+    Type(String),
 }
 
 /// A node in the project call graph: one function/method definition plus the
@@ -251,6 +268,10 @@ pub struct FileCalls {
     /// `f` is the outer one's. Only these names are kept (see
     /// [`resolve_caller`]); every other name resolves by itself.
     pub bodies: HashMap<usize, (usize, usize)>,
+    /// The class (or type, impl, trait) each method belongs to: definition
+    /// line → its name. What narrows a call whose receiver's type is known
+    /// to that type's method of the name ([`CallSite::receiver`]).
+    pub owners: HashMap<usize, String>,
 }
 
 impl FileCalls {
@@ -262,7 +283,8 @@ impl FileCalls {
         let tree = crate::highlight::parse(source, lang)?;
         let symbols = crate::outline::located_in(&tree, source, lang);
         let calls = calls_in(&tree, source, lang, &symbols);
-        FileCalls::of(file.to_path_buf(), lang, calls, &symbols)
+        let owners = owners_in(&tree, source, lang, &symbols);
+        FileCalls::of(file.to_path_buf(), lang, calls, &symbols, owners)
     }
 
     /// The call facts of a file parsed for other reasons as well — what
@@ -279,20 +301,28 @@ impl FileCalls {
         lang: Lang,
         calls: Vec<CallSite>,
         symbols: &[Located],
+        owners: HashMap<usize, String>,
     ) -> Option<FileCalls> {
         lang_spec(lang)?;
-        Some(FileCalls::new(file, lang, calls, symbols))
+        Some(FileCalls::new(file, lang, calls, symbols, owners))
     }
 
-    /// Whether this file contributes nothing to a graph: no call site, and no
-    /// bodyless declaration to tell a definition from.
+    /// Whether this file contributes nothing to a graph: no call site, no
+    /// bodyless declaration to tell a definition from, and no method whose
+    /// class a call elsewhere may name.
     pub fn is_empty(&self) -> bool {
-        self.calls.is_empty() && self.declarations.is_empty()
+        self.calls.is_empty() && self.declarations.is_empty() && self.owners.is_empty()
     }
 
     /// Assemble from facts already read off the file's tree (see
     /// `outline::analyze`).
-    pub fn new(file: PathBuf, lang: Lang, calls: Vec<CallSite>, symbols: &[Located]) -> FileCalls {
+    pub fn new(
+        file: PathBuf,
+        lang: Lang,
+        calls: Vec<CallSite>,
+        symbols: &[Located],
+        owners: HashMap<usize, String>,
+    ) -> FileCalls {
         let defined = || {
             symbols
                 .iter()
@@ -316,6 +346,7 @@ impl FileCalls {
                 .filter(|(name, _, _)| defined_as.get(name).is_some_and(|&n| n > 1))
                 .map(|(_, line, span)| (line, span))
                 .collect(),
+            owners,
         }
     }
 }
@@ -405,6 +436,21 @@ impl ProjectCallGraph {
             v.sort_by_key(|&i| nodes[i].line);
         }
 
+        // The class each method belongs to, by node: what a call whose
+        // receiver's type is known narrows to.
+        let owner_at: HashMap<(&Path, usize), &str> = files
+            .iter()
+            .flat_map(|f| {
+                f.owners
+                    .iter()
+                    .map(move |(&line, name)| ((f.file.as_path(), line), name.as_str()))
+            })
+            .collect();
+        let owner: Vec<Option<&str>> = nodes
+            .iter()
+            .map(|n| owner_at.get(&(n.file.as_path(), n.line)).copied())
+            .collect();
+
         let empty_scope: HashSet<PathBuf> = HashSet::new();
         let mut edges: HashSet<(usize, usize)> = HashSet::new();
         for fc in files {
@@ -440,7 +486,30 @@ impl ProjectCallGraph {
                 let callees = resolved
                     .entry((cs.callee.as_str(), cs.method))
                     .or_insert_with(|| resolve_callees(&defs, &nodes, &facts, cs, &site));
-                for &callee in callees.iter() {
+                // A receiver of a known type calls that type's method of the
+                // name: `cart.total()` after `cart = Cart()` is `Cart.total`,
+                // not every `total` there is. A type with no method of the
+                // name (an inherited one) keeps them all.
+                let wanted = match &cs.receiver {
+                    Some(Receiver::Own) => owner[caller],
+                    Some(Receiver::Type(ty)) => Some(ty.as_str()),
+                    None => None,
+                };
+                let narrowed: Vec<usize> = wanted
+                    .map(|ty| {
+                        callees
+                            .iter()
+                            .copied()
+                            .filter(|&c| owner[c] == Some(ty))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let targets: &[usize] = if narrowed.is_empty() {
+                    callees
+                } else {
+                    &narrowed
+                };
+                for &callee in targets {
                     // Skip self-edges so a recursive function with no other
                     // callers still reads as "uncalled".
                     if callee != caller && edges.len() < MAX_EDGES {
@@ -952,12 +1021,13 @@ fn node_text<'a>(node: Node, src: &'a str) -> &'a str {
 /// One node of [`walk`]: the node, its parent and the sibling before it
 /// (carried, as tree-sitter finds a parent by walking down from the root, a
 /// cost of the depth per call, and a sibling through its parent), and the
-/// enclosing function name in scope for it.
+/// enclosing function in scope for it: its name, and the byte its
+/// definition starts at (where a receiver's binding is looked for).
 type WalkItem<'t> = (
     Node<'t>,
     Option<Node<'t>>,
     Option<Node<'t>>,
-    Option<Rc<str>>,
+    Option<(Rc<str>, usize)>,
 );
 
 /// Iterative depth-first walk carrying the nearest enclosing function name. It is
@@ -980,11 +1050,11 @@ fn walk(
         }
         // A function definition becomes the enclosing scope for its subtree —
         // under the first of its names that the file's outline has.
-        let own: Option<Rc<str>> = if spec.fn_kinds.contains(&kind) {
+        let own: Option<(Rc<str>, usize)> = if spec.fn_kinds.contains(&kind) {
             fn_names(node, parent, before, src, lang)
                 .into_iter()
                 .find(|name| callable.is_none_or(|c| c.contains(name.as_str())))
-                .map(|s| Rc::from(s.as_str()))
+                .map(|s| (Rc::from(s.as_str()), node.start_byte()))
         } else {
             None
         };
@@ -993,15 +1063,20 @@ fn walk(
         if spec.call_kinds.contains(&kind)
             && let Some((callee, method)) = callee_name(node, parent, src, lang)
         {
+            let receiver = match &current {
+                Some((_, from)) if method => receiver_of(node, &callee, *from, src, lang),
+                _ => None,
+            };
             out.push(CallSite {
-                caller: current.as_deref().map(str::to_string),
+                caller: current.as_ref().map(|(name, _)| name.to_string()),
                 callee,
                 method,
+                receiver,
                 line: node.start_position().row + 1,
             });
         }
         if spec.macro_calls && kind == "token_tree" {
-            macro_calls(node, src, current.as_deref(), out);
+            macro_calls(node, src, current.as_ref().map(|(name, _)| &**name), out);
         }
 
         let mut cursor = node.walk();
@@ -1040,6 +1115,7 @@ fn macro_calls(tree: Node, src: &str, caller: Option<&str>, out: &mut Vec<CallSi
             caller: caller.map(str::to_string),
             callee: node_text(*token, src).to_string(),
             method: prev == Some("."),
+            receiver: None,
             line: token.start_position().row + 1,
         });
     }
@@ -1426,6 +1502,284 @@ fn last_identifier(text: &str) -> Option<String> {
     }
     // A leading digit means it wasn't an identifier (e.g. a numeric literal).
     last.filter(|s| !s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+}
+
+/// What the receiver of the method call `call` (calling `callee`) is known
+/// to be ([`CallSite::receiver`]): looked for in the source of the calling
+/// function before the call, from `from`.
+fn receiver_of(call: Node, callee: &str, from: usize, src: &str, lang: Lang) -> Option<Receiver> {
+    let receiver = receiver_text(node_text(call, src), callee)?.trim();
+    if matches!(
+        receiver,
+        "self" | "this" | "$this" | "Self" | "cls" | "static"
+    ) {
+        return Some(Receiver::Own);
+    }
+    if !is_plain_name(receiver) {
+        return None;
+    }
+    let before = src.get(from..call.start_byte())?;
+    if let Some(ty) = bound_type(before, receiver, lang) {
+        return Some(Receiver::Type(ty));
+    }
+    // A type as the receiver: its own (static) method. Not in Go, where an
+    // exported name is as likely a variable.
+    (lang != Lang::Go && receiver.starts_with(|c: char| c.is_uppercase()))
+        .then(|| Receiver::Type(receiver.to_string()))
+}
+
+/// The receiver expression of a call written `receiver<sep>name(…)`: what
+/// precedes the first `.name`, `->name`, `?.name` or `::name` standing as a
+/// whole name in `call`'s text.
+fn receiver_text<'a>(call: &'a str, name: &str) -> Option<&'a str> {
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let mut at = 0;
+    while let Some(found) = call[at..].find(name) {
+        let start = at + found;
+        let end = start + name.len();
+        let whole = !call[end..].starts_with(word);
+        let head = &call[..start];
+        let sep = ["?->", "->", "?.", "::", "."]
+            .into_iter()
+            .find(|sep| head.ends_with(sep));
+        if whole && let Some(sep) = sep {
+            return Some(&head[..head.len() - sep.len()]);
+        }
+        at = end;
+    }
+    None
+}
+
+/// A name standing alone — `cart`, `$cart`, `@cart` — not an expression.
+fn is_plain_name(text: &str) -> bool {
+    let text = text.strip_prefix(['$', '@']).unwrap_or(text);
+    text.starts_with(|c: char| c == '_' || c.is_alphabetic())
+        && text.chars().all(|c| c == '_' || c.is_alphanumeric())
+}
+
+/// The type `name` is bound to in `scope` (a function's source up to a
+/// call in it), when every binding there says the same: built by a
+/// constructor (`name = Cart()`, `name := &Cart{}`, `let name =
+/// Cart::new()`, `name = new Cart()`, `name = Cart.new`), declared with it
+/// (`Cart name = …`, `Cart* name;`, `(Cart name)`), or annotated with it
+/// (`name: Cart`, Go's `name *Cart`). `None` when nothing says, or two
+/// bindings disagree.
+fn bound_type(scope: &str, name: &str, lang: Lang) -> Option<String> {
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let mut found: Option<String> = None;
+    let mut at = 0;
+    while let Some(i) = scope[at..].find(name) {
+        let start = at + i;
+        let end = start + name.len();
+        at = end;
+        let head = &scope[..start];
+        if head.ends_with(|c: char| word(c) || matches!(c, '.' | '$' | '@' | '>' | ':'))
+            || scope[end..].starts_with(word)
+        {
+            continue; // part of a longer name, or a member of something else
+        }
+        let after = scope[end..].trim_start_matches([' ', '\t']);
+        let ty = if let Some(rest) = after.strip_prefix(":=") {
+            constructed_type(rest, lang)
+        } else if after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>") {
+            constructed_type(&after[1..], lang)
+        } else if let Some(rest) = after.strip_prefix(':').filter(|r| !r.starts_with(':')) {
+            leading_type(rest, lang)
+        } else {
+            None
+        };
+        // A declaration names the type before the name: `Cart cart = …`.
+        let declared = || {
+            let ends = after.starts_with(['=', ';', ',', ')']) && !after.starts_with("==");
+            ends.then(|| trailing_type(head)).flatten()
+        };
+        // Go writes the type after the name: `(c *Cart)`, `var c Cart`.
+        let go_typed = || {
+            let opens = head.trim_end().ends_with(['(', ',']) || head.trim_end().ends_with("var");
+            (lang == Lang::Go && opens)
+                .then(|| leading_type(after, lang))
+                .flatten()
+        };
+        let Some(ty) = ty.or_else(declared).or_else(go_typed) else {
+            continue;
+        };
+        match &found {
+            Some(seen) if *seen != ty => return None,
+            _ => found = Some(ty),
+        }
+    }
+    found
+}
+
+/// The type a constructor expression builds: `Cart(…)`, `Cart { … }`,
+/// `Cart::new(…)`, `new Cart(…)`, `&Cart{…}`, `Cart.new`, `Cart<T>(…)`.
+fn constructed_type(rhs: &str, lang: Lang) -> Option<String> {
+    let mut rhs = rhs.trim_start();
+    for prefix in ["new ", "&mut ", "&"] {
+        if let Some(rest) = rhs.strip_prefix(prefix) {
+            rhs = rest.trim_start();
+        }
+    }
+    let path_len = rhs
+        .find(|c: char| !(c == '_' || c == ':' || c == '.' || c.is_alphanumeric()))
+        .unwrap_or(rhs.len());
+    let path = &rhs[..path_len];
+    let rest = rhs[path_len..].trim_start();
+    let segments: Vec<&str> = path.split([':', '.']).filter(|s| !s.is_empty()).collect();
+    let typed = |s: &&str| type_like(s, lang);
+    // Go builds a value with a composite literal, `Cart{…}`: `newCart(…)`
+    // and `pkg.New(…)` are functions, whatever they return.
+    let opens: &[char] = if lang == Lang::Go {
+        &['{']
+    } else {
+        &['(', '{', '<']
+    };
+    let ty = match segments.as_slice() {
+        // `Cart(…)`, `Cart { … }`, `Cart<T>(…)`.
+        [.., last] if typed(last) && rest.starts_with(opens) => *last,
+        // `Cart::new(…)`, `Cart.new`, `mod::Cart::with(…)`: the type before
+        // the function.
+        [.., ty, _] if lang != Lang::Go && typed(ty) => *ty,
+        _ => return None,
+    };
+    Some(ty.to_string())
+}
+
+/// The type an annotation starts with: `Cart`, `&mut Cart`, `*Cart`.
+fn leading_type(text: &str, lang: Lang) -> Option<String> {
+    let mut text = text.trim_start();
+    for prefix in ["&mut ", "&", "*", "mut ", "dyn "] {
+        if let Some(rest) = text.strip_prefix(prefix) {
+            text = rest.trim_start();
+        }
+    }
+    let end = text
+        .find(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .unwrap_or(text.len());
+    let ty = &text[..end];
+    type_like(ty, lang).then(|| ty.to_string())
+}
+
+/// The type a declaration ends with before its name: `Cart`, `final Cart`,
+/// `Cart*`, `List<Cart>` → `List`.
+fn trailing_type(head: &str) -> Option<String> {
+    let mut head = head.trim_end().trim_end_matches(['*', '&', ' ']);
+    if head.ends_with('>') {
+        let mut depth = 0usize;
+        let mut cut = None;
+        for (i, c) in head.char_indices().rev() {
+            match c {
+                '>' => depth += 1,
+                '<' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        cut = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        head = head[..cut?].trim_end();
+    }
+    let start = head
+        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |i| i + 1);
+    let ty = &head[start..];
+    ty.starts_with(|c: char| c.is_uppercase())
+        .then(|| ty.to_string())
+}
+
+/// Whether `name` reads as a type: capitalized, as types are written —
+/// in Go, any name, as an unexported type is lowercase.
+fn type_like(name: &str, lang: Lang) -> bool {
+    let first = name.chars().next();
+    let identifier = first.is_some_and(|c| c == '_' || c.is_alphabetic())
+        && name.chars().all(|c| c == '_' || c.is_alphanumeric());
+    identifier && (lang == Lang::Go || first.is_some_and(char::is_uppercase))
+}
+
+/// Containers a method belongs to, by node kind, named by their `name`
+/// field. Traits, interfaces, protocols and mixin modules are left out: a
+/// call on `self` in one of their methods may reach any implementation.
+const CLASS_KINDS: &[&str] = &[
+    "class_definition",
+    "class_declaration",
+    "class",
+    "class_specifier",
+    "struct_specifier",
+    "union_specifier",
+    "enum_declaration",
+    "record_declaration",
+    "struct_declaration",
+    "object_declaration",
+    "abstract_class_declaration",
+];
+
+/// The class (type, impl) each callable of a file belongs to, by its
+/// definition line ([`FileCalls::owners`]).
+pub fn owners_in(
+    tree: &Tree,
+    src: &str,
+    lang: Lang,
+    symbols: &[Located],
+) -> HashMap<usize, String> {
+    let root = tree.root_node();
+    symbols
+        .iter()
+        .filter(|l| is_callable(&l.symbol.kind))
+        .filter_map(|l| {
+            // Inside the signature, past any decorator or doc comment the
+            // declaration's span takes in.
+            let at = l.signature_end.saturating_sub(1).max(l.declaration.0);
+            let leaf = root.descendant_for_byte_range(at, at)?;
+            Some((l.symbol.line, owner_from(leaf, src, lang)?))
+        })
+        .collect()
+}
+
+/// The class a definition at `node` (any node inside it) belongs to.
+fn owner_from(node: Node, src: &str, lang: Lang) -> Option<String> {
+    let mut cur = Some(node);
+    while let Some(n) = cur {
+        match n.kind() {
+            // Go: `func (c *Cart) Total()` belongs to `Cart`.
+            "method_declaration" if lang == Lang::Go => {
+                let receiver = n.child_by_field_name("receiver")?;
+                let mut cursor = receiver.walk();
+                let param = receiver.named_children(&mut cursor).next()?;
+                return base_type_name(node_text(param.child_by_field_name("type")?, src));
+            }
+            // Rust: `impl Cart { … }`, `impl Trait for Cart { … }`.
+            "impl_item" => return base_type_name(node_text(n.child_by_field_name("type")?, src)),
+            // C++: `int Cart::total() { … }`, defined out of its class.
+            "function_definition" if lang == Lang::Cpp => {
+                let declarator = node_text(n.child_by_field_name("declarator")?, src);
+                let name = declarator.split('(').next().unwrap_or("");
+                if let Some((scope, _)) = name.rsplit_once("::") {
+                    return base_type_name(scope);
+                }
+            }
+            kind if CLASS_KINDS.contains(&kind) => {
+                if let Some(name) = n.child_by_field_name("name") {
+                    return base_type_name(node_text(name, src));
+                }
+            }
+            _ => {}
+        }
+        cur = n.parent();
+    }
+    None
+}
+
+/// A type's own name in how it is written: `*Cart[T]` → `Cart`,
+/// `ns::Cart<T>` → `Cart`, `&'a mut Cart` → `Cart`.
+fn base_type_name(text: &str) -> Option<String> {
+    let text = text.split(['<', '[', '(']).next()?.trim();
+    let name = text
+        .rsplit(|c: char| !(c == '_' || c.is_alphanumeric()))
+        .find(|s| !s.is_empty())?;
+    (name.starts_with(|c: char| c == '_' || c.is_alphabetic())).then(|| name.to_string())
 }
 
 /// Raw spelling is useful for display, but `foo` and `r#foo` name the same
@@ -2474,6 +2828,308 @@ mod edge_tests {
         ProjectCallGraph::build(defs_of(files), &sources, &HashMap::new())
     }
 
+    /// Who calls the `ordinal`th `name` of `file`, as `caller@line`.
+    fn callers_named(g: &ProjectCallGraph, file: &str, name: &str, ordinal: u32) -> Vec<String> {
+        let id = g
+            .id_of_key(Path::new(file), name, ordinal)
+            .unwrap_or_else(|| panic!("no {name} in {file}"));
+        let mut out: Vec<String> = g
+            .callers_of(id)
+            .iter()
+            .map(|&c| format!("{}@{}", g.node(c).name, g.node(c).line))
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// A method called on a receiver whose type the caller states links to
+    /// that type's method, not every method of the name: `main` builds a
+    /// `Cart` and calls its `total`, and `Item.total` was listed as called
+    /// by `main`. `self.f()` is the caller's own class's `f`. A receiver
+    /// whose type is not known (a loop variable) still links to them all.
+    #[test]
+    fn a_typed_receiver_calls_its_own_types_method() {
+        let cart = "\
+class Item:
+    def total(self):
+        return 1
+
+class Cart:
+    def subtotal(self):
+        return sum(item.total() for item in self.items)
+
+    def total(self):
+        return self.subtotal()
+";
+        let main = "\
+from cart import Cart
+
+def main():
+    cart = Cart()
+    cart.total()
+";
+        let files = [("/p/cart.py", cart), ("/p/main.py", main)];
+        let sources: Vec<(PathBuf, String)> = files
+            .iter()
+            .map(|(f, s)| (PathBuf::from(f), s.to_string()))
+            .collect();
+        // `main.py` imports `cart.py`.
+        let scope = HashMap::from([(
+            PathBuf::from("/p/main.py"),
+            HashSet::from([PathBuf::from("/p/cart.py")]),
+        )]);
+        let g = ProjectCallGraph::build(defs_of(&files), &sources, &scope);
+        // `Item.total` is the file's first `total`, `Cart.total` its second.
+        assert_eq!(callers_named(&g, "/p/cart.py", "total", 0), ["subtotal@6"]);
+        assert_eq!(
+            callers_named(&g, "/p/cart.py", "total", 1),
+            ["main@3", "subtotal@6"],
+            "`item` has no stated type, so either total may be the one"
+        );
+        assert_eq!(callers_named(&g, "/p/cart.py", "subtotal", 0), ["total@9"]);
+    }
+
+    /// The class each method belongs to, however the language writes it:
+    /// inside its class, in a Rust `impl`, by a Go receiver, or out of its
+    /// C++ class as `Cart::total`.
+    #[test]
+    fn each_language_says_whose_method_it_is() {
+        let owners = |file: &str, src: &str| {
+            let call = FileCalls::read(Path::new(file), src).expect(file);
+            let mut owners: Vec<(usize, String)> = call.owners.into_iter().collect();
+            owners.sort();
+            owners
+        };
+        let cart = |line: usize| vec![(line, "Cart".to_string())];
+        assert_eq!(
+            owners(
+                "a.py",
+                "class Cart:\n    def total(self):\n        pass\n\ndef main():\n    pass\n"
+            ),
+            cart(2)
+        );
+        assert_eq!(
+            owners(
+                "a.rs",
+                "struct Cart;\nimpl Cart {\n    fn total(&self) {}\n}\nfn main() {}\n"
+            ),
+            cart(3)
+        );
+        assert_eq!(
+            owners(
+                "a.rs",
+                "struct Cart<T>(T);\nimpl<T> Summed for Cart<T> {\n    fn total(&self) {}\n}\n"
+            ),
+            cart(3)
+        );
+        assert_eq!(
+            owners(
+                "a.go",
+                "package m\ntype Cart struct{}\nfunc (c *Cart) Total() int { return 1 }\nfunc main() {}\n"
+            ),
+            cart(3)
+        );
+        assert_eq!(
+            owners(
+                "a.ts",
+                "class Cart {\n  total() { return 1 }\n}\nfunction main() {}\n"
+            ),
+            cart(2)
+        );
+        assert_eq!(
+            owners("A.java", "class Cart {\n  int total() { return 1; }\n}\n"),
+            cart(2)
+        );
+        assert_eq!(
+            owners("a.rb", "class Cart\n  def total\n    1\n  end\nend\n"),
+            cart(2)
+        );
+        assert_eq!(
+            owners("a.cs", "class Cart {\n  int Total() { return 1; }\n}\n"),
+            cart(2)
+        );
+        assert_eq!(
+            owners(
+                "a.php",
+                "<?php\nclass Cart {\n  function total() { return 1; }\n}\n"
+            ),
+            cart(3)
+        );
+        assert_eq!(
+            owners(
+                "a.cpp",
+                "class Cart {\n public:\n  int total() { return 1; }\n};\nint Cart::other() { return 2; }\n"
+            ),
+            vec![(3, "Cart".to_string()), (5, "Cart".to_string())]
+        );
+        // A trait's own methods are any implementation's: no owner.
+        assert_eq!(
+            owners(
+                "b.rs",
+                "trait Summed {\n    fn total(&self) -> u32 { 0 }\n}\n"
+            ),
+            vec![]
+        );
+    }
+
+    /// What a receiver is known to be, as each language binds it.
+    #[test]
+    fn receivers_are_typed_as_their_bindings_say() {
+        let receiver = |file: &str, src: &str, callee: &str| {
+            let calls = FileCalls::read(Path::new(file), src).expect(file).calls;
+            calls
+                .into_iter()
+                .find(|c| c.callee == callee)
+                .unwrap_or_else(|| panic!("no call of {callee} in {file}"))
+                .receiver
+        };
+        let cart = Some(Receiver::Type("Cart".into()));
+        assert_eq!(
+            receiver("a.py", "def f():\n    c = Cart()\n    c.total()\n", "total"),
+            cart
+        );
+        assert_eq!(
+            receiver("a.py", "def f(c: Cart):\n    c.total()\n", "total"),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "class A:\n    def f(self):\n        self.total()\n",
+                "total"
+            ),
+            Some(Receiver::Own)
+        );
+        assert_eq!(
+            receiver(
+                "a.rs",
+                "fn f() {\n    let c = Cart::new();\n    c.total();\n}\n",
+                "total"
+            ),
+            cart
+        );
+        assert_eq!(
+            receiver("a.rs", "fn f(c: &mut Cart) {\n    c.total();\n}\n", "total"),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "a.go",
+                "package m\nfunc f() {\n\tc := &Cart{}\n\tc.Total()\n}\n",
+                "Total"
+            ),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "a.go",
+                "package m\nfunc (c *Cart) f() {\n\tc.Total()\n}\n",
+                "Total"
+            ),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "a.ts",
+                "function f() {\n  const c = new Cart();\n  c.total();\n}\n",
+                "total"
+            ),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "A.java",
+                "class A {\n  void f() {\n    Cart c = new Cart();\n    c.total();\n  }\n}\n",
+                "total"
+            ),
+            cart
+        );
+        assert_eq!(
+            receiver("a.rb", "def f\n  c = Cart.new\n  c.total\nend\n", "total"),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "a.php",
+                "<?php\nfunction f() {\n  $c = new Cart();\n  $c->total();\n}\n",
+                "total"
+            ),
+            cart
+        );
+        assert_eq!(
+            receiver(
+                "a.cs",
+                "class A {\n  void F() {\n    var c = new Cart();\n    c.Total();\n  }\n}\n",
+                "Total"
+            ),
+            cart
+        );
+        // A type called on itself.
+        assert_eq!(
+            receiver(
+                "A.java",
+                "class A {\n  void f() {\n    Cart.total();\n  }\n}\n",
+                "total"
+            ),
+            cart
+        );
+        // Unknown: no binding, a function's result, an expression, two
+        // bindings that disagree, a Go function that builds one.
+        assert_eq!(
+            receiver("a.py", "def f(c):\n    c.total()\n", "total"),
+            None
+        );
+        assert_eq!(
+            receiver("a.py", "def f():\n    c = make()\n    c.total()\n", "total"),
+            None
+        );
+        assert_eq!(
+            receiver("a.py", "def f(self):\n    self.c.total()\n", "total"),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f(x):\n    c = Cart()\n    c = Item()\n    c.total()\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.go",
+                "package m\nfunc f() {\n\tc := newCart()\n\tc.Total()\n}\n",
+                "Total"
+            ),
+            None
+        );
+    }
+
+    /// A known type with no method of the name — one it inherits — keeps
+    /// every method of the name, as before.
+    #[test]
+    fn a_type_without_the_method_keeps_every_candidate() {
+        let src = "\
+class Base:
+    def run(self):
+        pass
+
+class Other:
+    def run(self):
+        pass
+
+class Sub(Base):
+    pass
+
+def main():
+    s = Sub()
+    s.run()
+";
+        let g = graph(&[("/p/a.py", src)]);
+        assert_eq!(callers_named(&g, "/p/a.py", "run", 0), ["main@12"]);
+        assert_eq!(callers_named(&g, "/p/a.py", "run", 1), ["main@12"]);
+    }
+
     /// The call facts a symbol index keeps — `FileCalls::of` over the one
     /// `outline::analyze` it makes of each file — are exactly what
     /// `FileCalls::read` parses for, and `build_from_calls` over them is the
@@ -2505,13 +3161,13 @@ mod edge_tests {
             let Some(a) = crate::outline::analyze(src, lang) else {
                 continue;
             };
-            let of = FileCalls::of(PathBuf::from(file), a.lang, a.calls, &a.symbols);
+            let of = FileCalls::of(PathBuf::from(file), a.lang, a.calls, &a.symbols, a.owners);
             let read = FileCalls::read(Path::new(file), src);
             assert_eq!(
                 of.as_ref()
-                    .map(|c| (&c.file, c.lang, &c.calls, &c.declarations)),
+                    .map(|c| (&c.file, c.lang, &c.calls, &c.declarations, &c.owners)),
                 read.as_ref()
-                    .map(|c| (&c.file, c.lang, &c.calls, &c.declarations)),
+                    .map(|c| (&c.file, c.lang, &c.calls, &c.declarations, &c.owners)),
                 "{file}"
             );
             kept.extend(of);
@@ -3269,6 +3925,7 @@ function outer() {}
             analysis.lang,
             analysis.calls.clone(),
             &analysis.symbols,
+            analysis.owners.clone(),
         )
         .unwrap();
         assert_eq!(kept.bodies.len(), 2, "{:?}", kept.bodies);

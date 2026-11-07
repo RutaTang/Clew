@@ -42,45 +42,53 @@ pub(crate) fn graph_modal_frame<'a>(
         header = header.push(if graph_spin {
             icon_btn(
                 Glyph::Pause,
-                "Stop spinning",
+                tr!("Stop spinning"),
                 Message::Graph(GraphMsg::ToggleSpin),
             )
         } else {
-            icon_btn(Glyph::Play, "Spin", Message::Graph(GraphMsg::ToggleSpin))
+            icon_btn(
+                Glyph::Play,
+                tr!("Spin"),
+                Message::Graph(GraphMsg::ToggleSpin),
+            )
         });
     }
     if graph_mode {
         header = header.push(if graph_3d {
             icon_btn(
                 Glyph::Plane,
-                "Flatten to 2D",
+                tr!("Flatten to 2D"),
                 Message::Graph(GraphMsg::Toggle3D),
             )
         } else {
             icon_btn(
                 Glyph::Cube,
-                "Show in 3D",
+                tr!("Show in 3D"),
                 Message::Graph(GraphMsg::Toggle3D),
             )
         });
         // Heat: colour by how often each file changed, instead of by language.
         header = header.push(chrome_tip(
             button(
-                text(if graph_heat { "Heat ●" } else { "Heat" })
-                    .size(ts::SMALL)
-                    .color(if graph_heat {
-                        theme::danger()
-                    } else {
-                        theme::fg_muted()
-                    }),
+                text(if graph_heat {
+                    format!("{} ●", tr!("Heat"))
+                } else {
+                    tr!("Heat").to_string()
+                })
+                .size(ts::SMALL)
+                .color(if graph_heat {
+                    theme::danger()
+                } else {
+                    theme::fg_muted()
+                }),
             )
             .style(theme::toolbar_button)
             .padding([4, 8])
             .on_press(Message::Graph(GraphMsg::ToggleHeat)),
             if graph_heat {
-                "Colour by language"
+                tr!("Colour by language")
             } else {
-                "Colour by change frequency (commits in the recent history)"
+                tr!("Colour by change frequency (commits in the recent history)")
             },
             None,
         ));
@@ -89,19 +97,19 @@ pub(crate) fn graph_modal_frame<'a>(
         .push(if graph_mode {
             icon_btn(
                 Glyph::List,
-                "List view",
+                tr!("List view"),
                 Message::Graph(GraphMsg::OverlayViewToggle),
             )
         } else {
             icon_btn(
                 Glyph::Graph,
-                "Map view",
+                tr!("Map view"),
                 Message::Graph(GraphMsg::OverlayViewToggle),
             )
         })
         .push(icon_btn(
             Glyph::Close,
-            "Close",
+            tr!("Close"),
             Message::Graph(GraphMsg::CloseOverlay),
         ));
     let panel = container(column![header, body].spacing(12))
@@ -119,10 +127,10 @@ pub(crate) fn graph_modal_frame<'a>(
 
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
     let title = match overlay {
-        crate::Overlay::ProjectImports => "Project Import Graph",
-        crate::Overlay::ProjectCalls => "Project Call Graph",
-        crate::Overlay::ProjectTypes => "Project Type Map",
-        crate::Overlay::ProjectMaps => "Project Maps",
+        crate::Overlay::ProjectImports => tr!("Project Import Graph"),
+        crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
+        crate::Overlay::ProjectTypes => tr!("Project Type Map"),
+        crate::Overlay::ProjectMaps => tr!("Project Maps"),
     };
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
@@ -134,7 +142,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         } else if let Some(precise) = app.precise_label() {
             text(precise).size(ts::SMALL).color(theme::accent()).into()
         } else {
-            button(text("Refine with LSP").size(ts::SMALL))
+            button(text(tr!("Refine with LSP")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
                 .on_press(Message::Graph(GraphMsg::RefineProjectCalls))
@@ -142,7 +150,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         }),
         crate::Overlay::ProjectImports => None,
         crate::Overlay::ProjectTypes => app.docs_loading().then(|| {
-            text("Building the API index…")
+            text(tr!("Building the API index…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into()
@@ -183,14 +191,14 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
     let empty_msg = if app.proj.project_calls.building {
-        "Building call graph…"
+        tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
-        "Indexing the project…"
+        tr!("Indexing the project…")
     } else if app.proj.graph_layout_pending {
         // Laid out off the UI thread (`App::refresh_graph_layout`).
-        "Laying out the map…"
+        tr!("Laying out the map…")
     } else {
-        "Nothing to show."
+        tr!("Nothing to show.")
     };
     let Some(layout) = &app.proj.graph_layout else {
         return hint(empty_msg);
@@ -220,69 +228,7 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     )
     .width(Fill)
     .height(Fill);
-    let visited = trace_files(app);
-    let legend = graph_legend(
-        kind,
-        app.graph_3d,
-        (layout.nodes.len(), layout.total),
-        app.graph_heat && app.proj.churn.is_some(),
-        layout.nodes.iter().any(|n| visited.contains(&n.file)),
-    );
-    column![map, text(legend).size(ts::CAPTION).color(theme::dim())]
-        .spacing(6)
-        .height(iced::Length::Fill)
-        .into()
-}
-
-/// The line under a graph map that says how to read it: what a node is
-/// (`kind`), how many are shown of how many (`shown`), what its colour means
-/// (the heat overlay's change counts, or language and depth), what an arrow
-/// means, and the rings it may carry — a cycle (imports only) and a stop of
-/// the last debug run (`visited`).
-pub(crate) fn graph_legend(
-    kind: crate::Overlay,
-    graph_3d: bool,
-    shown: (usize, usize),
-    heat: bool,
-    visited: bool,
-) -> String {
-    use crate::Overlay;
-    let noun = match kind {
-        Overlay::ProjectTypes => "types",
-        Overlay::ProjectMaps => "nodes",
-        _ => "files",
-    };
-    let mut parts: Vec<String> = Vec::new();
-    if shown.1 > shown.0 {
-        parts.push(format!(
-            "Showing the {} most-connected of {} {noun}",
-            shown.0, shown.1
-        ));
-    }
-    parts.push(map_nav_hint(graph_3d).to_string());
-    parts.push("drag a node · scroll to zoom · size = degree".into());
-    parts.push(if heat {
-        "colour = how often it changed (red most, grey never)".into()
-    } else {
-        "hue = language, paler = deeper".into()
-    });
-    parts.push(
-        match kind {
-            Overlay::ProjectImports => "arrow → the file it imports",
-            Overlay::ProjectCalls => "arrow → the file it calls into",
-            Overlay::ProjectTypes => "arrow → the type it uses or inherits",
-            Overlay::ProjectMaps => "arrows as the map's own line says",
-        }
-        .into(),
-    );
-    if kind == Overlay::ProjectImports {
-        parts.push("gold ring = import cycle".into());
-    }
-    if visited {
-        parts.push("green ring = the last debug run stopped here".into());
-    }
-    parts.push("click a node to open it".into());
-    parts.join(" · ")
+    map.into()
 }
 
 /// A distinct base colour per graphed language (see `theme::language_hue`).
@@ -437,6 +383,9 @@ const GRAPH_PAD: f32 = 48.0;
 const ALPHA_REST: f32 = 0.02;
 /// A label opacity this close to its target counts as arrived.
 const LABEL_EPS: f32 = 0.004;
+/// How much room past the right edge a label moved to its node's left
+/// needs before it goes back to the right (px).
+const LABEL_SIDE_SLACK: f32 = 24.0;
 /// How far (px) outside every disc a click may land and still pick the
 /// nearest node, so tiny discs stay easy to hit.
 const HIT_SLOP: f32 = 16.0;
@@ -494,9 +443,6 @@ pub(crate) struct GraphState {
     fit_off: (f32, f32),
     /// Extra pan offset, used only in 2D mode (3D re-centres on the origin).
     pan: iced::Vector,
-    /// Whether the previous frame rendered in 3D, so a 2D → 3D switch can
-    /// re-inflate the depth (2D collapses it flat).
-    was_3d: bool,
     /// Per-node label opacity, eased each frame toward `label_target` (depth
     /// fade × whether decluttering keeps it). Animating this — rather than
     /// deciding draw/skip per frame — means labels cross-fade instead of
@@ -511,10 +457,55 @@ pub(crate) struct GraphState {
     moved: f32,
     /// Last absolute cursor position while dragging.
     last_cursor: iced::Point,
-    /// The idle spin was running at the last tick.
+    /// The camera still turns: the idle spin is on, or a fling or a spin
+    /// that was just switched off has not come to rest.
     spinning: bool,
     /// A 3D → 2D switch is still relaxing depth toward the plane.
     flattening: bool,
+    /// Turn rates of the camera, radians per second: what a released orbit
+    /// flings it with, easing toward the idle spin (or to rest).
+    yaw_vel: f32,
+    pitch_vel: f32,
+    /// The idle spin's rate as the turn eases toward it: itself eased in
+    /// (`LEAD_TAU`), so a spin starting or stopping builds its acceleration
+    /// from nought instead of jumping to it.
+    spin_goal: f32,
+    /// The camera angles at the last tick, for the rate an orbit drag turns.
+    last_yaw: f32,
+    last_pitch: f32,
+    /// How 3D the picture is drawn: 1 in 3D, 0 flat, between while a switch
+    /// eases from `dim_from` to the mode asked for (`dim_3d`), `dim_t` of
+    /// the way there.
+    dim: f32,
+    dim_from: f32,
+    dim_t: f32,
+    dim_3d: bool,
+    /// The zoom the wheel asked for; `zoom` eases to it. In 2D the point
+    /// under the pointer (`zoom_at`, from the middle) stays put.
+    zoom_target: f32,
+    zoom_at: Option<iced::Vector>,
+    /// The zoom's rate of change, in log space per second.
+    zoom_vel: f32,
+    /// What the camera looks at, and the scale that fits the graph in the
+    /// frame (before the zoom): eased to where the graph is, so neither
+    /// jumps as it settles, grows a depth or flattens.
+    center: crate::graphlayout::V3,
+    fit_base: f32,
+    /// Where, at a scale of one, the middle of the picture is off the
+    /// camera's centre: a 3D camera at rest centres what it shows by it.
+    shift: (f32, f32),
+    /// How fast `shift` is moving: it rides a spring, so a re-centring
+    /// starts from rest.
+    shift_vel: (f32, f32),
+    /// Where the spring takes `shift`: its target, eased in (`LEAD_TAU`),
+    /// so a re-centring builds its acceleration from nought.
+    shift_goal: (f32, f32),
+    /// The framing has not caught up with the graph yet.
+    framing: bool,
+    /// Which side of its node each label is drawn on: 0 right, 1 left,
+    /// eased, so a label that must change sides cross-fades.
+    label_side: Vec<f32>,
+    label_side_target: Vec<f32>,
     /// Something changed the picture since the last tick (camera, zoom, pan,
     /// a dragged node), so the next tick must recompute.
     dirty: bool,
@@ -543,7 +534,6 @@ impl Default for GraphState {
             fit_scale: 1.0,
             fit_off: (0.0, 0.0),
             pan: iced::Vector::new(0.0, 0.0),
-            was_3d: true,
             label_alpha: Vec::new(),
             label_target: Vec::new(),
             label_w: Vec::new(),
@@ -552,6 +542,26 @@ impl Default for GraphState {
             last_cursor: iced::Point::new(0.0, 0.0),
             spinning: false,
             flattening: false,
+            yaw_vel: 0.0,
+            pitch_vel: 0.0,
+            spin_goal: 0.0,
+            last_yaw: 0.6,
+            last_pitch: 0.35,
+            dim: 1.0,
+            dim_from: 1.0,
+            dim_t: 1.0,
+            dim_3d: true,
+            zoom_target: 1.0,
+            zoom_at: None,
+            zoom_vel: 0.0,
+            center: [0.0; 3],
+            fit_base: 0.0,
+            shift: (0.0, 0.0),
+            shift_vel: (0.0, 0.0),
+            shift_goal: (0.0, 0.0),
+            framing: false,
+            label_side: Vec::new(),
+            label_side_target: Vec::new(),
             dirty: true,
             last_bounds: iced::Size::ZERO,
             last_hover: None,
@@ -576,16 +586,92 @@ impl GraphState {
 /// requesting frames; once it is true it stops, and a settled map costs
 /// nothing until the next interaction.
 pub(crate) fn graph_settled(st: &GraphState) -> bool {
+    let arrived = |now: &[f32], to: &[f32]| {
+        now.len() == to.len() && now.iter().zip(to).all(|(a, t)| (a - t).abs() <= LABEL_EPS)
+    };
     st.drag == Drag::None
         && st.alpha <= ALPHA_REST
         && !st.spinning
         && !st.flattening
-        && st.label_alpha.len() == st.label_target.len()
-        && st
-            .label_alpha
-            .iter()
-            .zip(&st.label_target)
-            .all(|(a, t)| (a - t).abs() <= LABEL_EPS)
+        && st.dim_t >= 1.0
+        && st.zoom == st.zoom_target
+        && !st.framing
+        && arrived(&st.label_alpha, &st.label_target)
+        && arrived(&st.label_side, &st.label_side_target)
+}
+
+/// How long a switch between 3D and 2D takes, in seconds.
+const DIM_SECS: f32 = 0.6;
+/// Time constants (seconds) things ease toward where they are going with:
+/// the framing, a label's opacity and its side, and a camera's
+/// turn rate toward the idle spin or rest (`TURN_TAU`, slow, so a fling
+/// coasts) — pitch settling sooner.
+/// The zoom spring's rate (per second): settled in about a quarter second.
+const ZOOM_RATE: f32 = 18.0;
+/// The re-centring spring's rate: settled in about half a second.
+const SHIFT_RATE: f32 = 9.0;
+const FRAME_TAU: f32 = 0.14;
+const LABEL_TAU: f32 = 0.11;
+const TURN_TAU: f32 = 0.55;
+const PITCH_TAU: f32 = 0.3;
+/// Up to this many nodes no label fades with depth; the fade is full
+/// this many nodes past that.
+const FADE_FREE_NODES: f32 = 6.0;
+const FADE_FULL_NODES: f32 = 24.0;
+/// The lead-in a camera's start or stop eases its target in by, so the
+/// motion's acceleration builds from nought rather than jumping.
+const LEAD_TAU: f32 = 0.09;
+/// Turns of the spin the 3D framing is measured at, and the room it
+/// leaves for a node's farthest falling between two of them (cos of half
+/// a step, inverted, with a margin).
+const SPIN_SAMPLES: usize = 24;
+const SPIN_SAMPLE_SLACK: f32 = 1.012;
+/// Fastest a fling turns the camera, radians per second.
+const MAX_TURN: f32 = 8.0;
+/// The camera's angles a switch to 3D swings to from flat.
+const HOME_YAW: f32 = 0.6;
+const HOME_PITCH: f32 = 0.35;
+
+/// The share of the way to its target an eased value covers in `dt`
+/// seconds with time constant `tau` — the same in any frame rate.
+fn ease_step(dt: f32, tau: f32) -> f32 {
+    1.0 - (-dt / tau).exp()
+}
+
+/// Ease in and out, for a move from one state to another (`t` from 0 to
+/// 1): it starts and stops with no speed and no acceleration, and its
+/// acceleration never jumps (the quintic "smootherstep").
+fn ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * t * (t * (t * 6.0 - 15.0) + 10.0)
+}
+
+/// One step of `dt` seconds of a critically damped spring at `rate`: where
+/// a value `x` off its rest, moving at `v`, is then, and how fast — solved
+/// exactly, so it gathers speed from rest and settles without overshoot at
+/// any frame rate.
+fn spring(x: f32, v: f32, rate: f32, dt: f32) -> (f32, f32) {
+    let decay = (-rate * dt).exp();
+    let k = v + rate * x;
+    ((x + k * dt) * decay, (v - rate * k * dt) * decay)
+}
+
+/// `a` wrapped into (−π, π]: the same turn of the camera.
+fn wrap_angle(a: f32) -> f32 {
+    use std::f32::consts::{PI, TAU};
+    let w = (a + PI).rem_euclid(TAU) - PI;
+    if w <= -PI { w + TAU } else { w }
+}
+
+/// A radius that holds the graph, robust to a lone far-flung node: the
+/// largest of `dists` (sorted), but no more than half again past the
+/// 90th percentile, so one outlier cannot shrink the rest into a knot.
+fn robust_extent(dists: &[f32]) -> f32 {
+    let Some(&most) = dists.last() else {
+        return 1.0;
+    };
+    let p90 = dists[((dists.len() - 1) as f32 * 0.9) as usize];
+    most.min(p90 * 1.5).max(1.0)
 }
 
 /// A cheap signature of the node set, so a rebuilt graph (different nodes) is
@@ -686,8 +772,14 @@ impl GraphCanvas<'_> {
         (p[0] * persp, p[1] * persp, p[2], persp)
     }
 
-    /// Screen position of node `i`: full 3D projection once seeded, else the
+    /// Screen position of node `i`: the projection once seeded, else the
     /// static fallback. Returns `(x, y, depth, perspective)`.
+    ///
+    /// One projection for both modes, blended by how 3D the picture is
+    /// (`dim`): in 3D the camera turns about the graph's centre with
+    /// perspective and depth; flat, it looks straight on, orthographic, with
+    /// the pan and one depth for all. Between, a switch is a camera move,
+    /// never a jump.
     fn node_screen(
         &self,
         i: usize,
@@ -698,24 +790,24 @@ impl GraphCanvas<'_> {
             let p = self.node_fit(i, bounds);
             return (p.x, p.y, 0.0, 1.0);
         }
-        if self.is_3d {
-            let (rx, ry, z, persp) = Self::project_view(rotate(st.pos[i], st.yaw, st.pitch));
-            (
-                rx * st.fit_scale + st.fit_off.0,
-                ry * st.fit_scale + st.fit_off.1,
-                z,
-                persp,
-            )
-        } else {
-            // Flat 2D: orthographic x/y with a pan, uniform depth (no fog/size).
-            let p = st.pos[i];
-            (
-                p[0] * st.fit_scale + st.fit_off.0 + st.pan.x,
-                p[1] * st.fit_scale + st.fit_off.1 + st.pan.y,
-                0.0,
-                1.0,
-            )
-        }
+        let e = st.dim;
+        let p = st.pos[i];
+        let q = [
+            p[0] - st.center[0],
+            p[1] - st.center[1],
+            p[2] - st.center[2],
+        ];
+        let (rx, ry, z, persp3) = Self::project_view(rotate(q, st.yaw * e, st.pitch * e));
+        // `project_view` scaled x and y by the perspective: undo the part a
+        // flatter picture does not have.
+        let persp = 1.0 + (persp3 - 1.0) * e;
+        let (x, y) = (rx / persp3 * persp, ry / persp3 * persp);
+        (
+            (x - st.shift.0) * st.fit_scale + st.fit_off.0 + st.pan.x * (1.0 - e),
+            (y - st.shift.1) * st.fit_scale + st.fit_off.1 + st.pan.y * (1.0 - e),
+            z * e,
+            persp,
+        )
     }
 
     /// Every node's projection, once.
@@ -750,25 +842,26 @@ impl GraphCanvas<'_> {
         cursor: iced::Point,
         st: &GraphState,
     ) -> crate::graphlayout::V3 {
-        if !self.is_3d {
-            // Flat 2D: straight inverse of the orthographic transform.
-            return [
-                (cursor.x - st.fit_off.0 - st.pan.x) / st.fit_scale.max(1e-3),
-                (cursor.y - st.fit_off.1 - st.pan.y) / st.fit_scale.max(1e-3),
-                0.0,
-            ];
-        }
-        let z2 = rotate(st.pos[i], st.yaw, st.pitch)[2];
-        let persp = FOCAL / (CAM - z2).max(FOCAL * 0.15);
-        // Undo fit → raw2d → view xy (divide out the perspective).
-        let x1 = (cursor.x - st.fit_off.0) / st.fit_scale.max(1e-3) / persp;
-        let y2 = (cursor.y - st.fit_off.1) / st.fit_scale.max(1e-3) / persp;
+        // The inverse of `node_screen`, at the node's own depth.
+        let e = st.dim;
+        let (yaw, pitch) = (st.yaw * e, st.pitch * e);
+        let c = st.center;
+        let p = st.pos[i];
+        let z2 = rotate([p[0] - c[0], p[1] - c[1], p[2] - c[2]], yaw, pitch)[2];
+        let persp = 1.0 + (FOCAL / (CAM - z2).max(FOCAL * 0.15) - 1.0) * e;
+        let scale = st.fit_scale.max(1e-3) * persp;
+        let x1 = (cursor.x - st.fit_off.0 - st.pan.x * (1.0 - e)) / scale + st.shift.0 / persp;
+        let y2 = (cursor.y - st.fit_off.1 - st.pan.y * (1.0 - e)) / scale + st.shift.1 / persp;
         // Un-rotate (inverse pitch, then inverse yaw).
-        let (sy, cy) = st.yaw.sin_cos();
-        let (sp, cp) = st.pitch.sin_cos();
+        let (sy, cy) = yaw.sin_cos();
+        let (sp, cp) = pitch.sin_cos();
         let y1 = y2 * cp + z2 * sp;
         let z1 = -y2 * sp + z2 * cp;
-        [x1 * cy - z1 * sy, y1, x1 * sy + z1 * cy]
+        [
+            x1 * cy - z1 * sy + c[0],
+            y1 + c[1],
+            x1 * sy + z1 * cy + c[2],
+        ]
     }
 
     /// The message that opens node `i`, if it is still part of this layout.
@@ -812,6 +905,16 @@ impl GraphCanvas<'_> {
         st.vel = vec![[0.0; 3]; n];
         st.label_alpha = vec![0.0; n];
         st.label_target = vec![0.0; n];
+        st.label_side = vec![0.0; n];
+        st.label_side_target = vec![0.0; n];
+        // A new graph is framed where it is, not eased in from the last, and
+        // drawn in the mode asked for, not switched into it.
+        st.fit_base = 0.0;
+        let dim = if self.is_3d { 1.0 } else { 0.0 };
+        st.dim = dim;
+        st.dim_from = dim;
+        st.dim_t = 1.0;
+        st.dim_3d = self.is_3d;
         st.label_w = self
             .layout
             .nodes
@@ -849,24 +952,48 @@ impl GraphCanvas<'_> {
             st.touch();
         }
         st.rev = self.rev;
+        // Frame time, as it passed: a map waking from rest, or drawn again
+        // after it was out of sight, steps one frame, not the whole pause.
         let dt = st
             .last_frame
             .map(|t| now.duration_since(t).as_secs_f32())
+            .filter(|&gap| gap <= 0.1)
             .unwrap_or(1.0 / 60.0)
             .clamp(0.004, 0.05);
         st.last_frame = Some(now);
 
-        // Coming back to 3D after a flat 2D view: re-inflate the depth and wake
-        // the sim, so it re-expands into a volume instead of staying a flat sheet
-        // seen edge-on.
-        if self.is_3d && !st.was_3d {
-            for (i, p) in st.pos.iter_mut().enumerate() {
-                p[2] = (((i * 61) % 100) as f32 / 100.0 - 0.5) * WORLD * 0.8;
+        // A switch between 3D and 2D: a camera move over `DIM_SECS`, from
+        // wherever the last one had got to.
+        if self.is_3d != st.dim_3d {
+            if !self.is_3d && st.dim >= 0.999 {
+                // The same view, by the shortest way round to face-on.
+                st.yaw = wrap_angle(st.yaw);
             }
-            st.alpha = st.alpha.max(0.7);
+            if self.is_3d && st.dim <= 0.001 {
+                // From flat: re-inflate the depth (2D collapsed it) and wake
+                // the sim, so it opens into a volume again; the camera swings
+                // to its home angles rather than wherever it was left.
+                for (i, p) in st.pos.iter_mut().enumerate() {
+                    p[2] = (((i * 61) % 100) as f32 / 100.0 - 0.5) * WORLD * 0.8;
+                }
+                st.alpha = st.alpha.max(0.7);
+                st.yaw = HOME_YAW;
+                st.pitch = HOME_PITCH;
+            }
+            st.dim_3d = self.is_3d;
+            st.dim_from = st.dim;
+            st.dim_t = 0.0;
+            st.yaw_vel = 0.0;
+            st.pitch_vel = 0.0;
+            st.spin_goal = 0.0;
             st.touch();
         }
-        st.was_3d = self.is_3d;
+        let switching = st.dim_t < 1.0;
+        if switching {
+            st.dim_t = (st.dim_t + dt / DIM_SECS).min(1.0);
+            let to = if self.is_3d { 1.0 } else { 0.0 };
+            st.dim = st.dim_from + (to - st.dim_from) * ease_in_out(st.dim_t);
+        }
 
         let pinned = match st.drag {
             Drag::Node(i, sig) if sig == st.sig && i < n => Some(i),
@@ -875,19 +1002,93 @@ impl GraphCanvas<'_> {
         if pinned.is_some() {
             st.alpha = st.alpha.max(0.3);
         }
-        st.spinning = self.is_3d && self.spin && st.drag == Drag::None;
+
+        // The camera's turn: followed from the pointer while orbiting (its
+        // rate measured, to fling with on release), else coasting toward the
+        // idle spin — or to rest — so a spin starts, stops and hands over
+        // from a fling without a jolt.
+        if st.drag == Drag::Orbit {
+            let follow = ease_step(dt, 0.04);
+            let yaw_rate = (st.yaw - st.last_yaw) / dt;
+            let pitch_rate = (st.pitch - st.last_pitch) / dt;
+            st.yaw_vel += (yaw_rate.clamp(-MAX_TURN, MAX_TURN) - st.yaw_vel) * follow;
+            st.pitch_vel += (pitch_rate.clamp(-MAX_TURN, MAX_TURN) - st.pitch_vel) * follow;
+        } else {
+            let spin = if self.is_3d && self.spin && st.drag == Drag::None {
+                SPIN_RATE
+            } else {
+                0.0
+            };
+            st.spin_goal += (spin - st.spin_goal) * ease_step(dt, LEAD_TAU);
+            if (st.spin_goal - spin).abs() < 1e-4 {
+                st.spin_goal = spin;
+            }
+            st.yaw_vel += (st.spin_goal - st.yaw_vel) * ease_step(dt, TURN_TAU);
+            st.pitch_vel *= 1.0 - ease_step(dt, PITCH_TAU);
+            if st.yaw_vel.abs() < 1e-3 && st.spin_goal == 0.0 {
+                st.yaw_vel = 0.0;
+            }
+            if st.pitch_vel.abs() < 1e-3 {
+                st.pitch_vel = 0.0;
+            }
+            st.yaw += st.yaw_vel * dt;
+            let pitch = st.pitch + st.pitch_vel * dt;
+            st.pitch = pitch.clamp(-1.45, 1.45);
+            if st.pitch != pitch {
+                st.pitch_vel = 0.0;
+            }
+        }
+        st.last_yaw = st.yaw;
+        st.last_pitch = st.pitch;
+        let turning = st.yaw_vel != 0.0 || st.pitch_vel != 0.0;
+        st.spinning = turning || (self.is_3d && self.spin && st.drag == Drag::None);
+
+        // The zoom eases to where the wheel asked for; flat, about the
+        // point under the pointer.
+        let zooming = st.zoom != st.zoom_target;
+        if zooming {
+            let from = st.zoom;
+            let to = st.zoom_target;
+            // A critically damped spring, in log space (each step of the
+            // wheel the same), solved exactly for the frame: it gathers
+            // speed and settles without overshoot, at any frame rate.
+            let (x, v) = spring((from / to).ln(), st.zoom_vel, ZOOM_RATE, dt);
+            st.zoom_vel = v;
+            if x.abs() < 1e-4 && st.zoom_vel.abs() < 1e-3 {
+                st.zoom = to;
+                st.zoom_vel = 0.0;
+            } else {
+                st.zoom = to * x.exp();
+            }
+            if let Some(at) = st.zoom_at.filter(|_| !self.is_3d) {
+                let k = st.zoom / from;
+                st.pan =
+                    iced::Vector::new(at.x - (at.x - st.pan.x) * k, at.y - (at.y - st.pan.y) * k);
+            }
+            if st.zoom == to {
+                st.zoom_at = None;
+            }
+        }
+
         st.flattening = !self.is_3d && st.pos.iter().any(|p| p[2].abs() > 0.5);
+        let switching = switching || st.dim_t < 1.0;
         let hovered = cursor
             .position_in(bounds)
             .and_then(|c| self.hit(c, bounds, st));
         let physics = pinned.is_some() || st.alpha > ALPHA_REST;
+        let resized = bounds.size() != st.last_bounds;
         let changed = st.dirty
             || physics
             || st.spinning
             || st.flattening
-            || bounds.size() != st.last_bounds
+            || switching
+            || zooming
+            || st.framing
+            || resized
             || hovered != st.last_hover;
         if !changed && graph_settled(st) {
+            // At rest: the next frame, whenever it comes, starts afresh.
+            st.last_frame = None;
             return false;
         }
         st.dirty = false;
@@ -911,14 +1112,11 @@ impl GraphCanvas<'_> {
             // twice as fast as a 60 Hz one).
             st.alpha = crate::graphlayout::cool(st.alpha, dt * 4.0);
         }
-        if st.spinning {
-            // Gentle idle spin, so the depth reads as 3D.
-            st.yaw += dt * SPIN_RATE;
-        }
-        if !self.is_3d {
-            // Flat 2D: relax the depth toward the z=0 plane, so toggling over
-            // from 3D collapses smoothly rather than snapping flat.
-            let f = (1.0 - dt * 7.0).clamp(0.0, 1.0);
+        if !self.is_3d && !switching {
+            // Flat 2D, the camera face-on: relax the depth toward the z=0
+            // plane, where it no longer shows. (During the switch it would
+            // move the picture under the camera's own move.)
+            let f = 1.0 - ease_step(dt, 1.0 / 7.0);
             for p in st.pos.iter_mut() {
                 p[2] *= f;
             }
@@ -926,28 +1124,162 @@ impl GraphCanvas<'_> {
                 v[2] = 0.0;
             }
         }
-        // Refit from a robust radius (a high percentile of node distances), so a
-        // couple of far-flung outliers can't zoom the whole cluster into a tiny
-        // knot. The radius is rotation-invariant, so the spin doesn't make the
-        // framing pulse, and the origin always projects to the centre.
-        let mut dists: Vec<f32> = st
+
+        // --- Framing ----------------------------------------------------------
+        // The whole graph, centred. In 3D the camera turns about the graph's
+        // centroid and fits a sphere round it — the same at every angle, so a
+        // spin never makes the framing breathe; flat, it fits the graph's own
+        // box, every bit of the frame used. Robust to a lone far-flung node.
+        // Both eased toward, blended by how 3D the picture is; a new graph or
+        // a resized frame takes its framing at once.
+        let e = st.dim;
+        let inner_w = (bounds.width - 2.0 * GRAPH_PAD).max(1.0);
+        let inner_h = (bounds.height - 2.0 * GRAPH_PAD).max(1.0);
+        let box_center: crate::graphlayout::V3 = std::array::from_fn(|axis| {
+            let (lo, hi) = st.pos.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                (lo.min(p[axis]), hi.max(p[axis]))
+            });
+            if n == 0 { 0.0 } else { (lo + hi) / 2.0 }
+        });
+        // In 3D: how far out each node is drawn — across and up — at the
+        // farthest it gets in a whole turn of the spin at this tilt, its
+        // perspective included. The spin only turns the camera round the
+        // upright axis, so the framing it gives holds at every angle of it
+        // (a spin never makes it breathe), yet is no bigger than the graph
+        // needs: a sphere round a flat or tall graph left half the frame
+        // empty. A tilt (an orbit up or down) eases it to the new bound.
+        let pitch = st.pitch * e;
+        let (mut across, mut up): (Vec<f32>, Vec<f32>) = st
             .pos
             .iter()
-            .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
-            .collect();
-        dists.sort_by(f32::total_cmp);
-        let idx = (dists.len().saturating_sub(1) as f32 * 0.9) as usize;
-        let r = dists.get(idx).copied().unwrap_or(1.0).max(1.0);
-        let persp0 = FOCAL / CAM;
-        let fit = (bounds.width.min(bounds.height) - 2.0 * GRAPH_PAD) / (2.0 * r * persp0);
-        st.fit_scale = fit.max(1e-4) * st.zoom;
+            .map(|p| {
+                let d = [
+                    p[0] - box_center[0],
+                    p[1] - box_center[1],
+                    p[2] - box_center[2],
+                ];
+                (0..SPIN_SAMPLES).fold((0.0f32, 0.0f32), |(x, y), k| {
+                    let yaw = k as f32 * std::f32::consts::TAU / SPIN_SAMPLES as f32;
+                    let (rx, ry, _, _) = Self::project_view(rotate(d, yaw, pitch));
+                    (x.max(rx.abs()), y.max(ry.abs()))
+                })
+            })
+            .unzip();
+        across.sort_by(f32::total_cmp);
+        up.sort_by(f32::total_cmp);
+        // Sampled turns can miss a node's farthest by a hair: a little room.
+        let fit_3d = (inner_w / (2.0 * robust_extent(&across)))
+            .min(inner_h / (2.0 * robust_extent(&up)))
+            / SPIN_SAMPLE_SLACK;
+        let half = |axis: usize| {
+            let mut d: Vec<f32> = st
+                .pos
+                .iter()
+                .map(|p| (p[axis] - box_center[axis]).abs())
+                .collect();
+            d.sort_by(f32::total_cmp);
+            robust_extent(&d)
+        };
+        let fit_2d = (inner_w / (2.0 * half(0))).min(inner_h / (2.0 * half(1)));
+        // A 3D camera at rest centres the picture as it stands: the middle
+        // of what it shows, not the pivot it turns about (from some angles
+        // the graph sits off to one side of it). Turning — the spin, a fling,
+        // an orbit — it centres on the pivot again, the one centre no angle
+        // runs out of; the two ease into each other as the camera starts and
+        // stops. The scale stays the whole turn's: no zooming in and out as
+        // the camera is grabbed and let go.
+        //
+        // A node held is not a turn of the camera: the camera holds its
+        // framing while the node is held, so the node stays under the hand —
+        // neither re-centred for the grab nor followed as it is pulled out —
+        // and eases to the graph as it has become once it is let go. (A new
+        // frame, or a switch between 3D and 2D, still frames it at once.)
+        let reframe = st.fit_base <= 0.0 || resized || switching;
+        let held = matches!(st.drag, Drag::Node(..)) && !reframe;
+        let still = !st.spinning && st.drag == Drag::None;
+        let shift_to = if held {
+            st.shift_goal
+        } else if still && e > 0.0 {
+            let (lo_x, hi_x, lo_y, hi_y) = st.pos.iter().fold(
+                (f32::MAX, f32::MIN, f32::MAX, f32::MIN),
+                |(a, b, c, d), p| {
+                    let q = [
+                        p[0] - box_center[0],
+                        p[1] - box_center[1],
+                        p[2] - box_center[2],
+                    ];
+                    let (rx, ry, _, persp3) =
+                        Self::project_view(rotate(q, st.yaw * e, st.pitch * e));
+                    let persp = 1.0 + (persp3 - 1.0) * e;
+                    let (x, y) = (rx / persp3 * persp, ry / persp3 * persp);
+                    (a.min(x), b.max(x), c.min(y), d.max(y))
+                },
+            );
+            if n == 0 {
+                (0.0, 0.0)
+            } else {
+                ((lo_x + hi_x) / 2.0, (lo_y + hi_y) / 2.0)
+            }
+        } else {
+            (0.0, 0.0)
+        };
+        let (fit_to, center_to) = if held {
+            (st.fit_base, st.center)
+        } else {
+            (fit_2d + (fit_3d - fit_2d) * e, box_center)
+        };
+        // While the mode switches, the blend of the two framings moves as
+        // smoothly as the switch does: followed, not eased after.
+        if reframe {
+            st.fit_base = fit_to;
+            st.center = center_to;
+            st.shift = shift_to;
+            st.shift_vel = (0.0, 0.0);
+            st.shift_goal = shift_to;
+        } else {
+            let step = ease_step(dt, FRAME_TAU);
+            st.fit_base += (fit_to - st.fit_base) * step;
+            for (now, to) in st.center.iter_mut().zip(center_to) {
+                *now += (to - *now) * step;
+            }
+            // The re-centring jumps its target when the camera starts or
+            // stops: the target eased in, then a critically damped spring
+            // takes it there — from rest, its acceleration building.
+            let lead = ease_step(dt, LEAD_TAU);
+            let goal = (
+                st.shift_goal.0 + (shift_to.0 - st.shift_goal.0) * lead,
+                st.shift_goal.1 + (shift_to.1 - st.shift_goal.1) * lead,
+            );
+            st.shift_goal = goal;
+            let (x, vx) = spring(st.shift.0 - goal.0, st.shift_vel.0, SHIFT_RATE, dt);
+            let (y, vy) = spring(st.shift.1 - goal.1, st.shift_vel.1, SHIFT_RATE, dt);
+            st.shift = (goal.0 + x, goal.1 + y);
+            st.shift_vel = (vx, vy);
+        }
+        let near_fit = (st.fit_base / fit_to - 1.0).abs() < 1e-3;
+        let near_center = (0..3).all(|c| (st.center[c] - center_to[c]).abs() < 0.05);
+        let near_shift = (st.shift.0 - shift_to.0).abs() < 0.05
+            && (st.shift.1 - shift_to.1).abs() < 0.05
+            && st.shift_vel.0.abs() < 0.5
+            && st.shift_vel.1.abs() < 0.5
+            && (st.shift_goal.0 - shift_to.0).abs() < 0.05
+            && (st.shift_goal.1 - shift_to.1).abs() < 0.05;
+        st.framing = !(near_fit && near_center && near_shift);
+        if !st.framing {
+            st.fit_base = fit_to;
+            st.center = center_to;
+            st.shift = shift_to;
+            st.shift_vel = (0.0, 0.0);
+            st.shift_goal = shift_to;
+        }
+        st.fit_scale = st.fit_base.max(1e-4) * st.zoom;
         st.fit_off = (bounds.width * 0.5, bounds.height * 0.5);
 
         // --- Label opacities ------------------------------------------------
         // Compute each label's *target* opacity (depth fade × whether the
-        // declutter keeps it), then ease the stored opacity toward it — so both
-        // the depth fade and the discrete declutter flips resolve as smooth
-        // cross-fades instead of pops as the graph rotates.
+        // declutter keeps it) and side, then ease the stored ones toward
+        // them — so the depth fade, the discrete declutter flips and a label
+        // changing sides all resolve as cross-fades instead of pops.
         let lproj = self.project_all(bounds, st);
         let (mut minz, mut maxz) = (f32::MAX, f32::MIN);
         for p in &lproj {
@@ -955,6 +1287,11 @@ impl GraphCanvas<'_> {
             maxz = maxz.max(p.2);
         }
         let span = (maxz - minz).max(1.0);
+        // The depth fade thins a crowd of labels; a few nodes keep all
+        // their names. Measured against the nodes' own depths, it took the
+        // farthest label away whatever the map, and a map of three files
+        // named one of them. Full from a few dozen nodes up.
+        let depth_fade = e * ((n as f32 - FADE_FREE_NODES) / FADE_FULL_NODES).clamp(0.0, 1.0);
         // Priority: hovered first, then nearest the camera.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
@@ -964,22 +1301,34 @@ impl GraphCanvas<'_> {
         });
         let mut placed: Vec<iced::Rectangle> = Vec::new();
         let mut target = vec![0.0f32; n];
+        let mut side = st.label_side_target.clone();
+        side.resize(n, 0.0);
         for &i in &order {
             let (x, y, z, persp) = lproj[i];
             let is_hover = hovered == Some(i);
-            let fade = if is_hover || !self.is_3d {
+            let fade = if is_hover {
                 1.0
             } else {
-                smoothstep(0.34, 0.82, (z - minz) / span)
+                1.0 - depth_fade + depth_fade * smoothstep(0.34, 0.82, (z - minz) / span)
+            };
+            let r = node_radius(self.layout.nodes[i].weight, persp);
+            // The width the label is actually drawn at, not a per-char guess.
+            let width = st.label_w.get(i).copied().unwrap_or(0.0);
+            // Left of its node when it would run off the right edge — and
+            // back only once there is room to spare, so a node near the edge
+            // does not flick its label from side to side.
+            let past = x + r + 3.0 + width - (bounds.width - 2.0);
+            side[i] = if side[i] >= 0.5 {
+                if past > -LABEL_SIDE_SLACK { 1.0 } else { 0.0 }
+            } else if past > 0.0 {
+                1.0
+            } else {
+                0.0
             };
             if fade <= 0.006 {
                 continue; // too deep to bother placing
             }
-            let r = node_radius(self.layout.nodes[i].weight, persp);
-            // The width the label is actually drawn at, not a per-char guess.
-            let width = st.label_w.get(i).copied().unwrap_or(0.0);
-            let flip = x + r + 3.0 + width > bounds.width - 2.0;
-            let rect_x = if flip {
+            let rect_x = if side[i] >= 0.5 {
                 x - r - 3.0 - width
             } else {
                 x + r + 3.0
@@ -999,15 +1348,20 @@ impl GraphCanvas<'_> {
                 }
             }
         }
-        // Ease toward the target (time-based, ~0.12s to close most of the gap).
-        let step = (dt * 9.0).min(1.0);
-        for (la, t) in st.label_alpha.iter_mut().zip(&target) {
-            *la += (t - *la) * step;
-            if (*la - t).abs() <= LABEL_EPS {
-                *la = *t;
+        let step = ease_step(dt, LABEL_TAU);
+        for (now, to) in st
+            .label_alpha
+            .iter_mut()
+            .zip(&target)
+            .chain(st.label_side.iter_mut().zip(&side))
+        {
+            *now += (to - *now) * step;
+            if (*now - to).abs() <= LABEL_EPS {
+                *now = *to;
             }
         }
         st.label_target = target;
+        st.label_side_target = side;
         !graph_settled(st)
     }
 
@@ -1017,7 +1371,6 @@ impl GraphCanvas<'_> {
         &self,
         frame: &mut iced::widget::canvas::Frame,
         st: &GraphState,
-        bounds: iced::Rectangle,
         proj: &[(f32, f32, f32, f32)],
         hovered: Option<usize>,
     ) {
@@ -1039,11 +1392,7 @@ impl GraphCanvas<'_> {
             else {
                 continue;
             };
-            let d = if self.is_3d {
-                (near(az) + near(bz)) * 0.5
-            } else {
-                1.0
-            };
+            let d = 1.0 - st.dim + st.dim * (near(az) + near(bz)) * 0.5;
             let (dx, dy) = (bx - ax, by - ay);
             let len = (dx * dx + dy * dy).sqrt();
             if len < 2.0 {
@@ -1094,7 +1443,8 @@ impl GraphCanvas<'_> {
             }
             let la = st.label_alpha.get(i).copied().unwrap_or(0.0);
             if la >= 0.01 {
-                self.draw_label(frame, bounds, i, p, radius(i), la, false);
+                let side = st.label_side.get(i).copied().unwrap_or(0.0);
+                self.draw_label(frame, i, p, radius(i), la, side, false);
             }
         }
     }
@@ -1138,17 +1488,38 @@ impl GraphCanvas<'_> {
         }
     }
 
-    /// One node label at opacity `alpha`, flipped to the node's left when it
-    /// would run off the right edge.
+    /// One node label at opacity `alpha`, on the node's right or — `side`
+    /// 1 — its left; between, on both, cross-faded, as a label changing
+    /// sides is drawn.
     #[allow(clippy::too_many_arguments)]
     fn draw_label(
         &self,
         frame: &mut iced::widget::canvas::Frame,
-        bounds: iced::Rectangle,
         i: usize,
         (x, y, _, _): (f32, f32, f32, f32),
         r: f32,
         alpha: f32,
+        side: f32,
+        hover: bool,
+    ) {
+        for (left, share) in [(false, 1.0 - side), (true, side)] {
+            let a = alpha.min(1.0) * share;
+            if a >= 0.01 {
+                self.draw_label_at(frame, i, (x, y), r, a, left, hover);
+            }
+        }
+    }
+
+    /// One node label at opacity `alpha`, right of its node or `left` of it.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_label_at(
+        &self,
+        frame: &mut iced::widget::canvas::Frame,
+        i: usize,
+        (x, y): (f32, f32),
+        r: f32,
+        alpha: f32,
+        left: bool,
         hover: bool,
     ) {
         use iced::widget::canvas::Text;
@@ -1163,8 +1534,7 @@ impl GraphCanvas<'_> {
         // fall back to `fill_text` for labels the texture font cannot draw.
         match super::graph_labels::label_texture(&nd.label, color) {
             Some(tex) => {
-                let flip = x + r + 3.0 + tex.width > bounds.width - 2.0;
-                let bx = if flip {
+                let bx = if left {
                     x - r - 3.0 - tex.width
                 } else {
                     x + r + 3.0
@@ -1176,13 +1546,11 @@ impl GraphCanvas<'_> {
                     ),
                     iced::advanced::image::Image::new(tex.handle)
                         .filter_method(iced::advanced::image::FilterMethod::Linear)
-                        .opacity(alpha.min(1.0)),
+                        .opacity(alpha),
                 );
             }
             None => {
-                let width = super::graph_labels::label_width(&nd.label);
-                let flip = x + r + 3.0 + width > bounds.width - 2.0;
-                let (text_x, align_x) = if flip {
+                let (text_x, align_x) = if left {
                     (x - r - 3.0, iced::alignment::Horizontal::Right)
                 } else {
                     (x + r + 3.0, iced::alignment::Horizontal::Left)
@@ -1190,7 +1558,7 @@ impl GraphCanvas<'_> {
                 frame.fill_text(Text {
                     content: nd.label.clone(),
                     position: iced::Point::new(text_x, y),
-                    color: theme::with_alpha(color, alpha.min(1.0)),
+                    color: theme::with_alpha(color, alpha),
                     size: super::graph_labels::SIZE.into(),
                     align_x: align_x.into(),
                     align_y: iced::alignment::Vertical::Center,
@@ -1238,7 +1606,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             state.scene_key.set(Some(key));
         }
         let scene = state.scene.draw(renderer, bounds.size(), |frame| {
-            self.draw_scene(frame, state, bounds, &proj, hovered);
+            self.draw_scene(frame, state, &proj, hovered);
         });
         // The hovered node and its label, on top.
         let mut top = Frame::new(renderer, bounds.size());
@@ -1246,7 +1614,8 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             let r = node_radius(self.layout.nodes[i].weight, proj[i].3);
             self.draw_node(&mut top, i, proj[i], r, true);
             let la = state.label_alpha.get(i).copied().unwrap_or(1.0);
-            self.draw_label(&mut top, bounds, i, proj[i], r, la.max(0.01), true);
+            let side = state.label_side.get(i).copied().unwrap_or(0.0);
+            self.draw_label(&mut top, i, proj[i], r, la.max(0.01), side, true);
         }
         vec![scene, top.into_geometry()]
     }
@@ -1279,11 +1648,18 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             // the wheel fall through to the page.
             iced::Event::Mouse(mouse::Event::WheelScrolled { delta }) if self.scroll_zooms => {
                 cursor.position_in(bounds)?;
+                let at = cursor.position_in(bounds)?;
                 let dy = match delta {
                     mouse::ScrollDelta::Lines { y, .. } => *y,
                     mouse::ScrollDelta::Pixels { y, .. } => *y / 40.0,
                 };
-                state.zoom = (state.zoom * (1.0 + dy * 0.12)).clamp(0.3, 5.0);
+                // Eased to by the ticks; flat, the point under the pointer
+                // stays where it is.
+                state.zoom_target = (state.zoom_target * (1.0 + dy * 0.12)).clamp(0.3, 5.0);
+                state.zoom_at = Some(iced::Vector::new(
+                    at.x - bounds.width * 0.5,
+                    at.y - bounds.height * 0.5,
+                ));
                 state.touch();
                 Some(Action::request_redraw().and_capture())
             }
@@ -1294,6 +1670,12 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 let cin = cursor.position_in(bounds)?;
                 state.moved = 0.0;
                 state.last_cursor = cursor.position().unwrap_or(cin);
+                // A grab holds the camera: no fling or spin under the hand.
+                state.yaw_vel = 0.0;
+                state.pitch_vel = 0.0;
+                state.spin_goal = 0.0;
+                state.last_yaw = state.yaw;
+                state.last_pitch = state.pitch;
                 state.drag = match self.hit(cin, bounds, state) {
                     Some(i) => {
                         state.alpha = state.alpha.max(0.5);
@@ -1511,17 +1893,6 @@ pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a
     .into()
 }
 
-/// What dragging the map's background does, as its caption says it: a 3D
-/// map orbits, a 2D one pans. One wording for every map (the overview's
-/// caption said "orbit" in 2D).
-pub(crate) fn map_nav_hint(graph_3d: bool) -> &'static str {
-    if graph_3d {
-        "drag to orbit"
-    } else {
-        "drag to pan"
-    }
-}
-
 pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.import_graph;
     if g.is_empty() {
@@ -1530,11 +1901,11 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
         // not a finding: say it is being built rather than "nothing found".
         let work = &app.proj.import_work;
         let msg = if app.scanning || app.proj.indexing {
-            "Indexing the project…"
+            tr!("Indexing the project…")
         } else if work.running || !work.pending.is_empty() {
-            "Resolving imports…"
+            tr!("Resolving imports…")
         } else {
-            "No imports found in this project."
+            tr!("No imports found in this project.")
         };
         return container(text(msg).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -1546,13 +1917,23 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
-        text(format!(
-            "{} files · {} internal edges · {} external packages · {} cycles",
-            ranks.files,
-            ranks.internal_edges,
-            ranks.externals.len(),
-            app.proj.import_cycles.len(),
-        ))
+        text(
+            [
+                trn!("1 file", "{n} files", ranks.files),
+                trn!(
+                    "1 internal edge",
+                    "{n} internal edges",
+                    ranks.internal_edges
+                ),
+                trn!(
+                    "1 external package",
+                    "{n} external packages",
+                    ranks.externals.len()
+                ),
+                trn!("1 cycle", "{n} cycles", app.proj.import_cycles.len()),
+            ]
+            .join(" · "),
+        )
         .size(ts::BODY)
         .color(theme::accent())
         .into(),
@@ -1560,7 +1941,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
 
     // Cycles — a real structural smell worth surfacing first.
     if !app.proj.import_cycles.is_empty() {
-        rows.push(section_header("IMPORT CYCLES"));
+        rows.push(section_header(tr!("Import cycles")));
         for cycle in &app.proj.import_cycles {
             let names: Vec<String> = cycle
                 .iter()
@@ -1585,13 +1966,13 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
     }
 
     // Most depended-on (highest fan-in) — the architectural hubs.
-    rows.push(section_header("MOST DEPENDED-ON (fan-in)"));
+    rows.push(section_header(tr!("Most depended-on (fan-in)")));
     for file in &ranks.by_fan_in {
         rows.push(import_file_row(app, file));
     }
 
     // Most dependencies (highest fan-out).
-    rows.push(section_header("MOST DEPENDENCIES (fan-out)"));
+    rows.push(section_header(tr!("Most dependencies (fan-out)")));
     for file in &ranks.by_fan_out {
         rows.push(import_file_row(app, file));
     }
@@ -1600,7 +1981,7 @@ pub(crate) fn project_imports_body(app: &App) -> Element<'_, Message> {
 
     // External packages the project pulls in.
     if !ranks.externals.is_empty() {
-        rows.push(section_header("EXTERNAL PACKAGES"));
+        rows.push(section_header(tr!("External packages")));
         rows.push(
             container(
                 text(ranks.externals.join("  ·  "))
@@ -1697,11 +2078,11 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
         // (the graph is linked from its symbol index), is not a finding: only
         // a build over the whole index says there are no functions.
         let msg = if app.proj.project_calls.building {
-            "Building call graph…"
+            tr!("Building call graph…")
         } else if app.scanning || app.proj.indexing {
-            "Indexing the project…"
+            tr!("Indexing the project…")
         } else {
-            "No functions found in this project."
+            tr!("No functions found in this project.")
         };
         return container(text(msg).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -1711,9 +2092,9 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} functions · {} call edges",
-            g.node_count(),
-            g.edge_count(),
+            "{} · {}",
+            trn!("1 function", "{n} functions", g.node_count()),
+            trn!("1 call edge", "{n} call edges", g.edge_count()),
         ))
         .size(ts::BODY)
         .color(theme::accent())
@@ -1721,7 +2102,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     );
     rows.push(
         text(app.precise_summary().unwrap_or_else(|| {
-            "Name-based & approximate — Refine with LSP for exact edges.".to_string()
+            tr!("Name-based & approximate — Refine with LSP for exact edges.").to_string()
         }))
         .size(ts::CAPTION)
         .color(theme::dim())
@@ -1738,35 +2119,41 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 
     // Most-called functions (hubs), unique names only so the counts mean something.
     if !summary.hubs.is_empty() {
-        rows.push(section_header("MOST CALLED (unique names)"));
+        rows.push(section_header(tr!("Most called (unique names)")));
         for &(id, callers) in &summary.hubs {
-            rows.push(call_symbol_row(app, id, format!("{callers} callers")));
+            rows.push(call_symbol_row(
+                app,
+                id,
+                trn!("1 caller", "{n} callers", callers),
+            ));
         }
     }
 
     let visits = trace_visits(app, g);
     if !visits.is_empty() {
-        rows.push(section_header("EXECUTED (the last debug run stopped here)"));
+        rows.push(section_header(tr!(
+            "Executed (the last debug run stopped here)"
+        )));
         for &(id, stops) in visits.iter().take(40) {
-            rows.push(call_symbol_row(
-                app,
-                id,
-                format!("{stops} {}", if stops == 1 { "stop" } else { "stops" }),
-            ));
+            rows.push(call_symbol_row(app, id, trn!("1 stop", "{n} stops", stops)));
         }
     }
 
     if !summary.entries.is_empty() {
-        rows.push(section_header(
-            "ENTRY POINTS (main, routes, commands, handlers)",
-        ));
+        rows.push(section_header(tr!(
+            "Entry points (main, routes, commands, handlers)"
+        )));
         for &(id, kind) in summary.entries.iter().take(40) {
-            rows.push(call_symbol_row(app, id, kind.to_string()));
+            rows.push(call_symbol_row(
+                app,
+                id,
+                crate::i18n::lookup(kind).to_string(),
+            ));
         }
         if summary.entries.len() > 40 {
             rows.push(
                 container(
-                    text(format!("… and {} more", summary.entries.len() - 40))
+                    text(tr!("… and {n} more", n = summary.entries.len() - 40))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
@@ -1779,14 +2166,14 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     rows.extend(churn_rows(app));
 
     let uncalled = &summary.uncalled;
-    rows.push(section_header("UNCALLED (possibly dead)"));
+    rows.push(section_header(tr!("Uncalled (possibly dead)")));
     for &(id, out) in uncalled.iter().take(60) {
         rows.push(call_symbol_row(app, id, format!("→{out}")));
     }
     if uncalled.len() > 60 {
         rows.push(
             container(
-                text(format!("… and {} more", uncalled.len() - 60))
+                text(tr!("… and {n} more", n = uncalled.len() - 60))
                     .size(ts::CAPTION)
                     .color(theme::dim()),
             )
@@ -1810,11 +2197,11 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.type_graph;
     if g.is_empty() {
         let msg = if app.docs_loading() {
-            "Building the API index…"
+            tr!("Building the API index…")
         } else if app.scanning || app.proj.indexing {
-            "Indexing the project…"
+            tr!("Indexing the project…")
         } else {
-            "No types found in this project."
+            tr!("No types found in this project.")
         };
         return container(text(msg).size(ts::BODY).color(theme::dim()))
             .padding(8)
@@ -1823,39 +2210,37 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
         text(format!(
-            "{} types · {} relations · {} inherit",
-            g.node_count(),
-            g.edge_count(),
-            g.inherits_count(),
+            "{} · {} · {}",
+            trn!("1 type", "{n} types", g.node_count()),
+            trn!("1 relation", "{n} relations", g.edge_count()),
+            trn!("1 inherits", "{n} inherit", g.inherits_count()),
         ))
         .size(ts::BODY)
         .color(theme::accent())
         .into(),
     );
-    rows.push(
-        text("A relation is a type named in another's declaration, fields, variants or method signatures.")
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into(),
-    );
     const TOP: usize = 12;
     let referenced = g.most_referenced(TOP);
     if !referenced.is_empty() {
-        rows.push(section_header("MOST REFERENCED (named by others)"));
+        rows.push(section_header(tr!("Most referenced (named by others)")));
         for id in referenced {
             rows.push(type_row(app, id, format!("{} ←", g.fan_in(id))));
         }
     }
     let derived = g.most_derived(TOP);
     if !derived.is_empty() {
-        rows.push(section_header("BASE TYPES (most subtypes)"));
+        rows.push(section_header(tr!("Base types (most subtypes)")));
         for id in derived {
-            rows.push(type_row(app, id, format!("{} subtypes", g.subtypes(id))));
+            rows.push(type_row(
+                app,
+                id,
+                trn!("1 subtype", "{n} subtypes", g.subtypes(id)),
+            ));
         }
     }
     let dependent = g.most_dependent(TOP);
     if !dependent.is_empty() {
-        rows.push(section_header("MOST DEPENDENCIES (naming others)"));
+        rows.push(section_header(tr!("Most dependencies (naming others)")));
         for id in dependent {
             rows.push(type_row(app, id, format!("→ {}", g.fan_out(id))));
         }
@@ -1878,7 +2263,8 @@ pub(crate) struct MapChoice {
 
 impl std::fmt::Display for MapChoice {
     fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(out, "{} ({})", self.title, self.nodes)
+        // The title, from clew-core, in the reader's language.
+        write!(out, "{} ({})", crate::i18n::lookup(&self.title), self.nodes)
     }
 }
 
@@ -1898,7 +2284,7 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         .and_then(|i| choices.get(i).cloned());
     match choices.len() {
         0 => app.proj.maps_building.then(|| {
-            text("Reading the project's maps…")
+            text(tr!("Reading the project's maps…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into()
@@ -1907,6 +2293,8 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
             pick_list(choices, selected, |c: MapChoice| {
                 Message::Graph(GraphMsg::SelectMap(c.id))
             })
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
             .padding([3, 8])
             .into(),
@@ -1928,15 +2316,11 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     };
     let Some(at) = app.selected_map_index() else {
         return hint(if let Some(e) = &app.proj.maps_error {
-            format!("Couldn't read the project's maps: {e}")
+            tr!("Couldn't read the project's maps: {error}", error = e)
         } else if app.proj.maps_building || app.scanning {
-            "Reading the project's maps…".into()
+            tr!("Reading the project's maps…").into()
         } else {
-            "No maps for this project. Maps are read from what the code declares: a SQL schema \
-             and its migrations, a web framework's routes, dependency injection and ORM \
-             relations, an OTP supervision tree, Go interfaces and the types that satisfy them, \
-             and more for each language."
-                .into()
+            tr!("No maps for this project.").into()
         });
     };
     let root = app
@@ -1948,22 +2332,24 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     let map = &app.proj.maps[at];
     let mut rows: Vec<Element<'_, Message>> = vec![
         text(format!(
-            "{} · {} nodes · {} arrows",
-            map.title,
-            map.nodes.len(),
-            map.edges.len()
+            "{} · {} · {}",
+            crate::i18n::lookup(&map.title),
+            trn!("1 node", "{n} nodes", map.nodes.len()),
+            trn!("1 arrow", "{n} arrows", map.edges.len())
         ))
         .size(ts::BODY)
         .color(theme::accent())
         .into(),
-        text(map.description.clone())
+        // Its line on how to read it, from clew-core: in the reader's
+        // language where the catalog has it.
+        text(crate::i18n::lookup(&map.description).to_string())
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
     ];
     if let Some(e) = &app.proj.maps_error {
         rows.push(
-            text(format!("The last read failed: {e}"))
+            text(tr!("The last read failed: {error}", error = e))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
@@ -1985,7 +2371,8 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     }
     let mut listed = 0;
     'kinds: for kind in kinds {
-        rows.push(section_header(kind));
+        // A kind of node, as clew-core names it ("table", "route").
+        rows.push(section_header(map_kind_label(kind)));
         for (i, n) in map.nodes.iter().enumerate().filter(|(_, n)| n.kind == kind) {
             if listed == MAP_LIST_MAX {
                 break 'kinds;
@@ -2040,8 +2427,9 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     }
     if listed < map.nodes.len() {
         rows.push(
-            text(format!(
-                "{} more — the graph view shows every node",
+            text(trn!(
+                "1 more — the graph view shows every node",
+                "{n} more — the graph view shows every node",
                 map.nodes.len() - listed
             ))
             .size(ts::CAPTION)
@@ -2184,10 +2572,10 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let Some(churn) = app.proj.churn.as_deref() else {
         if app.proj.churn_loading {
-            rows.push(section_header("MOST CHANGED"));
+            rows.push(section_header(tr!("Most changed")));
             rows.push(
                 container(
-                    text("Reading the change history…")
+                    text(tr!("Reading the change history…"))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
@@ -2200,8 +2588,9 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
     if churn.top.is_empty() {
         return rows;
     }
-    rows.push(section_header(&format!(
-        "MOST CHANGED (last {} commits)",
+    rows.push(section_header(&trn!(
+        "Most changed (last commit)",
+        "Most changed (last {n} commits)",
         churn.commits
     )));
     let now = std::time::SystemTime::now()
@@ -2222,10 +2611,9 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
         }
         line = line.push(space().width(Fill)).push(
             text(format!(
-                "{} {} · {}",
-                f.commits,
-                if f.commits == 1 { "commit" } else { "commits" },
-                crate::git::relative_time(f.last, now)
+                "{} · {}",
+                trn!("1 commit", "{n} commits", f.commits),
+                crate::i18n::ago(f.last, now)
             ))
             .size(ts::CAPTION)
             .color(heat_color(
@@ -2255,6 +2643,18 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
 pub(crate) const CHURN_ROWS: usize = 12;
 
 // -------------------------------------------------- explanation overlay
+
+/// A kind of map node, as its list's heading says it: clew-core's word for
+/// it, in the reader's language. The two that name something else elsewhere
+/// (the debugger stops on a "step" and at an "entry") have headings of
+/// their own.
+fn map_kind_label(kind: &str) -> &str {
+    match kind {
+        "step" => tr!("Build step"),
+        "entry" => tr!("Entry point"),
+        other => crate::i18n::lookup(other),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -2428,6 +2828,28 @@ mod tests {
         assert!(st.pos.iter().all(|p| p[2].abs() <= 0.5));
     }
 
+    /// A small map names every node however it is turned: the depth fade
+    /// took the farthest of three files' labels away, and the middle one's
+    /// was faint.
+    #[test]
+    fn a_small_map_names_every_node() {
+        let l = layout(3);
+        let c = canvas(&l, true, false);
+        let mut st = GraphState::default();
+        assert!(frames_to_rest(&c, &mut st, 5_000).is_some());
+        assert!(
+            st.label_target.iter().all(|&t| t > 0.99),
+            "{:?}",
+            st.label_target
+        );
+        // A crowd still thins by depth.
+        let crowd = layout(60);
+        let c = canvas(&crowd, true, false);
+        let mut st = GraphState::default();
+        assert!(frames_to_rest(&c, &mut st, 20_000).is_some());
+        assert!(st.label_target.iter().any(|&t| t < 0.5));
+    }
+
     #[test]
     fn graph_settled_requires_every_kind_of_motion_to_be_over() {
         let mut st = GraphState::default();
@@ -2525,5 +2947,350 @@ mod tests {
             }
             other => panic!("expected the node to open, got {other:?}"),
         }
+    }
+
+    /// Where each node is drawn.
+    fn on_screen(c: &GraphCanvas<'_>, st: &GraphState) -> Vec<(f32, f32)> {
+        (0..c.layout.nodes.len())
+            .map(|i| {
+                let p = c.node_screen(i, BOUNDS, st);
+                (p.0, p.1)
+            })
+            .collect()
+    }
+
+    /// Ticks `frames` frames at 60 fps, the first `from` frames after
+    /// `t0`: how far the node that moved most moved in each.
+    fn steps(
+        c: &GraphCanvas<'_>,
+        st: &mut GraphState,
+        t0: std::time::Instant,
+        from: usize,
+        frames: usize,
+    ) -> Vec<f32> {
+        let mut last = on_screen(c, st);
+        (from..from + frames)
+            .map(|f| {
+                let now = t0 + std::time::Duration::from_micros(16_667 * f as u64);
+                let _ = c.tick(st, BOUNDS, now, iced::advanced::mouse::Cursor::Unavailable);
+                let here = on_screen(c, st);
+                let most = here
+                    .iter()
+                    .zip(&last)
+                    .map(|(a, b)| ((a.0 - b.0).powi(2) + (a.1 - b.1).powi(2)).sqrt())
+                    .fold(0.0f32, f32::max);
+                last = here;
+                most
+            })
+            .collect()
+    }
+
+    /// The sharpest change of speed between two frames, px per frame, from
+    /// a speed of `before`.
+    fn jolt(before: f32, steps: &[f32]) -> f32 {
+        std::iter::once(before)
+            .chain(steps.iter().copied())
+            .collect::<Vec<_>>()
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0, f32::max)
+    }
+
+    /// A map left to settle in the mode asked for, and when it got there.
+    fn settled(l: &Layout, is_3d: bool) -> (GraphState, std::time::Instant, usize) {
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let c = canvas(l, is_3d, false);
+        let _ = steps(&c, &mut st, t0, 0, 1500);
+        assert!(graph_settled(&st), "the map did not settle");
+        (st, t0, 1500)
+    }
+
+    /// Switching between 3D and 2D moves the camera: it gathers speed and
+    /// settles — no frame jumps. It used to snap the whole picture in one
+    /// frame (over 100 px), the "flattening" after it unseen.
+    #[test]
+    fn switching_between_3d_and_2d_is_a_camera_move_not_a_jump() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        let to_2d = steps(&canvas(&l, false, false), &mut st, t0, f, 60);
+        assert!(to_2d[0] < 1.0, "it starts gently: {to_2d:?}");
+        assert!(jolt(0.0, &to_2d) < 2.5, "{to_2d:?}");
+        assert!(
+            to_2d[40..].iter().all(|&d| d < 0.05),
+            "and arrives: {to_2d:?}"
+        );
+        let _ = steps(&canvas(&l, false, false), &mut st, t0, f + 60, 900);
+        assert!(graph_settled(&st));
+        assert_eq!(st.dim, 0.0);
+        let to_3d = steps(&canvas(&l, true, false), &mut st, t0, f + 960, 60);
+        assert!(to_3d[0] < 1.5, "{to_3d:?}");
+        assert!(jolt(0.0, &to_3d) < 3.0, "{to_3d:?}");
+    }
+
+    /// A step of the wheel eases the zoom in and settles on what was asked;
+    /// flat, the point under the pointer stays where it is.
+    #[test]
+    fn the_wheel_zoom_eases_and_keeps_the_point_under_the_pointer() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, false);
+        let c = canvas(&l, false, false);
+        let (x, y, _, _) = c.node_screen(7, BOUNDS, &st);
+        let at = iced::advanced::mouse::Cursor::Available(Point::new(x, y));
+        let wheel = iced::Event::Mouse(iced::mouse::Event::WheelScrolled {
+            delta: iced::mouse::ScrollDelta::Lines { x: 0.0, y: 1.0 },
+        });
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            &c, &mut st, &wheel, BOUNDS, at,
+        );
+        assert_eq!(st.zoom, 1.0, "not at once");
+        let zoom = steps(&c, &mut st, t0, f, 60);
+        assert!(zoom[0] < 2.0, "it starts gently: {zoom:?}");
+        assert!(jolt(0.0, &zoom) < 2.5, "{zoom:?}");
+        assert!(graph_settled(&st), "settled");
+        assert!((st.zoom - 1.12).abs() < 1e-4, "{}", st.zoom);
+        let (x2, y2, _, _) = c.node_screen(7, BOUNDS, &st);
+        assert!(
+            (x2 - x).abs() < 0.5 && (y2 - y).abs() < 0.5,
+            "the node under the pointer moved: ({x}, {y}) → ({x2}, {y2})"
+        );
+    }
+
+    /// A node grabbed in a still 3D map stays under the pointer, held still
+    /// or pulled out: the camera holds its framing while the node is held.
+    /// The grab used to re-centre the picture on the pivot, as a turn does,
+    /// sliding the node out from under a pointer held still, and the camera
+    /// followed a node pulled out.
+    #[test]
+    fn a_node_held_in_a_still_3d_map_stays_under_the_pointer() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        assert!(
+            st.shift.0.abs() + st.shift.1.abs() > 1.0,
+            "precondition: at rest the picture is centred off the pivot: {:?}",
+            st.shift
+        );
+        let c = canvas(&l, true, false);
+        let (x, y, _, _) = c.node_screen(7, BOUNDS, &st);
+        let program = |e: &iced::Event, st: &mut GraphState, at: Point| {
+            <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                &c,
+                st,
+                e,
+                BOUNDS,
+                iced::advanced::mouse::Cursor::Available(at),
+            )
+        };
+        let press =
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left));
+        let _ = program(&press, &mut st, Point::new(x, y));
+        let Drag::Node(i, _) = st.drag else {
+            panic!("the press grabbed no node: {:?}", st.drag);
+        };
+        let (x, y, _, _) = c.node_screen(i, BOUNDS, &st);
+        let _ = steps(&c, &mut st, t0, f, 60);
+        let (x1, y1, _, _) = c.node_screen(i, BOUNDS, &st);
+        assert!(
+            (x1 - x).abs() < 0.5 && (y1 - y).abs() < 0.5,
+            "held still, the node slid from ({x}, {y}) to ({x1}, {y1})"
+        );
+        // Pulled out toward the frame's edge, then held there.
+        let out = Point::new(x + 120.0 * (x - BOUNDS.width / 2.0).signum(), y);
+        let moved = iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: out });
+        let _ = program(&moved, &mut st, out);
+        let _ = steps(&c, &mut st, t0, f + 60, 60);
+        let (x2, y2, _, _) = c.node_screen(i, BOUNDS, &st);
+        assert!(
+            (x2 - out.x).abs() < 0.5 && (y2 - out.y).abs() < 0.5,
+            "pulled out to {out:?}, the node is drawn at ({x2}, {y2})"
+        );
+    }
+
+    /// The idle spin gathers speed when switched on and coasts to a stop
+    /// when switched off — the re-centring that goes with each riding a
+    /// spring; a map woken from rest takes one frame's step, not the whole
+    /// pause's.
+    #[test]
+    fn the_spin_starts_and_stops_without_a_jolt() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        let on = steps(&canvas(&l, true, true), &mut st, t0, f + 600, 240);
+        // Starting, the camera also moves from centring the picture at rest
+        // to centring the turn: both from rest, on a spring.
+        assert!(on[0] < 0.3, "{:?}", &on[..4]);
+        assert!(jolt(0.0, &on) < 0.5, "{on:?}");
+        let off = steps(&canvas(&l, true, false), &mut st, t0, f + 840, 600);
+        assert!(jolt(on[on.len() - 1], &off) < 0.05, "{:?}", &off[..4]);
+        assert_eq!(off.last(), Some(&0.0), "it came to rest");
+        assert!(graph_settled(&st));
+    }
+
+    /// At rest the whole map is in its frame and centred in it: flat, its
+    /// box fills the frame inside the padding; in 3D every node stays inside
+    /// at any angle. The type map once ran off the top and bottom.
+    #[test]
+    fn a_map_at_rest_is_whole_and_centred_in_its_frame() {
+        let l = layout(40);
+        let (st, _, _) = settled(&l, false);
+        let shown = on_screen(&canvas(&l, false, false), &st);
+        let (lo_x, lo_y, hi_x, hi_y) = shown.iter().fold(
+            (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+            |(a, b, c, d), p| (a.min(p.0), b.min(p.1), c.max(p.0), d.max(p.1)),
+        );
+        assert!(lo_x >= GRAPH_PAD - 0.5 && hi_x <= BOUNDS.width - GRAPH_PAD + 0.5);
+        assert!(lo_y >= GRAPH_PAD - 0.5 && hi_y <= BOUNDS.height - GRAPH_PAD + 0.5);
+        assert!(((lo_x + hi_x) / 2.0 - BOUNDS.width / 2.0).abs() < 1.0);
+        assert!(((lo_y + hi_y) / 2.0 - BOUNDS.height / 2.0).abs() < 1.0);
+        let filled = (hi_x - lo_x) / (BOUNDS.width - 2.0 * GRAPH_PAD);
+        let filled = filled.max((hi_y - lo_y) / (BOUNDS.height - 2.0 * GRAPH_PAD));
+        assert!(filled > 0.99, "it fills the frame: {filled}");
+
+        // A 3D camera at rest: what it shows is centred.
+        let (st, _, _) = settled(&l, true);
+        let shown = on_screen(&canvas(&l, true, false), &st);
+        let (lo_x, lo_y, hi_x, hi_y) = shown.iter().fold(
+            (f32::MAX, f32::MAX, f32::MIN, f32::MIN),
+            |(a, b, c, d), p| (a.min(p.0), b.min(p.1), c.max(p.0), d.max(p.1)),
+        );
+        assert!(
+            ((lo_x + hi_x) / 2.0 - BOUNDS.width / 2.0).abs() < 1.0,
+            "{lo_x}..{hi_x}"
+        );
+        assert!(
+            ((lo_y + hi_y) / 2.0 - BOUNDS.height / 2.0).abs() < 1.0,
+            "{lo_y}..{hi_y}"
+        );
+
+        // Spinning, it frames the whole turn.
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let c = canvas(&l, true, true);
+        let _ = steps(&c, &mut st, t0, 0, 1500);
+        assert!(
+            st.shift.0.abs() < 0.05 && st.shift.1.abs() < 0.05,
+            "{:?}",
+            st.shift
+        );
+        // A whole turn of the spin: always inside the padding, and out to
+        // its edge on one axis somewhere in the turn — the frame used, not
+        // half of it.
+        let (half_w, half_h) = (
+            BOUNDS.width / 2.0 - GRAPH_PAD,
+            BOUNDS.height / 2.0 - GRAPH_PAD,
+        );
+        let (mut far_x, mut far_y) = (0.0f32, 0.0f32);
+        let yaw = st.yaw;
+        for k in 0..360 {
+            st.yaw = yaw + k as f32 * std::f32::consts::TAU / 360.0;
+            for (x, y) in on_screen(&c, &st) {
+                far_x = far_x.max((x - BOUNDS.width / 2.0).abs());
+                far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
+            }
+        }
+        assert!(
+            far_x <= half_w + 0.5 && far_y <= half_h + 0.5,
+            "{far_x} {far_y}"
+        );
+        assert!(
+            far_x >= half_w * 0.97 || far_y >= half_h * 0.97,
+            "the turn reaches the frame's edge: {far_x} of {half_w}, {far_y} of {half_h}"
+        );
+        for k in 0..24 {
+            st.yaw = k as f32 * 0.27;
+            st.pitch = (k as f32 * 0.4).sin() * 1.4;
+            for (x, y) in on_screen(&c, &st) {
+                assert!(
+                    (0.0..=BOUNDS.width).contains(&x) && (0.0..=BOUNDS.height).contains(&y),
+                    "({x}, {y}) is out of the frame at yaw {} pitch {}",
+                    st.yaw,
+                    st.pitch
+                );
+            }
+        }
+    }
+
+    /// An orbit let go while moving keeps turning, slowing to a stop: the
+    /// camera does not halt dead under a flick, nor run on forever.
+    #[test]
+    fn a_released_orbit_coasts_to_a_stop() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        let c = canvas(&l, true, false);
+        let event = |st: &mut GraphState, e: iced::Event, at: Point| {
+            <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                &c,
+                st,
+                &e,
+                BOUNDS,
+                iced::advanced::mouse::Cursor::Available(at),
+            )
+        };
+        let corner = Point::new(2.0, 2.0);
+        let _ = event(
+            &mut st,
+            iced::Event::Mouse(iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left)),
+            corner,
+        );
+        assert_eq!(st.drag, Drag::Orbit);
+        for k in 1..=6 {
+            let at = Point::new(2.0 + 12.0 * k as f32, 2.0);
+            let _ = event(
+                &mut st,
+                iced::Event::Mouse(iced::mouse::Event::CursorMoved { position: at }),
+                at,
+            );
+            let _ = steps(&c, &mut st, t0, f + k, 1);
+        }
+        let _ = event(
+            &mut st,
+            iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
+                iced::mouse::Button::Left,
+            )),
+            Point::new(74.0, 2.0),
+        );
+        let released = st.yaw;
+        assert!(st.yaw_vel > 1.0, "flung: {}", st.yaw_vel);
+        // The turn, frame by frame: only ever slower.
+        let turns: Vec<f32> = (0..300)
+            .map(|k| {
+                let before = st.yaw;
+                let _ = steps(&c, &mut st, t0, f + 7 + k, 1);
+                st.yaw - before
+            })
+            .collect();
+        assert!(
+            st.yaw > released + 0.1,
+            "it coasted on: {} → {}",
+            released,
+            st.yaw
+        );
+        assert!(
+            turns.windows(2).all(|w| w[1] <= w[0] + 1e-6),
+            "only ever slowing: {turns:?}"
+        );
+        assert!(graph_settled(&st), "and came to rest");
+    }
+
+    /// A label that would run off the right edge is drawn left of its node,
+    /// and one moving between the sides is eased across, not flipped.
+    #[test]
+    fn a_label_at_the_right_edge_sits_left_of_its_node() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, false);
+        let c = canvas(&l, false, false);
+        let shown = on_screen(&c, &st);
+        let right = (0..shown.len())
+            .max_by(|&a, &b| shown[a].0.total_cmp(&shown[b].0))
+            .unwrap();
+        assert_eq!(st.label_side[right], 0.0, "room enough on the right");
+        // Panned to the edge: its label goes over to the left, eased.
+        st.pan.x = BOUNDS.width - shown[right].0 - 20.0;
+        st.touch();
+        let _ = steps(&c, &mut st, t0, f, 1);
+        assert_eq!(st.label_side_target[right], 1.0);
+        let side = st.label_side[right];
+        assert!(side > 0.0 && side < 1.0, "eased: {side}");
+        let _ = steps(&c, &mut st, t0, f + 1, 120);
+        assert_eq!(st.label_side[right], 1.0);
     }
 }

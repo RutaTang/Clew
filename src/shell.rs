@@ -63,6 +63,7 @@ use iced::futures::future::BoxFuture;
 use iced::{Element, Subscription, Task, Theme, keyboard, window};
 
 use crate::app::UnsavedEdits;
+use crate::tr_noop;
 use crate::{App, Message};
 use crate::{EditorMsg, SettingsMsg, UpdaterMsg, WindowMsg};
 
@@ -230,12 +231,13 @@ struct Question {
     lose: &'static str,
 }
 
-/// The buttons of a window's question.
-const KEEP_WINDOW: &str = "Keep Window Open";
-const CLOSE_ANYWAY: &str = "Close Anyway";
+/// The buttons of a window's question, in English: a [`Question`] carries
+/// them in the reader's language (`crate::i18n::lookup`).
+const KEEP_WINDOW: &str = tr_noop!("Keep Window Open");
+const CLOSE_ANYWAY: &str = tr_noop!("Close Anyway");
 /// The buttons of a quit's question.
-const CANCEL_QUIT: &str = "Cancel";
-const QUIT_ANYWAY: &str = "Quit Anyway";
+const CANCEL_QUIT: &str = tr_noop!("Cancel");
+const QUIT_ANYWAY: &str = tr_noop!("Quit Anyway");
 
 /// How a question's sheet ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -674,8 +676,8 @@ impl Clew {
         let question = Question {
             title,
             message,
-            keep: KEEP_WINDOW,
-            lose: CLOSE_ANYWAY,
+            keep: crate::i18n::lookup(KEEP_WINDOW),
+            lose: crate::i18n::lookup(CLOSE_ANYWAY),
         };
         let asked = Asked::new(self.ticket(), std::slice::from_ref(&lost), agreed);
         let task = self.ask_on(id, question, &asked, by);
@@ -912,8 +914,8 @@ impl Clew {
         let question = Question {
             title,
             message,
-            keep: CANCEL_QUIT,
-            lose: QUIT_ANYWAY,
+            keep: crate::i18n::lookup(CANCEL_QUIT),
+            lose: crate::i18n::lookup(QUIT_ANYWAY),
         };
         let asked = Asked::new(self.ticket(), &lost, agreed);
         let by = if self.terminating {
@@ -1264,6 +1266,9 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let before = crate::theme::revision();
             // Same for the keymap: a rebind lands in the acting window's copy.
             let keymap_before = clew.windows.get(&id).map(|app| app.keymap.stamp());
+            // And the language, which the menu bar is built in.
+            #[cfg(target_os = "macos")]
+            let lang_before = crate::i18n::current();
             let task = match clew.windows.get_mut(&id) {
                 Some(app) => app.update(msg).map(move |m| Shell::Window(id, m)),
                 // The window is gone; its async work is not. iced keeps
@@ -1286,6 +1291,16 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let keymap_after = clew.windows.get(&id).map(|app| app.keymap.stamp());
             if keymap_before.is_some() && keymap_after != keymap_before {
                 adopt_keymap(clew, id);
+            }
+            // The menu bar speaks the language it was built in: a language
+            // chosen in Settings rebuilds it.
+            #[cfg(target_os = "macos")]
+            {
+                if crate::i18n::current() != lang_before
+                    && let Some(app) = clew.windows.get(&id)
+                {
+                    crate::macos::menu::rebuild(&app.keymap);
+                }
             }
             let task = if crate::theme::revision() == before {
                 task
@@ -1450,11 +1465,36 @@ fn forward_key(
     }
 }
 
+/// The key the app is told was pressed: the character typed for a plain or
+/// shifted press, which is what the code view's motions are spelled in;
+/// the key itself, without its modifiers, for a chord with Ctrl, Alt or ⌘,
+/// which is how shortcuts are spelled. iced gives the key without its
+/// modifiers, so Shift+G arrived as "g" — `G` (to the end) began a `g`
+/// prefix that ate the next key — and `$` as "4", `zR` and `zM` as `zr`
+/// and `zm`: none of them ever ran.
+fn typed_key(
+    key: keyboard::Key,
+    modified_key: keyboard::Key,
+    modifiers: keyboard::Modifiers,
+) -> keyboard::Key {
+    let chord = modifiers.command() || modifiers.control() || modifiers.alt() || modifiers.logo();
+    match modified_key {
+        keyboard::Key::Character(_) if !chord => modified_key,
+        _ => key,
+    }
+}
+
 /// Route a global runtime event to the shell message for the window it
 /// occurred in. A named `fn` because `listen_with` takes a non-capturing one.
 fn route(event: iced::Event, status: iced::event::Status, window: window::Id) -> Option<Shell> {
     match event {
-        iced::Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) => {
+        iced::Event::Keyboard(keyboard::Event::KeyPressed {
+            key,
+            modified_key,
+            modifiers,
+            ..
+        }) => {
+            let key = typed_key(key, modified_key, modifiers);
             forward_key(&key, modifiers, status).then(|| {
                 Shell::Window(
                     window,
@@ -2538,8 +2578,7 @@ mod tests {
         assert_eq!(question.title, "2 changes are not confirmed by the host");
         assert!(
             question.message.contains(&format!(
-                "2 changes to bookmarks in {project} were sent to the host, but it has not \
-                 confirmed them"
+                "2 changes to bookmarks in {project} were not confirmed by the host"
             )),
             "{}",
             question.message
@@ -2590,8 +2629,7 @@ mod tests {
         assert_eq!(question.title, "A change is not confirmed by the host");
         assert!(
             question.message.contains(&format!(
-                "1 change to bookmarks in {project} was sent to the host, but it has not \
-                 confirmed it"
+                "1 change to bookmarks in {project} was not confirmed by the host"
             )),
             "{}",
             question.message
@@ -2878,8 +2916,7 @@ mod tests {
             question.message,
             format!(
                 "3 changes to bookmarks in {project} are not saved to the host: 1 could not be \
-                 sent and 2 were sent but not confirmed. Keep the window open, and clew keeps \
-                 trying to save them. Close it, and they may be lost."
+                 sent and 2 were sent but not confirmed. Close, and they may be lost."
             )
         );
         // Asked after the grace, of a close the user asked for in clew.
@@ -2995,8 +3032,8 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "1 change to bookmarks in {project} could not be saved by the host. Keep the \
-                 window open, and it is tried again. Close it, and it is lost."
+                "1 change to bookmarks in {project} could not be saved by the host. Close, and \
+                 it is lost."
             )
         );
         assert!(rt.is_open(window));
@@ -3059,7 +3096,7 @@ mod tests {
             question.message,
             format!(
                 "The host could not save the change to the bookmark at a.rs:1 in {project}: it \
-                 is lost. Keep the window open to make it again, or close it."
+                 is lost."
             )
         );
         rt.answer(0, false);
@@ -3386,7 +3423,7 @@ mod tests {
         assert_eq!(rt.asked().len(), 1);
         rt.answer(0, false);
         // The wait is over: the next one says itself anew.
-        assert!(!rt.clew.windows[&window].waiting_said);
+        assert!(rt.clew.windows[&window].waiting_said.is_none());
 
         // The quit sends again the edit the host failed — due in its flush,
         // and the edit on the wire after it removes another bookmark — and
@@ -3730,6 +3767,69 @@ mod tests {
     /// debuggee ran on with no window left to stop them. The teardown must
     /// also stay window-scoped: another window's session is not this one's to
     /// end.
+    /// A chord held with Ctrl or ⌘ types nothing into a focused field: on
+    /// X11 winit gives Ctrl+= the text "=", and the search field took
+    /// "a" to "a=0" as Ctrl+= and Ctrl+0 zoomed. AltGr — Ctrl+Alt on
+    /// Windows — still types its character, and a plain or shifted key its.
+    /// A shifted letter or symbol reaches the code view as the character it
+    /// types — `G`, `$` — and a chord as its unmodified key, as shortcuts
+    /// are spelled.
+    #[test]
+    fn a_key_is_routed_as_the_character_it_types() {
+        use iced::keyboard::{Key, Modifiers};
+        let press = |key: &str, typed: &str, modifiers| {
+            let event = iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                key: Key::Character(key.into()),
+                modified_key: Key::Character(typed.into()),
+                physical_key: keyboard::key::Physical::Unidentified(
+                    keyboard::key::NativeCode::Unidentified,
+                ),
+                location: keyboard::Location::Standard,
+                modifiers,
+                text: None,
+                repeat: false,
+            });
+            match route(event, iced::event::Status::Ignored, window::Id::unique()) {
+                Some(Shell::Window(_, Message::Editor(EditorMsg::KeyPressed(key, _)))) => key,
+                _ => panic!("{key} was not routed as a key press"),
+            }
+        };
+        assert_eq!(
+            press("g", "G", Modifiers::SHIFT),
+            Key::Character("G".into())
+        );
+        assert_eq!(
+            press("4", "$", Modifiers::SHIFT),
+            Key::Character("$".into())
+        );
+        assert_eq!(
+            press("j", "j", Modifiers::empty()),
+            Key::Character("j".into())
+        );
+        assert_eq!(
+            press("f", "F", Modifiers::CTRL | Modifiers::SHIFT),
+            Key::Character("f".into())
+        );
+        assert_eq!(press("p", "p", Modifiers::LOGO), Key::Character("p".into()));
+    }
+
+    #[test]
+    fn a_ctrl_or_command_chord_types_nothing() {
+        use iced::keyboard::Modifiers;
+        use iced_winit::conversion::typed_text;
+        let text = |s: &str, m: Modifiers| typed_text(Some(s.into()), m).map(|t| t.to_string());
+        assert_eq!(text("=", Modifiers::CTRL), None);
+        assert_eq!(text("+", Modifiers::CTRL | Modifiers::SHIFT), None);
+        assert_eq!(text("0", Modifiers::LOGO), None);
+        assert_eq!(
+            text("€", Modifiers::CTRL | Modifiers::ALT),
+            Some("€".into())
+        );
+        assert_eq!(text("=", Modifiers::empty()), Some("=".into()));
+        assert_eq!(text("+", Modifiers::SHIFT), Some("+".into()));
+        assert_eq!(text("ø", Modifiers::ALT), Some("ø".into()));
+    }
+
     #[test]
     fn closing_a_window_ends_its_debug_run_and_leaves_the_other_windows_alone() {
         let mut clew = test_clew();

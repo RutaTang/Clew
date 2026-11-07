@@ -1,0 +1,2 @@
+/* What macOS shows when Clew first asks to use the microphone. */
+"NSMicrophoneUsageDescription" = "Clew listens when you press the voice key or the microphone button, so you can say a command or ask about the code. What you say is turned into text on this Mac and never leaves it.";

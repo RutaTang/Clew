@@ -53,6 +53,8 @@ use std::process::Command;
 
 use clew_core::update::Version;
 
+use crate::tr;
+
 /// The installed `Clew.app` bundle we are running from, or `None` when clew is
 /// not running from a `.app` (e.g. a `cargo run` dev binary). In that case there
 /// is nothing to swap and the caller falls back to a manual download.
@@ -79,13 +81,16 @@ pub fn installed_bundle() -> Option<PathBuf> {
 /// answer: the two calls are a download apart.
 pub fn self_install_blocker() -> Option<String> {
     let Some(bundle) = installed_bundle() else {
-        return Some("clew is not running from an installed app".into());
+        return Some(tr!("clew is not running from an installed app").into());
     };
     if let Err(e) = replaceable(&bundle) {
         return Some(e);
     }
     if let Err(e) = signing_identity(&bundle) {
-        return Some(format!("this copy of clew cannot anchor an update ({e})"));
+        return Some(tr!(
+            "this copy of clew cannot anchor an update ({error})",
+            error = e
+        ));
     }
     None
 }
@@ -96,33 +101,33 @@ fn replaceable(bundle: &Path) -> Result<(), String> {
     // Gatekeeper runs a quarantined app that was never moved from a randomized
     // read-only mirror; there is no "installed" copy to replace.
     if bundle.to_string_lossy().contains("/AppTranslocation/") {
-        return Err(
-            "clew is running from a quarantined, translocated copy — move \
-                    Clew.app into /Applications and open it from there"
-                .into(),
-        );
+        return Err(tr!(
+            "clew is running from a quarantined, translocated copy — move Clew.app into /Applications and open it from there"
+        )
+        .into());
     }
     let parent = bundle
         .parent()
-        .ok_or("the app bundle has no parent directory")?;
+        .ok_or(tr!("the app bundle has no parent directory"))?;
     // `access(W_OK)` answers for this user, ACLs and read-only mounts included
     // (a mounted disk image reports EROFS). The parent is where the backup and
     // the new copy are created; the bundle itself is renamed and, once the new
     // version is in, deleted — which needs write access inside it too.
     for (path, what) in [
-        (parent, "the folder clew is installed in"),
+        (parent, tr!("the folder clew is installed in")),
         (bundle, "Clew.app"),
     ] {
         if let Err(e) = writable(path) {
             return Err(match e.raw_os_error() {
-                Some(libc::EROFS) => {
-                    "clew is running from a read-only volume (the disk image?) — copy \
-                     Clew.app to /Applications and open it from there"
-                        .to_string()
-                }
-                _ => format!(
-                    "this account cannot modify {what} ({}): {e}",
-                    path.display()
+                Some(libc::EROFS) => tr!(
+                    "clew is running from a read-only volume (the disk image?) — copy Clew.app to /Applications and open it from there"
+                )
+                .to_string(),
+                _ => tr!(
+                    "this account cannot modify {what} ({path}): {error}",
+                    what = what,
+                    path = path.display(),
+                    error = e
                 ),
             });
         }
@@ -158,8 +163,9 @@ pub fn install_dmg(dmg: &Path, expected: Version, reopen: Option<PathBuf>) -> Re
 }
 
 fn install_dmg_inner(dmg: &Path, expected: Version, reopen: Option<PathBuf>) -> Result<(), String> {
-    let target = installed_bundle()
-        .ok_or("clew is not running from an installed app, so it can't self-update")?;
+    let target = installed_bundle().ok_or(tr!(
+        "clew is not running from an installed app, so it can't update itself"
+    ))?;
     // Re-checked, not taken from the pre-download answer: an install that
     // cannot complete must fail HERE, while clew is still running to say so.
     replaceable(&target)?;
@@ -171,8 +177,12 @@ fn install_dmg_inner(dmg: &Path, expected: Version, reopen: Option<PathBuf>) -> 
     // the release page rather than being told this after waiting for a disk
     // image. Re-read here regardless: it is the identity every signature check
     // below is made against, so it is not taken on the earlier answer's word.
-    let identity = signing_identity(&target)
-        .map_err(|e| format!("cannot read this app's signing identity: {e}"))?;
+    let identity = signing_identity(&target).map_err(|e| {
+        tr!(
+            "cannot read this app's signing identity: {error}",
+            error = e
+        )
+    })?;
     // Assessed, then judged by policy. Under the shipped policy this REFUSES an
     // un-notarized image; the admitting branch survives so that flipping
     // `REQUIRE_NOTARIZATION` back cannot make such an install silent.
@@ -217,8 +227,8 @@ fn app_on_image(mount: &Path) -> Result<PathBuf, String> {
     let app = mount.join("Clew.app");
     match std::fs::symlink_metadata(&app) {
         Ok(meta) if meta.is_dir() => Ok(app),
-        Ok(_) => Err("the update image's Clew.app is not an app folder".into()),
-        Err(_) => Err("the update image has no Clew.app".into()),
+        Ok(_) => Err(tr!("the update image's Clew.app is not an app folder").into()),
+        Err(_) => Err(tr!("the update image has no Clew.app").into()),
     }
 }
 
@@ -249,7 +259,7 @@ fn stage_from_image(
         run(Command::new("/usr/bin/ditto")
             .arg(&src_app)
             .arg(&staged_app))
-        .map_err(|e| format!("could not stage the update: {e}"))?;
+        .map_err(|e| tr!("could not stage the update: {error}", error = e))?;
         // What gets installed is the copy, so the copy is what is checked:
         // it sits in this user's private folder, where nothing changes it
         // between this check and the swap.
@@ -291,8 +301,8 @@ fn attach_image_reading(
     dmg: &Path,
     read: impl FnOnce(&str) -> Option<PathBuf>,
 ) -> Result<Attached, String> {
-    let image =
-        std::fs::canonicalize(dmg).map_err(|e| format!("could not open the update image: {e}"))?;
+    let image = std::fs::canonicalize(dmg)
+        .map_err(|e| tr!("could not open the update image: {error}", error = e))?;
     let attached = run(Command::new("/usr/bin/hdiutil")
         .args([
             "attach",
@@ -303,8 +313,8 @@ fn attach_image_reading(
             "-noautoopen",
         ])
         .arg(&image))
-    .map_err(|e| format!("could not open the update image: {e}"))
-    .and_then(|plist| read(&plist).ok_or_else(|| "could not find the update volume".into()));
+    .map_err(|e| tr!("could not open the update image: {error}", error = e))
+    .and_then(|plist| read(&plist).ok_or_else(|| tr!("could not find the update volume").into()));
     match attached {
         Ok(mount_point) => Ok(Attached { image, mount_point }),
         Err(e) => {
@@ -392,7 +402,7 @@ fn attached_disk(image: &Path) -> Result<Option<PathBuf>, String> {
 /// `src/backend/updater.rs`.
 fn staging_parent() -> Result<PathBuf, String> {
     Ok(clew_core::lsp::store::data_root()
-        .ok_or("no data directory to stage the update in")?
+        .ok_or(tr!("no data directory to stage the update in"))?
         .join("updates"))
 }
 
@@ -461,18 +471,21 @@ fn parse_signing_identity(text: &str) -> Result<SigningIdentity, String> {
     };
     let team = field("TeamIdentifier=")
         .filter(|s| !s.is_empty() && s != "not set")
-        .ok_or("the bundle has no Team Identifier")?;
+        .ok_or(tr!("the bundle has no Team Identifier"))?;
     if !team.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(format!("`{team}` is not a usable Team Identifier"));
+        return Err(tr!("`{team}` is not a usable Team Identifier", team = team));
     }
     let identifier = field("Identifier=")
         .filter(|s| !s.is_empty())
-        .ok_or("the bundle has no signing identifier")?;
+        .ok_or(tr!("the bundle has no signing identifier"))?;
     if !identifier
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
-        return Err(format!("`{identifier}` is not a usable signing identifier"));
+        return Err(tr!(
+            "`{identifier}` is not a usable signing identifier",
+            identifier = identifier
+        ));
     }
     Ok(SigningIdentity { identifier, team })
 }
@@ -538,7 +551,7 @@ fn notarization_gate(
     match assessed {
         Ok(()) => Ok(None),
         Err(e) => {
-            let reason = format!("the update is not notarized by Apple: {e}");
+            let reason = tr!("the update is not notarized by Apple: {error}", error = e);
             if required {
                 Err(reason)
             } else {
@@ -572,14 +585,17 @@ fn notarization_gate(
 fn requirement_arg(identity: &SigningIdentity) -> Result<String, String> {
     let SigningIdentity { identifier, team } = identity;
     if team.is_empty() || !team.chars().all(|c| c.is_ascii_alphanumeric()) {
-        return Err(format!("`{team}` is not a usable Team Identifier"));
+        return Err(tr!("`{team}` is not a usable Team Identifier", team = team));
     }
     if identifier.is_empty()
         || !identifier
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
     {
-        return Err(format!("`{identifier}` is not a usable signing identifier"));
+        return Err(tr!(
+            "`{identifier}` is not a usable signing identifier",
+            identifier = identifier
+        ));
     }
     Ok(format!(
         "=anchor apple generic and identifier \"{identifier}\" \
@@ -598,15 +614,18 @@ fn verify(app: &Path, identity: &SigningIdentity) -> Result<(), String> {
         .args(["--verify", "--deep", "--strict", "-R"])
         .arg(requirement_arg(identity)?)
         .arg(app))
-    .map_err(|e| format!("the update's signature is invalid: {e}"))?;
+    .map_err(|e| tr!("the update's signature is invalid: {error}", error = e))?;
     // Belt and braces: what the bundle declares must agree with what the
     // requirement just matched. A disagreement means a hand-assembled
     // signature, not something Apple's toolchain produced.
     let declared = signing_identity(app)?;
     if declared != *identity {
-        return Err(format!(
-            "the update is signed as {} by team {} (this app is {} by {}), refusing to install it",
-            declared.identifier, declared.team, identity.identifier, identity.team
+        return Err(tr!(
+            "the update is signed as {identifier} by team {team} (this app is {own_identifier} by {own_team}), refusing to install it",
+            identifier = declared.identifier,
+            team = declared.team,
+            own_identifier = identity.identifier,
+            own_team = identity.team
         ));
     }
     Ok(())
@@ -619,7 +638,7 @@ fn bundle_short_version(app: &Path) -> Result<String, String> {
         .args(["-c", "Print :CFBundleShortVersionString"])
         .arg(&plist))
     .map(|out| out.trim().to_string())
-    .map_err(|e| format!("the update does not state its version: {e}"))
+    .map_err(|e| tr!("the update does not state its version: {error}", error = e))
 }
 
 /// The version gate: the verified candidate must be newer than what is
@@ -633,8 +652,10 @@ fn check_candidate_version(
 ) -> Result<(), String> {
     let candidate = clew_core::update::ensure_upgrade(running, candidate)?;
     if candidate != expected {
-        return Err(format!(
-            "the update image holds clew {candidate}, but {expected} was offered; refusing it"
+        return Err(tr!(
+            "the update image holds clew {candidate}, but {expected} was offered; refusing it",
+            candidate = candidate,
+            expected = expected
         ));
     }
     Ok(())
@@ -901,7 +922,7 @@ fn spawn_swap_helper(plan: &SwapPlan) -> Result<(), String> {
         .arg("-c")
         .arg(&script)
         .spawn()
-        .map_err(|e| format!("could not start the updater helper: {e}"))?;
+        .map_err(|e| tr!("could not start the updater helper: {error}", error = e))?;
     Ok(())
 }
 

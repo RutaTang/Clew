@@ -28,13 +28,13 @@ pub(crate) const FINDER_TOP: f32 = 88.0;
 
 /// Dialog widths, narrowest first.
 pub(crate) const PROMPT_W: f32 = 460.0;
-pub(crate) const SETTINGS_W: f32 = 480.0;
+/// Settings: its list of pages and the page beside it.
+pub(crate) const SETTINGS_W: f32 = 860.0;
+pub(crate) const SETTINGS_NAV_W: f32 = 212.0;
 pub(crate) const WHY_W: f32 = 480.0;
-pub(crate) const SHORTCUTS_W: f32 = 540.0;
 pub(crate) const DIALOG_W: f32 = 560.0;
 /// The command bar: the design's 580 inside its 1 px border.
 pub(crate) const FINDER_W: f32 = 582.0;
-pub(crate) const SERVER_PANEL_W: f32 = 720.0;
 pub(crate) const GRAPH_MODAL_W: f32 = 760.0;
 /// Width of the reading-target dropdown.
 pub(crate) const TARGET_MENU_W: f32 = 172.0;
@@ -44,8 +44,7 @@ pub(crate) const TUTORIAL_CARD_W: f32 = 440.0;
 /// Tallest each dialog grows before its body scrolls, beside the widths above.
 pub(crate) const WHY_MAX_H: f32 = 440.0;
 pub(crate) const FINDER_MAX_H: f32 = 520.0;
-pub(crate) const SHORTCUTS_MAX_H: f32 = 600.0;
-pub(crate) const SERVER_PANEL_MAX_H: f32 = 600.0;
+pub(crate) const SETTINGS_MAX_H: f32 = 640.0;
 pub(crate) const DIALOG_MAX_H: f32 = 620.0;
 pub(crate) const GRAPH_MODAL_MAX_H: f32 = 640.0;
 
@@ -151,10 +150,9 @@ pub(crate) fn modal<'a>(
 }
 
 /// The fields of a single-line prompt dialog (breakpoint condition, bookmark
-/// note, reading note): a title, a hint, one input, Cancel and a submit.
+/// note, reading note): a title, one input, Cancel and a submit.
 pub(crate) struct Prompt<'a> {
     pub(crate) title: String,
-    pub(crate) hint: &'a str,
     pub(crate) placeholder: &'a str,
     pub(crate) value: &'a str,
     pub(crate) input_id: iced::widget::Id,
@@ -169,8 +167,8 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
     let panel = container(
         column![
             text(p.title).size(ts::EMPHASIS).color(theme::fg()),
-            text(p.hint).size(ts::SMALL).color(theme::dim()),
             text_input(p.placeholder, p.value)
+                .style(theme::input)
                 .id(p.input_id)
                 .on_input(p.on_input)
                 .on_submit(p.submit.clone())
@@ -178,7 +176,7 @@ pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
                 .padding(8),
             row![
                 space().width(Fill),
-                button(text("Cancel").size(ts::BODY))
+                button(text(tr!("Cancel")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([4, 12])
                     .on_press(p.cancel.clone()),
@@ -238,4 +236,22 @@ pub(crate) fn sideways_scroll() -> Direction {
 /// positions stable while the thing it stands for is hidden (see `ui::view`).
 pub(crate) fn slot<'a>() -> Element<'a, Message> {
     space().into()
+}
+
+/// Side of a panel's close button.
+const CLOSE_SIDE: f32 = 28.0;
+
+/// The × at the end of a panel's title (Settings, Connect, Glossary, the
+/// language servers): quiet until the pointer is over it, named in its tip.
+pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
+    super::chrome_tip(
+        button(container(glyph::icon(Glyph::Close, theme::fg_muted(), 14.0)).center(Fill))
+            .style(theme::icon_button(false))
+            .width(CLOSE_SIDE)
+            .height(CLOSE_SIDE)
+            .padding(0)
+            .on_press(msg),
+        tr!("Close"),
+        Some("Esc".to_string()),
+    )
 }

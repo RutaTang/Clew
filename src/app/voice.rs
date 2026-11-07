@@ -115,7 +115,7 @@ impl Transcriber for Engine {
         }
         match loaded.as_ref() {
             Some(whisper) => whisper.transcribe(audio, options, cancel),
-            None => Err("the speech model did not load".into()),
+            None => Err(tr!("the speech model did not load").into()),
         }
     }
 }
@@ -145,9 +145,11 @@ fn fetch_over_net(
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<u64, String> {
     if !url.starts_with("https://") {
-        return Err("refusing a model download that is not HTTPS".into());
+        return Err(tr!("refusing a model download that is not HTTPS").into());
     }
-    clew_core::net::download(
+    // A gigabyte over a link that drops now and then: it picks up where it
+    // stopped rather than start again.
+    clew_core::net::download_resuming(
         url,
         &[],
         clew_core::net::Limits {
@@ -248,20 +250,21 @@ impl Default for VoicePrefs {
 }
 
 /// The languages offered for a multilingual model, as whisper's codes and
-/// their names; `None` lets the model tell.
+/// their names — in English, shown through `crate::i18n::lookup`; `None`
+/// lets the model tell.
 pub(crate) const LANGUAGES: &[(Option<&str>, &str)] = &[
-    (None, "Detect"),
-    (Some("en"), "English"),
-    (Some("zh"), "Chinese"),
-    (Some("es"), "Spanish"),
-    (Some("fr"), "French"),
-    (Some("de"), "German"),
-    (Some("ja"), "Japanese"),
-    (Some("ko"), "Korean"),
-    (Some("pt"), "Portuguese"),
-    (Some("ru"), "Russian"),
-    (Some("it"), "Italian"),
-    (Some("hi"), "Hindi"),
+    (None, tr_noop!("Detect automatically")),
+    (Some("en"), tr_noop!("English")),
+    (Some("zh"), tr_noop!("Chinese")),
+    (Some("es"), tr_noop!("Spanish")),
+    (Some("fr"), tr_noop!("French")),
+    (Some("de"), tr_noop!("German")),
+    (Some("ja"), tr_noop!("Japanese")),
+    (Some("ko"), tr_noop!("Korean")),
+    (Some("pt"), tr_noop!("Portuguese")),
+    (Some("ru"), tr_noop!("Russian")),
+    (Some("it"), tr_noop!("Italian")),
+    (Some("hi"), tr_noop!("Hindi")),
 ];
 
 impl VoicePrefs {
@@ -323,6 +326,9 @@ pub(crate) struct VoiceState {
     last_toggle: Option<Instant>,
     /// What was last heard, and what came of it.
     pub heard: Option<Heard>,
+    /// When it was heard: the pill in the corner says it for a moment
+    /// ([`HEARD_SHOWN`]).
+    pub heard_at: Option<Instant>,
     /// A command heard that asks before it runs: its title.
     pub confirm: Option<String>,
     /// Models downloading, by id.
@@ -340,7 +346,21 @@ pub(crate) struct VoiceState {
     pub(crate) fetch: Fetch,
 }
 
+/// How long the pill in the corner says what was last heard.
+pub(crate) const HEARD_SHOWN: Duration = Duration::from_secs(4);
+
 impl VoiceState {
+    /// Record what was heard, and when: the pill says it for a moment.
+    pub(crate) fn hear(&mut self, heard: Heard) {
+        self.heard = Some(heard);
+        self.heard_at = Some(Instant::now());
+    }
+
+    /// Whether what was last heard is still said on the pill.
+    pub(crate) fn heard_fresh(&self) -> bool {
+        self.heard.is_some() && self.heard_at.is_some_and(|at| at.elapsed() < HEARD_SHOWN)
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             phase: VoicePhase::Idle,
@@ -349,6 +369,7 @@ impl VoiceState {
             token: 0,
             last_toggle: None,
             heard: None,
+            heard_at: None,
             confirm: None,
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
@@ -442,6 +463,165 @@ impl VoiceMsg {
     }
 }
 
+/// The index in `shown` of the command `said` names in `lang`, when it is
+/// one of the titles as the palette shows them — said with or without its
+/// category ("View:") or its aside in parentheses, and with the words that
+/// only say "do it" or "please" (open, show, go to; 打开, 请; を開いて,
+/// 열어 줘) left out on both sides. Spaces and punctuation aside, what is
+/// left must be the title exactly, and only one title: an extra word is a
+/// request for Ask, not a command. Words that put something away (close,
+/// hide) are never dropped, so "close the minimap" never shows it. English
+/// is `clew_voice::intent::command`'s, which reads it word by word.
+pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str]) -> Option<usize> {
+    use crate::i18n::Lang;
+    // Each list is compacted as the text is, so "s'il vous plaît" is
+    // "silvousplaît".
+    let (leading, trailing): (&[&str], &[&str]) = match lang {
+        Lang::En => return None,
+        Lang::Fr => (
+            &[
+                "silvousplaît",
+                "silteplaît",
+                "pouvezvous",
+                "peuxtu",
+                "ouvrir",
+                "ouvre",
+                "ouvrez",
+                "afficher",
+                "affiche",
+                "affichez",
+                "montrer",
+                "montre",
+                "aller",
+                "allez",
+                "va",
+                "à",
+                "au",
+                "aux",
+                "les",
+                "le",
+                "la",
+                "l",
+                "un",
+                "une",
+                "des",
+            ],
+            &["silvousplaît", "silteplaît", "merci"],
+        ),
+        Lang::Zh => (
+            &[
+                "麻烦",
+                "帮我",
+                "给我",
+                "我想",
+                "我要",
+                "请",
+                "打开",
+                "显示",
+                "转到",
+                "跳转到",
+                "切换到",
+                "去",
+            ],
+            &["一下", "吧", "谢谢"],
+        ),
+        Lang::Ko => (
+            &[],
+            &[
+                "열어주세요",
+                "열어줘",
+                "열어",
+                "보여주세요",
+                "보여줘",
+                "표시해주세요",
+                "표시해줘",
+                "해주세요",
+                "해줘",
+                "주세요",
+                "열기",
+                "표시",
+                "을",
+                "를",
+            ],
+        ),
+        Lang::Ja => (
+            &[],
+            &[
+                "してください",
+                "ください",
+                "を開いて",
+                "開いて",
+                "を開く",
+                "開く",
+                "を表示して",
+                "表示して",
+                "を表示",
+                "して",
+                "を",
+                "に",
+            ],
+        ),
+    };
+    fn compact(text: &str) -> String {
+        text.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    }
+    // Each time the longest word that fits, whatever the lists' order:
+    // "ouvrez" is not "ouvre" and a "z", nor "aux" "au" and an "x".
+    let bare = |text: &str| -> String {
+        let mut text = compact(text);
+        loop {
+            let before = text.len();
+            if let Some(word) = leading
+                .iter()
+                .filter(|word| text.starts_with(**word) && text.len() > word.len())
+                .max_by_key(|word| word.len())
+            {
+                text = text[word.len()..].to_string();
+            }
+            if let Some(word) = trailing
+                .iter()
+                .filter(|word| text.ends_with(**word) && text.len() > word.len())
+                .max_by_key(|word| word.len())
+            {
+                text = text[..text.len() - word.len()].to_string();
+            }
+            if text.len() == before {
+                return text;
+            }
+        }
+    };
+    let said = bare(said);
+    if said.is_empty() {
+        return None;
+    }
+    let mut found = None;
+    for (index, title) in shown.iter().enumerate() {
+        // The title, without its category, without its aside, both.
+        let main = title
+            .split_once([':', '：'])
+            .map_or(*title, |(_, rest)| rest);
+        let plain = |t: &str| -> String {
+            match t.split_once(['(', '（']) {
+                Some((before, _)) => before.to_string(),
+                None => t.to_string(),
+            }
+        };
+        let fits = [*title, main, &plain(title), &plain(main)]
+            .iter()
+            .any(|form| bare(form) == said);
+        if fits {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(index);
+        }
+    }
+    found
+}
+
 impl App {
     /// Handle a [`VoiceMsg`].
     pub(crate) fn update_voice(&mut self, message: VoiceMsg) -> Task<Message> {
@@ -487,14 +667,30 @@ impl App {
                 if self.voice.downloads.remove(id).is_none() {
                     return Task::none();
                 }
-                let name = models::find(id).map_or(id, |m| m.name);
+                let name = crate::i18n::lookup(models::find(id).map_or(id, |m| m.name));
                 match result {
                     Ok(_) => {
                         self.voice.download_errors.remove(id);
-                        self.status = format!("{name} is ready — press the voice key to talk");
+                        self.status = tr!(
+                            "{model} is ready — press the voice key to talk",
+                            model = name
+                        );
+                        // The model just downloaded is the one the voice
+                        // key hears with from now on, as that says: kept
+                        // to the one chosen before, the key would send the
+                        // reader back to Settings for a model still not on
+                        // this computer (the first one chosen is Small).
+                        if self.voice.prefs.model != id {
+                            self.voice.prefs.model = id.to_string();
+                            self.save_voice_prefs();
+                        }
                     }
                     Err(e) => {
-                        self.status = format!("Could not download {name}: {e}");
+                        self.status = tr!(
+                            "Could not download {model}: {error}",
+                            model = name,
+                            error = e
+                        );
                         self.voice.download_errors.insert(id, e);
                     }
                 }
@@ -502,9 +698,10 @@ impl App {
             }
             VoiceMsg::RemoveModel(id) => {
                 if let (Some(model), Some(store)) = (models::find(id), self.voice.store.as_ref()) {
+                    let name = crate::i18n::lookup(model.name);
                     self.status = match store.remove(model) {
-                        Ok(()) => format!("Removed {}", model.name),
-                        Err(e) => format!("Could not remove {}: {e}", model.name),
+                        Ok(()) => tr!("Removed {model}", model = name),
+                        Err(e) => tr!("Could not remove {model}: {error}", model = name, error = e),
                     };
                 }
                 Task::none()
@@ -536,7 +733,7 @@ impl App {
 
     fn save_voice_prefs(&mut self) {
         if let Err(e) = self.voice.prefs.save() {
-            self.status = format!("Could not save the voice settings: {e}");
+            self.status = tr!("Could not save the voice settings: {error}", error = e);
         }
     }
 
@@ -557,7 +754,7 @@ impl App {
         match self.voice.phase {
             VoicePhase::Listening { .. } => self.stop_listening(),
             VoicePhase::Transcribing { .. } => {
-                self.status = "Still working out what was said…".into();
+                self.status = tr!("Still working out what was said…").into();
                 Task::none()
             }
             VoicePhase::Idle => self.start_listening(),
@@ -570,7 +767,7 @@ impl App {
     /// (this never sends the reader to Settings for one).
     pub(crate) fn resume_listening(&mut self) -> Task<Message> {
         let ready = self.voice.keep_listening
-            && self.ask_view != crate::app::model::AskView::Closed
+            && self.ask_view.is_open()
             && self.voice.phase == VoicePhase::Idle
             && self.voice.confirm.is_none()
             && self.voice.installed(self.voice.prefs.model());
@@ -586,12 +783,13 @@ impl App {
         self.voice.confirm = None;
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
-            self.status = format!(
-                "Voice needs a speech model on this computer — download {} ({} MB) in \
-                 Settings → Voice",
-                model.name, model.size_mb
+            self.status = tr!(
+                "Voice needs a speech model on this computer — download {model} ({size} MB) \
+                 in Settings → Voice",
+                model = crate::i18n::lookup(model.name),
+                size = model.size_mb
             );
-            return self.update(Message::Settings(SettingsMsg::Open));
+            return self.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
         }
         match (self.voice.open_mic)(MAX_SECONDS) {
             Ok(listening) => {
@@ -601,11 +799,11 @@ impl App {
                     level: 0.0,
                 };
                 self.voice.heard = None;
-                self.status = "Listening… say a command or a question (Esc cancels)".into();
+                self.status = tr!("Listening… say a command or a question (Esc cancels)").into();
             }
             Err(e) => {
-                self.status = format!("Can't listen: {e}");
-                self.voice.heard = Some(Heard {
+                self.status = tr!("Can't listen: {error}", error = e);
+                self.voice.hear(Heard {
                     text: String::new(),
                     outcome: HeardOutcome::Failed(e),
                 });
@@ -624,7 +822,7 @@ impl App {
         };
         if let Some(e) = listening.error() {
             self.cancel_voice();
-            self.status = format!("Stopped listening: {e}");
+            self.status = tr!("Stopped listening: {error}", error = e);
             return Task::none();
         }
         let level = listening.level();
@@ -640,11 +838,11 @@ impl App {
             && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
         {
             self.cancel_voice();
-            self.voice.heard = Some(Heard {
+            self.voice.hear(Heard {
                 text: String::new(),
                 outcome: HeardOutcome::Nothing,
             });
-            self.status = "Nothing was heard — check the microphone and try again".into();
+            self.status = tr!("Nothing was heard — check the microphone and try again").into();
         }
         Task::none()
     }
@@ -660,17 +858,17 @@ impl App {
         let token = self.voice.token;
         self.voice.phase = VoicePhase::Transcribing { token };
         self.voice.cancel = Arc::new(AtomicBool::new(false));
-        self.status = "Transcribing…".into();
+        self.status = tr!("Transcribing…").into();
         let model = self.voice.prefs.model();
         let Some(path) = self.voice.store.as_ref().map(|s| s.path(model)) else {
-            return self.on_transcribed(token, Err("no data directory for the model".into()));
+            return self.on_transcribed(token, Err(tr!("no data directory for the model").into()));
         };
         // The window's command names, so whisper spells them as they are
         // spelled here.
         let hint = self
             .palette_commands()
             .iter()
-            .map(|c| c.title.trim_end_matches('…').to_string())
+            .map(|c| c.shown().trim_end_matches('…').to_string())
             .collect::<Vec<_>>()
             .join(", ");
         let options = Options {
@@ -693,7 +891,7 @@ impl App {
                     }
                 })
                 .await
-                .map_err(|_| "transcribing failed unexpectedly".to_string())?
+                .map_err(|_| tr!("transcribing failed unexpectedly").to_string())?
             },
             move |result| Message::Voice(VoiceMsg::Transcribed { token, result }),
         )
@@ -709,7 +907,7 @@ impl App {
             self.voice.cancel.store(true, Ordering::Relaxed);
         }
         if self.voice.phase != VoicePhase::Idle {
-            self.status = "Stopped listening".into();
+            self.status = tr!("Stopped listening").into();
         }
         self.voice.phase = VoicePhase::Idle;
         if self.voice.confirm.take().is_some() {
@@ -728,8 +926,8 @@ impl App {
             Ok(text) => text.trim().to_string(),
             Err(e) if e == "cancelled" => return Task::none(),
             Err(e) => {
-                self.status = format!("Could not transcribe: {e}");
-                self.voice.heard = Some(Heard {
+                self.status = tr!("Could not transcribe: {error}", error = e);
+                self.voice.hear(Heard {
                     text: String::new(),
                     outcome: HeardOutcome::Failed(e),
                 });
@@ -737,8 +935,8 @@ impl App {
             }
         };
         if text.is_empty() {
-            self.status = "Didn't catch that — try again".into();
-            self.voice.heard = Some(Heard {
+            self.status = tr!("Didn't catch that — try again").into();
+            self.voice.hear(Heard {
                 text,
                 outcome: HeardOutcome::Nothing,
             });
@@ -747,20 +945,34 @@ impl App {
         if self.voice.prefs.run_commands {
             let commands = self.palette_commands();
             let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-            if let Some(i) = clew_voice::intent::command(&text, &titles) {
+            // Said in English, or as the palette shows it in the reader's
+            // language.
+            let found = clew_voice::intent::command(&text, &titles).or_else(|| {
+                let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+                said_as_shown(crate::i18n::current(), &text, &shown)
+            });
+            if let Some(i) = found {
                 let command = &commands[i];
                 let title = command.title.clone();
                 if command.costly() {
-                    self.status = format!("“{text}” → {title}? Confirm or press Esc");
+                    self.status = tr!(
+                        "“{text}” → {command}? Confirm or press Esc",
+                        text = text,
+                        command = crate::i18n::lookup(&title)
+                    );
                     self.voice.confirm = Some(title.clone());
-                    self.voice.heard = Some(Heard {
+                    self.voice.hear(Heard {
                         text,
                         outcome: HeardOutcome::Confirm(title),
                     });
                     return Task::none();
                 }
-                self.status = format!("“{text}” → {title}");
-                self.voice.heard = Some(Heard {
+                self.status = tr!(
+                    "“{text}” → {command}",
+                    text = text,
+                    command = crate::i18n::lookup(&title)
+                );
+                self.voice.hear(Heard {
                     text,
                     outcome: HeardOutcome::Ran(title.clone()),
                 });
@@ -768,7 +980,7 @@ impl App {
             }
         }
         // A question: to Ask, with the window open on it.
-        self.voice.heard = Some(Heard {
+        self.voice.hear(Heard {
             text: text.clone(),
             outcome: HeardOutcome::Asked,
         });
@@ -781,7 +993,7 @@ impl App {
         self.proj.ask_input = input;
         self.proj.ask_spoken = true;
         if self.voice.prefs.send_questions && !self.ask_stream_active() {
-            self.status = format!("Asking “{text}”");
+            self.status = tr!("Asking “{text}”", text = text);
             return self.update(Message::Ask(AskMsg::Submit));
         }
         self.code_focused = false;
@@ -800,7 +1012,7 @@ impl App {
             return Task::none();
         }
         let Some(store) = self.voice.store.clone() else {
-            self.status = "There is no data directory to keep the model in".into();
+            self.status = tr!("There is no data directory to keep the model in").into();
             return Task::none();
         };
         self.voice.download_errors.remove(id);
@@ -819,7 +1031,7 @@ impl App {
                     let result = (|| {
                         let mut install = store
                             .begin(model)
-                            .map_err(|e| format!("could not save the model: {e}"))?;
+                            .map_err(|e| tr!("could not save the model: {error}", error = e))?;
                         let mut last = Instant::now();
                         let mut progress = |done: u64, total: Option<u64>| {
                             if last.elapsed() >= Duration::from_millis(150) {
@@ -831,14 +1043,16 @@ impl App {
                                 }));
                             }
                         };
-                        fetch(
+                        match fetch(
                             &model.url(),
                             model.max_bytes(),
                             &worker_cancel,
                             &mut install,
                             &mut progress,
-                        )?;
-                        install.finish()
+                        ) {
+                            Ok(_) => install.finish(),
+                            Err(e) => Err(download_failure(&e, install.written(), model)),
+                        }
                     })();
                     let _ = tx.send(Message::Voice(VoiceMsg::Downloaded { id, result }));
                 });
@@ -860,9 +1074,64 @@ impl App {
                 _task: handle.abort_on_drop(),
             },
         );
-        self.status = format!("Downloading {} ({} MB)…", model.name, model.size_mb);
+        self.status = tr!(
+            "Downloading {model} ({size} MB)…",
+            model = crate::i18n::lookup(model.name),
+            size = model.size_mb
+        );
         task
     }
+}
+
+/// What a failed download of `model` says, under the model in Settings: why,
+/// in the reader's language, with the address it failed at cut to its host
+/// (a CDN's signed one is a paragraph), and how far it got if it got
+/// anywhere.
+pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model) -> String {
+    let why = if clew_core::net::was_cut_short(error) {
+        tr!("the connection closed").to_string()
+    } else {
+        crate::i18n::message(&with_host_only(error))
+    };
+    if written == 0 {
+        return why;
+    }
+    tr!(
+        "Stopped at {done} of {total} MB: {why}",
+        done = written / 1_000_000,
+        total = model.size_mb,
+        why = why
+    )
+}
+
+/// A transfer's `error` with the address it starts with cut to its host
+/// (and port, when it names one). Every error a transfer returns names the hop that failed first — `{url}:
+/// why`, or `{url} (through the proxy {spec}): why` — and the catalogs say
+/// it whole, address and all; what follows the address is left as it is,
+/// for them to know it.
+fn with_host_only(error: &str) -> String {
+    let Some(rest) = ["https://", "http://"]
+        .iter()
+        .find_map(|scheme| error.strip_prefix(scheme))
+    else {
+        return error.to_string();
+    };
+    // An address holds no spaces: it is all up to the first one, less the
+    // colon a reason follows it with.
+    let (address, after) = rest.split_at(rest.find(' ').unwrap_or(rest.len()));
+    let (address, colon) = match address.strip_suffix(':') {
+        Some(address) => (address, ":"),
+        None => (address, ""),
+    };
+    let authority = address.split(['/', '?', '#']).next().unwrap_or_default();
+    // Never a user's name or password, should the address hold one.
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if host.is_empty() {
+        return error.to_string();
+    }
+    format!("{host}{colon}{after}")
 }
 
 /// Sets its flag when dropped.

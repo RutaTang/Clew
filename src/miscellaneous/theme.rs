@@ -10,7 +10,7 @@
 
 use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
-use iced::widget::{button, container, progress_bar, scrollable, text_input};
+use iced::widget::{button, checkbox, container, pick_list, progress_bar, scrollable, text_input};
 use iced::{Border, Color, Theme};
 
 /// Build a `Color` from a `0xRRGGBB` literal.
@@ -50,11 +50,10 @@ pub struct Palette {
     pub border: Color,    // hard borders around elevated surfaces
     pub hairline: Color,  // 1px dividers
     // Colors used only inside the widget-style helpers below.
-    pub elevated: Color,       // floating modal panel background
-    pub on_accent: Color,      // text on an accent-filled button
-    pub accent_hover: Color,   // accent button, hovered/pressed
-    pub control_border: Color, // border of a filled neutral (secondary) button
-    pub scrollbar: Color,      // overlay scrollbar thumb
+    pub elevated: Color,     // floating modal panel background
+    pub on_accent: Color,    // text on an accent-filled button
+    pub accent_hover: Color, // accent button, hovered/pressed
+    pub scrollbar: Color,    // overlay scrollbar thumb
     // Semantic status colors mirrored into the iced palette.
     pub success: Color,
     pub warning: Color,
@@ -126,7 +125,6 @@ const CLEW_DARK_PAL: Palette = Palette {
     elevated: rgb(0x1c1c1f),
     on_accent: rgb(0x0b0b0f),
     accent_hover: rgb(0xa5a3f8),
-    control_border: rgb(0x3a3a40),
     scrollbar: rgb(0x8e8e96),
     success: rgb(0x4ade80),
     warning: rgb(0xfbbf24),
@@ -173,7 +171,6 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xffffff),
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x4b48c9),
-    control_border: rgb(0xd4d4d8),
     scrollbar: rgb(0xa1a1aa),
     success: rgb(0x16a34a),
     warning: rgb(0xb45309),
@@ -220,7 +217,6 @@ const ONE_DARK_PAL: Palette = Palette {
     elevated: rgb(0x2c313a),
     on_accent: rgb(0x1b1d23),
     accent_hover: rgb(0x539bd4),
-    control_border: rgb(0x3d4450),
     scrollbar: rgb(0x8a94a6),
     success: rgb(0x98c379),
     warning: rgb(0xe5c07b),
@@ -265,7 +261,6 @@ const ONE_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xffffff),
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x3467d6),
-    control_border: rgb(0xc3c8d0),
     scrollbar: rgb(0x9096a1),
     success: rgb(0x50a14f),
     warning: rgb(0xb26f00),
@@ -312,7 +307,6 @@ const GRUVBOX_DARK_PAL: Palette = Palette {
     elevated: rgb(0x3c3836),
     on_accent: rgb(0x1d2021),
     accent_hover: rgb(0x9fbdb0),
-    control_border: rgb(0x504945),
     scrollbar: rgb(0x7c6f64),
     success: rgb(0xb8bb26),
     warning: rgb(0xfabd2f),
@@ -357,7 +351,6 @@ const GRUVBOX_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xfbf1c7),
     on_accent: rgb(0xfbf1c7),
     accent_hover: rgb(0x05505f),
-    control_border: rgb(0xbdae93),
     scrollbar: rgb(0xa89984),
     success: rgb(0x79740e),
     warning: rgb(0xb57614),
@@ -406,7 +399,6 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     elevated: rgb(0xfaf4e2),
     on_accent: rgb(0xf4ecd8),
     accent_hover: rgb(0x305d8c),
-    control_border: rgb(0xcabf9f),
     scrollbar: rgb(0xb3a988),
     success: rgb(0x4c6b3c),
     warning: rgb(0xa5762f),
@@ -451,7 +443,6 @@ const PAPER_DARK_PAL: Palette = Palette {
     elevated: rgb(0x302921),
     on_accent: rgb(0x1f1a14),
     accent_hover: rgb(0x96b4c2),
-    control_border: rgb(0x443a2c),
     scrollbar: rgb(0x6a5f4a),
     success: rgb(0xa3b072),
     warning: rgb(0xd9a441),
@@ -500,7 +491,6 @@ const CYBERPUNK_PAL: Palette = Palette {
     elevated: rgb(0x16112b),
     on_accent: rgb(0x0a0816),
     accent_hover: rgb(0x5cf7ff),
-    control_border: rgb(0x352b5a),
     scrollbar: rgb(0x4a4080),
     success: rgb(0x00ff9f),
     warning: rgb(0xfcee0a),
@@ -631,6 +621,12 @@ fn bump_revision() {
     REVISION.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Have every window draw again — the language changed, which each draws
+/// from as it does from the palette.
+pub fn redraw_everywhere() {
+    bump_revision();
+}
+
 /// Whether a light theme is currently active.
 pub fn is_light() -> bool {
     MODE.load(Ordering::Relaxed) == 1
@@ -715,11 +711,13 @@ impl ThemePref {
         }
     }
 
+    /// Its name in Settings, in the reader's language: only ever shown
+    /// ([`ThemePref::as_str`] is what the config keeps).
     pub fn label(self) -> &'static str {
         match self {
-            ThemePref::Dark => "Dark",
-            ThemePref::Light => "Light",
-            ThemePref::System => "System",
+            ThemePref::Dark => crate::tr!("Dark"),
+            ThemePref::Light => crate::tr!("Light"),
+            ThemePref::System => crate::tr!("System"),
         }
     }
 
@@ -1269,6 +1267,25 @@ pub fn modal_panel(_theme: &Theme) -> container::Style {
     }
 }
 
+/// The list of Settings' pages, down the modal's left: the chrome's fill,
+/// rounded only on the modal's own left corners so it never shows past them.
+pub fn settings_nav(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(bg_panel().into()),
+        border: Border {
+            radius: iced::border::Radius {
+                top_left: MENU_RADIUS,
+                bottom_left: MENU_RADIUS,
+                top_right: 0.0,
+                bottom_right: 0.0,
+            },
+            ..Border::default()
+        },
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
 /// [`modal_panel`] with the corners of `radius`: the design rounds its
 /// command bar 12, its ⋯ menu 11.
 pub fn modal_panel_rounded(radius: f32) -> impl Fn(&Theme) -> container::Style {
@@ -1313,16 +1330,17 @@ pub fn with_shadow_scale<R>(scale: f32, draw: impl FnOnce() -> R) -> R {
     drawn
 }
 
-/// A tooltip: the design's dark bubble in either appearance (`tip`), its
-/// hairline edge in dark (`tipBorder`) and its shadow (`tipShadow`).
+/// A tooltip, in the window's own appearance: a white bubble with a
+/// hairline edge in light, the dark one in dark — not a dark bubble over a
+/// light window. Its shadow lifts it off what it covers.
 pub fn tip(_theme: &Theme) -> container::Style {
     let light = is_light();
     container::Style {
-        background: Some(if light { rgb(0x18181B) } else { rgb(0x2A2A2F) }.into()),
+        background: Some(if light { Color::WHITE } else { rgb(0x2A2A2F) }.into()),
         text_color: Some(tip_text()),
         border: Border {
             color: if light {
-                Color::TRANSPARENT
+                hairline()
             } else {
                 Color::from_rgba(1.0, 1.0, 1.0, 0.08)
             },
@@ -1330,7 +1348,7 @@ pub fn tip(_theme: &Theme) -> container::Style {
             radius: 8.0.into(),
         },
         shadow: iced::Shadow {
-            color: scrim(if light { 0.18 } else { 0.5 }),
+            color: scrim(if light { 0.14 } else { 0.5 }),
             offset: iced::Vector::new(0.0, if light { 6.0 } else { 8.0 }),
             blur_radius: if light { 20.0 } else { 24.0 },
         },
@@ -1338,20 +1356,22 @@ pub fn tip(_theme: &Theme) -> container::Style {
     }
 }
 
-/// A tooltip's words (`tipText`): light on its dark bubble.
+/// A tooltip's words (`tipText`): the window's own text colour.
 pub fn tip_text() -> Color {
-    if is_light() {
-        rgb(0xFAFAFA)
-    } else {
-        rgb(0xEDEDEF)
-    }
+    if is_light() { fg() } else { rgb(0xEDEDEF) }
 }
 
-/// A key of a tooltip's shortcut (`tipKey`): a wash of white on the bubble.
+/// A key of a tooltip's shortcut (`tipKey`): a wash over the bubble — of
+/// the text's colour on the light one, of white on the dark.
 pub fn tip_key(_theme: &Theme) -> container::Style {
     container::Style {
         background: Some(
-            Color::from_rgba(1.0, 1.0, 1.0, if is_light() { 0.14 } else { 0.10 }).into(),
+            if is_light() {
+                wash(0.07)
+            } else {
+                Color::from_rgba(1.0, 1.0, 1.0, 0.10)
+            }
+            .into(),
         ),
         text_color: Some(tip_text()),
         border: Border {
@@ -1510,6 +1530,132 @@ pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::St
     }
 }
 
+/// A text field on its own: the same rounded well as [`field`] — the
+/// search field, Ask's input — its edge lit in the accent while it has the
+/// keyboard. Every field of the app looks like this one.
+pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let focused = matches!(status, text_input::Status::Focused { .. });
+    let hovered = matches!(status, text_input::Status::Hovered);
+    text_input::Style {
+        background: wash(if is_light() { 0.035 } else { 0.045 }).into(),
+        border: Border {
+            color: if focused {
+                with_alpha(accent(), 0.65)
+            } else if hovered {
+                wash(0.16)
+            } else {
+                hairline()
+            },
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        icon: dim(),
+        placeholder: dim(),
+        value: fg(),
+        selection: selection(),
+    }
+}
+
+/// A drop-down: the same rounded well as a field ([`input`]), its edge lit
+/// while it is open.
+pub fn pick(_theme: &Theme, status: pick_list::Status) -> pick_list::Style {
+    pick_list::Style {
+        text_color: fg(),
+        placeholder_color: dim(),
+        handle_color: dim(),
+        background: wash(if is_light() { 0.035 } else { 0.045 }).into(),
+        border: Border {
+            color: match status {
+                pick_list::Status::Opened { .. } => with_alpha(accent(), 0.65),
+                pick_list::Status::Hovered => wash(0.16),
+                pick_list::Status::Active => hairline(),
+            },
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+    }
+}
+
+/// A drop-down's list: a rounded panel as the menus are, its row under the
+/// pointer lit as theirs.
+pub fn pick_menu(_theme: &Theme) -> iced::overlay::menu::Style {
+    iced::overlay::menu::Style {
+        background: if is_light() {
+            Color::WHITE.into()
+        } else {
+            mix(bg(), Color::WHITE, 0.06).into()
+        },
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        text_color: fg(),
+        selected_text_color: fg_bright(),
+        selected_background: wash(0.08).into(),
+        shadow: iced::Shadow {
+            color: scrim(0.18),
+            offset: iced::Vector::new(0.0, 4.0),
+            blur_radius: 16.0,
+        },
+    }
+}
+
+/// A checkbox: rounded as the fields are, filled in the accent when on.
+pub fn check(_theme: &Theme, status: checkbox::Status) -> checkbox::Style {
+    let (checked, hovered, disabled) = match status {
+        checkbox::Status::Active { is_checked } => (is_checked, false, false),
+        checkbox::Status::Hovered { is_checked } => (is_checked, true, false),
+        checkbox::Status::Disabled { is_checked } => (is_checked, false, true),
+    };
+    checkbox::Style {
+        background: if checked {
+            with_alpha(accent(), if disabled { 0.45 } else { 1.0 }).into()
+        } else if hovered {
+            wash(0.06).into()
+        } else {
+            Color::TRANSPARENT.into()
+        },
+        icon_color: on_accent(),
+        border: Border {
+            color: if checked {
+                with_alpha(accent(), if disabled { 0.45 } else { 1.0 })
+            } else if hovered {
+                wash(0.28)
+            } else {
+                wash(if disabled { 0.12 } else { 0.22 })
+            },
+            width: 1.0,
+            radius: 5.0.into(),
+        },
+        text_color: Some(if disabled { dim() } else { fg() }),
+    }
+}
+
+/// An on/off option beside a field (match case, whole word, regex): as
+/// round as the field, outlined while off, filled in the accent while on.
+pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
+        button::Style {
+            background: Some(if on {
+                accent().into()
+            } else if hovered {
+                wash(0.06).into()
+            } else {
+                Color::TRANSPARENT.into()
+            }),
+            text_color: if on { on_accent() } else { fg_muted() },
+            border: Border {
+                radius: 7.0.into(),
+                width: 1.0,
+                color: if on { accent() } else { hairline() },
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
 /// The face of a field that is really a button (the chat field opens the
 /// conversation): no fill of its own, the field around it is the well.
 pub fn field_face(_theme: &Theme, status: button::Status) -> button::Style {
@@ -1536,6 +1682,39 @@ pub fn trough(_theme: &Theme) -> container::Style {
             ..Border::default()
         },
         ..container::Style::default()
+    }
+}
+
+/// A card of Settings' rows (`ui::form`): a faint well with a hairline
+/// edge, set off the page it is on.
+pub fn form_card(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(wash(if is_light() { 0.018 } else { 0.03 }).into()),
+        border: Border {
+            color: hairline(),
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        text_color: Some(fg()),
+        ..container::Style::default()
+    }
+}
+
+/// One of several choices in a card (`ui::form::choice`): a row of the
+/// card, washed while the pointer is over it.
+pub fn form_choice(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: match status {
+            button::Status::Hovered => Some(wash(0.04).into()),
+            button::Status::Pressed => Some(wash(0.07).into()),
+            _ => None,
+        },
+        text_color: fg(),
+        border: Border {
+            radius: 10.0.into(),
+            ..Border::default()
+        },
+        ..button::Style::default()
     }
 }
 
@@ -1736,6 +1915,19 @@ pub fn floating_card(_theme: &Theme) -> container::Style {
         },
         shadow: panel_shadow(),
         ..container::Style::default()
+    }
+}
+
+/// The pill Ask hides to, in the window's corner: the floating card's
+/// surface, as round as it is tall.
+pub fn floating_pill(theme: &Theme) -> container::Style {
+    let card = floating_card(theme);
+    container::Style {
+        border: Border {
+            radius: 20.0.into(),
+            ..card.border
+        },
+        ..card
     }
 }
 
@@ -1961,39 +2153,25 @@ pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// Secondary action button — a filled neutral button with a subtle border, for
-/// the non-primary choice next to a `primary_button` (e.g. "Open Remote…").
+/// Secondary action button — the non-primary choice next to a
+/// `primary_button` (e.g. "Open Remote…"), or a field's own button ("Use",
+/// "Browse…"): the rounded well of a field ([`input`]), a shade deeper so
+/// it reads as something to press.
 pub fn secondary_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let bg = match status {
-        button::Status::Hovered | button::Status::Pressed => bg_active(),
-        _ => bg_hover(),
+    let light = is_light();
+    let (shade, text_color) = match status {
+        button::Status::Hovered => (if light { 0.075 } else { 0.09 }, fg()),
+        button::Status::Pressed => (if light { 0.11 } else { 0.13 }, fg()),
+        button::Status::Disabled => (if light { 0.03 } else { 0.04 }, dim()),
+        button::Status::Active => (if light { 0.05 } else { 0.065 }, fg()),
     };
     button::Style {
-        background: Some(bg.into()),
-        text_color: fg_bright(),
+        background: Some(wash(shade).into()),
+        text_color,
         border: Border {
-            radius: RADIUS.into(),
+            radius: 8.0.into(),
             width: 1.0,
-            color: active().control_border,
-        },
-        ..button::Style::default()
-    }
-}
-
-/// Sidebar tab button (Files / Search).
-pub fn tab_button(active: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
-    move |_theme, status| button::Style {
-        background: if active {
-            Some(bg().into())
-        } else if matches!(status, button::Status::Hovered) {
-            Some(bg_hover().into())
-        } else {
-            None
-        },
-        text_color: if active { fg_bright() } else { fg_muted() },
-        border: Border {
-            radius: 5.0.into(),
-            ..Border::default()
+            color: hairline(),
         },
         ..button::Style::default()
     }

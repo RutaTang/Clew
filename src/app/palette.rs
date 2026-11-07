@@ -23,7 +23,10 @@ const MAX_RECENT: usize = 8;
 /// One command in the palette.
 #[derive(Debug, Clone)]
 pub(crate) struct PaletteCommand {
-    /// What the row says; unique in the list, and how a click finds it.
+    /// Its name, in English whatever the interface speaks: unique in the
+    /// list, how a click, the voice and the agent find it, and what the
+    /// recent commands keep. The row shows it translated
+    /// ([`PaletteCommand::shown`]).
     pub(crate) title: String,
     /// Its key, when it has one: a chord (`⌘⇧C`) or a reading key (`gd`).
     pub(crate) keys: Option<String>,
@@ -31,6 +34,11 @@ pub(crate) struct PaletteCommand {
 }
 
 impl PaletteCommand {
+    /// What the row says: its title, in the reader's language.
+    pub(crate) fn shown(&self) -> &str {
+        crate::i18n::lookup(&self.title)
+    }
+
     /// Whether running it costs something beyond what the window shows —
     /// a paid pass over the project, the program started or stepped, a
     /// breakpoint set in it, another project opened, a file written — so
@@ -60,8 +68,6 @@ pub enum Suggestion {
     /// Ask Clew: the Ask window, its suggestions about what the caret is
     /// in. The row's words.
     Ask(String),
-    /// Talk instead of typing: voice.
-    Talk,
     /// The file finder.
     GoToFile,
     /// A symbol of the open file, from the one the caret is in on.
@@ -73,19 +79,20 @@ pub enum Suggestion {
         line: usize,
         abs: std::path::PathBuf,
     },
-    /// A palette command, by its title: one that opens a project when none
-    /// is open, else one run lately.
+    /// A palette command, by its title (in English, as
+    /// [`PaletteCommand::title`]): one that opens a project when none is
+    /// open, else one run lately.
     Command { title: String, recent: bool },
 }
 
 impl Suggestion {
-    /// The heading it is listed under.
+    /// The heading it is listed under, in the reader's language.
     pub(crate) fn group(&self) -> &'static str {
         match self {
-            Suggestion::Ask(_) | Suggestion::Talk => "Ask",
-            Suggestion::Command { recent: true, .. } => "Recent",
+            Suggestion::Ask(_) => tr!("Ask"),
+            Suggestion::Command { recent: true, .. } => tr!("Recent"),
             Suggestion::GoToFile | Suggestion::Symbol { .. } | Suggestion::Command { .. } => {
-                "Go to"
+                tr!("Go to")
             }
         }
     }
@@ -105,25 +112,26 @@ impl PaletteCommand {
         let message = match &self.action {
             PaletteAction::Send(message) | PaletteAction::AtCaret(message) => message,
             PaletteAction::Goto(_) | PaletteAction::Insight => {
-                return (Glyph::Play, "This only changes what the window shows.");
+                return (Glyph::Play, tr!("This only changes what the window shows."));
             }
         };
         match message {
             Message::Editor(EditorMsg::RunAction(Action::StartDebug)) | Message::Debug(_) => {
-                (Glyph::Debug, "This builds the program and runs it.")
+                (Glyph::Debug, tr!("This builds the program and runs it."))
             }
             Message::Editor(EditorMsg::RunAction(Action::ExplainAll)) | Message::Explain(_) => (
                 Glyph::Sparkle,
-                "This asks the language model about the code, which costs money.",
+                tr!("This uses the AI model, which costs money."),
             ),
-            Message::Project(ProjectMsg::OpenFolderPressed) => {
-                (Glyph::Folder, "This opens another folder in this window.")
-            }
+            Message::Project(ProjectMsg::OpenFolderPressed) => (
+                Glyph::Folder,
+                tr!("This opens another folder in this window."),
+            ),
             Message::Connect(ConnectMsg::Open) => {
-                (Glyph::Remote, "This connects to another computer.")
+                (Glyph::Remote, tr!("This connects to another computer."))
             }
-            Message::Export(_) => (Glyph::Export, "This writes a file."),
-            _ => (Glyph::Play, "This runs a command of the window."),
+            Message::Export(_) => (Glyph::Export, tr!("This writes a file.")),
+            _ => (Glyph::Play, tr!("This runs one of the window's commands.")),
         }
     }
 }
@@ -164,17 +172,51 @@ impl App {
     }
 
     /// Rank the commands and then the files against what the command bar
-    /// has typed.
+    /// has typed: the commands by the titles their rows show, then any
+    /// more that their English titles match.
     pub(crate) fn refresh_bar(&mut self) {
         self.palette = self.palette_commands();
-        let titles: Vec<&str> = self.palette.iter().map(|c| c.title.as_str()).collect();
         let files = self
             .proj
             .project
             .as_ref()
             .map(|p| p.files.clone())
             .unwrap_or_default();
-        self.proj.finder.refresh_bar(&titles, &files);
+        let n = self.palette.len();
+        let english = self.ranked_in_english(|finder, titles| finder.refresh_bar(titles, &files));
+        let shown: Vec<&str> = self.palette.iter().map(PaletteCommand::shown).collect();
+        self.proj.finder.refresh_bar(&shown, &files);
+        if let Some(english) = english {
+            let results = &mut self.proj.finder.results;
+            let (mut commands, files): (Vec<usize>, Vec<usize>) =
+                results.iter().partition(|&&i| i < n);
+            let most = commands
+                .len()
+                .max(english.iter().filter(|&&i| i < n).count());
+            for i in english.into_iter().filter(|&i| i < n) {
+                if !commands.contains(&i) {
+                    commands.push(i);
+                }
+            }
+            commands.truncate(most);
+            commands.extend(files);
+            *results = commands;
+        }
+    }
+
+    /// The finder's results ranked, by `rank`, against the commands'
+    /// English titles — `None` while the interface speaks English, where
+    /// those are the titles shown.
+    fn ranked_in_english(
+        &mut self,
+        rank: impl FnOnce(&mut crate::finder::Finder, &[&str]),
+    ) -> Option<Vec<usize>> {
+        if crate::i18n::current() == crate::i18n::Lang::En {
+            return None;
+        }
+        let titles: Vec<&str> = self.palette.iter().map(|c| c.title.as_str()).collect();
+        rank(&mut self.proj.finder, &titles);
+        Some(std::mem::take(&mut self.proj.finder.results))
     }
 
     /// What the command bar suggests here, in the order it lists them.
@@ -188,10 +230,9 @@ impl App {
             _ => None,
         };
         out.push(Suggestion::Ask(match about {
-            Some(about) => format!("Ask Clew about {about}"),
-            None => "Ask Clew a question".to_string(),
+            Some(about) => tr!("Ask Clew about {name}", name = about),
+            None => tr!("Ask Clew a question").to_string(),
         }));
-        out.push(Suggestion::Talk);
         let listed = |title: &str| self.palette.iter().any(|c| c.title == title);
         if self.proj.project.is_some() {
             out.push(Suggestion::GoToFile);
@@ -226,7 +267,7 @@ impl App {
                 }
             }
         } else {
-            for title in ["Open Folder…", "Open Remote…"] {
+            for title in [tr_noop!("Open Folder…"), tr_noop!("Open Remote…")] {
                 if listed(title) {
                     out.push(Suggestion::Command {
                         title: title.to_string(),
@@ -282,20 +323,34 @@ impl App {
         self.code_focused = true;
         match suggestion {
             Suggestion::Ask(_) => self.update(Message::Ask(AskMsg::Open)),
-            Suggestion::Talk => self.update(Message::Voice(VoiceMsg::Toggle)),
             Suggestion::GoToFile => self.on_finder_opened(FinderMode::Files),
             Suggestion::Symbol { abs, line, .. } => self.open_file(abs, Some(line), true),
             Suggestion::Command { .. } => Task::none(),
         }
     }
 
-    /// Rebuild the command list and rank it against the finder's query.
+    /// Rebuild the command list and rank it against the finder's query: by
+    /// the titles their rows show, then any more that their English titles
+    /// match.
     pub(crate) fn refresh_palette(&mut self) {
         self.palette = self.palette_commands();
-        let titles: Vec<&str> = self.palette.iter().map(|c| c.title.as_str()).collect();
-        self.proj
-            .finder
-            .refresh_commands(&titles, &self.palette_recent);
+        let recent = self.palette_recent.clone();
+        let english =
+            self.ranked_in_english(|finder, titles| finder.refresh_commands(titles, &recent));
+        let shown: Vec<&str> = self.palette.iter().map(PaletteCommand::shown).collect();
+        let recent: Vec<String> = recent
+            .iter()
+            .map(|t| crate::i18n::lookup(t).to_string())
+            .collect();
+        self.proj.finder.refresh_commands(&shown, &recent);
+        if let Some(english) = english {
+            let results = &mut self.proj.finder.results;
+            for i in english {
+                if !results.contains(&i) {
+                    results.push(i);
+                }
+            }
+        }
     }
 
     /// Run the command titled `title` — looked up afresh, so a click on a
@@ -345,7 +400,8 @@ impl App {
     }
 
     /// Every command the window offers now, in the order the palette lists
-    /// them with nothing typed.
+    /// them with nothing typed. Their titles are in English (each marked for
+    /// the catalogs where it is written); the rows show them translated.
     pub(crate) fn palette_commands(&self) -> Vec<PaletteCommand> {
         let mut out = Vec::new();
         let project = self.proj.project.is_some();
@@ -389,7 +445,7 @@ impl App {
                 (GotoKind::TypeDefinition, "gy"),
             ] {
                 add(
-                    kind.label().to_string(),
+                    kind.name().to_string(),
                     Some(keys.into()),
                     PaletteAction::Goto(kind),
                 );
@@ -400,7 +456,7 @@ impl App {
                 .and_then(InsightKind::for_lang)
             {
                 add(
-                    kind.label().to_string(),
+                    kind.name().to_string(),
                     Some("ge".into()),
                     PaletteAction::Insight,
                 );
@@ -408,25 +464,37 @@ impl App {
             let at_caret = |m| PaletteAction::AtCaret(m);
             for (title, keys, message) in [
                 (
-                    "Call Hierarchy",
+                    tr_noop!("Call Hierarchy"),
                     Some("gc"),
                     Message::Calls(CallsMsg::FromMenu),
                 ),
-                ("View Docs", None, Message::Docs(DocsMsg::ViewFromMenu)),
-                ("Explain", None, Message::Explain(ExplainMsg::FromMenu)),
-                ("Add to Ask", None, Message::Ask(AskMsg::AboutSelection)),
                 (
-                    "Why Is This Here?",
+                    tr_noop!("View Docs"),
+                    None,
+                    Message::Docs(DocsMsg::ViewFromMenu),
+                ),
+                (
+                    tr_noop!("Explain"),
+                    None,
+                    Message::Explain(ExplainMsg::FromMenu),
+                ),
+                (
+                    tr_noop!("Add to Ask"),
+                    None,
+                    Message::Ask(AskMsg::AboutSelection),
+                ),
+                (
+                    tr_noop!("Why Is This Here?"),
                     None,
                     Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
                 ),
                 (
-                    "Toggle Breakpoint",
+                    tr_noop!("Toggle Breakpoint"),
                     None,
                     Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
                 ),
                 (
-                    "Conditional Breakpoint…",
+                    tr_noop!("Conditional Breakpoint…"),
                     None,
                     Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
                 ),
@@ -443,10 +511,10 @@ impl App {
         if let Some(session) = &self.debug.session {
             if session.status == DebugStatus::Stopped {
                 for (title, cmd) in [
-                    ("Debug: Continue", DebugCmd::Continue),
-                    ("Debug: Step Over", DebugCmd::StepOver),
-                    ("Debug: Step Into", DebugCmd::StepIn),
-                    ("Debug: Step Out", DebugCmd::StepOut),
+                    (tr_noop!("Debug: Continue"), DebugCmd::Continue),
+                    (tr_noop!("Debug: Step Over"), DebugCmd::StepOver),
+                    (tr_noop!("Debug: Step Into"), DebugCmd::StepIn),
+                    (tr_noop!("Debug: Step Out"), DebugCmd::StepOut),
                 ] {
                     add(
                         title.into(),
@@ -456,7 +524,7 @@ impl App {
                 }
             }
             add(
-                "Debug: Stop".into(),
+                tr_noop!("Debug: Stop").into(),
                 None,
                 send(Message::Debug(DebugMsg::Stop)),
             );
@@ -465,46 +533,59 @@ impl App {
         // The toolbar's own tools.
         if project {
             add(
-                "Overview".into(),
+                tr_noop!("Overview").into(),
                 None,
                 send(Message::Overview(OverviewMsg::Show)),
             );
             add(
-                "Stats".into(),
+                tr_noop!("Stats").into(),
                 None,
                 send(Message::Overview(OverviewMsg::ShowStats)),
             );
         }
         add(
-            "Settings".into(),
+            tr_noop!("Settings").into(),
             Some(crate::keymap::local_keys("⌘,")),
             send(Message::Settings(SettingsMsg::Open)),
         );
 
         // The sidebar's tabs and the panels.
         if project {
-            for (label, tab) in ui::SIDEBAR_TABS {
+            for (_, tab) in ui::SIDEBAR_TABS {
                 add(
-                    format!("Sidebar: {}", title_case(label)),
+                    sidebar_title(tab).into(),
                     None,
                     send(Message::Window(WindowMsg::SidebarTabPicked(tab))),
                 );
             }
-            let toggle = |shown: bool, what: &str| {
-                format!("View: {} {what}", if shown { "Hide" } else { "Show" })
-            };
+            // Each title whole, as it reads: "View: Hide Sidebar" while the
+            // sidebar shows, "View: Show Sidebar" while it does not.
+            let toggle =
+                |shown: bool, hide: &str, show: &str| if shown { hide } else { show }.to_string();
             add(
-                toggle(self.show_left_sidebar, "Sidebar"),
+                toggle(
+                    self.show_left_sidebar,
+                    tr_noop!("View: Hide Sidebar"),
+                    tr_noop!("View: Show Sidebar"),
+                ),
                 None,
                 send(Message::Window(WindowMsg::ToggleLeftSidebar)),
             );
             add(
-                toggle(self.show_right_panel, "Context Panel"),
+                toggle(
+                    self.show_right_panel,
+                    tr_noop!("View: Hide Margin"),
+                    tr_noop!("View: Show Margin"),
+                ),
                 None,
                 send(Message::Window(WindowMsg::ToggleRightPanel)),
             );
             add(
-                toggle(self.show_bottom, "Debug Panel"),
+                toggle(
+                    self.show_bottom,
+                    tr_noop!("View: Hide Debug Panel"),
+                    tr_noop!("View: Show Debug Panel"),
+                ),
                 None,
                 send(Message::Window(if self.show_bottom {
                     WindowMsg::CollapseBottom
@@ -513,46 +594,59 @@ impl App {
                 })),
             );
             // The ⋯ menu's view toggles.
-            for (shown, what, message) in [
+            for (shown, hide, show, message) in [
                 (
                     self.show_inline_summaries,
-                    "Outline Summaries",
+                    tr_noop!("View: Hide Outline Summaries"),
+                    tr_noop!("View: Show Outline Summaries"),
                     Message::Window(WindowMsg::ToggleInlineSummaries),
                 ),
                 (
                     self.show_file_banner,
-                    "File Summary",
+                    tr_noop!("View: Hide File Summary"),
+                    tr_noop!("View: Show File Summary"),
                     Message::Window(WindowMsg::ToggleFileBanner),
                 ),
                 (
                     self.show_inlay_hints,
-                    "Inlay Hints",
+                    tr_noop!("View: Hide Inlay Hints"),
+                    tr_noop!("View: Show Inlay Hints"),
                     Message::Lsp(LspMsg::ToggleInlayHints),
                 ),
                 (
                     self.show_minimap,
-                    "Minimap",
+                    tr_noop!("View: Hide Minimap"),
+                    tr_noop!("View: Show Minimap"),
                     Message::Window(WindowMsg::ToggleMinimap),
                 ),
                 (
                     self.show_inline_blame,
-                    "Inline Blame",
+                    tr_noop!("View: Hide Inline Blame"),
+                    tr_noop!("View: Show Inline Blame"),
                     Message::Window(WindowMsg::ToggleInlineBlame),
                 ),
                 (
                     self.show_indent_guides,
-                    "Indent Guides",
+                    tr_noop!("View: Hide Indent Guides"),
+                    tr_noop!("View: Show Indent Guides"),
                     Message::Window(WindowMsg::ToggleIndentGuides),
                 ),
             ] {
-                add(toggle(shown, what), None, send(message));
+                add(toggle(shown, hide, show), None, send(message));
             }
             // The ⋯ menu's tools that have no chord of their own.
             for (title, message) in [
-                ("Glossary", Message::Glossary(GlossaryMsg::Open)),
-                ("Skim (Fold Bodies)", Message::Editor(EditorMsg::SkimFile)),
-                ("Export Notes…", Message::Export(ExportMsg::Start)),
-                ("Tutorial", Message::Tutorial(TutorialMsg::Start)),
+                (tr_noop!("Glossary"), Message::Glossary(GlossaryMsg::Open)),
+                (
+                    tr_noop!("Skim (Fold Bodies)"),
+                    Message::Editor(EditorMsg::SkimFile),
+                ),
+                (tr_noop!("Export Notes…"), Message::Export(ExportMsg::Start)),
+                (
+                    tr_noop!("Set Up Project…"),
+                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage)),
+                ),
+                (tr_noop!("Tutorial"), Message::Tutorial(TutorialMsg::Start)),
             ] {
                 add(title.into(), None, send(message));
             }
@@ -563,9 +657,9 @@ impl App {
                 Some(crate::explain::Node::Function { .. })
             ) {
                 let title = if self.proj.explain.showing_detail {
-                    "Explain: Summary"
+                    tr_noop!("Explain: Summary")
                 } else {
-                    "Explain: In Blocks"
+                    tr_noop!("Explain: In Blocks")
                 };
                 add(
                     title.into(),
@@ -573,46 +667,53 @@ impl App {
                     send(Message::Explain(ExplainMsg::ToggleBlocks)),
                 );
             }
-            // Where the conversation is, and clearing it.
-            let ask = match self.ask_view {
-                AskView::Margin => ("Ask: Take Out of the Margin", AskMsg::Float),
-                _ => ("Ask: Keep in the Margin", AskMsg::KeepInMargin),
-            };
-            add(ask.0.into(), None, send(Message::Ask(ask.1)));
+            // Where the conversation is, its sessions, and clearing it.
+            add(
+                tr_noop!("Ask: New Session").into(),
+                None,
+                send(Message::Ask(AskMsg::NewSession)),
+            );
+            if self.ask_view.is_open() {
+                add(
+                    tr_noop!("Ask: Hide").into(),
+                    None,
+                    send(Message::Ask(AskMsg::Hide)),
+                );
+            }
             if self.ask_view != AskView::Expanded {
                 add(
-                    "Ask: Make Large".into(),
+                    tr_noop!("Ask: Make Large").into(),
                     None,
                     send(Message::Ask(AskMsg::Expand)),
                 );
             }
             if !self.proj.ask_turns.is_empty() {
                 add(
-                    "Ask: Clear Conversation".into(),
+                    tr_noop!("Ask: Clear Conversation").into(),
                     None,
                     send(Message::Ask(AskMsg::Clear)),
                 );
             }
         }
         add(
-            "Open Folder…".into(),
+            tr_noop!("Open Folder…").into(),
             None,
             send(Message::Project(ProjectMsg::OpenFolderPressed)),
         );
         add(
-            "Open Remote…".into(),
+            tr_noop!("Open Remote…").into(),
             None,
             send(Message::Connect(ConnectMsg::Open)),
         );
 
         // The appearance.
-        for (pref, name) in [
-            (theme::ThemePref::Light, "Light"),
-            (theme::ThemePref::Dark, "Dark"),
-            (theme::ThemePref::System, "Match System"),
+        for (pref, title) in [
+            (theme::ThemePref::Light, tr_noop!("Theme: Light")),
+            (theme::ThemePref::Dark, tr_noop!("Theme: Dark")),
+            (theme::ThemePref::System, tr_noop!("Theme: Match System")),
         ] {
             add(
-                format!("Theme: {name}"),
+                title.into(),
                 None,
                 send(Message::Settings(SettingsMsg::SetThemePref(pref))),
             );
@@ -621,14 +722,20 @@ impl App {
     }
 }
 
-/// `FILES` → `Files`.
-fn title_case(label: &str) -> String {
-    let mut chars = label.chars();
-    match chars.next() {
-        Some(first) => first
-            .to_uppercase()
-            .chain(chars.flat_map(char::to_lowercase))
-            .collect(),
-        None => String::new(),
+/// The palette's title for showing sidebar view `tab`, in English (see
+/// [`PaletteCommand::title`]).
+fn sidebar_title(tab: SidebarTab) -> &'static str {
+    match tab {
+        SidebarTab::Files => tr_noop!("Sidebar: Files"),
+        SidebarTab::Search => tr_noop!("Sidebar: Search"),
+        SidebarTab::Semantic => tr_noop!("Sidebar: Find"),
+        SidebarTab::Marks => tr_noop!("Sidebar: Marks"),
+        SidebarTab::Trail => tr_noop!("Sidebar: Trail"),
+        SidebarTab::Calls => tr_noop!("Sidebar: Calls"),
+        SidebarTab::Flow => tr_noop!("Sidebar: Flow"),
+        SidebarTab::Imports => tr_noop!("Sidebar: Imports"),
+        SidebarTab::Walk => tr_noop!("Sidebar: Walk"),
+        SidebarTab::Notes => tr_noop!("Sidebar: Notes"),
+        SidebarTab::Docs => tr_noop!("Sidebar: Docs"),
     }
 }

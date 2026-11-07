@@ -22,11 +22,19 @@ pub(crate) fn write_trail((root, text): TrailWrite) -> Task<Message> {
                 history::save_text(&task_root, text.as_deref()).map_err(|e| e.to_string())
             })
             .await
-            .unwrap_or_else(|e| Err(format!("the write failed unexpectedly: {e}")));
+            .unwrap_or_else(|e| Err(tr!("the write failed unexpectedly: {error}", error = e)));
             (root, result)
         },
         |(root, result)| Message::Reading(ReadingMsg::TrailSaved { root, result }),
     )
+}
+
+/// The reading state a file of the project keeps
+/// (`App::keeps_reading_state`).
+#[derive(Clone, Copy)]
+enum Kept {
+    Bookmarks,
+    Notes,
 }
 
 impl App {
@@ -80,9 +88,13 @@ impl App {
         if let Err(e) = result {
             let open = self.proj.project.as_ref().is_some_and(|p| p.root == root);
             self.status = if open {
-                format!("Reading trail not saved: {e}")
+                tr!("Reading trail not saved: {error}", error = e)
             } else {
-                format!("Reading trail of {} not saved: {e}", root.display())
+                tr!(
+                    "Reading trail of {path} not saved: {error}",
+                    path = root.display(),
+                    error = e
+                )
             };
         }
         match self.trail_writer.finished() {
@@ -113,7 +125,7 @@ impl App {
     /// its absolute path, which the stores hide when they load: a bookmark or
     /// a note kept for one showed for the session, then was gone without a
     /// word.
-    fn keeps_reading_state(&mut self, rel: &str, what: &str) -> bool {
+    fn keeps_reading_state(&mut self, rel: &str, what: Kept) -> bool {
         let path = std::path::Path::new(rel);
         if !path.is_absolute() {
             return true;
@@ -121,7 +133,16 @@ impl App {
         let name = path
             .file_name()
             .map_or_else(|| rel.to_string(), |n| n.to_string_lossy().into_owned());
-        self.status = format!("{what} are kept for the project's files — {name} is outside it");
+        self.status = match what {
+            Kept::Bookmarks => tr!(
+                "Only the project's files can have bookmarks — {file} is outside it",
+                file = name
+            ),
+            Kept::Notes => tr!(
+                "Only the project's files can have notes — {file} is outside it",
+                file = name
+            ),
+        };
         false
     }
 
@@ -129,8 +150,7 @@ impl App {
         // A past revision on screen: its lines are not the live file's, and
         // the bookmark went on the hidden live file's caret line instead.
         if ui::time_travel_pane(self).is_some() {
-            self.status =
-                "Bookmarks mark the file as it is now — leave time travel to mark a line".into();
+            self.status = tr!("Leave time travel to bookmark").into();
             return Task::none();
         }
         let line_height = self.line_height();
@@ -146,7 +166,7 @@ impl App {
             preview = preview.chars().take(80).collect();
         }
         let rel = v.rel.clone();
-        if !self.keeps_reading_state(&rel, "Bookmarks") {
+        if !self.keeps_reading_state(&rel, Kept::Bookmarks) {
             return Task::none();
         }
         // What the press asks for, by what this window shows: a bookmark on
@@ -199,11 +219,12 @@ impl App {
             Ok(())
         };
         self.status = match saved {
-            Ok(()) if added => format!("Bookmarked {rel}:{line}"),
-            Ok(()) => format!("Removed bookmark {rel}:{line}"),
-            Err(e) => {
-                format!("Cannot write .clew/bookmarks.json: {e} — kept for this session, not saved")
-            }
+            Ok(()) if added => tr!("Bookmarked {file}:{line}", file = rel, line = line),
+            Ok(()) => tr!("Removed bookmark {file}:{line}", file = rel, line = line),
+            Err(e) => tr!(
+                "Cannot write .clew/bookmarks.json: {error} — kept for this session, not saved",
+                error = e
+            ),
         };
         Task::none()
     }
@@ -249,8 +270,10 @@ impl App {
             self.proj.bookmarks = merged;
             self.touch_project_state(bookmarks::REL);
             if let Err(e) = saved {
-                self.status =
-                    format!("Cannot write .clew/bookmarks.json: {e} — removed for this session");
+                self.status = tr!(
+                    "Cannot write .clew/bookmarks.json: {error} — removed for this session",
+                    error = e
+                );
             }
         }
         Task::none()
@@ -309,8 +332,10 @@ impl App {
                 // deleted from one another window just added.
                 self.proj.bookmarks = merged;
                 if let Err(e) = saved {
-                    self.status = format!(
-                        "Cannot write .clew/bookmarks.json: {e} — kept for this session, not saved"
+                    self.status = tr!(
+                        "Cannot write .clew/bookmarks.json: {error} — kept for this session, not \
+                         saved",
+                        error = e
                     );
                 }
             }
@@ -365,8 +390,10 @@ impl App {
         self.proj.notes = merged;
         self.touch_project_state(notes::REL);
         if let Err(e) = saved {
-            self.status =
-                format!("Cannot write .clew/notes.json: {e} — kept for this session, not saved");
+            self.status = tr!(
+                "Cannot write .clew/notes.json: {error} — kept for this session, not saved",
+                error = e
+            );
         }
         true
     }
@@ -411,7 +438,7 @@ impl App {
         if let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone())
             && let Err(e) = reading::save_target(&root, &self.proj.reading_target)
         {
-            self.status = format!("Could not save target: {e}");
+            self.status = tr!("Could not save the reading target: {error}", error = e);
         }
         Task::none()
     }
@@ -447,11 +474,13 @@ impl App {
                 Task::none()
             }
             ReadingMsg::NoteToggleUnderstood { rel, .. }
-                if !self.keeps_reading_state(&rel, "Notes") =>
+                if !self.keeps_reading_state(&rel, Kept::Notes) =>
             {
                 Task::none()
             }
-            ReadingMsg::NoteEditStart { rel, .. } if !self.keeps_reading_state(&rel, "Notes") => {
+            ReadingMsg::NoteEditStart { rel, .. }
+                if !self.keeps_reading_state(&rel, Kept::Notes) =>
+            {
                 Task::none()
             }
             ReadingMsg::NoteToggleUnderstood { rel, symbol } => {

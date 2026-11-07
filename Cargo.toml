@@ -12,7 +12,7 @@ exclude = ["vendor"]
 
 [package]
 name = "clew"
-version = "0.1.19"
+version = "0.2.0"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"
@@ -45,6 +45,7 @@ nucleo-matcher = "0.3.1"
 rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+sys-locale = "0.3.2"
 # Native math + mermaid rendering to self-contained SVG — no webview / no helper
 # binary (replaces the old `clew-view` MathJax/mermaid.js path).
 ratex-svg = { version = "0.1.13", features = ["standalone", "embed-fonts"] }
@@ -105,6 +106,10 @@ objc2-foundation = { version = "0.3", features = [
 [dev-dependencies]
 iced_test = "0.14"
 socket2 = "0.6"
+# The vendored windowing: the text a key press types (`shell`'s tests), and
+# on Windows the window `app::corners` makes as iced makes Clew's. The
+# version the build already carries.
+iced_winit = "0.14"
 
 # A borderless window of winit's kind, asked of Windows' compositor to be
 # rounded, and one made as iced makes Clew's, drawn by iced's renderer and
@@ -112,7 +117,6 @@ socket2 = "0.6"
 # windows of a Clew started by a test (tests/relaunch.rs): the versions the
 # build already carries.
 [target.'cfg(windows)'.dev-dependencies]
-iced_winit = "0.14"
 windows-sys = { version = "0.61", features = [
     "Wdk_System_SystemServices",
     "Win32_Graphics_Dwm",

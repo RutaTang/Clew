@@ -152,7 +152,7 @@ impl AiClient {
         let tx = self
             .server_tx
             .as_ref()
-            .ok_or("not connected to a server".to_string())?;
+            .ok_or_else(|| tr!("not connected to a server").to_string())?;
         Ok(self.rpc(tx, request).await?)
     }
 
@@ -168,9 +168,9 @@ impl AiClient {
     ) -> Result<clew_protocol::GitResult, String> {
         match self.request(clew_protocol::Request::Git { op }).await? {
             clew_protocol::Event::GitResult { result, .. } => Ok(result),
-            other => Err(format!(
-                "unexpected reply to a git request: {}",
-                event_name(&other)
+            other => Err(tr!(
+                "unexpected reply to a git request: {reply}",
+                reply = event_name(&other)
             )),
         }
     }
@@ -251,11 +251,11 @@ impl AiClient {
         .await;
         match queued {
             Ok(Ok(())) => awaiting.sent = true,
-            Ok(Err(_)) => return Err(RpcError::local("server gone")),
+            Ok(Err(_)) => return Err(RpcError::local(tr!("server gone"))),
             Err(_) => {
-                return Err(RpcError::local(format!(
-                    "the server took no requests for {}s",
-                    limit.as_secs()
+                return Err(RpcError::local(tr!(
+                    "the server took no requests for {seconds}s",
+                    seconds = limit.as_secs()
                 )));
             }
         }
@@ -265,12 +265,12 @@ impl AiClient {
                 message,
             }),
             Ok(Ok(event)) => Ok(event),
-            Ok(Err(_)) => Err(RpcError::local("server dropped the request")),
+            Ok(Err(_)) => Err(RpcError::local(tr!("server dropped the request"))),
             // Given up on: `awaiting` forgets the entry and, for a `Chat`,
             // stops the server's work that nobody will read now.
-            Err(_) => Err(RpcError::local(format!(
-                "no reply from the server within {}s",
-                limit.as_secs()
+            Err(_) => Err(RpcError::local(tr!(
+                "no reply from the server within {seconds}s",
+                seconds = limit.as_secs()
             ))),
         }
     }
@@ -335,9 +335,10 @@ impl AiClient {
             };
             return match self.rpc(tx, req).await.map_err(CallError::Rpc)? {
                 clew_protocol::Event::ChatResult { text } => Ok(text),
-                other => Err(CallError::Internal(format!(
-                    "unexpected reply to Chat: {}",
-                    event_name(&other)
+                other => Err(CallError::Internal(tr!(
+                    "unexpected reply to {request}: {reply}",
+                    request = "Chat",
+                    reply = event_name(&other)
                 ))),
             };
         }
@@ -358,7 +359,7 @@ impl AiClient {
             .map_err(CallError::Llm)
         })
         .await
-        .unwrap_or_else(|_| Err(CallError::Internal("task join failed".into())))
+        .unwrap_or_else(|_| Err(CallError::Internal(tr!("task join failed").into())))
     }
 
     /// Embed texts — stopped, like a completion, when this future is dropped
@@ -377,7 +378,11 @@ impl AiClient {
                 .await?
             {
                 clew_protocol::Event::Embeddings { vecs } => Ok(vecs),
-                other => Err(format!("unexpected reply to Embed: {}", event_name(&other))),
+                other => Err(tr!(
+                    "unexpected reply to {request}: {reply}",
+                    request = "Embed",
+                    reply = event_name(&other)
+                )),
             };
         }
         let abandoned = RaiseOnDrop::default();
@@ -388,7 +393,7 @@ impl AiClient {
             })
         })
         .await
-        .unwrap_or_else(|_| Err("task join failed".into()))
+        .unwrap_or_else(|_| Err(tr!("task join failed").into()))
     }
 }
 
@@ -536,18 +541,23 @@ impl GitSource {
                 let root = root.clone();
                 tokio::task::spawn_blocking(move || git::run_op(&root, op))
                     .await
-                    .map_err(|_| "git task failed".to_string())?
+                    .map_err(|_| tr!("git task failed").to_string())?
                     .map_err(|e| e.to_string())?
             }
         };
         if !result.answers(&asked) {
-            return Err(format!(
-                "the git reply answers another operation ({})",
-                result.name()
+            return Err(tr!(
+                "the git reply answers another operation ({operation})",
+                operation = result.name()
             ));
         }
         let name = result.name();
-        T::take(result).ok_or_else(|| format!("the {name} git reply is not the expected shape"))
+        T::take(result).ok_or_else(|| {
+            tr!(
+                "the {operation} git reply is not the expected shape",
+                operation = name
+            )
+        })
     }
 }
 

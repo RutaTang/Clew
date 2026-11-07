@@ -19,8 +19,6 @@ use super::*;
 // iced's column!/row! from the prelude macros of the same name.
 use iced::widget::row;
 
-use crate::VoiceMsg;
-use crate::app::voice::VoicePhase;
 use crate::keymap::{Action, MenuSection};
 
 /// Height of the top bar.
@@ -43,18 +41,14 @@ const TRAFFIC_W: f32 = 3.0 * 12.0 + 2.0 * 8.0;
 /// Width of back / forward: the room before them, and their gap.
 pub(crate) const NAV_W: f32 = NAV_PAD_L + 2.0 * ICON_BTN + 2.0;
 const NAV_PAD_L: f32 = 4.0;
-/// The chat field: widest it grows, its height, and the room kept clear
+/// The search field: widest it grows, its height, and the room kept clear
 /// either side of it.
 const FIELD_MAX_W: f32 = 460.0;
 const FIELD_H: f32 = 34.0;
-/// The field while listening: its red dot, and the design's gap between
-/// what it holds.
-const REC_DOT: f32 = 7.0;
-const LISTENING_GAP: f32 = 9.0;
 const FIELD_MARGIN: f32 = 14.0;
 /// Width of one of the window buttons of Windows and Linux.
 const WIN_BTN_W: f32 = 46.0;
-/// The slot the panel toggle is centred in at the top bar's right (macOS).
+/// The room kept at the top bar's right (macOS), past the search field.
 const TOGGLE_SLOT_W: f32 = 44.0;
 /// Room before the window buttons (Windows and Linux).
 const WIN_BTNS_GAP: f32 = 14.0;
@@ -80,8 +74,8 @@ pub(crate) fn left_cluster_w(app: &App) -> f32 {
 /// edge as the sidebar is resized.
 const SIDEBAR_PAST_BAR: f32 = 6.0;
 
-/// Width of the top bar's right cluster: the panel toggle (macOS), or the
-/// window buttons (Windows and Linux).
+/// Width of the top bar's right cluster: room at the corner (macOS), or
+/// the window buttons (Windows and Linux).
 fn right_cluster_w() -> f32 {
     if MAC_CHROME {
         TOGGLE_SLOT_W
@@ -90,10 +84,10 @@ fn right_cluster_w() -> f32 {
     }
 }
 
-/// Where the chat field is drawn, in window coordinates: centred in the
+/// Where the search field is drawn, in window coordinates: centred in the
 /// room between the left and right clusters, never wider than
 /// [`FIELD_MAX_W`].
-pub(crate) fn chat_field_rect(app: &App) -> iced::Rectangle {
+pub(crate) fn search_field_rect(app: &App) -> iced::Rectangle {
     let left = left_cluster_w(app) + NAV_W;
     let area = (app.window_width - left - right_cluster_w()).max(0.0);
     let width = (area - 2.0 * FIELD_MARGIN).clamp(0.0, FIELD_MAX_W);
@@ -325,7 +319,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         chrome_tip(
             icon_button(Glyph::Menu, theme::fg_muted(), app.show_app_menu)
                 .on_press(Message::Window(WindowMsg::ToggleAppMenu)),
-            "Menu",
+            tr!("Menu"),
             None,
         )
     };
@@ -340,7 +334,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             false,
         )
         .on_press(Message::Window(WindowMsg::ToggleLeftSidebar)),
-        "Toggle sidebar",
+        tr!("Toggle sidebar"),
         None,
     );
     let left = container(
@@ -378,7 +372,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                     app.proj.history.can_back(),
                     Message::Reading(ReadingMsg::GoBack)
                 ),
-                "Back",
+                tr!("Back"),
                 caps(Action::GoBack),
             ),
             chrome_tip(
@@ -387,7 +381,7 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
                     app.proj.history.can_forward(),
                     Message::Reading(ReadingMsg::GoForward)
                 ),
-                "Forward",
+                tr!("Forward"),
                 caps(Action::GoForward),
             ),
         ]
@@ -397,30 +391,15 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
     .padding(iced::padding::left(NAV_PAD_L))
     .width(Length::Fixed(NAV_W));
 
-    let field = container(chat_field(app))
+    let field = container(search_field(app))
         .width(Fill)
         .align_x(iced::Center)
         .padding([0.0, FIELD_MARGIN]);
 
-    // Right: the panel toggle (macOS), or the window buttons.
+    // Right: room at the corner (macOS), or the window buttons. The margin
+    // is shown and hidden from the View menu, where it is.
     let right: Element<'_, Message> = if MAC_CHROME {
-        container(chrome_tip(
-            icon_button(
-                Glyph::PanelRight,
-                if app.show_right_panel {
-                    theme::fg_muted()
-                } else {
-                    theme::dim()
-                },
-                false,
-            )
-            .on_press(Message::Window(WindowMsg::ToggleRightPanel)),
-            "Toggle panel",
-            None,
-        ))
-        .width(Length::Fixed(TOGGLE_SLOT_W))
-        .align_x(iced::Center)
-        .into()
+        space().width(Length::Fixed(TOGGLE_SLOT_W)).into()
     } else {
         container(window_buttons(app))
             .padding(iced::padding::left(WIN_BTNS_GAP))
@@ -539,15 +518,15 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
         )
     };
     let (max_glyph, max_label) = if app.maximized {
-        (WindowGlyph::Restore, "Restore")
+        (WindowGlyph::Restore, tr!("Restore"))
     } else {
-        (WindowGlyph::Maximize, "Maximize")
+        (WindowGlyph::Maximize, tr!("Maximize"))
     };
     row![
         key(
             WindowGlyph::Minimize,
             false,
-            "Minimize",
+            tr!("Minimize"),
             Message::Window(WindowMsg::Minimize)
         ),
         key(
@@ -559,7 +538,7 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
         key(
             WindowGlyph::Close,
             true,
-            "Close",
+            tr!("Close"),
             Message::Window(WindowMsg::Close)
         ),
     ]
@@ -567,160 +546,50 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The chat field: the one place to talk to Clew. Typed or said, a question
-/// or something to do — Clew answers, and opens, jumps and runs what was
-/// asked for. A click opens the conversation; the microphone listens. While
-/// voice is busy the field says what it is doing, with a way to stop.
-fn chat_field(app: &App) -> Element<'_, Message> {
-    let rect = chat_field_rect(app);
-    let listening = app.voice.is_listening();
-    let busy = app.voice.is_busy() || app.voice.confirm.is_some();
-    let active = app.ask_view != AskView::Closed || busy;
-    let small = |label: &'static str, msg: Message, primary: bool| {
-        button(text(label).size(ts::SMALL))
-            .style(if primary {
-                theme::primary_button
-            } else {
-                theme::toolbar_button
-            })
-            .padding([2, 8])
-            .on_press(msg)
-    };
-    // The card opens over the field: what voice is doing is said on the
-    // card then, and the field under it keeps its plain face — no second
-    // set of the same controls hidden beneath the card.
-    let covered = super::askfloat::ask_is_card(app);
-    let face: Element<'_, Message> =
-        if let Some(title) = app.voice.confirm.as_ref().filter(|_| !covered) {
-            row![
-                text(format!("Run “{title}”?"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .width(Fill)
+/// The search field in the top bar: files, symbols and — typed after `>`
+/// — commands, in the finder it opens. Ask and voice are not here: they
+/// live in the window's corner ([`super::askfloat`]).
+fn search_field(app: &App) -> Element<'_, Message> {
+    let rect = search_field_rect(app);
+    let chord = app.keymap.chord(Action::OpenFile).caps();
+    let face = button(
+        row![
+            glyph::icon(Glyph::Search, theme::fg_muted(), 15.0),
+            container(ts::set_in(
+                text(tr!("Search files, symbols and commands"))
+                    .font(crate::fonts::in_control(crate::fonts::UI))
+                    .color(theme::dim())
                     .wrapping(Wrapping::None),
-                small("Run", Message::Voice(VoiceMsg::Confirm), true),
-                small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
-            ]
-            .spacing(6)
-            .align_y(iced::Center)
-            .into()
-        } else {
-            match app.voice.phase {
-                // Listening: how loud, and how to stop — the microphone itself,
-                // lit, or Esc.
-                VoicePhase::Listening { level, .. } if !covered => row![
-                    container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
-                        container::Style {
-                            background: Some(theme::recording().into()),
-                            border: iced::border::rounded(REC_DOT / 2.0),
-                            ..container::Style::default()
-                        }
-                    }),
-                    ts::set_in(
-                        text("Listening…").color(theme::fg()),
-                        FIELD_H - 2.0,
-                        ts::INTER,
-                        ts::BASE,
-                    ),
-                    super::askfloat::level_bars(&[5.0, 9.0, 13.0, 8.0, 11.0, 6.0], level, false),
-                    space().width(Fill),
-                    keycap("Esc".to_string()),
-                ]
-                .spacing(LISTENING_GAP)
-                .align_y(iced::Center)
-                .into(),
-                VoicePhase::Transcribing { .. } if !covered => row![
-                    text("Working out what you said…")
-                        .size(ts::BASE)
-                        .color(theme::fg_muted())
-                        .width(Fill)
-                        .wrapping(Wrapping::None),
-                    small("Cancel", Message::Voice(VoiceMsg::Cancel), false),
-                ]
-                .spacing(6)
-                .align_y(iced::Center)
-                .into(),
-                _ => {
-                    let chord = app.keymap.chord(Action::ToggleAsk).caps();
-                    button(
-                        row![
-                            glyph::icon(Glyph::Message, theme::accent(), 15.0),
-                            container(ts::set_in(
-                                text("Ask a question, or say what to do")
-                                    .font(crate::fonts::in_control(crate::fonts::UI))
-                                    .color(theme::dim())
-                                    .wrapping(Wrapping::None),
-                                FIELD_H - 2.0,
-                                ts::INTER,
-                                ts::BASE,
-                            ))
-                            .width(Fill)
-                            .clip(true),
-                            control_keycap(chord),
-                        ]
-                        .spacing(9)
-                        .height(Fill)
-                        .align_y(iced::Center),
-                    )
-                    .style(theme::field_face)
-                    .padding(0)
-                    .width(Fill)
-                    .height(Fill)
-                    .on_press(Message::Ask(AskMsg::Toggle))
-                    .into()
-                }
-            }
-        };
-    let chord = app.keymap.chord(Action::Voice).caps();
-    let mic = tip_at(
-        button(
-            container(glyph::icon(
-                Glyph::Mic,
-                if listening {
-                    crate::theme::active().on_accent
-                } else {
-                    theme::fg_muted()
-                },
-                15.0,
+                FIELD_H - 2.0,
+                ts::INTER,
+                ts::BASE,
             ))
             .width(Fill)
-            .height(Fill)
-            .align_x(iced::Center)
-            .align_y(iced::Center),
-        )
-        .style(move |t: &iced::Theme, status| {
-            if listening {
-                theme::round_button(true)(t, status)
-            } else {
-                theme::icon_button(false)(t, status)
-            }
-        })
-        .padding(0)
-        .width(Length::Fixed(26.0))
-        .height(Length::Fixed(26.0))
-        .on_press(Message::Voice(VoiceMsg::Toggle)),
-        if listening { "Stop listening" } else { "Talk" },
-        Some(chord),
-        tooltip::Position::Bottom,
-    );
-    // The design's 12 before and 4 after, inside the field's 1 px edge
-    // (which iced draws inside the box).
-    container(
-        row![face, mic]
-            .spacing(4)
-            .height(Fill)
-            .align_y(iced::Center),
+            .clip(true),
+            control_keycap(chord),
+        ]
+        .spacing(9)
+        .height(Fill)
+        .align_y(iced::Center),
     )
-    .padding(Padding {
-        top: 1.0,
-        right: 4.0 + 1.0,
-        bottom: 1.0,
-        left: 12.0 + 1.0,
-    })
-    .width(Length::Fixed(rect.width))
-    .height(Length::Fixed(FIELD_H))
-    .style(theme::field(active))
-    .into()
+    .style(theme::field_face)
+    .padding(0)
+    .width(Fill)
+    .height(Fill)
+    .on_press(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    // The design's 12 before and 6 after, inside the field's 1 px edge
+    // (which iced draws inside the box).
+    container(face)
+        .padding(Padding {
+            top: 1.0,
+            right: 6.0 + 1.0,
+            bottom: 1.0,
+            left: 12.0 + 1.0,
+        })
+        .width(Length::Fixed(rect.width))
+        .height(Length::Fixed(FIELD_H))
+        .style(theme::field(false))
+        .into()
 }
 
 // ---------------------------------------------------------------- tool strip
@@ -777,14 +646,7 @@ pub(crate) fn body_top(app: &App) -> f32 {
 pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
     let x = app.window_width - STRIP_W / 2.0;
     let y = match tool {
-        StripTool::Settings => {
-            let toggle = if MAC_CHROME {
-                0.0
-            } else {
-                ICON_BTN + STRIP_SPACING
-            };
-            app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - toggle - ICON_BTN / 2.0
-        }
+        StripTool::Settings => app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - ICON_BTN / 2.0,
         tool => {
             let i = STRIP_TOP.iter().position(|t| *t == tool).unwrap_or(0);
             let rules = STRIP_RULE_BEFORE.iter().filter(|&&r| r <= i).count();
@@ -806,55 +668,55 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         let (glyph, label, shortcut, msg) = match tool {
             StripTool::Overview => (
                 Glyph::Overview,
-                "Overview",
+                tr!("Overview"),
                 None,
                 Message::Overview(OverviewMsg::Show),
             ),
             StripTool::Stats => (
                 Glyph::Stats,
-                "Stats",
+                tr!("Stats"),
                 None,
                 Message::Overview(OverviewMsg::ShowStats),
             ),
             StripTool::Debug => (
                 Glyph::Debug,
-                "Debug",
+                tr!("Debug"),
                 caps(Action::StartDebug),
                 Message::Debug(DebugMsg::Start),
             ),
             StripTool::CallGraph => (
                 Glyph::Network,
-                "Call Graph",
+                tr!("Call Graph"),
                 caps(Action::CallGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
             ),
             StripTool::ImportGraph => (
                 Glyph::ImportGraph,
-                "Import Graph",
+                tr!("Import Graph"),
                 caps(Action::ImportGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
             ),
             StripTool::TypeMap => (
                 Glyph::TypeMap,
-                "Type Map",
+                tr!("Type Map"),
                 caps(Action::TypeGraph),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
             ),
             StripTool::ProjectMaps => (
                 Glyph::ProjectMaps,
-                "Project Maps",
+                tr!("Project Maps"),
                 caps(Action::ProjectMaps),
                 Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
             ),
             StripTool::More => (
                 Glyph::More,
-                "More",
+                tr!("More"),
                 None,
                 Message::Window(WindowMsg::ToggleToolsMenu),
             ),
             StripTool::Settings => (
                 Glyph::Settings,
-                "Settings",
+                tr!("Settings"),
                 Some(crate::keymap::local_keys("⌘,")),
                 Message::Settings(SettingsMsg::Open),
             ),
@@ -897,25 +759,6 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     strip = strip
         .push(space().height(Fill))
         .push(tool(StripTool::Settings));
-    // Windows and Linux keep the right panel's toggle here, at the foot:
-    // their top-right corner belongs to the window buttons.
-    if !MAC_CHROME {
-        strip = strip.push(tip_at(
-            icon_button(
-                Glyph::PanelRight,
-                if app.show_right_panel {
-                    theme::fg_muted()
-                } else {
-                    theme::dim()
-                },
-                false,
-            )
-            .on_press(Message::Window(WindowMsg::ToggleRightPanel)),
-            "Toggle panel",
-            None,
-            tooltip::Position::Left,
-        ));
-    }
     container(strip.padding(Padding {
         top: STRIP_PAD_TOP,
         bottom: STRIP_PAD_BOTTOM,
@@ -938,6 +781,7 @@ pub(crate) enum ToolsRow {
     OpenFolder,
     OpenRemote,
     ExportNotes,
+    SetUp,
     LspServers,
     Shortcuts,
     Tutorial,
@@ -947,13 +791,14 @@ pub(crate) enum ToolsRow {
 /// project, opening another, and the rest. The menu is built from this list,
 /// and the tutorial points at rows by their position in it — so the two
 /// cannot drift.
-pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 9] = [
+pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 10] = [
     ToolsRow::ExplainAll,
     ToolsRow::Walkthrough,
     ToolsRow::Glossary,
     ToolsRow::OpenFolder,
     ToolsRow::OpenRemote,
     ToolsRow::ExportNotes,
+    ToolsRow::SetUp,
     ToolsRow::LspServers,
     ToolsRow::Shortcuts,
     ToolsRow::Tutorial,
@@ -963,8 +808,10 @@ pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 9] = [
 pub(crate) const TOOLS_MENU_SEPARATORS: [usize; 2] = [3, 5];
 /// The [`TOOLS_MENU_ROWS`] positions a heading stands over, and what it
 /// says: the group of rows it names.
-pub(crate) const TOOLS_MENU_HEADINGS: [(usize, &str); 2] =
-    [(0, "Understand the project"), (3, "Open")];
+pub(crate) const TOOLS_MENU_HEADINGS: [(usize, &str); 2] = [
+    (0, tr_noop!("Understand the project")),
+    (3, tr_noop!("Open")),
+];
 
 impl ToolsRow {
     /// This row's position in [`TOOLS_MENU_ROWS`] (0 = top).
@@ -981,8 +828,83 @@ impl ToolsRow {
     }
 }
 
-/// Width of a menu panel.
-pub(crate) const TOOLS_MENU_W: f32 = 248.0;
+/// Width of the ⋯ menu's panel as designed.
+const TOOLS_MENU_DESIGN_W: f32 = 248.0;
+
+/// Width of a menu panel holding `rows` (each a label and the width of what
+/// trails it) and `headings`: as designed, or wider when a label in the
+/// reader's language needs it, so no row wraps.
+fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
+    // A row: its padding, its icon's gutter and the gaps around the label.
+    const ROW_CHROME: f32 = 2.0 * 9.0 + 15.0 + 3.0 * 10.0 + 2.0 * MENU_PAD;
+    let label = |l: &str| super::sheet::text_width(l, ts::BASE, crate::fonts::UI);
+    let widest_row = rows
+        .iter()
+        .map(|(l, trailing)| label(l) + trailing + ROW_CHROME)
+        .fold(0.0, f32::max);
+    let widest_heading = headings
+        .iter()
+        .map(|h| {
+            super::sheet::text_width(h, ts::SMALL, crate::fonts::UI_MEDIUM)
+                + 2.0 * 9.0
+                + 2.0 * MENU_PAD
+        })
+        .fold(0.0, f32::max);
+    design.max(widest_row).max(widest_heading).ceil()
+}
+
+/// What a ⋯ menu row says.
+fn tools_row_label(row: ToolsRow) -> &'static str {
+    match row {
+        ToolsRow::ExplainAll => tr!("Explain All"),
+        ToolsRow::Walkthrough => tr!("Walkthrough"),
+        ToolsRow::Glossary => tr!("Glossary"),
+        ToolsRow::OpenFolder => tr!("Open Folder…"),
+        ToolsRow::OpenRemote => tr!("Open Remote…"),
+        ToolsRow::ExportNotes => tr!("Export Notes…"),
+        ToolsRow::SetUp => tr!("Set Up Project…"),
+        ToolsRow::LspServers => tr!("Language Servers"),
+        ToolsRow::Shortcuts => tr!("Keyboard Shortcuts"),
+        ToolsRow::Tutorial => tr!("Tutorial"),
+    }
+}
+
+/// What the ⋯ menu's Explain All row says while a pass runs, `progress`
+/// being how far it has got (done, of total).
+fn cancel_explaining_label(progress: Option<(usize, usize)>) -> String {
+    match progress {
+        Some((done, total)) if total > 0 => tr!(
+            "Cancel explaining ({done}/{total})",
+            done = done,
+            total = total
+        ),
+        _ => tr!("Cancel explaining").to_string(),
+    }
+}
+
+/// Width of the ⋯ menu's panel, in the reader's language.
+pub(crate) fn tools_menu_w(app: &App) -> f32 {
+    // The Explain All row as it reads while a pass runs: with its count
+    // once there is one, at the most it says — as many done as the total —
+    // so the menu does not widen as the count climbs.
+    let cancel = cancel_explaining_label(
+        app.proj
+            .explain
+            .progress
+            .filter(|_| app.proj.explain.running)
+            .map(|(_, total)| (total, total)),
+    );
+    let rows: Vec<(&str, f32)> = TOOLS_MENU_ROWS
+        .iter()
+        .map(|&r| (tools_row_label(r), 0.0))
+        .chain([(cancel.as_str(), 0.0)])
+        .collect();
+    let headings: Vec<&str> = TOOLS_MENU_HEADINGS
+        .iter()
+        .map(|&(_, h)| crate::i18n::lookup(h))
+        .collect();
+    menu_w(TOOLS_MENU_DESIGN_W, &rows, &headings)
+}
 /// Inner padding of a menu panel: the design's 5, inside the panel's 1 px
 /// edge — which CSS lays outside the padding and iced draws inside it.
 const MENU_PAD: f32 = 5.0 + 1.0;
@@ -1022,9 +944,9 @@ pub(crate) fn tools_menu_rows_rect(app: &App, first: usize, count: usize) -> ice
     let last = first + count.max(1) - 1;
     let y = top_of(first);
     iced::Rectangle {
-        x: app.window_width - TOOLS_MENU_RIGHT - TOOLS_MENU_W + MENU_PAD,
+        x: app.window_width - TOOLS_MENU_RIGHT - tools_menu_w(app) + MENU_PAD,
         y,
-        width: TOOLS_MENU_W - 2.0 * MENU_PAD,
+        width: tools_menu_w(app) - 2.0 * MENU_PAD,
         height: top_of(last) + MENU_ROW_H - y,
     }
 }
@@ -1044,7 +966,12 @@ fn menu_item<'a>(
     let mut b = button(
         row![
             container(gutter).width(15),
-            ts::set_in(text(label), MENU_ROW_H, ts::INTER, ts::BASE),
+            ts::set_in(
+                text(label).wrapping(Wrapping::None),
+                MENU_ROW_H,
+                ts::INTER,
+                ts::BASE
+            ),
             space().width(Fill),
             trailing,
         ]
@@ -1111,39 +1038,33 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             items.push(menu_separator());
         }
         if let Some(&(_, heading)) = TOOLS_MENU_HEADINGS.iter().find(|&&(h, _)| h == i) {
-            items.push(menu_heading(heading));
+            items.push(menu_heading(crate::i18n::lookup(heading)));
         }
         let item = match r {
             // While a pass runs the row cancels it — the bottom-up pass is
             // thousands of model calls on a big repo, so it must be
             // stoppable; with no key configured it routes to Settings.
-            ToolsRow::ExplainAll if app.proj.explain.running => {
-                let label = match app.proj.explain.progress {
-                    Some((done, total)) if total > 0 => {
-                        format!("Cancel explaining ({done}/{total})")
-                    }
-                    _ => "Cancel explaining".to_string(),
-                };
-                menu_item(
-                    Some(Glyph::Close),
-                    label,
-                    slot(),
-                    Some(Message::Explain(ExplainMsg::Cancel)),
-                )
-            }
+            ToolsRow::ExplainAll if app.proj.explain.running => menu_item(
+                Some(Glyph::Close),
+                cancel_explaining_label(app.proj.explain.progress),
+                slot(),
+                Some(Message::Explain(ExplainMsg::Cancel)),
+            ),
             ToolsRow::ExplainAll => menu_item(
                 Some(Glyph::TextLines),
-                "Explain All".into(),
+                tr!("Explain All").into(),
                 slot(),
+                // Asking first what it costs (the setup sheet), or for a key,
+                // on the page of Settings that takes it.
                 Some(if app.llm_available {
-                    Message::Explain(ExplainMsg::Project)
+                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
                 } else {
-                    Message::Settings(SettingsMsg::Open)
+                    Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
                 }),
             ),
             ToolsRow::Walkthrough => menu_item(
                 Some(Glyph::ListOrdered),
-                "Walkthrough".into(),
+                tr!("Walkthrough").into(),
                 slot(),
                 Some(Message::Window(WindowMsg::SidebarTabPicked(
                     SidebarTab::Walk,
@@ -1151,37 +1072,45 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             ),
             ToolsRow::Glossary => menu_item(
                 Some(Glyph::Book),
-                "Glossary".into(),
+                tr!("Glossary").into(),
                 slot(),
                 has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
             ),
             ToolsRow::OpenFolder => menu_item(
                 Some(Glyph::FolderOpen),
-                "Open Folder…".into(),
+                tr!("Open Folder…").into(),
                 slot(),
                 Some(Message::Project(ProjectMsg::OpenFolderPressed)),
             ),
             ToolsRow::OpenRemote => menu_item(
                 Some(Glyph::Servers),
-                "Open Remote…".into(),
+                tr!("Open Remote…").into(),
                 slot(),
                 Some(Message::Connect(ConnectMsg::Open)),
             ),
             ToolsRow::ExportNotes => menu_item(
                 Some(Glyph::Export),
-                "Export Notes…".into(),
+                tr!("Export Notes…").into(),
                 slot(),
                 has_project.then_some(Message::Export(ExportMsg::Start)),
             ),
+            ToolsRow::SetUp => menu_item(
+                Some(Glyph::Settings),
+                tr!("Set Up Project…").into(),
+                slot(),
+                has_project.then_some(Message::Project(ProjectMsg::SetupShow(
+                    crate::app::setup::SetupMode::Manage,
+                ))),
+            ),
             ToolsRow::LspServers => menu_item(
                 Some(Glyph::Plug),
-                "Language Servers".into(),
+                tr!("Language Servers").into(),
                 slot(),
                 Some(Message::Lsp(LspMsg::TogglePanel)),
             ),
             ToolsRow::Shortcuts => menu_item(
                 Some(Glyph::Shortcuts),
-                "Keyboard Shortcuts".into(),
+                tr!("Keyboard Shortcuts").into(),
                 slot(),
                 Some(Message::Window(WindowMsg::OpenShortcuts)),
             ),
@@ -1189,7 +1118,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             // (the menu keeps its shape) but is inert.
             ToolsRow::Tutorial => menu_item(
                 Some(Glyph::Help),
-                "Tutorial".into(),
+                tr!("Tutorial").into(),
                 slot(),
                 has_project.then_some(Message::Tutorial(TutorialMsg::Start)),
             ),
@@ -1197,7 +1126,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         items.push(item);
     }
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(TOOLS_MENU_W)
+        .width(tools_menu_w(app))
         .padding(MENU_PAD)
         // The design's ⋯ menu is rounded 11.
         .style(theme::modal_panel_rounded(11.0));
@@ -1224,10 +1153,12 @@ pub(crate) enum ViewRow {
     InlineBlame,
     IndentGuides,
     Minimap,
+    /// The margin beside the code: its notes, calls and history.
+    Margin,
 }
 
 /// The View menu's rows, top to bottom.
-pub(crate) const VIEW_MENU_ROWS: [ViewRow; 7] = [
+pub(crate) const VIEW_MENU_ROWS: [ViewRow; 8] = [
     ViewRow::OutlineSummaries,
     ViewRow::FileSummary,
     ViewRow::Blocks,
@@ -1235,6 +1166,7 @@ pub(crate) const VIEW_MENU_ROWS: [ViewRow; 7] = [
     ViewRow::InlineBlame,
     ViewRow::IndentGuides,
     ViewRow::Minimap,
+    ViewRow::Margin,
 ];
 
 impl ViewRow {
@@ -1248,6 +1180,7 @@ impl ViewRow {
             ViewRow::InlineBlame => Message::Window(WindowMsg::ToggleInlineBlame),
             ViewRow::IndentGuides => Message::Window(WindowMsg::ToggleIndentGuides),
             ViewRow::Minimap => Message::Window(WindowMsg::ToggleMinimap),
+            ViewRow::Margin => Message::Window(WindowMsg::ToggleRightPanel),
         }
     }
 }
@@ -1263,6 +1196,7 @@ pub(crate) fn closes_view_menu(message: &Message) -> bool {
             | Message::Window(WindowMsg::ToggleInlineBlame)
             | Message::Window(WindowMsg::ToggleIndentGuides)
             | Message::Window(WindowMsg::ToggleMinimap)
+            | Message::Window(WindowMsg::ToggleRightPanel)
     )
 }
 
@@ -1276,12 +1210,28 @@ pub(crate) fn view_menu_top(app: &App) -> f32 {
 /// button it opens from, kept inside the window.
 pub(crate) fn view_menu_left(app: &App) -> f32 {
     let x = super::sheet::view_button_rect(app).map_or(0.0, |b| b.x);
-    x.min(app.window_width - STRIP_W - VIEW_MENU_W - 8.0)
+    x.min(app.window_width - STRIP_W - view_menu_w() - 8.0)
         .max(8.0)
 }
 
-/// Width of the View menu.
-pub(crate) const VIEW_MENU_W: f32 = 220.0;
+/// Width of the View menu, in the reader's language (its rows end in a
+/// check).
+pub(crate) fn view_menu_w() -> f32 {
+    let rows: Vec<(&str, f32)> = [
+        tr!("Outline summaries"),
+        tr!("File summary"),
+        tr!("Explanation in blocks"),
+        tr!("Inlay hints"),
+        tr!("Inline blame"),
+        tr!("Indent guides"),
+        tr!("Minimap"),
+        tr!("Margin"),
+    ]
+    .into_iter()
+    .map(|l| (l, 14.0))
+    .collect();
+    menu_w(220.0, &rows, &[])
+}
 
 /// Height of the View menu's panel.
 pub(crate) fn view_menu_height() -> f32 {
@@ -1302,21 +1252,30 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
         .iter()
         .map(|&r| {
             let (glyph, label, on) = match r {
-                ViewRow::OutlineSummaries => {
-                    (Glyph::Note, "Outline summaries", app.show_inline_summaries)
-                }
-                ViewRow::FileSummary => (Glyph::Info, "File summary", app.show_file_banner),
+                ViewRow::OutlineSummaries => (
+                    Glyph::Note,
+                    tr!("Outline summaries"),
+                    app.show_inline_summaries,
+                ),
+                ViewRow::FileSummary => (Glyph::Info, tr!("File summary"), app.show_file_banner),
                 ViewRow::Blocks => (
                     Glyph::List,
-                    "Explanation in blocks",
+                    tr!("Explanation in blocks"),
                     app.proj.explain.showing_detail,
                 ),
-                ViewRow::InlayHints => (Glyph::Lightbulb, "Inlay hints", app.show_inlay_hints),
-                ViewRow::InlineBlame => (Glyph::TimeTravel, "Inline blame", app.show_inline_blame),
-                ViewRow::IndentGuides => {
-                    (Glyph::TextLines, "Indent guides", app.show_indent_guides)
-                }
-                ViewRow::Minimap => (Glyph::Minimap, "Minimap", app.show_minimap),
+                ViewRow::InlayHints => (Glyph::Lightbulb, tr!("Inlay hints"), app.show_inlay_hints),
+                ViewRow::InlineBlame => (
+                    Glyph::TimeTravel,
+                    tr!("Inline blame"),
+                    app.show_inline_blame,
+                ),
+                ViewRow::IndentGuides => (
+                    Glyph::TextLines,
+                    tr!("Indent guides"),
+                    app.show_indent_guides,
+                ),
+                ViewRow::Minimap => (Glyph::Minimap, tr!("Minimap"), app.show_minimap),
+                ViewRow::Margin => (Glyph::PanelRight, tr!("Margin"), app.show_right_panel),
             };
             // Blocks are a function's: with no function explained, the row
             // is there, inert.
@@ -1334,7 +1293,7 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
-        .width(VIEW_MENU_W)
+        .width(view_menu_w())
         .padding(MENU_PAD)
         .style(theme::modal_panel);
     modal(
@@ -1349,8 +1308,22 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
 
 // ------------------------------------------------ the app menu (☰)
 
-/// Width of the app menu.
-const APP_MENU_W: f32 = 280.0;
+/// Width of the app menu, in the reader's language: its rows and their
+/// shortcuts.
+fn app_menu_w(app: &App) -> f32 {
+    let chord = |c: &str| super::sheet::text_width(c, ts::SMALL, crate::fonts::UI);
+    let mut rows: Vec<(String, f32)> = app_menu_head(app)
+        .into_iter()
+        .map(|(_, label, keys, _)| (label.to_string(), keys.as_deref().map_or(0.0, chord)))
+        .collect();
+    for action in Action::ALL {
+        let title = crate::i18n::lookup(action.menu().title).to_string();
+        rows.push((title, chord(&app.keymap.chord(action).caps())));
+    }
+    rows.push((tr!("Close Window").to_string(), 0.0));
+    let rows: Vec<(&str, f32)> = rows.iter().map(|(l, w)| (l.as_str(), *w)).collect();
+    menu_w(280.0, &rows, &[])
+}
 
 /// The rows of the app menu that are not keymap actions, top first.
 fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
@@ -1358,19 +1331,19 @@ fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message
     vec![
         (
             Glyph::Folder,
-            "Open Folder…",
+            tr!("Open Folder…"),
             None,
             Message::Project(ProjectMsg::OpenFolderPressed),
         ),
         (
             Glyph::Remote,
-            "Open Remote…",
+            tr!("Open Remote…"),
             None,
             Message::Connect(ConnectMsg::Open),
         ),
         (
             Glyph::Settings,
-            "Settings…",
+            tr!("Settings…"),
             Some(crate::keymap::local_keys("⌘,")),
             Message::Settings(SettingsMsg::Open),
         ),
@@ -1421,7 +1394,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
             }
             items.push(menu_item(
                 None,
-                placed.title.to_string(),
+                crate::i18n::lookup(placed.title).to_string(),
                 menu_chord(app, action),
                 Some(Message::Editor(EditorMsg::RunAction(action))),
             ));
@@ -1430,7 +1403,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     items.push(menu_separator());
     items.push(menu_item(
         Some(Glyph::Close),
-        "Close Window".into(),
+        tr!("Close Window").into(),
         slot(),
         Some(Message::Window(WindowMsg::Close)),
     ));
@@ -1440,7 +1413,7 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
             .direction(thin_scroll())
             .style(theme::overlay_scrollbar),
     )
-    .width(APP_MENU_W)
+    .width(app_menu_w(app))
     .max_height(max_h)
     .padding(MENU_PAD)
     .style(theme::modal_panel);
@@ -1472,7 +1445,7 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             button(
                 row![
                     container(mark).width(18),
-                    text(t.to_string()).size(ts::BODY)
+                    text(super::statusbar::target_label(&t)).size(ts::BODY)
                 ]
                 .align_y(iced::Center),
             )
@@ -1573,7 +1546,7 @@ mod tests {
         let mut app = crate::app::tests::blank_app();
         app.window_width = 1400.0;
         app.show_left_sidebar = true;
-        let r = chat_field_rect(&app);
+        let r = search_field_rect(&app);
         assert_eq!(r.width, FIELD_MAX_W);
         let room_left = left_cluster_w(&app) + NAV_W;
         let room_right = app.window_width - right_cluster_w();
@@ -1582,6 +1555,6 @@ mod tests {
             "{r:?}"
         );
         app.window_width = 600.0;
-        assert!(chat_field_rect(&app).width < FIELD_MAX_W);
+        assert!(search_field_rect(&app).width < FIELD_MAX_W);
     }
 }

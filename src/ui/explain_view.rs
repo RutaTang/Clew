@@ -178,7 +178,7 @@ fn render_segments<'a>(
                     .into(),
                 None => source_block(
                     tex,
-                    "equation",
+                    tr!("Could not render this equation. Its source:"),
                     app.proj.explain.svg_failed.contains_key(key),
                 ),
             }),
@@ -186,7 +186,7 @@ fn render_segments<'a>(
                 Some(sv) => container(svg_widget(sv)).padding([8, 0]).into(),
                 None => source_block(
                     src,
-                    "diagram",
+                    tr!("Could not render this diagram. Its source:"),
                     app.proj.explain.svg_failed.contains_key(key),
                 ),
             }),
@@ -282,15 +282,19 @@ pub(crate) fn svg_widget<'a>(sv: &crate::ExplainSvg) -> Element<'a, Message> {
 
 /// A math/mermaid block shown as its source: while its render is on the way,
 /// and in place of one the renderer could not draw (`failed`), which also
-/// says so above the source.
-pub(crate) fn source_block<'a>(source: &'a str, what: &str, failed: bool) -> Element<'a, Message> {
+/// says so (`failure`) above the source.
+pub(crate) fn source_block<'a>(
+    source: &'a str,
+    failure: &str,
+    failed: bool,
+) -> Element<'a, Message> {
     let code = text(source)
         .font(crate::fonts::CODE)
         .size(ts::SMALL)
         .color(theme::dim());
     let body: Element<'a, Message> = if failed {
         column![
-            text(format!("⚠ this {what} could not be rendered — its source:"))
+            text(format!("⚠ {failure}"))
                 .size(ts::CAPTION)
                 .color(theme::warning()),
             code,
@@ -332,10 +336,10 @@ pub(crate) fn call_flow_rows<'a>(
     let Some(id) = g.id_of_key(file, name, *ordinal) else {
         // No node for this function yet — show a hint only while the graph builds.
         if app.proj.project_calls.building {
-            out.push(section_header("CALL FLOW"));
+            out.push(section_header(tr!("Call flow")));
             out.push(
                 container(
-                    text("Building call graph…")
+                    text(tr!("Building call graph…"))
                         .size(ts::CAPTION)
                         .color(theme::dim()),
                 )
@@ -359,32 +363,48 @@ pub(crate) fn call_flow_rows<'a>(
     // Split callers into tests and the rest, so the tests that exercise this
     // function read as its executable spec. Callees stay their own group.
     let sorted = |ids: &[usize]| {
-        let mut v: Vec<&crate::projectcalls::SymNode> = ids.iter().map(|&i| g.node(i)).collect();
-        v.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut v: Vec<(usize, &crate::projectcalls::SymNode)> =
+            ids.iter().map(|&i| (i, g.node(i))).collect();
+        v.sort_by(|(_, a), (_, b)| a.name.cmp(&b.name).then(a.line.cmp(&b.line)));
         v
     };
     let (tests, callers): (Vec<_>, Vec<_>) = sorted(g.callers_of(id))
         .into_iter()
-        .partition(|n| app.is_test_symbol(&n.file, &n.name));
+        .partition(|(_, n)| app.is_test_symbol(&n.file, &n.name));
     let callees = sorted(g.callees_of(id));
     let green = theme::success();
 
     // (header, arrow, nodes, jump-to-call-site, name colour). Tests and callees
     // open the symbol's definition; a plain caller jumps to the actual call line.
     for (label, arrow, items, to_call, name_color) in [
-        ("TESTS", "←", tests, false, green),
-        ("CALLED BY", "←", callers, true, theme::accent()),
-        ("CALLS", "→", callees, false, theme::accent()),
+        (tr!("Tests"), "←", tests, false, green),
+        (tr!("Called by"), "←", callers, true, theme::accent()),
+        (tr!("Calls"), "→", callees, false, theme::accent()),
     ] {
         if items.is_empty() {
             continue;
         }
         out.push(section_header(label));
-        for n in items {
+        for (k, &(node_id, n)) in items.iter().enumerate() {
+            // Each row is its own function: a file's second `total` opens
+            // that one, not the first.
+            let ordinal = g.ordinals().get(node_id).copied().unwrap_or(0);
             let target = Node::Function {
                 file: n.file.clone(),
                 name: n.name.clone(),
-                ordinal: 0, // call-graph nodes are name-resolved
+                ordinal,
+            };
+            // Two rows that would read the same (`Item.total`, `Cart.total`)
+            // say where each is.
+            let twin = |j: usize| {
+                items
+                    .get(j)
+                    .is_some_and(|(_, m)| m.name == n.name && m.file == n.file)
+            };
+            let place = if (k > 0 && twin(k - 1)) || twin(k + 1) {
+                format!("{}:{}", rel_of(app, &n.file), n.line)
+            } else {
+                rel_of(app, &n.file)
             };
             let summary = app
                 .proj
@@ -393,20 +413,20 @@ pub(crate) fn call_flow_rows<'a>(
                 .get(&target)
                 .map(crate::app::shown_summary)
                 .unwrap_or_default();
-            let is_live = label == "CALLED BY" && live_parent.as_deref() == Some(n.name.as_str());
+            // Only the callers (the rows that jump to their call) can be the
+            // live one.
+            let is_live = to_call && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::success();
             let mut r = row![
                 text(arrow)
                     .size(ts::SMALL)
                     .color(if is_live { live } else { theme::dim() }),
                 text(n.name.clone()).size(ts::BODY).color(name_color),
-                text(rel_of(app, &n.file))
-                    .size(ts::CAPTION)
-                    .color(theme::dim()),
+                text(place).size(ts::CAPTION).color(theme::dim()),
             ]
             .spacing(6);
             if is_live {
-                r = r.push(text("● live").size(ts::CAPTION).color(live));
+                r = r.push(text(tr!("● live")).size(ts::CAPTION).color(live));
             }
             let mut col = column![r].spacing(1);
             if !summary.is_empty() {
@@ -416,6 +436,7 @@ pub(crate) fn call_flow_rows<'a>(
                 Message::Nav(NavMsg::JumpToCall {
                     caller_file: n.file.clone(),
                     caller: n.name.clone(),
+                    caller_line: n.line,
                     callee: name.clone(),
                 })
             } else {
@@ -462,14 +483,17 @@ fn reached_from_rows<'a>(
             .into()
     };
     if let Some(kind) = app.entry_kind_of(file, name) {
-        out.push(section_header("REACHED FROM"));
+        out.push(section_header(tr!("Reached from")));
         out.push(
             container(
                 row![
                     text("●").size(ts::SMALL).color(theme::success()),
-                    text(format!("an entry point: {}", kind.label()))
-                        .size(ts::SMALL)
-                        .color(theme::success()),
+                    text(tr!(
+                        "Entry point: {kind}",
+                        kind = crate::i18n::lookup(kind.label())
+                    ))
+                    .size(ts::SMALL)
+                    .color(theme::success()),
                 ]
                 .spacing(6),
             )
@@ -502,13 +526,9 @@ fn reached_from_rows<'a>(
             )
         },
     );
-    out.push(section_header("REACHED FROM"));
+    out.push(section_header(tr!("Reached from")));
     if paths.is_empty() {
-        out.push(caption(
-            "no entry point reaches this in the call graph (called from outside the \
-             project, through an interface, or by a callback)"
-                .into(),
-        ));
+        out.push(caption(tr!("No entry point reaches this").into()));
         return out;
     }
     for chain in paths.iter() {
@@ -517,15 +537,15 @@ fn reached_from_rows<'a>(
         for (i, &step) in chain.iter().enumerate() {
             let n = g.node(step);
             if i == last {
-                steps.push(text("this").size(ts::SMALL).color(theme::dim()).into());
+                steps.push(text(tr!("this")).size(ts::SMALL).color(theme::dim()).into());
                 break;
             }
             let entry = i == 0;
             let label: Element<'a, Message> = if entry {
                 let kind = app
                     .entry_kind_of(&n.file, &n.name)
-                    .map(|k| k.label())
-                    .unwrap_or("test");
+                    .map(|k| crate::i18n::lookup(k.label()))
+                    .unwrap_or(tr!("test"));
                 row![
                     text(n.name.clone()).size(ts::SMALL).color(theme::success()),
                     text(kind).size(ts::CAPTION).color(theme::dim()),
@@ -545,7 +565,7 @@ fn reached_from_rows<'a>(
                     .on_press(Message::Semantic(SemanticMsg::OpenNode(Node::Function {
                         file: n.file.clone(),
                         name: n.name.clone(),
-                        ordinal: 0, // call-graph nodes are name-resolved
+                        ordinal: g.ordinals().get(step).copied().unwrap_or(0),
                     })))
                     .into(),
             );
@@ -566,20 +586,13 @@ fn reached_from_rows<'a>(
 pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let Some(node) = app.proj.explain.view.as_ref() else {
-        return compact_empty_state(
-            Glyph::Lightbulb,
-            if crate::keymap::MAC_KEYS {
-                "Move the cursor into a function, or ⌘-click a file or folder."
-            } else {
-                "Move the cursor into a function, or Ctrl+click a file or folder."
-            },
-        );
+        return compact_empty_state(Glyph::Lightbulb, tr!("Move the cursor into a function."));
     };
     // The note's head: what it is about, in the face it is written in (a
     // function's name as code), and what kind of thing that is.
     let (title, meta, code) = match node {
-        Node::Folder(p) => (rel_of(app, p), "folder".to_string(), false),
-        Node::File(p) => (rel_of(app, p), "file".to_string(), false),
+        Node::Folder(p) => (rel_of(app, p), tr!("folder").to_string(), false),
+        Node::File(p) => (rel_of(app, p), tr!("file").to_string(), false),
         Node::Function { file, name, .. } => (
             name.clone(),
             match file.file_name() {
@@ -606,7 +619,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
             explain_children(&app.proj.explain.cache, node)
         });
     if !children.is_empty() {
-        rows.push(section_header("CONTAINS"));
+        rows.push(section_header(tr!("Contains")));
         for (label, n) in children.iter() {
             let summary = app
                 .proj
@@ -642,17 +655,27 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
     // Functions get a summary ⇄ per-block-detail toggle.
     if matches!(node, Node::Function { .. }) {
         actions.push(if app.proj.explain.showing_detail {
-            act("Summary", Message::Explain(ExplainMsg::Show(node.clone()))).into()
+            act(
+                tr!("Summary"),
+                Message::Explain(ExplainMsg::Show(node.clone())),
+            )
+            .into()
         } else {
             act(
-                "Explain blocks",
+                tr!("Explain blocks"),
                 Message::Explain(ExplainMsg::Blocks(node.clone())),
             )
             .into()
         });
     }
     if app.llm_available {
-        actions.push(act("Re-explain", Message::Explain(ExplainMsg::ReexplainNode)).into());
+        actions.push(
+            act(
+                tr!("Re-explain"),
+                Message::Explain(ExplainMsg::ReexplainNode),
+            )
+            .into(),
+        );
     }
 
     // The header is padded, but the scrollable itself reaches the panel's right
@@ -762,11 +785,11 @@ pub(crate) fn human_size(bytes: u64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
     if b >= MB {
-        format!("{:.1} MB", b / MB)
+        tr!("{size} MB", size = crate::i18n::decimal(b / MB, 1))
     } else if b >= KB {
-        format!("{:.0} KB", b / KB)
+        tr!("{size} KB", size = crate::i18n::decimal(b / KB, 0))
     } else {
-        format!("{bytes} B")
+        tr!("{size} B", size = bytes)
     }
 }
 
@@ -781,29 +804,33 @@ pub(crate) fn lsp_consent_modal(
     let asked = asked.into();
     let ready = asked.ready;
     use crate::LspProvision;
-    const SERVER_BLURB: &str = "clew manages its own “go to definition” server for this \
-                                language, separate from anything on your system:";
+    let server_blurb = tr!("clew keeps it separate from your system:");
     let (title, blurb, action) = match consent.provision {
         LspProvision::DebugAdapter { .. } => (
-            "Install a debug adapter?",
-            "Debugging this program needs a debug adapter that is not installed yet. \
-             This will run:",
-            "Install",
+            tr!("Install a debug adapter?"),
+            tr!("This will run:"),
+            tr!("Install"),
         ),
-        LspProvision::Install(_) => ("Install a language server?", SERVER_BLURB, "Install"),
+        LspProvision::Install(_) => (
+            tr!("Install a language server?"),
+            server_blurb,
+            tr!("Install"),
+        ),
         LspProvision::Build { .. } => (
-            "Let the language server build this project?",
-            "To understand this code, its language server builds the project — which runs \
-             the project's own code, with your permissions. Allow it only for code you \
-             trust; without it clew still reads the project with its own parser.",
-            "Allow",
+            tr!("Let the language server build this project?"),
+            tr!("Building runs the project's own code. Allow only if you trust it."),
+            tr!("Allow"),
         ),
-        _ => ("Download a language server?", SERVER_BLURB, "Download"),
+        _ => (
+            tr!("Download a language server?"),
+            server_blurb,
+            tr!("Download"),
+        ),
     };
     // Leave to build is given to one project, and the button says which.
     let action = match &consent.provision {
         LspProvision::Build { root, .. } => match root.file_name() {
-            Some(name) => format!("{action} in {}", name.to_string_lossy()),
+            Some(name) => tr!("Allow in {folder}", folder = name.to_string_lossy()),
             None => action.to_string(),
         },
         _ => action.to_string(),
@@ -833,20 +860,25 @@ pub(crate) fn lsp_consent_modal(
             .padding(8)
             .width(Fill)
             .style(theme::editor),
-            // Wrapped: what it runs is the point of the question, and a
-            // line cut at the dialog's edge hid the most of it.
-            text(consent.describe())
-                .size(ts::BODY)
-                .color(theme::dim())
-                .wrapping(Wrapping::WordOrGlyph),
         ]
+        // Wrapped: what it runs is the point of the question, and a line
+        // cut at the dialog's edge hid the most of it.
+        .push({
+            let said = consent.describe();
+            (!said.is_empty()).then(|| {
+                text(said)
+                    .size(ts::BODY)
+                    .color(theme::dim())
+                    .wrapping(Wrapping::WordOrGlyph)
+            })
+        })
         // Asked one at a time: say that more follow, so answering this one
         // and seeing another does not read as the same question again.
         .push(more_questions(waiting))
         .push(
             row![
                 space().width(Fill),
-                button(text("Not now").size(ts::BASE))
+                button(text(tr!("Not now")).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
@@ -881,8 +913,7 @@ pub(crate) fn lsp_consent_modal(
 fn more_questions<'a>(waiting: usize) -> Option<Element<'a, Message>> {
     let said = match waiting {
         0 => return None,
-        1 => "1 more question is waiting for your answer after this one.".to_string(),
-        n => format!("{n} more questions are waiting for your answer after this one."),
+        n => trn!("1 more after this", "{n} more after this", n),
     };
     Some(text(said).size(ts::SMALL).color(theme::dim()).into())
 }
@@ -925,7 +956,7 @@ pub(crate) fn lsp_command_modal(
     }
     if let Some(options) = &pending.init_options {
         blocks.push(
-            text("initialize options from .clew/lsp.toml:")
+            text(tr!("Initialization options from .clew/lsp.toml:"))
                 .size(ts::BODY)
                 .color(theme::dim())
                 .into(),
@@ -950,25 +981,25 @@ pub(crate) fn lsp_command_modal(
     // options, and a button whose label does not match what happens is how a
     // consent prompt stops being consent.
     let (decline, accept) = match pending.command.is_some() {
-        true => ("Don't run", "Run it"),
-        false => ("Don't allow", "Allow"),
+        true => (tr!("Don't run"), tr!("Run it")),
+        false => (tr!("Don't allow"), tr!("Allow")),
     };
     let panel = container(
         column![
-            text("Let this project configure its language server?")
+            text(tr!("Let this project configure its language server?"))
                 .size(ts::TITLE)
                 .color(theme::fg()),
-            text(
-                "This project's .clew/lsp.toml decides what clew runs for its \
-                 own “go to definition”, and with which options. It is part of \
-                 the repository — allow it only if you trust this project.",
-            )
+            text(tr!(
+                "Its .clew/lsp.toml chooses what runs. Allow only if you trust this project."
+            ))
             .size(ts::BASE)
             .color(theme::fg()),
             column(blocks).spacing(8),
-            text(format!(
-                "language: {} · server: {} {}",
-                pending.language, pending.server_name, pending.version
+            text(tr!(
+                "Language: {language} · Server: {server} {version}",
+                language = pending.language,
+                server = pending.server_name,
+                version = pending.version
             ))
             .size(ts::BODY)
             .color(theme::dim())
@@ -1005,78 +1036,5 @@ pub(crate) fn lsp_command_modal(
     // Fresh for each question: one replaced in place is drawn with buttons
     // of its own — a press held on the last one's Allow is not this one's.
     let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh(number, panel));
-    modal(panel, Placement::Center, Backdrop::Dim(None))
-}
-
-// ---------------------------------------------------------------- consent modal
-
-pub(crate) fn consent_modal(
-    root: &std::path::Path,
-    asked: impl Into<crate::ui::placed::Asked>,
-) -> Element<'_, Message> {
-    let asked = asked.into();
-    let ready = asked.ready;
-    let name = root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| root.display().to_string());
-
-    let panel = container(
-        column![
-            text("Allow clew to use this project?")
-                .size(ts::TITLE)
-                .color(theme::fg()),
-            text(
-                "clew stores bookmarks and reading data in a “.clew” folder \
-                 inside the project:",
-            )
-            .size(ts::BASE)
-            .color(theme::fg()),
-            container(
-                // Paths have no spaces to break on, so glyph-wrap to keep a long
-                // path inside the box instead of overflowing off the panel.
-                text(format!("{}/.clew", root.display()))
-                    .size(ts::BODY)
-                    .color(theme::accent())
-                    .font(crate::fonts::CODE)
-                    .wrapping(Wrapping::Glyph),
-            )
-            .padding(8)
-            .width(Fill)
-            .style(theme::editor),
-            text("Without it the project can't be opened. You can delete .clew any time.")
-                .size(ts::BODY)
-                .color(theme::dim()),
-            row![
-                space().width(Fill),
-                button(text("Not now").size(ts::BASE))
-                    .style(theme::toolbar_button)
-                    .padding([6, 16])
-                    .on_press(Message::Project(ProjectMsg::ConsentDenied(
-                        root.to_path_buf()
-                    ))),
-                crate::ui::fresh::allow(
-                    ready,
-                    button(text(format!("Allow in {name}")).size(ts::BASE))
-                        .style(theme::primary_button)
-                        .padding([6, 16])
-                        .on_press_maybe(ready.then(|| {
-                            Message::Project(ProjectMsg::ConsentAllowed(root.to_path_buf()))
-                        }))
-                ),
-            ]
-            .spacing(10)
-            .align_y(iced::Center),
-        ]
-        .spacing(14),
-    )
-    .width(DIALOG_W)
-    .padding(CONFIRM_PAD)
-    .style(theme::modal_panel);
-
-    // The choice is required: the backdrop ignores clicks (Escape declines).
-    // Fresh for each folder asked about (`fresh`); where its answers are
-    // (`placed`).
-    let panel = crate::ui::placed::placed(&asked, crate::ui::fresh::fresh_for(&root, panel));
     modal(panel, Placement::Center, Backdrop::Dim(None))
 }

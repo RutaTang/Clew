@@ -258,15 +258,17 @@ impl std::fmt::Display for McpError {
                 f,
                 "the server needs you to sign in (HTTP {status}) — Settings → MCP servers → Sign in"
             ),
+            // Two messages, not one with an optional tail: each is then
+            // whole, and said whole in the reader's language.
+            McpError::Unauthorized { status, detail, .. } if detail.is_empty() => write!(
+                f,
+                "the server refused the request (HTTP {status}) — it needs credentials: \
+                 add them as a header (e.g. Authorization) in the server's settings"
+            ),
             McpError::Unauthorized { status, detail, .. } => write!(
                 f,
                 "the server refused the request (HTTP {status}) — it needs credentials: \
-                 add them as a header (e.g. Authorization) in the server's settings{}",
-                if detail.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({detail})")
-                }
+                 add them as a header (e.g. Authorization) in the server's settings ({detail})"
             ),
             McpError::Protocol(why) => write!(f, "the server's answer is not valid MCP: {why}"),
             McpError::OldSse => write!(

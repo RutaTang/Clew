@@ -94,7 +94,7 @@ jobs:
   # 404'd.
   preflight:
     name: Preflight · versions agree, full suite passes
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     permissions:
       contents: read
@@ -319,7 +319,7 @@ jobs:
   app:
     needs: [preflight, server]
     name: App · macOS
-    runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
+    runs-on: macos-15 # Apple Silicon, matching the shipped arm64 target
     timeout-minutes: 90
     permissions:
       contents: read

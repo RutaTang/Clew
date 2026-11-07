@@ -69,7 +69,10 @@ use crate::incremental::Version;
 /// 14: Java, PHP, Ruby, C#, Erlang, Haskell and Zig imports are extracted —
 /// and a Java package or C# namespace a file declares, recorded beside them
 /// (`clew_core::imports::RawImport::is_mod_decl`); an older entry lists none.
-pub(crate) const CACHE_VERSION: u32 = 14;
+/// 15: each call site's receiver type and each method's class are kept
+/// ([`CachedCalls::receivers`], [`CachedCalls::owners`]), which narrow a
+/// method call to its class's method; an older entry has neither.
+pub(crate) const CACHE_VERSION: u32 = 15;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
@@ -129,6 +132,17 @@ pub struct CachedCalls {
     /// definition. Empty for most files.
     #[serde(default)]
     pub bodies: Vec<usize>,
+    /// One number per call site, in `sites`' order: what its receiver is
+    /// known to be (`clew_core::projectcalls::CallSite::receiver`) — `0`
+    /// unknown, `1` the caller's own class, a type's index in `names` plus
+    /// two.
+    #[serde(default)]
+    pub receivers: Vec<i64>,
+    /// Two numbers per method whose class is known
+    /// (`clew_core::projectcalls::FileCalls::owners`): its definition line,
+    /// then the class's index in `names`.
+    #[serde(default)]
+    pub owners: Vec<i64>,
 }
 
 /// Everything cached about one file: how to confirm it is unchanged (mtime,
@@ -245,6 +259,8 @@ mod tests {
                 sites: vec![1, 2, 4],
                 declarations: Vec::new(),
                 bodies: vec![3, 3, 9],
+                receivers: vec![1],
+                owners: vec![3, 1],
             }),
         }
     }

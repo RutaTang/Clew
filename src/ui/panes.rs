@@ -48,11 +48,11 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         }
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
-            "No file open",
+            tr!("No file open"),
             if crate::keymap::MAC_KEYS {
-                "Pick a file from the tree, or press ⌘P."
+                tr!("Pick a file from the tree, or press ⌘P.")
             } else {
-                "Pick a file from the tree, or press Ctrl+P."
+                tr!("Pick a file from the tree, or press Ctrl+P.")
             },
             None,
         ))
@@ -130,7 +130,12 @@ pub(crate) fn time_travel_view<'a>(
     // never goes blank on entry.
     let code: Element<'a, Message> = match tt.viewer.as_ref().or(live) {
         Some(hv) => time_travel_code(app, tt, hv),
-        None => center(text("Loading revision…").size(ts::BASE).color(theme::dim())).into(),
+        None => center(
+            text(tr!("Loading revision…"))
+                .size(ts::BASE)
+                .color(theme::dim()),
+        )
+        .into(),
     };
     // The story sits in a slot that is always there (zero-size until it is
     // asked for): pushed in ahead of the code, it moved the historical view's
@@ -176,7 +181,7 @@ pub(crate) fn time_travel_banner<'a>(
         });
     let exit = button(
         row![
-            text("Exit").size(ts::SMALL).color(theme::fg_muted()),
+            text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()),
             keycap
         ]
         .spacing(6)
@@ -189,7 +194,7 @@ pub(crate) fn time_travel_banner<'a>(
     let Some(c) = commit else {
         let head = row![
             glyph::icon(Glyph::TimeTravel, theme::accent(), 15.0),
-            text("Time Travel").size(ts::BODY).color(theme::fg()),
+            text(tr!("Time Travel")).size(ts::BODY).color(theme::fg()),
             space().width(Fill),
             exit,
         ]
@@ -216,7 +221,7 @@ pub(crate) fn time_travel_banner<'a>(
         text(format!(
             "{}  ·  {}",
             c.author,
-            crate::git::relative_time(c.time, now)
+            crate::i18n::ago(c.time, now)
         ))
         .size(ts::SMALL)
         .color(theme::dim()),
@@ -232,22 +237,27 @@ pub(crate) fn time_travel_banner<'a>(
         .wrapping(Wrapping::Word);
 
     let why: Element<'a, Message> = if tt.why_loading {
-        text("Summarizing…")
+        text(tr!("Summarizing…"))
             .size(ts::SMALL)
             .color(theme::dim())
             .into()
     } else if let Some(w) = tt.why.get(&c.sha) {
-        text(w.clone())
+        // Plain text: a model's code marks would show as they are.
+        text(strip_backticks(w))
             .size(ts::SMALL)
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
             .into()
     } else {
-        button(text("What & why?").size(ts::SMALL).color(theme::accent()))
-            .style(theme::toolbar_button)
-            .padding([2, 8])
-            .on_press(Message::TimeTravel(TimeTravelMsg::Why))
-            .into()
+        button(
+            text(tr!("What & why?"))
+                .size(ts::SMALL)
+                .color(theme::accent()),
+        )
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(Message::TimeTravel(TimeTravelMsg::Why))
+        .into()
     };
 
     container(column![head, subject, why].spacing(5))
@@ -266,7 +276,7 @@ pub(crate) fn time_travel_code<'a>(
 ) -> Element<'a, Message> {
     let lh = app.line_height();
     let row0 = (tt.scroll_y / lh) as usize;
-    let sticky = crate::analyze::sticky_headers(&hv.folds, hv.line_at_row(row0), 5);
+    let sticky = hv.sticky_at_row(row0);
     // Read-only, but clicking still places a caret and dragging selects (for
     // reading / copying). Right-click has no menu in a historical view.
     let code = CodeView::new(
@@ -335,11 +345,11 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     let scope_label = match &tt.scope {
         TimeScope::Symbol { name, kind, .. } => format!("{} {name}", short_kind(kind)),
-        TimeScope::File => "whole file".to_string(),
+        TimeScope::File => tr!("whole file").to_string(),
     };
     // Clicking toggles between the whole file and the block under the caret.
     let scope_btn = button(
-        text(format!("scope: {scope_label}  ⇄"))
+        text(format!("{}  ⇄", tr!("Scope: {scope}", scope = scope_label)))
             .size(ts::SMALL)
             .color(theme::fg_muted()),
     )
@@ -349,12 +359,15 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
-            text("Story…").size(ts::SMALL).color(theme::dim()).into()
+            text(tr!("Writing the story…"))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .into()
         } else {
             let label = if tt.story.is_some() {
-                "Hide story"
+                tr!("Hide story")
             } else {
-                "Story"
+                tr!("Story")
             };
             let color = if tt.story.is_some() {
                 theme::fg_muted()
@@ -375,13 +388,13 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
         row![
             chrome_tip(
                 step(Glyph::ArrowLeft, older),
-                "Older commit",
+                tr!("Older commit"),
                 Some(crate::keymap::local_keys("⌘←"))
             ),
             sl,
             chrome_tip(
                 step(Glyph::ArrowRight, newer),
-                "Newer commit",
+                tr!("Newer commit"),
                 Some(crate::keymap::local_keys("⌘→"))
             ),
             text(format!("{} / {}", tt.idx + 1, n))
@@ -406,24 +419,24 @@ pub(crate) fn time_travel_story<'a>(
     tt: &'a TimeTravel,
     story: &'a [crate::PreparedSeg],
 ) -> Element<'a, Message> {
-    let name = tt.scope.symbol_name().unwrap_or("this block");
+    let name = tt.scope.symbol_name().unwrap_or(tr!("this block"));
     let header = row![
         column![
-            text(format!("Story of {name}"))
+            text(tr!("Story of {name}", name = name))
                 .size(ts::BODY)
                 .color(theme::accent()),
             // `git log -L` only follows the block's CURRENT lines, so earlier
             // rewrites may not be attributed — say so, so it's not read as a full
             // biography.
-            text("from the commits that touched these lines")
+            text(tr!("From the commits that touched these lines"))
                 .size(ts::CAPTION)
                 .color(theme::dim()),
         ]
         .spacing(1),
         space().width(Fill),
-        button(text("✕").size(ts::SMALL).color(theme::dim()))
+        button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
             .style(theme::toolbar_button)
-            .padding([1, 6])
+            .padding([4, 6])
             .on_press(Message::TimeTravel(TimeTravelMsg::Story)),
     ]
     .align_y(iced::Center);
@@ -453,11 +466,11 @@ pub(crate) fn diff_view<'a>(
 
     let header = container(
         row![
-            text(format!("{}  ·  vs HEAD", d.rel))
+            text(tr!("{file}  ·  vs HEAD", file = d.rel))
                 .size(ts::BODY)
                 .color(theme::accent()),
             space().width(Fill),
-            button(text("✕ close").size(ts::SMALL))
+            button(text(format!("✕ {}", tr!("Close"))).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
                 .on_press(Message::Editor(EditorMsg::ToggleDiff)),
@@ -477,7 +490,7 @@ pub(crate) fn diff_view<'a>(
         return column![
             header,
             center(
-                text(format!("No uncommitted changes in {}", d.rel))
+                text(tr!("No uncommitted changes in {file}", file = d.rel))
                     .size(ts::BASE)
                     .color(theme::dim()),
             )
@@ -491,77 +504,92 @@ pub(crate) fn diff_view<'a>(
     // content width and long lines become reachable via horizontal scroll —
     // measured, not guessed: the real monospace advance, and the columns the
     // widest line is drawn in (counted once, when the diff arrived — see
-    // `DiffState::new` — not per repaint).
-    let run_width = row_width(
+    // `DiffState::new` — not per repaint). Never narrower than the pane: a
+    // diff of short lines tinted its added lines and hunk headers only as
+    // far as its longest line, a third of the way across.
+    let content_width = row_width(
         d.max_cols,
         mono_advance(app.font_size),
         DIFF_PAD_LEFT + DIFF_PAD_RIGHT,
     );
-    // One text block per run of same-kind lines rather than a widget per line:
-    // the same picture (runs stack with no gap) at a fraction of the layout
-    // work on a long diff — prepared once, borrowed here.
-    let mut rows: Vec<Element<'a, Message>> = Vec::new();
-    for run in &d.runs {
-        let (bg, fg) = match run.kind {
-            DiffKind::Add => (
-                Some(theme::with_alpha(theme::success(), 0.14)),
-                theme::success(),
-            ),
-            DiffKind::Remove => (
-                Some(theme::with_alpha(theme::danger(), 0.14)),
-                theme::danger(),
-            ),
-            DiffKind::Hunk => (
-                Some(theme::with_alpha(theme::accent(), 0.12)),
-                theme::accent(),
-            ),
-            DiffKind::Header => (None, theme::dim()),
-            DiffKind::Context => (None, theme::fg()),
-        };
-        let mut cell = container(
-            text(run.text.as_str())
-                .font(crate::fonts::CODE)
-                .size(app.font_size)
-                .color(fg)
-                .wrapping(Wrapping::None),
-        )
-        .width(Length::Fixed(run_width))
-        .padding(Padding {
-            top: 0.0,
-            right: DIFF_PAD_RIGHT,
-            bottom: 0.0,
-            left: DIFF_PAD_LEFT,
-        });
-        if let Some(bg) = bg {
-            cell = cell.style(move |_: &iced::Theme| container::Style {
-                background: Some(bg.into()),
-                ..container::Style::default()
+    let body = iced::widget::responsive(move |size| {
+        let run_width = diff_run_width(content_width, size.width);
+        // One text block per run of same-kind lines rather than a widget per
+        // line: the same picture (runs stack with no gap) at a fraction of the
+        // layout work on a long diff — prepared once, borrowed here.
+        let mut rows: Vec<Element<'a, Message>> = Vec::new();
+        for run in &d.runs {
+            let (bg, fg) = match run.kind {
+                DiffKind::Add => (
+                    Some(theme::with_alpha(theme::success(), 0.14)),
+                    theme::success(),
+                ),
+                DiffKind::Remove => (
+                    Some(theme::with_alpha(theme::danger(), 0.14)),
+                    theme::danger(),
+                ),
+                DiffKind::Hunk => (
+                    Some(theme::with_alpha(theme::accent(), 0.12)),
+                    theme::accent(),
+                ),
+                DiffKind::Header => (None, theme::dim()),
+                DiffKind::Context => (None, theme::fg()),
+            };
+            let mut cell = container(
+                text(run.text.as_str())
+                    .font(crate::fonts::CODE)
+                    .size(app.font_size)
+                    .color(fg)
+                    .wrapping(Wrapping::None),
+            )
+            .width(Length::Fixed(run_width))
+            .padding(Padding {
+                top: 0.0,
+                right: DIFF_PAD_RIGHT,
+                bottom: 0.0,
+                left: DIFF_PAD_LEFT,
             });
+            if let Some(bg) = bg {
+                cell = cell.style(move |_: &iced::Theme| container::Style {
+                    background: Some(bg.into()),
+                    ..container::Style::default()
+                });
+            }
+            rows.push(cell.into());
         }
-        rows.push(cell.into());
-    }
-    if d.lines.len() > MAX_DIFF_ROWS {
-        rows.push(
-            text(format!("… {} more lines", d.lines.len() - MAX_DIFF_ROWS))
+        if d.lines.len() > MAX_DIFF_ROWS {
+            rows.push(
+                text(trn!(
+                    "… 1 more line",
+                    "… {n} more lines",
+                    d.lines.len() - MAX_DIFF_ROWS
+                ))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into(),
-        );
-    }
+            );
+        }
 
-    // A walkthrough step can open its file here — the diff stays on for the
-    // file it was asked for — so the reader's scroll counts here as in the
-    // code this stands in for.
-    let body = reader_scroll(
-        scrollable(Column::with_children(rows).padding([4, 0]))
-            .direction(both_scroll())
-            .style(theme::overlay_scrollbar)
-            .width(Fill)
-            .height(Fill),
-        reader_scroll_report(app, pane, &d.abs),
-    );
+        // A walkthrough step can open its file here — the diff stays on for
+        // the file it was asked for — so the reader's scroll counts here as
+        // in the code this stands in for.
+        reader_scroll(
+            scrollable(Column::with_children(rows).padding([4, 0]))
+                .direction(both_scroll())
+                .style(theme::overlay_scrollbar)
+                .width(Fill)
+                .height(Fill),
+            reader_scroll_report(app, pane, &d.abs),
+        )
+    });
 
     column![header, body].width(Fill).height(Fill).into()
+}
+
+/// The width of a diff row: the widest line's (`content`), or the pane's
+/// (`visible`) when the lines are all shorter, so a row's tint spans it.
+pub(crate) fn diff_run_width(content: f32, visible: f32) -> f32 {
+    content.max(visible)
 }
 
 /// The most diff lines the view renders (the rest are summarized).
@@ -653,7 +681,8 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         )
     };
 
-    let input = text_input("Find in file…", &app.proj.find.query)
+    let input = text_input(tr!("Find in file…"), &app.proj.find.query)
+        .style(theme::input)
         .id(find_input_id())
         .on_input(|v| Message::Editor(EditorMsg::FindQueryChanged(v)))
         .on_submit(Message::Editor(EditorMsg::FindStep(1)))
@@ -661,10 +690,10 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         .padding([4, 8])
         .width(190);
 
-    let btn = |label: &'static str, msg: Message| {
-        button(text(label).size(ts::BASE))
+    let btn = |g: Glyph, msg: Message| {
+        button(glyph::icon(g, theme::fg_muted(), 12.0))
             .style(theme::toolbar_button)
-            .padding([2, 8])
+            .padding([6, 7])
             .on_press(msg)
     };
 
@@ -672,9 +701,9 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         row![
             input,
             text(count).size(ts::SMALL).color(theme::dim()).width(46),
-            btn("‹", Message::Editor(EditorMsg::FindStep(-1))),
-            btn("›", Message::Editor(EditorMsg::FindStep(1))),
-            btn("✕", Message::Editor(EditorMsg::FindClosed)),
+            btn(Glyph::ChevronLeft, Message::Editor(EditorMsg::FindStep(-1))),
+            btn(Glyph::ChevronRight, Message::Editor(EditorMsg::FindStep(1))),
+            btn(Glyph::Close, Message::Editor(EditorMsg::FindClosed)),
         ]
         .spacing(6)
         .align_y(iced::Center),
@@ -730,20 +759,39 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
     // opening local code or connecting out over SSH.
     let (subtitle, primary, secondary): (String, (&str, Message), (&str, Message)) =
         if app.connection.is_remote() {
+            let host = app.connection.label();
+            // Said as it is: a host that could not be reached read
+            // "Connected to …", with Browse folders offering its folders.
+            let (subtitle, primary) = if app.server.ready {
+                (
+                    tr!("Connected to {host}", host = host),
+                    tr!("Browse folders…"),
+                )
+            } else if app.handshake_failure.is_some() {
+                (
+                    tr!("Could not connect to {host}", host = host),
+                    tr!("Open Remote…"),
+                )
+            } else {
+                (
+                    tr!("Connecting to {host}…", host = host),
+                    tr!("Open Remote…"),
+                )
+            };
             (
-                format!("connected to {}", app.connection.label()),
-                ("Browse folders…", Message::Connect(ConnectMsg::Open)),
-                ("Disconnect", Message::Connect(ConnectMsg::Disconnect)),
+                subtitle,
+                (primary, Message::Connect(ConnectMsg::Open)),
+                (tr!("Disconnect"), Message::Connect(ConnectMsg::Disconnect)),
             )
         } else {
             (
                 // "clew" = the thread that guides you out of the labyrinth.
-                "Find the thread through your codebase".to_string(),
+                tr!("Find the thread through your codebase").to_string(),
                 (
-                    "Open Folder…",
+                    tr!("Open Folder…"),
                     Message::Project(ProjectMsg::OpenFolderPressed),
                 ),
-                ("Open Remote…", Message::Connect(ConnectMsg::Open)),
+                (tr!("Open Remote…"), Message::Connect(ConnectMsg::Open)),
             )
         };
 
@@ -920,9 +968,12 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
                 Some(&v.rel),
             )? {
                 CfgReason::Target(target) => {
-                    format!("not built for {}", super::statusbar::target_name(&target))
+                    tr!(
+                        "not built for {target}",
+                        target = super::statusbar::target_name(&target)
+                    )
                 }
-                CfgReason::Features => "not built with these features".to_string(),
+                CfgReason::Features => tr!("not built with these features").to_string(),
             },
         )
     })
@@ -1019,9 +1070,9 @@ pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),
-            button(text("✕").size(ts::SMALL).color(theme::dim()))
+            button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                 .style(theme::toolbar_button)
-                .padding([0, 6])
+                .padding([4, 6])
                 .on_press(Message::Window(WindowMsg::ToggleFileBanner)),
         ]
         .spacing(8)
@@ -1043,11 +1094,16 @@ pub(crate) const RIGHT_PANEL_MIN_WINDOW_W: f32 = 950.0;
 /// The one test the view and the tutorial's spotlight both use — the
 /// spotlight used to take `show_right_panel` alone and framed a panel the
 /// view had hidden (a split, a narrow window, no file).
+///
+/// Not beside a page that covers the panes (the Overview, Stats, Glossary,
+/// a Docs page): its notes are of the file under it, and the sheet's
+/// header, whose View menu shows and hides it, is not drawn there either.
 pub(crate) fn right_panel_shown(app: &App) -> bool {
     app.show_right_panel
         && !app.proj.split
         && app.window_width >= RIGHT_PANEL_MIN_WINDOW_W
         && app.active_viewer().is_some()
+        && super::docs_stats::pane_cover(app).is_none()
 }
 
 /// The reading panel — the margin beside the code: notes on what is read
@@ -1059,15 +1115,7 @@ pub(crate) fn right_panel(app: &App) -> Option<Element<'_, Message>> {
         return None;
     }
     let body: Element<'_, Message> = match app.margin_tab {
-        // The conversation, while it is kept here.
-        crate::MarginTab::Ask if super::askfloat::ask_in_margin(app) => {
-            let height = app.window_height
-                - crate::ui::TOOLBAR_H
-                - crate::ui::STATUSBAR_H
-                - crate::ui::sheet::sheet_header_height(app);
-            super::askfloat::ask_margin(app, height)
-        }
-        crate::MarginTab::Notes | crate::MarginTab::Ask => margin_notes(app),
+        crate::MarginTab::Notes => margin_notes(app),
         crate::MarginTab::Calls => margin_calls(app),
         crate::MarginTab::History => margin_history(app),
     };
@@ -1121,14 +1169,7 @@ fn margin_notes(app: &App) -> Element<'_, Message> {
             .zip(&ordinals)
             .any(|(sym, &o)| app.proj.explain.cache.contains_key(&function_node(sym, o)));
         if !any_note {
-            return compact_empty_state(
-                Glyph::Lightbulb,
-                if crate::keymap::MAC_KEYS {
-                    "Move the cursor into a function, or ⌘-click a file or folder."
-                } else {
-                    "Move the cursor into a function, or Ctrl+click a file or folder."
-                },
-            );
+            return compact_empty_state(Glyph::Lightbulb, tr!("Move the cursor into a function."));
         }
         return notes_beside_code(app, v, None, ordinals);
     };
@@ -1171,13 +1212,21 @@ fn notes_beside_code<'a>(
         let offset = (size.height - v.viewport_h).max(0.0);
         let y_of =
             |line1: usize| offset + v.row_of(line1.saturating_sub(1)) as f32 * lh - v.scroll_y;
+        // The Ask pill floats over the margin's foot while Ask is hidden: a
+        // raised note low in the view had its references, date and Ask
+        // under it. The raised note stops above it.
+        let foot = if app.ask_view == crate::AskView::Hidden {
+            super::askfloat::PILL_H + super::askfloat::ASK_MARGIN + NOTE_GAP
+        } else {
+            0.0
+        };
         let mut notes: Vec<(f32, f32, Element<'_, Message>)> = Vec::new();
         if matches!(active, Some(Node::File(_))) {
             let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
             notes.push((
                 0.0,
                 ACTIVE_NOTE_H,
-                active_note(app, name, "file".into(), NoteOf::File),
+                active_note(app, name, tr!("file").into(), NoteOf::File),
             ));
         }
         for (sym, &ordinal) in v.symbols.iter().zip(&ordinals) {
@@ -1209,7 +1258,11 @@ fn notes_beside_code<'a>(
             if !is_active && cached.is_none() {
                 continue;
             }
-            let meta = format!("{} · line {}", short_kind(&sym.kind), sym.line);
+            let meta = tr!(
+                "{kind} · line {line}",
+                kind = short_kind(&sym.kind),
+                line = sym.line
+            );
             let note = if is_active {
                 active_note(
                     app,
@@ -1223,7 +1276,12 @@ fn notes_beside_code<'a>(
                     .unwrap_or_default();
                 plain_note(sym.name.clone(), meta, summary, sym.line)
             };
-            notes.push(((y - lift).max(0.0), h, note));
+            let top = if is_active {
+                (y - lift).min(size.height - h - foot)
+            } else {
+                y - lift
+            };
+            notes.push((top.max(0.0), h, note));
         }
         notes.sort_by(|a, b| a.0.total_cmp(&b.0));
         // Each note level with its function, or just under the one above
@@ -1355,10 +1413,8 @@ impl Leaning {
     /// What the note says: "21 references", "1 caller".
     pub(crate) fn label(self) -> String {
         match self {
-            Leaning::References(1) => "1 reference".to_string(),
-            Leaning::References(n) => format!("{n} references"),
-            Leaning::Callers(1) => "1 caller".to_string(),
-            Leaning::Callers(n) => format!("{n} callers"),
+            Leaning::References(n) => trn!("1 reference", "{n} references", n),
+            Leaning::Callers(n) => trn!("1 caller", "{n} callers", n),
         }
     }
 }
@@ -1397,6 +1453,19 @@ pub(crate) fn leaning_on(
             .filter(|s| s.callee == name && s.caller.as_deref() == Some(*caller))
             .count();
     }
+    // The calls at the top of its own file, in no function: Python's
+    // `if __name__ == "__main__": main()`, a script's own steps. They are
+    // not in the graph, which links functions, and a `main` so called read
+    // "0 references". Only a plain function's: a bare call is no method's.
+    if g.node(id).kind == "function"
+        && let Some(calls) = app.proj.calls_by_file.get(file)
+    {
+        sites += calls
+            .calls
+            .iter()
+            .filter(|s| s.callee == name && s.caller.is_none() && !s.method)
+            .count();
+    }
     Some(Leaning::References(sites))
 }
 
@@ -1433,15 +1502,27 @@ pub(crate) fn short_date(time: i64, now: i64) -> String {
         let y = yoe + era * 400 + i64::from(m <= 2);
         (y, m, d)
     }
+    // The months' short names, in the reader's language where shown.
     const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+        tr_noop!("Jan"),
+        tr_noop!("Feb"),
+        tr_noop!("Mar"),
+        tr_noop!("Apr"),
+        tr_noop!("May"),
+        tr_noop!("Jun"),
+        tr_noop!("Jul"),
+        tr_noop!("Aug"),
+        tr_noop!("Sep"),
+        tr_noop!("Oct"),
+        tr_noop!("Nov"),
+        tr_noop!("Dec"),
     ];
     let (y, m, d) = civil(time);
-    let month = MONTHS[(m - 1) as usize];
+    let month = crate::i18n::lookup(MONTHS[(m - 1) as usize]);
     if y == civil(now).0 {
-        format!("{month} {d}")
+        tr!("{month} {day}", month = month, day = d)
     } else {
-        format!("{month} {d}, {y}")
+        tr!("{month} {day}, {year}", month = month, day = d, year = y)
     }
 }
 
@@ -1492,14 +1573,14 @@ fn active_note<'a>(
         (NoteOf::File, Some(v)) => (None, last_changed(v, 1, usize::MAX)),
         _ => (None, None),
     };
-    let calls_label = leaning.map_or_else(|| "Calls".to_string(), Leaning::label);
+    let calls_label = leaning.map_or_else(|| tr!("Calls").to_string(), Leaning::label);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64);
     let history_label = match changed {
         Some(Some(time)) => short_date(time, now),
-        Some(None) => "Uncommitted".to_string(),
-        None => "History".to_string(),
+        Some(None) => tr!("Uncommitted").to_string(),
+        None => tr!("History").to_string(),
     };
     let actions = row![
         action(
@@ -1516,11 +1597,12 @@ fn active_note<'a>(
         ),
         action(
             Glyph::Message,
-            "Ask".into(),
+            tr!("Ask").into(),
             true,
-            Message::Ask(AskMsg::Suggested(format!(
-                "What does `{name}` in {} do, and why is it written this way?",
-                app.active_viewer().map_or("", |v| v.rel.as_str())
+            Message::Ask(AskMsg::Suggested(tr!(
+                "What does `{name}` in {file} do, and why is it written this way?",
+                name = name,
+                file = app.active_viewer().map_or("", |v| v.rel.as_str())
             ))),
         ),
     ]
@@ -1580,16 +1662,13 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
         .as_ref()
         .filter(|n| matches!(n, crate::explain::Node::Function { .. }));
     let Some(node) = node else {
-        return compact_empty_state(
-            Glyph::CallGraph,
-            "Move the cursor into a function to see who calls it and what it calls.",
-        );
+        return compact_empty_state(Glyph::CallGraph, tr!("Move the cursor into a function."));
     };
     let rows = call_flow_rows(app, node);
     let open = button(
         row![
             glyph::icon(Glyph::CallGraph, theme::fg_muted(), 14.0),
-            text("Open the call hierarchy").size(ts::BODY),
+            text(tr!("Open the call hierarchy")).size(ts::BODY),
         ]
         .spacing(8)
         .align_y(iced::Center),
@@ -1597,9 +1676,7 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
     .style(theme::menu_row)
     .width(Fill)
     .padding([6, 8])
-    .on_press(Message::Window(WindowMsg::SidebarTabPicked(
-        SidebarTab::Calls,
-    )));
+    .on_press(Message::Calls(CallsMsg::OfFunction));
     scrollable(
         column![Column::with_children(rows).spacing(8).width(Fill), open,]
             .spacing(10)
@@ -1644,28 +1721,28 @@ fn margin_history(app: &App) -> Element<'_, Message> {
     if in_function {
         rows = rows.push(row_of(
             Glyph::TimeTravel,
-            "This function through time",
-            "Scrub its history, commit by commit.",
+            tr!("This function through time"),
+            tr!("Scrub its history, commit by commit."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
     rows = rows
         .push(row_of(
             Glyph::TimeTravel,
-            "This file through time",
-            "Scrub the whole file back through its commits.",
+            tr!("This file through time"),
+            tr!("Scrub the whole file back through its commits."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
         ))
         .push(row_of(
             Glyph::Info,
-            "Why is this line here?",
-            "The commits that shaped the caret's line, explained.",
+            tr!("Why is this line here?"),
+            tr!("The commits that shaped the current line, explained."),
             Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
         ))
         .push(row_of(
             Glyph::Diff,
-            "Changes since the last commit",
-            "What is new in this file, in the reader.",
+            tr!("Changes since the last commit"),
+            tr!("See what's new in this file."),
             Message::Editor(EditorMsg::ToggleDiff),
         ));
     container(rows)
@@ -1709,10 +1786,13 @@ pub(crate) fn outline_note_for(query: Option<Result<(), crate::highlight::QueryE
     use crate::highlight::QueryError;
     match query {
         Some(Err(QueryError::Invalid(e))) => {
-            format!("Outline unavailable: the outline query does not compile ({e}).")
+            tr!(
+                "Outline unavailable: the outline query does not compile ({error}).",
+                error = e
+            )
         }
-        Some(Err(QueryError::Unsupported)) | None => "No outline for this language.".into(),
-        Some(Ok(())) => "No symbols in this file.".into(),
+        Some(Err(QueryError::Unsupported)) | None => tr!("No outline for this language.").into(),
+        Some(Ok(())) => tr!("No symbols in this file.").into(),
     }
 }
 
@@ -1758,7 +1838,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             text(short_kind(&symbol.kind))
                 .size(ts::CAPTION)
                 .color(theme::kind_color(&symbol.kind))
-                .width(40),
+                .width(34),
             // Understood symbols dim, so the outline shows at a glance what's left.
             text(&symbol.name)
                 .size(ts::BODY)
@@ -1860,26 +1940,18 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
         }
 
-        let jump = button(col)
-            .style(theme::list_row(is_current))
-            .width(Fill)
-            .padding(Padding {
-                top: 4.0,
-                right: 4.0,
-                bottom: 4.0,
-                left: 4.0,
-            })
-            .on_press(Message::Editor(EditorMsg::OutlineJump(symbol.line)));
-        // Leading "understood" toggle and trailing note pencil sit outside the
-        // jump button so each captures its own click.
+        // Leading "understood" toggle and trailing note pencil sit inside
+        // the row — each a button of its own, which takes its own press
+        // before the row's — so the row's band, and its hover, run across
+        // the whole of it rather than starting after them.
         let (cg, gcolor) = if understood {
             (Glyph::CheckCircle, theme::accent())
         } else {
             (Glyph::Circle, theme::dim())
         };
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
-            .style(theme::list_row(false))
-            .padding([5, 5])
+            .style(theme::icon_button(false))
+            .padding([4, 4])
             .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
                 rel: v.rel.clone(),
                 symbol: symbol.name.clone(),
@@ -1893,20 +1965,29 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             },
             12.0,
         ))
-        .style(theme::list_row(false))
-        .padding([5, 5])
+        .style(theme::icon_button(false))
+        .padding([4, 4])
         .on_press(Message::Reading(ReadingMsg::NoteEditStart {
             rel: v.rel.clone(),
             symbol: symbol.name.clone(),
         }));
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
-        rows.push(
-            row![toggle, jump, pencil]
-                .spacing(1)
-                .align_y(iced::alignment::Vertical::Top)
-                .into(),
-        );
+        let jump = button(
+            row![toggle, col.width(Fill), pencil]
+                .spacing(2)
+                .align_y(iced::alignment::Vertical::Top),
+        )
+        .style(theme::list_row(is_current))
+        .width(Fill)
+        .padding(Padding {
+            top: 2.0,
+            right: 2.0,
+            bottom: 2.0,
+            left: 2.0,
+        })
+        .on_press(Message::Editor(EditorMsg::OutlineJump(symbol.line)));
+        rows.push(jump.into());
     }
 
     // Sub-label under "OUTLINE": the reader's manual "understood" coverage for
@@ -1915,10 +1996,11 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
     // progress lives only in the status bar, so it isn't duplicated here.
     let names: Vec<String> = v.symbols.iter().map(|s| s.name.clone()).collect();
     let (done, total) = crate::notes::coverage(&app.proj.notes, &v.rel, &names);
-    let header_content: Element<'_, Message> = text(format!("{done}/{total} understood"))
-        .size(ts::SMALL)
-        .color(theme::fg_muted())
-        .into();
+    let header_content: Element<'_, Message> =
+        text(tr!("{done}/{total} understood", done = done, total = total))
+            .size(ts::SMALL)
+            .color(theme::fg_muted())
+            .into();
     let header = container(header_content).padding(Padding {
         top: 2.0,
         right: 10.0,

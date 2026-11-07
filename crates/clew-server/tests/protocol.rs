@@ -173,6 +173,7 @@ async fn hello(server: &mut Server) {
             Request::Hello {
                 protocol: PROTOCOL_VERSION,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: None,
             },
         )
         .await;
@@ -300,6 +301,7 @@ impl FakeProvider {
             api_key: "k".into(),
             model: "m".into(),
             base_url: self.base.clone(),
+            reply_language: None,
         }
     }
 }
@@ -1517,6 +1519,7 @@ async fn hello_refuses_a_protocol_mismatch() {
             Request::Hello {
                 protocol: PROTOCOL_VERSION - 1,
                 fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+                locale: None,
             },
         )
         .await;
@@ -1561,6 +1564,7 @@ async fn hello_refuses_a_fingerprint_mismatch() {
             Request::Hello {
                 protocol: PROTOCOL_VERSION,
                 fingerprint: "0000000000000000".into(),
+                locale: None,
             },
         )
         .await;
@@ -3136,6 +3140,7 @@ async fn use_provider(server: &mut Server, provider: &FakeProvider) {
                 Request::SetAiConfig {
                     chat: Some(provider.chat_config()),
                     embed: None,
+                    locale: None,
                 },
             )
             .await
@@ -3484,6 +3489,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
         Request::Hello {
             protocol: PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         },
     );
     server.wait_for("Ready", |msg| match msg {
@@ -3531,6 +3537,7 @@ fn a_disconnect_stops_the_work_and_ends_the_process() {
         Request::SetAiConfig {
             chat: Some(provider.chat_config()),
             embed: None,
+            locale: None,
         },
     );
     server.send(
@@ -3860,6 +3867,7 @@ fn debug_remotely(
         Request::Hello {
             protocol: PROTOCOL_VERSION,
             fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
         },
     );
     server.wait_for("Ready", |msg| match msg {

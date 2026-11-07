@@ -22,6 +22,19 @@
   <string>__BUILD__</string>
   <key>LSMinimumSystemVersion</key>
   <string>11.0</string>
+  <!-- The languages clew speaks: macOS then shows its own parts of the app
+       (the standard menu items, open panels, alerts) in the same one, and
+       takes the microphone prompt from Resources/<lang>.lproj. -->
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleLocalizations</key>
+  <array>
+    <string>en</string>
+    <string>fr</string>
+    <string>zh-Hans</string>
+    <string>ko</string>
+    <string>ja</string>
+  </array>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>LSApplicationCategoryType</key>

@@ -257,6 +257,7 @@ pub(crate) fn build_project_calls_graph(
                 analysis.lang,
                 analysis.calls,
                 &analysis.symbols,
+                analysis.owners,
             )
             .filter(|c| !c.is_empty()),
         );

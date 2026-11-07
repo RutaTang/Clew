@@ -765,7 +765,7 @@ impl LspClient {
 
         // On failure `client` — the only handle — drops here, which ends the
         // session and takes the child down with it.
-        let params = initialize_params(root, init_options, process_id);
+        let params = initialize_params(root, init_options, process_id, locale());
         let result = client.call("initialize", params).await?;
         let caps = result.get("capabilities");
         let encoding = match caps
@@ -875,7 +875,13 @@ impl LspClient {
             "position": { "line": line, "character": character }
         });
         if method.ends_with("/references") {
-            params["context"] = json!({ "includeDeclaration": false });
+            // The declaration is asked for too. Left out, pyright also left
+            // out every use reached through an import (`from cart import
+            // apply_discount` and the calls after it) and the use the
+            // request was made from: Find References listed one file's
+            // callers, and a value traced from a use lost that use. Callers
+            // that hold the declaration apart drop it again by position.
+            params["context"] = json!({ "includeDeclaration": true });
         }
         let result = self.call(method, params).await?;
         Ok(parse_definition(&result))
@@ -1166,10 +1172,37 @@ impl LspClient {
     }
 }
 
+/// The language the reader reads clew in, as the tag editors send (`fr`,
+/// `zh-cn`): `initialize`'s `locale`, so a server that translates its
+/// messages answers in it. `None` (the default) sends none, and servers
+/// speak English. One for the process: the GUI sets it as its language
+/// changes, clew-server from its client's `Hello`. A server already running
+/// keeps the one it started with.
+static LOCALE: std::sync::RwLock<Option<String>> = std::sync::RwLock::new(None);
+
+/// Name the language servers started from now on are told the reader
+/// reads (see [`LOCALE`]).
+pub fn set_locale(tag: Option<String>) {
+    if let Ok(mut locale) = LOCALE.write() {
+        *locale = tag;
+    }
+}
+
+/// The language [`set_locale`] named last.
+fn locale() -> Option<String> {
+    LOCALE.read().ok().and_then(|locale| locale.clone())
+}
+
 /// The `initialize` request's params. `process_id` is our pid for a server
 /// we spawned, `None` (sent as `null`) for one whose parent is someone else —
-/// see [`LspClient::connect`].
-fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Option<u32>) -> Value {
+/// see [`LspClient::connect`]. `locale`, the reader's language, if not
+/// English.
+fn initialize_params(
+    root: &Path,
+    init_options: Option<Value>,
+    process_id: Option<u32>,
+    locale: Option<String>,
+) -> Value {
     let mut params = json!({
         "processId": process_id,
         "rootUri": path_to_uri(root),
@@ -1215,6 +1248,9 @@ fn initialize_params(root: &Path, init_options: Option<Value>, process_id: Optio
     });
     if let Some(opts) = init_options {
         params["initializationOptions"] = opts;
+    }
+    if let Some(tag) = locale {
+        params["locale"] = json!(tag);
     }
     params
 }
@@ -2867,8 +2903,13 @@ mod session_tests {
             "processId must be present and null, got {params}"
         );
         // A local child, by contrast, is ours and gets our pid.
-        let local = initialize_params(Path::new("/proj"), None, Some(4242));
+        let local = initialize_params(Path::new("/proj"), None, Some(4242), None);
         assert_eq!(local["processId"], 4242);
+        // English asks for nothing; another language is named, so a server
+        // that translates answers in it.
+        assert!(params.get("locale").is_none(), "{params}");
+        let french = initialize_params(Path::new("/proj"), None, None, Some("fr".into()));
+        assert_eq!(french["locale"], "fr");
         // Server-initiated progress is advertised; without it servers report
         // none, and "indexing" looks the same as "no answer".
         assert_eq!(params["capabilities"]["window"]["workDoneProgress"], true);
@@ -2891,6 +2932,24 @@ mod session_tests {
         let reply = peer.next().await;
         assert_eq!(reply["id"], "wf");
         assert_eq!(reply["result"], folders);
+    }
+
+    /// References ask for the declaration too: left out, pyright also left
+    /// out every use reached through an import, and the use asked from.
+    #[tokio::test]
+    async fn references_ask_for_the_declaration() {
+        let (client, mut peer, _) = connected().await;
+        let asked = tokio::spawn(async move {
+            client
+                .navigate("textDocument/references", Path::new("/proj/a.py"), 3, 4)
+                .await
+        });
+        let request = peer.next().await;
+        assert_eq!(request["method"], "textDocument/references");
+        assert_eq!(request["params"]["context"]["includeDeclaration"], true);
+        peer.send(json!({"jsonrpc": "2.0", "id": request["id"], "result": []}))
+            .await;
+        assert_eq!(asked.await.unwrap(), Ok(Vec::new()));
     }
 
     /// F5: several progress reports run at once; one ending must not declare

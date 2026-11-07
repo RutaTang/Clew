@@ -36,7 +36,7 @@ impl App {
                         app.pending_open = Some(path);
                         app.request_open(root)
                     } else {
-                        app.status = format!("No such path: {}", arg.display());
+                        app.status = tr!("No such path: {path}", path = arg.display());
                         Task::none()
                     }
                 }
@@ -66,6 +66,8 @@ impl App {
             server: crate::app::server::ServerLink::default(),
             pending_open: None,
             pending_consent: None,
+            setup: None,
+            pending_setup: None,
             trust: clew_core::trust::Trust::load(),
             scanning: false,
             sidebar: SidebarTab::Files,
@@ -77,6 +79,8 @@ impl App {
             import_dir: imports::Dir::Imports,
             trail_writer: TrailWriter::default(),
             connection: Self::startup_connection(),
+            left_local: None,
+            escape_taken: false,
             // A CLEW_SSH startup target never carries the per-host AI-key
             // opt-in; only the Connect flow can grant it.
             remote_ai_opt_in: false,
@@ -95,7 +99,9 @@ impl App {
             lsp_gen: std::collections::HashMap::new(),
             embed_available: embed::Config::available(),
             show_bottom: false,
-            ask_view: AskView::Closed,
+            ask_view: AskView::Hidden,
+            ask_sessions_menu: false,
+            ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
             debug: DebugState::default(),
             debug_hover_eval: false,
@@ -108,15 +114,14 @@ impl App {
             show_view_menu: false,
             file_filter: String::new(),
             keymap: keymap::Keymap::load(),
-            show_shortcuts: false,
             rebinding: None,
             keymap_notice: None,
-            show_inline_summaries: true,
-            show_file_banner: true,
-            show_inlay_hints: true,
-            show_minimap: false,
-            show_inline_blame: false,
-            show_indent_guides: false,
+            show_inline_summaries: view_pref(VIEW_SUMMARIES, true),
+            show_file_banner: view_pref(VIEW_BANNER, true),
+            show_inlay_hints: view_pref(VIEW_INLAY_HINTS, true),
+            show_minimap: view_pref(VIEW_MINIMAP, false),
+            show_inline_blame: view_pref(VIEW_BLAME, false),
+            show_indent_guides: view_pref(VIEW_INDENT_GUIDES, false),
             settings: SettingsDraft::default(),
             ask_agent: crate::app::integrations::stored_ask_agent(),
             overlay_open: false,
@@ -124,7 +129,12 @@ impl App {
             acp_agents: clew_core::acp::config::load().0,
             // Load the persisted appearance settings and point the palette at
             // them before the first frame, so the window opens in the right theme.
-            theme_pref: theme::init(),
+            theme_pref: {
+                // And the language, so the first frame speaks it: the saved
+                // one for the first window, the one spoken for a later one.
+                crate::i18n::init();
+                theme::init()
+            },
             update: UpdateState {
                 auto_check: updater::auto_check_enabled(),
                 ..UpdateState::default()
@@ -151,10 +161,11 @@ impl App {
             pending_g: false,
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
-            status: "Open a folder to start reading".to_string(),
-            waiting_said: false,
+            status: tr!("Open a folder to start reading").to_string(),
+            waiting_said: None,
             main_window: None,
             tutorial: None,
+            tutorial_layout: None,
             window_width: 1280.0,
             window_height: 800.0,
             fullscreen: false,
@@ -247,8 +258,9 @@ impl App {
             );
         }
         // The level meter and the pause that ends listening, read only while
-        // the microphone is open.
-        if self.voice.is_listening() {
+        // the microphone is open — and the moment the pill says what was
+        // heard, so it goes when the moment is over.
+        if self.voice.is_listening() || self.voice.heard_fresh() {
             subs.push(
                 iced::time::every(crate::app::voice::LISTEN_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
@@ -640,6 +652,32 @@ impl App {
                 self.file_filter = filter;
                 Task::none()
             }
+            // The Escape that clears a filled filter does only that: the
+            // same press, forwarded to the key handler (`shell::forward_key`),
+            // also closed the find bar or the Ask card, or dropped the code
+            // selection. An empty filter leaves Escape to do what it does.
+            WindowMsg::FileFilterEscaped => {
+                if !self.file_filter.is_empty() {
+                    self.file_filter.clear();
+                    self.escape_taken = true;
+                }
+                Task::none()
+            }
+            // Enter opens what the filter found first, as a click on its row
+            // would: typing a file's name and pressing Enter did nothing.
+            WindowMsg::FileFilterSubmitted => {
+                let first = self.proj.project.as_ref().and_then(|p| {
+                    crate::ui::filtered_files(p, &self.file_filter)
+                        .next()
+                        .map(|f| f.rel.clone())
+                });
+                match first {
+                    Some(rel) => {
+                        Task::done(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
+                    }
+                    None => Task::none(),
+                }
+            }
             // Asked first, then set: what the button shows next is what was
             // asked for, not a read that may race the change.
             WindowMsg::ToggleMaximize => match self.main_window {
@@ -664,16 +702,12 @@ impl App {
                 Task::none()
             }
             WindowMsg::OpenShortcuts => {
-                self.show_shortcuts = true;
+                // The shortcuts are a page of Settings, not a panel apart.
                 self.rebinding = None;
                 self.keymap_notice = None;
-                Task::none()
-            }
-            WindowMsg::CloseShortcuts => {
-                self.show_shortcuts = false;
-                self.rebinding = None;
-                self.keymap_notice = None;
-                Task::none()
+                self.update(Message::Settings(SettingsMsg::OpenAt(
+                    crate::SettingsPage::Shortcuts,
+                )))
             }
             WindowMsg::RebindStart(action) => {
                 self.rebinding = Some(action);
@@ -683,15 +717,15 @@ impl App {
             WindowMsg::RebindReset(action) => {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {
-                    self.keymap_notice = Some(format!(
-                        "Its default is used by “{}” now — rebind that first",
-                        other.label()
+                    self.keymap_notice = Some(tr!(
+                        "Its default is used by “{action}” now — rebind that first",
+                        action = crate::i18n::lookup(other.label())
                     ));
                     return Task::none();
                 }
                 self.keymap_notice = None;
                 if let Err(e) = self.keymap.save() {
-                    self.status = format!("Could not save shortcuts: {e}");
+                    self.status = tr!("Could not save shortcuts: {error}", error = e);
                 }
                 Task::none()
             }
@@ -700,30 +734,80 @@ impl App {
                 self.rebinding = None;
                 self.keymap_notice = None;
                 if let Err(e) = self.keymap.save() {
-                    self.status = format!("Could not save shortcuts: {e}");
+                    self.status = tr!("Could not save shortcuts: {error}", error = e);
                 }
                 Task::none()
             }
             WindowMsg::ToggleInlineSummaries => {
                 self.show_inline_summaries = !self.show_inline_summaries;
+                self.keep_view_pref(VIEW_SUMMARIES, self.show_inline_summaries);
                 Task::none()
             }
             WindowMsg::ToggleFileBanner => {
                 self.show_file_banner = !self.show_file_banner;
+                self.keep_view_pref(VIEW_BANNER, self.show_file_banner);
                 Task::none()
             }
             WindowMsg::ToggleMinimap => {
                 self.show_minimap = !self.show_minimap;
+                self.keep_view_pref(VIEW_MINIMAP, self.show_minimap);
                 Task::none()
             }
             WindowMsg::ToggleInlineBlame => {
                 self.show_inline_blame = !self.show_inline_blame;
+                self.keep_view_pref(VIEW_BLAME, self.show_inline_blame);
                 Task::none()
             }
             WindowMsg::ToggleIndentGuides => {
                 self.show_indent_guides = !self.show_indent_guides;
+                self.keep_view_pref(VIEW_INDENT_GUIDES, self.show_indent_guides);
                 Task::none()
             }
+            WindowMsg::NoFileDialog => {
+                self.status =
+                    tr!("No file dialog could open here — install xdg-desktop-portal or zenity")
+                        .into();
+                Task::none()
+            }
+        }
+    }
+}
+
+/// The View menu's choices, as the global config's root keeps them: a
+/// minimap or blame turned on is there next launch (they were this
+/// session's only, unlike the theme).
+pub(crate) const VIEW_SUMMARIES: &str = "view_inline_summaries";
+pub(crate) const VIEW_BANNER: &str = "view_file_banner";
+pub(crate) const VIEW_INLAY_HINTS: &str = "view_inlay_hints";
+pub(crate) const VIEW_MINIMAP: &str = "view_minimap";
+pub(crate) const VIEW_BLAME: &str = "view_inline_blame";
+pub(crate) const VIEW_INDENT_GUIDES: &str = "view_indent_guides";
+
+/// A View-menu choice as saved, or `default` when it never was (or the
+/// config cannot be read).
+fn view_pref(key: &str, default: bool) -> bool {
+    // A test's app is the app as shipped: the suite shares one data
+    // directory, so a test that toggled a choice would change every later
+    // test's view.
+    if cfg!(test) {
+        return default;
+    }
+    clew_core::globalconfig::get(key)
+        .and_then(|v| v.as_bool())
+        .unwrap_or(default)
+}
+
+impl App {
+    /// Keep a View-menu choice for the next launch. Not kept, it still holds
+    /// for this session, and the reader is told.
+    pub(crate) fn keep_view_pref(&mut self, key: &str, on: bool) {
+        if cfg!(test) {
+            return;
+        }
+        let saved =
+            clew_core::globalconfig::set_keys(vec![(key.to_string(), toml::Value::Boolean(on))]);
+        if let Err(e) = saved {
+            self.status = tr!("Could not save settings: {error}", error = e);
         }
     }
 }

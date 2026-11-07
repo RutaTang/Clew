@@ -6,6 +6,7 @@
 
 use crate::graph::tree::{self, TreeNode};
 use crate::lsp::client::CallItem;
+use crate::{tr, trn};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
@@ -18,8 +19,8 @@ pub enum Direction {
 impl Direction {
     pub fn label(self) -> &'static str {
         match self {
-            Direction::Incoming => "Callers",
-            Direction::Outgoing => "Callees",
+            Direction::Incoming => tr!("Callers"),
+            Direction::Outgoing => tr!("Callees"),
         }
     }
 
@@ -179,12 +180,19 @@ impl CallTree {
     /// "12 more callers not shown" for a node the size cap cut short.
     pub fn hidden_note(&self, id: usize) -> Option<String> {
         let hidden = self.get(id)?.hidden;
-        (hidden > 0).then(|| {
-            let what = match self.direction {
-                Direction::Incoming => "callers",
-                Direction::Outgoing => "callees",
-            };
-            format!("{hidden} more {what} not shown (tree limit {MAX_NODES})")
+        (hidden > 0).then(|| match self.direction {
+            Direction::Incoming => trn!(
+                "1 more caller not shown (tree limit {limit})",
+                "{n} more callers not shown (tree limit {limit})",
+                hidden,
+                limit = MAX_NODES
+            ),
+            Direction::Outgoing => trn!(
+                "1 more callee not shown (tree limit {limit})",
+                "{n} more callees not shown (tree limit {limit})",
+                hidden,
+                limit = MAX_NODES
+            ),
         })
     }
 

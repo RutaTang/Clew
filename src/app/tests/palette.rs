@@ -198,12 +198,11 @@ fn without_a_project_only_what_needs_none_is_listed() {
     let mut app = blank_app();
     open_palette(&mut app);
     assert!(app.proj.finder.open);
-    // The bar suggests asking, talking, and opening a project.
+    // The bar suggests asking, and opening a project.
     assert_eq!(
         app.palette_home,
         [
             Suggestion::Ask("Ask Clew a question".into()),
-            Suggestion::Talk,
             Suggestion::Command {
                 title: "Open Folder…".into(),
                 recent: false
@@ -293,7 +292,6 @@ fn the_command_bar_suggests_what_to_do_here() {
         app.palette_home,
         [
             Suggestion::Ask("Ask Clew about origin".into()),
-            Suggestion::Talk,
             Suggestion::GoToFile,
             symbol("origin", 3),
         ]
@@ -303,15 +301,14 @@ fn the_command_bar_suggests_what_to_do_here() {
             .iter()
             .map(Suggestion::group)
             .collect::<Vec<_>>(),
-        ["Ask", "Ask", "Go to", "Go to"]
+        ["Ask", "Go to", "Go to"]
     );
     // The results are the suggestions, the first selected; the arrows keep
     // count of the headings over the selection, for scrolling it into view.
-    assert_eq!(app.proj.finder.results, [0, 1, 2, 3]);
+    assert_eq!(app.proj.finder.results, [0, 1, 2]);
     assert_eq!(app.headings_over_selection(), 1);
     down(&mut app);
-    down(&mut app);
-    assert_eq!(app.proj.finder.selected, 2);
+    assert_eq!(app.proj.finder.selected, 1);
     assert_eq!(app.headings_over_selection(), 2);
 
     // Go to File… opens the file finder in its place.
@@ -325,8 +322,8 @@ fn the_command_bar_suggests_what_to_do_here() {
         v.caret = Some((0, 0));
     }
     open_palette(&mut app);
-    assert_eq!(app.palette_home[3], symbol("Point", 1));
-    assert_eq!(app.palette_home[4], symbol("origin", 3));
+    assert_eq!(app.palette_home[2], symbol("Point", 1));
+    assert_eq!(app.palette_home[3], symbol("origin", 3));
     let _ = app.update(Message::Nav(NavMsg::PaletteSuggestion(symbol("origin", 3))));
     assert!(!app.proj.finder.open);
     assert_eq!(

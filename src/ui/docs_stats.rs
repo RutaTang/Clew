@@ -31,11 +31,10 @@ pub(crate) fn overview_map_canvas<'a>(
 }
 
 pub(crate) fn group_header(rel: &str) -> Element<'_, Message> {
-    let name = rel.rsplit('/').next().unwrap_or(rel);
-    let (glyph, color) = crate::icons::file_icon(name);
+    // The file tree's own quiet file mark, not a coloured one per language.
     container(
         row![
-            icon_text(glyph, color, 12.0),
+            container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
             // In the order it is spelled (`highlight::in_order`).
             text(crate::highlight::in_order(rel))
                 .size(ts::SMALL)
@@ -96,12 +95,7 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
 pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
     if let Some(cover) = pane_cover(app) {
         return editor_shell(match cover {
-            PaneCover::Scanning => empty_state(
-                Glyph::Search,
-                "Scanning project…",
-                "Indexing files so you can read and search them.",
-                None,
-            ),
+            PaneCover::Scanning => empty_state(Glyph::Search, tr!("Scanning project…"), "", None),
             PaneCover::Welcome => welcome(app),
             PaneCover::Docs(page) => docs_page(page),
             PaneCover::Overview => overview_home(app),
@@ -154,7 +148,7 @@ pub(crate) fn module_label(rel: &str) -> String {
         return segs
             .last()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| "(root)".into());
+            .unwrap_or_else(|| tr_noop!("(root)").into());
     }
     // A file that names its parent module collapses to the directory.
     let is_dir_file = (lang == "rust"
@@ -172,7 +166,7 @@ pub(crate) fn module_label(rel: &str) -> String {
         segs.pop();
     }
     if segs.is_empty() {
-        return "(root)".to_string();
+        return tr_noop!("(root)").to_string();
     }
     let sep = match lang {
         "rust" => "::",
@@ -209,25 +203,21 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     if app.proj.docs.files.is_empty() {
         return if app.docs_loading() {
-            empty_state(
-                Glyph::Sparkle,
-                "Building docs…",
-                "Reading the project's public API.",
-                None,
-            )
+            empty_state(Glyph::Sparkle, tr!("Building docs…"), "", None)
         } else {
             empty_state(
                 Glyph::Note,
-                "No documentation",
-                "No documented symbols found in this project.",
-                Some(("Rebuild", Message::Docs(DocsMsg::Refresh))),
+                tr!("No documentation"),
+                "",
+                Some((tr!("Rebuild"), Message::Docs(DocsMsg::Refresh))),
             )
         };
     }
 
     // Toolbar: a filter on top, then the grouping / visibility / rebuild
     // controls (two rows so they fit a narrow sidebar).
-    let filter = text_input("Filter docs…", &app.proj.docs.filter)
+    let filter = text_input(tr!("Filter docs…"), &app.proj.docs.filter)
+        .style(theme::input)
         .on_input(|v| Message::Docs(DocsMsg::FilterChanged(v)))
         .size(ts::BODY)
         .padding(6)
@@ -240,17 +230,17 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
     };
     let group_btn = chip(
         if app.docs_view.by_module {
-            "Modules".into()
+            tr!("Modules").into()
         } else {
-            "Files".into()
+            tr!("Files").into()
         },
         Message::Docs(DocsMsg::ToggleGrouping),
     );
     let vis_btn = chip(
         if app.docs_view.show_all {
-            "All".into()
+            tr!("All").into()
         } else {
-            "Public".into()
+            tr!("Public").into()
         },
         Message::Docs(DocsMsg::ToggleShowAll),
     );
@@ -297,15 +287,25 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         });
         let label = group.label.clone();
         let expanded = !query.is_empty() || app.proj.docs.expanded.contains(&label);
-        let arrow = if expanded { "▾" } else { "▸" };
+        let arrow = if expanded {
+            Glyph::ChevronDown
+        } else {
+            Glyph::ChevronRight
+        };
         rows.push(
             button(
                 row![
-                    text(arrow).size(ts::CAPTION).color(theme::dim()).width(10),
-                    text(label.clone())
-                        .size(ts::BODY)
-                        .color(theme::fg_muted())
-                        .wrapping(Wrapping::None),
+                    container(glyph::icon(arrow, theme::dim(), 10.0)).width(10),
+                    // The module of files at the root is named in the
+                    // reader's language; every other label is code's.
+                    text(if label == tr_noop!("(root)") {
+                        tr!("(root)").to_string()
+                    } else {
+                        label.clone()
+                    })
+                    .size(ts::BODY)
+                    .color(theme::fg_muted())
+                    .wrapping(Wrapping::None),
                 ]
                 .spacing(4)
                 .align_y(iced::Center),
@@ -416,7 +416,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             .color(theme::dim())
             .wrapping(Wrapping::None),
         space().width(Fill),
-        button(text("Open source").size(ts::BODY))
+        button(text(tr!("Open source")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
             .on_press(Message::Editor(EditorMsg::OpenRel {
@@ -450,7 +450,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         .style(theme::editor);
 
         let doc: Element<'a, Message> = if e.doc_items.is_empty() {
-            text("No documentation.")
+            text(tr!("No documentation."))
                 .size(ts::BODY)
                 .color(theme::dim())
                 .into()
@@ -513,7 +513,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
 
     if app.proj.overview.generating {
         return center(
-            text("Generating architecture overview…")
+            text(tr!("Generating architecture overview…"))
                 .size(ts::EMPHASIS)
                 .color(theme::dim()),
         )
@@ -522,11 +522,11 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
 
     if app.proj.overview.markdown.is_some() {
         let header = row![
-            text("Architecture Overview")
+            text(tr!("Architecture Overview"))
                 .size(ts::HEADING)
                 .color(theme::fg()),
             space().width(Fill),
-            regen("Regenerate"),
+            regen(tr!("Regenerate")),
         ]
         .align_y(iced::Center);
         // The module map, drawn natively (same engine as the Import Graph
@@ -541,7 +541,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         {
             items.push(
                 column![
-                    text("Module map")
+                    text(tr!("Module map"))
                         .size(ts::SUBTITLE)
                         .color(theme::fg_muted()),
                     container(
@@ -550,12 +550,6 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                             .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
                     )
                     .width(Fill),
-                    text(format!(
-                        "size = how connected · {} · drag a node to move it · click to open",
-                        super::map_nav_hint(app.graph_3d)
-                    ))
-                    .size(ts::CAPTION)
-                    .color(theme::dim()),
                 ]
                 .spacing(6)
                 .into(),
@@ -585,24 +579,23 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
 
     // Not generated yet.
     let action: Element<'_, Message> = if !app.llm_available {
-        text("Configure an LLM key in Settings to generate the overview.")
+        text(tr!("Add an API key in Settings to generate the overview."))
             .size(ts::BODY)
             .color(theme::dim())
             .into()
     } else if app.proj.explain.cache.is_empty() {
-        text("Run “Explain All” first — the overview is built from the explanations.")
+        text(tr!("Run Explain All first."))
             .size(ts::BODY)
             .color(theme::dim())
             .into()
     } else {
-        regen("Generate overview").into()
+        regen(tr!("Generate overview")).into()
     };
     center(
         column![
-            text("Architecture Overview").size(ts::HEADING).color(theme::fg()),
-            text("A generated tour of this codebase: what it does, core modules, entry points, and where to start.")
-                .size(ts::BASE)
-                .color(theme::dim()),
+            text(tr!("Architecture Overview"))
+                .size(ts::HEADING)
+                .color(theme::fg()),
             action,
         ]
         .spacing(12)
@@ -612,18 +605,10 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// Group a large integer with thousands separators, e.g. `12345` → `12,345`.
+/// Group a large integer with thousands separators, e.g. `12345` → `12,345`
+/// (as the reader writes it).
 pub(crate) fn fmt_thousands(n: usize) -> String {
-    let digits = n.to_string();
-    let len = digits.len();
-    let mut out = String::with_capacity(len + len / 3);
-    for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (len - i).is_multiple_of(3) {
-            out.push(',');
-        }
-        out.push(ch);
-    }
-    out
+    crate::i18n::number(n as u64)
 }
 
 /// A stable, readable color for the language at rank `i` in the bar/table.
@@ -716,7 +701,7 @@ pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
 /// The code-statistics "home": totals, a language-proportion bar, a per-language
 /// breakdown, and the largest files (each row opens the file).
 pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
-    let refresh = button(text("Refresh").size(ts::BODY))
+    let refresh = button(text(tr!("Refresh")).size(ts::BODY))
         .style(theme::toolbar_button)
         .padding([3, 12])
         .on_press(Message::Overview(OverviewMsg::RefreshStats));
@@ -724,13 +709,15 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     // Nothing to show yet: computing, or a project with no counted code.
     let Some(report) = app.proj.stats.report.as_ref().filter(|r| !r.is_empty()) else {
         let msg = if app.proj.stats.building {
-            "Computing code statistics…"
+            tr!("Computing code statistics…")
         } else {
-            "No code files to count in this project."
+            tr!("No code files to count in this project.")
         };
         return center(
             column![
-                text("Code Statistics").size(ts::HEADING).color(theme::fg()),
+                text(tr!("Code Statistics"))
+                    .size(ts::HEADING)
+                    .color(theme::fg()),
                 text(msg).size(ts::BASE).color(theme::dim()),
             ]
             .spacing(12)
@@ -742,12 +729,17 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
 
     // A recompute running over already-shown (stale) numbers.
     let updating: Element<'_, Message> = if app.proj.stats.building {
-        text("updating…").size(ts::BODY).color(theme::dim()).into()
+        text(tr!("Updating…"))
+            .size(ts::BODY)
+            .color(theme::dim())
+            .into()
     } else {
         slot()
     };
     let header = row![
-        text("Code Statistics").size(ts::HEADING).color(theme::fg()),
+        text(tr!("Code Statistics"))
+            .size(ts::HEADING)
+            .color(theme::fg()),
         space().width(Fill),
         updating,
         space().width(10),
@@ -759,11 +751,11 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     // "Code files" (tokei-counted source files), not the tree's total file count —
     // labelled explicitly so the two numbers don't read as a contradiction.
     let summary = row![
-        stat_cell("Code files", t.files),
-        stat_cell("Lines", t.lines()),
-        stat_cell("Code", t.code),
-        stat_cell("Comments", t.comments),
-        stat_cell("Blanks", t.blanks),
+        stat_cell(tr!("Code files"), t.files),
+        stat_cell(tr!("Lines"), t.lines()),
+        stat_cell(tr!("Code"), t.code),
+        stat_cell(tr!("Comments"), t.comments),
+        stat_cell(tr!("Blanks"), t.blanks),
     ]
     .spacing(36);
 
@@ -781,12 +773,12 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     let table_header = row![
         // Match the color swatch's width so headers line up with the cells below.
         space().width(10),
-        head("Language", 150.0),
-        head("Files", 70.0),
-        head("Code", 90.0),
-        head("Comments", 90.0),
-        head("Blanks", 80.0),
-        head("Share", 70.0),
+        head(tr!("programming language\u{4}Language"), 150.0),
+        head(tr!("Files"), 70.0),
+        head(tr!("Code"), 90.0),
+        head(tr!("Comments"), 90.0),
+        head(tr!("Blanks"), 80.0),
+        head(tr!("Share"), 70.0),
     ]
     .spacing(8)
     .align_y(iced::Center);
@@ -801,7 +793,11 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                 cell(fmt_thousands(l.code), 90.0, theme::fg()),
                 cell(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
                 cell(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
-                cell(format!("{share:.2}%"), 70.0, theme::dim()),
+                cell(
+                    tr!("{percent}%", percent = crate::i18n::decimal(share, 2)),
+                    70.0,
+                    theme::dim(),
+                ),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -854,10 +850,10 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         space().height(4),
         language_bar(report),
         space().height(10),
-        section("By language"),
+        section(tr!("By language")),
         table,
         space().height(14),
-        section("Largest files"),
+        section(tr!("Largest files")),
         files,
     ]
     .spacing(8)
@@ -891,28 +887,24 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
     use crate::app::glossary::TermKind;
     let glossary = app.glossary();
     let header = row![
-        text("Glossary").size(ts::HEADING).color(theme::fg()),
+        text(tr!("Glossary")).size(ts::HEADING).color(theme::fg()),
         space().width(Fill),
-        button(text("Close").size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Glossary(GlossaryMsg::Close)),
+        super::chrome::close_button(Message::Glossary(GlossaryMsg::Close)),
     ]
     .align_y(iced::Center);
 
     if glossary.is_empty() {
         let (title, subtitle, action) = if app.docs_loading() {
             (
-                "Building the glossary…",
-                "Reading the project's doc comments.",
+                tr!("Building the glossary…"),
+                tr!("Reading the project's doc comments."),
                 None,
             )
         } else {
             (
-                "No terms yet",
-                "A term is a type, module or acronym with a one-line definition: a \
-                 documented type or constant, or a file Explain All has summarised.",
-                Some(("Rebuild", Message::Docs(DocsMsg::Refresh))),
+                tr!("No terms yet"),
+                "",
+                Some((tr!("Rebuild"), Message::Docs(DocsMsg::Refresh))),
             )
         };
         return container(
@@ -924,25 +916,35 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    let filter = text_input("Filter terms…", &app.proj.glossary.filter)
+    let filter = text_input(tr!("Filter terms…"), &app.proj.glossary.filter)
+        .style(theme::input)
         .on_input(|v| Message::Glossary(GlossaryMsg::FilterChanged(v)))
         .size(ts::BODY)
         .padding(6)
         .width(Fill);
     let query = app.proj.glossary.filter.trim().to_lowercase();
     let matching: Vec<&crate::app::glossary::Term> = glossary.matching(&query).collect();
-    let hint = format!(
-        "{} of {} terms · click a term to open its definition · hovering a term in the code shows the same line",
-        matching.len(),
-        glossary.len()
-    );
+    // While a filter narrows the list, how many of the terms it kept.
+    let count: Element<'_, Message> = if query.is_empty() {
+        space().into()
+    } else {
+        text(trn!(
+            "{shown} of 1 term",
+            "{shown} of {n} terms",
+            glossary.len(),
+            shown = matching.len()
+        ))
+        .size(ts::CAPTION)
+        .color(theme::dim())
+        .into()
+    };
 
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     if matching.is_empty() {
         items.push(
-            text(format!(
-                "No term matches “{}”",
-                app.proj.glossary.filter.trim()
+            text(tr!(
+                "No term matches “{filter}”",
+                filter = app.proj.glossary.filter.trim()
             ))
             .size(ts::BASE)
             .color(theme::dim())
@@ -970,7 +972,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                     .style(theme::toolbar_button)
                     .padding([2, 6])
                     .on_press(open),
-                text(term.badge.clone())
+                text(term.shown_badge().to_string())
                     .size(ts::SMALL)
                     .color(theme::accent())
                     .font(crate::fonts::CODE),
@@ -1006,8 +1008,9 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         }
         if of_kind.len() > GLOSSARY_ROWS_SHOWN {
             rows.push(
-                text(format!(
-                    "{} more — narrow the filter to see them",
+                text(trn!(
+                    "1 more — narrow the filter to see it",
+                    "{n} more — narrow the filter to see them",
                     of_kind.len() - GLOSSARY_ROWS_SHOWN
                 ))
                 .size(ts::CAPTION)
@@ -1031,7 +1034,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
         column![
             header,
             filter,
-            text(hint).size(ts::CAPTION).color(theme::dim()),
+            count,
             scrollable(
                 Column::with_children(items)
                     .spacing(16)

@@ -15,6 +15,14 @@ impl App {
 
         let cmd = modifiers.command();
 
+        // An Escape a field used already (see `escape_taken`); read on every
+        // press, so it never holds over to a later one.
+        if std::mem::take(&mut self.escape_taken)
+            && matches!(key.as_ref(), Key::Named(Named::Escape))
+        {
+            return Task::none();
+        }
+
         // Rebinding capture takes priority: the next chord becomes the binding.
         if let Some(action) = self.rebinding {
             return self.capture_rebind(action, &key, modifiers);
@@ -46,10 +54,10 @@ impl App {
             self.step_ask_down();
             return Task::none();
         }
-        // While the shortcuts panel is open (and not capturing), swallow every
-        // key so nothing acts behind the modal. (Esc never gets here: the
-        // panel is an overlay, so `escape_message` above closed it.)
-        if self.show_shortcuts {
+        // While Settings shows the shortcuts (and is not capturing), swallow
+        // every key so nothing acts behind it. (Esc never gets here: Settings
+        // is an overlay, so `escape_message` above closed it.)
+        if self.shortcuts_shown() {
             return Task::none();
         }
         // Tab / Shift-Tab move keyboard focus between fields (inside the open
@@ -280,14 +288,15 @@ impl App {
             ImportGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(
                 Overlay::ProjectImports,
             ))),
-            // The same as the ⋯ menu's row: cancel a running pass, else start
-            // one (or ask for a key first).
+            // The same as the ⋯ menu's row: cancel a running pass, else ask
+            // first what one costs (or ask for a key first, on the page of
+            // Settings that takes it).
             ExplainAll => self.update(if self.proj.explain.running {
                 Message::Explain(ExplainMsg::Cancel)
             } else if self.llm_available {
-                Message::Explain(ExplainMsg::Project)
+                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
             } else {
-                Message::Settings(SettingsMsg::Open)
+                Message::Settings(SettingsMsg::OpenAt(SettingsPage::LanguageModel))
             }),
             ToggleDiff => self.update(Message::Editor(EditorMsg::ToggleDiff)),
             TimeTravel => self.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false })),
@@ -315,7 +324,7 @@ impl App {
             let chord = self.keymap.chord(action);
             return self.capture_chord(target, chord);
         }
-        if self.tutorial.is_some() || self.show_shortcuts {
+        if self.tutorial.is_some() || self.shortcuts_shown() {
             return Task::none();
         }
         self.run_command_action(action).unwrap_or_else(Task::none)
@@ -338,7 +347,7 @@ impl App {
             return Task::none();
         }
         let Some(chord) = keymap::Chord::from_event(key, modifiers) else {
-            self.keymap_notice = Some("Unsupported key".into());
+            self.keymap_notice = Some(tr!("This key can't be used in a shortcut").into());
             return Task::none();
         };
         self.capture_chord(action, chord)
@@ -349,21 +358,21 @@ impl App {
     fn capture_chord(&mut self, action: keymap::Action, chord: keymap::Chord) -> Task<Message> {
         if !chord.is_command() {
             self.keymap_notice = Some(if keymap::MAC_KEYS {
-                "Shortcut must include ⌘, ⌥, or ⌃".into()
+                tr!("A shortcut must include ⌘, ⌥ or ⌃").into()
             } else {
-                "Shortcut must include Ctrl or Alt".into()
+                tr!("A shortcut must include Ctrl or Alt").into()
             });
             return Task::none();
         }
         if let Some(other) = self.keymap.conflict(&chord, action) {
-            self.keymap_notice = Some(format!("Already used by “{}”", other.label()));
+            self.keymap_notice = Some(tr!("Already used by “{name}”", name = other.label()));
             return Task::none();
         }
         self.keymap.rebind(action, chord);
         self.rebinding = None;
         self.keymap_notice = None;
         if let Err(e) = self.keymap.save() {
-            self.status = format!("Could not save shortcuts: {e}");
+            self.status = tr!("Could not save shortcuts: {error}", error = e);
         }
         Task::none()
     }

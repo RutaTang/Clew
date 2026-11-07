@@ -11,14 +11,67 @@ use crate::*;
 /// The status line for a project just scanned: its size, and what the walk
 /// skipped or added when it did (see `fs_scan::ScanReport::summary`).
 pub(crate) fn scan_status(files: usize, truncated: bool, report: &fs_scan::ScanReport) -> String {
-    let size = format!(
-        "{files} files{}",
-        if truncated { " (truncated)" } else { "" }
-    );
-    match report.summary() {
+    let size = if truncated {
+        trn!("1 file (truncated)", "{n} files (truncated)", files)
+    } else {
+        trn!("1 file", "{n} files", files)
+    };
+    match scan_summary(report) {
         Some(summary) => format!("{size} — {summary}"),
         None => size,
     }
+}
+
+/// One line describing what a scan skipped or added, in the language
+/// spoken, or `None` when it was a plain walk — what
+/// `fs_scan::ScanReport::summary` says in English.
+fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
+    let mut parts = Vec::new();
+    if report.non_utf8 > 0 {
+        parts.push(trn!(
+            "1 entry skipped (name is not UTF-8)",
+            "{n} entries skipped (name is not UTF-8)",
+            report.non_utf8
+        ));
+    }
+    if report.walk_errors > 0 {
+        parts.push(match &report.first_error {
+            Some(error) => trn!(
+                "1 unreadable entry (first: {error})",
+                "{n} unreadable entries (first: {error})",
+                report.walk_errors,
+                error = error
+            ),
+            None => trn!(
+                "1 unreadable entry",
+                "{n} unreadable entries",
+                report.walk_errors
+            ),
+        });
+    }
+    if !report.tracked_ignored.is_empty() {
+        parts.push(trn!(
+            "1 tracked file shown despite .gitignore or a build-directory name",
+            "{n} tracked files shown despite .gitignore or a build-directory name",
+            report.tracked_ignored.len()
+        ));
+    }
+    if let Some(error) = &report.tracked_error {
+        parts.push(tr!(
+            "git could not list the tracked files, so ignored ones may be missing ({error})",
+            error = error
+        ));
+    }
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The status line for a project's file set: "120 files · 1042 symbols".
+pub(crate) fn size_status(files: usize, symbols: usize) -> String {
+    format!(
+        "{} · {}",
+        trn!("1 file", "{n} files", files),
+        trn!("1 symbol", "{n} symbols", symbols)
+    )
 }
 
 /// The languages among `files` that clew ships a server for, sorted — which
@@ -64,7 +117,7 @@ async fn scan_off_thread(root: PathBuf) -> (ScanResult, fs_scan::ScanReport) {
                 },
                 fs_scan::ScanReport {
                     walk_errors: 1,
-                    first_error: Some(format!("the scan stopped unexpectedly: {e}")),
+                    first_error: Some(tr!("the scan stopped unexpectedly: {error}", error = e)),
                     ..Default::default()
                 },
             )
@@ -87,14 +140,16 @@ impl App {
         {
             return self.start_scan(root);
         }
-        // Otherwise ask via an in-app modal (see ui::consent_modal).
-        self.pending_consent = Some(root);
-        Task::none()
+        // Otherwise ask, in the setup sheet (see `crate::app::setup`): where
+        // clew keeps its data, and what to set up — filled in by a look at
+        // the project that reads it and writes nothing.
+        self.pending_consent = Some(root.clone());
+        self.show_setup(crate::app::setup::SetupMode::Open, root)
     }
 
     pub(crate) fn start_scan(&mut self, root: PathBuf) -> Task<Message> {
         self.scanning = true;
-        self.status = format!("Scanning {}…", root.display());
+        self.status = tr!("Scanning {path}…", path = root.display());
         // Preferred: let clew-server scan and return the tree (its `Tree` reply
         // builds the project via `handle_server_reply`).
         if self.server.is_up() {
@@ -107,7 +162,7 @@ impl App {
             // to have there. Park the request for the reconnect instead.
             if self.connection.is_remote() {
                 self.pending_scan_root = Some(root);
-                self.status = "Lost the remote host — reopening once reconnected…".into();
+                self.status = tr!("Lost the remote host — reopening once reconnected…").into();
                 return Task::none();
             }
         } else {
@@ -192,9 +247,10 @@ impl App {
         };
         if self.connection.is_remote() {
             self.scanning = false;
-            self.status = format!(
-                "Could not open {} on the remote host: {message}",
-                root.display()
+            self.status = tr!(
+                "Could not open {path} on the remote host: {error}",
+                path = root.display(),
+                error = message
             );
             // The host left this project for the one it could not open, and
             // stopped the installs it ran for it (`request_open_project`):
@@ -233,9 +289,10 @@ impl App {
                 .collect();
             return Task::batch(again);
         }
-        let why = format!(
-            "clew-server could not open {} ({message}) — scanning it here",
-            root.display()
+        let why = tr!(
+            "clew-server could not open {path} ({error}) — scanning it here",
+            path = root.display(),
+            error = message
         );
         self.server.close();
         self.handshake_failure = Some(why.clone());
@@ -293,9 +350,13 @@ impl App {
         let host = self.connection.approval_host().map(str::to_string);
         if let Err(e) = self.trust.update(|t| t.trust_root(host.as_deref(), &root)) {
             self.pending_open = None;
-            self.status = format!("Cannot record consent: {e}");
+            self.setup = None;
+            self.status = tr!("Cannot record consent: {error}", error = e);
             return Task::none();
         }
+        // What else the sheet had ticked: the leave to build now, the rest
+        // once the project is open.
+        self.take_open_setup(&root);
         // `.clew/` still holds this project's own state (bookmarks, caches);
         // create it now so the first save doesn't fail, but a failure here is
         // not fatal — a read-only project still opens, it just can't persist.
@@ -333,6 +394,17 @@ impl App {
         // (`forget_project_state`). That includes any tree resync still awaited
         // for it (this tree IS the project's file list, and answers it better).
         let _ = self.forget_project_state();
+        // A first open's answer is carried out for the project it opened.
+        // Another opened instead (⌘O while it scanned) drops it: kept, it
+        // waited for that path to open again, however much later, and ran
+        // then with nothing on screen.
+        if self
+            .pending_setup
+            .as_ref()
+            .is_some_and(|intent| intent.root != result.root)
+        {
+            self.pending_setup = None;
+        }
         // Tracked files the ignore rules hid, listed anyway: marked in the tree.
         self.proj.tracked_ignored = report.tracked_ignored.into_iter().collect();
         // Persisted project state (`.clew/`) lives WITH the project. For a
@@ -350,6 +422,13 @@ impl App {
         self.proj.derived_dir =
             clew_core::derived::dir(self.connection.approval_host(), &result.root);
         let store = self.proj.derived_dir.clone();
+        // Ask's sessions in this project, kept beside its other derived
+        // files; the card starts on a new one.
+        self.proj.ask_sessions = store
+            .as_deref()
+            .map(crate::app::ask_sessions::load)
+            .unwrap_or_default();
+        self.proj.ask_session = None;
         // Land on the architecture-overview home (filled from the cache when
         // the project's state has loaded).
         self.proj.overview.showing = true;
@@ -366,6 +445,9 @@ impl App {
             files: files.clone(),
             truncated: result.truncated,
         });
+        // The breakpoints set in this project before, by this window or the
+        // last run of clew.
+        self.restore_breakpoints();
         // The server cleared its per-project LSP approvals on OpenProject;
         // push this project's recorded ones so its spawn paths (SpawnLsp, the
         // Ask agent) honor them.
@@ -497,6 +579,23 @@ impl App {
         // the project being left (its lsp.toml, its host): they go with it,
         // and a listing still in flight for it is dropped by its stamp.
         self.lsp_located.clear();
+        // Its breakpoints go too: they are kept with the project
+        // (`breakpoints_store`) and set again when it opens. Held by absolute
+        // path, those of a project left stayed in every gutter and every
+        // debug run of the next — a remote project with the same paths as a
+        // local one drew, and sent its debugger, the local one's.
+        self.debug.breakpoints.clear();
+        // So does the sheet asking about it ("Set Up Project…", Explain All
+        // asking first): left up, its Apply acted on whatever project was
+        // open by then, at a cost the user had not seen. A first open's sheet
+        // asks about the folder it names, not this project, and stays.
+        if self
+            .setup
+            .as_ref()
+            .is_some_and(|s| s.mode != crate::app::setup::SetupMode::Open)
+        {
+            self.setup = None;
+        }
         // The two note editors carry a project-RELATIVE anchor plus a draft
         // (which is why neither may outlive its project: Save re-resolves the
         // root when it runs); what the user typed into them is lost with the
@@ -513,7 +612,7 @@ impl App {
             .flatten()
             .any(|draft| !draft.trim().is_empty())
         {
-            discarded.push("Unsaved note was discarded with the previous project".to_string());
+            discarded.push(tr!("Unsaved note was discarded with the previous project").to_string());
         }
         // Anything still marked dirty is a change this client holds and the
         // remote never received. Leaving the project discards it, so say so
@@ -522,9 +621,9 @@ impl App {
         if !left.remote_state_dirty.is_empty() {
             let mut lost: Vec<&str> = left.remote_state_dirty.iter().map(String::as_str).collect();
             lost.sort_unstable();
-            discarded.push(format!(
-                "Unsaved remote state was discarded: {}",
-                lost.join(", ")
+            discarded.push(tr!(
+                "Unsaved remote state was discarded: {files}",
+                files = lost.join(", ")
             ));
         }
         if discarded.is_empty() {
@@ -634,7 +733,7 @@ impl App {
             // Nothing was read: the stored trail is still on disk, and what
             // is in memory is only this session's visits.
             self.proj.inflight.state_unread = true;
-            problems.push(format!("the project's saved state ({why})"));
+            problems.push(tr!("the project's saved state ({error})", error = why));
         }
 
         if let Some(loaded) = state.history {
@@ -710,11 +809,6 @@ impl App {
                 Err(e) => problems.push(e),
             }
         }
-        // Language servers asked for before `lsp.toml` was known.
-        for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
-            tasks.push(self.ensure_lsp(&language));
-        }
-
         // Derived caches: whatever this session already produced is newer.
         if let Some(problem) = state.explain_problem {
             problems.push(problem);
@@ -760,10 +854,20 @@ impl App {
         }
 
         if !problems.is_empty() {
-            self.status = format!(
-                "Left untouched, could not read: {} — fix or remove the file to use it",
-                problems.join("; ")
+            self.status = tr!(
+                "Left untouched, could not read: {problems} — fix or remove the file to use it",
+                problems = problems.join("; ")
             );
+        }
+        // What the setup sheet asked for, now that the explanations it
+        // would redo are known.
+        tasks.push(self.apply_pending_setup());
+        // Language servers asked for before `lsp.toml` was known — after the
+        // sheet's: a server it fetches is on its way, and is waited for.
+        // Asked first, each popped the very download question the sheet's
+        // tick had answered, and the tick was skipped.
+        for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
+            tasks.push(self.ensure_lsp(&language));
         }
         Task::batch(tasks)
     }
@@ -801,13 +905,10 @@ impl App {
         // resolved to a since-moved file) may now resolve differently.
         let cycles = self.reresolve_import_graph();
         if let Some(p) = &self.proj.project {
-            self.status = match report.summary() {
-                Some(summary) => format!(
-                    "{} files · {} symbols — {summary}",
-                    p.files.len(),
-                    self.symbol_count()
-                ),
-                None => format!("{} files · {} symbols", p.files.len(), self.symbol_count()),
+            let size = size_status(p.files.len(), self.symbol_count());
+            self.status = match scan_summary(&report) {
+                Some(summary) => format!("{size} — {summary}"),
+                None => size,
             };
         }
         // This is the first point at which a created or deleted Rust file
@@ -912,6 +1013,16 @@ impl App {
         !self.connection.is_remote()
     }
 
+    /// The work a "…ing" status line named is done and says nothing of its
+    /// own: the line is cleared if it still says one of `busy`, so it does
+    /// not go on saying "Explaining why…" under the answer. Whatever was
+    /// said there since is left to be read.
+    pub(crate) fn settle_status(&mut self, busy: &[&str]) {
+        if busy.iter().any(|b| self.status == *b) {
+            self.status.clear();
+        }
+    }
+
     /// The stamp for project-scoped work spawned now (see [`Stamp`]): its
     /// result is accepted while this project instance stays open, across
     /// reconnects of the transport.
@@ -990,7 +1101,7 @@ pub(crate) fn read_or_unread(
     read: Result<LoadedProjectState, tokio::task::JoinError>,
 ) -> LoadedProjectState {
     read.unwrap_or_else(|e| {
-        LoadedProjectState::unread(format!("the read failed unexpectedly: {e}"))
+        LoadedProjectState::unread(tr!("the read failed unexpectedly: {error}", error = e))
     })
 }
 
@@ -1011,12 +1122,30 @@ impl App {
                 Task::none()
             }
             ProjectMsg::OpenFolderPressed => {
-                pick_folder(self.main_window).map(|v| Message::Project(ProjectMsg::FolderPicked(v)))
+                // A dialog that could not open before may now: the line that
+                // said so is taken down as another is tried.
+                self.settle_status(&[tr!(
+                    "No file dialog could open here — install xdg-desktop-portal or zenity"
+                )]);
+                pick_folder(self.main_window, tr!("Open a project folder").into()).map(|picked| {
+                    match picked {
+                        Ok(v) => Message::Project(ProjectMsg::FolderPicked(v)),
+                        Err(_) => Message::Window(WindowMsg::NoFileDialog),
+                    }
+                })
             }
             ProjectMsg::FolderPicked(None) => Task::none(),
             // A picker opened before a connect can still answer after it: the
             // path is this machine's, so it is not a remote project's root.
             ProjectMsg::FolderPicked(Some(_)) if self.connection.is_remote() => Task::none(),
+            // A dialog can hand back a path that is not there — one typed
+            // into GTK's location bar, which completes as it is typed — and
+            // opening it offered to set up a project, and make its `.clew`,
+            // in a folder that does not exist.
+            ProjectMsg::FolderPicked(Some(root)) if !root.is_dir() => {
+                self.status = tr!("No folder at {path}", path = root.display());
+                Task::none()
+            }
             ProjectMsg::FolderPicked(Some(root)) => {
                 // The user asking for a project is the retry a latched
                 // handshake refusal does not take on its own; without it
@@ -1031,10 +1160,63 @@ impl App {
                 }
                 self.pending_consent = None;
                 self.pending_open = None;
-                self.status = "Project not opened: creating .clew was not allowed".to_string();
+                self.setup = None;
+                self.status = tr!("Project not opened").to_string();
                 Task::none()
             }
             ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
+            ProjectMsg::SetupShow(mode) => {
+                // A first open's sheet is answered first. There is one sheet:
+                // replaced (⌘⇧E reaches under it), the first open's question
+                // read "Checking the project…" for good, and its Open lost
+                // what it had ticked.
+                if self
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s.mode == crate::app::setup::SetupMode::Open)
+                {
+                    return Task::none();
+                }
+                // Explaining needs a key: without one, Settings, where it
+                // goes (the config may have changed since the flag was set).
+                if mode == crate::app::setup::SetupMode::Explain
+                    && let Err(open_settings) = self.require_llm()
+                {
+                    return open_settings;
+                }
+                match self.proj.project.as_ref() {
+                    Some(p) => {
+                        let root = p.root.clone();
+                        self.show_setup(mode, root)
+                    }
+                    None => Task::none(),
+                }
+            }
+            ProjectMsg::SetupCounted { root, census } => self.on_setup_counted(root, census),
+            ProjectMsg::SetupServers(on) => {
+                if let Some(setup) = self.setup.as_mut() {
+                    setup.servers = on;
+                }
+                Task::none()
+            }
+            ProjectMsg::SetupExplain(on) => {
+                if let Some(setup) = self.setup.as_mut() {
+                    setup.explain = on && self.llm_available;
+                }
+                Task::none()
+            }
+            ProjectMsg::SetupApply => self.on_setup_apply(),
+            ProjectMsg::SetupClose => {
+                // A first open's sheet is answered with Open or Not now.
+                if self
+                    .setup
+                    .as_ref()
+                    .is_some_and(|s| s.mode != crate::app::setup::SetupMode::Open)
+                {
+                    self.setup = None;
+                }
+                Task::none()
+            }
             ProjectMsg::ScanDone { result, report, .. } => {
                 // Accept only the scan we are waiting for: a slow scan of a
                 // project the user has already left must not re-open it. The

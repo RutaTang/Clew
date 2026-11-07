@@ -47,17 +47,17 @@ pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
 /// A view's name, as its tab's tooltip says it.
 pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
     match tab {
-        SidebarTab::Files => "Files",
-        SidebarTab::Search => "Search text",
-        SidebarTab::Semantic => "Find by meaning",
-        SidebarTab::Marks => "Marks",
-        SidebarTab::Trail => "Reading trail",
-        SidebarTab::Calls => "Calls",
-        SidebarTab::Flow => "Value flow",
-        SidebarTab::Imports => "Imports",
-        SidebarTab::Walk => "Walkthroughs",
-        SidebarTab::Notes => "Reading notes",
-        SidebarTab::Docs => "API docs",
+        SidebarTab::Files => tr!("Files"),
+        SidebarTab::Search => tr!("Search text"),
+        SidebarTab::Semantic => tr!("Find by meaning"),
+        SidebarTab::Marks => tr!("Bookmarks"),
+        SidebarTab::Trail => tr!("Reading trail"),
+        SidebarTab::Calls => tr!("Calls"),
+        SidebarTab::Flow => tr!("Value flow"),
+        SidebarTab::Imports => tr!("Imports"),
+        SidebarTab::Walk => tr!("Walkthroughs"),
+        SidebarTab::Notes => tr!("Reading notes"),
+        SidebarTab::Docs => tr!("API docs"),
     }
 }
 
@@ -123,7 +123,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                         .on_press(Message::Window(WindowMsg::SidebarTabPicked(
                             SidebarTab::Files,
                         ))),
-                    "Back to the files",
+                    tr!("Back to the files"),
                     None,
                     tooltip::Position::Bottom,
                 ),
@@ -142,26 +142,44 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
         slot()
     };
 
-    // The Files view narrows to what its filter matches.
+    // The Files view narrows to what its filter matches. Escape in the
+    // field, or its ×, empties it: it stayed filled however often Escape
+    // was pressed, and only deleting every letter brought the tree back.
     let filter: Element<'_, Message> =
         if app.sidebar == SidebarTab::Files && app.proj.project.is_some() {
+            let cleared = Message::Window(WindowMsg::FileFilterChanged(String::new()));
+            let mut field = row![
+                glyph::icon(Glyph::Filter, theme::dim(), 13.0),
+                ts::field_in(
+                    text_input(tr!("Filter files"), &app.file_filter)
+                        .id(super::file_filter_id())
+                        .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
+                        .on_submit(Message::Window(WindowMsg::FileFilterSubmitted))
+                        .style(theme::bare_input),
+                    FILTER_H - 2.0,
+                    ts::INTER,
+                    ts::BODY,
+                ),
+            ]
+            .spacing(8)
+            .height(Fill)
+            .align_y(iced::Center);
+            if !app.file_filter.is_empty() {
+                field = field.push(tip_at(
+                    button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
+                        .style(theme::toolbar_button)
+                        .padding(3)
+                        .on_press(cleared.clone()),
+                    tr!("Clear filter"),
+                    None,
+                    tooltip::Position::Bottom,
+                ));
+            }
             container(
-                container(
-                    row![
-                        glyph::icon(Glyph::Filter, theme::dim(), 13.0),
-                        ts::field_in(
-                            text_input("Filter files", &app.file_filter)
-                                .on_input(|s| Message::Window(WindowMsg::FileFilterChanged(s)))
-                                .style(theme::bare_input),
-                            FILTER_H - 2.0,
-                            ts::INTER,
-                            ts::BODY,
-                        ),
-                    ]
-                    .spacing(8)
-                    .height(Fill)
-                    .align_y(iced::Center),
-                )
+                container(super::escape_clears::EscapeClears::new(
+                    field,
+                    Message::Window(WindowMsg::FileFilterEscaped),
+                ))
                 .height(Length::Fixed(FILTER_H))
                 // The design's 10 inside its 1 px border, which here takes
                 // no room of its own.
@@ -220,7 +238,7 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
     // A quick action to review the current branch/PR changes as a narrated tour.
     let mut actions = column![
-        button(text("\u{2387} Review branch changes").size(ts::SMALL))
+        button(text(format!("\u{2387} {}", tr!("Review branch changes"))).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
@@ -233,13 +251,12 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
         actions = actions.push(
             button(
                 text(format!(
-                    "\u{25B6} Walk the last run ({} {})",
-                    app.debug.trace.len(),
-                    if app.debug.trace.len() == 1 {
-                        "stop"
-                    } else {
-                        "stops"
-                    }
+                    "\u{25B6} {}",
+                    trn!(
+                        "Walk the last run (1 stop)",
+                        "Walk the last run ({n} stops)",
+                        app.debug.trace.len()
+                    )
                 ))
                 .size(ts::SMALL),
             )
@@ -289,25 +306,17 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
 /// a debug run, or the user's feature prompt.
 pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
-        "Whole codebase".to_string()
+        tr!("Whole codebase").to_string()
     } else if let Some(rest) = scope.strip_prefix("@trace") {
-        format!(
-            "Debug run{}",
-            if rest.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", rest.trim())
-            }
-        )
+        match rest.trim() {
+            "" => tr!("Debug run").to_string(),
+            program => tr!("Debug run ({program})", program = program),
+        }
     } else if let Some(rest) = scope.strip_prefix("@diff") {
-        format!(
-            "Change review{}",
-            if rest.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" ({})", rest.trim())
-            }
-        )
+        match rest.trim() {
+            "" => tr!("Change review").to_string(),
+            label => tr!("Change review ({label})", label = label),
+        }
     } else {
         scope.to_string()
     }
@@ -317,24 +326,27 @@ pub(crate) fn scope_label(scope: &str) -> String {
 /// mode) a Generate button.
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let is_search = app.walk_ui.mode == crate::WalkMode::Search;
-    // Two-segment control; only the inactive segment is pressable (it flips mode).
+    // Two segments, the mode in use raised; only the other is pressable (it
+    // flips mode). On a line of its own: beside the field it left the field
+    // too narrow to say what it is for.
     let seg = |label: &str, active: bool| {
-        let mut b = button(text(label.to_string()).size(ts::SMALL))
-            .style(theme::tab_button(active))
-            .padding([3, 10]);
-        if !active {
-            b = b.on_press(Message::Walk(WalkMsg::ToggleMode));
-        }
-        b
+        button(text(label.to_string()).size(ts::SMALL))
+            .style(theme::segment(active))
+            .padding([2, 10])
+            .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
     };
-    let toggle = row![seg("Search", is_search), seg("Walk", !is_search)].spacing(2);
+    let toggle =
+        container(row![seg(tr!("Search"), is_search), seg(tr!("Walk"), !is_search)].spacing(1))
+            .padding(2)
+            .style(theme::trough);
 
     let placeholder = if is_search {
-        "Search walkthroughs…"
+        tr!("Search walkthroughs…")
     } else {
-        "Walk a feature, or leave empty for the whole codebase…"
+        tr!("A feature, or leave empty for all")
     };
     let mut input = text_input(placeholder, &app.walk_ui.input)
+        .style(theme::input)
         .on_input(|v| Message::Walk(WalkMsg::InputChanged(v)))
         .size(ts::BODY)
         .padding(6);
@@ -342,16 +354,18 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         // Enter submits the same way the Generate button does ("" = whole codebase).
         input = input.on_submit(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())));
     }
-    let mut bar = row![toggle, input].spacing(6).align_y(iced::Center);
+    let mut field = row![input].spacing(6).align_y(iced::Center);
     if !is_search {
-        bar = bar.push(
-            button(text("Generate").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([4, 12])
+        field = field.push(
+            button(text(tr!("Generate")).size(ts::SMALL))
+                .style(theme::secondary_button)
+                .padding([5, 10])
                 .on_press(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone()))),
         );
     }
-    container(bar).padding(8).into()
+    container(column![toggle, field].spacing(8))
+        .padding(8)
+        .into()
 }
 
 /// The library list: every saved tour, filtered by the search query, each with a
@@ -384,20 +398,10 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         gen_scope.filter(|s| !app.proj.walk.library.iter().any(|w| w.scope.as_str() == *s));
 
     if app.proj.walk.library.is_empty() && pending_new.is_none() {
-        return empty_state(
-            Glyph::Compass,
-            "No walkthroughs yet",
-            "Switch to Walk mode and generate a guided tour of the codebase or a feature.",
-            None,
-        );
+        return empty_state(Glyph::Compass, tr!("No walkthroughs yet"), "", None);
     }
     if visible.is_empty() && pending_new.is_none() {
-        return empty_state(
-            Glyph::Search,
-            "No matches",
-            "No saved walkthrough matches your search.",
-            None,
-        );
+        return empty_state(Glyph::Search, tr!("No matches"), "", None);
     }
 
     // The current step of the open tour (for highlighting the expanded steps).
@@ -416,7 +420,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             container(
                 column![
                     text(label).size(ts::BASE).color(theme::fg()),
-                    text("Generating…").size(ts::CAPTION).color(theme::accent()),
+                    text(tr!("Generating…"))
+                        .size(ts::CAPTION)
+                        .color(theme::accent()),
                 ]
                 .spacing(1),
             )
@@ -429,7 +435,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
         let is_open = app.proj.walk.open.as_deref() == Some(wt.scope.as_str());
         let busy = gen_scope == Some(wt.scope.as_str());
         let (subtitle, sub_color) = if busy {
-            ("Generating…".to_string(), theme::accent())
+            (tr!("Generating…").to_string(), theme::accent())
         } else {
             (scope_label(&wt.scope), theme::dim())
         };
@@ -470,9 +476,9 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         .style(theme::toolbar_button)
                         .padding([6, 9])
                         .on_press(Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))),
-                    button(text("✕").size(ts::BODY))
+                    button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
-                        .padding([6, 9])
+                        .padding([7, 9])
                         .on_press(Message::Walk(WalkMsg::Delete(wt.scope.clone()))),
                 ]
                 .spacing(2),
@@ -622,24 +628,19 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
         // No action button here: the open/connect actions live in the centered
         // welcome hero, so the sidebar just states what's going on.
         return if app.scanning {
-            empty_state(
-                Glyph::Search,
-                "Scanning…",
-                "Reading the project's files.",
-                None,
-            )
+            empty_state(Glyph::Search, tr!("Scanning…"), "", None)
         } else if app.connection.is_remote() {
             empty_state(
                 Glyph::Remote,
-                "No folder open",
-                "Browse the host to open a folder.",
+                tr!("No folder open"),
+                tr!("Browse the host to open a folder."),
                 None,
             )
         } else {
             empty_state(
                 Glyph::Folder,
-                "No folder open",
-                "Open a folder to start reading.",
+                tr!("No folder open"),
+                tr!("Open a folder to start reading."),
                 None,
             )
         };
@@ -652,12 +653,7 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     } else {
         filtered_file_rows(&mut rows, project, filter, app);
         if rows.is_empty() {
-            return empty_state(
-                Glyph::Filter,
-                "No matching files",
-                "Nothing in this project is named like that.",
-                None,
-            );
+            return empty_state(Glyph::Filter, tr!("No matching files"), "", None);
         }
     }
     scrollable(
@@ -683,6 +679,21 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
 /// most of a large project, and the list is for picking, not browsing.
 const FILTER_LIMIT: usize = 400;
 
+/// The files the Files view's filter lists, in its order: every file whose
+/// path holds the filter (any case, its ends trimmed), at most
+/// [`FILTER_LIMIT`]. Enter in the filter opens the first.
+pub(crate) fn filtered_files<'a>(
+    project: &'a crate::Project,
+    filter: &str,
+) -> impl Iterator<Item = &'a crate::fs_scan::FileEntry> {
+    let needle = filter.trim().to_lowercase();
+    project
+        .files
+        .iter()
+        .filter(move |f| !needle.is_empty() && f.rel.to_lowercase().contains(&needle))
+        .take(FILTER_LIMIT)
+}
+
 /// The Files view narrowed by its filter: every file whose path holds it
 /// (any case), as its name with its folder beside it.
 fn filtered_file_rows<'a>(
@@ -691,13 +702,7 @@ fn filtered_file_rows<'a>(
     filter: &str,
     app: &'a App,
 ) {
-    let needle = filter.to_lowercase();
-    for f in project
-        .files
-        .iter()
-        .filter(|f| f.rel.to_lowercase().contains(&needle))
-        .take(FILTER_LIMIT)
-    {
+    for f in filtered_files(project, filter) {
         let (folder, name) = f.rel.rsplit_once('/').unwrap_or(("", f.rel.as_str()));
         let is_current = app.active_viewer().is_some_and(|v| v.rel == f.rel);
         rows.push(
@@ -748,7 +753,7 @@ const SIDEBAR_GAP: f32 = 12.0;
 
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
-pub(crate) const TRACKED_IGNORED_MARK: &str = "tracked · ignored";
+pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked · ignored");
 
 pub(crate) fn append_tree_rows<'a>(
     rows: &mut Vec<Element<'a, Message>>,
@@ -814,7 +819,7 @@ pub(crate) fn append_tree_rows<'a>(
         // A file git tracks although the ignore rules would hide it: listed
         // (what the repository contains is never invisible), and said so.
         let mark: Element<'_, Message> = if app.proj.tracked_ignored.contains(&rel) {
-            text(TRACKED_IGNORED_MARK)
+            text(crate::i18n::lookup(TRACKED_IGNORED_MARK))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .wrapping(Wrapping::None)
@@ -866,6 +871,33 @@ pub(crate) fn append_tree_rows<'a>(
     }
 }
 
+/// Room a tree row keeps for its chevron, so a row without one lines up.
+pub(crate) const CHEVRON_W: f32 = 18.0;
+
+/// A tree row's expand / collapse control: its chevron centred in a
+/// square of [`CHEVRON_W`], lit under the pointer — a target a pointer
+/// finds, not a glyph's width of one.
+pub(crate) fn chevron<'a>(expanded: bool, msg: Message) -> Element<'a, Message> {
+    button(
+        container(glyph::icon(
+            if expanded {
+                Glyph::ChevronDown
+            } else {
+                Glyph::ChevronRight
+            },
+            theme::dim(),
+            10.0,
+        ))
+        .center(Fill),
+    )
+    .style(theme::list_row(false))
+    .width(Length::Fixed(CHEVRON_W))
+    .height(Length::Fixed(CHEVRON_W))
+    .padding(0)
+    .on_press(msg)
+    .into()
+}
+
 /// A file-type glyph in the embedded icon font, for inline use (breadcrumb,
 /// finder rows, …).
 pub(crate) fn icon_text(glyph: char, color: iced::Color, size: f32) -> iced::widget::Text<'static> {
@@ -897,16 +929,20 @@ pub(crate) fn empty_state<'a>(
         text(title.to_string())
             .size(ts::EMPHASIS)
             .color(theme::fg()),
-        container(
-            text(subtitle.to_string())
-                .size(ts::BODY)
-                .color(theme::dim())
-                .align_x(iced::Center)
-        )
-        .max_width(260),
     ]
     .spacing(4)
     .align_x(iced::Center);
+    if !subtitle.is_empty() {
+        col = col.push(
+            container(
+                text(subtitle.to_string())
+                    .size(ts::BODY)
+                    .color(theme::dim())
+                    .align_x(iced::Center),
+            )
+            .max_width(260),
+        );
+    }
     if let Some((label, msg)) = action {
         col = col.push(space().height(10));
         col = col.push(
@@ -948,48 +984,20 @@ pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
 pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
-    let input = text_input("Search in project…", &app.proj.search.query)
+    let input = text_input(tr!("Search in project…"), &app.proj.search.query)
+        .style(theme::input)
         .id(search_input_id())
         .on_input(|v| Message::Nav(NavMsg::SearchQueryChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BASE)
         .padding(7);
 
-    // Match-option toggles: case-sensitive, whole-word, regex. Each carries a
-    // border so it reads as a clickable control even when off, and fills with the
-    // accent (like VS Code's search toggles) when on.
+    // Match-option toggles: case-sensitive, whole-word, regex — as round as
+    // the fields, outlined while off, filled in the accent while on.
     let chip = |label: &'static str, active: bool, opt: SearchOpt| -> Element<'_, Message> {
-        let style = move |_t: &iced::Theme, status: button::Status| {
-            let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
-            let bg = if active {
-                theme::accent()
-            } else if hovered {
-                theme::bg_hover()
-            } else {
-                theme::bg()
-            };
-            button::Style {
-                background: Some(bg.into()),
-                text_color: if active {
-                    theme::on_accent()
-                } else {
-                    theme::fg_muted()
-                },
-                border: iced::Border {
-                    radius: 4.0.into(),
-                    width: 1.0,
-                    color: if active {
-                        theme::accent()
-                    } else {
-                        theme::hairline()
-                    },
-                },
-                ..button::Style::default()
-            }
-        };
         button(text(label).size(ts::BODY).font(crate::fonts::CODE))
-            .style(style)
-            .padding([2, 7])
+            .style(theme::toggle(active))
+            .padding([3, 8])
             .on_press(Message::Nav(NavMsg::SearchToggle(opt)))
             .into()
     };
@@ -1001,36 +1009,52 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     .spacing(4);
 
     // Include / exclude glob filters.
-    let include = text_input("files to include (e.g. src/**)", &app.proj.search.include)
-        .on_input(|v| Message::Nav(NavMsg::SearchIncludeChanged(v)))
-        .on_submit(Message::Nav(NavMsg::SearchSubmitted))
-        .size(ts::BODY)
-        .padding(5);
-    let exclude = text_input("files to exclude", &app.proj.search.exclude)
+    let include = text_input(
+        tr!("files to include (e.g. src/**)"),
+        &app.proj.search.include,
+    )
+    .style(theme::input)
+    .on_input(|v| Message::Nav(NavMsg::SearchIncludeChanged(v)))
+    .on_submit(Message::Nav(NavMsg::SearchSubmitted))
+    .size(ts::BODY)
+    .padding(5);
+    let exclude = text_input(tr!("files to exclude"), &app.proj.search.exclude)
+        .style(theme::input)
         .on_input(|v| Message::Nav(NavMsg::SearchExcludeChanged(v)))
         .on_submit(Message::Nav(NavMsg::SearchSubmitted))
         .size(ts::BODY)
         .padding(5);
 
     let status_line = if let Some(err) = &app.proj.search.error {
-        Some((err.clone(), theme::danger()))
+        // As clew-core, or the host, said it: in the reader's language.
+        Some((crate::i18n::message(err), theme::danger()))
     } else if app.proj.search.running {
-        Some(("Searching…".to_string(), theme::dim()))
+        Some((tr!("Searching…").to_string(), theme::dim()))
     } else if app.proj.search.ran {
         let n = app.proj.search.hits.len();
         let msg = if n >= crate::search::MAX_HITS {
-            format!("{n}+ matches (capped)")
+            tr!("{n}+ matches (capped)", n = n)
         } else {
-            format!("{n} matches")
+            crate::app::count_matches(n)
+        };
+        // A language server's list in place of the search's results says
+        // which list it is.
+        let msg = match &app.proj.search.listing {
+            Some(list) => format!("{list} · {msg}"),
+            None => msg,
         };
         Some((msg, theme::dim()))
+    } else if app.proj.search.query.trim().chars().count() == 1 {
+        // One character, which matches most of a project, is searched for
+        // only when asked (see `search_when_typing_pauses`).
+        Some((tr!("Press Enter to search").to_string(), theme::dim()))
     } else {
         None
     };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
-    for hit in &app.proj.search.hits {
+    for (i, hit) in app.proj.search.hits.iter().enumerate() {
         if last_rel != Some(hit.rel.as_str()) {
             last_rel = Some(hit.rel.as_str());
             rows.push(group_header(&hit.rel));
@@ -1042,13 +1066,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    // As the code view draws the line, wherever the preview
-                    // came from — the server's search, a reference read from
-                    // disk or from an open pane: a direction control in it
-                    // reordered it here.
-                    text(crate::highlight::line_in_order(&hit.preview))
-                        .size(ts::BODY)
-                        .wrapping(Wrapping::None),
+                    search_preview(app, i, &hit.preview),
                 ]
                 .spacing(4),
             )
@@ -1084,6 +1102,89 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// A result's preview: in its language's colours once they have come
+/// (`SearchState::styled`), what the search matched — or the symbol a
+/// reference list is of — marked as the code view marks a find. It was
+/// plain text, and the reader had to look for the match along the line.
+fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, Message> {
+    // As the code view draws the line, wherever the preview came from — the
+    // server's search, a reference read from disk or from an open pane: a
+    // direction control in it reordered it here.
+    let shown = crate::highlight::line_in_order(preview);
+    let styled = app
+        .proj
+        .search
+        .styled
+        .get(i)
+        // Only colours of the text shown: a preview read again since keeps
+        // its plain look until its own arrive.
+        .filter(|spans| spans.iter().map(|(t, _)| t.as_str()).collect::<String>() == *shown);
+    let plain = [(shown.to_string(), None)];
+    let spans: &[(String, Option<u8>)] = match styled {
+        Some(spans) => spans,
+        None => &plain,
+    };
+    let marks = app
+        .proj
+        .search
+        .matcher
+        .as_ref()
+        .map(|m| m.ranges(&shown))
+        .unwrap_or_default();
+    let pieces = mark_spans(spans, &marks);
+    let mark = theme::with_alpha(theme::find(), 0.35);
+    let spans: Vec<iced::widget::text::Span<'static, Message>> = pieces
+        .into_iter()
+        .map(|(piece, style, marked)| {
+            let span = iced::widget::span(piece)
+                .color(
+                    style
+                        .and_then(crate::highlight::style_color)
+                        .unwrap_or(theme::code_fg()),
+                )
+                .size(ts::BODY);
+            if marked {
+                span.background(mark).border(iced::border::rounded(2))
+            } else {
+                span
+            }
+        })
+        .collect();
+    iced::widget::rich_text(spans)
+        .wrapping(Wrapping::None)
+        .into()
+}
+
+/// `spans` cut where `marks` (byte ranges of their joined text) begin and
+/// end: each piece with its style, and whether a mark covers it.
+pub(crate) fn mark_spans(
+    spans: &[(String, Option<u8>)],
+    marks: &[(usize, usize)],
+) -> Vec<(String, Option<u8>, bool)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (text, style) in spans {
+        let end = at + text.len();
+        let mut cuts: Vec<usize> = marks
+            .iter()
+            .flat_map(|&(s, e)| [s, e])
+            .filter(|&c| c > at && c < end && text.is_char_boundary(c - at))
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut from = at;
+        for c in cuts.into_iter().chain(std::iter::once(end)) {
+            if c > from {
+                let marked = marks.iter().any(|&(s, e)| s <= from && c <= e);
+                out.push((text[from - at..c - at].to_string(), *style, marked));
+                from = c;
+            }
+        }
+        at = end;
+    }
+    out
+}
+
 /// Label a history entry: the symbol name recorded at nav time (stable as lines
 /// shift), else `file:line`. Jumps land on symbol lines, so most read as names.
 pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> String {
@@ -1100,22 +1201,20 @@ pub(crate) fn loc_label(loc: &crate::history::Loc, label: Option<&str>) -> Strin
 /// The TRAIL tab: the navigation history as a tree. Backtracking then exploring
 /// elsewhere branches (the old path is kept), so this is the full reading trail.
 /// Indentation follows the tree depth; nodes with children can be collapsed;
-/// click a node to jump. Scrolls both ways for deep/wide trees.
+/// click a node to jump. Rows are the panel's width, as the file tree's are;
+/// a name too long for it is cut at the edge.
 pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
     let visits = app.proj.history.flatten_with(&app.proj.trail_collapsed);
     if visits.is_empty() {
-        return empty_state(
-            Glyph::Minimap,
-            "No reading trail yet",
-            "Jump around the code and your trail builds here.",
-            None,
-        );
+        return empty_state(Glyph::Minimap, tr!("No reading trail yet"), "", None);
     }
 
     let header = row![
-        text("Reading trail").size(ts::SMALL).color(theme::dim()),
+        text(tr!("Reading trail"))
+            .size(ts::SMALL)
+            .color(theme::dim()),
         space().width(Fill),
-        button(text("Clear").size(ts::CAPTION).color(theme::dim()))
+        button(text(tr!("Clear")).size(ts::CAPTION).color(theme::dim()))
             .style(theme::list_row(false))
             .padding([1, 6])
             .on_press(Message::Reading(ReadingMsg::HistoryClear)),
@@ -1133,34 +1232,20 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         // Indent by tree depth, but cap it: past ~8 levels a deep branch would
         // otherwise push the node (including the current one) off the panel's
         // right edge. Beyond the cap, depth stops adding indent.
-        let indent = 4.0 + (v.depth.min(8) as f32) * 10.0;
-        let name_color = if v.is_current {
-            theme::accent()
-        } else {
-            theme::fg()
-        };
-        let fname = v
-            .loc
-            .path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("");
-        let (glyph, gcolor) = crate::icons::file_icon(fname);
+        let indent = (v.depth.min(8) as f32) * 14.0;
 
         // A collapse chevron for nodes with children (forks stand out in accent);
         // leaves get a fixed-width spacer so names still line up.
         let toggle: Element<'_, Message> = if v.has_children {
-            let ar = if v.collapsed { "▸" } else { "▾" };
-            button(text(ar).size(ts::CAPTION).color(theme::dim()))
-                .style(theme::list_row(false))
-                .padding([2, 3])
-                .on_press(Message::Reading(ReadingMsg::TrailToggleCollapse {
+            chevron(
+                !v.collapsed,
+                Message::Reading(ReadingMsg::TrailToggleCollapse {
                     id: v.id,
                     loc: v.loc.clone(),
-                }))
-                .into()
+                }),
+            )
         } else {
-            space().width(12).into()
+            space().width(CHEVRON_W).into()
         };
         // Status marker: current dot (accent), fork ⋔ (accent), other visited
         // nodes a grey dot so the trail reads as a string of nodes. The dots
@@ -1183,46 +1268,55 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
                 .align_x(iced::Center)
                 .into()
         };
+        // The row is the whole width, as the file tree's are — its depth
+        // indents what is in it, not the row — and the place being read is
+        // the row lit as the open file is, its name in the medium weight.
         let jump = button(
             row![
+                space().width(indent),
+                toggle,
                 marker,
-                icon_text(glyph, gcolor, 12.0),
-                column![
+                container(glyph::icon(Glyph::File, theme::dim(), 12.0)).width(12),
+                container(column![
                     text(loc_label(&v.loc, v.label.as_deref()))
                         .size(ts::BODY)
-                        .color(name_color),
+                        .font(if v.is_current {
+                            crate::fonts::UI_MEDIUM
+                        } else {
+                            crate::fonts::UI
+                        })
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
                     text(rel_of(app, &v.loc.path))
                         .size(ts::CAPTION)
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
-                ],
+                ])
+                .width(Fill)
+                .clip(true),
             ]
-            .spacing(5)
+            .spacing(6)
             .align_y(iced::Center),
         )
         .style(theme::list_row(v.is_current))
+        .width(Fill)
         .padding(Padding {
-            top: 2.0,
+            top: 3.0,
             right: 8.0,
-            bottom: 2.0,
-            left: 4.0,
+            bottom: 3.0,
+            left: 6.0,
         })
         .on_press(Message::Reading(ReadingMsg::HistoryJump {
             id: v.id,
             loc: v.loc.clone(),
         }));
 
-        rows.push(
-            row![space().width(indent), toggle, jump]
-                .spacing(1)
-                .align_y(iced::Center)
-                .into(),
-        );
+        rows.push(jump.into());
     }
     column![
         header,
         scrollable(Column::with_children(rows).spacing(1))
-            .direction(both_scroll())
+            .direction(thin_scroll())
             .style(theme::overlay_scrollbar)
             .height(Fill),
     ]
@@ -1233,11 +1327,11 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
     if app.proj.bookmarks.is_empty() {
         return empty_state(
             Glyph::Bookmark,
-            "No bookmarks yet",
+            tr!("No bookmarks yet"),
             if crate::keymap::MAC_KEYS {
-                "Press ⌘D to mark the current line."
+                tr!("Press ⌘D to bookmark the current line.")
             } else {
-                "Press Ctrl+D to mark the current line."
+                tr!("Press Ctrl+D to bookmark the current line.")
             },
             None,
         );
@@ -1370,10 +1464,10 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         })
     };
     column![
-        label("In this file"),
+        label(tr!("In this file")),
         container(outline_content(app)).height(Length::FillPortion(1)),
         hairline(),
-        label("All notes"),
+        label(tr!("All notes")),
         container(notes_list(app)).height(Length::FillPortion(1)),
     ]
     .into()
@@ -1382,12 +1476,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 /// Every reading note in the project, file by file.
 fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
-        return empty_state(
-            Glyph::Note,
-            "No reading notes yet",
-            "In this file's outline, click ○ to mark a symbol understood, or ✎ to add a note.",
-            None,
-        );
+        return empty_state(Glyph::Note, tr!("No reading notes yet"), "", None);
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -1418,7 +1507,7 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
-            None => text("detached")
+            None => text(tr!("detached"))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
@@ -1549,18 +1638,19 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     use crate::explain::Node;
     let n = app.proj.embed_index.entries.len();
 
-    let input = text_input("Ask by meaning…", &app.proj.semantic_query)
+    let input = text_input(tr!("Search by meaning…"), &app.proj.semantic_query)
+        .style(theme::input)
         .on_input(|v| Message::Semantic(SemanticMsg::QueryChanged(v)))
         .on_submit(Message::Semantic(SemanticMsg::Search))
         .size(ts::BASE)
         .padding(7);
 
     let build_label = if app.proj.building_embeddings {
-        "Building…"
+        tr!("Building…")
     } else if n == 0 {
-        "Build index"
+        tr!("Build index")
     } else {
-        "Rebuild"
+        tr!("Rebuild")
     };
     let mut build = button(text(build_label).size(ts::SMALL))
         .style(theme::toolbar_button)
@@ -1571,15 +1661,15 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
     let info = text(if app.proj.building_embeddings {
-        "Building the index…".to_string()
+        tr!("Building the index…").to_string()
     } else if n > 0 {
-        format!("{n} indexed")
+        trn!("1 indexed", "{n} indexed", n)
     } else if app.proj.explain.cache.is_empty() {
-        "Run Explain All to enable semantic search.".to_string()
+        tr!("Run Explain All to enable semantic search.").to_string()
     } else if !app.embed_available {
-        "Set an embedding provider in Settings.".to_string()
+        tr!("Set an embedding provider in Settings.").to_string()
     } else {
-        "Preparing the index…".to_string()
+        tr!("Preparing the index…").to_string()
     })
     .size(ts::CAPTION)
     .color(theme::dim());
@@ -1592,7 +1682,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     );
     if app.proj.searching_semantic {
         rows.push(
-            text("Searching…")
+            text(tr!("Searching…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into(),
@@ -1621,9 +1711,12 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
                             .color(theme::accent())
                             .wrapping(Wrapping::None),
                         space().width(Fill),
-                        text(format!("{:.0}%", score * 100.0))
-                            .size(ts::CAPTION)
-                            .color(theme::dim()),
+                        text(tr!(
+                            "{percent}%",
+                            percent = crate::i18n::decimal(f64::from(*score) * 100.0, 0)
+                        ))
+                        .size(ts::CAPTION)
+                        .color(theme::dim()),
                     ]
                     .align_y(iced::Center),
                     text(short).size(ts::CAPTION).color(theme::dim()),

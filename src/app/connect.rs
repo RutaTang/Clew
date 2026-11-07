@@ -86,7 +86,7 @@ impl App {
         let user = ui.user.trim().to_string();
         if host.is_empty() || user.is_empty() {
             if let Some(ui) = &mut self.connect {
-                ui.stage = ConnectStage::Error("Host and user are required.".into());
+                ui.stage = ConnectStage::Error(tr!("Host and user are required.").into());
             }
             return Task::none();
         }
@@ -124,7 +124,7 @@ impl App {
     pub(crate) fn remember_connection(&mut self, conn: connect::SavedConnection) {
         match connect::upsert(conn) {
             Ok(merged) => self.saved_connections = merged,
-            Err(e) => self.status = format!("Cannot save connections: {e}"),
+            Err(e) => self.status = tr!("Cannot save connections: {error}", error = e),
         }
     }
 
@@ -133,7 +133,7 @@ impl App {
     /// subscription brings up the new transport, which hands back a fresh channel
     /// via `ServerMsg::Connected`. The Connect modal, if open, moves to "connecting".
     pub(crate) fn connect_to(&mut self, target: connect::ConnTarget) -> Task<Message> {
-        let headline = format!("Connecting to {}…", target.label());
+        let headline = tr!("Connecting to {host}…", host = target.label());
         self.connect_to_saying(target, headline)
     }
 
@@ -148,6 +148,14 @@ impl App {
         headline: String,
     ) -> Task<Message> {
         let label = target.label();
+        // Leaving this machine for a host: its project is the one to come
+        // back to. Any other switch keeps what was remembered.
+        if !self.connection.is_remote()
+            && target.is_remote()
+            && let Some(project) = &self.proj.project
+        {
+            self.left_local = Some(project.root.clone());
+        }
         // Stop the old project's work FIRST: `drop_connection_state` drops the
         // project's link (its stream ids) and the server link (the channel) —
         // after either, a Cancel can no longer be addressed.
@@ -168,11 +176,15 @@ impl App {
         let discarded = self.forget_project_state();
         self.pending_scan_root = None;
         self.scanning = false;
-        // A folder awaiting consent, or a file waiting to open once a scan
+        // A folder awaiting consent (and its sheet), a first open's answer
+        // waiting for its project, or a file waiting to open once a scan
         // lands, names a path on the host being left. Kept, Allow would trust
         // — and open — the same path on the host being connected to, which is
-        // another machine's project.
+        // another machine's project, and the answer would be carried out
+        // there: its downloads, and a paid Explain All pass.
         self.pending_consent = None;
+        self.setup = None;
+        self.pending_setup = None;
         self.pending_open = None;
         // A new transport instance: late messages still queued from the old
         // one (its key differs, but its channel already held them) carry the
@@ -353,10 +365,11 @@ impl App {
             Ok(removed) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let headline = format!(
-                    "Forgot {removed} key{} clew had recorded for {host} — connecting; check \
-                     the new key's fingerprint before trusting it",
-                    if removed == 1 { "" } else { "s" }
+                let headline = trn!(
+                    "Forgot {host}'s old key — connecting…",
+                    "Forgot {host}'s old keys — connecting…",
+                    removed,
+                    host = host
                 );
                 let task = self.reconnect_saying(target, headline);
                 self.remote_ai_opt_in = opt_in;
@@ -364,7 +377,10 @@ impl App {
             }
             Err(e) => {
                 if let Some(ui) = &mut self.connect {
-                    ui.stage = ConnectStage::Error(format!("The old key was not forgotten: {e}"));
+                    ui.stage = ConnectStage::Error(tr!(
+                        "The old key was not forgotten: {error}",
+                        error = e
+                    ));
                 }
                 Task::none()
             }
@@ -402,17 +418,17 @@ impl App {
         };
         let recorded = match host_field {
             Some(host_field) => connect::trust_host_key(&key, &host_field),
-            None => Err("this connection names no single host to trust".into()),
+            None => Err(tr!("this connection names no single host to trust").into()),
         };
         match recorded {
             Ok(path) => {
                 // The same host again: its AI-key grant stands.
                 let opt_in = self.remote_ai_opt_in;
-                let headline = format!(
-                    "Trusted {} key {} (recorded in {}) — connecting…",
-                    key.kind,
-                    key.fingerprint,
-                    path.display()
+                let headline = tr!(
+                    "Trusted {kind} key {fingerprint} (recorded in {path}) — connecting…",
+                    kind = key.kind,
+                    fingerprint = key.fingerprint,
+                    path = path.display()
                 );
                 let task = self.reconnect_saying(target, headline);
                 self.remote_ai_opt_in = opt_in;
@@ -420,7 +436,10 @@ impl App {
             }
             Err(e) => {
                 if let Some(ui) = &mut self.connect {
-                    ui.stage = ConnectStage::Error(format!("The host key was not trusted: {e}"));
+                    ui.stage = ConnectStage::Error(tr!(
+                        "The host key was not trusted: {error}",
+                        error = e
+                    ));
                 }
                 Task::none()
             }
@@ -478,7 +497,7 @@ impl App {
         {
             ui.send_ai_keys = false;
         }
-        self.status = "This host no longer holds your AI keys".into();
+        self.status = tr!("This host no longer holds your AI keys").into();
         Task::none()
     }
 }
@@ -517,7 +536,12 @@ impl App {
             }
             ConnectMsg::Field(field, value) => self.on_connect_field(field, value),
             ConnectMsg::PickIdentity => {
-                pick_file(self.main_window).map(|v| Message::Connect(ConnectMsg::IdentityPicked(v)))
+                pick_file(self.main_window, tr!("Choose an SSH private key").into()).map(|picked| {
+                    match picked {
+                        Ok(v) => Message::Connect(ConnectMsg::IdentityPicked(v)),
+                        Err(_) => Message::Window(WindowMsg::NoFileDialog),
+                    }
+                })
             }
             ConnectMsg::IdentityPicked(path) => {
                 if let (Some(ui), Some(path)) = (&mut self.connect, path) {
@@ -560,16 +584,22 @@ impl App {
                 // it had deleted.
                 match connect::remove(&user_host, port) {
                     Ok(merged) => self.saved_connections = merged,
-                    Err(e) => self.status = format!("Cannot save connections: {e}"),
+                    Err(e) => self.status = tr!("Cannot save connections: {error}", error = e),
                 }
                 Task::none()
             }
             ConnectMsg::Disconnect => {
                 self.connect = None;
-                if self.connection.is_remote() {
-                    self.connect_to(connect::ConnTarget::Local)
-                } else {
-                    Task::none()
+                if !self.connection.is_remote() {
+                    return Task::none();
+                }
+                let switched = self.connect_to(connect::ConnTarget::Local);
+                // Back to the project this window was reading here, through
+                // the same gate as any open: a folder since untrusted is
+                // asked about again.
+                match self.left_local.take() {
+                    Some(root) if root.is_dir() => Task::batch([switched, self.request_open(root)]),
+                    _ => switched,
                 }
             }
             ConnectMsg::BrowseTo(path) => {

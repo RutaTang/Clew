@@ -69,9 +69,9 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
         // The top bar's left cluster: the window buttons (or the app menu),
         // the sidebar toggle, back / forward.
         Anchor::ToolbarLeft => rect(0.0, 0.0, left_cluster_w(app) + NAV_W, TOOLBAR_H),
-        Anchor::ChatField => {
-            let f = chat_field_rect(app);
-            rect(f.x, f.y, f.width, f.height)
+        Anchor::AskCorner => {
+            let r = super::askfloat::ask_corner_rect(app);
+            rect(r.x, r.y, r.width, r.height)
         }
         Anchor::Strip(tool) => {
             let c = strip_tool_center(app, tool);
@@ -90,7 +90,7 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
         Anchor::ViewMenu => rect(
             view_menu_left(app),
             view_menu_top(app),
-            VIEW_MENU_W,
+            view_menu_w(),
             view_menu_height(),
         ),
         Anchor::Sidebar if sidebar > 1.0 => rect(0.0, top, sidebar, bot - top),
@@ -188,9 +188,13 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     };
 
     // The callout card: progress · title · body · controls.
-    let progress = text(format!("Step {} of {}", step_i + 1, total))
-        .size(ts::SMALL)
-        .color(theme::accent());
+    let progress = text(tr!(
+        "Step {step} of {total}",
+        step = step_i + 1,
+        total = total
+    ))
+    .size(ts::SMALL)
+    .color(theme::accent());
     let title = text(step.title.clone()).size(ts::TITLE).color(theme::fg());
     let body = text(step.body.clone())
         .size(ts::BASE)
@@ -198,7 +202,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
         .wrapping(Wrapping::Word);
 
     let back: Element<'_, Message> = if step_i > 0 {
-        button(text("Back").size(ts::BODY))
+        button(text(tr!("Back")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([4, 12])
             .on_press(Message::Tutorial(TutorialMsg::Step(-1)))
@@ -207,14 +211,14 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
         slot()
     };
     let last = step_i + 1 == total;
-    let next = button(text(if last { "Done" } else { "Next" }).size(ts::BODY))
+    let next = button(text(if last { tr!("Done") } else { tr!("Next") }).size(ts::BODY))
         .style(theme::primary_button)
         .padding([4, 16])
         .on_press(Message::Tutorial(TutorialMsg::Step(1)));
     // "Skip tour" is the subtle exit, kept left and muted. Small horizontal
     // padding so its text lines up with the title/body above it, rather than
     // sitting indented by a wider button's internal padding.
-    let skip = button(text("Skip tour").size(ts::BODY).color(theme::dim()))
+    let skip = button(text(tr!("Skip tour")).size(ts::BODY).color(theme::dim()))
         .style(theme::toolbar_button)
         .padding([4, 6])
         .on_press(Message::Tutorial(TutorialMsg::Exit));
@@ -243,7 +247,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     // banner.
     let body_top = TOOLBAR_H + update_banner_height(app);
     // The ⋯ dropdown's left edge, measured from the window's right edge.
-    let menu_left = TOOLS_MENU_RIGHT + TOOLS_MENU_W;
+    let menu_left = TOOLS_MENU_RIGHT + tools_menu_w(app);
     let lo = body_top + 14.0;
     let hi = (app.window_height - 260.0).max(lo);
     let (ax, ay, pad) = match step.anchor {
@@ -265,9 +269,9 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
                 ..Padding::ZERO
             },
         ),
-        // Ask hangs under the field in this step: the card goes to the
-        // bottom left, clear of it.
-        Anchor::ChatField => (
+        // Ask is open in the bottom-right corner in this step: the card goes
+        // to the bottom left, clear of it.
+        Anchor::AskCorner => (
             Horizontal::Left,
             Vertical::Bottom,
             Padding {
@@ -330,7 +334,7 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
             Vertical::Top,
             Padding {
                 top: view_menu_top(app),
-                left: (view_menu_left(app) + VIEW_MENU_W + gap)
+                left: (view_menu_left(app) + view_menu_w() + gap)
                     .min(app.window_width - TUTORIAL_CARD_W - STRIP_W - gap),
                 ..Padding::ZERO
             },

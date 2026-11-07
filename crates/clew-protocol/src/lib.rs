@@ -115,7 +115,12 @@ pub use payload::*;
 /// for the reading aid that dims it; [`Request::ProjectMaps`] reads the
 /// project's maps ([`ProjectMap`]) — its schema, routes, supervision trees —
 /// where its files are.
-pub const PROTOCOL_VERSION: u32 = 19;
+///
+/// v20: [`AiChatConfig`] carries the reader's `reply_language`, so what a
+/// model writes on the server (Ask's agent turns) is in their language; and
+/// `Hello` and `SetAiConfig` their `locale`, for the language servers the
+/// server starts.
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -456,6 +461,11 @@ pub struct AiChatConfig {
     pub api_key: String,
     pub model: String,
     pub base_url: String,
+    /// The language the reader reads, by its English name ("Japanese"),
+    /// when not English: what the server's model writes for them is
+    /// written in it (`clew_core::llm::set_reply_language`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_language: Option<String>,
 }
 
 /// Embedding provider config (OpenAI-compatible).
@@ -563,6 +573,12 @@ pub enum Request {
         protocol: u32,
         #[serde(default)]
         fingerprint: String,
+        /// The language the client's reader reads (the tag editors send:
+        /// `fr`, `zh-cn`), which the language servers this server starts
+        /// are told, so one that translates its messages answers in it.
+        /// Absent for English (and from an older client).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        locale: Option<String>,
     },
     /// Open a project rooted at this server-side path. Reply: `Tree` (once the
     /// scan committed and the watcher is live); then a full `ProjectSymbols`
@@ -784,6 +800,12 @@ pub enum Request {
     SetAiConfig {
         chat: Option<AiChatConfig>,
         embed: Option<AiEmbedConfig>,
+        /// The language the client's reader reads, as `Hello`'s `locale`
+        /// names it, which the language servers this server starts from now
+        /// on are told: sent again with the rest as the reader changes
+        /// language, which `Hello` alone never told the server. Whatever
+        /// the AI config, a grant withheld included.
+        locale: Option<String>,
     },
     /// A chat completion the server runs with its stored chat config. Reply:
     /// `ChatResult` with the whole response; a model call that failed is an

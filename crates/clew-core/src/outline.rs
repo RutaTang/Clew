@@ -1045,6 +1045,8 @@ pub struct Analysis {
     pub symbols: Vec<Located>,
     pub imports: Vec<crate::imports::RawImport>,
     pub calls: Vec<crate::projectcalls::CallSite>,
+    /// The class each callable belongs to (`projectcalls::owners_in`).
+    pub owners: std::collections::HashMap<usize, String>,
 }
 
 impl Analysis {
@@ -1124,11 +1126,13 @@ fn analyze_impl(source: &str, lang_key: &str, scope_rust: bool) -> Option<Analys
         imports = crate::rustscope::scope_rust_imports_in(&tree, source, imports);
     }
     let calls = crate::projectcalls::calls_in(&tree, source, lang, &symbols);
+    let owners = crate::projectcalls::owners_in(&tree, source, lang, &symbols);
     Some(Analysis {
         lang,
         symbols,
         imports,
         calls,
+        owners,
     })
 }
 
@@ -1143,6 +1147,7 @@ pub fn analyze_definitions(source: &str, lang_key: &str) -> Option<Analysis> {
         symbols: located_in(&tree, source, lang),
         imports: Vec::new(),
         calls: Vec::new(),
+        owners: Default::default(),
     })
 }
 

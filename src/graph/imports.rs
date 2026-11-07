@@ -29,6 +29,8 @@ use std::sync::Arc;
 use clew_core::imports::{ERLANG_LIB, PY_NAME_SEP};
 use clew_core::rustscope::RustUse;
 
+use crate::{tr, trn};
+
 // Extraction lives in clew-core (shared with the server's project-symbol
 // snapshot, so a remote client receives raw imports over the protocol
 // instead of reading remote-pathed files off its own disk). The index takes
@@ -292,19 +294,27 @@ impl TsConfigs {
         } = self.left_out;
         let mut parts = Vec::new();
         if configs > 0 {
-            parts.push(format!(
-                "{configs} more configs not read (limit {MAX_TS_CONFIGS})"
+            parts.push(trn!(
+                "1 more config not read (limit {limit})",
+                "{n} more configs not read (limit {limit})",
+                configs,
+                limit = MAX_TS_CONFIGS
             ));
         }
         if extends > 0 {
-            parts.push(format!(
-                "{extends} `extends` entries past the first {MAX_TS_EXTENDS_ENTRIES} of an \
-                 array ignored"
+            parts.push(trn!(
+                "1 `extends` entry past the first {limit} of an array ignored",
+                "{n} `extends` entries past the first {limit} of an array ignored",
+                extends,
+                limit = MAX_TS_EXTENDS_ENTRIES
             ));
         }
         if bases > 0 {
-            parts.push(format!(
-                "{bases} more bases not read (limit {MAX_TS_SOURCES} files)"
+            parts.push(trn!(
+                "1 more base not read (limit {limit} files)",
+                "{n} more bases not read (limit {limit} files)",
+                bases,
+                limit = MAX_TS_SOURCES
             ));
         }
         if !files.is_empty() {
@@ -313,27 +323,38 @@ impl TsConfigs {
                 .take(MAX_NAMED_TS_FILES)
                 .map(|(rel, why)| match why {
                     TsNotRead::TooLarge(size) => {
-                        format!("{rel} (too large, {} KiB)", size.div_ceil(1024))
+                        tr!(
+                            "{file} (too large, {size} KiB)",
+                            file = rel,
+                            size = size.div_ceil(1024)
+                        )
                     }
                     // Each as what it is: a Latin-1 config and a link out of
                     // the project were both "not a plain text file".
                     TsNotRead::Refused(clew_protocol::Refusal::NotUtf8) => {
-                        format!("{rel} (not UTF-8)")
+                        tr!("{file} (not UTF-8)", file = rel)
                     }
                     TsNotRead::Refused(clew_protocol::Refusal::NotPlainFile) => {
-                        format!("{rel} (not a plain file)")
+                        tr!("{file} (not a plain file)", file = rel)
                     }
                     TsNotRead::Refused(clew_protocol::Refusal::OutsideProject) => {
-                        format!("{rel} (outside the project)")
+                        tr!("{file} (outside the project)", file = rel)
                     }
-                    TsNotRead::Unreadable(why) => format!("{rel} (could not be read: {why})"),
+                    TsNotRead::Unreadable(why) => tr!(
+                        "{file} (could not be read: {error})",
+                        file = rel,
+                        error = why
+                    ),
                 })
                 .collect();
-            let more = match files.len().saturating_sub(MAX_NAMED_TS_FILES) {
-                0 => String::new(),
-                more => format!(" and {more} more"),
-            };
-            parts.push(format!("{}{more} not read", named.join(", ")));
+            parts.push(match files.len().saturating_sub(MAX_NAMED_TS_FILES) {
+                0 => tr!("{files} not read", files = named.join(", ")),
+                more => tr!(
+                    "{files} and {count} more not read",
+                    files = named.join(", "),
+                    count = more
+                ),
+            });
         }
         (!parts.is_empty()).then(|| format!("tsconfig/jsconfig: {}", parts.join("; ")))
     }
@@ -1730,7 +1751,9 @@ impl Resolver {
         }
         let segs: Vec<&str> = body.split('.').filter(|s| !s.is_empty()).collect();
         // Absolute: try the project root and each ancestor of `from` as a source
-        // root (covers `src/`-layout and package-relative resolution).
+        // root (covers `src/`-layout and package-relative resolution), then
+        // `src/` itself, as Pyright does: a `tests/` file's `from cart import`
+        // of `src/cart.py` (pytest's `pythonpath = src`) read as a package.
         let mut bases: Vec<PathBuf> = vec![self.root.clone()];
         let mut p = from.parent();
         while let Some(d) = p {
@@ -1740,6 +1763,7 @@ impl Resolver {
             }
             p = d.parent();
         }
+        bases.push(self.root.join("src"));
         for base in bases {
             if let Some(f) = self.python_module_file(&base, &segs) {
                 return Target::Internal(f);
@@ -2283,7 +2307,7 @@ where
         }
         let got = fetch(rels).await;
         if let Some((unread, why)) = got.unread.into_iter().next() {
-            return Err(why.unwrap_or_else(|| format!("{unread} could not be read there")));
+            return Err(why.unwrap_or_else(|| tr!("{file} could not be read there", file = unread)));
         }
         for (r, text) in got.files {
             match text.len() as u64 {
@@ -2953,7 +2977,7 @@ pub(crate) fn panic_note(panic: &(dyn std::any::Any + Send)) -> String {
         .downcast_ref::<&str>()
         .copied()
         .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("no message");
+        .unwrap_or(tr!("no message"));
     let line = message.lines().next().unwrap_or_default();
     let mut note: String = line.chars().take(MAX_CHARS).collect();
     if note.len() < line.len() {
@@ -3720,8 +3744,8 @@ pub enum Dir {
 impl Dir {
     pub fn label(self) -> &'static str {
         match self {
-            Dir::Imports => "Imports",
-            Dir::Importers => "Importers",
+            Dir::Imports => tr!("Imports"),
+            Dir::Importers => tr!("Importers"),
         }
     }
 
@@ -3864,7 +3888,14 @@ impl ImportTree {
     /// "N more not shown" for a node the size cap cut short.
     pub fn hidden_note(&self, id: usize) -> Option<String> {
         let hidden = self.get(id)?.hidden;
-        (hidden > 0).then(|| format!("{hidden} more not shown (tree limit {MAX_NODES})"))
+        (hidden > 0).then(|| {
+            trn!(
+                "1 more not shown (tree limit {limit})",
+                "{n} more not shown (tree limit {limit})",
+                hidden,
+                limit = MAX_NODES
+            )
+        })
     }
 
     /// Expand `id` in place, pulling its children from the graph. Idempotent. A
@@ -3961,12 +3992,12 @@ impl ImportTree {
                         }
                         Target::External(name) => {
                             if seen_ext.insert(name.clone()) {
-                                out.push(leaf(e, name.clone(), "external", depth, parent));
+                                out.push(leaf(e, name.clone(), tr!("external"), depth, parent));
                             }
                         }
                         Target::Unresolved(spec) => {
                             if seen_ext.insert(format!("?{spec}")) {
-                                out.push(leaf(e, spec.clone(), "unresolved", depth, parent));
+                                out.push(leaf(e, spec.clone(), tr!("unresolved"), depth, parent));
                             }
                         }
                     }
@@ -5030,6 +5061,23 @@ mod tests {
         assert_eq!(
             r.resolve(&ri("numpy"), &root.join("top.py"), "python"),
             Target::External("numpy".into())
+        );
+    }
+
+    /// A `src/` layout's module, imported from a test beside it (pytest's
+    /// `pythonpath = src`, Pyright's own default): the project's file, not a
+    /// package named `cart`.
+    #[test]
+    fn a_python_import_reaches_a_src_layout_module_from_tests() {
+        let root = Path::new("/proj");
+        let r = resolver(root, &["src/cart.py", "src/main.py", "tests/test_cart.py"]);
+        assert_eq!(
+            r.resolve(&ri("cart"), &root.join("tests/test_cart.py"), "python"),
+            Target::Internal(root.join("src/cart.py"))
+        );
+        assert_eq!(
+            r.resolve(&ri("cart"), &root.join("src/main.py"), "python"),
+            Target::Internal(root.join("src/cart.py"))
         );
     }
 

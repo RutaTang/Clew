@@ -123,6 +123,10 @@ pub enum Motion {
     FileEnd,
 }
 
+/// The most sticky headers pinned over the top of a code view: the innermost
+/// enclosing blocks of the line there.
+pub const STICKY_MAX: usize = 5;
+
 #[derive(Debug, Clone)]
 pub struct Viewer {
     pub abs: PathBuf,
@@ -165,6 +169,10 @@ pub struct Viewer {
     /// in content space can be mapped back to the window.
     pub scroll_x: f32,
     pub viewport_h: f32,
+    /// Whether `viewport_h` is the code view's height as last reported, not
+    /// the generous guess a pane starts with: only a measured height can say
+    /// a jump target is already in view.
+    pub viewport_measured: bool,
     pub target_line: Option<usize>, // 1-based jump target, drawn highlighted
     pub selection: Option<Selection>,
     /// Last clicked position as (0-based line, 0-based display column).
@@ -275,6 +283,7 @@ impl Viewer {
             // Generous default until the first scroll event reports the real
             // viewport; only affects how many rows are materialized.
             viewport_h: 2400.0,
+            viewport_measured: false,
             target_line: None,
             selection: None,
             caret: None,
@@ -495,6 +504,39 @@ impl Viewer {
             .unwrap_or_else(|| self.lines.len().saturating_sub(1))
     }
 
+    /// The headers pinned over the view when display row `row` is at its
+    /// top: the blocks around that line — less any that ends above the first
+    /// line seen under them. The line at the top is under the pinned
+    /// headers, so a function that ends there was pinned over the next one:
+    /// `def subtotal` over `def total`, as if one were inside the other.
+    /// With no line left under them (the view scrolled on past the file's
+    /// end), a header would only cover the file's last lines: the end of a
+    /// file read as its last function's `def` and nothing after it.
+    pub fn sticky_at_row(&self, row: usize) -> Vec<usize> {
+        let rows = if self.visible.is_empty() {
+            self.lines.len()
+        } else {
+            self.visible.len()
+        };
+        let mut headers =
+            crate::analyze::sticky_headers(&self.folds, self.line_at_row(row), STICKY_MAX);
+        while let Some(&last) = headers.last() {
+            let under = row + headers.len();
+            let below = self.line_at_row(under);
+            let ends_above = under >= rows
+                || self
+                    .folds
+                    .iter()
+                    .find(|&&(header, _)| header == last)
+                    .is_some_and(|&(_, end)| end < below);
+            if !ends_above {
+                break;
+            }
+            headers.pop();
+        }
+        headers
+    }
+
     /// Display row of a source line, accounting for collapsed folds above it.
     pub fn row_of(&self, line: usize) -> usize {
         if self.visible.is_empty() {
@@ -531,18 +573,11 @@ impl Viewer {
     /// Unlike `collapse_all`, it leaves container folds (impl/mod) open so every
     /// signature stays visible.
     pub fn skim_bodies(&mut self, sig_lines: &[usize]) {
-        let headers: Vec<usize> = sig_lines
-            .iter()
-            .filter_map(|&l0| (l0..=l0.saturating_add(4)).find(|&l| self.is_fold_header(l)))
-            .collect();
+        let headers = self.skim_headers(sig_lines);
         if headers.is_empty() {
             return;
         }
-        let folded = headers
-            .iter()
-            .filter(|h| self.collapsed.contains(h))
-            .count();
-        if folded * 2 >= headers.len() {
+        if self.skimmed_among(&headers) {
             for h in &headers {
                 self.collapsed.remove(h);
             }
@@ -552,6 +587,30 @@ impl Viewer {
             }
         }
         self.after_fold_change();
+    }
+
+    /// Whether the bodies [`Self::skim_bodies`] folds are (mostly) folded:
+    /// what pressing Skim again would undo, so the button shows it pressed.
+    pub fn skimmed(&self, sig_lines: &[usize]) -> bool {
+        let headers = self.skim_headers(sig_lines);
+        !headers.is_empty() && self.skimmed_among(&headers)
+    }
+
+    /// The fold headers of the functions starting at `sig_lines` (0-based):
+    /// each the first header within a few lines of its signature.
+    fn skim_headers(&self, sig_lines: &[usize]) -> Vec<usize> {
+        sig_lines
+            .iter()
+            .filter_map(|&l0| (l0..=l0.saturating_add(4)).find(|&l| self.is_fold_header(l)))
+            .collect()
+    }
+
+    fn skimmed_among(&self, headers: &[usize]) -> bool {
+        let folded = headers
+            .iter()
+            .filter(|h| self.collapsed.contains(h))
+            .count();
+        folded * 2 >= headers.len()
     }
 
     /// Expand every fold.
@@ -623,15 +682,32 @@ impl Viewer {
     }
 
     /// Absolute scroll offset that brings `line` (1-based) near the top,
-    /// keeping a few lines of context above it.
+    /// keeping a few lines of context above it — or the top of the file,
+    /// when the line is in view there with room below it: a short file was
+    /// scrolled past its first lines (its imports) for a target already on
+    /// the first screen.
     pub fn scroll_offset_for(&self, line: Option<usize>, line_height: f32) -> f32 {
         match line {
             Some(l) => {
                 // Work in display rows so collapsed folds above the target are
-                // accounted for. `l` is 1-based; keep ~3 rows of context above.
+                // accounted for. `l` is 1-based; keep ~3 rows of context above
+                // — below the sticky headers pinned over the top of the view
+                // for the line there: three rows down from a line inside four
+                // nested blocks, the target was under their headers.
                 let row = self.row_of(l.saturating_sub(1));
+                if self.viewport_measured && (row + 4) as f32 * line_height <= self.viewport_h {
+                    return 0.0;
+                }
                 let max_y = (self.content_rows().saturating_sub(1)) as f32 * line_height;
-                ((row.saturating_sub(3)) as f32 * line_height).clamp(0.0, max_y.max(0.0))
+                let mut top = row.saturating_sub(3);
+                for _ in 0..8 {
+                    let pinned = self.sticky_at_row(top).len();
+                    if top == 0 || row >= top + pinned {
+                        break;
+                    }
+                    top = row.saturating_sub(3 + pinned);
+                }
+                (top as f32 * line_height).clamp(0.0, max_y.max(0.0))
             }
             None => 0.0,
         }
@@ -1241,6 +1317,23 @@ mod tests {
         assert!(small.scroll_offset_for(Some(1_000_000), LH) <= 5.0 * LH);
     }
 
+    /// A target on the first screen, room below it, keeps the file at its
+    /// top (a short file lost its first lines to the context rule) — once
+    /// the view's height is measured; the guess a pane starts with says
+    /// nothing about what is in view.
+    #[test]
+    fn a_target_on_the_first_screen_keeps_the_file_at_its_top() {
+        let mut v = viewer_with_lines(1000);
+        v.viewport_h = 20.0 * LH;
+        assert_eq!(v.scroll_offset_for(Some(6), LH), 2.0 * LH, "unmeasured");
+        v.viewport_measured = true;
+        assert_eq!(v.scroll_offset_for(Some(6), LH), 0.0);
+        assert_eq!(v.scroll_offset_for(Some(16), LH), 0.0);
+        // Too near the bottom edge to read with what follows it.
+        assert_eq!(v.scroll_offset_for(Some(18), LH), 14.0 * LH);
+        assert_eq!(v.scroll_offset_for(Some(100), LH), 96.0 * LH);
+    }
+
     #[test]
     fn char_selection_orders_endpoints_and_extracts_text() {
         let mut v = viewer_with_lines(10);
@@ -1375,6 +1468,81 @@ mod tests {
         let src3 = "aaa\nbb\nccc\n";
         v.reload(Arc::new(src3.to_string()), plain_lines(src3));
         assert_eq!(v.caret, Some((1, 2)));
+    }
+
+    /// A jump keeps its target clear of the sticky headers drawn over the
+    /// top of the view: three rows of context below a line four blocks
+    /// deep had the target under those blocks' headers.
+    #[test]
+    fn a_jump_target_is_not_under_the_sticky_headers() {
+        let mut source = String::new();
+        for (depth, line) in [
+            (0, "class Cart:"),
+            (1, "def add(self, item):"),
+            (2, "for existing in self.items:"),
+            (3, "if existing.name == item.name:"),
+            (4, "existing.quantity += 1"),
+            (4, "return"),
+            (2, "self.items.append(item)"),
+            (0, ""),
+            (1, "def subtotal(self):"),
+            (2, "return 0"),
+        ] {
+            source.push_str(&format!("{}{line}\n", "    ".repeat(depth)));
+        }
+        for _ in 0..60 {
+            source.push_str("x = 1\n");
+        }
+        let lines = plain_lines(&source);
+        let v = Viewer::new(
+            PathBuf::from("/tmp/cart.py"),
+            "cart.py".into(),
+            None,
+            Arc::new(source),
+            lines,
+        );
+        for target in 1..=10 {
+            let top = (v.scroll_offset_for(Some(target), LH) / LH).round() as usize;
+            let pinned = v.sticky_at_row(top).len();
+            let row = v.row_of(target - 1);
+            assert!(
+                row >= top + pinned,
+                "line {target} at row {row} under {pinned} headers pinned from row {top}"
+            );
+        }
+    }
+
+    /// A block that ends among the lines under the pinned headers is not
+    /// pinned over what follows it: `def subtotal` was pinned over `def
+    /// total`, as if one were inside the other.
+    #[test]
+    fn a_header_is_not_pinned_over_the_block_after_it() {
+        let source = "class Cart:\n    def subtotal(self):\n        a = 1\n        return a\n\n    def total(self):\n        return 2\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/cart.py"),
+            "cart.py".into(),
+            None,
+            Arc::new(source.to_string()),
+            plain_lines(source),
+        );
+        // Row 2 (`a = 1`) at the top: `class Cart` and `def subtotal` would
+        // cover rows 2 and 3, and row 4 — the blank before `def total` — is
+        // past `subtotal`'s end.
+        assert_eq!(v.sticky_at_row(2), vec![0]);
+        // Deep inside a block, both stay pinned.
+        let deep = "class A:\n    def f(self):\n        a = 1\n        b = 2\n        c = 3\n        d = 4\n";
+        let v = Viewer::new(
+            PathBuf::from("/tmp/a.py"),
+            "a.py".into(),
+            None,
+            Arc::new(deep.to_string()),
+            plain_lines(deep),
+        );
+        assert_eq!(v.sticky_at_row(2), vec![0, 1]);
+        // Scrolled on until the last line is the first in view: no header
+        // covers it, nor the line before it with the last line under it.
+        assert_eq!(v.sticky_at_row(5), Vec::<usize>::new());
+        assert_eq!(v.sticky_at_row(4), vec![0]);
     }
 
     #[test]

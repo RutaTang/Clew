@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, progress_bar,
-    row, scrollable, slider, space, stack, text, text_input, tooltip,
+    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
+    slider, space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Length, Padding, Task};
 
@@ -15,16 +15,18 @@ use crate::finder::FinderMode;
 use crate::fs_scan::DirNode;
 use crate::glyph::{self, Glyph, WindowGlyph};
 use crate::viewer::Viewer;
-use crate::{App, AskView, Message, SidebarTab, TimeScope, TimeTravel, theme};
+use crate::{App, Message, SidebarTab, TimeScope, TimeTravel, theme};
 use crate::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
     GlossaryMsg, GraphMsg, HoverMsg, LspMsg, NavMsg, OverviewMsg, ProjectMsg, ReadingMsg,
     SemanticMsg, SettingsMsg, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WindowMsg,
 };
+use crate::{tr, tr_noop, trn};
 mod anchored;
 // A line of text on the design's baseline wherever it lands (`ts::set_in`).
 mod baseline;
 mod corner_safe;
+mod escape_clears;
 pub(crate) use anchored::*;
 mod chrome;
 pub(crate) use chrome::*;
@@ -71,6 +73,9 @@ pub(crate) use overlays::*;
 mod updater;
 pub(crate) use updater::*;
 mod askfloat;
+mod form;
+mod meter;
+mod setup;
 pub(crate) use askfloat::*;
 mod voice;
 pub(crate) use voice::*;
@@ -259,6 +264,16 @@ pub fn ask_input_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-input")
 }
 
+/// The Files view's filter field.
+pub fn file_filter_id() -> iced::widget::Id {
+    iced::widget::Id::new("file-filter")
+}
+
+/// The search field of Ask's menu of sessions, focused as the menu opens.
+pub fn ask_sessions_search_id() -> iced::widget::Id {
+    iced::widget::Id::new("ask-sessions-search")
+}
+
 /// The Ask conversation scrollable, so a new answer can snap it to the bottom.
 pub fn ask_scroll_id() -> iced::widget::Id {
     iced::widget::Id::new("ask-conversation")
@@ -293,10 +308,12 @@ pub(crate) enum ActiveOverlay<'a> {
     LspCommand(&'a crate::PendingLspCommand, u64, usize),
     /// The question on screen, its number, and how many more wait behind it.
     LspConsent(&'a crate::LspConsent, u64, usize),
+    /// "Set up project…", or Explain All asking first (a first open's
+    /// sheet is `Consent`).
+    Setup(&'a crate::app::setup::ProjectSetup),
     UpdateNotes,
     Settings,
     Connect,
-    Shortcuts,
     BpCondition(&'a (std::path::PathBuf, usize, String)),
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
@@ -307,7 +324,6 @@ pub(crate) enum ActiveOverlay<'a> {
     AppMenu,
     ViewMenu,
     Graph(crate::Overlay),
-    ServerPanel,
     Finder,
     ContextMenu(&'a crate::ContextMenu),
     Hover(&'a crate::HoverState),
@@ -326,14 +342,18 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         )
     } else if let Some((number, consent)) = app.proj.pending_lsp_consent.on_screen() {
         O::LspConsent(consent, number, app.proj.pending_lsp_consent.len() - 1)
+    } else if let Some(setup) = app
+        .setup
+        .as_ref()
+        .filter(|s| s.mode != crate::app::setup::SetupMode::Open)
+    {
+        O::Setup(setup)
     } else if app.update.show_notes {
         O::UpdateNotes
     } else if app.settings.open {
         O::Settings
     } else if app.connect.is_some() {
         O::Connect
-    } else if app.show_shortcuts {
-        O::Shortcuts
     } else if let Some(edit) = &app.proj.bp_cond_edit {
         O::BpCondition(edit)
     } else if let Some(edit) = &app.proj.note_edit {
@@ -354,8 +374,6 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::ViewMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
-    } else if app.server_panel {
-        O::ServerPanel
     } else if app.proj.finder.open {
         O::Finder
     } else if let Some(menu) = &app.proj.context_menu {
@@ -385,10 +403,10 @@ impl<'a> ActiveOverlay<'a> {
             Self::Consent(_) => "consent",
             Self::LspCommand(..) => "lsp-command",
             Self::LspConsent(..) => "lsp-consent",
+            Self::Setup(_) => "setup",
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
             Self::Connect => "connect",
-            Self::Shortcuts => "shortcuts",
             Self::Why(_) => "why",
             Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
@@ -396,7 +414,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::AppMenu => "app-menu",
             Self::ViewMenu => "view-menu",
             Self::Graph(_) => "graph",
-            Self::ServerPanel => "server-panel",
             Self::ContextMenu(_) => "context-menu",
             Self::BpCondition(_)
             | Self::BookmarkNote(_)
@@ -418,9 +435,15 @@ impl<'a> ActiveOverlay<'a> {
         match self {
             // Each Allow is drawn enabled once its question has been within
             // reach long enough to be read, where it is (`App::asked`).
-            Self::Consent(root) => {
-                consent_modal(root, app.asked(Question::Project(root.to_path_buf())))
-            }
+            Self::Consent(root) => setup::setup_sheet(
+                app,
+                root,
+                app.setup
+                    .as_ref()
+                    .filter(|s| s.root == root && s.mode == crate::app::setup::SetupMode::Open),
+                app.asked(Question::Project(root.to_path_buf())),
+            ),
+            Self::Setup(s) => setup::setup_sheet(app, &s.root, Some(s), true),
             Self::LspCommand(pending, number, waiting) => lsp_command_modal(
                 pending,
                 number,
@@ -436,7 +459,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
-            Self::Shortcuts => shortcuts_modal(app),
             Self::BpCondition(edit) => bp_condition_modal(app, edit),
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
@@ -447,7 +469,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::AppMenu => app_menu(app),
             Self::ViewMenu => view_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
-            Self::ServerPanel => server_panel_modal(app),
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(menu),
             Self::Hover(hover) => hover_tooltip(hover),
@@ -462,10 +483,10 @@ impl<'a> ActiveOverlay<'a> {
             Self::Consent(root) => Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
             Self::LspCommand(_, number, _) => Message::Lsp(LspMsg::CommandDismissed(*number)),
             Self::LspConsent(_, number, _) => Message::Lsp(LspMsg::ConsentDismissed(*number)),
+            Self::Setup(_) => Message::Project(ProjectMsg::SetupClose),
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),
-            Self::Shortcuts => Message::Window(WindowMsg::CloseShortcuts),
             Self::BpCondition(_) => Message::Debug(DebugMsg::BpConditionCancel),
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),
@@ -476,7 +497,6 @@ impl<'a> ActiveOverlay<'a> {
             Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
             Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
-            Self::ServerPanel => Message::Lsp(LspMsg::TogglePanel),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
             Self::ContextMenu(_) => Message::Hover(HoverMsg::ContextMenuClosed),
             // Not `HoverMsg::Cleared`: that one keeps a peek the pointer rests in.

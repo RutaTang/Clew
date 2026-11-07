@@ -39,7 +39,7 @@ impl App {
             return Task::none();
         }
         self.update.checking = true;
-        self.status = "Checking for updates…".into();
+        self.status = tr!("Checking for updates…").into();
         updater::check_task(true)
     }
 
@@ -66,11 +66,13 @@ impl App {
                 if manual {
                     let running = self.update.available.as_ref().map(|u| u.version);
                     self.status = match running {
-                        Some(running) if release.version > running => format!(
-                            "clew {} is available — after the update to {running} in progress",
-                            release.version
+                        Some(running) if release.version > running => tr!(
+                            "clew {version} is available — after the update to {running} \
+                             in progress",
+                            version = release.version,
+                            running = running
                         ),
-                        _ => "The update is already in progress".into(),
+                        _ => tr!("The update is already in progress").into(),
                     };
                 }
             }
@@ -92,17 +94,20 @@ impl App {
                 self.update.phase = UpdatePhase::Idle;
                 self.update.progress = None;
                 if manual {
-                    self.status = format!("clew {} is available", release.version);
+                    self.status = tr!("clew {version} is available", version = release.version);
                 }
             }
             Ok(_) => {
                 if manual {
-                    self.status = format!("clew is up to date (v{})", updater::current_version());
+                    self.status = tr!(
+                        "clew is up to date (v{version})",
+                        version = updater::current_version()
+                    );
                 }
             }
             Err(e) => {
                 if manual {
-                    self.status = format!("Update check failed: {e}");
+                    self.status = tr!("Update check failed: {error}", error = e);
                 }
             }
         }
@@ -137,7 +142,10 @@ impl App {
         // The link came out of a network response; it is not fetched unless
         // it points at this project's releases, over https.
         if let Err(e) = updater::validate_dmg_url(&url) {
-            self.status = format!("Not downloading the update ({e}) — opening the release page");
+            self.status = tr!(
+                "Not downloading the update ({error}) — opening the release page",
+                error = e
+            );
             return Task::done(Message::Content(ContentMsg::OpenLink(release_page)));
         }
         // In-app install needs a bundle this account can replace and a signing
@@ -146,8 +154,10 @@ impl App {
         // and fall back to the release page — BEFORE the download, rather than
         // after clew has quit for a swap that cannot happen.
         if let Some(reason) = self.self_install_blocker() {
-            self.status =
-                format!("clew can't update itself here: {reason} — opening the release page");
+            self.status = tr!(
+                "clew can't update itself here: {reason} — opening the release page",
+                reason = reason
+            );
             return Task::done(Message::Content(ContentMsg::OpenLink(release_page)));
         }
         let version = update.version;
@@ -169,7 +179,7 @@ impl App {
         self.update.phase = UpdatePhase::Downloading;
         self.update.progress = Some((0, None));
         self.update.show_notes = false;
-        self.status = format!("Downloading clew {version}…");
+        self.status = tr!("Downloading clew {version}…", version = version);
         let (task, download) = updater::download_task(url, version, self.update.generation);
         self.update.download = Some(download);
         task
@@ -190,7 +200,7 @@ impl App {
         self.update.generation += 1;
         self.update.phase = UpdatePhase::Idle;
         self.update.progress = None;
-        self.status = "Update download cancelled".into();
+        self.status = tr!("Update download cancelled").into();
         Task::none()
     }
 
@@ -247,7 +257,7 @@ impl App {
             (Ok(dmg), Some(expected)) => {
                 self.update.phase = UpdatePhase::Installing;
                 self.update.progress = None;
-                self.status = "Installing update…".into();
+                self.status = tr!("Installing update…").into();
                 // Only a LOCAL project can be reopened by path. A remote
                 // project's root names the other host, so passing it would
                 // have the relaunched clew open whatever THIS machine has
@@ -264,15 +274,15 @@ impl App {
                 // Nothing on offer any more, so nothing to check the image
                 // against: it is not installed.
                 updater::discard_download(&dmg);
-                let e = "the offered update is no longer known".to_string();
+                let e = tr!("the offered update is no longer available").to_string();
                 self.update.phase = UpdatePhase::Failed(e.clone());
-                self.status = format!("Update failed: {e}");
+                self.status = tr!("Update failed: {error}", error = e);
                 Task::none()
             }
             (Err(e), _) => {
                 self.update.phase = UpdatePhase::Failed(e.clone());
                 self.update.progress = None;
-                self.status = format!("Update download failed: {e}");
+                self.status = tr!("Update download failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -288,12 +298,12 @@ impl App {
     pub(crate) fn on_update_installed(&mut self, result: Result<(), String>) -> Task<Message> {
         match result {
             Ok(()) => {
-                self.status = "Restarting clew to finish the update…".into();
+                self.status = tr!("Restarting clew to finish the update…").into();
                 Task::none()
             }
             Err(e) => {
                 self.update.phase = UpdatePhase::Failed(e.clone());
-                self.status = format!("Update failed: {e}");
+                self.status = tr!("Update failed: {error}", error = e);
                 Task::none()
             }
         }
@@ -306,8 +316,10 @@ impl App {
     /// running, the update shown as still installing.
     pub(crate) fn on_quit_cancelled(&mut self) {
         if self.update.phase == UpdatePhase::Installing {
-            let kept = "clew was kept open — the update is installed if it quits within a \
-                        minute; after that, install it again";
+            let kept = tr!(
+                "clew was kept open — the update is installed if clew quits within a \
+                 minute; after that, install it again"
+            );
             self.update.phase = UpdatePhase::Failed(kept.into());
             self.update.progress = None;
             self.status = kept.into();
@@ -321,7 +333,7 @@ impl App {
     pub(crate) fn on_set_auto_update(&mut self, enabled: bool) -> Task<Message> {
         self.update.auto_check = enabled;
         if let Err(e) = updater::set_auto_check(enabled) {
-            self.status = format!("Could not save preference: {e}");
+            self.status = tr!("Could not save the update setting: {error}", error = e);
         }
         if enabled && !self.update.checking && self.update.available.is_none() {
             updater::check_task(false)
@@ -339,7 +351,7 @@ impl App {
     }
     #[cfg(not(target_os = "macos"))]
     fn self_install_blocker(&self) -> Option<String> {
-        Some("self-install is only supported on macOS".into())
+        Some(tr!("self-install is only supported on macOS").into())
     }
 }
 

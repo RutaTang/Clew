@@ -16,7 +16,11 @@ pub(crate) fn open_status(rel: &str, lang_key: Option<&str>) -> String {
     // The sheet's header names the file: the status line says something
     // only when there is something to say about it.
     match lang_key.and_then(highlight::highlight_error) {
-        Some(e) => format!("{rel} — shown without highlighting: {e}"),
+        Some(e) => tr!(
+            "{file} — shown without highlighting: {error}",
+            file = rel,
+            error = e
+        ),
         None => String::new(),
     }
 }
@@ -159,7 +163,7 @@ impl App {
                         .as_ref()
                         .is_some_and(|other| other.abs == open.abs && *pending == Some(other.req))
                 });
-        if !still_coming && self.status == format!("Loading {}…", self.rel_of(&open.abs)) {
+        if !still_coming && self.status == open.said {
             self.status.clear();
         }
     }
@@ -213,6 +217,7 @@ impl App {
     fn open_file_at(&mut self, abs: PathBuf, line: Option<usize>) -> Task<Message> {
         // A jump lands the reader in the code view.
         self.code_focused = true;
+        let landing = self.proj.landing.clone();
         let pane = self.proj.active;
         let line_height = self.line_height();
         // Same file already in the active pane: move the cursor and scroll.
@@ -230,7 +235,8 @@ impl App {
             if let Some(l) = line {
                 let l0 = l.saturating_sub(1);
                 v.reveal(l0); // expand any fold hiding the jump target
-                v.caret = Some((l0, 0));
+                let col = landing_col(&landing, v, l0);
+                v.caret = Some((l0, col));
             }
             // Notebook cells have variable height, so their goto scrolls to an
             // estimated cell offset (the target ring points precisely).
@@ -281,12 +287,13 @@ impl App {
                 // This is now the one load the pane is waiting for; any
                 // earlier in-flight load for it is superseded.
                 self.proj.link.pane_pending[pane] = Some(id);
+                self.status = tr!("Loading {file}…", file = rel);
                 self.proj.link.pane_opening[pane] = Some(PaneOpen {
                     req: id,
                     abs,
                     target: line,
+                    said: self.status.clone(),
                 });
-                self.status = format!("Loading {rel}…");
                 return Task::none();
             }
         }
@@ -296,7 +303,10 @@ impl App {
         // show (and index) the wrong project.
         if self.connection.is_remote() {
             self.proj.link.pane_pending[pane] = None;
-            self.status = format!("Disconnected from the remote host — cannot open {rel}");
+            self.status = tr!(
+                "Disconnected from the remote host — cannot open {file}",
+                file = rel
+            );
             return Task::none();
         }
         // Fallback: server not up — read + highlight locally. The token comes
@@ -305,12 +315,13 @@ impl App {
             .next_req_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.proj.link.pane_pending[pane] = Some(req);
+        self.status = tr!("Loading {file}…", file = rel);
         self.proj.link.pane_opening[pane] = Some(PaneOpen {
             req,
             abs: abs.clone(),
             target: line,
+            said: self.status.clone(),
         });
-        self.status = format!("Loading {rel}…");
         let stamp = self.stamp();
         // A file of the project is read only if it really is one (see
         // `load_file`); one outside it by its path is a dependency's source.
@@ -367,14 +378,18 @@ impl App {
         let source = Arc::new(content);
         let lines = highlight::plain_lines(&source);
         let line_height = self.line_height();
-        let old_viewport = self.proj.panes[pane].as_ref().map(|v| v.viewport_h);
+        let old_viewport = self.proj.panes[pane]
+            .as_ref()
+            .map(|v| (v.viewport_h, v.viewport_measured));
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
-        if let Some(h) = old_viewport {
+        if let Some((h, measured)) = old_viewport {
             v.viewport_h = h;
+            v.viewport_measured = measured;
         }
         v.target_line = target;
         // Put the block cursor on the jump target (or the top of the file).
-        v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
+        let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
+        v.caret = Some((l0, landing_col(&self.proj.landing, &v, l0)));
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
         // Just the path here; the right status segment already reports line
@@ -511,7 +526,7 @@ impl App {
                                 .map_err(|e| e.to_string())
                         })
                         .await
-                        .unwrap_or_else(|e| Err(format!("the git task failed: {e}")))
+                        .unwrap_or_else(|e| Err(tr!("the git task failed: {error}", error = e)))
                     },
                     move |info| {
                         Message::Editor(EditorMsg::GitInfoLoaded {
@@ -543,7 +558,7 @@ impl App {
         // Purely lexical, so it is identical for local and remote and never
         // probes this machine's disk at a remote path.
         if !clew_core::statefile::safe_rel(&rel) {
-            self.status = format!("Refused a path outside the project: {rel}");
+            self.status = tr!("Refused a path outside the project: {file}", file = rel);
             return Task::none();
         }
         let abs = project.root.join(&rel);
@@ -632,7 +647,7 @@ impl App {
             .panes
             .get(pane)
             .and_then(|s| s.as_ref())
-            .map(|v| v.viewport_h);
+            .map(|v| (v.viewport_h, v.viewport_measured));
 
         let mut v = Viewer::new(abs.clone(), rel, lang_key, source.clone(), lines);
         v.symbols = symbols;
@@ -646,11 +661,13 @@ impl App {
         };
         v.set_inactive_lines(dimmed);
         v.highlighted = true;
-        if let Some(h) = old_viewport {
+        if let Some((h, measured)) = old_viewport {
             v.viewport_h = h;
+            v.viewport_measured = measured;
         }
         v.target_line = target;
-        v.caret = Some((target.map(|t| t.saturating_sub(1)).unwrap_or(0), 0));
+        let l0 = target.map(|t| t.saturating_sub(1)).unwrap_or(0);
+        v.caret = Some((l0, landing_col(&self.proj.landing, &v, l0)));
         let y = v.scroll_offset_for(target, line_height);
         v.scroll_y = y;
         self.status = open_status(&v.rel, lang_key);
@@ -833,9 +850,14 @@ impl App {
             let Some(slot) = self.proj.panes.get(pane) else {
                 continue;
             };
-            let old = slot
-                .as_ref()
-                .map(|v| (v.viewport_h, v.scroll_y, v.nb_expanded.clone()));
+            let old = slot.as_ref().map(|v| {
+                (
+                    v.viewport_h,
+                    v.viewport_measured,
+                    v.scroll_y,
+                    v.nb_expanded.clone(),
+                )
+            });
             let mut v = Viewer::new(
                 abs.clone(),
                 rel.clone(),
@@ -846,8 +868,9 @@ impl App {
             v.symbols = symbols.clone();
             v.highlighted = true;
             v.notebook = Some(doc.clone());
-            if let Some((h, old_scroll, old_expanded)) = old {
+            if let Some((h, measured, old_scroll, old_expanded)) = old {
                 v.viewport_h = h;
+                v.viewport_measured = measured;
                 if refresh {
                     v.nb_expanded = old_expanded;
                     v.scroll_y = old_scroll;
@@ -1060,7 +1083,11 @@ impl App {
         let info = match info {
             Ok(info) => info,
             Err(e) => {
-                self.status = format!("git blame of {}: {e}", self.rel_of(&abs));
+                self.status = tr!(
+                    "Couldn't read git blame for {file}: {error}",
+                    file = self.rel_of(&abs),
+                    error = e
+                );
                 None
             }
         };
@@ -1098,7 +1125,7 @@ impl App {
         // its reply finds no pending request and is dropped, instead of
         // opening the view the user just asked to turn off.
         if self.proj.diff_pending.take().is_some() {
-            self.status = "Diff cancelled".into();
+            self.status = tr!("Diff cancelled").into();
             return Task::none();
         }
         // Toggle off if already showing this file's diff.
@@ -1107,6 +1134,7 @@ impl App {
             && d.abs == *abs
         {
             self.proj.diff = None;
+            self.proj.diff_refresh = None;
             // The code view is built anew in the diff's place: put it back
             // where the reader left it.
             return self.restore_code_scroll(self.proj.active);
@@ -1117,10 +1145,30 @@ impl App {
         let Some(git) = self.git_source() else {
             return Task::none();
         };
-        let rel = self.rel_of(&abs);
         let req = self.mint_request_id();
         self.proj.diff_pending = Some((req, abs.clone()));
-        self.status = format!("Computing the diff of {rel}…");
+        self.status = tr!("Computing the diff of {file}…", file = self.rel_of(&abs));
+        self.load_diff(git, req, abs)
+    }
+
+    /// The diff on screen again, when `path` — just changed or deleted on
+    /// disk — is its file: it showed the file as it was when Diff was
+    /// pressed, and said "no uncommitted changes" over a file just edited.
+    pub(crate) fn refresh_open_diff(&mut self, path: &Path) -> Task<Message> {
+        if self.proj.diff.as_ref().is_none_or(|d| d.abs != path) {
+            return Task::none();
+        }
+        let Some(git) = self.git_source() else {
+            return Task::none();
+        };
+        let req = self.mint_request_id();
+        self.proj.diff_refresh = Some(req);
+        self.load_diff(git, req, path.to_path_buf())
+    }
+
+    /// Compute `abs`'s diff against `HEAD`, arriving as `DiffLoaded`.
+    fn load_diff(&self, git: crate::app::rpc::GitSource, req: u64, abs: PathBuf) -> Task<Message> {
+        let rel = self.rel_of(&abs);
         let stamp = self.stamp();
         Task::perform(
             async move {
@@ -1154,21 +1202,38 @@ impl App {
         rel: String,
         result: Result<Option<Vec<git::DiffLine>>, String>,
     ) -> Task<Message> {
+        if self.proj.diff_refresh == Some(req) {
+            self.proj.diff_refresh = None;
+            // The view takes the new lines while it still shows that file;
+            // a failure leaves what it showed (the edit's own status stands).
+            if let Ok(lines) = result
+                && self.proj.diff.as_ref().is_some_and(|d| d.abs == abs)
+            {
+                self.proj.diff = Some(DiffState::new(abs, rel, lines.unwrap_or_default()));
+            }
+            return Task::none();
+        }
         if self.proj.diff_pending.as_ref().map(|(r, _)| *r) != Some(req) {
             return Task::none();
         }
         self.proj.diff_pending = None;
         match result {
-            Err(e) => self.status = format!("Couldn't compute the diff of {rel}: {e}"),
+            Err(e) => {
+                self.status = tr!(
+                    "Couldn't compute the diff of {file}: {error}",
+                    file = rel,
+                    error = e
+                )
+            }
             Ok(None) => {
-                self.status = format!("No diff for {rel} — it is not tracked by git");
+                self.status = tr!("No diff for {file} — it is not tracked by git", file = rel);
             }
             Ok(Some(lines)) => {
                 // Show the diff only if the active pane still shows that file —
                 // a slow diff must not display against another file.
                 if self.active_viewer().is_some_and(|v| v.abs == abs) {
                     if lines.is_empty() {
-                        self.status = format!("{rel} has no changes against HEAD");
+                        self.status = tr!("{file} has no changes against HEAD", file = rel);
                     } else {
                         self.status.clear();
                     }
@@ -1271,7 +1336,7 @@ impl App {
             return Task::none();
         };
         let n = text.lines().count();
-        self.status = format!("Copied {n} line{}", if n == 1 { "" } else { "s" });
+        self.status = trn!("Copied 1 line", "Copied {n} lines", n);
         iced::clipboard::write(text)
     }
 
@@ -1407,18 +1472,22 @@ impl App {
         let Some(v) = self.active_viewer() else {
             return;
         };
-        let sig_lines: Vec<usize> = self
-            .proj
+        let sig_lines = self.skim_lines(&v.abs);
+        self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+    }
+
+    /// Where `abs`'s functions and methods start (0-based): what Skim folds.
+    pub(crate) fn skim_lines(&self, abs: &Path) -> Vec<usize> {
+        self.proj
             .symbol_index_by_file
-            .get(&v.abs)
+            .get(abs)
             .map(|syms| {
                 syms.iter()
                     .filter(|s| matches!(s.kind.as_str(), "function" | "method"))
                     .map(|s| s.line.saturating_sub(1)) // 1-based symbol line → 0-based
                     .collect()
             })
-            .unwrap_or_default();
-        self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+            .unwrap_or_default()
     }
 
     pub(crate) fn on_find_opened(&mut self) -> Task<Message> {
@@ -1604,7 +1673,7 @@ impl App {
             return None;
         }
         let text = if b.uncommitted {
-            "· Uncommitted change".to_string()
+            format!("· {}", tr!("Uncommitted change"))
         } else {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1617,7 +1686,7 @@ impl App {
             format!(
                 "{}, {} · {}",
                 b.author,
-                git::relative_time(b.time, now),
+                crate::i18n::ago(b.time, now),
                 summary
             )
         };
@@ -1627,10 +1696,9 @@ impl App {
     /// Sticky-scroll header lines for a viewer at its current scroll position.
     pub fn sticky_headers(&self, v: &Viewer) -> Vec<usize> {
         let row = (v.scroll_y / self.line_height()) as usize;
-        let first_visible = v.line_at_row(row);
         // Read enclosing headers off the precomputed fold ranges — cheap enough
         // to recompute each frame, so sticky scroll stays smooth in huge files.
-        analyze::sticky_headers(&v.folds, first_visible, 5)
+        v.sticky_at_row(row)
     }
 
     pub(crate) fn rel_of(&self, abs: &Path) -> String {
@@ -1690,6 +1758,7 @@ impl App {
                     v.scroll_y = viewport.absolute_offset().y;
                     v.scroll_x = viewport.absolute_offset().x;
                     v.viewport_h = viewport.bounds().height;
+                    v.viewport_measured = true;
                 }
                 Task::none()
             }
@@ -1811,4 +1880,38 @@ impl App {
             }
         }
     }
+}
+
+/// The column a jump to `line0` of `v`'s file lands on: the name a
+/// definition or symbol jumped to there (`landing`), else the line's start.
+fn landing_col(
+    landing: &Option<(PathBuf, usize, crate::app::state::LandingAt)>,
+    v: &Viewer,
+    line0: usize,
+) -> usize {
+    use crate::app::state::LandingAt;
+    use crate::viewer::{Col, PositionEncoding};
+    let Some((abs, line, at)) = landing else {
+        return 0;
+    };
+    if *abs != v.abs || *line != line0 {
+        return 0;
+    }
+    let Some(raw) = v.source_line(line0) else {
+        return 0;
+    };
+    match at {
+        LandingAt::Char(character, encoding) => Col::from_offset(raw, *character, *encoding).0,
+        LandingAt::Name(name) => {
+            word_at(raw, name).map_or(0, |at| Col::from_offset(raw, at, PositionEncoding::Utf8).0)
+        }
+    }
+}
+
+/// Where `raw` first spells `name` as a whole word, in bytes.
+fn word_at(raw: &str, name: &str) -> Option<usize> {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+    raw.match_indices(name).map(|(at, _)| at).find(|&at| {
+        !word(raw[..at].chars().next_back()) && !word(raw[at + name.len()..].chars().next())
+    })
 }

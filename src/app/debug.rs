@@ -36,6 +36,23 @@ fn push_debug_output(session: &mut DebugSession, category: String, text: String)
     }
 }
 
+/// A DAP stop reason as the status line says it: the reasons the protocol
+/// names, in the reader's language; any other as the adapter gave it.
+fn stop_reason_label(reason: &str) -> &str {
+    match reason {
+        "step" => tr!("step"),
+        "breakpoint" => tr!("breakpoint"),
+        "exception" => tr!("exception"),
+        "pause" => tr!("pause"),
+        "entry" => tr!("entry"),
+        "goto" => tr!("goto"),
+        "function breakpoint" => tr!("function breakpoint"),
+        "data breakpoint" => tr!("data breakpoint"),
+        "instruction breakpoint" => tr!("instruction breakpoint"),
+        other => other,
+    }
+}
+
 /// A `launch` body without Clew's own notice in it (see
 /// `clew_core::debugadapter::NOTICE`), and the notice.
 fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<String>) {
@@ -46,7 +63,22 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// The most children one variable shows: a list of a million is read a
+/// screenful at a time by no one.
+pub(crate) const MAX_VAR_CHILDREN: usize = 300;
+
 impl App {
+    /// The active pane's file, when its debugger runs it from source (a
+    /// Python, JavaScript, Ruby, PHP… script): what Debug runs with no
+    /// launch.json.
+    fn debuggable_script(&self) -> Option<PathBuf> {
+        let abs = &self.active_viewer()?.abs;
+        match dap::Lang::detect(None, abs)? {
+            dap::Lang::Native | dap::Lang::CSharp => None,
+            _ => Some(abs.clone()),
+        }
+    }
+
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
@@ -64,7 +96,7 @@ impl App {
             return Task::batch([ended, self.start_debug()]);
         }
         if self.debug.session.is_some() {
-            self.status = "A debug session is already running".into();
+            self.status = tr!("A debug session is already running").into();
             return Task::none();
         }
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
@@ -80,21 +112,39 @@ impl App {
         } else {
             let cfg = match read_launch_config(&root) {
                 Ok(cfg) => cfg,
+                // No launch.json: a script open in the active pane is run as
+                // it is, as editors do — Debug on a Python file only told the
+                // reader to write a config first. A program that must be
+                // built (native, .NET) still needs one, to name the binary.
+                Err(_)
+                    if !root.join(".clew").join("launch.json").exists()
+                        && let Some(script) = self.debuggable_script() =>
+                {
+                    crate::app::model::LaunchConfig {
+                        program: script,
+                        args: Vec::new(),
+                        cwd: root.clone(),
+                        type_hint: None,
+                    }
+                }
                 Err(e) => {
                     self.status = e;
                     return Task::none();
                 }
             };
             if !cfg.program.exists() {
-                self.status = format!(
-                    "Program not found: {} — build it first",
-                    cfg.program.display()
+                self.status = tr!(
+                    "Program not found: {path} — build it first",
+                    path = cfg.program.display()
                 );
                 return Task::none();
             }
             // Pick the language (explicit type, else the program's extension).
             let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program) else {
-                self.status = format!("Unknown debug type {:?} in launch.json", cfg.type_hint);
+                self.status = tr!(
+                    "Unknown debug type {kind} in launch.json",
+                    kind = format!("{:?}", cfg.type_hint)
+                );
                 return Task::none();
             };
             (cfg.program, cfg.args, cfg.cwd, Some(lang))
@@ -124,8 +174,11 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned());
         self.debug.pending_reason.clear();
         self.status = match lang {
-            Some(lang) => format!("Starting debugger — {}…", lang.label()),
-            None => "Starting debugger on the remote…".into(),
+            Some(lang) => tr!(
+                "Starting debugger — {adapter}…",
+                adapter = crate::i18n::lookup(lang.label())
+            ),
+            None => tr!("Starting debugger on the remote host…").into(),
         };
         // This run's identity: every message the adapter stream produces carries
         // it, so a late event from a previous run can't land on this session.
@@ -180,7 +233,7 @@ impl App {
                             .send(Message::Debug(DebugMsg::Failed {
                                 stamp: stamp.clone(),
                                 run,
-                                error: "not connected to the remote server".into(),
+                                error: tr!("not connected to the remote server").into(),
                             }))
                             .await;
                         return;
@@ -195,13 +248,15 @@ impl App {
                     {
                         Ok(clew_protocol::Event::StateContent { text: Some(t), .. }) => t,
                         Ok(clew_protocol::Event::StateContent { text: None, .. }) => {
+                            let error = tr!(
+                                "Create .clew/launch.json in the remote project with {example}",
+                                example = r#"{"program": "path", "type": "..."}"#
+                            );
                             let _ = output
                                 .send(Message::Debug(DebugMsg::Failed {
                                     stamp: stamp.clone(),
                                     run,
-                                    error: "Create .clew/launch.json in the REMOTE project \
-                                            with {\"program\": \"path\", \"type\": \"...\"}"
-                                        .into(),
+                                    error,
                                 }))
                                 .await;
                             return;
@@ -211,16 +266,20 @@ impl App {
                         other => {
                             let why = match other {
                                 Err(e) => e,
-                                Ok(event) => format!(
-                                    "unexpected reply: {}",
-                                    crate::app::rpc::event_name(&event)
+                                Ok(event) => tr!(
+                                    "unexpected reply: {event}",
+                                    event = crate::app::rpc::event_name(&event)
                                 ),
                             };
+                            let error = tr!(
+                                "could not read the remote launch.json: {error}",
+                                error = why
+                            );
                             let _ = output
                                 .send(Message::Debug(DebugMsg::Failed {
                                     stamp: stamp.clone(),
                                     run,
-                                    error: format!("could not read the remote launch.json: {why}"),
+                                    error,
                                 }))
                                 .await;
                             return;
@@ -241,14 +300,15 @@ impl App {
                     };
                     let Some(lang) = dap::Lang::detect(cfg.type_hint.as_deref(), &cfg.program)
                     else {
+                        let error = tr!(
+                            "Unknown debug type {kind} in the remote launch.json",
+                            kind = format!("{:?}", cfg.type_hint)
+                        );
                         let _ = output
                             .send(Message::Debug(DebugMsg::Failed {
                                 stamp: stamp.clone(),
                                 run,
-                                error: format!(
-                                    "Unknown debug type {:?} in the remote launch.json",
-                                    cfg.type_hint
-                                ),
+                                error,
                             }))
                             .await;
                         return;
@@ -282,11 +342,13 @@ impl App {
                             match serde_json::from_str::<serde_json::Value>(&launch) {
                                 Ok(v) => v,
                                 Err(e) => {
+                                    let error =
+                                        tr!("invalid launch configuration: {error}", error = e);
                                     let _ = output
                                         .send(Message::Debug(DebugMsg::Failed {
                                             stamp: stamp.clone(),
                                             run,
-                                            error: format!("bad launch config: {e}"),
+                                            error,
                                         }))
                                         .await;
                                     return;
@@ -294,11 +356,15 @@ impl App {
                             }
                         }
                         Ok(other) => {
+                            let error = tr!(
+                                "unexpected SpawnAdapter reply: {reply}",
+                                reply = format!("{other:?}")
+                            );
                             let _ = output
                                 .send(Message::Debug(DebugMsg::Failed {
                                     stamp: stamp.clone(),
                                     run,
-                                    error: format!("unexpected SpawnAdapter reply: {other:?}"),
+                                    error,
                                 }))
                                 .await;
                             return;
@@ -341,7 +407,12 @@ impl App {
                             dap::adapter::resolve(lang, &program, &args, &root, &cwd, &choices)
                         })
                         .await
-                        .unwrap_or_else(|e| Err(format!("resolving the debug adapter failed: {e}")))
+                        .unwrap_or_else(|e| {
+                            Err(tr!(
+                                "resolving the debug adapter failed: {error}",
+                                error = e
+                            ))
+                        })
                     };
                     let adapter = match resolved {
                         Ok(dap::Resolved::Ready(a)) => a,
@@ -468,7 +539,7 @@ impl App {
                         r = client.initialize() => Some(r),
                         _ = stopped => None,
                         _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {
-                            Some(Err("no answer to initialize within 20s".into()))
+                            Some(Err(tr!("no answer to initialize within 20 seconds").into()))
                         }
                     }
                 };
@@ -530,7 +601,7 @@ impl App {
                             run,
                             event: dap::DapEvent::Output(dap::proto::Output {
                                 category: "console".into(),
-                                text: format!("{text}\n"),
+                                text: format!("{}\n", crate::i18n::lookup(&text)),
                             }),
                         }))
                         .await;
@@ -622,9 +693,9 @@ impl App {
         if self.proj.project.is_none() {
             return Task::none();
         }
-        self.status = format!(
-            "Debugging needs {} — waiting for your approval",
-            install.name()
+        self.status = tr!(
+            "Debugging needs {adapter} — waiting for your approval",
+            adapter = install.name()
         );
         self.proj.pending_lsp_consent.offer(LspConsent {
             language: String::new(),
@@ -645,7 +716,11 @@ impl App {
         install: dap::AdapterInstall,
         stamp: Stamp,
     ) -> Task<Message> {
-        self.status = format!("Installing {} {}…", install.name(), install.version());
+        self.status = tr!(
+            "Installing {name} {version}…",
+            name = install.name(),
+            version = install.version()
+        );
         // Raised when the project it was consented in is left (the session
         // is dropped whole): the install stops between chunks, or its `pip`
         // is killed, instead of running on for a session that cannot start.
@@ -679,26 +754,28 @@ impl App {
             // Stopped because the project it was for was left (see
             // `on_debug_install_allowed`): not a failure of the install.
             Err(e) if !self.owns(&stamp) => {
-                self.status =
-                    format!("Debug adapter install stopped with the project it was for ({e})");
+                self.status = tr!(
+                    "Debug adapter install stopped because its project was closed ({error})",
+                    error = e
+                );
                 Task::none()
             }
             Err(e) => {
-                self.status = format!("Debug adapter install failed: {e}");
+                self.status = tr!("Debug adapter install failed: {error}", error = e);
                 Task::none()
             }
             // The install is global and reported whatever the project; only
             // starting the session belongs to the project it was asked in.
             Ok(()) if self.owns(&stamp) => self.start_debug(),
             Ok(()) => {
-                self.status = "Debug adapter installed".into();
+                self.status = tr!("Debug adapter installed").into();
                 Task::none()
             }
         }
     }
 
     pub(crate) fn on_debug_stop(&mut self) -> Task<Message> {
-        self.status = "Debugger stopped".into();
+        self.status = tr!("Debugger stopped").into();
         // The teardown itself is shared with the project switch, which used to
         // carry its own copy of it (see `stop_debug_session`).
         self.stop_debug_session()
@@ -749,12 +826,10 @@ impl App {
             eprintln!("[clew] may be lost with the window: {}", sent.line());
         }
         self.quitting = true;
-        // An appearance previewed in its Settings and never saved goes with
-        // it, as Close discards it: the appearance is the process's, and the
-        // other windows, told of the preview, kept painting it — and wrote it
-        // to the config with their next appearance change.
+        // Settings open as the window goes: closed as Close closes it, what
+        // was typed in it kept.
         if self.settings.open {
-            self.restore_theme_snapshot();
+            let _ = self.close_settings();
             self.settings.open = false;
         }
         // The update download is this window's too, and iced keeps draining a
@@ -1034,6 +1109,20 @@ impl App {
 
     /// The session on screen is running: what the panel showed of another
     /// session's stop is gone.
+    /// Put `text` on the status line as what the run is doing now.
+    pub(crate) fn say_debug_state(&mut self, text: String) {
+        self.debug.said = Some(text.clone());
+        self.status = text;
+    }
+
+    /// Take down what [`say_debug_state`](Self::say_debug_state) said, if
+    /// the status line still says it: the run has ended.
+    fn unsay_debug_state(&mut self) {
+        if let Some(said) = self.debug.said.take() {
+            self.settle_status(&[&said]);
+        }
+    }
+
     fn show_debug_running(&mut self) {
         if let Some(session) = self.debug.session.as_mut() {
             session.status = DebugStatus::Running;
@@ -1072,7 +1161,10 @@ impl App {
             return Task::none();
         };
         let tid = s.thread_id.unwrap_or(0);
-        self.status = format!("Stopped: {}", s.reason);
+        self.say_debug_state(tr!(
+            "Stopped: {reason}",
+            reason = stop_reason_label(&s.reason)
+        ));
         let run = self.debug_run;
         // This is a new stop: whatever is still loading for the previous
         // one is stale, and this fetch is stamped with the new identity.
@@ -1160,6 +1252,48 @@ impl App {
     /// anything still being fetched for the stop we are leaving is now stale.
     pub(crate) fn bump_debug_stop(&mut self) {
         self.debug_stop += 1;
+        // What was open named values at the stop just left.
+        self.debug.open_vars.clear();
+        self.debug.var_children.clear();
+    }
+
+    /// Open or close the variable `reference` in the panel, reading its
+    /// children the first time it opens at this stop.
+    pub(crate) fn toggle_debug_var(&mut self, reference: i64) -> Task<Message> {
+        if self.debug.open_vars.remove(&reference) {
+            return Task::none();
+        }
+        self.debug.open_vars.insert(reference);
+        if self.debug.var_children.contains_key(&reference) {
+            return Task::none();
+        }
+        let stamp = self.debug_stamp();
+        let Some(client) = self
+            .debug
+            .session
+            .as_ref()
+            .filter(|s| s.status == DebugStatus::Stopped)
+            .and_then(|s| s.client.clone())
+        else {
+            return Task::none();
+        };
+        let (run, stop) = (self.debug_run, self.debug_stop);
+        Task::perform(
+            async move {
+                let mut vars = client.variables(reference).await.unwrap_or_default();
+                vars.truncate(MAX_VAR_CHILDREN);
+                vars
+            },
+            move |vars| {
+                Message::Debug(DebugMsg::VarChildren {
+                    stamp: stamp.clone(),
+                    run,
+                    stop,
+                    reference,
+                    vars,
+                })
+            },
+        )
     }
 
     /// Whether a DAP result tagged `(run, stop)` still describes where the
@@ -1231,7 +1365,10 @@ impl App {
                         push_debug_output(
                             session,
                             "console".into(),
-                            format!("A debugged process exited with code {code}\n"),
+                            format!(
+                                "{}\n",
+                                tr!("A debugged process exited with code {code}", code = code)
+                            ),
                         );
                     }
                     return Task::none();
@@ -1308,8 +1445,15 @@ impl App {
                 // behind, an inspection still in flight for it would arrive and
                 // fill the panel back in while the program is running.
                 self.bump_debug_stop();
+                // Running again: "Stopped: breakpoint" is no longer so.
+                if self.debug.said.as_deref().is_some_and(|s| s == self.status) {
+                    self.say_debug_state(tr!("Debugger running…").into());
+                }
                 self.show_paused_debug_session()
             }
+            // Telemetry is the adapter's own ("ptvsd", "debugpy"), never the
+            // program's: the protocol has it kept from the user.
+            dap::DapEvent::Output(o) if o.category == "telemetry" => Task::none(),
             dap::DapEvent::Output(o) => {
                 push_debug_output(session, o.category, o.text);
                 Task::none()
@@ -1318,13 +1462,14 @@ impl App {
                 push_debug_output(
                     session,
                     "console".into(),
-                    format!("Process exited with code {code}\n"),
+                    format!("{}\n", tr!("Process exited with code {code}", code = code)),
                 );
                 session.status = DebugStatus::Terminated;
                 session.current = None;
                 // The program is gone: an inspection still loading for the last
                 // stop must not resurrect a location in a dead process.
                 self.bump_debug_stop();
+                self.unsay_debug_state();
                 Task::none()
             }
             dap::DapEvent::Terminated => {
@@ -1333,6 +1478,7 @@ impl App {
                 session.frames.clear();
                 session.scopes.clear();
                 self.bump_debug_stop();
+                self.unsay_debug_state();
                 Task::none()
             }
             dap::DapEvent::StartDebugging(config) => {
@@ -1484,7 +1630,7 @@ impl App {
             return Task::none();
         }
         let teardown = self.stop_debug_session();
-        self.status = format!("Debug failed: {error}");
+        self.status = tr!("Debug failed: {error}", error = error);
         teardown
     }
 
@@ -1519,7 +1665,10 @@ impl App {
         if self.debug.child_started != Some(run) {
             return self.on_debug_failed(
                 run,
-                format!("the debug target's session did not start — {error}"),
+                tr!(
+                    "the debug target's session did not start — {error}",
+                    error = error
+                ),
             );
         }
         let ended = self.end_debug_child(child);
@@ -1529,9 +1678,15 @@ impl App {
         push_debug_output(
             session,
             "console".into(),
-            format!("[clew] a child debug session failed to start — {error}\n"),
+            format!(
+                "{}\n",
+                tr!(
+                    "[clew] a child debug session failed to start — {error}",
+                    error = error
+                )
+            ),
         );
-        self.status = format!("Child debug session failed — {error}");
+        self.status = tr!("Child debug session failed — {error}", error = error);
         ended
     }
 
@@ -1867,7 +2022,11 @@ impl App {
                     // The request failed or timed out. `let _ =` used to hide
                     // this too: every breakpoint in the file stays "unknown",
                     // so say so instead of leaving a silently dead gutter.
-                    self.status = format!("Breakpoints in {} not set: {e}", self.rel_of(&path));
+                    self.status = tr!(
+                        "Could not set breakpoints in {file}: {error}",
+                        file = self.rel_of(&path),
+                        error = e
+                    );
                     continue;
                 }
             };
@@ -1897,12 +2056,18 @@ impl App {
         // One line of status, preferring the refusals: a breakpoint that will
         // never fire is worth more than one that merely slid a line.
         if refused > 0 {
-            self.status = format!(
-                "{refused} breakpoint{} could not be set (drawn hollow)",
-                if refused == 1 { "" } else { "s" }
+            self.status = trn!(
+                "1 breakpoint could not be set (shown hollow)",
+                "{n} breakpoints could not be set (shown hollow)",
+                refused
             );
         } else if let Some((rel, from, to)) = moved {
-            self.status = format!("Breakpoint {rel}:{from} bound to line {to}");
+            self.status = tr!(
+                "Breakpoint at {file}:{from} moved to line {to}",
+                file = rel,
+                from = from,
+                to = to
+            );
         }
         Task::none()
     }
@@ -1932,9 +2097,17 @@ impl App {
                 bp.bound_line = line.filter(|l| verified && *l != *requested);
                 if was != Some(verified) {
                     self.status = match (verified, message) {
-                        (true, _) => format!("Breakpoint at line {requested} is now live"),
-                        (false, Some(m)) => format!("Breakpoint at line {requested}: {m}"),
-                        (false, None) => format!("Breakpoint at line {requested} is not live"),
+                        (true, _) => {
+                            tr!("Breakpoint at line {line} is now live", line = requested)
+                        }
+                        (false, Some(m)) => tr!(
+                            "Breakpoint at line {line}: {message}",
+                            line = requested,
+                            message = m
+                        ),
+                        (false, None) => {
+                            tr!("Breakpoint at line {line} is not live", line = requested)
+                        }
                     };
                 }
                 return Task::none();
@@ -2045,6 +2218,7 @@ impl App {
         if map.is_empty() {
             self.debug.breakpoints.remove(&path);
         }
+        self.keep_breakpoint(&path, line);
         self.push_breakpoints(&path)
     }
 
@@ -2113,7 +2287,8 @@ impl App {
             .entry(path.clone())
             .or_default()
             .insert(line, bp);
-        self.status = "Conditional breakpoint set".into();
+        self.status = tr!("Conditional breakpoint set").into();
+        self.keep_breakpoint(&path, line);
         self.push_breakpoints(&path)
     }
 
@@ -2158,7 +2333,7 @@ impl App {
                     let children = self.debug_children();
                     children.own = Some((client, hover_safe));
                     children.active = crate::app::state::OWN_SESSION;
-                    self.status = "Debugger running…".into();
+                    self.say_debug_state(tr!("Debugger running…").into());
                     self.bump_debug_stop();
                 }
                 Task::none()
@@ -2200,7 +2375,7 @@ impl App {
                         // "terminated", the next Start tore it down.
                         if status == Some(DebugStatus::Terminated) {
                             self.show_debug_running();
-                            self.status = "Debugger running…".into();
+                            self.say_debug_state(tr!("Debugger running…").into());
                         }
                     }
                 }
@@ -2254,7 +2429,7 @@ impl App {
                 {
                     session.status = DebugStatus::Stopped;
                     session.current = current;
-                    self.status = format!("Debugger control failed: {error}");
+                    self.status = tr!("Debugger control failed: {error}", error = error);
                 }
                 Task::none()
             }
@@ -2323,10 +2498,23 @@ impl App {
             DebugMsg::ToggleHoverEval => {
                 self.debug_hover_eval = !self.debug_hover_eval;
                 self.status = if self.debug_hover_eval {
-                    "Hovering a name while paused now evaluates it in the program".into()
+                    tr!("Hover now evaluates names in the debuggee").into()
                 } else {
-                    "Hover evaluation in the debuggee is off".into()
+                    tr!("Hover evaluation in the debuggee is off").into()
                 };
+                Task::none()
+            }
+            DebugMsg::ToggleVar(reference) => self.toggle_debug_var(reference),
+            DebugMsg::VarChildren {
+                run,
+                stop,
+                reference,
+                vars,
+                ..
+            } => {
+                if self.owns_debug_stop(run, stop) {
+                    self.debug.var_children.insert(reference, vars);
+                }
                 Task::none()
             }
             DebugMsg::WatchesEvaluated {

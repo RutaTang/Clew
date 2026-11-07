@@ -9,9 +9,13 @@ use crate::app::state::TimeStart;
 use crate::*;
 
 /// What the status line says while a start's history loads.
-const LOADING_HISTORY: &str = "Loading history…";
+fn loading_history() -> &'static str {
+    tr!("Loading history…")
+}
 /// What it says instead when the start refused a notebook's cell scope.
-const NO_CELL_HISTORY: &str = "Cell history isn't available for notebooks — showing the whole file";
+fn no_cell_history() -> &'static str {
+    tr!("No cell history for notebooks — showing the whole file")
+}
 
 /// The 1-based line range, in HEAD's copy of `rel`, of the `ordinal`-th
 /// symbol named `name` (0 = the first), or `None` when HEAD's copy has no
@@ -54,12 +58,78 @@ async fn head_range(
             .map(|s| (s.line, s.end_line))
     })
     .await
-    .map_err(|e| format!("reading the file at HEAD failed: {e}"))
+    .map_err(|e| tr!("reading the file at HEAD failed: {error}", error = e))
 }
 /// What it says when a scope toggle still loading gives way to the reader's
 /// use of the session (`App::time_travel_start_gives_way`): the toggle's
 /// button still shows the scope the session keeps.
-const SCOPE_KEPT: &str = "Scope unchanged — you went on before the new scope loaded";
+fn scope_kept() -> &'static str {
+    tr!("Scope unchanged — you moved on before the new scope loaded")
+}
+
+/// Where a time-travel session shows, for the status line
+/// (`App::where_time_travel_shows`).
+#[derive(Clone, Copy)]
+enum Shows {
+    Here,
+    BehindPage,
+    LeftPane,
+    RightPane,
+    OffScreen,
+}
+
+/// What the status line says when the history of `file` opens where it
+/// `shows`, replacing the session over `old` — `None` when that was the same
+/// file's.
+fn replaced_status(shows: Shows, file: &str, old: Option<&str>) -> String {
+    match (shows, old) {
+        (Shows::Here, None) => tr!(
+            "History of {file} opened here, replacing the one open before",
+            file = file
+        ),
+        (Shows::Here, Some(old)) => tr!(
+            "History of {file} opened here, replacing that of {old}",
+            file = file,
+            old = old
+        ),
+        (Shows::BehindPage, None) => tr!(
+            "History of {file} opened behind this page, replacing the one open before",
+            file = file
+        ),
+        (Shows::BehindPage, Some(old)) => tr!(
+            "History of {file} opened behind this page, replacing that of {old}",
+            file = file,
+            old = old
+        ),
+        (Shows::LeftPane, None) => tr!(
+            "History of {file} opened in the left pane, replacing the one open before",
+            file = file
+        ),
+        (Shows::LeftPane, Some(old)) => tr!(
+            "History of {file} opened in the left pane, replacing that of {old}",
+            file = file,
+            old = old
+        ),
+        (Shows::RightPane, None) => tr!(
+            "History of {file} opened in the right pane, replacing the one open before",
+            file = file
+        ),
+        (Shows::RightPane, Some(old)) => tr!(
+            "History of {file} opened in the right pane, replacing that of {old}",
+            file = file,
+            old = old
+        ),
+        (Shows::OffScreen, None) => tr!(
+            "History of {file} opened off screen, replacing the one open before",
+            file = file
+        ),
+        (Shows::OffScreen, Some(old)) => tr!(
+            "History of {file} opened off screen, replacing that of {old}",
+            file = file,
+            old = old
+        ),
+    }
+}
 
 /// The path the file had in commit `sha` (blame's short id, or a full one),
 /// by its history (`git log --follow`, newest first) — `rel`, its path now,
@@ -148,7 +218,7 @@ impl App {
     pub(crate) fn on_time_travel_start(&mut self, symbol: bool) -> Task<Message> {
         self.show_tools_menu = false;
         let Some(git) = self.git_source() else {
-            self.status = "Time Travel needs a git repository".into();
+            self.status = tr!("Time Travel needs a git repository").into();
             return Task::none();
         };
         let Some(v) = self.active_viewer() else {
@@ -195,7 +265,13 @@ impl App {
         // with the history still loading, give this request up, so the
         // history the reader asked for never opened.
         self.proj.walk.reader_moved_in(&abs);
-        let generation = self.await_history(abs.clone(), pane, rescoping);
+        // What the status line says while the history loads (below).
+        let said = if symbol_refused {
+            no_cell_history()
+        } else {
+            loading_history()
+        };
+        let generation = self.await_history(abs.clone(), pane, rescoping, said);
         // (An earlier start's open keeps what its load's failure says, if
         // it failed while held: `SupersededOpen::failed`.)
         self.proj.link.superseded_open = superseded
@@ -215,12 +291,7 @@ impl App {
         // Say why the scope did not change, so the toggle is not silently
         // inert on a notebook. Transient: `TimeTravelMsg::Ready` clears the status
         // when the history lands, exactly as it does over "Loading history…".
-        self.status = if symbol_refused {
-            NO_CELL_HISTORY
-        } else {
-            LOADING_HISTORY
-        }
-        .into();
+        self.status = said.into();
         // Local git, or the protocol when the repository is on the remote host.
         let symbol_key = scope.symbol_key().map(|(n, o)| (n.to_string(), o));
         let rel_asked = rel.clone();
@@ -269,9 +340,16 @@ impl App {
     /// Await the history of `abs`, asked for in `pane`, as the one
     /// time-travel start still loading (`ProjectSession::time_start`), under
     /// a new number: the `Ready` that names it is the one that applies.
-    /// `rescope`: it re-scopes the session on screen. The caller has settled
-    /// the start it supersedes, if any (`give_up_time_travel_start`).
-    pub(crate) fn await_history(&mut self, abs: PathBuf, pane: usize, rescope: bool) -> u64 {
+    /// `rescope`: it re-scopes the session on screen; `said`: what the
+    /// caller has the status line say meanwhile. The caller has settled the
+    /// start it supersedes, if any (`give_up_time_travel_start`).
+    pub(crate) fn await_history(
+        &mut self,
+        abs: PathBuf,
+        pane: usize,
+        rescope: bool,
+        said: &str,
+    ) -> u64 {
         self.proj.time_gen += 1;
         let generation = self.proj.time_gen;
         self.proj.time_start = Some(TimeStart {
@@ -279,6 +357,7 @@ impl App {
             abs,
             pane,
             rescope,
+            said: said.to_string(),
         });
         generation
     }
@@ -296,7 +375,7 @@ impl App {
     /// waiting on it (`settle_walk_anchor`).
     pub(crate) fn give_up_time_travel_start(&mut self) -> Option<SupersededOpen> {
         let start = self.proj.time_start.take()?;
-        if self.status == LOADING_HISTORY || self.status == NO_CELL_HISTORY {
+        if self.status == start.said {
             self.status.clear();
         }
         self.proj
@@ -350,11 +429,11 @@ impl App {
             return Task::none();
         };
         let said = if start.rescope {
-            SCOPE_KEPT.to_string()
+            scope_kept().to_string()
         } else {
-            format!(
-                "Stopped loading the history of {} — you went on in this one",
-                self.rel_of(&start.abs)
+            tr!(
+                "Stopped loading the history of {file} — you kept working in this one",
+                file = self.rel_of(&start.abs)
             )
         };
         let carried = self.drop_time_travel_start();
@@ -375,18 +454,18 @@ impl App {
     /// line: here, in the focused pane; behind the page over the panes; else
     /// in the pane that shows its file — the one its history was asked in,
     /// which a start keeps on it (`TimeStart::pane`).
-    fn where_time_travel_shows(&self, abs: &Path) -> &'static str {
+    fn where_time_travel_shows(&self, abs: &Path) -> Shows {
         let shows = |pane: usize| self.proj.panes[pane].as_ref().is_some_and(|v| v.abs == abs);
         if ui::time_travel_on_screen(self).is_some() {
-            "here"
+            Shows::Here
         } else if ui::pane_cover(self).is_some() {
-            "behind this page"
+            Shows::BehindPage
         } else if shows(0) {
-            "in the left pane"
+            Shows::LeftPane
         } else if shows(1) {
-            "in the right pane"
+            Shows::RightPane
         } else {
-            "off screen"
+            Shows::OffScreen
         }
     }
 
@@ -426,10 +505,12 @@ impl App {
                 // A failure to read the history is not "no history": say
                 // which.
                 let said = match failed {
-                    Err(e) => format!("Couldn't load the git history: {e}"),
+                    Err(e) => tr!("Couldn't load the git history: {error}", error = e),
                     Ok(_) => match &scope {
-                        TimeScope::Symbol { name, .. } => format!("No git history for `{name}`"),
-                        TimeScope::File => "No git history for this file".into(),
+                        TimeScope::Symbol { name, .. } => {
+                            tr!("No git history for `{name}`", name = name)
+                        }
+                        TimeScope::File => tr!("No git history for this file").into(),
                     },
                 };
                 let carried = superseded.map_or_else(Task::none, |s| self.carry_out_superseded(s));
@@ -488,12 +569,8 @@ impl App {
         // in the other pane, or behind a page, while the one it replaced was
         // on screen, in use.
         let replacing = replaced.map(|old| {
-            let whose = if old.abs == abs {
-                "the one open before".to_string()
-            } else {
-                format!("that of {}", old.rel)
-            };
-            (abs.clone(), format!("History of {rel}"), whose)
+            let whose = (old.abs != abs).then(|| old.rel.clone());
+            (abs.clone(), rel.clone(), whose)
         });
         let mut tt = TimeTravel {
             abs,
@@ -527,13 +604,13 @@ impl App {
             self.selecting = false;
         }
         match replacing {
-            Some((abs, what, whose)) => {
+            Some((abs, file, whose)) => {
                 let shows = self.where_time_travel_shows(&abs);
-                self.status = format!("{what} opened {shows}, replacing {whose}");
+                self.status = replaced_status(shows, &file, whose.as_deref());
             }
             // Otherwise only what the start itself said goes: the reader may
             // have made something else of the status line since.
-            None if self.status == LOADING_HISTORY || self.status == NO_CELL_HISTORY => {
+            None if self.status == start.said => {
                 self.status.clear();
             }
             None => {}
@@ -622,7 +699,7 @@ impl App {
                     })
                 })
                 .await
-                .map_err(|e| format!("building the revision failed: {e}"))
+                .map_err(|e| tr!("building the revision failed: {error}", error = e))
             },
             move |step| {
                 Message::TimeTravel(TimeTravelMsg::Step {
@@ -662,7 +739,7 @@ impl App {
             Ok(step) => step,
             Err(e) => {
                 tt.loading = false;
-                self.status = format!("Couldn't load this revision: {e}");
+                self.status = tr!("Couldn't load this revision: {error}", error = e);
                 return Task::none();
             }
         };
@@ -966,7 +1043,7 @@ impl App {
             Ok(text) => {
                 tt.why.insert(sha, text.trim().to_string());
             }
-            Err(e) => self.status = format!("Couldn't summarize: {e}"),
+            Err(e) => self.status = tr!("Couldn't summarize: {error}", error = e),
         }
         if let Some(tt) = self.proj.time_travel.as_mut() {
             tt.sync_why_loading();
@@ -1071,7 +1148,7 @@ impl App {
         let md = match result {
             Ok(md) => md,
             Err(e) => {
-                self.status = format!("Story failed: {e}");
+                self.status = tr!("Couldn't write the story: {error}", error = e);
                 return Task::none();
             }
         };
@@ -1100,7 +1177,7 @@ impl App {
             return Task::none();
         };
         let Some(git) = v.git.clone() else {
-            self.status = "No git history for this file".into();
+            self.status = tr!("No git history for this file").into();
             return Task::none();
         };
         // Target line range (0-based inclusive): the selection, else the
@@ -1128,7 +1205,7 @@ impl App {
             }
         }
         if commits.is_empty() {
-            self.status = "This code isn't committed yet — no history to explain".into();
+            self.status = tr!("This code isn't committed yet — no history to explain").into();
             return Task::none();
         }
         let last = l1.min(l0 + 40); // cap the snippet
@@ -1138,9 +1215,13 @@ impl App {
             .join("\n");
         let rel = v.rel.clone();
         let title = if l0 == l1 {
-            format!("Why line {} exists", l0 + 1)
+            tr!("Why line {line} exists", line = l0 + 1)
         } else {
-            format!("Why lines {}–{} exist", l0 + 1, l1 + 1)
+            tr!(
+                "Why lines {first}–{last} exist",
+                first = l0 + 1,
+                last = l1 + 1
+            )
         };
         self.blame_why_seq += 1;
         let token = self.blame_why_seq;
@@ -1158,7 +1239,7 @@ impl App {
             return Task::none();
         }
         let stamp = self.stamp();
-        self.status = "Explaining why…".into();
+        self.status = tr!("Explaining why…").into();
         let commits_ctx = commits.clone();
         let ai = self.ai_client();
         Task::perform(
@@ -1226,10 +1307,13 @@ impl App {
             return Task::none();
         }
         let md = match result {
-            Ok(m) => m,
+            Ok(m) => {
+                self.settle_status(&[tr!("Explaining why…")]);
+                m
+            }
             Err(e) => {
-                self.status = format!("Couldn't explain: {e}");
-                format!("*Couldn't explain why: {e}*")
+                self.status = tr!("Couldn't explain: {error}", error = e);
+                format!("*{}*", tr!("Couldn't explain why: {error}", error = e))
             }
         };
         let (prepared, task) = self.prepare_segments(&md);

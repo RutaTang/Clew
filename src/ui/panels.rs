@@ -26,7 +26,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let title = container(
         row![
             glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
-            text("Debug").size(ts::SMALL).color(theme::fg_bright()),
+            text(tr!("Debug")).size(ts::SMALL).color(theme::fg_bright()),
         ]
         .spacing(6)
         .align_y(iced::Center),
@@ -34,7 +34,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     .padding([5, 12]);
     // A borderless "hide" affordance — no button box, just a chevron that
     // brightens on hover.
-    let collapse = button(text("⌄").size(ts::BASE))
+    let collapse = button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
         .style(theme::list_row(false))
         .padding([3, 10])
         .on_press(Message::Window(WindowMsg::CollapseBottom));
@@ -51,12 +51,7 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let content: Element<'_, Message> = if app.debug.session.is_some() {
         debug_panel(app)
     } else {
-        empty_state(
-            Glyph::Debug,
-            "No debug session",
-            "Press Debug on the tool strip to start one (needs .clew/launch.json).",
-            None,
-        )
+        empty_state(Glyph::Debug, tr!("No debug session"), "", None)
     };
 
     container(column![tabs, hairline(), content].height(Fill))
@@ -73,15 +68,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         return space().into();
     };
     let (status_txt, status_color) = match session.status {
-        DebugStatus::Launching => ("launching…", theme::dim()),
-        DebugStatus::Running => ("running", theme::success()),
-        DebugStatus::Stopped => ("stopped", theme::warning()),
-        DebugStatus::Terminated => ("terminated", theme::dim()),
+        DebugStatus::Launching => (tr!("launching…"), theme::dim()),
+        DebugStatus::Running => (tr!("running"), theme::success()),
+        DebugStatus::Stopped => (tr!("stopped"), theme::warning()),
+        DebugStatus::Terminated => (tr!("terminated"), theme::dim()),
     };
     let stopped = session.status == DebugStatus::Stopped;
 
     let ctrl = |label: &'static str, msg: Message, enabled: bool| {
-        let mut b = button(text(label).size(ts::BODY))
+        let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if enabled {
@@ -91,42 +86,54 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     };
     let controls = row![
         ctrl(
-            "▶ Continue",
+            tr!("▶ Continue"),
             Message::Debug(DebugMsg::Control(DebugCmd::Continue)),
             stopped
         ),
         ctrl(
-            "⤼ Over",
+            tr!("⤼ Over"),
             Message::Debug(DebugMsg::Control(DebugCmd::StepOver)),
             stopped
         ),
         ctrl(
-            "⤓ In",
+            tr!("⤓ In"),
             Message::Debug(DebugMsg::Control(DebugCmd::StepIn)),
             stopped
         ),
         ctrl(
-            "⤒ Out",
+            tr!("⤒ Out"),
             Message::Debug(DebugMsg::Control(DebugCmd::StepOut)),
             stopped
         ),
-        ctrl("■ Stop", Message::Debug(DebugMsg::Stop), true),
+        ctrl(tr!("■ Stop"), Message::Debug(DebugMsg::Stop), true),
     ]
     .spacing(4);
-    let header = row![
-        text("Debug").size(ts::BASE).color(theme::fg()),
-        text(status_txt).size(ts::SMALL).color(status_color),
-        space().width(Fill),
-        trace_control(app),
-        hover_eval_control(app),
-        controls,
-    ]
-    .spacing(8)
-    .align_y(iced::Center);
+    // The controls whole at the right; what is said before them takes the
+    // room left, cut short where a language's words need more.
+    let said = container(
+        row![
+            text(tr!("Debug"))
+                .size(ts::BASE)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+            text(status_txt)
+                .size(ts::SMALL)
+                .color(status_color)
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            trace_control(app),
+            hover_eval_control(app),
+        ]
+        .spacing(8)
+        .align_y(iced::Center),
+    )
+    .width(Fill)
+    .clip(true);
+    let header = row![said, controls].spacing(8).align_y(iced::Center);
 
     // Call stack — click a frame to jump to its source.
     let mut stack_rows: Vec<Element<'_, Message>> = vec![
-        text("CALL STACK")
+        text(tr!("CALL STACK"))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
@@ -164,7 +171,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 
     // Variables — each scope with its name = value rows.
     let mut var_rows: Vec<Element<'_, Message>> = vec![
-        text("VARIABLES")
+        text(tr!("VARIABLES"))
             .size(ts::CAPTION)
             .color(theme::dim())
             .into(),
@@ -176,24 +183,16 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 .color(theme::dim())
                 .into(),
         );
-        for v in &sc.vars {
-            var_rows.push(
-                row![
-                    text(v.name.clone()).size(ts::SMALL).color(theme::warning()),
-                    text(" = ").size(ts::SMALL).color(theme::dim()),
-                    text(v.value.clone())
-                        .size(ts::SMALL)
-                        .color(theme::fg())
-                        .wrapping(Wrapping::None),
-                ]
-                .into(),
-            );
-        }
+        push_var_rows(app, &sc.vars, 0, &mut var_rows);
     }
 
     // Program output.
-    let mut out_rows: Vec<Element<'_, Message>> =
-        vec![text("OUTPUT").size(ts::CAPTION).color(theme::dim()).into()];
+    let mut out_rows: Vec<Element<'_, Message>> = vec![
+        text(tr!("OUTPUT"))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    ];
     for (cat, txt) in &session.output {
         let color = if cat == "stderr" {
             theme::danger()
@@ -210,10 +209,15 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
     }
 
     // Watch — expressions re-evaluated each stop, with an add box + remove.
-    let mut watch_rows: Vec<Element<'_, Message>> =
-        vec![text("WATCH").size(ts::CAPTION).color(theme::dim()).into()];
+    let mut watch_rows: Vec<Element<'_, Message>> = vec![
+        text(tr!("WATCH"))
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .into(),
+    ];
     watch_rows.push(
-        text_input("Add watch…", &app.debug.watch_input)
+        text_input(tr!("Add watch…"), &app.debug.watch_input)
+            .style(theme::input)
             .on_input(|v| Message::Debug(DebugMsg::WatchInput(v)))
             .on_submit(Message::Debug(DebugMsg::WatchAdd))
             .size(ts::SMALL)
@@ -231,7 +235,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             row![
                 // By identity (the expression): an index into the list drawn
                 // here can name another watch once the list changes.
-                button(text("✕").size(ts::CAPTION).color(theme::dim()))
+                button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                     .style(theme::list_row(false))
                     .padding([0, 4])
                     .on_press(Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone()))),
@@ -269,19 +273,34 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
 pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
     let n = app.debug.trace.len();
     if n == 0 {
-        return text("trace: no stops yet")
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into();
+        // "Yet" only while the program can still stop: a run that ended
+        // without stopping has no stops, and never will.
+        let ended = app
+            .debug
+            .session
+            .as_ref()
+            .is_some_and(|s| s.status == crate::DebugStatus::Terminated);
+        return text(if ended {
+            tr!("Trace: no stops")
+        } else {
+            tr!("Trace: no stops yet")
+        })
+        .size(ts::CAPTION)
+        .color(theme::dim())
+        .into();
     }
-    let count = format!(
-        "trace: {n} {}{}",
-        if n == 1 { "stop" } else { "stops" },
-        if app.debug.trace_cut { " (cut)" } else { "" }
-    );
+    let count = if app.debug.trace_cut {
+        trn!(
+            "Trace: 1 stop (cut short)",
+            "Trace: {n} stops (cut short)",
+            n
+        )
+    } else {
+        trn!("Trace: 1 stop", "Trace: {n} stops", n)
+    };
     row![
         text(count).size(ts::CAPTION).color(theme::dim()),
-        button(text("Walk this run").size(ts::SMALL))
+        button(text(tr!("Walk this run")).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([2, 8])
             .on_press(Message::Walk(WalkMsg::GenerateTrace)),
@@ -293,36 +312,49 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
 
 /// Whether hovering a name while paused evaluates it (see
 /// `dap::hover_eval_allowed`). An adapter that promised side-effect-free
-/// hovers needs no switch — the header just says hovers show values. For any
-/// other adapter an evaluation may run the program's own code, so it is a
-/// checkbox the reader has to tick, with the risk named beside it.
+/// hovers needs no switch, and nothing is shown. For any other adapter an
+/// evaluation may run the program's own code, so it is a checkbox the
+/// reader has to tick, with the risk named beside it.
 pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
-        return text("hover shows values")
-            .size(ts::CAPTION)
-            .color(theme::dim())
-            .into();
+        return space().into();
     }
     tooltip(
         iced::widget::checkbox(app.debug_hover_eval)
-            .label("Evaluate on hover")
+            .style(theme::check)
+            .label(tr!("Evaluate on hover"))
             .on_toggle(|_| Message::Debug(DebugMsg::ToggleHoverEval))
             .size(14)
             .text_size(ts::SMALL)
             .spacing(6),
         container(
-            text(
-                "This adapter does not promise side-effect-free hovers: evaluating a \
-                 hovered name can run the program's own code (getters, Debug/toString).",
-            )
-            .size(ts::SMALL)
-            .color(theme::fg()),
+            text(tr!("May run the program's own code."))
+                .size(ts::SMALL)
+                .color(theme::fg()),
         )
         .max_width(TIP_MAX_W)
         .padding([4, 8])
         .style(theme::modal_panel),
         tooltip::Position::Bottom,
     )
+    .into()
+}
+
+/// [`tree_note_row`] for a node that has none to show ("No callers found"):
+/// quiet, as there is nothing wrong.
+fn tree_empty_row<'a>(depth: usize, note: String) -> Element<'a, Message> {
+    container(
+        text(note)
+            .size(ts::CAPTION)
+            .color(theme::dim())
+            .wrapping(Wrapping::None),
+    )
+    .padding(Padding {
+        top: 0.0,
+        right: 4.0,
+        bottom: 2.0,
+        left: depth as f32 * 12.0 + 16.0 + 6.0,
+    })
     .into()
 }
 
@@ -398,15 +430,9 @@ const SAID_SIZE: f32 = 11.0;
 const BUBBLE_SHARE: f32 = 0.82;
 
 /// The width of the conversation's text column: the card's, inside its
-/// 1 px edge, or the margin's while it is kept there; less the 16 either
-/// side.
+/// 1 px edge, less the 16 either side.
 fn conversation_width(app: &App) -> f32 {
-    let panel = if crate::ui::askfloat::ask_in_margin(app) {
-        app.right_width
-    } else {
-        crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width) - 2.0
-    };
-    panel - 32.0
+    crate::ui::askfloat::ask_place(app).map_or(ASK_CARD_W, |p| p.width) - 2.0 - 32.0
 }
 /// Room for each of the composer's optional rows (the pinned code, an ACP
 /// agent's settings) over the input.
@@ -442,19 +468,47 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             && app.proj.ask_pins.is_empty()
         {
             convo.push(
-                text(
-                    "Answers are grounded once “Explain All” has run, or in code you “Add to Ask”.",
-                )
+                text(tr!(
+                    "For grounded answers, run “Explain All” or add code with “Add to Ask”."
+                ))
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
             );
         }
+        // While voice listens: what can be said, and what comes of it.
+        if app.voice.is_listening() {
+            convo.push(
+                text(tr!("Try saying"))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .into(),
+            );
+            for (say, does) in crate::ui::askfloat::try_saying(app) {
+                convo.push(
+                    row![
+                        // Wrapped, not run under its result: an example
+                        // in some languages is longer than its row.
+                        text(say)
+                            .size(ts::SMALL)
+                            .color(theme::fg())
+                            .width(Fill)
+                            .wrapping(Wrapping::WordOrGlyph),
+                        container(text(does).size(ts::CAPTION).color(theme::fg_muted()))
+                            .padding([2, 8])
+                            .style(theme::chip),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .into(),
+                );
+            }
+        }
         // Context-aware starter questions — click one to ask it.
         let suggestions = app.suggested_questions();
-        if !suggestions.is_empty() {
+        if !suggestions.is_empty() && !app.voice.is_listening() {
             convo.push(
-                text("Try asking")
+                text(tr!("Try asking"))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
@@ -490,7 +544,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 row![
                     glyph::icon(Glyph::Mic, theme::dim(), SAID_SIZE),
                     ts::set_in(
-                        text("Said").color(theme::dim()),
+                        text(tr!("Said")).color(theme::dim()),
                         ts::INTER.normal(SAID_SIZE),
                         ts::INTER,
                         SAID_SIZE,
@@ -533,7 +587,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         );
         if let Some(agent) = &turn.extras.agent {
             convo.push(
-                text(format!("asked {agent}"))
+                text(tr!("Asked {agent}", agent = agent))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
@@ -601,11 +655,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             // (with a cursor) as it streams; it's re-rendered richly when done.
             if turn.answer_md.trim().is_empty() {
                 let label = if !turn.extras.approvals.is_empty() {
-                    "Waiting for your answer…"
+                    tr!("Waiting for your answer…")
                 } else if turn.steps.is_empty() {
-                    "Thinking…"
+                    tr!("Thinking…")
                 } else {
-                    "Exploring…"
+                    tr!("Exploring…")
                 };
                 convo.push(text(label).size(ts::BODY).color(theme::dim()).into());
             } else {
@@ -620,7 +674,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
         if !turn.sources.is_empty() {
-            convo.push(text("Sources").size(ts::CAPTION).color(theme::dim()).into());
+            convo.push(
+                text(tr!("Sources"))
+                    .size(ts::CAPTION)
+                    .color(theme::dim())
+                    .into(),
+            );
             let chips: Vec<Element<'_, Message>> = turn
                 .sources
                 .iter()
@@ -631,7 +690,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     }
     // Retrieval phase (before the answer turn exists) shows a spinner line.
     if app.proj.asking {
-        convo.push(text("Thinking…").size(ts::BODY).color(theme::dim()).into());
+        convo.push(
+            text(tr!("Thinking…"))
+                .size(ts::BODY)
+                .color(theme::dim())
+                .into(),
+        );
     }
     let conversation = scrollable(Column::with_children(convo).spacing(14).width(Fill))
         .id(ask_scroll_id())
@@ -701,11 +765,15 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             // own that is there with no count to show — the gap over the
             // card — so one more coming moves nothing of it.
             let count: Element<'_, Message> = if more > 0 {
-                text(format!("{more} more waiting after this one"))
-                    .size(ts::CAPTION)
-                    .line_height(ts::normal_line(ts::CAPTION))
-                    .color(theme::dim())
-                    .into()
+                text(trn!(
+                    "1 more waiting after this one",
+                    "{n} more waiting after this one",
+                    more
+                ))
+                .size(ts::CAPTION)
+                .line_height(ts::normal_line(ts::CAPTION))
+                .color(theme::dim())
+                .into()
             } else {
                 space().into()
             };
@@ -742,7 +810,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         .style(theme::toolbar_button)
                         .padding([0, 4])
                         .on_press(Message::Ask(AskMsg::PinGoto(key))),
-                        button(text("✕").size(ts::SMALL).color(theme::dim()))
+                        button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                             .style(theme::toolbar_button)
                             .padding([0, 6])
                             .on_press(Message::Ask(AskMsg::Unpin(key))),
@@ -766,17 +834,21 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .as_deref()
         .and_then(|n| app.acp_agents.iter().find(|a| a.name == n))
     {
-        Some(agent) => format!(
-            "Ask {} about this codebase…",
-            crate::app::integrations::acp_label(agent)
+        Some(agent) => tr!(
+            "Ask {agent} about this codebase…",
+            agent = crate::app::integrations::acp_label(agent)
         ),
-        // Once there is a conversation, what is typed is a reply — and the
-        // microphone's key is said, as another way to give it.
-        None if !app.proj.ask_turns.is_empty() => format!(
-            "Reply, or press {} to talk",
-            app.keymap.chord(crate::keymap::Action::Voice).caps()
-        ),
-        None => "Ask about this codebase…".to_string(),
+        // Once there is a conversation, what is typed is a reply — and, in
+        // the large window, where there is room to say it, the microphone's
+        // key as another way to give it.
+        None if !app.proj.ask_turns.is_empty() && app.ask_view == crate::AskView::Expanded => {
+            tr!(
+                "Reply, or press {keys} to talk",
+                keys = app.keymap.chord(crate::keymap::Action::Voice).caps()
+            )
+        }
+        None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
+        None => tr!("Ask about this codebase…").to_string(),
     };
     let input = ts::field_in(
         text_input(&placeholder, &app.proj.ask_input)
@@ -816,7 +888,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     if idle {
         ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
     }
-    let ask_btn = super::toolbar::tip_at(ask_btn, "Ask", None, tooltip::Position::Top);
+    let ask_btn = super::toolbar::tip_at(ask_btn, tr!("Ask"), None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed.
     let listening = app.voice.is_listening();
     let talk = super::toolbar::tip_at(
@@ -830,7 +902,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         )
         .style(theme::round_button(false))
         .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
-        if listening { "Stop listening" } else { "Talk" },
+        if listening {
+            tr!("Stop listening")
+        } else {
+            tr!("Talk")
+        },
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );
@@ -867,6 +943,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                                 value: c.value,
                             })
                         })
+                        .style(theme::pick)
+                        .menu_style(theme::pick_menu)
                         .text_size(ts::CAPTION)
                         .padding([2, 6]),
                     ),
@@ -905,6 +983,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             pick_list(choices, selected, |c: AgentChoice| {
                 Message::Ask(AskMsg::PickAgent(c.name))
             })
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
             .padding([6, 8]),
         ))
@@ -916,7 +996,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // as it went, and a press held on Stop as the answer ended asked the
     // question typed meanwhile, let go of over Ask.
     let stop: Element<'_, Message> = if streaming {
-        button(text("Stop").size(ts::BASE))
+        button(text(tr!("Stop")).size(ts::BASE))
             .style(theme::toolbar_button)
             .padding([5, 12])
             .on_press(Message::Ask(AskMsg::Stop))
@@ -929,28 +1009,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // beside it what it does, which turns it as well.
     let on = app.voice.keep_listening;
     let turn = Message::Voice(crate::VoiceMsg::SetKeepListening(!on));
-    let knob = container(space().width(SWITCH_KNOB).height(SWITCH_KNOB)).style(theme::switch_knob);
-    let track = button(
-        container(knob)
-            .width(Fill)
-            .height(Fill)
-            .padding((SWITCH_H - SWITCH_KNOB) / 2.0)
-            .align_x(if on {
-                iced::alignment::Horizontal::Right
-            } else {
-                iced::alignment::Horizontal::Left
-            }),
-    )
-    .width(Length::Fixed(SWITCH_W))
-    .height(Length::Fixed(SWITCH_H))
-    .padding(0)
-    .style(theme::switch(on))
-    .on_press(turn.clone());
+    let track = super::form::switch(on, turn.clone());
     let keep_listening = row![
         track,
         iced::widget::mouse_area(ts::set_in(
-            text("Keep listening").color(theme::fg_muted()),
-            SWITCH_H,
+            text(tr!("Keep listening")).color(theme::fg_muted()),
+            super::form::SWITCH_H,
             ts::INTER,
             KEEP_LISTENING_SIZE,
         ))
@@ -990,10 +1054,6 @@ pub(crate) const ROUND_BUTTON: f32 = 30.0;
 const KEEP_LISTENING_SIZE: f32 = 12.0;
 /// The design's gap between the switch and what it says.
 const KEEP_LISTENING_GAP: f32 = 7.0;
-/// The design's switch: its track, and the knob in it.
-const SWITCH_W: f32 = 26.0;
-const SWITCH_H: f32 = 16.0;
-const SWITCH_KNOB: f32 = 12.0;
 /// Padding around the composer's row: a little more room at its start,
 /// where the question begins.
 pub(crate) const COMPOSER_PAD: Padding = Padding {
@@ -1194,15 +1254,22 @@ pub(crate) fn approval_card<'a>(
     // for them (`App::on_answers_page`), and its buttons are drawn anew.
     if pages > 1 {
         buttons.push(
-            button(text(format!("More answers ({} of {pages})", page + 1)).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([3, 10])
-                .on_press(Message::Ask(AskMsg::AnswersPage {
-                    stream,
-                    key: approval.key,
-                    page: (page + 1) % pages,
-                }))
-                .into(),
+            button(
+                text(tr!(
+                    "More answers ({page} of {pages})",
+                    page = page + 1,
+                    pages = pages
+                ))
+                .size(ts::SMALL),
+            )
+            .style(theme::toolbar_button)
+            .padding([3, 10])
+            .on_press(Message::Ask(AskMsg::AnswersPage {
+                stream,
+                key: approval.key,
+                page: (page + 1) % pages,
+            }))
+            .into(),
         );
     }
     // A yes and a no sit beside the question; more answers than that, a
@@ -1366,6 +1433,12 @@ fn step_title<'a>(title: &str) -> Element<'a, Message> {
         Some((verb, rest)) => {
             let mut said = verb.to_string();
             said[..1].make_ascii_uppercase();
+            // The server's verbs, in the reader's language where known.
+            let said = if crate::miscellaneous::extern_text::STEP_VERBS.contains(&said.as_str()) {
+                crate::i18n::lookup(&said).to_string()
+            } else {
+                said
+            };
             row![word(&said), code(rest.trim())]
                 .spacing(STEP_GAP)
                 .align_y(iced::Center)
@@ -1412,7 +1485,7 @@ fn agent_step_chip<'a>(
     let clickable = target.is_some();
     let show: Element<'a, Message> = if clickable {
         ts::set_in(
-            text("Show").color(theme::accent()),
+            text(tr!("Show")).color(theme::accent()),
             STEP_ROW_H,
             ts::INTER,
             ts::SMALL,
@@ -1446,61 +1519,113 @@ fn agent_step_chip<'a>(
     chip.into()
 }
 
+/// The head of a tree in the sidebar (Calls, Imports, Value flow): what it
+/// is rooted at and `detail` beside it, then its controls, and under them
+/// the way it reads (`switch`) — over a hairline, with no band of its own
+/// (the sidebar is the band).
+fn tree_head<'a>(
+    root: &'a str,
+    detail: Option<String>,
+    controls: Vec<Element<'a, Message>>,
+    switch: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut head = row![
+        text(root)
+            .size(ts::BODY)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    if let Some(detail) = detail {
+        head = head.push(text(detail).size(ts::CAPTION).color(theme::dim()));
+    }
+    head = head.push(space().width(Fill));
+    for control in controls {
+        head = head.push(control);
+    }
+    let head: Element<'a, Message> = match switch {
+        Some(switch) => column![head, switch].spacing(6).into(),
+        None => head.into(),
+    };
+    column![
+        container(head)
+            .padding(Padding {
+                top: 4.0,
+                right: 8.0,
+                bottom: 6.0,
+                left: 10.0,
+            })
+            .width(Fill),
+        super::panes::hairline(),
+    ]
+    .into()
+}
+
+/// Expand every node of a tree.
+fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
+    button(text(tr!("Expand all")).size(ts::SMALL))
+        .style(theme::toolbar_button)
+        .padding([2, 7])
+        .on_press(msg)
+        .into()
+}
+
+/// Which way a tree reads (callers or callees, imports or importers): a
+/// small segmented control, the way it reads raised; the other switches.
+fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a, Message> {
+    container(
+        Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
+            button(text(label).size(ts::SMALL))
+                .style(theme::segment(chosen))
+                .padding([1, 7])
+                .on_press_maybe((!chosen).then_some(msg))
+                .into()
+        }))
+        .spacing(1),
+    )
+    .padding(2)
+    .style(theme::trough)
+    .into()
+}
+
 /// The FLOW tab: the traced identifier's occurrences under the role each
 /// line gives it (declared, assigned, parameter, passed to, returned,
 /// branched on, member access, read), each opening its line; a `Passed`
 /// row unfolds into the callee's parameter and ITS occurrences.
 pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.flow else {
-        return empty_state(
-            Glyph::Search,
-            "No value trace yet",
-            "Right-click an identifier → Trace Value to see where it is set, passed and returned.",
-            None,
-        );
+        return empty_state(Glyph::Search, tr!("No value trace yet"), "", None);
     };
     let pending = app.proj.flow_pending == Some(tree.token);
-    let header = container(
-        row![
-            text(format!("`{}`", tree.symbol))
-                .size(ts::BODY)
-                .color(theme::accent())
-                .wrapping(Wrapping::None),
-            text(if pending {
-                "tracing…".to_string()
-            } else {
-                format!("{} places", tree.node_count())
-            })
-            .size(ts::CAPTION)
-            .color(theme::dim()),
-            space().width(Fill),
-            button(text("clear").size(ts::SMALL))
+    let header = tree_head(
+        &tree.symbol,
+        Some(if pending {
+            tr!("tracing…").to_string()
+        } else {
+            trn!("1 place", "{n} places", tree.node_count())
+        }),
+        vec![
+            button(text(tr!("Clear")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 7])
-                .on_press(Message::Flow(crate::FlowMsg::Clear)),
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .padding(Padding {
-        top: 6.0,
-        right: 8.0,
-        bottom: 6.0,
-        left: 10.0,
-    })
-    .style(theme::pane_header)
-    .width(Fill);
+                .on_press(Message::Flow(crate::FlowMsg::Clear))
+                .into(),
+        ],
+        None,
+    );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     if tree.stale {
         rows.push(
             container(
                 row![
-                    text("A traced file changed: rows marked changed were edited since the trace.")
+                    text(tr!("A traced file changed."))
                         .size(ts::CAPTION)
                         .color(theme::warning())
                         .width(Fill),
-                    button(text("trace again").size(ts::SMALL))
+                    button(text(tr!("Trace again")).size(ts::SMALL))
                         .style(theme::toolbar_button)
                         .padding([2, 7])
                         .on_press(Message::Flow(crate::FlowMsg::Retrace)),
@@ -1557,24 +1682,20 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         text("…")
             .size(ts::SMALL)
             .color(theme::accent())
-            .width(16)
+            .width(super::sidebar::CHEVRON_W)
+            .align_x(iced::Center)
             .into()
     } else if node.role == crate::app::flow::Role::Passed && node.callee.is_some() {
-        button(
-            text(if node.expanded { "▾" } else { "▸" })
-                .size(ts::SMALL)
-                .color(theme::dim()),
+        super::sidebar::chevron(
+            node.expanded,
+            Message::Flow(if node.children.is_some() {
+                crate::FlowMsg::Toggle { token, id }
+            } else {
+                crate::FlowMsg::Expand { token, id }
+            }),
         )
-        .style(theme::list_row(false))
-        .padding([0, 3])
-        .on_press(Message::Flow(if node.children.is_some() {
-            crate::FlowMsg::Toggle { token, id }
-        } else {
-            crate::FlowMsg::Expand { token, id }
-        }))
-        .into()
     } else {
-        space().width(16).into()
+        space().width(super::sidebar::CHEVRON_W).into()
     };
     let label = match node.role {
         crate::app::flow::Role::Passed => format!("→ {}", node.detail),
@@ -1585,7 +1706,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
     };
     let where_ = format!("{}:{}", node.rel, node.line + 1);
     let changed: Element<'_, Message> = if node.changed {
-        text("changed")
+        text(tr!("changed"))
             .size(ts::CAPTION)
             .color(theme::warning())
             .into()
@@ -1602,7 +1723,7 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         text(if node.classified {
             node.text.clone()
         } else {
-            "(line not read)".to_string()
+            tr!("(line not read)").to_string()
         })
         .size(ts::SMALL)
         .font(crate::fonts::CODE)
@@ -1638,41 +1759,30 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
 /// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.call_graph else {
+        // How to fill it: the tab alone gave no way in.
         return empty_state(
             Glyph::CallGraph,
-            "No call hierarchy yet",
-            "Put the cursor on a function and press gc, or right-click it → Call Hierarchy.",
+            tr!("No call hierarchy yet"),
+            tr!("Right-click a function and choose Call Hierarchy."),
             None,
         );
     };
 
-    let header = container(
-        row![
-            text(&tree.root_name)
-                .size(ts::BODY)
-                .color(theme::accent())
-                .wrapping(Wrapping::None),
-            space().width(Fill),
-            button(text("⇊ all").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 7])
-                .on_press(Message::Calls(CallsMsg::ExpandAll)),
-            button(text(tree.direction.label()).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Calls(CallsMsg::Direction)),
-        ]
-        .spacing(4)
-        .align_y(iced::Center),
-    )
-    .padding(Padding {
-        top: 6.0,
-        right: 8.0,
-        bottom: 6.0,
-        left: 10.0,
-    })
-    .style(theme::pane_header)
-    .width(Fill);
+    use crate::graph::callgraph::Direction;
+    let header = tree_head(
+        &tree.root_name,
+        None,
+        vec![expand_all(Message::Calls(CallsMsg::ExpandAll))],
+        Some(direction_switch(
+            [Direction::Incoming, Direction::Outgoing].map(|d| {
+                (
+                    crate::i18n::lookup(d.label()),
+                    tree.direction == d,
+                    Message::Calls(CallsMsg::Direction),
+                )
+            }),
+        )),
+    );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for id in tree.visible() {
@@ -1683,32 +1793,29 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
             text("…")
                 .size(ts::SMALL)
                 .color(theme::accent())
-                .width(16)
+                .width(super::sidebar::CHEVRON_W)
+                .align_x(iced::Center)
                 .into()
         } else if node.cyclic {
             text("↺")
                 .size(ts::SMALL)
                 .color(theme::dim())
-                .width(16)
+                .width(super::sidebar::CHEVRON_W)
+                .align_x(iced::Center)
                 .into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
-            space().width(16).into()
+            space().width(super::sidebar::CHEVRON_W).into()
         } else {
-            button(
-                text(if node.expanded { "▾" } else { "▸" })
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-            )
-            .style(theme::list_row(false))
-            .padding([0, 3])
             // Names the tree it was drawn from: node ids are bare indices, so
             // a click that lands after a direction flip or a new hierarchy
             // must act on nothing rather than on the new tree's node `id`.
-            .on_press(Message::Calls(CallsMsg::ExpandNode {
-                token: tree.token,
-                id,
-            }))
-            .into()
+            super::sidebar::chevron(
+                node.expanded,
+                Message::Calls(CallsMsg::ExpandNode {
+                    token: tree.token,
+                    id,
+                }),
+            )
         };
 
         let kind = kind_short(node.item.kind);
@@ -1760,6 +1867,15 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         if let Some(note) = tree.hidden_note(id) {
             rows.push(tree_note_row(node.depth + 1, note));
         }
+        // The function asked about has none: said, where the panel otherwise
+        // showed its name and nothing under it, as if it were still loading.
+        if node.depth == 0 && node.children.as_ref().is_some_and(|c| c.is_empty()) {
+            let none = match tree.direction {
+                Direction::Incoming => tr!("No callers found"),
+                Direction::Outgoing => tr!("No callees found"),
+            };
+            rows.push(tree_empty_row(1, none.to_string()));
+        }
     }
 
     // The banner sits in a slot that is always there (zero-size while there
@@ -1767,7 +1883,10 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     // position, iced rebuilt it at the top, and the reader lost their place.
     let stale: Element<'_, Message> = if tree.stale {
         tree_banner(
-            "⟳ code changed — press gc to refresh".into(),
+            format!(
+                "⟳ {}",
+                tr!("Code changed — press {keys} to refresh", keys = "gc")
+            ),
             theme::warning(),
         )
     } else {
@@ -1792,14 +1911,16 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     let Some(tree) = &app.proj.import_tree else {
         return container(
             column![
-                text("No file focused.").size(ts::BODY).color(theme::dim()),
+                text(tr!("No file focused."))
+                    .size(ts::BODY)
+                    .color(theme::dim()),
                 space().height(6),
-                text("Open a source file to see what it")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-                text("imports and what imports it.")
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
+                text(tr!(
+                    "Open a source file to see what it imports and what imports it."
+                ))
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::Word),
             ]
             .spacing(2),
         )
@@ -1807,33 +1928,19 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         .into();
     };
 
-    let header = container(
-        row![
-            text(&tree.root_name)
-                .size(ts::BODY)
-                .color(theme::accent())
-                .wrapping(Wrapping::None),
-            space().width(Fill),
-            button(text("⇊ all").size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 7])
-                .on_press(Message::Graph(GraphMsg::ImportExpandAll)),
-            button(text(tree.direction.label()).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Graph(GraphMsg::ImportDirection)),
-        ]
-        .spacing(4)
-        .align_y(iced::Center),
-    )
-    .padding(Padding {
-        top: 6.0,
-        right: 8.0,
-        bottom: 6.0,
-        left: 10.0,
-    })
-    .style(theme::pane_header)
-    .width(Fill);
+    use crate::graph::imports::Dir;
+    let header = tree_head(
+        &tree.root_name,
+        None,
+        vec![expand_all(Message::Graph(GraphMsg::ImportExpandAll))],
+        Some(direction_switch([Dir::Imports, Dir::Importers].map(|d| {
+            (
+                crate::i18n::lookup(d.label()),
+                tree.direction == d,
+                Message::Graph(GraphMsg::ImportDirection),
+            )
+        }))),
+    );
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     for id in tree.visible() {
@@ -1845,23 +1952,19 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             text("↺")
                 .size(ts::SMALL)
                 .color(theme::dim())
-                .width(16)
+                .width(super::sidebar::CHEVRON_W)
+                .align_x(iced::Center)
                 .into()
         } else if node.children.as_ref().is_some_and(|c| c.is_empty()) {
-            space().width(16).into()
+            space().width(super::sidebar::CHEVRON_W).into()
         } else {
-            button(
-                text(if node.expanded { "▾" } else { "▸" })
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
+            super::sidebar::chevron(
+                node.expanded,
+                Message::Graph(GraphMsg::ImportExpand {
+                    token: app.proj.import_tree_token,
+                    id,
+                }),
             )
-            .style(theme::list_row(false))
-            .padding([0, 3])
-            .on_press(Message::Graph(GraphMsg::ImportExpand {
-                token: app.proj.import_tree_token,
-                id,
-            }))
-            .into()
         };
 
         // Internal files open on click; external/unresolved are dim leaves.
@@ -1893,7 +1996,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                     space().width(6),
-                    text("ext").size(ts::CAPTION).color(theme::dim()),
+                    text(tr!("ext")).size(ts::CAPTION).color(theme::dim()),
                 ]
                 .align_y(iced::Center),
             )
@@ -1934,14 +2037,14 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
     let cycles: Element<'_, Message> = match app.proj.import_cycles.len() {
         0 => slot(),
         n => tree_banner(
-            format!("⚠ {n} import cycle{}", if n == 1 { "" } else { "s" }),
+            format!("⚠ {}", trn!("1 import cycle", "{n} import cycles", n)),
             theme::warning(),
         ),
     };
     // The graph under this tree is built from the symbol index; files the
     // index had to leave out have no edges here, so say which were left out.
     let capped: Element<'_, Message> = match index_cap_note(app) {
-        Some(note) => tree_banner(format!("Index incomplete: {note}"), theme::dim()),
+        Some(note) => tree_banner(tr!("Index incomplete: {note}", note = note), theme::dim()),
         None => slot(),
     };
     column![
@@ -1954,4 +2057,75 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .height(Fill),
     ]
     .into()
+}
+
+/// How deep the variables panel opens values into values.
+const MAX_VAR_DEPTH: usize = 12;
+
+/// `vars` as the panel's rows, `depth` levels in: `name = value`, a value
+/// with children opening and closing on a click, its children under it
+/// once read. A group with no value of its own (debugpy's "class
+/// variables") says only its name: it was drawn "class variables =".
+fn push_var_rows<'a>(
+    app: &'a App,
+    vars: &'a [crate::dap::Variable],
+    depth: usize,
+    out: &mut Vec<Element<'a, Message>>,
+) {
+    for v in vars {
+        let reference = v.variables_reference;
+        let opens = reference > 0 && depth < MAX_VAR_DEPTH;
+        let open = opens && app.debug.open_vars.contains(&reference);
+        let marker: Element<'a, Message> = if opens {
+            glyph::icon(
+                if open {
+                    Glyph::ChevronDown
+                } else {
+                    Glyph::ChevronRight
+                },
+                theme::dim(),
+                10.0,
+            )
+        } else {
+            space().width(10).into()
+        };
+        let mut line = row![
+            space().width(depth as f32 * 12.0),
+            marker,
+            text(v.name.clone()).size(ts::SMALL).color(theme::warning()),
+        ]
+        .spacing(3)
+        .align_y(iced::Center);
+        if !v.value.is_empty() {
+            line = line
+                .push(text("=").size(ts::SMALL).color(theme::dim()))
+                .push(
+                    text(v.value.clone())
+                        .size(ts::SMALL)
+                        .color(theme::fg())
+                        .wrapping(Wrapping::None),
+                );
+        }
+        out.push(if opens {
+            button(line)
+                .style(theme::list_row(false))
+                .padding(0)
+                .on_press(Message::Debug(DebugMsg::ToggleVar(reference)))
+                .into()
+        } else {
+            line.into()
+        });
+        if open {
+            match app.debug.var_children.get(&reference) {
+                Some(children) => push_var_rows(app, children, depth + 1, out),
+                None => out.push(
+                    row![
+                        space().width((depth + 1) as f32 * 12.0 + 13.0),
+                        text("…").size(ts::SMALL).color(theme::dim()),
+                    ]
+                    .into(),
+                ),
+            }
+        }
+    }
 }

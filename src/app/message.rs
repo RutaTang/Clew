@@ -257,6 +257,22 @@ pub enum ProjectMsg {
     /// `crate::app::model::Question`).
     ConsentAllowed(PathBuf),
     ConsentDenied(PathBuf),
+    /// Show the setup sheet over the open project: what to set up, or
+    /// Explain All asking first.
+    SetupShow(crate::app::setup::SetupMode),
+    /// The look at the project the sheet is for is in.
+    SetupCounted {
+        root: PathBuf,
+        census: crate::app::setup::Census,
+    },
+    /// The sheet's language-servers tick.
+    SetupServers(bool),
+    /// The sheet's explain tick.
+    SetupExplain(bool),
+    /// The sheet's Apply (or Explain).
+    SetupApply,
+    /// Put the sheet away (not a first open's: that is answered).
+    SetupClose,
     /// The client-side (fallback) scan finished. Its stamp is transport-bound
     /// (the transport and the project instance it was started under): the
     /// root alone cannot tell a local scan of `/p` from a
@@ -561,6 +577,12 @@ pub enum HoverMsg {
 #[derive(Debug, Clone)]
 pub enum NavMsg {
     SearchQueryChanged(String),
+    /// Typing in the search sidebar paused: search, if `typed` is still the
+    /// latest edit ([`SearchState::typed`](crate::app::model::SearchState)).
+    SearchSettled {
+        stamp: Stamp,
+        typed: u64,
+    },
     SearchSubmitted,
     SearchDone {
         stamp: Stamp,
@@ -583,6 +605,8 @@ pub enum NavMsg {
     FinderPick {
         abs: PathBuf,
         line: Option<usize>,
+        /// The symbol's name, for a symbol: the caret lands on it.
+        name: Option<String>,
     },
     FinderConfirm,
     /// Open the command bar: the finder, its suggestions showing.
@@ -615,11 +639,21 @@ pub enum NavMsg {
         seq: u64,
         previews: Vec<(usize, String)>,
     },
+    /// The Search sidebar's previews in their languages' colours, one per
+    /// hit, for the colouring `generation` (`SearchState::styled_gen`).
+    PreviewsStyled {
+        stamp: Stamp,
+        generation: u64,
+        styled: Vec<Vec<(String, Option<u8>)>>,
+    },
     /// Jump to the exact line where `caller` calls `callee` (from CALLED BY),
     /// resolved live from the caller file; falls back to the caller's definition.
     JumpToCall {
         caller_file: PathBuf,
         caller: String,
+        /// Where the caller is defined (1-based): which of the file's
+        /// same-name functions (`Item.total`, `Cart.total`) it is.
+        caller_line: usize,
         callee: String,
     },
 }
@@ -706,6 +740,9 @@ pub enum CallsMsg {
     Requested,
     /// Open the call hierarchy from the right-click context menu.
     FromMenu,
+    /// Open the call hierarchy of the function the margin's Calls is about
+    /// (its "Open the call hierarchy").
+    OfFunction,
     /// `prepareCallHierarchy` resolved the anchor item(s). `token` was minted
     /// at request time; only the awaited request may install a tree.
     Prepared {
@@ -999,7 +1036,9 @@ pub enum WalkMsg {
         /// superseded one is still saved into the library (it was paid for).
         seq: u64,
         scope: String,
-        result: Result<walkthrough::Walkthrough, String>,
+        /// The tour, or why there is none — a failure to parse the model's
+        /// answer being one a generation is retried once for.
+        result: Result<walkthrough::Walkthrough, walkthrough::Failure>,
     },
     /// Open the library tour with this scope for reading.
     Open(String),
@@ -1068,11 +1107,21 @@ pub enum AskMsg {
     Expand,
     /// Make the large window a card in the corner again.
     Shrink,
-    /// Keep the conversation in the margin, as a tab of its own.
-    KeepInMargin,
-    /// Take it out of the margin: a card over the code again.
-    Float,
-    /// Put the Ask window away.
+    /// Hide the card to its pill in the corner, the conversation kept.
+    Hide,
+    /// Start a new session: an empty card, the last one kept in the menu.
+    NewSession,
+    /// Open or close the menu of sessions under the card's title.
+    SessionsMenu(bool),
+    /// What the menu's search looks for changed.
+    SessionsQuery(String),
+    /// Enter in the menu's search: go back to the first session it found.
+    OpenFirstFound,
+    /// Go back to a session.
+    SwitchSession(u64),
+    /// Forget a session.
+    DeleteSession(u64),
+    /// Put Ask away: the pill goes too, until Ask is called again.
     Close,
     /// The Ask input box text changed.
     InputChanged(String),
@@ -1600,6 +1649,17 @@ pub enum DebugMsg {
     /// Remove a watch expression by identity (its text), from both the watch
     /// list and the last stop's evaluated values.
     WatchRemoveExpr(String),
+    /// Open or close a variable in the panel: its children, by its DAP
+    /// `variablesReference`, read when first opened at a stop.
+    ToggleVar(i64),
+    /// A variable's children, read at stop `stop` of run `run`.
+    VarChildren {
+        stamp: Stamp,
+        run: u64,
+        stop: u64,
+        reference: i64,
+        vars: Vec<crate::dap::Variable>,
+    },
     /// Toggle evaluating the hovered identifier in the paused debuggee. Off by
     /// default: an evaluation can run code (property getters, `Debug`
     /// impls) in the program being debugged, so it is opt-in.
@@ -1692,6 +1752,15 @@ pub enum LspMsg {
         generation: u64,
         result: Result<PathBuf, String>,
     },
+    /// A server fetched ahead of need (the setup sheet) is in, or failed —
+    /// not started: it starts when a file of its language opens. Same
+    /// staleness rule as [`LspMsg::DownloadResult`].
+    Fetched {
+        stamp: Stamp,
+        language: String,
+        generation: u64,
+        result: Result<PathBuf, String>,
+    },
     /// The off-thread staging of a repository-named language-server command
     /// (`lsp.toml` `command`) finished: its bytes were hashed and, when that
     /// fingerprint is already approved, copied to clew's private exec store.
@@ -1759,6 +1828,8 @@ pub enum DocsMsg {
 pub enum SettingsMsg {
     /// Set the Light/Dark/System appearance preference.
     SetThemePref(theme::ThemePref),
+    /// Speak another language, or follow the system's.
+    SetLanguage(crate::i18n::LangPref),
     /// The OS light/dark appearance changed (only acted on when following System).
     SystemAppearanceChanged,
     /// Another window changed the appearance. The palette is process-global,
@@ -1776,9 +1847,13 @@ pub enum SettingsMsg {
     EmbedKeyChanged(String),
     EmbedModelChanged(String),
     EmbedBaseUrlChanged(String),
-    /// Open / close the LLM settings modal.
+    /// Open / close the Settings modal: `Open` on the page it last showed,
+    /// `OpenAt` on the one a flow needs (Voice, for a model to download).
     Open,
+    OpenAt(SettingsPage),
     Close,
+    /// Show one of Settings' pages.
+    Page(SettingsPage),
     /// LLM settings draft edits.
     ProviderPicked(llm::Provider),
     KeyChanged(String),
@@ -1867,10 +1942,9 @@ pub enum WindowMsg {
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
     ToggleTargetMenu,
-    /// Open the "Keyboard Shortcuts" modal (from the More menu).
+    /// Show the keyboard shortcuts: Settings, on its Keyboard shortcuts
+    /// page.
     OpenShortcuts,
-    /// Close the "Keyboard Shortcuts" modal.
-    CloseShortcuts,
     /// Begin capturing a new chord for an action (click a binding).
     RebindStart(keymap::Action),
     /// Reset one action's binding to its default.
@@ -1887,12 +1961,19 @@ pub enum WindowMsg {
     ToggleInlineBlame,
     /// Toggle the lines down the code's indentation.
     ToggleIndentGuides,
+    /// A file picker could not be shown ([`crate::app::tasks::NoDialog`]).
+    NoFileDialog,
     /// Open / close the app menu of Windows and Linux (the top bar's ☰).
     ToggleAppMenu,
     /// Open / close the reader's View menu (the file tools' View ▾).
     ToggleViewMenu,
     /// The Files view's filter changed.
     FileFilterChanged(String),
+    /// Enter in the Files view's filter: open the first file it lists.
+    FileFilterSubmitted,
+    /// Escape in the Files view's filter, while it has the keyboard: clear
+    /// it (see `ui::escape_clears`).
+    FileFilterEscaped,
     /// Maximize the window, or make it a window again (Windows and Linux).
     ToggleMaximize,
     /// The reading panel's view picked.
@@ -2022,6 +2103,12 @@ impl ProjectMsg {
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
             | ProjectMsg::ConsentDenied(..)
+            | ProjectMsg::SetupShow(..)
+            | ProjectMsg::SetupCounted { .. }
+            | ProjectMsg::SetupServers(..)
+            | ProjectMsg::SetupExplain(..)
+            | ProjectMsg::SetupApply
+            | ProjectMsg::SetupClose
             | ProjectMsg::ToggleDir(..) => None,
         }
     }
@@ -2109,9 +2196,11 @@ impl NavMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             NavMsg::SearchDone { stamp, .. }
+            | NavMsg::SearchSettled { stamp, .. }
             | NavMsg::DefinitionResult { stamp, .. }
             | NavMsg::ReferencesResult { stamp, .. }
-            | NavMsg::LocationPreviews { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | NavMsg::LocationPreviews { stamp, .. }
+            | NavMsg::PreviewsStyled { stamp, .. } => Some(Origin::Stamped(stamp)),
             NavMsg::SearchQueryChanged(..)
             | NavMsg::SearchSubmitted
             | NavMsg::SearchToggle(..)
@@ -2170,6 +2259,7 @@ impl CallsMsg {
             }
             CallsMsg::Requested
             | CallsMsg::FromMenu
+            | CallsMsg::OfFunction
             | CallsMsg::ExpandNode { .. }
             | CallsMsg::Direction
             | CallsMsg::ExpandAll => None,
@@ -2379,8 +2469,13 @@ impl AskMsg {
             | AskMsg::Open
             | AskMsg::Expand
             | AskMsg::Shrink
-            | AskMsg::KeepInMargin
-            | AskMsg::Float
+            | AskMsg::Hide
+            | AskMsg::NewSession
+            | AskMsg::SessionsMenu(..)
+            | AskMsg::SessionsQuery(..)
+            | AskMsg::OpenFirstFound
+            | AskMsg::SwitchSession(..)
+            | AskMsg::DeleteSession(..)
             | AskMsg::Close
             | AskMsg::InputChanged(..)
             | AskMsg::Submit
@@ -2442,6 +2537,7 @@ impl DebugMsg {
             | DebugMsg::DapBreakpointsAnswered { stamp, .. }
             | DebugMsg::DapConfigured { stamp, .. }
             | DebugMsg::WatchesEvaluated { stamp, .. }
+            | DebugMsg::VarChildren { stamp, .. }
             | DebugMsg::Failed { stamp, .. }
             | DebugMsg::ChildFailed { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
@@ -2457,6 +2553,7 @@ impl DebugMsg {
             | DebugMsg::WatchInput(..)
             | DebugMsg::WatchAdd
             | DebugMsg::WatchRemoveExpr(..)
+            | DebugMsg::ToggleVar(..)
             | DebugMsg::ToggleHoverEval
             | DebugMsg::AdapterInstalled { .. } => None,
         }
@@ -2471,6 +2568,7 @@ impl LspMsg {
             LspMsg::InlayHintsLoaded { stamp, .. }
             | LspMsg::StartResult { stamp, .. }
             | LspMsg::DownloadResult { stamp, .. }
+            | LspMsg::Fetched { stamp, .. }
             | LspMsg::Staged { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
             LspMsg::ConsentAllowed(..)
@@ -2567,6 +2665,7 @@ impl SettingsMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             SettingsMsg::SetThemePref(..)
+            | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged
             | SettingsMsg::ThemeResynced
             | SettingsMsg::SetThemeVariant { .. }
@@ -2574,7 +2673,9 @@ impl SettingsMsg {
             | SettingsMsg::EmbedModelChanged(..)
             | SettingsMsg::EmbedBaseUrlChanged(..)
             | SettingsMsg::Open
+            | SettingsMsg::OpenAt(..)
             | SettingsMsg::Close
+            | SettingsMsg::Page(..)
             | SettingsMsg::ProviderPicked(..)
             | SettingsMsg::KeyChanged(..)
             | SettingsMsg::ModelChanged(..)
@@ -2630,7 +2731,6 @@ impl WindowMsg {
             | WindowMsg::ToggleToolsMenu
             | WindowMsg::ToggleTargetMenu
             | WindowMsg::OpenShortcuts
-            | WindowMsg::CloseShortcuts
             | WindowMsg::RebindStart(..)
             | WindowMsg::RebindReset(..)
             | WindowMsg::RebindResetAll
@@ -2639,9 +2739,12 @@ impl WindowMsg {
             | WindowMsg::ToggleMinimap
             | WindowMsg::ToggleInlineBlame
             | WindowMsg::ToggleIndentGuides
+            | WindowMsg::NoFileDialog
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
             | WindowMsg::FileFilterChanged(..)
+            | WindowMsg::FileFilterSubmitted
+            | WindowMsg::FileFilterEscaped
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
             | WindowMsg::MaximizedIs(..)

@@ -15,6 +15,7 @@ mod navigation_debug;
 mod palette;
 mod remote_state_refresh;
 mod semantic_space;
+mod setup;
 mod voice;
 mod windowtools;
 
@@ -908,6 +909,84 @@ fn going_back_to_the_file_on_screen_takes_back_the_load_it_cancels() {
         app.status, "Loading src/lib.rs…",
         "taken back while the other pane still waits for it"
     );
+}
+
+/// What the status line said before the language changed is known by the
+/// words it was said in, not by its words in the language spoken now: a
+/// load's "Loading B…" and a history's "Loading history…", said in French,
+/// are taken back once English is spoken. They were compared with their
+/// English words, and stayed up.
+#[test]
+fn a_loading_line_said_before_a_language_switch_is_still_taken_back() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("loading-said-before-a-switch");
+    open_synchronously(&mut app, "notes.txt", None);
+    with_lang(Lang::Fr, || {
+        let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+            rel: "src/lib.rs".into(),
+            line: None,
+        }));
+    });
+    assert_ne!(app.status, "Loading src/lib.rs…", "said in French");
+    let _ = app.update(Message::Editor(EditorMsg::OpenRel {
+        rel: "notes.txt".into(),
+        line: Some(1),
+    }));
+    assert_eq!(
+        app.status, "",
+        "the cancelled load still said it was coming"
+    );
+
+    let mut app = scanned_app("history-said-before-a-switch");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    with_lang(Lang::Fr, || {
+        let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    });
+    assert_ne!(app.status, "Loading history…", "said in French");
+    let _ = app.update(lib_history(&app, app.proj.time_gen));
+    assert!(app.proj.time_travel.is_some());
+    assert_eq!(
+        app.status, "",
+        "the history landed, its loading line still up"
+    );
+}
+
+/// The lines a close or a quit says as it waits for the host are known by
+/// the words they were said in: one said before the language changed is
+/// still counted down, and taken back as the wait ends; a "— retrying"
+/// said before is still not written over by the wait. Each was matched
+/// against its words in the language spoken now.
+#[test]
+fn a_waiting_line_said_before_a_language_switch_is_still_known() {
+    use crate::i18n::{Lang, with_lang};
+    let agreed = HashSet::new();
+    let mut app = blank_app();
+    app.show_waiting(true, &agreed);
+    let english = app.status.clone();
+    with_lang(Lang::Fr, || app.update_waiting(true, &agreed));
+    assert_ne!(app.status, english, "the wait is counted, now in French");
+    let french = app.status.clone();
+    app.end_waiting();
+    assert_eq!(app.status, "", "{french}: still up as the wait ended");
+
+    let tour = walkthrough::Walkthrough {
+        title: "tour".into(),
+        scope: "how it starts".into(),
+        steps: Vec::new(),
+    };
+    let (mut app, _, mut rx) = remote_app("waiting-said-before-a-switch");
+    let rel = walkthrough::LIBRARY_REL;
+    assert!(app.edit_remote_state(rel, walkthrough::merge_upsert(&tour).unwrap()));
+    let (sent, _) = took_state_edits(&mut rx, rel);
+    let [(request, _, _)] = sent.as_slice() else {
+        panic!("{sent:?}");
+    };
+    let _ = app.update(host_fails_one(&app, *request, "database is locked"));
+    let retrying = app.status.clone();
+    assert!(retrying.ends_with("— retrying"), "{retrying}");
+    with_lang(Lang::Fr, || app.update_waiting(true, &agreed));
+    assert_eq!(app.status, retrying, "the wait wrote over the retry");
 }
 
 /// A refusal for a read the window no longer waits on says nothing, as its
@@ -2390,6 +2469,58 @@ fn symbol_finder_flow() {
     let _ = app.update(Message::Reading(ReadingMsg::GoBack)); // no-op or previous loc; must not panic
 }
 
+/// The top bar's finder searches "files, symbols and commands": a
+/// function's name typed there lists the function after the files, and
+/// opening it lands the caret on its name.
+#[test]
+fn the_file_finder_finds_a_symbol_and_lands_on_its_name() {
+    let mut app = scanned_app("file-finder-symbols");
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        indexed: index::build_indexed(&root, files.clone()),
+    }));
+    settle_imports(&mut app, indexed);
+
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(
+        "origin".to_string(),
+    )));
+    let symbols = app.fresh_symbol_index();
+    let found = app
+        .proj
+        .finder
+        .results
+        .iter()
+        .position(|&i| i >= files.len() && symbols[i - files.len()].name == "origin")
+        .expect("the function is listed");
+    app.proj.finder.selected = found;
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert!(!app.proj.finder.open);
+    let target = root.join("src/lib.rs");
+    let content = read_text_file(&target).unwrap();
+    let req = app.proj.link.pane_pending[0].expect("open_file minted a load token");
+    let _ = app.update(Message::Editor(EditorMsg::FileLoaded {
+        stamp: app.stamp(),
+        req,
+        pane: 0,
+        abs: target,
+        target: Some(3),
+        result: Ok(content),
+    }));
+    // `pub fn origin() -> Point {`: on `origin`, not on `pub`.
+    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 7)));
+    // Nothing typed: the files alone.
+    let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(String::new())));
+    assert!(app.proj.finder.results.iter().all(|&i| i < files.len()));
+}
+
 #[test]
 fn goto_line_via_finder() {
     let mut app = scanned_app("goto");
@@ -2494,30 +2625,45 @@ fn a_launch_path_need_not_be_utf8() {
 
 /// Settings opened again while open — ⌘, again, or an action that asks
 /// for a key — leave the form as it stands: refilled, a key typed and not
-/// saved was lost, and the appearance Close goes back to became the one
-/// being previewed. And a window closed with Settings open puts back the
-/// appearance its preview changed, as Close does.
+/// yet saved was lost. Settings has no Save: what was typed is kept as it
+/// closes — by Close, and with the window — and closing with nothing typed
+/// writes nothing.
 #[test]
-fn settings_opened_again_or_closed_with_the_window_keep_what_was_there() {
-    use crate::theme::ThemePref;
+fn settings_keep_what_was_typed_as_they_close() {
+    let dir = test_dir("settings-close-keeps");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _env = data_dir_override(&dir);
     let mut app = blank_app();
     let _ = app.update(Message::Settings(SettingsMsg::Open));
-    let saved = app.settings.theme_snapshot;
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(!app.settings.open);
+    assert!(
+        !dir.join("config.toml").exists(),
+        "nothing typed, nothing written"
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
     app.settings.key = "typed, not saved".into();
-    let preview = if saved.0 == ThemePref::Light {
-        ThemePref::Dark
-    } else {
-        ThemePref::Light
-    };
-    let _ = app.update(Message::Settings(SettingsMsg::SetThemePref(preview)));
     let _ = app.update(Message::Settings(SettingsMsg::Open));
     assert_eq!(app.settings.key, "typed, not saved");
-    assert_eq!(app.settings.theme_snapshot, saved, "the saved appearance");
-    // The window goes, Settings open, the preview on.
-    assert_eq!(app.theme_pref, preview, "precondition: previewed");
-    let _ = app.on_window_closed();
-    assert_eq!(app.theme_pref, saved.0, "the preview went with the window");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
     assert!(!app.settings.open);
+    assert_eq!(
+        llm::Config::stored_key(),
+        "typed, not saved",
+        "kept by Close"
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    app.settings.key = "typed as the window closed".into();
+    let _ = app.on_window_closed();
+    assert!(!app.settings.open);
+    assert_eq!(
+        llm::Config::stored_key(),
+        "typed as the window closed",
+        "kept with the window"
+    );
 }
 
 /// A trail waiting to be written behind the one running when the window
@@ -2676,7 +2822,12 @@ fn a_file_outside_the_project_takes_no_bookmark_or_note() {
         symbol: "helper".into(),
     }));
     assert!(app.proj.reading_note_edit.is_none());
-    assert!(app.status.starts_with("Notes are kept"), "{}", app.status);
+    assert!(
+        app.status
+            .starts_with("Only the project's files can have notes"),
+        "{}",
+        app.status
+    );
     let _ = app.update(Message::Reading(ReadingMsg::NoteToggleUnderstood {
         rel,
         symbol: "helper".into(),
@@ -2776,7 +2927,7 @@ fn consent_gates_project_open() {
     ))));
     assert!(app.pending_consent.is_none());
     assert!(app.proj.project.is_none() && !app.scanning);
-    assert!(app.status.contains("not allowed"), "{}", app.status);
+    assert!(app.status.contains("not opened"), "{}", app.status);
     assert!(!clew_core::trust::Trust::load().is_root_trusted(None, &root));
 
     // A `.clew/` directory in the project does NOT imply consent: it ships with
@@ -2993,6 +3144,43 @@ fn opening_rust_prompts_for_server_download() {
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Declined(_))
     ));
+}
+
+/// What a language-server slot says is said in the language spoken when it
+/// is shown, in the status bar and on Settings → Languages alike. The slot
+/// keeps the English — clew's own words, clew-core's or the host's — where
+/// it kept a translation made as it was set, which stayed in that language
+/// after a switch until the project was reopened; and clew-core's words
+/// were shown in English whatever was spoken.
+#[test]
+fn a_language_server_slot_is_said_in_the_language_spoken_now() {
+    use crate::i18n::{Lang, with_lang};
+    let store = test_dir("lsp-slot-said-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let mut app = scanned_app("lsp-slot-said");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(consent_asked(&app))));
+    let _ = app.ensure_lsp("no-such-language");
+    let core = "jdtls is not available for this platform";
+    app.proj
+        .link
+        .lsp
+        .insert("java".into(), LspSlot::Unsupported(core.into()));
+    for (language, english) in [
+        ("rust", "server download declined"),
+        ("no-such-language", "no server for this language"),
+        ("java", core),
+    ] {
+        assert_eq!(app.lsp_status(language).as_deref(), Some(english));
+        assert_eq!(app.lsp_row(language).0, english);
+        with_lang(Lang::Fr, || {
+            let french = crate::i18n::message(english);
+            assert_ne!(french, english, "the catalog says it in French");
+            assert_eq!(app.lsp_status(language), Some(french.clone()), "{language}");
+            assert_eq!(app.lsp_row(language).0, french, "{language}");
+        });
+    }
 }
 
 /// The server panel lists only project-relevant languages — a Rust
@@ -3371,7 +3559,7 @@ fn a_server_that_builds_the_project_asks_before_it_starts() {
         "the question names what it runs, for this project"
     );
     assert!(
-        app.lsp_row("rust").0.contains("leave to build"),
+        app.lsp_row("rust").0.contains("permission to build"),
         "the panel must not read as a download: {:?}",
         app.lsp_row("rust").0
     );
@@ -3400,7 +3588,7 @@ fn a_server_that_builds_the_project_asks_before_it_starts() {
     assert!(asked(&app), "a fresh start asks again");
     assert_eq!(
         app.lsp_status("rust").as_deref(),
-        Some("waiting for leave to build the project"),
+        Some("waiting for permission to build the project"),
         "the status bar must not read as a download"
     );
     let _ = app.update(Message::Lsp(LspMsg::ConsentAllowed(consent_asked(&app))));
@@ -4406,9 +4594,21 @@ fn definition_result_jumps_and_records_history() {
         result: Ok(content),
     }));
     assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
-    // The cursor moves to the jump target (line 3 → 0-based line 2).
-    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 0)));
+    // The cursor moves to the jump target (line 3 → 0-based line 2), on the
+    // name it defines: `origin`, from the character the server named.
+    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 7)));
     assert!(app.proj.history.can_back(), "definition jump is undoable");
+    // A definition in the file already open lands on its name too.
+    let _ = app.update(Message::Nav(NavMsg::DefinitionResult {
+        stamp: app.stamp(),
+        seq: app.proj.goto_seq,
+        result: Ok(vec![lsp::client::Target {
+            path: app.active_viewer().unwrap().abs.clone(),
+            line: 0,
+            character: 11,
+        }]),
+    }));
+    assert_eq!(app.active_viewer().unwrap().caret, Some((0, 11)));
 }
 
 /// Full chain against a real rust-analyzer via the escape hatch: scan →
@@ -4800,6 +5000,170 @@ fn stale_search_result_is_dropped() {
         app.proj.search.running,
         "only the live submission may finish the spinner"
     );
+}
+
+/// Debug with no launch.json runs the script open in the active pane (it
+/// used to only say to write a config), while a program that must be built
+/// still needs one; and the adapter's telemetry ("ptvsd", "debugpy") stays
+/// out of the program's output, as the protocol has it.
+#[test]
+fn debug_runs_the_open_script_without_a_config_and_hides_telemetry() {
+    let mut app = scanned_app("debug-script");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    // A Rust file names no program to run.
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.start_debug();
+    assert!(app.debug.session.is_none());
+    assert!(app.status.contains("launch.json"), "{}", app.status);
+    assert!(
+        !app.status.contains(&*root.to_string_lossy()),
+        "the hint names the config by where it goes in the project: {}",
+        app.status
+    );
+
+    std::fs::write(root.join("app.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "app.py", None);
+    let _ = app.start_debug();
+    let session = app.debug.session.as_ref().expect("the script is debugged");
+    assert_eq!(session.program, root.join("app.py"));
+    assert_eq!(session.cwd, root);
+
+    let run = app.debug_run;
+    for (category, text) in [("telemetry", "ptvsd"), ("stdout", "hi\n")] {
+        let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+            stamp: app.transport_stamp(),
+            run,
+            event: dap::DapEvent::Output(dap::proto::Output {
+                category: category.into(),
+                text: text.into(),
+            }),
+        }));
+    }
+    let shown: String = app
+        .debug
+        .session
+        .as_ref()
+        .unwrap()
+        .output
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .collect();
+    assert!(shown.contains("hi"), "{shown:?}");
+    assert!(!shown.contains("ptvsd"), "{shown:?}");
+}
+
+/// A variable with children opens in the panel (it could not: debugpy's
+/// globals sat behind three value-less "… variables =" rows): its children
+/// are kept for the stop they were read at, and a reply for a stop already
+/// left is dropped, as is everything open once the program moves.
+#[test]
+fn debug_variables_open_into_their_children_for_the_stop() {
+    let mut app = scanned_app("debug-vars");
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    let child = |name: &str| crate::dap::Variable {
+        name: name.into(),
+        value: "1".into(),
+        type_name: None,
+        variables_reference: 0,
+    };
+    let (run, stop) = (app.debug_run, app.debug_stop);
+    let _ = app.update(Message::Debug(DebugMsg::ToggleVar(7)));
+    assert!(app.debug.open_vars.contains(&7));
+    let _ = app.update(Message::Debug(DebugMsg::VarChildren {
+        stamp: app.debug_stamp(),
+        run,
+        stop: stop.wrapping_sub(1),
+        reference: 7,
+        vars: vec![child("stale")],
+    }));
+    assert!(
+        app.debug.var_children.is_empty(),
+        "a past stop's children landed"
+    );
+    let _ = app.update(Message::Debug(DebugMsg::VarChildren {
+        stamp: app.debug_stamp(),
+        run,
+        stop,
+        reference: 7,
+        vars: vec![child("main")],
+    }));
+    assert_eq!(app.debug.var_children[&7][0].name, "main");
+    // Closed and opened again: no second read, the children are still there.
+    let _ = app.update(Message::Debug(DebugMsg::ToggleVar(7)));
+    assert!(!app.debug.open_vars.contains(&7));
+    let _ = app.update(Message::Debug(DebugMsg::ToggleVar(7)));
+    assert!(app.debug.var_children.contains_key(&7));
+    // The program moves on: what was open named values of the stop it left.
+    app.bump_debug_stop();
+    assert!(app.debug.open_vars.is_empty() && app.debug.var_children.is_empty());
+}
+
+/// The status line stops saying the debugger runs once the run is over:
+/// "Debugger running…" stayed under a program that had exited. What else
+/// was said since is left; and a run going on after a stop says so again.
+#[test]
+fn a_finished_run_is_no_longer_said_to_be_running() {
+    let mut app = scanned_app("debug-said");
+    let session = || DebugSession {
+        client: None,
+        status: DebugStatus::Running,
+        thread_id: None,
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    };
+    app.debug_run = 1;
+    let event = |app: &mut App, event| {
+        let _ = app.update(Message::Debug(DebugMsg::DapEvent {
+            stamp: app.transport_stamp(),
+            run: 1,
+            event,
+        }));
+    };
+    for end in [dap::DapEvent::Exited { code: 0 }, dap::DapEvent::Terminated] {
+        app.debug.session = Some(session());
+        app.say_debug_state(tr!("Debugger running…").into());
+        event(&mut app, end);
+        assert!(app.status.is_empty(), "{}", app.status);
+    }
+
+    // Something said since is not the debugger's to take down.
+    app.debug.session = Some(session());
+    app.say_debug_state(tr!("Debugger running…").into());
+    app.status = "Saved the note".into();
+    event(&mut app, dap::DapEvent::Terminated);
+    assert_eq!(app.status, "Saved the note");
+
+    // Stopped, then running again.
+    app.debug.session = Some(session());
+    app.say_debug_state(tr!("Stopped: {reason}", reason = "breakpoint"));
+    event(
+        &mut app,
+        dap::DapEvent::Continued {
+            thread_id: None,
+            all_threads: true,
+        },
+    );
+    assert_eq!(app.status, tr!("Debugger running…"));
 }
 
 /// A late event from a stopped debug run must not land on the next session.
@@ -5261,6 +5625,62 @@ fn connect_bootstrap_failure_clears_the_scanning_placeholder() {
     assert!(
         !app.scanning,
         "the abandoned scan must not leave the window masked"
+    );
+    assert!(
+        app.status.contains("host key has CHANGED"),
+        "the status line went on saying it was connecting: {:?}",
+        app.status
+    );
+}
+
+/// A connect that fails from the modal leaves the window saying so — the
+/// welcome read "Connected to …" over a host never reached — and
+/// "Disconnect and read local code" goes back to the local project the window
+/// left for it, not to an empty window. Once the local server is up, its
+/// "Connecting to Local…" headline goes too.
+#[test]
+fn a_failed_connect_says_so_and_disconnect_reads_the_local_project_again() {
+    let mut app = scanned_app("connect-failed-back-local");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let host = crate::connect::SavedConnection {
+        name: String::new(),
+        host: "h.example".into(),
+        user: "root".into(),
+        port: 2222,
+        identity: String::new(),
+        send_ai_keys: false,
+    };
+    app.connect = Some(ConnectUi::default());
+    let _ = app.connect_to(host.target());
+    assert!(
+        app.proj.project.is_none(),
+        "going remote closes the local project"
+    );
+    assert_eq!(app.left_local.as_deref(), Some(root.as_path()));
+
+    let _ = app.update(Message::Server(ServerMsg::Unavailable {
+        conn: app.conn_gen,
+        reason: "ssh is not installed here".into(),
+    }));
+    assert!(
+        app.handshake_failure.is_some(),
+        "the window must know the host was not reached"
+    );
+
+    let _ = app.update(Message::Connect(ConnectMsg::Disconnect));
+    assert!(!app.connection.is_remote());
+    assert!(app.left_local.is_none());
+    let reopening = app.pending_scan_root.as_deref() == Some(root.as_path())
+        || app.pending_consent.as_deref() == Some(root.as_path());
+    assert!(reopening, "the local project is not opened again");
+
+    // The local transport's handshake lands: the headline has done its job.
+    app.status = tr!("Connecting to {host}…", host = app.connection.label());
+    let _ = app.on_server_ready();
+    assert!(
+        !app.status.contains("Connecting to"),
+        "the status line still says {:?}",
+        app.status
     );
 }
 
@@ -6148,7 +6568,7 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
     // sent, carrying no keys. Sending nothing at all was the bug: it left a
     // server that had been granted the keys earlier still holding them.
     match rx.try_recv().expect("SetAiConfig is always sent").request {
-        clew_protocol::Request::SetAiConfig { chat, embed } => {
+        clew_protocol::Request::SetAiConfig { chat, embed, .. } => {
             assert!(chat.is_none() && embed.is_none(), "no keys without opt-in");
         }
         other => panic!("expected SetAiConfig, got {other:?}"),
@@ -6168,7 +6588,7 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
         .expect("revoking must reach the server")
         .request
     {
-        clew_protocol::Request::SetAiConfig { chat, embed } => {
+        clew_protocol::Request::SetAiConfig { chat, embed, .. } => {
             assert!(
                 chat.is_none() && embed.is_none(),
                 "revocation clears the keys"
@@ -6181,6 +6601,41 @@ fn remote_without_opt_in_keeps_ai_keys_on_the_client() {
     app.remote_ai_opt_in = true;
     let _ = app.connect_to(crate::backend::connect::ConnTarget::Local);
     assert!(!app.remote_ai_opt_in);
+}
+
+/// The server is told the language the reader reads with the AI config,
+/// whatever that holds — no keys granted included — and so again when the
+/// language changes (here in another window, which `ThemeResynced` brings):
+/// the language servers it starts from then on are told it. Only `Hello`
+/// told it, and only the language read as the window connected.
+#[test]
+fn the_server_is_told_the_language_the_reader_reads_now() {
+    use crate::i18n::{Lang, with_lang};
+    let mut app = scanned_app("server-told-the-language");
+    app.connection = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let mut rx = attach_server(&mut app);
+    for (lang, locale) in [
+        (Lang::Fr, Some("fr")),
+        (Lang::En, None),
+        (Lang::Zh, Some("zh-cn")),
+    ] {
+        while rx.try_recv().is_ok() {}
+        with_lang(lang, || {
+            let _ = app.update(Message::Settings(SettingsMsg::ThemeResynced));
+        });
+        let told = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|m| match m.request {
+            clew_protocol::Request::SetAiConfig { chat, locale, .. } => Some((chat, locale)),
+            _ => None,
+        });
+        let Some((chat, told)) = told else {
+            panic!("{lang:?}: the server was not told");
+        };
+        assert!(chat.is_none(), "no keys without the host's grant");
+        assert_eq!(told.as_deref(), locale, "{lang:?}");
+    }
 }
 
 /// Same-name methods in one file (different impls' `new`) get distinct explain
@@ -6636,7 +7091,7 @@ fn a_remote_debug_adapter_is_killed_once_however_the_run_ends() {
     };
     let (seen, status) = remote_debug_run("dap-remote-launch", unparsable, answers, "");
     assert_eq!(seen, ["kill"]);
-    assert!(status.contains("bad launch config"), "{status}");
+    assert!(status.contains("invalid launch configuration"), "{status}");
 
     let (seen, status) = remote_debug_run(
         "dap-remote-reply",
@@ -7638,6 +8093,582 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
         Some("mine"),
         "the generated tour is opened"
     );
+}
+
+/// Work that ends by showing its answer leaves no "…ing" behind it: the
+/// status line went on saying "Explaining why…" under the answer, and
+/// "Generating walkthrough…" over the tour it had generated. A line said
+/// since (a save that failed) is not cleared.
+#[test]
+fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
+    let mut app = scanned_app("busy-status-settles");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let epoch = app.project_epoch;
+    let stamp = || Stamp {
+        root: Some(root.clone()),
+        epoch,
+        conn: None,
+    };
+
+    // Why is this line here?
+    app.blame_why_seq += 1;
+    let token = app.blame_why_seq;
+    app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        token,
+        title: "Why line 3 exists".into(),
+        commits: vec![("abc1234".into(), "Add it".into())],
+        loading: true,
+        prepared: Vec::new(),
+    });
+    app.status = tr!("Explaining why…").into();
+    let s = stamp();
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
+        stamp: s,
+        token,
+        title: "Why line 3 exists".into(),
+        commits: vec![("abc1234".into(), "Add it".into())],
+        result: Ok("Because.".into()),
+    }));
+    assert!(app.status.is_empty(), "still says {:?}", app.status);
+
+    // A walkthrough.
+    app.status = tr!("Generating walkthrough…").into();
+    app.proj.walk.seq += 1;
+    app.proj.walk.pending = Some(app.proj.walk.seq);
+    let tour = walkthrough::Walkthrough {
+        title: "Tour".into(),
+        scope: String::new(),
+        steps: vec![walkthrough::Step {
+            title: "s".into(),
+            file: "src/lib.rs".into(),
+            symbol: None,
+            line: Some(1),
+            narration: "n".into(),
+        }],
+    };
+    let s = stamp();
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: s,
+        seq: app.proj.walk.seq,
+        scope: "tour".into(),
+        result: Ok(tour),
+    }));
+    assert!(
+        !app.status.contains("Generating walkthrough"),
+        "still says {:?}",
+        app.status
+    );
+
+    // Something said since stays.
+    app.status = "Saved".into();
+    app.settle_status(&[tr!("Explaining why…")]);
+    assert_eq!(app.status, "Saved");
+}
+
+/// A jump onto a type is named for it in the reading trail, as a jump onto
+/// a function is: Go to Type Definition onto `class Item` left a stop read
+/// as `cart.py:6`.
+#[test]
+fn a_jump_onto_a_type_is_named_in_the_trail() {
+    let mut app = scanned_app("trail-names-types");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let symbol = |name: &str, kind: &str, line: usize| SymbolEntry {
+        name: name.into(),
+        kind: kind.into(),
+        rel: "src/lib.rs".into(),
+        abs: lib.clone(),
+        line,
+        is_test: false,
+        entry: None,
+    };
+    app.proj.symbol_index_by_file.insert(
+        lib.clone(),
+        Arc::new(vec![
+            symbol("Point", "struct", 1),
+            symbol("origin", "function", 3),
+        ]),
+    );
+    let _ = app.open_file(lib.clone(), Some(1), true);
+    let _ = app.open_file(lib.clone(), Some(3), true);
+    let labels: Vec<Option<String>> = app
+        .proj
+        .history
+        .flatten_with(&std::collections::HashSet::new())
+        .into_iter()
+        .map(|v| v.label)
+        .collect();
+    assert!(
+        labels.contains(&Some("Point".into())),
+        "the struct's stop is unnamed: {labels:?}"
+    );
+    assert!(labels.contains(&Some("origin".into())), "{labels:?}");
+}
+
+/// Enter in the Files view's filter opens the first file it lists, as a
+/// click on that row does; with nothing listed, nothing opens.
+#[test]
+fn enter_in_the_file_filter_opens_its_first_file() {
+    let mut app = scanned_app("filter-enter");
+    app.file_filter = " NOTES ".into();
+    let sent = run_task(app.update(Message::Window(WindowMsg::FileFilterSubmitted)));
+    assert!(
+        matches!(sent.as_slice(), [Message::Editor(EditorMsg::OpenRel { rel, line: None })]
+            if rel == "notes.txt"),
+        "{sent:?}"
+    );
+    app.file_filter = "nothing-like-this".into();
+    let sent = run_task(app.update(Message::Window(WindowMsg::FileFilterSubmitted)));
+    assert!(sent.is_empty(), "{sent:?}");
+}
+
+/// A result's preview is coloured as its language reads (the ellipsis it
+/// was cut with left plain) and keeps exactly its text; a word under the
+/// caret is the identifier around it.
+#[test]
+fn previews_are_coloured_and_keep_their_text() {
+    use crate::app::navigation::{preview_spans, word_at_byte};
+    let spans = preview_spans("…lf.price * self.quantity", Some("python"));
+    assert_eq!(spans[0], ("…".to_string(), None));
+    assert_eq!(
+        spans.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+        "…lf.price * self.quantity"
+    );
+    let spans = preview_spans("return round(amount, 2)", Some("python"));
+    let style_of = |word: &str| spans.iter().find(|(t, _)| t == word).and_then(|(_, s)| *s);
+    assert!(style_of("return").is_some(), "{spans:?}");
+    assert_ne!(style_of("return"), style_of("round"));
+    // An unknown language: one plain span.
+    assert_eq!(
+        preview_spans("some text", None),
+        [("some text".to_string(), None)]
+    );
+    assert_eq!(word_at_byte("cart = Cart()", 8).as_deref(), Some("Cart"));
+    assert_eq!(word_at_byte("cart = Cart()", 7).as_deref(), Some("Cart"));
+    assert_eq!(word_at_byte("cart = Cart()", 11).as_deref(), Some("Cart"));
+    assert_eq!(word_at_byte("a + b", 2), None);
+}
+
+/// A search's results come coloured, each preview with its matches marked:
+/// they were plain text. Coloured off the UI thread, they are taken only for
+/// the list they were made for.
+#[test]
+fn search_results_are_coloured_and_marked() {
+    let mut app = scanned_app("search-colours");
+    app.proj.search.query = "origin".into();
+    let ran = app.update(Message::Nav(NavMsg::SearchSubmitted));
+    for m in run_task(ran) {
+        for styled in run_task(app.update(m)) {
+            let _ = app.update(styled);
+        }
+    }
+    let search = &app.proj.search;
+    let i = search
+        .hits
+        .iter()
+        .position(|h| h.rel == "src/lib.rs")
+        .expect("lib.rs has an origin");
+    let preview = &search.hits[i].preview;
+    assert_eq!(preview, "pub fn origin() -> Point {");
+    let spans = &search.styled[i];
+    assert!(spans.iter().any(|(_, style)| style.is_some()), "{spans:?}");
+    let marks = search.matcher.as_ref().expect("a matcher").ranges(preview);
+    assert_eq!(marks, [(7, 13)]);
+    let pieces = crate::ui::mark_spans(spans, &marks);
+    assert_eq!(
+        pieces
+            .iter()
+            .filter(|(_, _, marked)| *marked)
+            .map(|(t, _, _)| t.as_str())
+            .collect::<String>(),
+        "origin"
+    );
+
+    // A colouring asked for before a newer one is not taken.
+    let stale = Message::Nav(NavMsg::PreviewsStyled {
+        stamp: app.stamp(),
+        generation: app.proj.search.styled_gen - 1,
+        styled: vec![Vec::new(); app.proj.search.hits.len()],
+    });
+    let _ = app.update(stale);
+    assert!(!app.proj.search.styled[i].is_empty());
+    // Cleared with the results.
+    let _ = app.update(Message::Nav(NavMsg::SearchQueryChanged(String::new())));
+    assert!(app.proj.search.styled.is_empty() && app.proj.search.matcher.is_none());
+}
+
+/// A reference list shown in the Search sidebar leaves the search box as
+/// the reader left it: the list's label was written into it, so the box
+/// read "(references)", and an option toggled or a glob typed then searched
+/// the project for "(references)". Searching again shows the search's own
+/// results, under no label.
+#[test]
+fn a_reference_list_leaves_the_search_box_alone() {
+    let mut app = scanned_app("refs-keep-query");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.search.query = "needle".into();
+    let _ = app.show_locations(
+        "(references)",
+        vec![lsp::client::Target {
+            path: root.join("src/lib.rs"),
+            line: 2,
+            character: 7,
+        }],
+        crate::viewer::PositionEncoding::Utf16,
+    );
+    assert_eq!(app.proj.search.query, "needle");
+    assert_eq!(app.proj.search.listing.as_deref(), Some("(references)"));
+    assert_eq!(app.proj.search.hits.len(), 1);
+    // Its lines mark the name the references are of.
+    app.proj.nav_term = Some("origin".into());
+    let _ = app.show_locations(
+        "(references)",
+        vec![lsp::client::Target {
+            path: root.join("src/lib.rs"),
+            line: 2,
+            character: 7,
+        }],
+        crate::viewer::PositionEncoding::Utf16,
+    );
+    let marks = app
+        .proj
+        .search
+        .matcher
+        .as_ref()
+        .expect("the name's matcher")
+        .ranges("let o = origin(); // origins");
+    assert_eq!(marks, [(8, 14)]);
+
+    // An option toggled searches for what the box says.
+    for m in run_task(app.update(Message::Nav(NavMsg::SearchToggle(SearchOpt::Case)))) {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.proj.search.listing, None);
+    assert!(
+        app.proj.search.hits.iter().any(|h| h.rel == "notes.txt"),
+        "{:?}",
+        app.proj.search.hits
+    );
+}
+
+/// A folder dialog that hands back a path with no folder there — typed into
+/// GTK's location bar, which completes as it is typed — opens nothing and
+/// says so: the setup sheet offered to open it, and make its `.clew`, in a
+/// folder that did not exist. A dialog tried again takes down the line that
+/// said none could open.
+#[test]
+fn a_picked_folder_that_is_not_there_is_not_opened() {
+    let mut app = blank_app();
+    let missing = test_dir("picked-missing").join("not-here");
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        missing.clone(),
+    ))));
+    assert!(app.pending_consent.is_none() && app.setup.is_none());
+    assert!(!app.scanning);
+    assert_eq!(
+        app.status,
+        tr!("No folder at {path}", path = missing.display())
+    );
+
+    let _ = app.update(Message::Window(WindowMsg::NoFileDialog));
+    assert!(app.status.contains("zenity"), "{}", app.status);
+    let _ = app.update(Message::Project(ProjectMsg::OpenFolderPressed));
+    assert!(app.status.is_empty(), "{}", app.status);
+}
+
+/// The margin's "Open the call hierarchy" asks about the function the margin
+/// shows, at its name where it is defined: it only switched the sidebar to
+/// Calls, which stayed empty — and the caret, inside the body, is on some
+/// other name, so asking there would not do either.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_the_call_hierarchy_asks_about_the_function_shown() {
+    let mut app = scanned_app("calls-of-function");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    let (client, server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client));
+    // The caret on `x` in `Point { x: 0.0 }`, in origin()'s body.
+    app.proj.panes[0].as_mut().unwrap().caret = Some((3, 12));
+    app.proj.explain.view = Some(explain::Node::Function {
+        file: root.join("src/lib.rs"),
+        name: "origin".into(),
+        ordinal: 0,
+    });
+    app.sidebar = SidebarTab::Files;
+    let asked = app.update(Message::Calls(CallsMsg::OfFunction));
+    assert_eq!(app.sidebar, SidebarTab::Calls);
+    assert!(app.show_left_sidebar);
+    for m in run_task(asked) {
+        let _ = app.update(m);
+    }
+    // `pub fn origin() -> Point {`: line 2, from 0.
+    assert_eq!(server.prepared(2), 1, "{}", app.status);
+    assert_eq!(server.prepared(3), 0, "asked about the caret's line");
+    assert_eq!(
+        super::calls::name_col("pub fn origin() -> Point {", "origin"),
+        Some(7)
+    );
+    assert_eq!(
+        super::calls::name_col("    def total(self):", "total"),
+        Some(8)
+    );
+    // A whole word only: `subtotal` is not `total`.
+    assert_eq!(
+        super::calls::name_col("def subtotal(): total", "total"),
+        Some(16)
+    );
+    assert_eq!(super::calls::name_col("\tdef f():", "f"), Some(8));
+}
+
+/// The Escape that clears the Files filter does only that. The same press
+/// also reaches the key handler (a field's Escape is forwarded so overlays
+/// close), where it went on to put the Ask card away or drop the code
+/// selection. With the filter empty, Escape does what it always does.
+#[test]
+fn escape_that_clears_the_filter_does_nothing_else() {
+    let mut app = scanned_app("filter-escape");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    app.proj.panes[0].as_mut().unwrap().selection = Some(((0, 0), (0, 10)));
+    app.ask_view = AskView::Compact;
+    app.file_filter = "lib".into();
+    let escape = esc_press;
+    let selected = |app: &App| app.proj.panes[0].as_ref().unwrap().selection.is_some();
+
+    // In the filter: the widget's message, then the forwarded press.
+    let _ = app.update(Message::Window(WindowMsg::FileFilterEscaped));
+    let _ = app.update(escape());
+    assert!(app.file_filter.is_empty());
+    assert!(selected(&app), "the selection went with the filter");
+    assert_eq!(app.ask_view, AskView::Compact, "Ask went with the filter");
+
+    // The next Escape, in the code, is the code's again.
+    let _ = app.update(escape());
+    assert!(!selected(&app));
+
+    // In the empty filter, Escape is not the filter's.
+    let _ = app.update(Message::Window(WindowMsg::FileFilterEscaped));
+    let _ = app.update(escape());
+    assert_eq!(app.ask_view, AskView::Hidden);
+}
+
+/// Add to Ask with nothing selected adds the line right-clicked: it said
+/// "Select some code first" over the very line the menu was opened on. A
+/// blank line still asks for a selection.
+#[test]
+fn add_to_ask_without_a_selection_adds_the_line_clicked() {
+    let mut app = scanned_app("ask-adds-line");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let menu = |line| ContextMenu {
+        pane: 0,
+        line,
+        col: 4,
+        x: 10.0,
+        y: 10.0,
+        insight: None,
+    };
+    // `pub fn origin() -> Point {`, the third line.
+    app.proj.context_menu = Some(menu(2));
+    let _ = app.update(Message::Ask(AskMsg::AboutSelection));
+    assert_eq!(app.proj.ask_pins.len(), 1);
+    let pin = &app.proj.ask_pins[0];
+    assert_eq!((pin.rel.as_str(), pin.line), ("src/lib.rs", 3));
+    assert_eq!(pin.code, "pub fn origin() -> Point {");
+    assert!(app.status.contains('3'), "{}", app.status);
+    // Asking the question heeds "now ask your question".
+    let added = app.status.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.ask_input = "What does it do?".into();
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert_ne!(app.status, added, "the hint stayed after the question");
+    // The blank second line says nothing to ask about.
+    app.proj.context_menu = Some(menu(1));
+    let _ = app.update(Message::Ask(AskMsg::AboutSelection));
+    assert_eq!(app.proj.ask_pins.len(), 1);
+    assert_eq!(
+        app.status,
+        tr!("Select some code first, then choose Add to Ask")
+    );
+}
+
+/// Breakpoints are kept between runs: set in one window, they are there in
+/// the next window to open the project — a condition with its line — and a
+/// cleared one stays cleared. They used to live in memory only, so every
+/// restart dropped them.
+#[test]
+fn breakpoints_are_kept_for_the_next_run() {
+    let mut app = scanned_app("breakpoints-kept");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let toggle = |app: &mut App, line| {
+        let _ = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+            path: lib.clone(),
+            line,
+        }));
+    };
+    toggle(&mut app, 1);
+    toggle(&mut app, 4);
+    app.proj.bp_cond_edit = Some((lib.clone(), 3, "x > 1".into()));
+    let _ = app.update(Message::Debug(DebugMsg::BpConditionSet));
+    toggle(&mut app, 4); // cleared again
+
+    let mut next = blank_app();
+    scan_synchronously(&mut next, root.clone());
+    let kept: Vec<(usize, Option<String>)> = next
+        .debug
+        .breakpoints
+        .get(&lib)
+        .map(|file| {
+            file.iter()
+                .map(|(l, bp)| (*l, bp.condition.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(kept, vec![(1, None), (3, Some("x > 1".into()))]);
+    // Nothing the adapter said comes back with them: no session has.
+    assert!(
+        next.debug.breakpoints[&lib]
+            .values()
+            .all(|bp| bp.verified.is_none())
+    );
+
+    // Another project opened: this one's breakpoints leave the gutter and
+    // the debugger with it, and come back when it opens again.
+    let other = fixture_project("breakpoints-kept-other");
+    scan_synchronously(&mut next, other);
+    assert!(
+        next.debug.breakpoints.is_empty(),
+        "{:?}",
+        next.debug.breakpoints
+    );
+    scan_synchronously(&mut next, root.clone());
+    assert_eq!(next.debug.breakpoints[&lib].len(), 2);
+}
+
+/// A breakpoints file this clew cannot read (another version's, a hand
+/// edit) is never written over: read as none, one new breakpoint replaced
+/// every one it held. The breakpoint is still set for the session, and
+/// the status line says it was not kept.
+#[test]
+fn an_unreadable_breakpoints_file_is_left_as_it_is() {
+    let mut app = scanned_app("breakpoints-unreadable");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let dir = app.proj.derived_dir.clone().expect("a data directory");
+    let file = dir.join("breakpoints.json");
+    let theirs = r#"{"version":2,"breakpoints":[{"rel":"src/lib.rs","line":1,"hit":3}]}"#;
+    std::fs::write(&file, theirs).unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: root.join("src/lib.rs"),
+        line: 4,
+    }));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
+    assert!(app.status.contains("version 2"), "{}", app.status);
+    assert!(app.debug.breakpoints[&root.join("src/lib.rs")].contains_key(&4));
+}
+
+/// A remote project keeps its breakpoints as a local one does: by its path
+/// on the host, in this machine's data directory under the host's name —
+/// and a local project at the same path keeps its own.
+#[test]
+fn a_remote_projects_breakpoints_are_its_own() {
+    let host = crate::backend::connect::ConnTarget::Ssh {
+        label: "user@host".into(),
+        args: vec!["user@host".into()],
+    };
+    let root = PathBuf::from("/srv/remote-shop");
+    let open = |connection: crate::backend::connect::ConnTarget| {
+        let mut app = blank_app();
+        app.connection = connection;
+        app.proj.project = Some(crate::Project {
+            root: root.clone(),
+            tree: Default::default(),
+            files: Arc::new(Vec::new()),
+            truncated: false,
+        });
+        app.proj.derived_dir = clew_core::derived::dir(app.connection.approval_host(), &root);
+        app.restore_breakpoints();
+        app
+    };
+    let file = root.join("src/cart.py");
+    let mut remote = open(host.clone());
+    let _ = remote.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: file.clone(),
+        line: 7,
+    }));
+    let again = open(host);
+    assert!(again.debug.breakpoints[&file].contains_key(&7));
+    let local = open(crate::backend::connect::ConnTarget::Local);
+    assert!(
+        local.debug.breakpoints.is_empty(),
+        "the remote host's breakpoints in a local project at the same path"
+    );
+}
+
+/// The search sidebar searches once typing pauses, with the query as it
+/// then is: it searched only on Enter, so a query typed and left showed
+/// nothing. A pause a later keystroke overtook searches nothing; one letter
+/// waits for Enter; a cleared query clears the results at once.
+#[test]
+fn search_runs_once_typing_pauses() {
+    let mut app = scanned_app("live-search");
+    let typed = |app: &mut App, q: &str| {
+        run_task(app.update(Message::Nav(NavMsg::SearchQueryChanged(q.into()))))
+    };
+    assert!(
+        typed(&mut app, "o").is_empty(),
+        "one letter waits for Enter"
+    );
+    let first = typed(&mut app, "or");
+    let second = typed(&mut app, "ori");
+    assert!(
+        matches!(
+            first.as_slice(),
+            [Message::Nav(NavMsg::SearchSettled { .. })]
+        ),
+        "{first:?}"
+    );
+    for m in first {
+        let _ = app.update(m);
+    }
+    assert!(!app.proj.search.ran, "a pause overtaken searches nothing");
+    for m in second {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.search.ran, "the last pause searches");
+    let _ = typed(&mut app, "");
+    assert!(!app.proj.search.ran && app.proj.search.hits.is_empty());
+
+    // Enter, or an option toggled, while a pause is waited for searches
+    // then — and the pause, when it comes, does not search again.
+    for act in [
+        NavMsg::SearchSubmitted,
+        NavMsg::SearchToggle(SearchOpt::Case),
+    ] {
+        let pending = typed(&mut app, "fn");
+        let _ = app.update(Message::Nav(act));
+        let seq = app.proj.search_seq;
+        for m in pending {
+            assert!(run_task(app.update(m)).is_empty(), "searched twice");
+        }
+        assert_eq!(app.proj.search_seq, seq);
+    }
+
+    // Backspaced to one letter: the longer query's matches go, and the
+    // sidebar says the letter waits for Enter.
+    for m in typed(&mut app, "fn") {
+        for done in run_task(app.update(m)) {
+            let _ = app.update(done);
+        }
+    }
+    assert!(!app.proj.search.hits.is_empty(), "the fixture has an fn");
+    assert!(app.status.contains("match"), "{}", app.status);
+    let _ = typed(&mut app, "f");
+    assert!(app.proj.search.hits.is_empty() && !app.proj.search.ran);
+    assert!(app.status.is_empty(), "the count stayed: {}", app.status);
 }
 
 /// A tour's JSON as the remote `.clew/cache/walkthroughs.json` stores it.
@@ -8755,8 +9786,7 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         close_question(&lost(1, "me@host:/srv/app", &["bookmarks"])),
         question(
             "A change is not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Keep the \
-             window open, and it is sent once it is connected again. Close it, and it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Close, and it is lost."
         )
     );
     let three = lost(
@@ -8768,18 +9798,14 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         close_question(&three),
         question(
             "3 changes are not saved to the host",
-            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be \
-             sent to the host. Keep the window open, and they are sent once it is connected \
-             again. Close it, and they are lost."
+            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. Close, and they are lost."
         )
     );
     assert_eq!(
         quit_question(std::slice::from_ref(&three)),
         question(
             "3 changes are not saved to the host",
-            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be \
-             sent to the host. Cancel to keep clew open, and they are sent once the window is \
-             connected again. Quit, and they are lost."
+            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. Quit, and they are lost."
         )
     );
     let (title, message) = quit_question(&[three, lost(2, "you@other:/x", &["notes"])]);
@@ -8816,34 +9842,28 @@ fn the_questions_say_when_edits_were_sent_but_not_confirmed() {
         close_question(&sent(1, "me@host:/srv/app")),
         question(
             "A change is not confirmed by the host",
-            "1 change to bookmarks in me@host:/srv/app was sent to the host, but it has not \
-             confirmed it: the connection may be down. Keep the window open, and it is sent \
-             again once it is connected again. Close it, and it may be lost."
+            "1 change to bookmarks in me@host:/srv/app was not confirmed by the host. Close, and it may be lost."
         )
     );
     assert_eq!(
         close_question(&sent(2, "me@host:/srv/app")),
         question(
             "2 changes are not confirmed by the host",
-            "2 changes to bookmarks in me@host:/srv/app were sent to the host, but it has not \
-             confirmed them: the connection may be down. Keep the window open, and they are \
-             sent again once it is connected again. Close it, and they may be lost."
+            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. Close, and they may be lost."
         )
     );
     assert_eq!(
         quit_question(&[sent(2, "me@host:/srv/app")]),
         question(
             "2 changes are not confirmed by the host",
-            "2 changes to bookmarks in me@host:/srv/app were sent to the host, but it has not \
-             confirmed them: the connection may be down. Cancel to keep clew open, and they are \
-             sent again once the window is connected again. Quit, and they may be lost."
+            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. Quit, and they may be lost."
         )
     );
     let (title, message) = quit_question(&[sent(2, "me@host:/srv/app"), sent(1, "you@other:/x")]);
     assert_eq!(title, "3 changes are not confirmed by their hosts");
     assert!(
         message.starts_with(
-            "These changes were sent to their hosts, which have not confirmed them:\n\n\
+            "Not confirmed by their hosts yet:\n\n\
              • 2 changes to bookmarks in me@host:/srv/app\n\
              • 1 change to bookmarks in you@other:/x\n\n"
         ) && message.ends_with("Quit, and they may be lost."),
@@ -8880,16 +9900,15 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "4 changes are not saved to the host",
             "4 changes to bookmarks in me@host:/srv/app are not saved to the host: 1 could not \
-             be sent, 2 were sent but not confirmed and 1 could not be saved by the host. Keep \
-             the window open, and clew keeps trying to save them. Close it, and they may be lost."
+             be sent, 2 were sent but not confirmed and 1 could not be saved by the host. Close, \
+             and they may be lost."
         )
     );
     assert_eq!(
         close_question(&edits("me@host:/srv/app", (0, 0, 2), &[])),
         question(
             "2 changes are not saved to the host",
-            "2 changes to bookmarks in me@host:/srv/app could not be saved by the host. Keep the \
-             window open, and they are tried again. Close it, and they are lost."
+            "2 changes to bookmarks in me@host:/srv/app could not be saved by the host. Close, and they are lost."
         )
     );
     assert_eq!(
@@ -8900,9 +9919,8 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         )),
         question(
             "2 changes are not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Keep the \
-             window open, and it is sent once it is connected again. Close it, and it is lost. \
-             The host could not save the change to the bookmark at a.rs:1: it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Close, and it \
+             is lost. The host could not save the change to the bookmark at a.rs:1: it is lost."
         )
     );
     assert_eq!(
@@ -8914,8 +9932,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "2 changes are not saved to the host",
             "The host could not save the changes to the bookmark at a.rs:1 and the note on f in \
-             lib.rs in me@host:/srv/app: they are lost. Keep the window open to make them again, \
-             or close it."
+             lib.rs in me@host:/srv/app: they are lost."
         )
     );
     assert_eq!(
@@ -8923,8 +9940,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "2 changes are not saved to the host",
             "2 changes to bookmarks in me@host:/srv/app are not saved to the host: 1 was sent but \
-             not confirmed and 1 could not be saved by the host. Cancel to keep clew open, and \
-             clew keeps trying to save them. Quit, and they may be lost."
+             not confirmed and 1 could not be saved by the host. Quit, and they may be lost."
         )
     );
     let (title, message) = quit_question(&[
@@ -8940,8 +9956,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
          • 1 change to bookmarks in you@other:/x could not be saved by the host\n\
          • the change to the walkthrough “tour” in you@other:/x: the host could not save it, \
          and it is lost\n\n\
-         Cancel to keep clew open, and clew keeps trying to save the others. Quit, and they may \
-         be lost."
+         Quit, and the others may be lost."
     );
 }
 
@@ -9040,9 +10055,8 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     };
     assert_eq!(
         close_question(&waiting).1,
-        "1 change to notes in me@host:/srv/app is not sent yet: it waits for the host to save an \
-         earlier change first. Keep the window open, and it is sent once the change before it is \
-         saved. Close it, and it is lost."
+        "1 change to notes in me@host:/srv/app is waiting for an earlier change. Close, and it is \
+         lost."
     );
     // Several, alone, and in a quit's list among another window's.
     let two = crate::app::remote_state::UnsavedEdits {
@@ -9053,9 +10067,8 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     };
     assert_eq!(
         close_question(&two).1,
-        "2 changes to notes in me@host:/srv/app are not sent yet: each waits for the host to save \
-         an earlier change first. Keep the window open, and they are sent once the changes before \
-         them are saved. Close it, and they are lost."
+        "2 changes to notes in me@host:/srv/app are waiting for an earlier change. Close, and \
+         they are lost."
     );
     // Among other reasons, counted as they are.
     let mixed = crate::app::remote_state::UnsavedEdits {
@@ -9374,7 +10387,11 @@ fn forgetting_a_key_mid_session_keeps_the_project_and_its_edits() {
         "and its unsent edit with it"
     );
     assert!(app.connect.is_none(), "nothing left to pick");
-    assert!(app.status.contains("Forgot 1 key"), "{}", app.status);
+    assert!(
+        app.status.contains("old key — connecting"),
+        "{}",
+        app.status
+    );
 }
 
 /// A remote window holding `edits` bookmark removals (at most three) over a
@@ -10920,6 +11937,25 @@ fn an_abandoned_docs_build_does_not_hijack_the_pane_later() {
     );
 }
 
+/// "View docs" that finds its symbol says so: it said nothing, and a failed
+/// try just before it ("No definition found") stood beside the page.
+#[test]
+fn view_docs_that_finds_its_symbol_says_so() {
+    let mut app = scanned_app("docs-found-status");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let mut rx = attach_server(&mut app);
+    app.view_docs_for("origin");
+    assert!(took_build_docs(&mut rx));
+    app.status = tr!("No definition found").into();
+    answer_docs(&mut app, &root, 3);
+    assert!(app.proj.docs.page.is_some(), "the page opens");
+    assert_eq!(app.status, tr!("Docs for “{name}”", name = "origin"));
+    // Asked again with the index current: the same.
+    app.status = tr!("No definition found").into();
+    app.view_docs_for("origin");
+    assert_eq!(app.status, tr!("Docs for “{name}”", name = "origin"));
+}
+
 /// A build reads every file, so there is only ever one in flight: a manual
 /// refresh pressed during one is dropped — `ensure_docs` was single-flight, but
 /// the refresh went straight to `request_docs` and was not. The guard lives in
@@ -11061,7 +12097,7 @@ fn a_scrub_keeps_the_readers_place_on_both_axes() {
         v.scroll_x = 120.0;
         v.scroll_y = 40.0;
     }
-    let asked = app.await_history(abs.clone(), app.proj.active, false);
+    let asked = app.await_history(abs.clone(), app.proj.active, false, "");
     let commit = |sha: &str| clew_protocol::HistCommit {
         sha: sha.into(),
         author: "a".into(),
@@ -11429,6 +12465,7 @@ async fn a_superseded_server_search_cannot_repaint_the_reference_list() {
             line: 0,
             character: 0,
         }],
+        crate::viewer::PositionEncoding::Utf16,
     );
     assert_eq!(
         app.proj.search.hits.len(),
@@ -11461,7 +12498,7 @@ async fn a_superseded_server_search_cannot_repaint_the_reference_list() {
         vec![lib],
         "a search the references superseded must not repaint the sidebar"
     );
-    assert_eq!(app.proj.search.query, "(references)");
+    assert_eq!(app.proj.search.listing.as_deref(), Some("(references)"));
     assert!(
         !app.proj.search.running,
         "the retired search must not leave its spinner running: an empty or \
@@ -11735,7 +12772,11 @@ fn a_panicked_merge_or_a_moved_config_hands_the_build_back() {
         ..space.clone()
     };
     let failed = built_in_stored_space(built, &space, &moved).unwrap_err();
-    assert!(failed.error.contains("config changed"), "{}", failed.error);
+    assert!(
+        failed.error.contains("settings changed"),
+        "{}",
+        failed.error
+    );
     let back = failed.previous.take().expect("the build comes back");
     assert_eq!(back.entries.len(), 1, "the build was dropped");
 }
@@ -12218,7 +13259,7 @@ fn enter_while_an_agent_turn_runs_starts_no_second_answer() {
     );
     assert_eq!(app.proj.ask_input, "and this?", "the question was lost");
     assert!(
-        app.status.contains("still being written"),
+        app.status.contains("Still answering"),
         "the refusal was not explained: {}",
         app.status
     );
@@ -12241,7 +13282,7 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         subject: format!("subject {sha}"),
         path: "src/lib.rs".into(),
     };
-    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false);
+    let asked = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::Ready {
         stamp: app.stamp(),
         generation: asked,
@@ -12324,7 +13365,11 @@ fn time_travel_summaries_survive_scrubbing_and_every_outcome_clears_the_spinner(
         result: Err("boom".into()),
     }));
     assert!(!tt(&app).1, "a failed story left its spinner up");
-    assert!(app.status.contains("Story failed"), "{}", app.status);
+    assert!(
+        app.status.contains("Couldn't write the story"),
+        "{}",
+        app.status
+    );
     let _story = app.update(Message::TimeTravel(TimeTravelMsg::Story));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::StoryDone {
         stamp: app.stamp(),
@@ -12574,7 +13619,7 @@ fn a_git_failure_in_time_travel_is_reported_not_read_as_empty() {
     let root = app.proj.project.as_ref().unwrap().root.clone();
     // The history of src/lib.rs, as it lands for a request made for it.
     let ready = |app: &mut App, commits| {
-        let generation = app.await_history(root.join("src/lib.rs"), app.proj.active, false);
+        let generation = app.await_history(root.join("src/lib.rs"), app.proj.active, false, "");
         Message::TimeTravel(TimeTravelMsg::Ready {
             stamp: app.stamp(),
             generation,
@@ -14116,7 +15161,7 @@ async fn a_refine_begun_before_the_index_landed_gives_way_to_it() {
     );
     assert!(app.status.contains("finished indexing"), "{}", app.status);
     assert!(
-        app.status.contains("1 too large"),
+        app.status.contains("1 file too large"),
         "the refinement's hand-back hid the index's cap note: {}",
         app.status
     );
@@ -17490,6 +18535,83 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     );
 }
 
+/// Skim is a toggle like Diff and Time Travel, and its button says so: it
+/// shows pressed while the file's bodies are folded, and not once a second
+/// press has unfolded them.
+#[test]
+fn the_skim_button_shows_whether_the_file_is_skimmed() {
+    let mut app = scanned_app("skim-state");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![SymbolEntry {
+            name: "origin".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs: abs.clone(),
+            line: 3,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let lines = app.skim_lines(&abs);
+    assert_eq!(lines, [2]);
+    assert!(!app.active_viewer().unwrap().skimmed(&lines));
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(app.active_viewer().unwrap().skimmed(&lines));
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(!app.active_viewer().unwrap().skimmed(&lines));
+}
+
+/// A diff on screen follows its file: an edit on disk computes it again over
+/// the new bytes (it said "no uncommitted changes" over a file just edited),
+/// quietly, and a press of Diff meanwhile closes the view rather than
+/// cancelling a load the reader never asked for.
+#[test]
+fn an_open_diff_follows_its_file_changing_on_disk() {
+    let mut app = scanned_app("diff-follows");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let stamp = app.stamp();
+    let loaded = |req: u64, lines: Vec<git::DiffLine>| {
+        Message::Editor(EditorMsg::DiffLoaded {
+            stamp: stamp.clone(),
+            req,
+            abs: abs.clone(),
+            rel: "src/lib.rs".into(),
+            result: Ok(Some(lines)),
+        })
+    };
+    let _load = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    let (req, _) = app.proj.diff_pending.clone().unwrap();
+    let _ = app.update(loaded(req, Vec::new()));
+    assert!(app.proj.diff.as_ref().unwrap().lines.is_empty());
+
+    let src = "pub fn edited() {}\n";
+    std::fs::write(&abs, src).unwrap();
+    let _ = app.update(rehashed(&app, vec![modified(&abs, 424242, src)]));
+    let again = app.proj.diff_refresh.expect("the diff is computed again");
+    assert!(app.proj.diff_pending.is_none());
+    assert_eq!(app.status, "Refreshed a file changed on disk");
+    let added = git::DiffLine {
+        kind: git::DiffKind::Add,
+        text: "pub fn edited() {}".into(),
+    };
+    let _ = app.update(loaded(again, vec![added.clone()]));
+    assert_eq!(app.proj.diff.as_ref().unwrap().lines, vec![added]);
+    assert_eq!(app.status, "Refreshed a file changed on disk");
+
+    // Diff pressed while a refresh is out closes the view, and the refresh
+    // then lands on nothing.
+    let _ = app.update(rehashed(&app, vec![modified(&abs, 525252, "x\n")]));
+    let late = app.proj.diff_refresh.expect("computed again");
+    let _ = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    assert!(app.proj.diff.is_none(), "Diff did not close the view");
+    let _ = app.update(loaded(late, Vec::new()));
+    assert!(app.proj.diff.is_none(), "a refresh reopened a closed diff");
+}
+
 /// The change-frequency overlay's data: a loaded history is keyed by
 /// absolute path with the heat scale's top, a project without git has none
 /// and says nothing, any other failure is reported, and the map's paint
@@ -17957,7 +19079,8 @@ fn a_failed_stats_or_overview_cache_write_is_reported() {
         "the report itself was lost"
     );
     assert!(
-        app.status.starts_with("Code statistics ready — not cached"),
+        app.status
+            .starts_with("Code statistics ready, but not cached"),
         "{}",
         app.status
     );
@@ -17980,7 +19103,7 @@ fn a_failed_stats_or_overview_cache_write_is_reported() {
     );
     assert!(
         app.status
-            .starts_with("Architecture overview ready — not cached"),
+            .starts_with("Architecture overview ready, but not cached"),
         "{}",
         app.status
     );
@@ -18025,7 +19148,7 @@ fn a_superseded_overview_or_search_leaves_the_newer_requests_spinner_alone() {
         result: Err("rate limited".into()),
     }));
     assert!(!app.proj.overview.generating);
-    assert_eq!(app.status, "Overview failed: rate limited");
+    assert_eq!(app.status, "Could not generate the overview: rate limited");
 
     app.proj.searching_semantic = true;
     app.proj.semantic_seq = 5;
@@ -18092,7 +19215,7 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
         &app,
         first,
         "first",
-        Err("parse error: bad json".into()),
+        Err(walkthrough::Failure::Unparsable("bad json".into())),
     ));
     assert_eq!(app.proj.walk.generating.as_deref(), Some("second"));
     assert!(
@@ -18122,6 +19245,63 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
         Some("second"),
         "the awaited tour opens"
     );
+}
+
+/// A tour whose JSON the model botched is asked for once more, in whatever
+/// language clew speaks: the retry was keyed on the failure's words
+/// ("parse: …"), which say something else since they are translated, and
+/// it never happened. A failure of another kind is not retried.
+#[test]
+fn a_walkthrough_that_does_not_parse_is_asked_for_again_in_any_language() {
+    use crate::i18n::{Lang, with_lang};
+    for lang in [Lang::En, Lang::Fr, Lang::Ja] {
+        with_lang(lang, || {
+            let mut app = scanned_app(&format!("walk-retry-unparsable-{}", lang.code()));
+            let root = app.proj.project.as_ref().unwrap().root.clone();
+            let done = |app: &mut App, result| {
+                app.proj.walk.seq += 1;
+                app.proj.walk.pending = Some(app.proj.walk.seq);
+                app.update(Message::Walk(WalkMsg::Done {
+                    stamp: Stamp {
+                        root: Some(root.clone()),
+                        epoch: app.project_epoch,
+                        conn: None,
+                    },
+                    seq: app.proj.walk.seq,
+                    scope: "how it starts".into(),
+                    result,
+                }))
+            };
+            let botched = walkthrough::parse(r#"{"title": "t", "steps": [oops]}"#);
+            assert!(
+                matches!(botched, Err(walkthrough::Failure::Unparsable(_))),
+                "{botched:?}"
+            );
+            let again = run_task(done(&mut app, botched));
+            assert!(app.proj.walk.retried, "{lang:?}: not retried");
+            assert!(
+                matches!(
+                    again.as_slice(),
+                    [Message::Walk(WalkMsg::Generate(scope))] if scope == "how it starts"
+                ),
+                "{lang:?}: {again:?}"
+            );
+            // The retry spent, the next failure is said.
+            let _ = done(
+                &mut app,
+                walkthrough::parse(r#"{"title": "t", "steps": [oops]}"#),
+            );
+            assert!(!app.proj.walk.retried);
+            assert!(
+                app.status
+                    .starts_with(crate::tr!("Walkthrough failed: {error}", error = "").as_str())
+            );
+
+            // A failure of another kind: said at once.
+            let _ = done(&mut app, Err("the provider refused".into()));
+            assert!(!app.proj.walk.retried, "{lang:?}: retried a refusal");
+        });
+    }
 }
 
 /// D1-12: a definition with several targets (a trait method's impls, per-platform
@@ -18439,7 +19619,8 @@ fn the_ai_keys_box_configures_the_form_host_and_revoke_withdraws_the_live_grant(
             &m.request,
             clew_protocol::Request::SetAiConfig {
                 chat: None,
-                embed: None
+                embed: None,
+                ..
             }
         )),
         "the server was not told to forget the keys"
@@ -18634,7 +19815,7 @@ fn a_blame_git_could_not_answer_is_reported_not_painted_empty() {
     }));
     assert_eq!(
         app.status,
-        "git blame of src/lib.rs: git did not finish within 90s and was stopped"
+        "Couldn't read git blame for src/lib.rs: git did not finish within 90s and was stopped"
     );
     assert!(
         app.active_viewer().unwrap().git.is_none(),
@@ -18792,10 +19973,13 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::OpenFolder => vec![Message::Project(ProjectMsg::OpenFolderPressed)],
             ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
             ToolsRow::ExplainAll => vec![
-                Message::Explain(ExplainMsg::Project),
-                Message::Settings(SettingsMsg::Open),
+                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain)),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
                 Message::Explain(ExplainMsg::Cancel),
             ],
+            ToolsRow::SetUp => vec![Message::Project(ProjectMsg::SetupShow(
+                crate::app::setup::SetupMode::Manage,
+            ))],
             ToolsRow::Walkthrough => vec![Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Walk,
             ))],
@@ -18818,7 +20002,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
     // The View menu's rows close it too; and the menus open one at a time.
-    app.show_shortcuts = false;
+    app.settings.open = false;
     app.show_view_menu = true;
     let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
     assert!(!app.show_view_menu, "picking a View row left the menu open");
@@ -18875,7 +20059,12 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(out.as_slice(), [Message::Settings(SettingsMsg::Open)]),
+            matches!(
+                out.as_slice(),
+                [Message::Settings(SettingsMsg::OpenAt(
+                    SettingsPage::LanguageModel
+                ))]
+            ),
             "{what} did not offer Settings: {out:?}"
         );
     }
@@ -18950,7 +20139,12 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
         );
         let out = run_task(task);
         assert!(
-            matches!(out.as_slice(), [Message::Settings(SettingsMsg::Open)]),
+            matches!(
+                out.as_slice(),
+                [Message::Settings(SettingsMsg::OpenAt(
+                    SettingsPage::LanguageModel
+                ))]
+            ),
             "{what} did not offer Settings: {out:?}"
         );
         if what.contains("Ask") {
@@ -19595,7 +20789,7 @@ fn a_search_that_skipped_files_says_so() {
     assert_eq!(app.proj.search.hits.len(), 1);
     assert_eq!(app.proj.search.skipped.len(), 1);
     assert!(
-        app.status.contains("1 matches")
+        app.status.contains("1 match")
             && app.status.contains("3 files not searched")
             && app.status.contains("dump.sql"),
         "{}",
@@ -19783,6 +20977,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             seq: app.proj.search_seq,
             result: Default::default(),
         }),
+        Message::Nav(NavMsg::SearchSettled {
+            stamp: s(),
+            typed: app.proj.search.typed,
+        }),
         Message::Editor(EditorMsg::DiffLoaded {
             stamp: s(),
             req: 1,
@@ -19839,6 +21037,12 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             generation: 0,
             result: Err("stale".into()),
         }),
+        Message::Lsp(LspMsg::Fetched {
+            stamp: s(),
+            language: "rust".into(),
+            generation: 0,
+            result: Err("stale".into()),
+        }),
         Message::Lsp(LspMsg::Staged {
             stamp: s(),
             language: "rust".into(),
@@ -19880,6 +21084,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: app.proj.search_seq,
             previews: Vec::new(),
+        }),
+        Message::Nav(NavMsg::PreviewsStyled {
+            stamp: s(),
+            generation: app.proj.search.styled_gen,
+            styled: Vec::new(),
         }),
         Message::Calls(CallsMsg::Prepared {
             stamp: s(),
@@ -20196,6 +21405,13 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stop: app.debug_stop,
             vals: Vec::new(),
         }),
+        Message::Debug(DebugMsg::VarChildren {
+            stamp: s(),
+            run,
+            stop: app.debug_stop,
+            reference: 1,
+            vars: Vec::new(),
+        }),
         Message::Debug(DebugMsg::Failed {
             stamp: s(),
             run,
@@ -20468,6 +21684,7 @@ fn fill_project_session(app: &mut App) {
             calls: Vec::new(),
             declarations: HashSet::from([1]),
             bodies: HashMap::new(),
+            owners: HashMap::new(),
         }),
     );
     p.tracked_ignored.insert("src/lib.rs".into());
@@ -20677,10 +21894,7 @@ fn a_server_nothing_needs_is_released_not_reconnected() {
         !app.conn_respawn,
         "a release is not a crash to back off from"
     );
-    assert_eq!(
-        app.status, "Project not opened: creating .clew was not allowed",
-        "a release is not news"
-    );
+    assert_eq!(app.status, "Project not opened", "a release is not news");
     // What the dropped stream had already queued is late, and dropped by the
     // one check.
     let dropped = app.stale_dropped;
@@ -20789,7 +22003,7 @@ async fn a_process_feed_nobody_reads_stops_the_process() {
     );
     assert!(!app.server.lsp_procs.contains_key("rust"));
     assert!(
-        app.status.contains("rust") && app.status.contains("stopped"),
+        app.status.contains("rust") && app.status.contains("Stopped"),
         "{}",
         app.status
     );
@@ -21091,7 +22305,7 @@ fn a_menu_action_runs_the_same_table_as_its_chord() {
     let _ = app.update(Message::Editor(EditorMsg::RunAction(
         keymap::Action::Shortcuts,
     )));
-    assert!(app.show_shortcuts);
+    assert!(app.shortcuts_shown());
 }
 
 /// A8: a menu action answers to the modal states its chord does — AppKit
@@ -21131,7 +22345,8 @@ fn a_menu_action_respects_the_modal_states_its_chord_does() {
     assert_eq!(app.rebinding, None);
     for modal in ["the tutorial", "the shortcuts panel"] {
         app.tutorial = (modal == "the tutorial").then_some(0);
-        app.show_shortcuts = modal == "the shortcuts panel";
+        app.settings.open = modal == "the shortcuts panel";
+        app.settings.page = crate::SettingsPage::Shortcuts;
         let out = run_task(app.update(explain_all()));
         assert!(
             out.is_empty() && app.status.is_empty(),
@@ -21140,7 +22355,7 @@ fn a_menu_action_respects_the_modal_states_its_chord_does() {
     }
     // With none of them up, the menu runs the action.
     app.tutorial = None;
-    app.show_shortcuts = false;
+    app.settings.open = false;
     let _ = app.update(explain_all());
     assert!(app.status.contains("API key"), "{}", app.status);
 }
@@ -21833,6 +23048,14 @@ fn a_refresh_that_paid_for_nothing_leaves_the_index_and_overview_alone() {
         (index, overview)
     };
     assert_eq!(refreshed(&mut app, 0), (false, false));
+    // No index yet: an automatic pass builds none nobody asked for.
+    assert_eq!(refreshed(&mut app, 1), (false, true));
+    // One there: it is kept fresh.
+    app.proj.embed_index.entries.push(embed::Entry {
+        node: explain::Node::File(root.join("src/lib.rs")),
+        hash: 1,
+        vec: vec![0.5, 0.5],
+    });
     assert_eq!(refreshed(&mut app, 1), (true, true));
 }
 
@@ -21889,7 +23112,7 @@ fn summaries_from_an_earlier_clew_are_kept_marked_not_billed() {
         "a refresh billed what it could not check"
     );
     assert!(
-        app.status.contains("7 from an earlier clew"),
+        app.status.contains("7 from an earlier version of clew"),
         "{}",
         app.status
     );
@@ -22434,7 +23657,7 @@ fn a_remote_project_past_one_reply_is_explained_over_several() {
     for node in helper_nodes(&root) {
         assert!(app.proj.explain.cache.contains_key(&node), "{node:?}");
     }
-    assert_eq!(app.status, "Explained 7 functions/files/folders");
+    assert_eq!(app.status, "Explained 7 functions, files and folders");
 }
 
 /// A file grown too large to explain is said to be, with its size, and what
@@ -22465,7 +23688,7 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
     assert_eq!(
         app.status,
-        "Explained 4 functions/files/folders · src/util/helper.rs is too large to explain \
+        "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
          (2.3 MB) — its summaries are dropped"
     );
     assert_eq!(
@@ -22485,7 +23708,7 @@ fn a_remote_file_too_large_to_explain_is_said_so_and_asked_for_once() {
 
     let batches = explain_remotely_within(&mut app, &mut rx, &host, limits, |_| false);
     assert_eq!(helper_asked(&batches), 1, "{batches:?}");
-    assert_eq!(app.status, "Explained 4 functions/files/folders");
+    assert_eq!(app.status, "Explained 4 functions, files and folders");
     assert_eq!(provider.calls(), 11);
 }
 
@@ -22533,7 +23756,7 @@ fn a_local_file_that_can_no_longer_be_explained_is_dropped_and_said_so() {
     assert_eq!(
         app.status,
         format!(
-            "Explained 4 functions/files/folders · src/util/helper.rs is too large to explain \
+            "Explained 4 functions, files and folders · src/util/helper.rs is too large to explain \
              ({size}) — its summaries are dropped"
         )
     );
@@ -22754,10 +23977,10 @@ fn a_file_that_cannot_be_explained_and_held_nothing_is_not_named() {
     app.llm_config_cache = Some(Some(provider.config.clone()));
     let explicit = app.update(Message::Explain(ExplainMsg::Project));
     drive(&mut app, explicit, explain_and_save);
-    assert_eq!(app.status, "Explained 4 functions/files/folders");
+    assert_eq!(app.status, "Explained 4 functions, files and folders");
     let refresh = save_watched(&mut app, &root, "src/lib.rs", TOP);
     drive(&mut app, refresh, explain_and_save);
-    assert_eq!(app.status, "Explained 4 functions/files/folders");
+    assert_eq!(app.status, "Explained 4 functions, files and folders");
     assert!(
         !app.proj
             .explain
@@ -23050,7 +24273,7 @@ fn a_walkthrough_whose_call_failed_says_what_failed() {
     });
     assert!(
         app.status
-            .starts_with("Block explanation failed: the provider rejected the API key (")
+            .starts_with("Could not explain the blocks: the provider rejected the API key (")
             && app.status.ends_with("— check it in Settings"),
         "{}",
         app.status
@@ -23156,7 +24379,7 @@ fn a_prompt_refused_for_its_length_freezes_nothing_that_quotes_it() {
     assert_ne!(app.proj.explain.cache[&top].summary, before.summary);
     assert!(
         app.status.starts_with(
-            "Explained 7 functions/files/folders · 1 failed: the prompt is too long for the \
+            "Explained 7 functions, files and folders · 1 failed: the prompt is too long for the \
              model ("
         ) && app
             .status
@@ -23610,6 +24833,97 @@ fn an_unchecked_summary_is_marked_in_the_hover() {
     assert!(shown.starts_with(crate::app::UNCHECKED_MARK), "{shown}");
 }
 
+/// A tour gives the reader's layout back when it ends — skipped or walked
+/// to its end: it left the margin hidden, the sidebar on another view.
+#[test]
+fn the_tour_gives_the_layout_back() {
+    let mut app = scanned_app("tour-layout");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.show_right_panel = true;
+    app.sidebar = SidebarTab::Marks;
+    for end in [
+        Message::Tutorial(TutorialMsg::Exit),
+        Message::Tutorial(TutorialMsg::Step(1_000)),
+    ] {
+        let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+        let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
+        assert!(app.tutorial.is_some());
+        let _ = app.update(end);
+        assert!(app.tutorial.is_none());
+        assert!(app.show_right_panel, "the margin stayed hidden");
+        assert_eq!(app.sidebar, SidebarTab::Marks);
+        assert!(!app.show_tools_menu);
+    }
+}
+
+/// Go to Line before its number is typed says what to type, and Enter then
+/// stays put: it opened the project's first file.
+#[test]
+fn go_to_line_without_a_number_opens_nothing() {
+    let mut app = scanned_app("goto-colon");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.on_goto_line_requested();
+    assert!(app.proj.finder.is_line_query());
+    let _ = app.update(Message::Nav(NavMsg::FinderConfirm));
+    assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
+    assert!(app.proj.finder.open, "the finder stays for the number");
+}
+
+/// Browse… picks what its field names — a JDK's home is a folder, a
+/// version is typed, not browsed to — under the field's own title (every
+/// one was "Choose an SSH private key"); and a picker that could not be
+/// shown says so instead of doing nothing.
+#[test]
+fn browse_picks_what_its_field_names_and_a_missing_dialog_is_said() {
+    use crate::LangField as F;
+    use crate::app::languages::browse_for;
+    assert_eq!(
+        browse_for(F::JavaHome).map(|(folder, _)| folder),
+        Some(true)
+    );
+    assert_eq!(
+        browse_for(F::CDatabase).map(|(folder, _)| folder),
+        Some(true)
+    );
+    assert_eq!(
+        browse_for(F::PythonPath).map(|(folder, _)| folder),
+        Some(false)
+    );
+    assert_eq!(browse_for(F::PhpVersion), None);
+    assert_eq!(browse_for(F::ServerArgs), None);
+    for field in [F::PythonPath, F::ServerCommand, F::ZigPath] {
+        let (_, title) = browse_for(field).unwrap();
+        assert!(!title.contains("SSH"), "{title}");
+    }
+
+    let mut app = blank_app();
+    let _ = app.update(Message::Window(WindowMsg::NoFileDialog));
+    assert!(app.status.contains("xdg-desktop-portal"), "{}", app.status);
+}
+
+/// A summary's code marks are not shown in the plain-text views of it (the
+/// margin's notes, the file banner, the hover): they read "`Cart.total`
+/// sums…", backticks and all.
+#[test]
+fn a_short_view_of_a_summary_drops_its_code_marks() {
+    let cached = |summary: &str| crate::explain::Cached {
+        summary: summary.into(),
+        prompt_hash: 0,
+        detail: None,
+        basis: None,
+    };
+    let c = cached("`Cart.total` sums the items, then `apply_discount`s them.");
+    assert_eq!(
+        crate::app::shown_summary(&c),
+        "Cart.total sums the items, then apply_discounts them."
+    );
+    let plain = cached("Sums the items.");
+    assert!(matches!(
+        crate::app::shown_summary(&plain),
+        std::borrow::Cow::Borrowed(_)
+    ));
+}
+
 /// ⌘H and ⌘L belong to the menu (Hide clew, Go to Line), so time travel
 /// steps with ⌘← / ⌘→ only; a ⌘H / ⌘L the handler does see is not a step.
 #[test]
@@ -23939,7 +25253,7 @@ fn a_refused_remote_blame_clears_the_gutter_and_says_why() {
     );
     assert_eq!(
         app.status,
-        "git blame of src/lib.rs: git did not finish within 90s"
+        "Couldn't read git blame for src/lib.rs: git did not finish within 90s"
     );
     assert!(
         app.active_viewer().unwrap().git.is_none(),
@@ -25910,7 +27224,7 @@ fn lib_revision(app: &App, generation: u64, idx: usize) -> Message {
 fn lib_history_awaited(app: &mut App) -> u64 {
     let lib = app.proj.project.as_ref().unwrap().root.join("src/lib.rs");
     let pane = app.proj.active;
-    app.await_history(lib, pane, false)
+    app.await_history(lib, pane, false, "")
 }
 
 /// Going into the history of the step's file is the reader's own move there,
@@ -26716,7 +28030,7 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
         "⌘← stepped the history under the shortcuts panel"
     );
     let _ = app.update(esc_press());
-    assert!(!app.show_shortcuts);
+    assert!(!app.settings.open);
 
     // So does the tutorial, whose ← ⌘← is; on its first step, it stays.
     app.tutorial = Some(0);
@@ -26754,10 +28068,10 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Consent(_) => "consent",
             O::LspCommand(..) => "lsp command",
             O::LspConsent(..) => "lsp consent",
+            O::Setup(_) => "setup",
             O::UpdateNotes => "update notes",
             O::Settings => "settings",
             O::Connect => "connect",
-            O::Shortcuts => "shortcuts",
             O::BpCondition(_) => "breakpoint condition",
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
@@ -26768,7 +28082,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::AppMenu => "app menu",
             O::ViewMenu => "view menu",
             O::Graph(_) => "graph",
-            O::ServerPanel => "server panel",
             O::Finder => "finder",
             O::ContextMenu(_) => "context menu",
             O::Hover(_) => "hover",
@@ -26781,7 +28094,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.update.show_notes = false;
         app.settings.open = false;
         app.connect = None;
-        app.show_shortcuts = false;
         app.proj.bp_cond_edit = None;
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
@@ -26838,7 +28150,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.update.show_notes = true),
         Box::new(|a| a.settings.open = true),
         Box::new(|a| a.connect = Some(ConnectUi::default())),
-        Box::new(|a| a.show_shortcuts = true),
         Box::new(move |a| a.proj.bp_cond_edit = Some((lib.clone(), 1, String::new()))),
         Box::new(|a| a.proj.note_edit = Some(("src/lib.rs".into(), 1, String::new()))),
         Box::new(|a| {
@@ -26868,7 +28179,6 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.show_app_menu = true),
         Box::new(|a| a.show_view_menu = true),
         Box::new(|a| a.proj.overlay = Some(Overlay::ProjectImports)),
-        Box::new(|a| a.server_panel = true),
         Box::new(|a| a.proj.finder.open = true),
         Box::new(|a| {
             a.proj.context_menu = Some(ContextMenu {
@@ -26901,7 +28211,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (20, 20),
+        (18, 18),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -27587,7 +28897,7 @@ fn a_history_still_loading_gives_way_only_to_a_request_it_would_undo() {
         assert_eq!(
             app.status,
             if gives_way {
-                "Stopped loading the history of notes.txt — you went on in this one"
+                "Stopped loading the history of notes.txt — you kept working in this one"
             } else {
                 "Loading history…"
             },
@@ -27754,7 +29064,7 @@ fn a_rescope_still_loading_gives_way_to_a_step_an_exit_or_a_jump() {
         assert_eq!(
             app.status,
             if act == "⌘←" {
-                "Scope unchanged — you went on before the new scope loaded"
+                "Scope unchanged — you moved on before the new scope loaded"
             } else {
                 ""
             },
@@ -27881,7 +29191,7 @@ fn a_scope_toggle_still_loading_stands_with_a_summary_and_says_when_it_gives_way
             }
         }
         assert_eq!(
-            app.status, "Scope unchanged — you went on before the new scope loaded",
+            app.status, "Scope unchanged — you moved on before the new scope loaded",
             "{act}: the scope toggle stood, or gave way without a word"
         );
         let _ = app.update(lib_history(&app, asked));
@@ -29488,31 +30798,55 @@ fn reference_previews_come_from_the_lines_asked_for() {
     let (a, b) = (root.join("a.rs"), root.join("b.rs"));
     std::fs::write(&a, "  one\ntwo\n\tthree  \n").unwrap();
     std::fs::write(&b, "alpha\nbeta\n").unwrap();
-    let previews = crate::app::navigation::read_location_previews(vec![
-        (0, a.clone(), 2),
-        (1, b.clone(), 0),
-        (2, a.clone(), 0),
-        (3, a.clone(), 2),
-        (4, a.clone(), 99),
-        (5, root.join("missing.rs"), 0),
-    ]);
+    let utf16 = crate::viewer::PositionEncoding::Utf16;
+    let previews = crate::app::navigation::read_location_previews(
+        vec![
+            (0, a.clone(), 2, 1),
+            (1, b.clone(), 0, 0),
+            (2, a.clone(), 0, 2),
+            (3, a.clone(), 2, 1),
+            (4, a.clone(), 99, 0),
+            (5, root.join("missing.rs"), 0, 0),
+        ],
+        utf16,
+    );
     let want: Vec<(usize, String)> = [(0, "three"), (1, "alpha"), (2, "one"), (3, "three")]
         .into_iter()
         .map(|(i, t)| (i, t.to_string()))
         .collect();
     assert_eq!(previews, want);
 
+    // A hit far along a long line is shown from just before it, as a search
+    // hit is, its place counted in the server's units: an emoji is two
+    // UTF-16 units but one character.
+    let long = format!("    call({}needle);", "arg, ".repeat(40));
+    let at = long.find("needle").unwrap();
+    let shown = crate::app::navigation::location_preview(&long, Some(at), utf16);
+    assert!(
+        shown.starts_with('…') && shown.contains("needle);"),
+        "{shown}"
+    );
+    let wide = format!("{}needle", "😀".repeat(40));
+    let shown = crate::app::navigation::location_preview(&wide, Some(80), utf16);
+    assert!(
+        shown.starts_with('…') && shown.ends_with("😀needle"),
+        "{shown}"
+    );
+    let utf8 = crate::viewer::PositionEncoding::Utf8;
+    let shown = crate::app::navigation::location_preview(&wide, Some(160), utf8);
+    assert!(shown.ends_with("😀needle"), "{shown}");
+
     // Each file is read once and let go before the next: however many files
     // the hits are spread over, one file's text is held at a time.
-    let spread: Vec<(usize, PathBuf, usize)> = (0..30)
+    let spread: Vec<(usize, PathBuf, usize, usize)> = (0..30)
         .map(|k| {
             let path = root.join(format!("f{k}.rs"));
             std::fs::write(&path, format!("line {k}\n")).unwrap();
-            (k, path, 0)
+            (k, path, 0, 0)
         })
         .collect();
     crate::app::navigation::preview_texts::reset();
-    let previews = crate::app::navigation::read_location_previews(spread);
+    let previews = crate::app::navigation::read_location_previews(spread, utf16);
     assert_eq!(previews.len(), 30);
     assert_eq!(
         crate::app::navigation::preview_texts::peak(),
@@ -29528,7 +30862,7 @@ fn reference_previews_come_from_the_lines_asked_for() {
         line,
         character: 0,
     };
-    let _ = app.show_locations("refs", vec![target(2), target(40)]);
+    let _ = app.show_locations("refs", vec![target(2), target(40)], utf16);
     let previews: Vec<&str> = app
         .proj
         .search
@@ -29553,7 +30887,7 @@ fn reference_previews_come_from_the_lines_asked_for() {
         })
         .collect();
     let started = std::time::Instant::now();
-    let _ = app.show_locations("refs", deep);
+    let _ = app.show_locations("refs", deep, utf16);
     let took = started.elapsed();
     assert!(app.proj.search.hits.iter().all(|h| h.preview == "x"));
     assert!(took < std::time::Duration::from_secs(1), "{took:?}");
@@ -29667,10 +31001,10 @@ fn a_poisoned_reply_map_still_routes_replies() {
 }
 
 /// A16 / D1-22: the appearance is applied on screen before it is written, so
-/// a write that fails says so — from the menu, where it is committed at once,
-/// and from Settings' Save, appended to what the AI half reports — instead of
-/// looking saved until the next launch reverts it. (The preference picked is
-/// the one in effect, so no other test sees the palette move.)
+/// a write that fails says so — from the menu and from Settings, each
+/// committing it at once — instead of looking saved until the next launch
+/// reverts it. (The preference picked is the one in effect, so no other
+/// test sees the palette move.)
 #[test]
 fn a_failed_appearance_write_is_reported() {
     let dir = test_dir("theme-save-fails");
@@ -29688,11 +31022,12 @@ fn a_failed_appearance_write_is_reported() {
         "{}",
         app.status
     );
+    app.status.clear();
     let _ = app.update(Message::Settings(SettingsMsg::Open));
     let _ = app.update(Message::Settings(SettingsMsg::SetThemePref(pref)));
-    let _ = app.update(Message::Settings(SettingsMsg::Saved));
     assert!(
-        app.status.contains("the appearance setting was not saved"),
+        app.status
+            .starts_with("Could not save the appearance setting"),
         "{}",
         app.status
     );

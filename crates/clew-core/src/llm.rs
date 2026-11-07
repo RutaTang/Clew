@@ -870,6 +870,48 @@ fn json_messages(messages: &[ChatMsg]) -> Vec<Value> {
         .collect()
 }
 
+/// The language the reader reads, by its English name ("French"), when it
+/// is not English: what a model writes for them is written in it.
+static REPLY_LANGUAGE: Mutex<Option<String>> = Mutex::new(None);
+
+/// Have every model write what it says to the reader in `language` (its
+/// English name), or in English with `None`. Set by the app from the
+/// language its interface speaks.
+pub fn set_reply_language(language: Option<&str>) {
+    let mut held = REPLY_LANGUAGE.lock().unwrap_or_else(|e| e.into_inner());
+    *held = language.map(str::to_string);
+}
+
+/// The language set by [`set_reply_language`], if any.
+pub fn reply_language() -> Option<String> {
+    REPLY_LANGUAGE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// `system`, and — when the reader reads another language — the one line
+/// that has the model write to them in it, everything the program reads
+/// back (JSON, code, names) left as it is. Added here, where every request
+/// is made, and not to the prompts the app hashes: what was explained
+/// before stays explained.
+fn in_reply_language(system: &str) -> std::borrow::Cow<'_, str> {
+    with_reply_language(system, reply_language().as_deref())
+}
+
+/// [`in_reply_language`] for a given language.
+fn with_reply_language<'a>(system: &'a str, language: Option<&str>) -> std::borrow::Cow<'a, str> {
+    match language {
+        None => std::borrow::Cow::Borrowed(system),
+        Some(language) => std::borrow::Cow::Owned(format!(
+            "{system}\n\nWrite all prose meant for the reader in {language}, \
+             naturally, as a fluent native writer would. Keep code, identifiers, \
+             file paths, commands and anything quoted from the code exactly as \
+             they are, and keep any JSON keys and required formats unchanged."
+        )),
+    }
+}
+
 /// The body of a plain (tool-less) chat completion in `cfg`'s dialect.
 fn chat_body(
     cfg: &Config,
@@ -878,6 +920,7 @@ fn chat_body(
     max_tokens: u32,
     stream: bool,
 ) -> String {
+    let system = &*in_reply_language(system);
     let mut body = match cfg.provider.dialect() {
         Dialect::Anthropic => json!({
             "model": cfg.model,
@@ -908,6 +951,7 @@ fn tools_body(
     max_tokens: u32,
     wire: Wire,
 ) -> String {
+    let system = &*in_reply_language(system);
     match cfg.provider.dialect() {
         Dialect::Anthropic => anthropic_tools_body(cfg, system, messages, tools, max_tokens, wire),
         Dialect::OpenAi => openai_tools_body(cfg, system, messages, tools, max_tokens, wire),
@@ -2175,6 +2219,18 @@ fn first_line(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// English asks nothing more of a model; another language has it write
+    /// to the reader in that language, and leave what the program reads
+    /// back alone.
+    #[test]
+    fn a_reply_language_is_asked_for_after_the_system_prompt() {
+        assert_eq!(with_reply_language("Explain.", None), "Explain.");
+        let asked = with_reply_language("Explain.", Some("Japanese"));
+        assert!(asked.starts_with("Explain.\n\n"), "{asked}");
+        assert!(asked.contains("in Japanese"), "{asked}");
+        assert!(asked.contains("JSON keys"), "{asked}");
+    }
     // Read the WHOLE request before answering (see there for why).
     use crate::testutil::read_http_request as read_request;
     use std::io::Write;

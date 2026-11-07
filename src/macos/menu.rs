@@ -33,7 +33,9 @@
 //!
 //! [`menu_model`] is the whole menu as plain data, so its structure is tested
 //! without a main thread; [`install_once`] / [`rebuild`] only translate it to
-//! AppKit objects.
+//! AppKit objects. The model's titles are in English — its items are found
+//! by them — and are put in the reader's language as AppKit's items are made
+//! ([`make_item`]); the shell rebuilds the menu when the language changes.
 
 use std::sync::{Mutex, OnceLock};
 
@@ -49,6 +51,7 @@ use iced::futures::channel::mpsc;
 
 use crate::Message;
 use crate::keymap::{Action, Chord, Keymap, MENU_RESERVED, MenuSection};
+use crate::tr_noop;
 use crate::{ConnectMsg, EditorMsg, OverviewMsg, ProjectMsg, SettingsMsg, UpdaterMsg, WindowMsg};
 
 // Command tags: a stable id per bridged menu item that is NOT a keymap action,
@@ -288,19 +291,19 @@ fn command(title: &'static str, tag: isize) -> Entry {
 fn app_menu_entries() -> Vec<Entry> {
     vec![
         Entry::Standard {
-            title: "About clew",
+            title: tr_noop!("About clew"),
             action: sel!(orderFrontStandardAboutPanel:),
             key: None,
         },
         Entry::Separator,
-        command("Check for Updates…", CHECK_UPDATES),
+        command(tr_noop!("Check for Updates…"), CHECK_UPDATES),
         Entry::Separator,
-        command("Settings…", SETTINGS),
+        command(tr_noop!("Settings…"), SETTINGS),
         Entry::Separator,
         Entry::Standard {
-            title: "Hide clew",
+            title: tr_noop!("Hide clew"),
             action: sel!(hide:),
-            key: reserved_key("Hide clew"),
+            key: reserved_key(tr_noop!("Hide clew")),
         },
         Entry::Separator,
         // Bridged, NOT `terminate:`. AppKit's `terminate:` calls `exit(0)` from
@@ -311,7 +314,7 @@ fn app_menu_entries() -> Vec<Entry> {
         // ⌘Q through the bridge puts the quit back in the shell's hands, where
         // the teardown lives, directly (the terminate requests macOS makes
         // itself reach it too, through `crate::macos::terminate`).
-        command("Quit clew", QUIT),
+        command(tr_noop!("Quit clew"), QUIT),
     ]
 }
 
@@ -341,18 +344,18 @@ fn section_frame(section: MenuSection) -> (Vec<Entry>, Vec<Entry>) {
         MenuSection::Edit => (Vec::new(), Vec::new()),
         MenuSection::View => (
             vec![
-                command("Toggle Sidebar", TOGGLE_SIDEBAR),
-                command("Toggle Right Panel", TOGGLE_RIGHT),
+                command(tr_noop!("Toggle Sidebar"), TOGGLE_SIDEBAR),
+                command(tr_noop!("Toggle Margin"), TOGGLE_RIGHT),
             ],
             vec![
-                command("Overview", OVERVIEW),
-                command("Stats", STATS),
+                command(tr_noop!("Overview"), OVERVIEW),
+                command(tr_noop!("Stats"), STATS),
                 Entry::Separator,
-                command("Appearance: System", THEME_SYSTEM),
-                command("Appearance: Light", THEME_LIGHT),
-                command("Appearance: Dark", THEME_DARK),
+                command(tr_noop!("Appearance: System"), THEME_SYSTEM),
+                command(tr_noop!("Appearance: Light"), THEME_LIGHT),
+                command(tr_noop!("Appearance: Dark"), THEME_DARK),
                 Entry::Separator,
-                command("Toggle Full Screen", FULLSCREEN),
+                command(tr_noop!("Toggle Full Screen"), FULLSCREEN),
             ],
         ),
         MenuSection::Go => (Vec::new(), Vec::new()),
@@ -372,16 +375,16 @@ fn menu_model(keymap: &Keymap) -> Vec<MenuSpec> {
             entries: app_menu_entries(),
         },
         MenuSpec {
-            title: "File",
+            title: tr_noop!("File"),
             entries: vec![
-                command("New Window", NEW_WINDOW),
+                command(tr_noop!("New Window"), NEW_WINDOW),
                 Entry::Separator,
-                command("Open Folder…", OPEN_FOLDER),
-                command("Connect to Remote…", CONNECT),
+                command(tr_noop!("Open Folder…"), OPEN_FOLDER),
+                command(tr_noop!("Connect to Remote…"), CONNECT),
                 Entry::Separator,
                 // Bridged (not performClose:) — a frameless window ignores
                 // performClose:.
-                command("Close Window", CLOSE_WINDOW),
+                command(tr_noop!("Close Window"), CLOSE_WINDOW),
             ],
         },
     ];
@@ -439,7 +442,7 @@ fn set_main_menu(mtm: MainThreadMarker, keymap: &Keymap) {
 /// bar wants.
 fn submenu(mtm: MainThreadMarker, spec: &MenuSpec, target: &MenuTarget) -> Retained<NSMenuItem> {
     let menu = NSMenu::new(mtm);
-    menu.setTitle(&NSString::from_str(spec.title));
+    menu.setTitle(&NSString::from_str(crate::i18n::lookup(spec.title)));
     for entry in &spec.entries {
         match entry {
             Entry::Separator => menu.addItem(&NSMenuItem::separatorItem(mtm)),
@@ -470,7 +473,7 @@ fn make_item(
     key: Option<&KeyEquivalent>,
 ) -> Retained<NSMenuItem> {
     let item = NSMenuItem::new(mtm);
-    item.setTitle(&NSString::from_str(title));
+    item.setTitle(&NSString::from_str(crate::i18n::lookup(title)));
     if let Some(k) = key {
         item.setKeyEquivalent(&NSString::from_str(&k.key));
         item.setKeyEquivalentModifierMask(k.mask);

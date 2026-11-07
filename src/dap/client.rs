@@ -42,6 +42,7 @@ use tokio::process::Child;
 use tokio::sync::mpsc;
 
 use super::proto::{Breakpoint, DapEvent, EvalContext, Output, Scope, StackFrame, Variable};
+use crate::{tr, trn};
 
 /// How the adapter speaks DAP: over its own stdio, or over a loopback TCP
 /// port it announces on its stdout once it listens (js-debug, dlv).
@@ -88,6 +89,9 @@ pub struct DapClient {
     /// (where the same port number may be someone else's). `None` over stdio.
     addr: Option<SocketAddr>,
     timeout: Duration,
+    /// Set by the first [`Self::disconnect`] of any of this session's
+    /// handles: the session is asked to end once.
+    disconnected: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DapClient {
@@ -127,8 +131,13 @@ impl DapClient {
             .kill_on_drop(true);
         #[cfg(unix)]
         command.process_group(0);
-        let spawn_failed =
-            |e: std::io::Error| format!("failed to launch adapter {}: {e}", adapter.display());
+        let spawn_failed = |e: std::io::Error| {
+            tr!(
+                "could not start the debug adapter {path}: {error}",
+                path = adapter.display(),
+                error = e
+            )
+        };
         match transport {
             Transport::Stdio => {
                 command.stdin(std::process::Stdio::piped());
@@ -231,8 +240,9 @@ impl DapClient {
     /// announced ([`Self::tcp_addr`]) — dialled exactly, never re-derived.
     pub async fn connect_tcp_addr(addr: SocketAddr) -> Result<(DapClient, DapEvents), String> {
         if !addr.ip().is_loopback() {
-            return Err(format!(
-                "refusing to open a debug session on {addr}: only a loopback adapter is used"
+            return Err(tr!(
+                "refusing to open a debug session on {addr}: only a loopback adapter is used",
+                addr = addr
             ));
         }
         let stream = connect_retry(addr, None, CONNECT_TIMEOUT).await?;
@@ -284,6 +294,7 @@ impl DapClient {
             rpc,
             addr,
             timeout: REQUEST_TIMEOUT,
+            disconnected: Default::default(),
         };
         (client, events)
     }
@@ -323,23 +334,19 @@ impl DapClient {
             .call(command, arguments, timeout)
             .await
             .map_err(|e| match e {
-                CallError::NotRunning => "debug adapter not running".to_string(),
-                CallError::Closed => "debug adapter closed".to_string(),
-                CallError::TimedOut => format!("debug adapter did not answer '{command}' in time"),
+                CallError::NotRunning => tr!("debug adapter not running").to_string(),
+                CallError::Closed => tr!("debug adapter closed").to_string(),
+                CallError::TimedOut => tr!(
+                    "debug adapter did not answer '{command}' in time",
+                    command = command
+                ),
                 CallError::Failed(failure) => failure.message,
             })
     }
 
     pub async fn initialize(&self) -> Result<Value, String> {
-        self.request(
-            "initialize",
-            json!({
-                "adapterID": "clew", "clientID": "clew", "clientName": "clew",
-                "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
-                "supportsRunInTerminalRequest": false,
-            }),
-        )
-        .await
+        self.request("initialize", initialize_args(crate::i18n::current()))
+            .await
     }
 
     /// Launch the program with adapter-specific arguments. Sent at once; the
@@ -553,8 +560,18 @@ impl DapClient {
             .to_string())
     }
 
-    /// End the session and kill the debuggee.
+    /// End the session and kill the debuggee — once, whichever handle asks
+    /// first. Stop asked twice, from the app and from the run's own stream as
+    /// it saw the run end, and debugpy, which closes its connection once it
+    /// has answered one, failed on the second and exited with code 1: its
+    /// traceback came up on the status line.
     pub async fn disconnect(&self) -> Result<(), String> {
+        if self
+            .disconnected
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Ok(());
+        }
         let within = self.timeout.min(DISCONNECT_TIMEOUT);
         self.request_within("disconnect", json!({ "terminateDebuggee": true }), within)
             .await
@@ -579,6 +596,21 @@ const MAX_PENDING_OUTPUT_BYTES: usize = 4 * 1024 * 1024;
 /// with [`EventSink`]: whatever `recv` hands out is no longer queued, so its
 /// bytes are credited back here.
 ///
+/// The `initialize` request's arguments. `lang`, the reader's, is named as
+/// the `locale` when it is not English, so an adapter that translates its
+/// messages answers in it.
+fn initialize_args(lang: crate::i18n::Lang) -> Value {
+    let mut args = json!({
+        "adapterID": "clew", "clientID": "clew", "clientName": "clew",
+        "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path",
+        "supportsRunInTerminalRequest": false,
+    });
+    if let Some(tag) = lang.server_locale() {
+        args["locale"] = json!(tag);
+    }
+    args
+}
+
 /// `recv` is cancel-safe: its only await is the channel's own cancel-safe
 /// `recv`. The session loop selects it against the Stop flag, so a poll that
 /// loses that race must not consume or mis-credit an event.
@@ -664,7 +696,16 @@ impl EventSink {
             let n = std::mem::take(&mut self.dropped);
             self.queue(DapEvent::Output(Output {
                 category: "console".into(),
-                text: format!("[clew] {n} bytes of output dropped — the debuggee outran the UI\n"),
+                text: format!(
+                    "{}\n",
+                    trn!(
+                        "[clew] 1 byte of output dropped — the program wrote faster than it \
+                         could be shown",
+                        "[clew] {n} bytes of output dropped — the program wrote faster than it \
+                         could be shown",
+                        n
+                    )
+                ),
             }))?;
         }
         self.queue(event)
@@ -712,7 +753,13 @@ fn truncate_chunk(text: String) -> String {
     // costing 64 MiB while every byte count here saw 64 KiB.
     let mut out = String::with_capacity(cut + 64);
     out.push_str(&text[..cut]);
-    out.push_str(&format!("\n[clew] …{dropped} bytes truncated\n"));
+    out.push('\n');
+    out.push_str(&trn!(
+        "[clew] …1 byte truncated",
+        "[clew] …{n} bytes truncated",
+        dropped
+    ));
+    out.push('\n');
     out
 }
 
@@ -806,7 +853,7 @@ impl framing::Protocol for DapWire {
                         value
                             .get("message")
                             .and_then(Value::as_str)
-                            .unwrap_or("request failed"),
+                            .unwrap_or(tr!("request failed")),
                     ))
                 };
                 Handled::Response { id, result }
@@ -829,10 +876,21 @@ impl framing::Protocol for DapWire {
     fn frame_error(&mut self, error: &FrameError) {
         let text = if error.is_fatal() {
             format!(
-                "[clew] the debug adapter's output broke framing ({error}) — ending the session\n"
+                "{}\n",
+                tr!(
+                    "[clew] the debug adapter's output broke framing ({error}) — ending the \
+                     session",
+                    error = error
+                )
             )
         } else {
-            format!("[clew] skipped a malformed message from the debug adapter ({error})\n")
+            format!(
+                "{}\n",
+                tr!(
+                    "[clew] skipped a malformed message from the debug adapter ({error})",
+                    error = error
+                )
+            )
         };
         self.console(text);
     }
@@ -840,9 +898,12 @@ impl framing::Protocol for DapWire {
     fn ended(&mut self, reason: &EndReason) -> String {
         match reason {
             EndReason::Broken(error) => {
-                format!("the connection to the debug adapter broke: {error}")
+                tr!(
+                    "the connection to the debug adapter broke: {error}",
+                    error = error
+                )
             }
-            _ => "debug adapter stopped".to_string(),
+            _ => tr!("debug adapter stopped").to_string(),
         }
     }
 }
@@ -924,6 +985,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Lang;
     use clew_core::dapwire::parse_listening;
     use clew_core::framing::{read_message, write_frame};
     use std::time::Instant;
@@ -1301,6 +1363,32 @@ mod tests {
             }
             other => panic!("expected the child-session request, got {other:?}"),
         }
+    }
+
+    /// A session is asked to disconnect once, however many of its handles
+    /// ask: Stop asked from the app and from the run's stream, and debugpy
+    /// crashed on the second.
+    #[tokio::test]
+    async fn a_session_is_disconnected_once() {
+        let (client, _events, mut adapter) = manual_adapter().await;
+        let other = client.clone();
+        let first = tokio::spawn(async move { client.disconnect().await });
+        let asked = adapter.next().await;
+        assert_eq!(asked["command"], "disconnect");
+        adapter
+            .send(
+                json!({"seq": 1, "type": "response", "request_seq": asked["seq"],
+                         "command": "disconnect", "success": true}),
+            )
+            .await;
+        assert_eq!(first.await.unwrap(), Ok(()));
+        assert_eq!(other.disconnect().await, Ok(()));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), adapter.next())
+                .await
+                .is_err(),
+            "asked to disconnect again"
+        );
     }
 
     /// An adapter that does not answer `disconnect` is waited for a few
@@ -2292,5 +2380,15 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("could not connect"), "{err}");
+    }
+
+    /// The adapter is told the reader's language, when it is not English:
+    /// one that translates answers in it.
+    #[test]
+    fn initialize_names_the_readers_language() {
+        assert!(initialize_args(Lang::En).get("locale").is_none());
+        assert_eq!(initialize_args(Lang::Ja)["locale"], "ja");
+        assert_eq!(initialize_args(Lang::Zh)["locale"], "zh-cn");
+        assert_eq!(initialize_args(Lang::Fr)["adapterID"], "clew");
     }
 }

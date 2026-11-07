@@ -282,6 +282,7 @@ pub fn window_event(
             let modified_key = self::key(logical_key);
             let physical_key = self::physical_key(physical_key);
             let modifiers = self::modifiers(modifiers);
+            let text = typed_text(text, modifiers);
 
             let location = match location {
                 winit::keyboard::KeyLocation::Standard => {
@@ -564,6 +565,24 @@ pub fn mouse_button(mouse_button: winit::event::MouseButton) -> mouse::Button {
         winit::event::MouseButton::Back => mouse::Button::Back,
         winit::event::MouseButton::Forward => mouse::Button::Forward,
         winit::event::MouseButton::Other(other) => mouse::Button::Other(other),
+    }
+}
+
+/// clew patch: the text a key press types, with `modifiers` held — none
+/// while Ctrl or the logo key (⌘) is, but for AltGr, which Windows reports
+/// as Ctrl+Alt.
+///
+/// winit gives the text of the key with every modifier applied, and on X11
+/// Ctrl leaves a key outside `@`–`_` as it is: Ctrl+= gave "=" and Ctrl+0
+/// gave "0", which a focused text input typed as it also zoomed.
+pub fn typed_text(
+    text: Option<crate::core::SmolStr>,
+    modifiers: keyboard::Modifiers,
+) -> Option<crate::core::SmolStr> {
+    if modifiers.logo() || (modifiers.control() && !modifiers.alt()) {
+        None
+    } else {
+        text
     }
 }
 

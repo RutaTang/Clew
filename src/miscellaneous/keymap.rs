@@ -33,6 +33,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use iced::keyboard::{Key, Modifiers, key::Named};
 
+use crate::{tr, tr_noop};
+
 /// A rebindable command action. The `id` is the stable config key; the order in
 /// [`Action::ALL`] is the display order in the shortcuts panel and, within each
 /// [`MenuSection`], in the menu bar.
@@ -138,37 +140,38 @@ impl Action {
         Action::ALL.into_iter().find(|a| a.id() == s)
     }
 
-    /// Human-readable label for the shortcuts panel.
+    /// Human-readable label for the shortcuts panel, in the reader's
+    /// language: only ever shown.
     pub fn label(self) -> &'static str {
         match self {
-            Action::OpenFile => "Open file (fuzzy)",
-            Action::OpenSymbol => "Go to symbol",
-            Action::ProjectSearch => "Search in project",
-            Action::FindInFile => "Find in file",
-            Action::CopySelection => "Copy selection",
-            Action::ToggleBookmark => "Toggle bookmark",
-            Action::GotoLine => "Go to line",
-            Action::ToggleSplit => "Toggle split view",
-            Action::ZoomIn => "Increase font size",
-            Action::ZoomOut => "Decrease font size",
-            Action::ZoomReset => "Reset font size",
-            Action::GoBack => "Back",
-            Action::GoForward => "Forward",
-            Action::TraceValue => "Trace value at cursor",
-            Action::ToggleAsk => "Ask",
-            Action::StartDebug => "Start debugging",
-            Action::CallGraph => "Project call graph",
-            Action::ImportGraph => "Project import graph",
-            Action::TypeGraph => "Project type map",
-            Action::ProjectMaps => "Project maps (schema, routes, …)",
-            Action::ExplainAll => "Explain All",
-            Action::ToggleDiff => "Diff vs HEAD",
-            Action::TimeTravel => "Time Travel",
-            Action::Walkthrough => "Walkthrough",
-            Action::LspServers => "Language servers",
-            Action::Shortcuts => "Keyboard shortcuts",
-            Action::CommandPalette => "Command palette",
-            Action::Voice => "Talk (voice)",
+            Action::OpenFile => tr!("Go to file"),
+            Action::OpenSymbol => tr!("Go to symbol"),
+            Action::ProjectSearch => tr!("Search in project"),
+            Action::FindInFile => tr!("Find in file"),
+            Action::CopySelection => tr!("Copy selection"),
+            Action::ToggleBookmark => tr!("Toggle bookmark"),
+            Action::GotoLine => tr!("Go to line"),
+            Action::ToggleSplit => tr!("Toggle split view"),
+            Action::ZoomIn => tr!("Increase font size"),
+            Action::ZoomOut => tr!("Decrease font size"),
+            Action::ZoomReset => tr!("Reset font size"),
+            Action::GoBack => tr!("Back"),
+            Action::GoForward => tr!("Forward"),
+            Action::TraceValue => tr!("Trace value at cursor"),
+            Action::ToggleAsk => tr!("Ask"),
+            Action::StartDebug => tr!("Start debugging"),
+            Action::CallGraph => tr!("Project call graph"),
+            Action::ImportGraph => tr!("Project import graph"),
+            Action::TypeGraph => tr!("Project type map"),
+            Action::ProjectMaps => tr!("Project maps (schema, routes, …)"),
+            Action::ExplainAll => tr!("Explain All"),
+            Action::ToggleDiff => tr!("Diff vs HEAD"),
+            Action::TimeTravel => tr!("Time Travel"),
+            Action::Walkthrough => tr!("Walkthrough"),
+            Action::LspServers => tr!("Language servers"),
+            Action::Shortcuts => tr!("Keyboard shortcuts"),
+            Action::CommandPalette => tr!("Command palette"),
+            Action::Voice => tr!("Talk (voice)"),
         }
     }
 
@@ -180,34 +183,34 @@ impl Action {
     pub fn menu(self) -> MenuPlacement {
         let at = |section, title| MenuPlacement { section, title };
         match self {
-            Action::CopySelection => at(MenuSection::Edit, "Copy"),
-            Action::FindInFile => at(MenuSection::Edit, "Find…"),
-            Action::ProjectSearch => at(MenuSection::Edit, "Find in Files…"),
-            Action::ToggleSplit => at(MenuSection::View, "Split Editor"),
-            Action::ZoomIn => at(MenuSection::View, "Zoom In"),
-            Action::ZoomOut => at(MenuSection::View, "Zoom Out"),
-            Action::ZoomReset => at(MenuSection::View, "Actual Size"),
-            Action::GoBack => at(MenuSection::Go, "Back"),
-            Action::GoForward => at(MenuSection::Go, "Forward"),
-            Action::OpenFile => at(MenuSection::Go, "Go to File…"),
-            Action::OpenSymbol => at(MenuSection::Go, "Go to Symbol…"),
-            Action::GotoLine => at(MenuSection::Go, "Go to Line…"),
-            Action::ToggleBookmark => at(MenuSection::Go, "Toggle Bookmark"),
-            Action::TraceValue => at(MenuSection::Go, "Trace Value"),
-            Action::ToggleAsk => at(MenuSection::View, "Ask"),
-            Action::StartDebug => at(MenuSection::View, "Start Debugging"),
-            Action::CallGraph => at(MenuSection::View, "Call Graph"),
-            Action::ImportGraph => at(MenuSection::View, "Import Graph"),
-            Action::TypeGraph => at(MenuSection::View, "Type Map"),
-            Action::ProjectMaps => at(MenuSection::View, "Project Maps"),
-            Action::ExplainAll => at(MenuSection::View, "Explain All"),
-            Action::ToggleDiff => at(MenuSection::View, "Diff vs HEAD"),
-            Action::TimeTravel => at(MenuSection::View, "Time Travel"),
-            Action::Walkthrough => at(MenuSection::View, "Walkthrough"),
-            Action::LspServers => at(MenuSection::View, "Language Servers…"),
-            Action::Shortcuts => at(MenuSection::View, "Keyboard Shortcuts…"),
-            Action::CommandPalette => at(MenuSection::View, "Command Palette…"),
-            Action::Voice => at(MenuSection::View, "Talk"),
+            Action::CopySelection => at(MenuSection::Edit, tr_noop!("Copy")),
+            Action::FindInFile => at(MenuSection::Edit, tr_noop!("Find…")),
+            Action::ProjectSearch => at(MenuSection::Edit, tr_noop!("Find in Files…")),
+            Action::ToggleSplit => at(MenuSection::View, tr_noop!("Split Editor")),
+            Action::ZoomIn => at(MenuSection::View, tr_noop!("Zoom In")),
+            Action::ZoomOut => at(MenuSection::View, tr_noop!("Zoom Out")),
+            Action::ZoomReset => at(MenuSection::View, tr_noop!("Actual Size")),
+            Action::GoBack => at(MenuSection::Go, tr_noop!("Back")),
+            Action::GoForward => at(MenuSection::Go, tr_noop!("Forward")),
+            Action::OpenFile => at(MenuSection::Go, tr_noop!("Go to File…")),
+            Action::OpenSymbol => at(MenuSection::Go, tr_noop!("Go to Symbol…")),
+            Action::GotoLine => at(MenuSection::Go, tr_noop!("Go to Line…")),
+            Action::ToggleBookmark => at(MenuSection::Go, tr_noop!("Toggle Bookmark")),
+            Action::TraceValue => at(MenuSection::Go, tr_noop!("Trace Value")),
+            Action::ToggleAsk => at(MenuSection::View, tr_noop!("Ask")),
+            Action::StartDebug => at(MenuSection::View, tr_noop!("Start Debugging")),
+            Action::CallGraph => at(MenuSection::View, tr_noop!("Call Graph")),
+            Action::ImportGraph => at(MenuSection::View, tr_noop!("Import Graph")),
+            Action::TypeGraph => at(MenuSection::View, tr_noop!("Type Map")),
+            Action::ProjectMaps => at(MenuSection::View, tr_noop!("Project Maps")),
+            Action::ExplainAll => at(MenuSection::View, tr_noop!("Explain All")),
+            Action::ToggleDiff => at(MenuSection::View, tr_noop!("Diff vs HEAD")),
+            Action::TimeTravel => at(MenuSection::View, tr_noop!("Time Travel")),
+            Action::Walkthrough => at(MenuSection::View, tr_noop!("Walkthrough")),
+            Action::LspServers => at(MenuSection::View, tr_noop!("Language Servers…")),
+            Action::Shortcuts => at(MenuSection::View, tr_noop!("Keyboard Shortcuts…")),
+            Action::CommandPalette => at(MenuSection::View, tr_noop!("Command Palette…")),
+            Action::Voice => at(MenuSection::View, tr_noop!("Talk")),
         }
     }
 
@@ -310,11 +313,12 @@ pub enum MenuSection {
 impl MenuSection {
     pub const ALL: [MenuSection; 3] = [MenuSection::Edit, MenuSection::View, MenuSection::Go];
 
+    /// The menu's title, in the reader's language: only ever shown.
     pub fn title(self) -> &'static str {
         match self {
-            MenuSection::Edit => "Edit",
-            MenuSection::View => "View",
-            MenuSection::Go => "Go",
+            MenuSection::Edit => tr!("Edit"),
+            MenuSection::View => tr!("View"),
+            MenuSection::Go => tr!("Go"),
         }
     }
 }
@@ -324,7 +328,17 @@ impl MenuSection {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MenuPlacement {
     pub section: MenuSection,
+    /// In English, whatever the interface speaks: the command palette runs
+    /// an action by it and the menu finds its item by it. Shown through
+    /// [`MenuPlacement::shown`].
     pub title: &'static str,
+}
+
+impl MenuPlacement {
+    /// The title in the reader's language, as the menu shows it.
+    pub fn shown(&self) -> &'static str {
+        crate::i18n::lookup(self.title)
+    }
 }
 
 /// Chords the menu bar owns for its own commands, which are not keymap actions.
@@ -334,13 +348,16 @@ pub struct MenuPlacement {
 /// rebind UI refuses them through [`Keymap::conflict`]. `crate::macos::menu`
 /// takes these items' key equivalents from this same list, so the two cannot
 /// drift apart.
+///
+/// The titles are in English, whatever the interface speaks: the menu finds
+/// its items' chords by them. They are shown through `crate::i18n::lookup`.
 pub const MENU_RESERVED: [(Chord, &str); 6] = [
-    (Chord::cmd('q'), "Quit clew"),
-    (Chord::cmd('w'), "Close Window"),
-    (Chord::cmd('n'), "New Window"),
-    (Chord::cmd('o'), "Open Folder…"),
-    (Chord::cmd(','), "Settings…"),
-    (Chord::cmd('h'), "Hide clew"),
+    (Chord::cmd('q'), tr_noop!("Quit clew")),
+    (Chord::cmd('w'), tr_noop!("Close Window")),
+    (Chord::cmd('n'), tr_noop!("New Window")),
+    (Chord::cmd('o'), tr_noop!("Open Folder…")),
+    (Chord::cmd(','), tr_noop!("Settings…")),
+    (Chord::cmd('h'), tr_noop!("Hide clew")),
 ];
 
 /// The key part of a chord, normalized so equal chords compare equal:
@@ -597,11 +614,12 @@ pub enum Conflict {
 }
 
 impl Conflict {
-    /// What to name in the "Already used by …" notice.
+    /// What to name in the "Already used by …" notice, in the reader's
+    /// language.
     pub fn label(self) -> &'static str {
         match self {
             Conflict::Action(a) => a.label(),
-            Conflict::Menu(title) => title,
+            Conflict::Menu(title) => crate::i18n::lookup(title),
         }
     }
 }

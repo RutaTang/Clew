@@ -7,6 +7,8 @@ use std::collections::{HashSet, VecDeque};
 
 use clew_protocol::{Event, Refusal, Rel};
 
+use crate::tr;
+
 /// Most rels one `ReadSources` asks for: it bounds the request, and the work
 /// one reply does. What a reply carries is bounded in bytes on the host,
 /// which names the rels it had no room for (see [`read`]).
@@ -109,7 +111,7 @@ where
                 }
                 continue;
             }
-            Ok(_) => "unexpected reply to ReadSources".to_string(),
+            Ok(_) => tr!("unexpected reply to {request}", request = "ReadSources"),
             Err(why) => why,
         };
         // The round trip failed: nothing more is asked of this host.

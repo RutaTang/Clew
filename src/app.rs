@@ -53,6 +53,8 @@ pub(crate) mod state;
 pub(crate) mod corners;
 
 mod ask;
+pub(crate) mod ask_sessions;
+pub(crate) mod breakpoints_store;
 mod calls;
 mod connect;
 pub(crate) mod content;
@@ -64,6 +66,7 @@ pub(crate) mod export;
 pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
+pub(crate) mod setup;
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;
@@ -72,7 +75,8 @@ pub(crate) mod integrations;
 mod keys;
 pub(crate) mod languages;
 mod lsp;
-mod navigation;
+pub(crate) mod navigation;
+pub(crate) use navigation::count_matches;
 mod overview;
 pub(crate) mod palette;
 mod project;
