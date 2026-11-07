@@ -1867,9 +1867,10 @@ fn embed_query_within(
 ) -> Result<Vec<f32>, String> {
     let deadline = std::time::Instant::now() + limit;
     let stopped = || stop.load(Ordering::Relaxed);
-    let result = embed::embed_batch_cancellable(cfg, &[query.to_string()], &|| {
-        stopped() || std::time::Instant::now() >= deadline
-    });
+    let result =
+        embed::embed_batch_cancellable(cfg, &[query.to_string()], embed::Purpose::Query, &|| {
+            stopped() || std::time::Instant::now() >= deadline
+        });
     match result {
         Ok(mut vecs) if !vecs.is_empty() => Ok(vecs.remove(0)),
         Ok(_) => Err("the endpoint returned no vector".into()),

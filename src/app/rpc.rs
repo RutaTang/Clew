@@ -362,17 +362,21 @@ impl AiClient {
         .unwrap_or_else(|_| Err(CallError::Internal(tr!("task join failed").into())))
     }
 
-    /// Embed texts — stopped, like a completion, when this future is dropped
-    /// (its task aborted: the index build of a project the window left): on
-    /// the server by the `Cancel` that follows an abandoned `Embed`
-    /// ([`Awaiting`]), and on this machine by the flag the blocking batches
-    /// poll, which shuts the connection of the one in flight down.
+    /// Embed texts for the index — stopped, like a completion, when this
+    /// future is dropped (its task aborted: the index build of a project the
+    /// window left): on the server by the `Cancel` that follows an abandoned
+    /// `Embed` ([`Awaiting`]), and on this machine by the flag the blocking
+    /// batches poll, which shuts the connection of the one in flight down —
+    /// or stops the model, for vectors made here.
+    ///
+    /// Vectors made on this computer are made here whatever the endpoint:
+    /// the model is this computer's, and a server elsewhere has none.
     pub async fn embed(
         &self,
         cfg: embed::Config,
         texts: Vec<String>,
     ) -> Result<Vec<Vec<f32>>, String> {
-        if let Some(tx) = self.server() {
+        if let Some(tx) = self.server().filter(|_| !cfg.is_local()) {
             return match self
                 .rpc(tx, clew_protocol::Request::Embed { texts })
                 .await?
@@ -388,7 +392,7 @@ impl AiClient {
         let abandoned = RaiseOnDrop::default();
         let stop = abandoned.flag();
         tokio::task::spawn_blocking(move || {
-            embed::embed_all(&cfg, &texts, &|| {
+            embed::embed_all(&cfg, &texts, embed::Purpose::Document, &|| {
                 stop.load(std::sync::atomic::Ordering::Relaxed)
             })
         })
@@ -901,6 +905,30 @@ mod tests {
             cancel.request
         );
         assert!(pending.lock().unwrap().is_empty(), "the entry leaked");
+    }
+
+    /// Vectors made on this computer are made here even when AI calls go to
+    /// the server: the model is this computer's, and the server is asked
+    /// nothing. (Here the model is not downloaded, so making them fails —
+    /// on this side.)
+    #[tokio::test]
+    async fn vectors_made_here_are_not_asked_of_the_server() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<ClientMessage>(8);
+        let ai = AiClient {
+            endpoint: AiEndpoint::Server,
+            server_tx: Some(tx),
+            next_id: Arc::new(AtomicU64::new(1)),
+            pending: Arc::default(),
+        };
+        let err = ai
+            .embed(crate::embed::Config::local(), vec!["x".into()])
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("EmbeddingGemma") || err.contains("clew-speak"),
+            "{err}"
+        );
+        assert!(rx.try_recv().is_err(), "the server was asked");
     }
 
     /// The same on this machine: dropping an `embed` whose batch is out —

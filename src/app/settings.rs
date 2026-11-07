@@ -65,7 +65,9 @@ impl App {
         let stored = llm::Config::stored_key();
         self.settings.key_from_env = stored.is_empty() && !c.api_key.is_empty();
         self.settings.key = stored;
-        let e = embed::Config::current_or_default();
+        // The service, as it is stored, whether or not it is the source.
+        let e = embed::Config::service_or_default();
+        self.settings.embed_here = embed::Config::stored_here();
         self.settings.embed_model = e.model;
         self.settings.embed_base_url = e.base_url;
         let embed_stored = embed::Config::stored_key();
@@ -88,6 +90,7 @@ impl App {
                 self.settings.embed_base_url.clone(),
             ),
         );
+        self.settings.embed_here_snapshot = self.settings.embed_here;
         self.settings.save_failed = false;
         self.settings.integrations.note = None;
         self.refresh_integrations();
@@ -132,6 +135,16 @@ impl App {
                         kept.extend(embed_kept);
                         kept
                     })
+            })
+            .and_then(|mut kept| {
+                embed::Config::save_source_from(
+                    self.settings.embed_here,
+                    self.settings.embed_here_snapshot,
+                )
+                .map(|source_kept| {
+                    kept.extend(source_kept);
+                    kept
+                })
             });
         match saved {
             Ok(kept) => {
@@ -243,6 +256,7 @@ impl App {
             self.settings.embed_base_url.clone(),
         );
         now.provider != chat.provider
+            || self.settings.embed_here != self.settings.embed_here_snapshot
             || now.api_key != chat.api_key
             || now.model != chat.model
             || now.base_url != chat.base_url
@@ -342,6 +356,7 @@ fn saved_field_name(key: &str) -> &str {
         "api_key" => tr!("API key"),
         "model" => tr!("Model"),
         "base_url" => tr!("Base URL"),
+        "source" => tr!("Where embeddings are made"),
         other => other,
     }
 }
@@ -397,6 +412,13 @@ impl App {
                 self.settings.embed_base_url = s;
                 Task::none()
             }
+            msg @ (SettingsMsg::EmbedHere(..)
+            | SettingsMsg::DownloadEmbedModel
+            | SettingsMsg::CancelEmbedDownload
+            | SettingsMsg::EmbedDownloadProgress { .. }
+            | SettingsMsg::EmbedDownloaded(..)
+            | SettingsMsg::RemoveEmbedModel
+            | SettingsMsg::EmbedModelRemoved(..)) => self.on_local_embedding(msg),
             SettingsMsg::Open => {
                 let opened = self.on_open_settings();
                 Task::batch([opened, self.sync_server_listing()])

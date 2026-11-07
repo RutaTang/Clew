@@ -145,6 +145,21 @@ impl Drop for ServerLink {
     }
 }
 
+/// The embedding config a server is handed: `cfg` — unless its vectors are
+/// made on this computer and the server is on another (`remote`), which has
+/// no model to make them with.
+pub(crate) fn embed_for_server(
+    cfg: Option<embed::Config>,
+    remote: bool,
+) -> Option<clew_protocol::AiEmbedConfig> {
+    cfg.filter(|c| !c.is_local() || !remote)
+        .map(|c| clew_protocol::AiEmbedConfig {
+            api_key: c.api_key,
+            model: c.model,
+            base_url: c.base_url,
+        })
+}
+
 impl App {
     pub(crate) fn on_server_connected(&mut self, tx: server::RequestTx) -> Task<Message> {
         // The in-process clew-server is up; keep its request channel and
@@ -760,11 +775,7 @@ impl App {
                     base_url: c.base_url,
                     reply_language: llm::reply_language(),
                 }),
-                embed::Config::load().map(|c| clew_protocol::AiEmbedConfig {
-                    api_key: c.api_key,
-                    model: c.model,
-                    base_url: c.base_url,
-                }),
+                embed_for_server(embed::Config::load(), self.connection.is_remote()),
             )
         } else {
             (None, None)

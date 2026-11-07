@@ -42,6 +42,7 @@ Clew 的每个功能也都可以只用键盘完成（Linux 和 Windows 上 **⌘
 - 🧭 **Walkthrough**：上手一个新项目，不管是想了解项目主要的走向和涉及的代码，还是想知道某个功能主要的走向和涉及的代码，以及从哪里入手，又该按照什么顺序读，往往并不是容易的。Clew 提供了由 AI 驱动的 Walkthrough 功能，能针对整个项目或某个具体问题，生成一条有序、锚定到代码的引导式讲解，带你一步步走过关键的文件和函数，理清阅读的主线。
 - 🕰️ **Time Travel**：对于一段代码想不通为什么这么写时，往往需要回头看它以前长什么样、是什么时候、为什么变成现在这样。Clew 提供 Time Travel 功能，沿着时间轴拖动，就能把任意文件回退到它 git 历史里的任一版本。针对某个函数，它还能生成一段由 AI 驱动的 story，解释这个函数从历史一步步变成现在这样的原因。
 - 🔌 **多模型支持**：Clew 的 AI 功能背后是一个可替换的语言模型，不绑定任何一家厂商。你可以在设置里填入自己的 LLM Provider 的 API key 和 endpoint。
+- 🔎 **语义搜索，在你的电脑上**：Semantic Search 和 Ask Clew 借助 embeddings 按代码的功能来查找代码。embeddings 可以**在你的电脑上**由 [EmbeddingGemma](https://huggingface.co/onnx-community/embeddinggemma-300m-ONNX)（Google DeepMind，217 MB，遵循 [Gemma 使用条款](https://ai.google.dev/gemma/terms)）生成：不需要密钥，数据也不会离开这台电脑。在 **设置 → Embeddings** 中选择「在这台电脑上」并点击「下载」即可；每个文件都会按发布时的大小和 SHA-256 核对，并由 Clew 旁边的 `clew-speak` 运行。也可以选择「服务」：任何兼容 OpenAI 的 `/embeddings` 端点，切换时它的设置会被保留。
 - 🌐 **多语言界面**：Clew 支持英语、法语、简体中文、韩语和日语界面，默认跟随系统语言，也可以在 **设置 → 外观 → 语言** 中切换；AI 的回答、讲解和导览也会使用同一种语言。git、SSH 和系统报出的常见错误也会随之翻译；支持多语言的语言服务器和调试器，同样会用这种语言给出提示。
 - 🧩 **MCP 与 ACP**：Ask Clew 可以调用你自己的 **MCP** 服务器提供的工具（issue 跟踪、文档、数据库等），也可以把问题交给支持 **ACP** 的编码 agent（Claude Agent、Codex、Gemini CLI、GitHub Copilot 等）来回答。反过来，Clew 也通过 MCP 把它的代码理解工具提供给任何 agent，并通过 ACP 把它自己的 agent 提供给编辑器。
 

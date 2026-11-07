@@ -61,6 +61,7 @@ pub(crate) mod content;
 mod debug;
 mod docs;
 mod editor;
+pub(crate) mod embedding;
 mod explain;
 pub(crate) mod export;
 pub(crate) mod flow;

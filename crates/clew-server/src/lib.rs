@@ -1820,7 +1820,9 @@ impl Server {
                 tokio::spawn(async move {
                     let stop = flag.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        embed::embed_all(&cfg, &texts, &|| stop.load(Ordering::Relaxed))
+                        embed::embed_all(&cfg, &texts, embed::Purpose::Document, &|| {
+                            stop.load(Ordering::Relaxed)
+                        })
                     })
                     .await;
                     agents

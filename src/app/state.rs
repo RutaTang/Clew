@@ -764,6 +764,11 @@ pub struct SettingsDraft {
     pub embed_key: String,
     pub embed_model: String,
     pub embed_base_url: String,
+    /// Embeddings made on this computer, not by the service the three
+    /// fields above name — which are kept as they are, for a change back.
+    pub embed_here: bool,
+    /// `embed_here` as the modal pre-filled it (see `ai_snapshot`).
+    pub embed_here_snapshot: bool,
     /// The key in effect came from the environment, so the field above is
     /// deliberately BLANK rather than pre-filled with it. Set in
     /// `on_open_settings`; the form uses it only to say which variable it is
@@ -851,6 +856,8 @@ impl Default for SettingsDraft {
             embed_key: String::new(),
             embed_model: String::new(),
             embed_base_url: String::new(),
+            embed_here: false,
+            embed_here_snapshot: false,
             key_from_env: false,
             embed_key_from_env: false,
             // Replaced with what was read from storage the moment the modal
@@ -1146,6 +1153,8 @@ pub struct App {
     pub ask_sessions_query: String,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
+    /// EmbeddingGemma's download, for embeddings made on this computer.
+    pub(crate) local_embedding: crate::app::embedding::LocalEmbedding,
     /// The debugger (DAP): the active session plus breakpoints and watches that
     /// persist across sessions (see [`DebugState`]).
     pub debug: DebugState,

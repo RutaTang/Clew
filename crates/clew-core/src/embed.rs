@@ -11,7 +11,15 @@
 //!
 //! DeepSeek has no embeddings API, so the embedding endpoint is configured
 //! separately (defaulting to OpenAI, key falling back to `OPENAI_API_KEY` only
-//! while the endpoint is still OpenAI's).
+//! while the endpoint is still OpenAI's) — or the vectors are made on this
+//! computer, with no service and no key ([`local`]). That choice is the
+//! section's `source` (`local`, or `service` — the default); the service's
+//! own fields are kept as they are while it is not used. A config whose
+//! vectors are made here says so by its `base_url`: [`local::BASE_URL`].
+
+pub mod local;
+
+pub use local::Purpose;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -68,6 +76,27 @@ pub struct Config {
 /// rotating one — or clearing it, which makes `load` return `None` — would read
 /// as a move to another space and throw away a usable index (see [`Space`]).
 fn model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
+    if made_here(emb) {
+        return (local::MODEL.id.to_string(), local::BASE_URL.to_string());
+    }
+    service_model_and_base_url(emb)
+}
+
+/// What the stored `[embedding]` section's `source` says: vectors made on
+/// this computer (`local`), or by the service its fields name.
+fn made_here(emb: Option<&toml::Table>) -> bool {
+    emb.and_then(|e| e.get("source"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|source| source == SOURCE_LOCAL)
+}
+
+/// The `source` of embeddings made on this computer, and of a service's.
+const SOURCE_LOCAL: &str = "local";
+const SOURCE_SERVICE: &str = "service";
+
+/// The service the stored `[embedding]` section names, whether or not it
+/// is the source: its model and endpoint, defaults filled.
+fn service_model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
     let field = |k: &str| {
         emb.and_then(|e| e.get(k))
             .and_then(|v| v.as_str())
@@ -81,7 +110,18 @@ fn model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
     let model = field("model")
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.into());
-    (model, base_url)
+    (local_model_or(model, &base_url), base_url)
+}
+
+/// `model`, unless `base_url` says the vectors are made here: then the one
+/// model they are made with ([`local::MODEL`]), whatever was written — the
+/// name stamped on an index has to be the model that made it.
+fn local_model_or(model: String, base_url: &str) -> String {
+    if base_url == local::BASE_URL {
+        local::MODEL.id.to_string()
+    } else {
+        model
+    }
 }
 
 /// The identity of a vector space: the model AND the endpoint serving it.
@@ -126,6 +166,20 @@ pub fn stored_space() -> Space {
 }
 
 impl Config {
+    /// Vectors made on this computer ([`local`]).
+    pub fn local() -> Config {
+        Config {
+            api_key: String::new(),
+            model: local::MODEL.id.to_string(),
+            base_url: local::BASE_URL.to_string(),
+        }
+    }
+
+    /// Whether this config's vectors are made on this computer.
+    pub fn is_local(&self) -> bool {
+        self.base_url == local::BASE_URL
+    }
+
     /// The space this config's vectors live in.
     pub fn space(&self) -> Space {
         Space {
@@ -135,16 +189,38 @@ impl Config {
     }
 
     /// Load from the `[embedding]` section, falling back to `OPENAI_API_KEY` and
-    /// the OpenAI defaults. `None` when no key is available.
+    /// the OpenAI defaults. `None` when no key is available — or, for vectors
+    /// made here, while the model or the program that runs it is not
+    /// ([`local::ready`]).
     pub fn load() -> Option<Config> {
         let config = Self::current_or_default();
-        (!config.api_key.is_empty()).then_some(config)
+        let usable = if config.is_local() {
+            local::ready()
+        } else {
+            !config.api_key.is_empty()
+        };
+        usable.then_some(config)
     }
 
-    /// The stored embedding settings (defaults filled), even without a key.
-    /// The settings form must snapshot these values so a later save does not
-    /// mistake the stored model and endpoint for edits made by another window.
+    /// The stored embedding settings (defaults filled), even without a key:
+    /// the service's, or vectors made here ([`Config::local`]).
     pub fn current_or_default() -> Config {
+        if made_here(crate::globalconfig::section("embedding").as_ref()) {
+            return Config::local();
+        }
+        Self::service_or_default()
+    }
+
+    /// Whether the stored settings make vectors on this computer.
+    pub fn stored_here() -> bool {
+        made_here(crate::globalconfig::section("embedding").as_ref())
+    }
+
+    /// The service the stored settings name (defaults filled), even without
+    /// a key, and whether or not it is the source. The settings form must
+    /// snapshot these values so a later save does not mistake the stored
+    /// model and endpoint for edits made by another window.
+    pub fn service_or_default() -> Config {
         let emb = crate::globalconfig::section("embedding");
         let field = |k: &str| {
             emb.as_ref()
@@ -155,7 +231,7 @@ impl Config {
 
         // Resolved before the key, because whether the environment may supply
         // the key depends on where the request would go.
-        let (model, base_url) = model_and_base_url(emb.as_ref());
+        let (model, base_url) = service_model_and_base_url(emb.as_ref());
         let api_key = field("api_key")
             .filter(|k| !k.is_empty())
             .or_else(|| {
@@ -205,6 +281,7 @@ impl Config {
         } else {
             base_url.trim().trim_end_matches('/').to_string()
         };
+        let model = local_model_or(model, &base_url);
         Config {
             api_key: api_key.trim().to_string(),
             model,
@@ -213,13 +290,31 @@ impl Config {
     }
 
     /// Persist the `[embedding]` section, preserving other config sections
-    /// (see [`crate::globalconfig::update`]).
+    /// (see [`crate::globalconfig::update`]). Vectors made here are saved
+    /// as the `source` alone: the service's fields stay as they were.
     pub fn save(&self) -> Result<(), String> {
-        let mut emb = toml::Table::new();
-        emb.insert("api_key".into(), self.api_key.clone().into());
-        emb.insert("model".into(), self.model.clone().into());
-        emb.insert("base_url".into(), self.base_url.clone().into());
+        let mut emb = crate::globalconfig::section("embedding").unwrap_or_default();
+        if self.is_local() {
+            emb.insert("source".into(), SOURCE_LOCAL.into());
+        } else {
+            emb.insert("api_key".into(), self.api_key.clone().into());
+            emb.insert("model".into(), self.model.clone().into());
+            emb.insert("base_url".into(), self.base_url.clone().into());
+            emb.insert("source".into(), SOURCE_SERVICE.into());
+        }
         crate::globalconfig::update("embedding", emb)
+    }
+
+    /// Persist where vectors are made — here, or by the service — as an
+    /// edit of `previous`, what the form was opened with (see
+    /// [`Config::save_from`]): one another writer changed since is kept,
+    /// and named.
+    pub fn save_source_from(here: bool, previous: bool) -> Result<Vec<String>, String> {
+        let source = |here: bool| if here { SOURCE_LOCAL } else { SOURCE_SERVICE };
+        crate::globalconfig::update_fields(
+            "embedding",
+            &[("source", source(previous).into(), source(here).into())],
+        )
     }
 
     /// Persist this config as an edit OF `previous`, keeping any field another
@@ -319,8 +414,12 @@ fn build_agent(
 /// endpoint's token cap). Blocking — run off the UI thread — and bounded:
 /// every silence by [`REQUEST_TIMEOUT`], the whole by [`BATCH_PACE`]. A
 /// caller that must be able to stop it uses [`embed_batch_cancellable`].
-pub fn embed_batch(cfg: &Config, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    embed_batch_cancellable(cfg, texts, &|| false)
+pub fn embed_batch(
+    cfg: &Config,
+    texts: &[String],
+    purpose: Purpose,
+) -> Result<Vec<Vec<f32>>, String> {
+    embed_batch_cancellable(cfg, texts, purpose, &|| false)
 }
 
 /// How often a caller waiting on a batch re-tests its `cancelled` predicate.
@@ -339,13 +438,20 @@ const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// is abandoned once its answer is in, and that abandon, of a request that is
 /// over, cannot reach the batch the connection serves next
 /// (`crate::net::Lease`).
+///
+/// `purpose`, what the texts are embedded for, matters to a model run here
+/// ([`local::prompted`]); an endpoint is given the texts as they are.
 pub fn embed_batch_cancellable(
     cfg: &Config,
     texts: &[String],
+    purpose: Purpose,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Vec<f32>>, String> {
     if texts.is_empty() {
         return Ok(Vec::new());
+    }
+    if cfg.is_local() {
+        return local::embed(texts, purpose, cancelled);
     }
     let url = endpoint(cfg);
     let (agent, via) = agent(&url)?;
@@ -637,6 +743,7 @@ fn parse_embeddings(text: &str, expected: usize) -> Result<Vec<Vec<f32>>, String
 pub fn embed_all(
     cfg: &Config,
     texts: &[String],
+    purpose: Purpose,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Vec<f32>>, String> {
     const CHUNK: usize = 96;
@@ -645,7 +752,7 @@ pub fn embed_all(
         if cancelled() {
             return Err(crate::llm::CANCELLED.to_string());
         }
-        let batch = embed_batch_cancellable(cfg, chunk, cancelled)?;
+        let batch = embed_batch_cancellable(cfg, chunk, purpose, cancelled)?;
         // Each batch is uniform; so must the batches be with each other.
         if let (Some(first), Some(next)) = (out.first(), batch.first())
             && first.len() != next.len()
@@ -1834,7 +1941,7 @@ mod tests {
             model: "m".into(),
             base_url: format!("http://{addr}"),
         };
-        let err = embed_batch(&cfg, &["hello".to_string()])
+        let err = embed_batch(&cfg, &["hello".to_string()], Purpose::Query)
             .expect_err("a 3xx is not a set of embeddings");
         assert!(err.contains("redirected"), "the refusal is reported: {err}");
         endpoint.join().unwrap();
@@ -1873,7 +1980,8 @@ mod tests {
             model: "m".into(),
             base_url: format!("http://{addr}"),
         };
-        let result = std::panic::catch_unwind(|| embed_batch(&cfg, &["hello".to_string()]));
+        let result =
+            std::panic::catch_unwind(|| embed_batch(&cfg, &["hello".to_string()], Purpose::Query));
         peer.join().unwrap();
         let err = result
             .expect("a reset connection panicked the thread that asked")
@@ -2483,10 +2591,15 @@ mod integrity_tests {
             model: model.into(),
             base_url: format!("http://{addr}"),
         };
-        embed_batch(&cfg("text-embedding-3-small"), &["a".to_string()]).unwrap();
+        embed_batch(
+            &cfg("text-embedding-3-small"),
+            &["a".to_string()],
+            Purpose::Query,
+        )
+        .unwrap();
         let v3 = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(v3.contains("\"dimensions\":512"), "{v3}");
-        embed_batch(&cfg("nomic-embed-text"), &["a".to_string()]).unwrap();
+        embed_batch(&cfg("nomic-embed-text"), &["a".to_string()], Purpose::Query).unwrap();
         let other = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(!other.contains("dimensions"), "{other}");
         assert!(supports_dimensions("openai/text-embedding-3-large"));

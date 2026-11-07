@@ -9,6 +9,13 @@ description = "Clew's offline speech: text read aloud by an on-device model, in 
 base64 = "0.22.1"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+# The other models it runs — embeddings, and when a speaker is done — on the
+# ONNX Runtime sherpa-onnx links in: `ort` links none of its own
+# (`alternative-backend`), and is handed that one's API (`runtime.rs`).
+ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "api-24", "alternative-backend"] }
+# Text into tokens as the embedding model was trained on — in Rust alone,
+# no C regex library.
+tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 
 # sherpa-onnx's ONNX Runtime, linked statically where its prebuilt archive
 # is built against the C runtime the rest of the program uses. Windows's is

@@ -4381,7 +4381,8 @@ mod tests {
             "m".into(),
             "https://embeddings.invalid/v1".into(),
         );
-        let err = crate::embed::embed_batch(&cfg, &["x".to_string()]).unwrap_err();
+        let err = crate::embed::embed_batch(&cfg, &["x".to_string()], crate::embed::Purpose::Query)
+            .unwrap_err();
         refused("an embeddings batch", err);
         // Downloads.
         let limits = crate::net::Limits {

@@ -362,9 +362,12 @@ impl App {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            embed::embed_batch_cancellable(&ecfg, std::slice::from_ref(&q), &|| {
-                                retired.load(std::sync::atomic::Ordering::Relaxed)
-                            })
+                            embed::embed_batch_cancellable(
+                                &ecfg,
+                                std::slice::from_ref(&q),
+                                embed::Purpose::Query,
+                                &|| retired.load(std::sync::atomic::Ordering::Relaxed),
+                            )
                             .map(|mut v| v.pop().unwrap_or_default())
                         })
                         .await

@@ -139,7 +139,6 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     );
 
     let page = app.settings.page;
-    let stored = || form::note(tr!("Stored in {path}", path = crate::llm::config_hint())).into();
     let body: Element<'_, Message> = match page {
         SettingsPage::Appearance => form::page(vec![form::group(
             "",
@@ -179,33 +178,53 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 ),
             ],
         )]),
-        SettingsPage::LanguageModel => form::page(vec![
-            form::group(
+        SettingsPage::LanguageModel => form::page(vec![form::group(
+            "",
+            None,
+            None,
+            vec![
+                form::field(tr!("Provider"), None, provider),
+                form::field(tr!("API key"), None, key),
+                form::field(tr!("Model"), None, model),
+                form::field(tr!("Base URL"), None, base),
+            ],
+        )]),
+        SettingsPage::Embeddings => {
+            let here = app.settings.embed_here;
+            let source = form::segmented([
+                (
+                    tr!("On this computer").to_string(),
+                    here,
+                    Message::Settings(SettingsMsg::EmbedHere(true)),
+                ),
+                (
+                    tr!("A service").to_string(),
+                    !here,
+                    Message::Settings(SettingsMsg::EmbedHere(false)),
+                ),
+            ]);
+            let made = form::group(
                 "",
                 None,
                 None,
-                vec![
-                    form::field(tr!("Provider"), None, provider),
-                    form::field(tr!("API key"), None, key),
-                    form::field(tr!("Model"), None, model),
-                    form::field(tr!("Base URL"), None, base),
-                ],
-            ),
-            stored(),
-        ]),
-        SettingsPage::Embeddings => form::page(vec![
-            form::group(
-                "",
-                Some(tr!("Any OpenAI-compatible /embeddings endpoint.").into()),
-                None,
-                vec![
-                    form::field(tr!("API key"), None, embed_key),
-                    form::field(tr!("Model"), None, embed_model),
-                    form::field(tr!("Base URL"), None, embed_base),
-                ],
-            ),
-            stored(),
-        ]),
+                vec![form::item(tr!("Where embeddings are made"), None, source)],
+            );
+            let how = if here {
+                form::group("", None, None, embed_model_rows(app))
+            } else {
+                form::group(
+                    "",
+                    Some(tr!("Any OpenAI-compatible /embeddings endpoint.").into()),
+                    None,
+                    vec![
+                        form::field(tr!("API key"), None, embed_key),
+                        form::field(tr!("Model"), None, embed_model),
+                        form::field(tr!("Base URL"), None, embed_base),
+                    ],
+                )
+            };
+            form::page(vec![made, how])
+        }
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
         SettingsPage::Languages if app.proj.project.is_none() => form::page(vec![
@@ -2415,4 +2434,77 @@ fn settings_nav_w() -> f32 {
         })
         .fold(SETTINGS_NAV_W, f32::max)
         .ceil()
+}
+
+/// EmbeddingGemma's rows: what it is, and at its right whether it is here —
+/// Remove — its download, or getting it; under them its terms, and why its
+/// last download failed.
+fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
+    use clew_core::embed::local::MODEL;
+    let state: Element<'_, Message> = if let Some(d) = app.local_embedding.download.as_ref() {
+        let total = d.total.unwrap_or(MODEL.bytes()).max(1);
+        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
+        row![
+            container(super::meter::eased_bar(
+                share,
+                70.0,
+                4.0,
+                theme::progress,
+                super::meter::PROGRESS,
+            ))
+            .width(70),
+            text(tr!(
+                "{percent}%",
+                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
+            ))
+            .size(ts::SMALL)
+            .color(theme::dim()),
+            form::action(
+                tr!("Cancel"),
+                Some(Message::Settings(SettingsMsg::CancelEmbedDownload))
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    } else if app.embed_model_installed() {
+        form::action(
+            tr!("Remove"),
+            Some(Message::Settings(SettingsMsg::RemoveEmbedModel)),
+        )
+        .into()
+    } else {
+        form::primary(
+            &tr!("Download ({size} MB)", size = MODEL.size_mb()),
+            Some(Message::Settings(SettingsMsg::DownloadEmbedModel)),
+        )
+        .into()
+    };
+    let mut rows = vec![form::item(
+        MODEL.name,
+        Some(
+            tr!("Google DeepMind's, run by Clew: nothing leaves this computer, and no key is needed.")
+                .to_string(),
+        ),
+        state,
+    )];
+    if let Some(e) = &app.local_embedding.error {
+        rows.push(form::plain(
+            text(crate::i18n::message(e))
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph),
+        ));
+    }
+    rows.push(form::item(
+        tr!("Gemma Terms of Use"),
+        Some(tr!("Downloading EmbeddingGemma, you accept them.").to_string()),
+        form::action(
+            tr!("Read the terms"),
+            Some(Message::Content(ContentMsg::OpenLink(
+                MODEL.terms.to_string(),
+            ))),
+        ),
+    ));
+    rows
 }

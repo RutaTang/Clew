@@ -1871,6 +1871,19 @@ pub enum SettingsMsg {
     EmbedKeyChanged(String),
     EmbedModelChanged(String),
     EmbedBaseUrlChanged(String),
+    /// Embeddings made on this computer (`true`), or by a service.
+    EmbedHere(bool),
+    /// EmbeddingGemma: download it, stop downloading it, how far it is, and
+    /// how it ended; remove it, and how that ended.
+    DownloadEmbedModel,
+    CancelEmbedDownload,
+    EmbedDownloadProgress {
+        done: u64,
+        total: Option<u64>,
+    },
+    EmbedDownloaded(Result<(), String>),
+    RemoveEmbedModel,
+    EmbedModelRemoved(Result<(), String>),
     /// Open / close the Settings modal: `Open` on the page it last showed,
     /// `OpenAt` on the one a flow needs (Voice, for a model to download).
     Open,
@@ -2703,6 +2716,13 @@ impl SettingsMsg {
             | SettingsMsg::EmbedKeyChanged(..)
             | SettingsMsg::EmbedModelChanged(..)
             | SettingsMsg::EmbedBaseUrlChanged(..)
+            | SettingsMsg::EmbedHere(..)
+            | SettingsMsg::DownloadEmbedModel
+            | SettingsMsg::CancelEmbedDownload
+            | SettingsMsg::EmbedDownloadProgress { .. }
+            | SettingsMsg::EmbedDownloaded(..)
+            | SettingsMsg::RemoveEmbedModel
+            | SettingsMsg::EmbedModelRemoved(..)
             | SettingsMsg::Open
             | SettingsMsg::OpenAt(..)
             | SettingsMsg::Close

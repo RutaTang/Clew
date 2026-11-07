@@ -23,6 +23,9 @@
 //! a model that cannot be loaded, `{"error":…}` before it exits. It exits
 //! when stdin closes.
 
+mod embed;
+mod runtime;
+
 use std::io::{BufRead, Write};
 use std::path::Path;
 
@@ -90,6 +93,13 @@ fn main() {
     if first.as_deref() == Some("--version") {
         println!("clew-speak {}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+    if first.as_deref() == Some("embed") {
+        let Some(dir) = args.next() else {
+            eprintln!("usage: clew-speak embed <model dir>");
+            std::process::exit(2);
+        };
+        std::process::exit(embed::run(Path::new(&dir)));
     }
     let (Some(family), Some(dir)) = (first.as_deref().and_then(Family::parse), args.next()) else {
         eprintln!("usage: clew-speak supertonic|kokoro <model dir>");

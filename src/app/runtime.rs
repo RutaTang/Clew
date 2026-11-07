@@ -103,6 +103,7 @@ impl App {
             ask_sessions_menu: false,
             ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
+            local_embedding: Default::default(),
             debug: DebugState::default(),
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
