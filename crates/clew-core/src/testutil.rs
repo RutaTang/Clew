@@ -298,6 +298,30 @@ pub fn write_script(path: &Path, body: &str) {
     settle_new_executable_with(path, &["--clew-warm-up"]);
 }
 
+/// A stand-in for `clew-speak embed`, written to `path` as a shell script:
+/// it says it is ready (vectors of 3), then runs `body` for each request
+/// line in `$line`, its number in `$n`. `vectors` answers it with one vector
+/// a text.
+#[cfg(unix)]
+pub fn fake_embedder(path: &Path, body: &str) {
+    let script = format!(
+        "[ \"$1\" = embed ] || exit 9\n\
+         vectors() {{\n\
+           count=$(printf '%s' \"$line\" | grep -o '\",\"' | wc -l)\n\
+           count=$((count + 1)); data=''; i=0\n\
+           while [ $i -lt $count ]; do data=\"${{data}}AACAPwAAAAAAAAAA\"; i=$((i + 1)); done\n\
+           echo \"{{\\\"vectors\\\":{{\\\"id\\\":$n,\\\"dims\\\":3,\\\"data\\\":\\\"$data\\\"}}}}\"\n\
+         }}\n\
+         echo '{{\"ready\":{{\"dims\":3}}}}'\n\
+         n=0\n\
+         while read -r line; do\n\
+           n=$((n + 1))\n\
+           {body}\n\
+         done"
+    );
+    write_script(path, &script);
+}
+
 /// Whether this process runs as root, who reads and writes past every file
 /// mode: a test that observes a failed read or write through a `chmod` has
 /// nothing to observe then, and returns early.

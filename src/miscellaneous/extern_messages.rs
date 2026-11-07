@@ -138,6 +138,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!(
         "clew-server download failed checksum verification (expected {expected}, got {actual})"
     ),
+    tr_noop!("clew-speak, which makes embeddings on this computer, is not installed beside Clew"),
     tr_noop!("conflicting Content-Length headers"),
     tr_noop!("correct them in its setting ({example}, {PERCENT_ENCODING})"),
     tr_noop!("could not connect to the debug adapter on {addr}: {error}"),
@@ -408,9 +409,11 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the embedding model could not be asked: {e}"),
     tr_noop!("the embedding model could not be heard: {e}"),
     tr_noop!("the embedding model could not be spoken to"),
-    tr_noop!("the embedding model ended as it started — its files may be damaged"),
+    tr_noop!("the embedding model could not start: {why}"),
+    tr_noop!("the embedding model ended unexpectedly: {why}"),
     tr_noop!("the embedding model made a vector that is not a number"),
     tr_noop!("the embedding model said something unreadable: {e}"),
+    tr_noop!("the embedding model stopped answering"),
     tr_noop!("the embedding model took too long to load"),
     tr_noop!("the embeddings request stopped unexpectedly"),
     tr_noop!("the endpoint changed its vector length mid-build ({arg1} then {arg2})"),

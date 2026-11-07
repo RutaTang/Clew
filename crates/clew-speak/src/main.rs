@@ -88,8 +88,10 @@ enum Answer {
 }
 
 fn main() {
-    let mut args = std::env::args().skip(1);
-    let first = args.next();
+    // As the system gives them: a folder's name need not be Unicode (on
+    // Linux, any bytes), and `args` would end the program on one that is not.
+    let mut args = std::env::args_os().skip(1);
+    let first = args.next().map(|a| a.to_string_lossy().into_owned());
     if first.as_deref() == Some("--version") {
         println!("clew-speak {}", env!("CARGO_PKG_VERSION"));
         return;

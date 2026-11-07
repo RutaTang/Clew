@@ -86,7 +86,7 @@ impl App {
             return Task::none();
         }
         let Some(cfg) = embed::Config::load() else {
-            self.status = tr!("Configure an embedding endpoint in Settings").into();
+            self.status = crate::app::embedding::why_no_embeddings();
             return Task::none();
         };
         self.drop_foreign_embed_index(&cfg);
@@ -119,8 +119,32 @@ impl App {
         // stamped with — and the live-config check decides at its next use
         // (`drop_foreign_embed_index`).
         let space = cfg.space();
+        // None held — another source was chosen, then this one again: what
+        // is stored of this one is reused rather than paid for again.
+        let stored = existing
+            .entries
+            .is_empty()
+            .then(|| {
+                self.proj
+                    .derived_dir
+                    .clone()
+                    .zip(self.proj.project.as_ref())
+            })
+            .flatten()
+            .map(|(store, project)| (store, project.root.clone()));
         let (build, handle) = Task::perform(
             async move {
+                let existing = match stored {
+                    Some((store, root)) => {
+                        let cfg = cfg.clone();
+                        tokio::task::spawn_blocking(move || {
+                            embed::load_for(&store, &root, Some(&cfg))
+                        })
+                        .await
+                        .unwrap_or_default()
+                    }
+                    None => existing,
+                };
                 let index = build_embeddings(&ai, &cfg, nodes, existing).await?;
                 built_in_stored_space(index, &space, &embed::stored_space())
             },
@@ -269,7 +293,7 @@ impl App {
             return Task::none();
         }
         let Some(cfg) = embed::Config::load() else {
-            self.status = tr!("Configure an embedding endpoint in Settings").into();
+            self.status = crate::app::embedding::why_no_embeddings();
             return Task::none();
         };
         self.drop_foreign_embed_index(&cfg);

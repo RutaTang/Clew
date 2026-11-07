@@ -35,6 +35,28 @@ fn is_file(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
+/// Why no embeddings can be made, said as what to do: the model to
+/// download, the program to install beside Clew — or, for a service, its
+/// endpoint to set.
+pub(crate) fn why_no_embeddings() -> String {
+    if !embed::Config::stored_here() {
+        return tr!("Configure an embedding endpoint in Settings").into();
+    }
+    if !local::installed() {
+        return tr!(
+            "Download {model} in Settings → Embeddings",
+            model = MODEL.name
+        );
+    }
+    if local::program().is_none() {
+        return tr!(
+            "clew-speak, which makes embeddings on this computer, is not installed beside Clew"
+        )
+        .into();
+    }
+    tr!("Configure an embedding endpoint in Settings").into()
+}
+
 impl App {
     /// Whether EmbeddingGemma is here, and not being downloaded or removed
     /// in any window.
@@ -181,10 +203,14 @@ impl App {
                 match result {
                     Ok(()) => {
                         self.local_embedding.error = None;
-                        self.status = tr!(
-                            "{model} is ready — code is found by what it does, on this computer",
-                            model = MODEL.name
-                        );
+                        self.status = if local::program().is_some() {
+                            tr!(
+                                "{model} is ready — code is found by what it does, on this computer",
+                                model = MODEL.name
+                            )
+                        } else {
+                            why_no_embeddings()
+                        };
                         self.embed_model_changed();
                     }
                     Err(e) => {

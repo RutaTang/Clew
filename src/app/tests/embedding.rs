@@ -96,6 +96,28 @@ fn choosing_this_computer_keeps_the_service_as_it_was() {
     assert!(app.embed_available, "the service, with its key");
 }
 
+/// A `source` written by hand in other words ("Local") is read as what it
+/// says, and changed from Settings like any other — not kept as another
+/// window's; one that names neither is the service, and is changed too.
+#[test]
+fn a_source_written_by_hand_is_read_and_changed() {
+    let (_dir, _env) = data("embed-hand");
+    for (written, here) in [("Local", true), (" local ", true), ("lokal", false)] {
+        let mut emb = toml::Table::new();
+        emb.insert("source".into(), written.into());
+        clew_core::globalconfig::update("embedding", emb).unwrap();
+        let mut app = blank_app();
+        let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+            SettingsPage::Embeddings,
+        )));
+        assert_eq!(app.settings.embed_here, here, "{written}");
+        let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(!here)));
+        let _ = app.update(Message::Settings(SettingsMsg::Close));
+        assert!(!app.status.contains("another window"), "{}", app.status);
+        assert_eq!(embed::Config::stored_here(), !here, "{written}");
+    }
+}
+
 /// Moving to vectors made here is a move to another space: the index held
 /// in memory, made with the service, is let go.
 #[test]
@@ -241,4 +263,155 @@ fn a_server_elsewhere_is_not_handed_vectors_made_here() {
     assert_eq!(on(&service, true).as_deref(), Some("http://emb.test/v1"));
     assert_eq!(on(&service, false).as_deref(), Some("http://emb.test/v1"));
     assert!(crate::app::server::embed_for_server(None, false).is_none());
+}
+
+/// `PATH` with `bin` before what it was, and without any folder that holds
+/// a `clew-speak` — for as long as the guard lives.
+#[cfg(unix)]
+fn path_with(bin: Option<&Path>) -> clew_core::testutil::EnvVars {
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    let kept = std::env::split_paths(&old).filter(|d| !d.join("clew-speak").exists());
+    let dirs: Vec<PathBuf> = bin.map(Path::to_path_buf).into_iter().chain(kept).collect();
+    clew_core::testutil::EnvVars::new().set("PATH", std::env::join_paths(dirs).unwrap())
+}
+
+/// Why no embeddings can be made is said as what to do about it — the
+/// model to download, then the program to put beside Clew — where they are
+/// asked for: a search, a build of the index, a download just finished.
+#[cfg(unix)]
+#[test]
+fn what_is_missing_to_make_embeddings_is_said() {
+    let (_dir, _env) = data("embed-missing");
+    let _path = path_with(None);
+    assert!(local::program().is_none(), "no clew-speak to be found");
+    embed::Config::local().save().unwrap();
+    let mut app = blank_app();
+    app.proj.semantic_query = "where is the total".into();
+    let download = format!("Download {} in Settings → Embeddings", MODEL.name);
+    let _ = app.update(Message::Semantic(SemanticMsg::Search));
+    assert_eq!(app.status, download);
+    app.status.clear();
+    let _ = app.update(Message::Semantic(SemanticMsg::BuildIndex));
+    assert_eq!(app.status, download);
+    // Downloaded: the program is what is missing.
+    let program =
+        "clew-speak, which makes embeddings on this computer, is not installed beside Clew";
+    install_all(&local::dir().unwrap());
+    let _ = app.update(Message::Semantic(SemanticMsg::Search));
+    assert_eq!(app.status, program);
+    app.status.clear();
+    let _ = app.update(Message::Semantic(SemanticMsg::BuildIndex));
+    assert_eq!(app.status, program);
+    // A download with nothing left to fetch ends at once.
+    let task = app.update(Message::Settings(SettingsMsg::DownloadEmbedModel));
+    settle(&mut app, task);
+    assert_eq!(app.status, program, "not that it is ready");
+    // A service without its endpoint: that is what to set.
+    embed::Config::from_parts(String::new(), "m".into(), String::new())
+        .save()
+        .unwrap();
+    let _ = app.update(Message::Semantic(SemanticMsg::Search));
+    assert_eq!(app.status, "Configure an embedding endpoint in Settings");
+}
+
+/// Vectors no longer made here — a service chosen — and the model this
+/// window holds in memory goes now, not once it has been idle a while.
+#[cfg(unix)]
+#[test]
+fn choosing_a_service_lets_the_model_go() {
+    let (dir, _env) = data("embed-let-go");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    clew_core::testutil::fake_embedder(&bin.join("clew-speak"), "vectors");
+    let _path = path_with(Some(&bin));
+    install_all(&local::dir().unwrap());
+    embed::Config::from_parts("sk".into(), "m".into(), "http://emb.test/v1".into())
+        .save()
+        .unwrap();
+    embed::Config::local().save().unwrap();
+    let held = local::embed(&["the total".into()], local::Purpose::Query, &|| false);
+    assert_eq!(held.unwrap().len(), 1);
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(false)));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    let still_held = local::let_go();
+    local::unload();
+    assert!(
+        !still_held,
+        "the model was kept after the service was chosen"
+    );
+}
+
+/// From a service to this computer and back: the service's vectors are
+/// found as they were, and a build reuses them rather than paying the
+/// service for every one again.
+#[test]
+fn going_back_to_the_service_finds_its_index() {
+    // Nothing listens on port 1: a vector asked of the service fails the build.
+    let endpoint = "http://127.0.0.1:1/v1";
+    let _env = embeddings_at("embed-round-trip-data", endpoint);
+    let mut app = scanned_app("embed-round-trip");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let store = app.proj.derived_dir.clone().unwrap();
+    app.proj.explain.cache.insert(
+        explain::Node::File(root.join("src/lib.rs")),
+        explain::Cached {
+            summary: "Defines a point and its origin.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let nodes = app.gather_embed_nodes();
+    let index = |cfg: &embed::Config, vec: Vec<f32>| embed::Index {
+        model: cfg.model.clone(),
+        base_url: cfg.base_url.clone(),
+        entries: nodes
+            .iter()
+            .map(|(node, _, hash)| embed::Entry {
+                node: node.clone(),
+                hash: *hash,
+                vec: vec.clone(),
+            })
+            .collect(),
+    };
+    let service = embed::Config::current_or_default();
+    let service_index = index(&service, vec![1.0, 0.0]);
+    embed::save(&store, &service_index).unwrap();
+    app.proj.embed_index = service_index;
+    // To this computer, where an index is built and saved…
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(true)));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(app.proj.embed_index.entries.is_empty());
+    let (_, saved) = embed::merge_built(
+        &store,
+        &root,
+        &index(&embed::Config::local(), vec![0.0, 1.0, 0.0]),
+    );
+    saved.unwrap();
+    // …and back.
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(false)));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(app.proj.embed_index.entries.is_empty());
+    let build = app.update(Message::Semantic(SemanticMsg::BuildIndex));
+    settle(&mut app, build);
+    assert!(!app.proj.building_embeddings);
+    let vecs: Vec<Vec<f32>> = app
+        .proj
+        .embed_index
+        .entries
+        .iter()
+        .map(|e| e.vec.clone())
+        .collect();
+    assert_eq!(vecs, [vec![1.0, 0.0]], "{}", app.status);
+    assert_eq!(app.proj.embed_index.space(), service.space());
 }

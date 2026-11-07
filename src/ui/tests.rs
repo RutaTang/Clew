@@ -8725,3 +8725,63 @@ fn every_layer_leaves_the_rounded_corners_clear() {
         }
     }
 }
+
+/// What is missing to make embeddings on this computer — the model, then
+/// the program that runs it — is said where search would be, and on the
+/// Embeddings page once the model is here.
+#[cfg(unix)]
+#[test]
+fn what_is_missing_to_make_embeddings_is_shown() {
+    use clew_core::embed::local;
+    let dir = crate::app::tests::test_dir("ui-embed-missing");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _data = crate::app::tests::data_dir_override(&dir);
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    let kept: Vec<PathBuf> = std::env::split_paths(&old)
+        .filter(|d| !d.join("clew-speak").exists())
+        .collect();
+    let _path =
+        clew_core::testutil::EnvVars::new().set("PATH", std::env::join_paths(kept).unwrap());
+    assert!(local::program().is_none(), "no clew-speak to be found");
+    clew_core::embed::Config::local().save().unwrap();
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.explain_cache_mut().insert(
+        explain_file(&root, "src/lib.rs"),
+        crate::explain::Cached {
+            summary: "Sums the cart.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.embed_available = clew_core::embed::Config::available();
+    assert!(!app.embed_available);
+    let download = format!("Download {} in Settings → Embeddings", local::MODEL.name);
+    let program = "clew-speak, which makes embeddings on this computer, is not installed";
+    {
+        let mut sim = sim_elem(super::semantic_tab(&app));
+        assert!(shows(&mut sim, &download));
+    }
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Embeddings,
+    )));
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, program), "not before the model is here");
+    }
+    let model = local::dir().unwrap();
+    for file in local::MODEL.files {
+        let path = model.join(file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, program), "the page says what is missing");
+    }
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    let mut sim = sim_elem(super::semantic_tab(&app));
+    assert!(shows(&mut sim, program), "so does search");
+}

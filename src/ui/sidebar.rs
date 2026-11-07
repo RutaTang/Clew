@@ -1679,7 +1679,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     } else if app.proj.explain.cache.is_empty() {
         tr!("Run Explain All to enable semantic search.").to_string()
     } else if !app.embed_available {
-        tr!("Set an embedding provider in Settings.").to_string()
+        crate::app::embedding::why_no_embeddings()
     } else {
         tr!("Preparing the index…").to_string()
     })

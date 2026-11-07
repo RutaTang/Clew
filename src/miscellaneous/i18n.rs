@@ -1590,6 +1590,8 @@ mod tests {
                     "Err(",
                     "SayError::Voice(",
                     "SayError::Sentence(",
+                    "Halt::Engine(",
+                    "Halt::Batch(",
                     "msg =",
                     "write!(",
                     "f.write_str(",

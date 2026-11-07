@@ -168,6 +168,10 @@ impl App {
                 // the file, but only when the project opens; nothing was
                 // re-applying it to the copy already in memory.
                 let space_changed = embed::stored_space() != space_before;
+                // Vectors no longer made here: the model held in memory goes.
+                if !embed::Config::stored_here() {
+                    embed::local::let_go();
+                }
                 let dropped = space_changed && !self.proj.embed_index.entries.is_empty();
                 if space_changed {
                     self.retire_semantic_search();

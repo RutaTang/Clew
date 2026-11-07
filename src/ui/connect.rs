@@ -2488,7 +2488,15 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         ),
         state,
     )];
-    if let Some(e) = &app.local_embedding.error {
+    // Here, but nothing to run it with.
+    let unrunnable = app.embed_model_installed() && clew_core::embed::local::program().is_none();
+    if let Some(e) = app
+        .local_embedding
+        .error
+        .clone()
+        .or_else(|| unrunnable.then(crate::app::embedding::why_no_embeddings))
+        .as_ref()
+    {
         rows.push(form::plain(
             text(crate::i18n::message(e))
                 .size(ts::SMALL)

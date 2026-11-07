@@ -17,7 +17,8 @@
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::{Mutex, MutexGuard, TryLockError, mpsc};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, TryLockError, mpsc};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -198,6 +199,9 @@ struct Engine {
     child: Child,
     stdin: ChildStdin,
     answers: mpsc::Receiver<Result<Answer, String>>,
+    /// The last of what it wrote to its standard error: why it ended, when
+    /// it ends unasked.
+    said: Arc<Mutex<String>>,
     program: PathBuf,
     dir: PathBuf,
     next: u64,
@@ -220,14 +224,46 @@ impl Engine {
             .arg(dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|e| format!("could not start the embedding model: {e}"))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
             let _ = child.kill();
             let _ = child.wait();
             return Err("the embedding model could not be spoken to".into());
         };
+        // Read as it is written, to its end — a pipe left full would stop
+        // the model, and one closed early would fail its next write —
+        // keeping its last lines, whatever bytes they are.
+        let said = Arc::new(Mutex::new(String::new()));
+        let _ = std::thread::Builder::new()
+            .name("clew-embed-stderr".into())
+            .spawn({
+                let said = said.clone();
+                move || {
+                    let mut stderr = BufReader::new(stderr);
+                    let mut line = Vec::new();
+                    loop {
+                        line.clear();
+                        match stderr.read_until(b'\n', &mut line) {
+                            Ok(0) | Err(_) => break,
+                            Ok(_) => {}
+                        }
+                        let mut said = said.lock().unwrap_or_else(|e| e.into_inner());
+                        said.push_str(String::from_utf8_lossy(&line).trim());
+                        said.push('\n');
+                        if said.len() > 4096 {
+                            let cut = said.len() - 2048;
+                            let cut = (cut..said.len())
+                                .find(|i| said.is_char_boundary(*i))
+                                .unwrap_or(said.len());
+                            said.drain(..cut);
+                        }
+                    }
+                }
+            });
         let (tx, answers) = mpsc::channel();
         let reader = std::thread::Builder::new()
             .name("clew-embed-answers".into())
@@ -249,6 +285,7 @@ impl Engine {
             child,
             stdin,
             answers,
+            said,
             program: program.to_path_buf(),
             dir: dir.to_path_buf(),
             next: 0,
@@ -274,9 +311,8 @@ impl Engine {
                     return Err("the embedding model took too long to load".into());
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(
-                        "the embedding model ended as it started — its files may be damaged".into(),
-                    );
+                    let why = engine.why_it_ended();
+                    return Err(format!("the embedding model could not start: {why}"));
                 }
             }
         }
@@ -311,14 +347,41 @@ impl Engine {
                 Ok(Ok(_)) => {}
                 Err(mpsc::RecvTimeoutError::Timeout) if started.elapsed() < BATCH_TIMEOUT => {}
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(Halt::Engine("the embedding model stopped answering".into()));
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(Halt::Engine(
-                        "the embedding model ended unexpectedly".into(),
+                        "the embedding model stopped answering".to_string(),
                     ));
                 }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let why = self.why_it_ended();
+                    return Err(Halt::Engine(format!(
+                        "the embedding model ended unexpectedly: {why}"
+                    )));
+                }
             }
+        }
+    }
+
+    /// Why the program ended, as far as it says: the last line it wrote to
+    /// its standard error, else how it exited.
+    fn why_it_ended(&mut self) -> String {
+        // It has closed its output; its end is a moment away.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let status = loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+                _ => break None,
+            }
+        };
+        // What it wrote last is read a moment after it ends.
+        std::thread::sleep(POLL);
+        let said = self.said.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match said.lines().rev().find(|l| !l.trim().is_empty()) {
+            Some(line) => line.trim().to_string(),
+            None => match status.and_then(|s| s.code()) {
+                Some(code) => format!("exit code {code}"),
+                None => status.map_or_else(|| "still running".to_string(), |s| s.to_string()),
+            },
         }
     }
 }
@@ -349,6 +412,10 @@ fn decode(data: &str, dims: usize, count: usize) -> Result<Vec<Vec<f32>>, String
 /// The model, while it is loaded: one at a time, kept between batches.
 pub(crate) struct Engines {
     engine: Mutex<Option<Engine>>,
+    /// Queries waiting for the model: a batch of documents lets them go
+    /// first, so a search is held up by one batch of an index being built,
+    /// not by all of them.
+    queries: AtomicUsize,
 }
 
 /// The engine of this process.
@@ -358,23 +425,42 @@ impl Engines {
     pub(crate) const fn new() -> Engines {
         Engines {
             engine: Mutex::new(None),
+            queries: AtomicUsize::new(0),
         }
     }
 
     /// The engine's slot, once no other batch holds it — or `None` once
     /// waiting stops being wanted.
-    fn slot(&self, cancelled: &dyn Fn() -> bool) -> Option<MutexGuard<'_, Option<Engine>>> {
+    fn slot(
+        &self,
+        purpose: Purpose,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Option<MutexGuard<'_, Option<Engine>>> {
+        /// A query counted as waiting, until it is not.
+        struct Waiting<'a>(&'a AtomicUsize);
+        impl Drop for Waiting<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let _waiting = (purpose == Purpose::Query).then(|| {
+            self.queries.fetch_add(1, Ordering::SeqCst);
+            Waiting(&self.queries)
+        });
         loop {
-            match self.engine.try_lock() {
-                Ok(guard) => return Some(guard),
-                Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
-                Err(TryLockError::WouldBlock) => {
-                    if cancelled() {
-                        return None;
-                    }
-                    std::thread::sleep(POLL);
+            let after_queries =
+                purpose == Purpose::Document && self.queries.load(Ordering::SeqCst) > 0;
+            if !after_queries {
+                match self.engine.try_lock() {
+                    Ok(guard) => return Some(guard),
+                    Err(TryLockError::Poisoned(poisoned)) => return Some(poisoned.into_inner()),
+                    Err(TryLockError::WouldBlock) => {}
                 }
             }
+            if cancelled() {
+                return None;
+            }
+            std::thread::sleep(POLL);
         }
     }
 
@@ -391,7 +477,7 @@ impl Engines {
         let mut out = Vec::with_capacity(texts.len());
         for chunk in texts.chunks(BATCH) {
             let prompted: Vec<String> = chunk.iter().map(|t| prompted(purpose, t)).collect();
-            out.extend(self.batch(program, dir, &prompted, cancelled)?);
+            out.extend(self.batch(program, dir, &prompted, purpose, cancelled)?);
         }
         Ok(out)
     }
@@ -401,12 +487,13 @@ impl Engines {
         program: &Path,
         dir: &Path,
         texts: &[String],
+        purpose: Purpose,
         cancelled: &dyn Fn() -> bool,
     ) -> Result<Vec<Vec<f32>>, String> {
         if cancelled() {
             return Err(crate::llm::CANCELLED.into());
         }
-        let Some(mut slot) = self.slot(cancelled) else {
+        let Some(mut slot) = self.slot(purpose, cancelled) else {
             return Err(crate::llm::CANCELLED.into());
         };
         // Another program or model than the one loaded: that one goes.
@@ -489,10 +576,12 @@ pub fn embed(
     if texts.is_empty() {
         return Ok(Vec::new());
     }
-    let program = program().ok_or_else(|| {
-        "clew-speak, which makes embeddings on this computer, is not installed beside Clew"
-            .to_string()
-    })?;
+    let Some(program) = program() else {
+        return Err(
+            "clew-speak, which makes embeddings on this computer, is not installed beside Clew"
+                .into(),
+        );
+    };
     let Some(dir) = dir().filter(|dir| present(dir)) else {
         // Removed since it was loaded: what is still in memory goes too.
         ENGINES.unload();
@@ -506,6 +595,12 @@ pub fn embed(
 /// batch it is making.
 pub fn unload() {
     ENGINES.unload();
+}
+
+/// Let go of the model now if it is not making a batch — vectors are no
+/// longer made here — without waiting; whether it was let go.
+pub fn let_go() -> bool {
+    ENGINES.unload_if_idle(Duration::ZERO)
 }
 
 /// Remove the model's files, and whatever a download of it left — the
@@ -598,28 +693,12 @@ mod tests {
         assert!(!present(dir.path()), "a folder in a file's place");
     }
 
-    /// A stand-in for `clew-speak embed`, as a shell script: it says it is
-    /// ready (vectors of 3), then runs `body` for each request line in
-    /// `$line`, its number in `$n`. `vectors` prints one vector a text.
+    /// A stand-in for `clew-speak embed` at `dir/name`
+    /// ([`crate::testutil::fake_embedder`]).
     #[cfg(unix)]
     fn engine(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
-        let script = format!(
-            "[ \"$1\" = embed ] || exit 9\n\
-             vectors() {{\n\
-               count=$(printf '%s' \"$line\" | grep -o '\",\"' | wc -l)\n\
-               count=$((count + 1)); data=''; i=0\n\
-               while [ $i -lt $count ]; do data=\"${{data}}AACAPwAAAAAAAAAA\"; i=$((i + 1)); done\n\
-               echo \"{{\\\"vectors\\\":{{\\\"id\\\":$n,\\\"dims\\\":3,\\\"data\\\":\\\"$data\\\"}}}}\"\n\
-             }}\n\
-             echo '{{\"ready\":{{\"dims\":3}}}}'\n\
-             n=0\n\
-             while read -r line; do\n\
-               n=$((n + 1))\n\
-               {body}\n\
-             done"
-        );
-        crate::testutil::write_script(&path, &script);
+        crate::testutil::fake_embedder(&path, body);
         path
     }
 
@@ -735,9 +814,10 @@ mod tests {
             "if [ $n = 2 ]; then exit 0; fi; vectors",
         );
         assert!(ask(&ends).is_ok());
-        assert_eq!(
-            ask(&ends).unwrap_err(),
-            "the embedding model ended unexpectedly"
+        assert!(
+            ask(&ends)
+                .unwrap_err()
+                .starts_with("the embedding model ended unexpectedly: "),
         );
         assert!(!engines.loaded());
         assert!(ask(&ends).is_ok(), "a new one");
@@ -796,6 +876,114 @@ mod tests {
                 .unwrap()
                 .len(),
             1
+        );
+    }
+
+    /// A search is not held up by an index being built: the batch being
+    /// made is finished, and the search goes before the build's next.
+    #[cfg(unix)]
+    #[test]
+    fn a_query_goes_before_the_next_batch_of_a_build() {
+        let dir = crate::testutil::TempDir::new("embed-local");
+        // A batch takes a fifth of a second, as a real one may take more.
+        let program = engine(dir.path(), "engine", "sleep 0.2; vectors");
+        let engines = Arc::new(Engines::new());
+        engines
+            .embed(&program, dir.path(), &texts(1), Purpose::Document, &|| {
+                false
+            })
+            .unwrap();
+        let build = {
+            let (engines, program, dir) = (engines.clone(), program.clone(), dir.path().to_owned());
+            std::thread::spawn(move || {
+                let started = Instant::now();
+                let vectors = engines
+                    .embed(&program, &dir, &texts(16 * 20), Purpose::Document, &|| {
+                        false
+                    })
+                    .unwrap();
+                (vectors.len(), started.elapsed())
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+        let asked = Instant::now();
+        let query = engines
+            .embed(&program, dir.path(), &texts(1), Purpose::Query, &|| false)
+            .unwrap();
+        let waited = asked.elapsed();
+        let (built, took) = build.join().unwrap();
+        assert_eq!((query.len(), built), (1, 16 * 20), "both made");
+        assert!(
+            waited < Duration::from_millis(1200),
+            "the search waited {waited:?} of a build of {took:?}"
+        );
+    }
+
+    /// What the model writes to its standard error is read to its end,
+    /// whatever bytes a line holds: a line that is not UTF-8 neither stops
+    /// the reading — the model's next write would fail — nor what it says
+    /// last.
+    #[cfg(unix)]
+    #[test]
+    fn what_the_model_writes_is_read_whatever_its_bytes() {
+        let dir = crate::testutil::TempDir::new("embed-local");
+        let engines = Engines::new();
+        let program = engine(
+            dir.path(),
+            "engine",
+            "printf 'no such file: caf\\351\\n' >&2; \\
+             if [ $n = 2 ]; then echo 'out of memory' >&2; exit 1; fi; vectors",
+        );
+        let ask = || engines.embed(&program, dir.path(), &texts(1), Purpose::Query, &|| false);
+        assert!(ask().is_ok());
+        assert_eq!(
+            ask().unwrap_err(),
+            "the embedding model ended unexpectedly: out of memory"
+        );
+    }
+
+    /// A model that ends before it is ready, or while it makes a batch,
+    /// says why as it said it — not that its files may be damaged.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_that_ends_says_why() {
+        let dir = crate::testutil::TempDir::new("embed-local");
+        let engines = Engines::new();
+        let silent = dir.path().join("silent");
+        crate::testutil::write_script(
+            &silent,
+            "echo 'error while loading shared libraries: libonnxruntime.so' >&2\nexit 127",
+        );
+        let err = engines
+            .embed(&silent, dir.path(), &texts(1), Purpose::Query, &|| false)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "the embedding model could not start: error while loading shared libraries: \
+             libonnxruntime.so"
+        );
+        let mute = dir.path().join("mute");
+        crate::testutil::write_script(&mute, "exit 2");
+        let err = engines
+            .embed(&mute, dir.path(), &texts(1), Purpose::Query, &|| false)
+            .unwrap_err();
+        assert_eq!(err, "the embedding model could not start: exit code 2");
+        let dies = engine(
+            dir.path(),
+            "dies",
+            "if [ $n = 2 ]; then echo 'Killed: out of memory' >&2; exit 137; fi; vectors",
+        );
+        assert!(
+            engines
+                .embed(&dies, dir.path(), &texts(1), Purpose::Query, &|| false)
+                .is_ok()
+        );
+        let err = engines
+            .embed(&dies, dir.path(), &texts(1), Purpose::Query, &|| false)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            "the embedding model ended unexpectedly: Killed: out of memory"
         );
     }
 

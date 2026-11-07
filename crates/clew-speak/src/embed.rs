@@ -23,9 +23,11 @@ use ort::value::Tensor;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 
-/// The most tokens of a text that are embedded: the model's own limit.
-/// Clew's texts — summaries, questions — are far shorter.
-const MAX_TOKENS: usize = 2048;
+/// The most tokens of a text that are embedded. Clew's texts — summaries,
+/// questions — are far shorter; a batch is as long as its longest text, and
+/// at the model's own limit (2,048) one long text made a batch of sixteen
+/// take most of a minute and gigabytes.
+const MAX_TOKENS: usize = 512;
 
 /// The model's file in the folder, and its weights beside it — under the
 /// name the model gives them.
@@ -33,6 +35,21 @@ pub const MODEL_FILE: &str = "onnx/model_q4.onnx";
 pub const WEIGHTS_FILE: &str = "onnx/model_q4.onnx_data";
 const WEIGHTS_NAME: &str = "model_q4.onnx_data";
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
+
+/// The tokenizer in `json`, cutting a text at [`MAX_TOKENS`] and padding
+/// none: each text of a batch is run as long as it is.
+fn tokenizer(json: &[u8]) -> Result<Tokenizer, String> {
+    let unreadable = |e: tokenizers::Error| format!("the tokenizer could not be read: {e}");
+    let mut tokenizer = Tokenizer::from_bytes(json).map_err(unreadable)?;
+    tokenizer
+        .with_truncation(Some(tokenizers::TruncationParams {
+            max_length: MAX_TOKENS,
+            ..Default::default()
+        }))
+        .map_err(unreadable)?;
+    tokenizer.with_padding(None);
+    Ok(tokenizer)
+}
 
 pub struct Embedder {
     session: Session,
@@ -47,15 +64,7 @@ impl Embedder {
         let unreadable =
             |file: &str, e: std::io::Error| format!("the model could not be loaded: {file}: {e}");
         let read = |file: &str| std::fs::read(dir.join(file)).map_err(|e| unreadable(file, e));
-        let mut tokenizer = Tokenizer::from_bytes(read(TOKENIZER_FILE)?)
-            .map_err(|e| format!("the tokenizer could not be read: {e}"))?;
-        tokenizer
-            .with_truncation(Some(tokenizers::TruncationParams {
-                max_length: MAX_TOKENS,
-                ..Default::default()
-            }))
-            .map_err(|e| format!("the tokenizer could not be read: {e}"))?;
-        tokenizer.with_padding(None);
+        let tokenizer = tokenizer(&read(TOKENIZER_FILE)?)?;
         let model = read(MODEL_FILE)?;
         let weights =
             read_shared(&dir.join(WEIGHTS_FILE)).map_err(|e| unreadable(WEIGHTS_FILE, e))?;
@@ -232,6 +241,25 @@ fn send(out: &mut impl Write, answer: &Answer) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A long text is cut at the most tokens a text is embedded with, and
+    /// a short one is not padded: a batch is as long as its longest text.
+    #[test]
+    fn a_text_is_cut_at_the_most_tokens() {
+        let json = br#"{"version":"1.0","truncation":null,"padding":null,
+            "added_tokens":[],"normalizer":null,
+            "pre_tokenizer":{"type":"WhitespaceSplit"},"post_processor":null,
+            "decoder":null,"model":{"type":"WordLevel",
+            "vocab":{"word":0,"[UNK]":1},"unk_token":"[UNK]"}}"#;
+        let words = tokenizer(json).unwrap();
+        let long = "word ".repeat(3000);
+        let batch = words
+            .encode_batch(vec![long, "word word".to_string()], true)
+            .unwrap();
+        assert_eq!(batch[0].get_ids().len(), 512);
+        assert_eq!(batch[1].get_ids().len(), 2);
+        assert!(tokenizer(b"not a tokenizer").is_err());
+    }
 
     /// A vector is made of unit length; one of none is left as it is.
     #[test]

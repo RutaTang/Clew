@@ -16,6 +16,8 @@
 //! section's `source` (`local`, or `service` — the default); the service's
 //! own fields are kept as they are while it is not used. A config whose
 //! vectors are made here says so by its `base_url`: [`local::BASE_URL`].
+//! Their index is kept apart from a service's, as `embeddings-local.json`:
+//! going from one to the other and back finds the first as it was.
 
 pub mod local;
 
@@ -87,7 +89,13 @@ fn model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
 fn made_here(emb: Option<&toml::Table>) -> bool {
     emb.and_then(|e| e.get("source"))
         .and_then(|v| v.as_str())
-        .is_some_and(|source| source == SOURCE_LOCAL)
+        .is_some_and(names_here)
+}
+
+/// Whether a `source`, as written — by hand too ("Local") — names this
+/// computer.
+fn names_here(source: &str) -> bool {
+    source.trim().eq_ignore_ascii_case(SOURCE_LOCAL)
 }
 
 /// The `source` of embeddings made on this computer, and of a service's.
@@ -311,9 +319,18 @@ impl Config {
     /// and named.
     pub fn save_source_from(here: bool, previous: bool) -> Result<Vec<String>, String> {
         let source = |here: bool| if here { SOURCE_LOCAL } else { SOURCE_SERVICE };
+        // What is written, when it says what the form was opened with in
+        // other words ("Local", a word that names neither, read as the
+        // service): that is what is being changed, not another writer's.
+        let written = crate::globalconfig::section("embedding")
+            .and_then(|e| e.get("source").and_then(|v| v.as_str()).map(str::to_string));
+        let previous = match written {
+            Some(written) if names_here(&written) == previous => written,
+            _ => source(previous).to_string(),
+        };
         crate::globalconfig::update_fields(
             "embedding",
-            &[("source", source(previous).into(), source(here).into())],
+            &[("source", previous, source(here).into())],
         )
     }
 
@@ -854,8 +871,21 @@ struct StoredRef<'a> {
     entries: &'a [Entry],
 }
 
-fn index_path(store: &Path) -> PathBuf {
-    store.join("embeddings.json")
+/// The index of a service's vectors in a store.
+const INDEX_FILE: &str = "embeddings.json";
+/// The index of vectors made on this computer.
+const LOCAL_INDEX_FILE: &str = "embeddings-local.json";
+
+/// Where the index of `space` is kept in `store`: vectors made on this
+/// computer apart from a service's, so choosing the other and then this one
+/// again finds this one's as they were — a service's were paid for, and a
+/// build after the round trip would have paid for every one again.
+fn index_path(store: &Path, space: &Space) -> PathBuf {
+    store.join(if space.base_url == local::BASE_URL {
+        LOCAL_INDEX_FILE
+    } else {
+        INDEX_FILE
+    })
 }
 
 /// Load the index for `store`, judged against this machine's current embedding
@@ -908,9 +938,9 @@ pub fn load_for(store: &Path, root: &Path, cfg: Option<&Config>) -> Index {
 /// [`load_for`] against an explicit space (`None`: nothing can match), with
 /// the reason a stored index that exists was refused (see [`load_checked`]).
 fn load_in(store: &Path, root: &Path, space: Option<&Space>) -> (Index, Option<String>) {
-    let path = index_path(store);
+    let path = index_path(store, space.unwrap_or(&Space::default()));
     let Some(text) = crate::statefile::read(&path) else {
-        return (Index::default(), stored_index_problem(store));
+        return (Index::default(), index_problem(&path));
     };
     let stored = match serde_json::from_str::<Stored>(&text) {
         Ok(stored) => stored,
@@ -945,8 +975,12 @@ fn load_in(store: &Path, root: &Path, space: Option<&Space>) -> (Index, Option<S
 /// absent or readable. Cheap (one `lstat`), but blind to a file that reads
 /// and does not parse — [`load_checked`] reports that case too.
 pub fn stored_index_problem(store: &Path) -> Option<String> {
-    let path = index_path(store);
-    let meta = std::fs::symlink_metadata(&path).ok()?;
+    index_problem(&index_path(store, &stored_space()))
+}
+
+/// [`stored_index_problem`] of the index at `path`.
+fn index_problem(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return Some(format!(
             "the semantic index {} is not a plain file; ignored",
@@ -1000,7 +1034,7 @@ fn save_capped(store: &Path, index: &Index, cap: u64) -> std::io::Result<usize> 
         };
         let json = serde_json::to_vec(&stored).map_err(|e| std::io::Error::other(e.to_string()))?;
         if json.len() as u64 <= cap || keep == 0 {
-            crate::statefile::write_atomic(&index_path(store), &json)?;
+            crate::statefile::write_atomic(&index_path(store, &index.space()), &json)?;
             let left_out = index.entries.len() - keep;
             if left_out > 0 {
                 eprintln!(
@@ -1080,7 +1114,8 @@ fn merge_capped(
     // unlocked is the lost update the lock prevents, and the reasons it fails
     // — the store cannot be created, the lock's name is squatted — forbid the
     // write as well.
-    let locked = crate::statefile::lock(&index_path(store))
+    // One lock for the store's indexes, under the name it always had.
+    let locked = crate::statefile::lock(&store.join(INDEX_FILE))
         .map_err(|e| std::io::Error::new(e.kind(), format!("could not lock embeddings.json: {e}")));
     let (stored, problem) = load_in(store, root, Some(&built.space()));
     if let Some(problem) = problem {
@@ -1338,6 +1373,44 @@ mod tests {
     /// with a `..` in it (`TMPDIR=/work/../tmp`) every entry failed the
     /// lexical check `load` keeps entries by, and the index read as empty
     /// in its own space.
+    /// Vectors made on this computer are kept apart from a service's:
+    /// building the one leaves the other as it was, and each loads back
+    /// for its own config — the service's were paid for.
+    #[test]
+    fn the_index_made_here_is_kept_apart_from_the_services() {
+        let dir = crate::testutil::TempDir::new("embed-index-apart");
+        let resolved = dir.path().canonicalize().unwrap();
+        let (store, root) = (resolved.join("store"), resolved.join("proj"));
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = |vec: Vec<f32>| Entry {
+            node: Node::File(root.join("a.rs")),
+            hash: 7,
+            vec,
+        };
+        let service = Config::from_parts("sk".into(), "m".into(), "http://emb.test/v1".into());
+        let here = Config::local();
+        let index = |cfg: &Config, vec: Vec<f32>| Index {
+            model: cfg.model.clone(),
+            base_url: cfg.base_url.clone(),
+            entries: vec![entry(vec)],
+        };
+        save(&store, &index(&service, vec![1.0, 0.0])).unwrap();
+        let (_, saved) = merge_built(&store, &root, &index(&here, vec![0.0, 1.0, 0.0]));
+        saved.unwrap();
+        let vecs = |cfg: &Config| {
+            load_for(&store, &root, Some(cfg))
+                .entries
+                .into_iter()
+                .map(|e| e.vec)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vecs(&service), [vec![1.0, 0.0]], "the service's, as it was");
+        assert_eq!(vecs(&here), [vec![0.0, 1.0, 0.0]]);
+        save(&store, &index(&service, vec![0.6, 0.8])).unwrap();
+        assert_eq!(vecs(&here), [vec![0.0, 1.0, 0.0]], "and the other way");
+    }
+
     #[test]
     fn index_from_another_model_or_endpoint_is_discarded() {
         let dir = crate::testutil::DataDir::new("embed-index");
@@ -1390,7 +1463,7 @@ mod tests {
         // Serializing an `Index` no longer produces that shape — it now
         // carries both — so the file is written field by field, omitting them.
         std::fs::write(
-            index_path(&store),
+            index_path(&store, &Space::default()),
             serde_json::to_string(&serde_json::json!({ "entries": index.entries }))
                 .unwrap()
                 .as_bytes(),
@@ -2170,7 +2243,9 @@ mod integrity_tests {
             left_out > 100,
             "only {left_out} left out under a 50-entry cap"
         );
-        let bytes = std::fs::metadata(index_path(&dir)).unwrap().len();
+        let bytes = std::fs::metadata(index_path(&dir, &Space::default()))
+            .unwrap()
+            .len();
         assert!(bytes <= cap, "{bytes} bytes written under a {cap}-byte cap");
         let back = load(&dir, &root);
         assert_eq!(back.entries.len(), 200 - left_out);
@@ -2233,11 +2308,14 @@ mod integrity_tests {
         assert_eq!(to_embed(&adopted, &nodes), 0);
 
         // And merging that next build changes nothing: same index, same file.
-        let first_file = std::fs::read(index_path(&dir)).unwrap();
+        let first_file = std::fs::read(index_path(&dir, &Space::default())).unwrap();
         let (again, saved) = merge_capped(&dir, &root, &adopted, cap);
         assert_eq!(saved.unwrap(), left_out);
         assert_eq!(again.entries.len(), N);
-        assert_eq!(std::fs::read(index_path(&dir)).unwrap(), first_file);
+        assert_eq!(
+            std::fs::read(index_path(&dir, &Space::default())).unwrap(),
+            first_file
+        );
 
         // A new session loads the capped file: only what the file could not
         // hold is embedded again, once.
@@ -2274,7 +2352,7 @@ mod integrity_tests {
                 merge_capped(&dir, &root, &index("m", DEFAULT_BASE_URL, build), cap);
             let left_out = saved.unwrap();
             assert!(left_out > 0 && left_out < 30, "{left_out}");
-            files.push(std::fs::read(index_path(&dir)).unwrap());
+            files.push(std::fs::read(index_path(&dir, &Space::default())).unwrap());
             orders.push(
                 merged
                     .entries
@@ -2310,7 +2388,7 @@ mod integrity_tests {
         let root = PathBuf::from("/p");
         assert_eq!(load_checked(&dir, &root).1, None, "absent");
 
-        std::fs::write(index_path(&dir), b"{ not json").unwrap();
+        std::fs::write(index_path(&dir, &Space::default()), b"{ not json").unwrap();
         let (loaded, problem) = load_checked(&dir, &root);
         assert!(loaded.entries.is_empty());
         let problem = problem.expect("an unparseable file is a problem");
@@ -2426,7 +2504,7 @@ mod integrity_tests {
             &index("m", DEFAULT_BASE_URL, vec![entry("stored", vec![1.0])]),
         )
         .unwrap();
-        let before = std::fs::read(index_path(&data)).unwrap();
+        let before = std::fs::read(index_path(&data, &Space::default())).unwrap();
         // Something that is not a plain file squats on the lock's name.
         std::fs::create_dir(data.join(".embeddings.json.lock")).unwrap();
 
@@ -2444,7 +2522,7 @@ mod integrity_tests {
             "the fresh read merged with the build is handed back"
         );
         assert_eq!(
-            std::fs::read(index_path(&data)).unwrap(),
+            std::fs::read(index_path(&data, &Space::default())).unwrap(),
             before,
             "the file is left as it was"
         );
@@ -2455,7 +2533,7 @@ mod integrity_tests {
     #[test]
     fn an_unreadable_stored_index_is_reported() {
         let dir = with_config("oversize", "m");
-        let f = std::fs::File::create(index_path(&dir)).unwrap();
+        let f = std::fs::File::create(index_path(&dir, &Space::default())).unwrap();
         // Sparse: no bytes are written.
         f.set_len(crate::statefile::MAX_STATE_BYTES + 1).unwrap();
         let problem = stored_index_problem(&dir).expect("an over-cap file is a problem");
@@ -2463,7 +2541,7 @@ mod integrity_tests {
         assert!(load(&dir, Path::new("/p")).entries.is_empty());
         // Closed first: Windows keeps an open file's name until it is.
         drop(f);
-        std::fs::remove_file(index_path(&dir)).unwrap();
+        std::fs::remove_file(index_path(&dir, &Space::default())).unwrap();
         assert_eq!(stored_index_problem(&dir), None, "absent is not a problem");
     }
 
