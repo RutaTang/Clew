@@ -38,8 +38,8 @@ pub struct TurnModel {
     pub license: &'static str,
 }
 
-/// Smart Turn v3.2, for the CPU (int8): 8 MB; a pause is judged in about a
-/// tenth of a second, most of it making the spectrogram the model hears.
+/// Smart Turn v3.2, for the CPU (int8): 8 MB; a pause is judged in well
+/// under a tenth of a second.
 pub const MODEL: TurnModel = TurnModel {
     name: "Smart Turn",
     repo: "pipecat-ai/smart-turn-v3",

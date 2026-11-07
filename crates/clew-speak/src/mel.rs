@@ -53,7 +53,7 @@ fn normalize(x: &mut [f64]) {
 fn log_mel(x: &[f64], frames: usize) -> Vec<f32> {
     let window = hann();
     let filters = mel_filters();
-    let (cos, sin) = twiddles();
+    let tw = twiddles();
     let half = N_FFT / 2;
     // Mirrored about the first and the last sample, not repeating them.
     let at = |i: isize| -> f64 {
@@ -69,7 +69,7 @@ fn log_mel(x: &[f64], frames: usize) -> Vec<f32> {
     };
     let mut out = vec![0f32; BANDS * frames];
     let mut buffer = [0f64; N_FFT];
-    let mut power = [0f64; BINS];
+    let mut spectrum = [Complex::default(); N_FFT];
     // The silence before what was said is one value throughout: its
     // windows are all alike, worked out once.
     let mut same: Option<(u64, [f64; BANDS])> = None;
@@ -85,21 +85,15 @@ fn log_mel(x: &[f64], frames: usize) -> Vec<f32> {
                 for (b, w) in buffer.iter_mut().zip(&window) {
                     *b *= w;
                 }
-                for (k, p) in power.iter_mut().enumerate() {
-                    let (mut re, mut im) = (0f64, 0f64);
-                    for (n, &b) in buffer.iter().enumerate() {
-                        let t = (k * n) % N_FFT;
-                        re += b * cos[t];
-                        im -= b * sin[t];
-                    }
-                    *p = re * re + im * im;
-                }
+                fft(&buffer, &tw, &mut spectrum);
+                let power = |k: usize| spectrum[k].re.powi(2) + spectrum[k].im.powi(2);
                 let mut bands = [0f64; BANDS];
-                for (m, band) in bands.iter_mut().enumerate() {
-                    let energy: f64 = power
+                for (band, filter) in bands.iter_mut().zip(&filters) {
+                    let energy: f64 = filter
+                        .weights
                         .iter()
                         .enumerate()
-                        .map(|(k, p)| p * filters[k * BANDS + m])
+                        .map(|(i, w)| w * power(filter.first + i))
                         .sum();
                     *band = energy.max(1e-10).log10();
                 }
@@ -129,16 +123,91 @@ fn hann() -> [f64; N_FFT] {
     w
 }
 
-/// cos and sin of 2πt/N for every t: a DFT of the window's bins reads them.
-fn twiddles() -> ([f64; N_FFT], [f64; N_FFT]) {
-    let mut cos = [0f64; N_FFT];
-    let mut sin = [0f64; N_FFT];
-    for t in 0..N_FFT {
-        let a = 2.0 * std::f64::consts::PI * t as f64 / N_FFT as f64;
-        cos[t] = a.cos();
-        sin[t] = a.sin();
+/// A complex number, as the transform works with them.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+struct Complex {
+    re: f64,
+    im: f64,
+}
+
+impl Complex {
+    fn add(self, o: Complex) -> Complex {
+        Complex {
+            re: self.re + o.re,
+            im: self.im + o.im,
+        }
     }
-    (cos, sin)
+    fn mul(self, o: Complex) -> Complex {
+        Complex {
+            re: self.re * o.re - self.im * o.im,
+            im: self.re * o.im + self.im * o.re,
+        }
+    }
+}
+
+/// e^(−2πi·t/N) for every t: the roots of unity every size the transform
+/// divides [`N_FFT`] into reads its own from.
+fn twiddles() -> [Complex; N_FFT] {
+    let mut tw = [Complex::default(); N_FFT];
+    for (t, w) in tw.iter_mut().enumerate() {
+        let a = -2.0 * std::f64::consts::PI * t as f64 / N_FFT as f64;
+        *w = Complex {
+            re: a.cos(),
+            im: a.sin(),
+        };
+    }
+    tw
+}
+
+/// The discrete Fourier transform of `x` into `out`: mixed-radix
+/// Cooley–Tukey, as [`N_FFT`] is 2⁴·5² — some 7,000 steps where the sum
+/// as written takes 80,000.
+fn fft(x: &[f64; N_FFT], tw: &[Complex; N_FFT], out: &mut [Complex; N_FFT]) {
+    /// The `n`-point transform of `x[base]`, `x[base + stride]`, … into
+    /// `out`: the `p` interleaved `n/p`-point ones, combined.
+    fn step(x: &[f64], base: usize, stride: usize, n: usize, tw: &[Complex], out: &mut [Complex]) {
+        if n == 1 {
+            out[0] = Complex {
+                re: x[base],
+                im: 0.0,
+            };
+            return;
+        }
+        let p = [2, 3, 5]
+            .into_iter()
+            .find(|&p| n.is_multiple_of(p))
+            .unwrap_or(n);
+        let m = n / p;
+        for r in 0..p {
+            step(
+                x,
+                base + r * stride,
+                stride * p,
+                m,
+                tw,
+                &mut out[r * m..(r + 1) * m],
+            );
+        }
+        // X[k + q·m] = Σ_r W_n^(r·(k + q·m)) · Y_r[k], W_n read from the
+        // table of N_FFT's roots, every (N_FFT/n)-th.
+        let unit = N_FFT / n;
+        let mut y = vec![Complex::default(); p];
+        for k in 0..m {
+            for (r, v) in y.iter_mut().enumerate() {
+                *v = out[r * m + k];
+            }
+            for q in 0..p {
+                let at = k + q * m;
+                out[at] = y
+                    .iter()
+                    .enumerate()
+                    .fold(Complex::default(), |sum, (r, v)| {
+                        sum.add(v.mul(tw[(r * at * unit) % N_FFT]))
+                    });
+            }
+        }
+    }
+    step(x, 0, 1, N_FFT, tw, out);
 }
 
 /// Hz on the Slaney mel scale: linear to 1 kHz, logarithmic above.
@@ -160,9 +229,32 @@ fn mel_to_hz(mel: f64) -> f64 {
     }
 }
 
-/// The mel filters, bin by band ([`BINS`] × [`BANDS`]): triangles evenly
-/// spaced in mel from 0 Hz to 8 kHz, each scaled to the same area (Slaney).
-fn mel_filters() -> Vec<f64> {
+/// One mel filter: the weights of the bins it spans, from `first` on.
+struct Filter {
+    first: usize,
+    weights: Vec<f64>,
+}
+
+/// The mel filters, band by band: triangles evenly spaced in mel from 0 Hz
+/// to 8 kHz, each scaled to the same area (Slaney); each kept as the bins
+/// it spans, the few of the [`BINS`] that are not nought.
+fn mel_filters() -> Vec<Filter> {
+    let dense = dense_filters();
+    (0..BANDS)
+        .map(|m| {
+            let weight = |k: usize| dense[k * BANDS + m];
+            let first = (0..BINS).find(|&k| weight(k) != 0.0).unwrap_or(0);
+            let last = (0..BINS).rev().find(|&k| weight(k) != 0.0).unwrap_or(0);
+            Filter {
+                first,
+                weights: (first..=last.max(first)).map(weight).collect(),
+            }
+        })
+        .collect()
+}
+
+/// [`mel_filters`] as a matrix, bin by band ([`BINS`] × [`BANDS`]).
+fn dense_filters() -> Vec<f64> {
     let (lo, hi) = (hz_to_mel(0.0), hz_to_mel(RATE as f64 / 2.0));
     let edges: Vec<f64> = (0..BANDS + 2)
         .map(|i| mel_to_hz(lo + (hi - lo) * i as f64 / (BANDS + 1) as f64))
@@ -217,6 +309,47 @@ mod tests {
                 (got - want).abs() < 2e-4,
                 "band {band}, frame {frame}: {got}, not {want}"
             );
+        }
+    }
+
+    /// The transform is the sum it stands for, bin for bin.
+    #[test]
+    fn the_transform_is_the_sum() {
+        let mut x = [0f64; N_FFT];
+        for (n, v) in x.iter_mut().enumerate() {
+            *v = ((n * 7919) % 1000) as f64 / 500.0 - 1.0 + (n as f64 / 13.0).sin();
+        }
+        let tw = twiddles();
+        let mut out = [Complex::default(); N_FFT];
+        fft(&x, &tw, &mut out);
+        for (k, got) in out.iter().enumerate() {
+            let want = x
+                .iter()
+                .enumerate()
+                .fold(Complex::default(), |sum, (n, &v)| {
+                    sum.add(Complex { re: v, im: 0.0 }.mul(tw[(k * n) % N_FFT]))
+                });
+            assert!(
+                (got.re - want.re).abs() < 1e-9 && (got.im - want.im).abs() < 1e-9,
+                "bin {k}: {got:?}, not {want:?}"
+            );
+        }
+    }
+
+    /// Each filter kept as its span holds every weight the matrix does.
+    #[test]
+    fn the_filters_keep_every_weight() {
+        let dense = dense_filters();
+        let sparse = mel_filters();
+        for (m, filter) in sparse.iter().enumerate() {
+            for k in 0..BINS {
+                let kept = k
+                    .checked_sub(filter.first)
+                    .and_then(|i| filter.weights.get(i))
+                    .copied()
+                    .unwrap_or(0.0);
+                assert_eq!(kept, dense[k * BANDS + m], "band {m}, bin {k}");
+            }
         }
     }
 
