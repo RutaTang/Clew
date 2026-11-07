@@ -69,20 +69,30 @@ impl Tally {
     fn language(&self, text: &str, usual: Option<&str>) -> Option<&'static str> {
         use Script::*;
         let cjk = self.cjk();
-        let (script, most) = [
-            (Han, cjk),
-            (Cyrillic, self.words[Cyrillic as usize]),
-            (Greek, self.words[Greek as usize]),
-            (Arabic, self.words[Arabic as usize]),
-            (Devanagari, self.words[Devanagari as usize]),
-        ]
-        .into_iter()
-        .max_by_key(|(_, n)| *n)?;
-        // Mostly Latin, it is in a Latin script. A tie is not: a name in
-        // code, in a sentence of Russian, is still a sentence of Russian.
-        if most == 0 || most < self.words[Latin as usize] {
-            return None;
-        }
+        let latin = self.words[Latin as usize];
+        // Chinese, Japanese or Korean: more than a character of it, or one
+        // with no Latin words beside it. Its characters are not counted
+        // against Latin words — a name in code, said as its words, would
+        // outnumber them — and its voices say the Latin words among them.
+        // One character in a sentence of English is a quoted one.
+        let script = if cjk >= 2 || (cjk == 1 && latin == 0) {
+            Han
+        } else {
+            let (script, most) = [
+                (Cyrillic, self.words[Cyrillic as usize]),
+                (Greek, self.words[Greek as usize]),
+                (Arabic, self.words[Arabic as usize]),
+                (Devanagari, self.words[Devanagari as usize]),
+            ]
+            .into_iter()
+            .max_by_key(|(_, n)| *n)?;
+            // Mostly Latin, it is in a Latin script. A tie is not: a name
+            // in code, in a sentence of Russian, is still one of Russian.
+            if most == 0 || most < latin {
+                return None;
+            }
+            script
+        };
         let usual = usual.and_then(known_language);
         Some(match script {
             Han if self.chars[Hangul as usize] * 2 >= cjk => "ko",
@@ -926,6 +936,20 @@ mod tests {
         assert_eq!(language_for(mixed, russian, None), "ru");
         assert_eq!(language_for(mixed, mixed, Some("ru")), "ru");
         assert_eq!(language_for(mixed, mixed, None), "en");
+        // Chinese, Japanese and Korean too, from the first sentence on:
+        // their characters are not words to be outnumbered, and their
+        // voices say the Latin words among them. One character alone, in
+        // English, is quoted.
+        let chinese = "调用 get User By Id。";
+        assert_eq!(language_for(chinese, chinese, None), "zh");
+        let japanese = "get User By Id を呼ぶ。";
+        assert_eq!(language_for(japanese, japanese, Some("en")), "ja");
+        let korean = "get User By Id 호출.";
+        assert_eq!(language_for(korean, korean, None), "ko");
+        assert_eq!(
+            language_for("The character 中 means middle.", english, None),
+            "en"
+        );
         let greek = "Η συνάρτηση get User By Id. Επιστρέφει τον χρήστη.";
         assert_eq!(
             language_for("Η συνάρτηση get User By Id.", greek, None),
