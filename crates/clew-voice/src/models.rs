@@ -184,27 +184,15 @@ impl Store {
     /// Start installing `model`: a fresh partial file, written through the
     /// returned [`Install`] and checked by its [`Install::finish`].
     pub fn begin(&self, model: &'static Model) -> io::Result<Install> {
-        fs::create_dir_all(&self.dir)?;
-        let part = self.dir.join(format!("{}{PART}", model.file_name()));
-        // Whatever an earlier attempt left — or a link planted in its place
-        // — is removed (a link itself, not what it points at), and the file
-        // is then created new, so the bytes cannot be steered elsewhere.
-        match fs::remove_file(&part) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => {}
-        }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&part)?;
-        Ok(Install {
-            model,
-            file: Some(file),
-            part,
-            dest: self.path(model),
-            hasher: Hasher::of(&model.checksum),
-            written: 0,
-        })
+        Install::begin(
+            self.path(model),
+            Expected {
+                name: model.file_name(),
+                bytes: model.bytes,
+                max_bytes: model.max_bytes(),
+                checksum: model.checksum,
+            },
+        )
     }
 
     /// Remove `model` (and any download of it left part-way).
@@ -222,12 +210,23 @@ impl Store {
     }
 }
 
+/// What a download must turn out to be: its name (for what is said of
+/// it), its size where that is published, the most it may be, and what it
+/// hashes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expected {
+    pub name: String,
+    pub bytes: Option<u64>,
+    pub max_bytes: u64,
+    pub checksum: Checksum,
+}
+
 /// A model being downloaded: bytes written to it are hashed on their way
 /// to a partial file, which [`Install::finish`] renames into place only if
 /// the hash is the one listed. Dropped unfinished — cancelled, failed — it
 /// deletes what it wrote.
 pub struct Install {
-    model: &'static Model,
+    expected: Expected,
     file: Option<File>,
     part: PathBuf,
     dest: PathBuf,
@@ -265,6 +264,38 @@ impl Hasher {
 }
 
 impl Install {
+    /// Start a download that, once it is `expected`, becomes `dest`: a
+    /// fresh partial file beside it.
+    pub fn begin(dest: PathBuf, expected: Expected) -> io::Result<Install> {
+        let dir = dest
+            .parent()
+            .ok_or_else(|| io::Error::other("a download needs a folder"))?;
+        fs::create_dir_all(dir)?;
+        let name = dest
+            .file_name()
+            .ok_or_else(|| io::Error::other("a download needs a name"))?;
+        let part = dir.join(format!("{}{PART}", name.to_string_lossy()));
+        // Whatever an earlier attempt left — or a link planted in its place
+        // — is removed (a link itself, not what it points at), and the file
+        // is then created new, so the bytes cannot be steered elsewhere.
+        match fs::remove_file(&part) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)?;
+        Ok(Install {
+            hasher: Hasher::of(&expected.checksum),
+            expected,
+            file: Some(file),
+            part,
+            dest,
+            written: 0,
+        })
+    }
+
     /// Bytes written so far.
     pub fn written(&self) -> u64 {
         self.written
@@ -278,13 +309,12 @@ impl Install {
             .and_then(|()| file.sync_all())
             .map_err(|e| format!("could not save the model: {e}"))?;
         drop(file);
-        let expected = self.model.checksum;
-        if let Some(bytes) = self.model.bytes.filter(|b| *b != self.written) {
+        let expected = self.expected.checksum;
+        if let Some(bytes) = self.expected.bytes.filter(|b| *b != self.written) {
             return Err(format!(
                 "the download is not {} as published ({} bytes, not {bytes}) — it was \
                  discarded",
-                self.model.file_name(),
-                self.written
+                self.expected.name, self.written
             ));
         }
         let hasher = std::mem::replace(&mut self.hasher, Hasher::of(&expected));
@@ -293,7 +323,7 @@ impl Install {
             return Err(format!(
                 "the download is not {} as published (its {} is {digest}, not {}) — it \
                  was discarded",
-                self.model.file_name(),
+                self.expected.name,
                 expected.name(),
                 expected.hex()
             ));
@@ -305,10 +335,10 @@ impl Install {
 
 impl Write for Install {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.written + buf.len() as u64 > self.model.max_bytes() {
+        if self.written + buf.len() as u64 > self.expected.max_bytes {
             return Err(io::Error::other(format!(
                 "the download is larger than {} can be",
-                self.model.file_name()
+                self.expected.name
             )));
         }
         let file = self

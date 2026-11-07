@@ -5,7 +5,11 @@ edition = "2024"
 rust-version = "1.95"
 
 [dependencies]
+# What `clew-speak` answers: JSON lines, its audio in base64.
+base64 = "0.22.1"
 cpal = "0.18.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
 sha1 = "0.11"
 sha2 = "0.11"
 whisper-rs = "0.16.0"
