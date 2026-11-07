@@ -1640,12 +1640,17 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
         button::Style {
             background: Some(if on {
                 accent().into()
-            } else if hovered {
-                wash(0.06).into()
             } else {
                 Color::TRANSPARENT.into()
             }),
-            text_color: if on { on_accent() } else { fg_muted() },
+            // No wash under the pointer: the label brightens instead.
+            text_color: if on {
+                on_accent()
+            } else if hovered {
+                fg()
+            } else {
+                fg_muted()
+            },
             border: Border {
                 radius: 7.0.into(),
                 width: 1.0,
@@ -1658,12 +1663,11 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
 
 /// The face of a field that is really a button (the chat field opens the
 /// conversation): no fill of its own, the field around it is the well.
-pub fn field_face(_theme: &Theme, status: button::Status) -> button::Style {
+/// It draws nothing under the pointer: a wash inside the field's padding
+/// read as a second box in the field.
+pub fn field_face(_theme: &Theme, _status: button::Status) -> button::Style {
     button::Style {
-        background: match status {
-            button::Status::Hovered | button::Status::Pressed => Some(wash(0.03).into()),
-            _ => None,
-        },
+        background: None,
         text_color: fg_muted(),
         border: Border {
             radius: 8.0.into(),
@@ -1719,20 +1723,18 @@ pub fn form_choice(_theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// One segment of a segmented control: the chosen one raised as a chip,
-/// the rest quiet until the pointer is over them.
+/// the rest quiet, their labels brightening under the pointer.
 pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        let background = if chosen {
-            Some(if is_light() { Color::WHITE } else { wash(0.10) }.into())
-        } else {
-            match status {
-                button::Status::Hovered | button::Status::Pressed => Some(wash(0.05).into()),
-                _ => None,
-            }
-        };
+        let background = chosen.then(|| if is_light() { Color::WHITE } else { wash(0.10) }.into());
+        let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         button::Style {
             background,
-            text_color: if chosen { fg_bright() } else { fg_muted() },
+            text_color: if chosen || hovered {
+                fg_bright()
+            } else {
+                fg_muted()
+            },
             border: Border {
                 radius: 7.0.into(),
                 width: if chosen && !is_light() { 0.5 } else { 0.0 },
@@ -1753,16 +1755,12 @@ pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style
 }
 
 /// A borderless icon button of the chrome (the top bar, the tool strip):
-/// nothing until the pointer is over it; `on` keeps it lit (a menu it
-/// opened is showing, a panel it toggles is shown).
+/// no fill, under the pointer too; `on` keeps it lit (a menu it opened is
+/// showing, a panel it toggles is shown).
 pub fn icon_button(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        let background = match status {
-            button::Status::Pressed => Some(wash(0.11).into()),
-            button::Status::Hovered => Some(wash(0.07).into()),
-            _ if on => Some(wash(0.08).into()),
-            _ => None,
-        };
+        // No fill under the pointer; `on` is a state, not a hover.
+        let background = on.then(|| wash(0.08).into());
         button::Style {
             background,
             text_color: match status {
@@ -1784,8 +1782,6 @@ pub fn window_button(close: bool) -> impl Fn(&Theme, button::Status) -> button::
     move |_theme, status| {
         let background = match status {
             button::Status::Hovered | button::Status::Pressed if close => Some(CLOSE_HOVER.into()),
-            button::Status::Pressed => Some(wash(0.12).into()),
-            button::Status::Hovered => Some(wash(0.07).into()),
             _ => None,
         };
         button::Style {
@@ -2131,18 +2127,17 @@ pub fn round_button(primary: bool) -> impl Fn(&Theme, button::Status) -> button:
     }
 }
 
-/// Small toolbar button — borderless until hovered, so the toolbar reads as
-/// clean text that lights up on interaction rather than a wall of boxes.
+/// Small toolbar button: borderless and unfilled, under the pointer too, so
+/// the toolbar reads as clean text rather than a wall of boxes; its label
+/// brightens under the pointer.
 pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
-    let background = match status {
-        button::Status::Hovered => Some(bg_hover().into()),
-        button::Status::Pressed => Some(bg_active().into()),
-        _ => None,
-    };
     button::Style {
-        background,
+        // No fill under the pointer (a box round the Ask pill's face, the
+        // nav arrows); the label brightens instead.
+        background: None,
         text_color: match status {
             button::Status::Disabled => dim(),
+            button::Status::Hovered | button::Status::Pressed => fg_bright(),
             _ => fg(),
         },
         border: Border {

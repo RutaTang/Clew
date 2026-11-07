@@ -201,9 +201,10 @@ pub(crate) fn census(root: &Path, files: Option<Arc<Vec<fs_scan::FileEntry>>>) -
 }
 
 /// How the sheet names the servers it would set up: each, with what it
-/// takes — "rust-analyzer: download, builds the project".
+/// takes — "rust-analyzer: download, builds the project" — in a list as the
+/// reader's language writes one ("a, b", 「a、b」).
 pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
-    servers
+    let servers = servers
         .iter()
         .map(|s| {
             let mut takes: Vec<String> = Vec::new();
@@ -218,15 +219,20 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
             if takes.is_empty() {
                 s.name.clone()
             } else {
-                tr!(
-                    "{server}: {needs}",
-                    server = s.name,
-                    needs = takes.join(", ")
-                )
+                tr!("{server}: {needs}", server = s.name, needs = listed(takes))
             }
         })
-        .collect::<Vec<_>>()
-        .join(" · ")
+        .collect::<Vec<_>>();
+    listed(servers)
+}
+
+/// Items in a list as the reader's language writes one: "a, b, c" in
+/// English, 「a、b、c」 in Chinese and Japanese.
+fn listed(items: Vec<String>) -> String {
+    items
+        .into_iter()
+        .reduce(|list, item| tr!("{list}, {item}", list = list, item = item))
+        .unwrap_or_default()
 }
 
 /// `n` as a count said "about": two significant figures past a hundred,
@@ -583,8 +589,15 @@ mod tests {
         ];
         assert_eq!(
             servers_line(&servers),
-            "rust-analyzer: download, builds the project, running its code · pyright: install with npm"
+            "rust-analyzer: download, builds the project, running its code, pyright: install with npm"
         );
+        // As a list is written in the reader's language.
+        crate::i18n::with_lang(crate::i18n::Lang::Zh, || {
+            assert_eq!(
+                servers_line(&servers),
+                "rust-analyzer：需下载、构建项目（会运行项目代码）、pyright：使用 npm 安装"
+            );
+        });
         assert_eq!(
             explain_line(true, Some(Some(3617)), true),
             "About 3,600 AI calls. Also builds the search index."
