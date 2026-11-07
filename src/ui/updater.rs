@@ -32,7 +32,7 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
     let bar: Row<'_, Message> = match &app.update.phase {
         UpdatePhase::Idle => row![
             dot(),
-            text(tr!("clew {version} is available", version = version))
+            text(tr!("Clew {version} is available", version = version))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),
@@ -52,13 +52,13 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
             let (done, total) = app.update.progress.unwrap_or((0, None));
             let label = match total {
                 Some(t) if t > 0 => tr!(
-                    "Downloading clew {version}…  {done} / {total}",
+                    "Downloading Clew {version}…  {done} / {total}",
                     version = version,
                     done = human_size(done),
                     total = human_size(t)
                 ),
                 _ => tr!(
-                    "Downloading clew {version}…  {done}",
+                    "Downloading Clew {version}…  {done}",
                     version = version,
                     done = human_size(done)
                 ),
@@ -87,7 +87,7 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
         }
         UpdatePhase::Installing => row![
             dot(),
-            text(tr!("Installing update… clew will relaunch"))
+            text(tr!("Installing update… Clew will relaunch"))
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .width(Fill),

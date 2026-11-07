@@ -302,7 +302,7 @@ mod tests {
             "Stats",
             "Settings",
             "Sidebar: Files",
-            "Sidebar: Marks",
+            "Sidebar: Bookmarks",
             "View: Hide Minimap",
             "View: Show Context Panel",
             "Theme: Light",

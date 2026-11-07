@@ -375,7 +375,7 @@ impl App {
                             .map(|mut v| v.pop().unwrap_or_default())
                         })
                         .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_else(|_| Err("an internal task failed".into()))
                     },
                     move |qvec| {
                         Message::Ask(AskMsg::Retrieved {

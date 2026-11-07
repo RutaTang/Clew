@@ -129,7 +129,7 @@ impl Embedder {
             .map_err(|e| format!("the model made no vectors: {e}"))?;
         let dims = shape.get(1).copied().unwrap_or(0).max(0) as usize;
         if dims == 0 || data.len() != rows * dims {
-            return Err("the model made vectors of no length".into());
+            return Err("the model returned empty vectors".into());
         }
         Ok(data.chunks_exact(dims).map(unit).collect())
     }

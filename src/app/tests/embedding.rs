@@ -204,7 +204,7 @@ fn the_model_downloads_verified_and_is_removed() {
     );
     assert!(MODEL.url(last).contains(MODEL.revision));
     let error = app.local_embedding.error.clone().unwrap();
-    assert!(error.contains("as published"), "{error}");
+    assert!(error.contains("does not match the published"), "{error}");
     assert!(app.local_embedding.download.is_none());
     assert!(!dir.join(last.path).exists());
     let leftovers: Vec<_> = walk(&dir)
@@ -651,7 +651,10 @@ fn a_transfer_cancelled_as_it_ended_is_not_put_in_place() {
     let task = app.update(Message::Settings(SettingsMsg::DownloadEmbedModel));
     settle(&mut app, task);
     let error = app.local_embedding.error.clone().unwrap_or_default();
-    assert!(!error.contains("as published"), "it was checked: {error}");
+    assert!(
+        !error.contains("does not match the published"),
+        "it was checked: {error}"
+    );
     let dir = local::dir().unwrap();
     assert!(!MODEL.files.iter().any(|f| dir.join(f.path).exists()));
 }

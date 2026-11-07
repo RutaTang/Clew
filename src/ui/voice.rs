@@ -260,7 +260,7 @@ fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, M
 fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows = vec![form::toggle(
         tr!("Read answers aloud"),
-        Some(tr!("Answers to what you ask by voice are said, on this computer.").into()),
+        Some(tr!("Answers to spoken questions are read aloud on this computer.").into()),
         app.voice.prefs.speak,
         |v| Message::Voice(VoiceMsg::SetSpeak(v)),
     )];

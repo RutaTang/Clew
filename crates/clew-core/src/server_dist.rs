@@ -157,7 +157,7 @@ fn embedded_digest(embedded: Option<&str>, asset: &str) -> Result<Option<String>
     parse_digest_list(list)
         .remove(asset)
         .map(Some)
-        .ok_or_else(|| format!("this build of clew ships no clew-server named {asset}"))
+        .ok_or_else(|| format!("this build of Clew ships no clew-server named {asset}"))
 }
 
 /// A clew-server binary whose bytes were checked (see the module docs).

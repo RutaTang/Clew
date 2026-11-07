@@ -2969,7 +2969,7 @@ mod tests {
             question.message,
             format!(
                 "3 changes to bookmarks in {project} are not saved to the host: 1 could not be \
-                 sent and 2 were sent but not confirmed. Close, and they may be lost."
+                 sent and 2 were sent but not confirmed. If you close now, they may be lost."
             )
         );
         // Asked after the grace, of a close the user asked for in clew.
@@ -3085,8 +3085,7 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "1 change to bookmarks in {project} could not be saved by the host. Close, and \
-                 it is lost."
+                "1 change to bookmarks in {project} could not be saved by the host. If you close now, it will be lost."
             )
         );
         assert!(rt.is_open(window));
@@ -3417,11 +3416,7 @@ mod tests {
         rt.answer(0, false);
         assert!(rt.is_open(window));
         let app = &rt.clew.windows[&window];
-        assert!(
-            app.status.starts_with("clew was kept open"),
-            "{}",
-            app.status
-        );
+        assert!(app.status.starts_with("Clew stayed open"), "{}", app.status);
         assert!(
             matches!(app.update.phase, crate::UpdatePhase::Failed(_)),
             "{:?}",

@@ -61,7 +61,7 @@ pub(crate) fn setup_sheet<'a>(
     if mode == SetupMode::Open {
         body = body.push(
             row![
-                text(tr!("clew's data folder:"))
+                text(tr!("Project data folder:"))
                     .size(ts::BODY)
                     .color(theme::dim()),
                 text(format!("{}/.clew", root.display()))

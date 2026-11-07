@@ -150,7 +150,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                     // macOS draws its own parts of the window (the Open
                     // panel, alerts) in the language it was started in.
                     cfg!(target_os = "macos").then(|| {
-                        tr!("The Open panel and system alerts follow at the next launch.")
+                        tr!("The Open dialog and system alerts switch language the next time you start Clew.")
                             .to_string()
                     }),
                     language,
@@ -607,7 +607,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             PathChoice {
                 title: tr!("TypeScript and JavaScript"),
                 about: tr!("The TypeScript the language server runs."),
-                automatic: tr!("clew's built-in TypeScript 5"),
+                automatic: tr!("Clew's built-in TypeScript 5"),
                 chosen: app.proj.lang_choices.typescript.as_deref(),
                 found: found("typescript"),
                 field: crate::LangField::TypeScriptPath,
@@ -801,10 +801,10 @@ fn python_block<'a>(
             PythonSource::Chosen => tr!("Your choice"),
             PythonSource::LspToml => tr!("Set in the project's .clew/lsp.toml"),
             PythonSource::ProjectVenv => tr!("Found in the project"),
-            PythonSource::Activated => tr!("Active in the shell clew started from"),
+            PythonSource::Activated => tr!("Active in the shell Clew was started from"),
             // Nobody named one: the server looks for its own. "None" read
             // as though Python went without an interpreter.
-            PythonSource::Server => tr!("Left to the language server: it finds one itself"),
+            PythonSource::Server => tr!("Chosen by the language server"),
         };
         let mut in_use = column![text(who).size(ts::BASE).color(theme::fg())].spacing(2);
         if let Some(path) = &effect.interpreter {
@@ -814,9 +814,7 @@ fn python_block<'a>(
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
                 text(tr!(
-                    "Your choice {path} can't be used: it no longer exists, or it is a \
-                     program inside the repository. The interpreter above is used until you \
-                     pick another.",
+                    "The interpreter you chose ({path}) can't be used: it no longer exists, or it is a program inside the repository. The interpreter above is used until you pick another.",
                     path = bad
                 ))
                 .size(ts::SMALL)
@@ -1173,7 +1171,7 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
         ));
     }
     let flags_about = match c.flags.is_empty() {
-        true => tr!("For files the database does not cover.").to_string(),
+        true => tr!("For files not in compile_commands.json.").to_string(),
         false => tr!(
             "Current: {flags}",
             flags = crate::app::languages::join_args(&c.flags)
@@ -1311,7 +1309,7 @@ fn toolchain_block<'a>(
     )];
     for candidate in found {
         let label = match candidate.project {
-            true => tr!("{name} — the project's", name = candidate.name),
+            true => tr!("{name} (set by the project)", name = candidate.name),
             false => candidate.name.clone(),
         };
         rows.push(form::choice(
@@ -1426,8 +1424,7 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         tr!("Server programs"),
         Some(
             tr!(
-                "Your own server program for a language: a different build, or a server clew \
-                 doesn't support."
+                "Your own server program for a language: a different build, or a server Clew doesn't support."
             )
             .into(),
         ),
@@ -1692,7 +1689,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         tr!("MCP servers"),
         servers
             .is_empty()
-            .then(|| tr!("No MCP servers yet. Their tools are available in Ask.").to_string()),
+            .then(|| tr!("No MCP servers yet. Add one to use its tools in Ask.").to_string()),
         None,
         servers,
     ));
@@ -1701,7 +1698,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         tr!("ACP agents"),
         agents
             .is_empty()
-            .then(|| tr!("No agents yet. An agent can answer in Ask instead of clew.").to_string()),
+            .then(|| tr!("No agents yet. An agent can answer in Ask instead of Clew.").to_string()),
         None,
         agents,
     ));
@@ -1967,7 +1964,7 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let row: Element<'_, Message> = if held {
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 14.0),
-            text(tr!("{host} holds your AI keys.", host = host))
+            text(tr!("{host} holds your API keys.", host = host))
                 .size(ts::SMALL)
                 .color(theme::fg()),
             space().width(Fill),
@@ -1980,7 +1977,7 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
         .align_y(iced::Center)
         .into()
     } else {
-        text(tr!("{host} does not hold your AI keys.", host = host))
+        text(tr!("{host} does not hold your API keys.", host = host))
             .size(ts::SMALL)
             .color(theme::dim())
             .into()
@@ -2132,7 +2129,7 @@ pub(crate) fn connect_picker<'a>(
     col = col.push(
         iced::widget::checkbox(ui.send_ai_keys)
             .style(theme::check)
-            .label(tr!("Send my AI keys to this host"))
+            .label(tr!("Send my API keys to this host"))
             .on_toggle(|v| Message::Connect(ConnectMsg::ToggleAiKeys(v)))
             .size(14)
             .text_size(ts::BODY)
@@ -2483,7 +2480,7 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     let mut rows = vec![form::item(
         MODEL.name,
         Some(
-            tr!("Google DeepMind's, run by Clew: nothing leaves this computer, and no key is needed.")
+            tr!("By Google DeepMind, run by Clew: nothing leaves this computer, and no key is needed.")
                 .to_string(),
         ),
         state,
@@ -2506,7 +2503,7 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     }
     rows.push(form::item(
         tr!("Gemma Terms of Use"),
-        Some(tr!("Downloading EmbeddingGemma, you accept them.").to_string()),
+        Some(tr!("By downloading EmbeddingGemma, you accept these terms.").to_string()),
         form::action(
             tr!("Read the terms"),
             Some(Message::Content(ContentMsg::OpenLink(

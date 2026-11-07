@@ -70,7 +70,7 @@ fn injection(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "di",
         "Dependency injection",
-        "each component the container makes; an arrow to what it is given (labelled how), from an interface to what it resolves to, from a configuration to the beans it provides",
+        "each component the container makes; an arrow to each dependency it is given (labelled with how), from an interface to its implementation, and from a configuration to the beans it provides",
     );
     // .NET: what each service type resolves to.
     let mut registered: BTreeMap<String, Vec<String>> = BTreeMap::new();

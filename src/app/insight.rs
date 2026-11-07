@@ -263,7 +263,7 @@ pub(crate) fn c_answer(e: clew_protocol::MacroExpansion) -> InsightAnswer {
     if e.truncated {
         md.push_str(&format!(
             "\n\n*{}*",
-            tr!("Cut short: the expansion grew past clew's limit.")
+            tr!("Cut short: the expansion grew past Clew's limit.")
         ));
     }
     InsightAnswer {
@@ -313,7 +313,7 @@ pub(crate) fn haskell_answer(hover: &str) -> Option<InsightAnswer> {
     {
         markdown.push_str(&format!(
             "\n\n{}",
-            tr!("Here: {here}", here = format!("`{here}`"))
+            tr!("At this use: {here}", here = format!("`{here}`"))
         ));
     }
     if !parts.prose.is_empty() {

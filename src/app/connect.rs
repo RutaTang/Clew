@@ -497,7 +497,7 @@ impl App {
         {
             ui.send_ai_keys = false;
         }
-        self.status = tr!("This host no longer holds your AI keys").into();
+        self.status = tr!("This host no longer holds your API keys").into();
         Task::none()
     }
 }

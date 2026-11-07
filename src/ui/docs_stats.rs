@@ -420,7 +420,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             .color(theme::dim())
             .wrapping(Wrapping::None),
         space().width(Fill),
-        button(text(tr!("Open source")).size(ts::BODY))
+        button(text(tr!("View source")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
             .on_press(Message::Editor(EditorMsg::OpenRel {

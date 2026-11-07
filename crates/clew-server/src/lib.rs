@@ -1423,7 +1423,10 @@ impl Server {
                     .unwrap_or_else(|_| {
                         Err((
                             ErrorCode::Failed,
-                            format!("resolving the {language} server failed"),
+                            format!(
+                                "resolving the {language} server failed",
+                                language = lsp_gate::shown(&language)
+                            ),
                         ))
                     });
                     match resolved {
@@ -1484,7 +1487,10 @@ impl Server {
                     .await
                     .unwrap_or_else(|_| {
                         clew_protocol::LspResolution::Unsupported {
-                            message: format!("resolving the {language} server failed"),
+                            message: format!(
+                                "resolving the {language} server failed",
+                                language = lsp_gate::shown(&language)
+                            ),
                         }
                     });
                     Self::reply(
@@ -1528,7 +1534,10 @@ impl Server {
                     let resolution = match outcome {
                         Ok(resolution) => resolution,
                         Err(_) => clew_protocol::LspResolution::Unsupported {
-                            message: format!("installing the {language} server failed"),
+                            message: format!(
+                                "installing the {language} server failed",
+                                language = lsp_gate::shown(&language)
+                            ),
                         },
                     };
                     Self::reply(

@@ -735,13 +735,12 @@ async fn start(
             }
             store::Located::NeedsDownload { .. } | store::Located::NeedsInstall { .. } => {
                 return Err(format!(
-                    "the {language} language server is not installed — the user can \
-                     open a {language} file in clew to install it; use `search` for now"
+                    "the {language} language server is not installed — the user can open a {language} file in Clew to install it; use `search` for now"
                 ));
             }
             // Handled by the `Some(cmd)` arm above; never spawned as-is.
             store::Located::RepoCommand(_) => {
-                return Err("a repo-specified command must go through its approval".into());
+                return Err("a command set by the project must be approved first".into());
             }
             store::Located::Unsupported(msg) => return Err(msg),
         },

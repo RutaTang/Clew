@@ -422,7 +422,7 @@ pub(crate) fn time_travel_story<'a>(
     let name = tt.scope.symbol_name().unwrap_or(tr!("this block"));
     let header = row![
         column![
-            text(tr!("Story of {name}", name = name))
+            text(tr!("Story of “{name}”", name = name))
                 .size(ts::BODY)
                 .color(theme::accent()),
             // `git log -L` only follows the block's CURRENT lines, so earlier
@@ -1723,7 +1723,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         rows = rows.push(row_of(
             Glyph::TimeTravel,
             tr!("This function through time"),
-            tr!("Scrub its history, commit by commit."),
+            tr!("Step through its history, commit by commit."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
@@ -1731,7 +1731,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         .push(row_of(
             Glyph::TimeTravel,
             tr!("This file through time"),
-            tr!("Scrub the whole file back through its commits."),
+            tr!("Step back through the whole file's commits."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
         ))
         .push(row_of(

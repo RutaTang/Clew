@@ -395,8 +395,7 @@ impl Install {
         let expected = self.expected.checksum;
         if let Some(bytes) = self.expected.bytes.filter(|b| *b != self.written) {
             return Err(format!(
-                "the download is not {} as published ({} bytes, not {bytes}) — it was \
-                 discarded",
+                "the download does not match the published {} ({} bytes, not {bytes}) — it was discarded",
                 self.expected.name, self.written
             ));
         }
@@ -404,8 +403,7 @@ impl Install {
         let digest = hasher.finish();
         if digest != expected.hex() {
             return Err(format!(
-                "the download is not {} as published (its {} is {digest}, not {}) — it \
-                 was discarded",
+                "the download does not match the published {} (its {} is {digest}, not {}) — it was discarded",
                 self.expected.name,
                 expected.name(),
                 expected.hex()
@@ -424,7 +422,7 @@ impl Write for Install {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.written + buf.len() as u64 > self.expected.max_bytes {
             return Err(io::Error::other(format!(
-                "the download is larger than {} can be",
+                "the download is larger than {} should be",
                 self.expected.name
             )));
         }
@@ -618,7 +616,10 @@ mod tests {
         let mut install = store.begin(model).unwrap();
         install.write_all(b"something else").unwrap();
         let err = install.finish().unwrap_err();
-        assert!(err.contains("not ggml-test.bin as published"), "{err}");
+        assert!(
+            err.contains("does not match the published ggml-test.bin"),
+            "{err}"
+        );
         assert!(!store.installed(model));
         assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 0);
         let _ = fs::remove_dir_all(store.dir());

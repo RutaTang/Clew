@@ -37,7 +37,7 @@ pub(crate) fn render(x: &Export<'_>) -> String {
         "# {}\n\n",
         tr!("{project} — reading notes", project = md(x.project))
     ));
-    out.push_str(&format!("{}\n\n", tr!("Exported from clew.")));
+    out.push_str(&format!("{}\n\n", tr!("Exported from Clew.")));
 
     out.push_str(&format!(
         "## {}\n\n",
@@ -287,7 +287,7 @@ impl App {
         }
         if self.docs_loading() && waited < DOCS_WAITS {
             if waited == 0 {
-                self.status = tr!("Exporting — waiting for the docs index…").into();
+                self.status = tr!("Exporting — waiting for the API docs…").into();
             }
             let stamp = self.stamp();
             // Created where it is polled: a timer needs the runtime's context.
@@ -425,7 +425,7 @@ mod export_tests {
         let expected = "\
 # demo — reading notes
 
-Exported from clew.
+Exported from Clew.
 
 ## Notes (2)
 

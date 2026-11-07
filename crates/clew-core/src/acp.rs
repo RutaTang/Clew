@@ -540,7 +540,7 @@ impl Agent {
         let version = result.get("protocolVersion").and_then(Value::as_u64);
         if version != Some(PROTOCOL_VERSION) {
             return Err(AcpError::Protocol(format!(
-                "the agent speaks ACP version {}, and clew speaks {PROTOCOL_VERSION}",
+                "the agent speaks ACP version {}, and Clew speaks {PROTOCOL_VERSION}",
                 version.map_or("(none named)".to_string(), |v| v.to_string())
             )));
         }
@@ -1221,7 +1221,7 @@ fn project_rel(root: &Path, path: &str) -> Result<String, RpcError> {
     }
     let rel = path.strip_prefix(root).map_err(|_| {
         RpcError::invalid_params(format!(
-            "{} is outside the project — clew serves only the project's files",
+            "{} is outside the project — Clew serves only the project's files",
             path.display()
         ))
     })?;

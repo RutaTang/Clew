@@ -273,7 +273,7 @@ impl Located {
             return Ok(());
         }
         let Some(current) = self.install_digest() else {
-            return Err("this server is not installed by clew — nothing to install".into());
+            return Err("this server is not installed by Clew — nothing to install".into());
         };
         match Sha256::parse(consented) {
             Some(consented) if consented == current => Ok(()),
@@ -363,8 +363,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
             format!("{} is not available for this platform", server.server_name)
         } else {
             format!(
-                "{} {} is not available: clew ships a verified {} only at {}. \
-                 Remove the `version` from .clew/lsp.toml, or set an explicit `command`.",
+                "{} {} is not available: Clew ships a verified {} only at {}. Remove the `version` from .clew/lsp.toml, or set an explicit `command`.",
                 server.server_name, server.version, server.server_name, spec.version
             )
         });
@@ -796,10 +795,10 @@ pub(crate) fn run_bounded_cancellable(
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(if cancelled {
-                    format!("{name} was cancelled — stopped it")
+                    format!("{name} was cancelled and stopped")
                 } else {
                     format!(
-                        "{name} did not finish within {} s — stopped it",
+                        "{name} did not finish within {} s and was stopped",
                         limit.as_secs()
                     )
                 });

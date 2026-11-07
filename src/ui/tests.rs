@@ -1420,7 +1420,7 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     app.update.phase = crate::UpdatePhase::Downloading;
     app.update.progress = Some((1 << 20, Some(4 << 20)));
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Downloading clew 9.9.9"));
+    assert!(shows(&mut sim, "Downloading Clew 9.9.9"));
     let sent = click(sim, "Cancel");
     assert!(
         matches!(
@@ -2751,7 +2751,7 @@ fn forgetting_a_key_keeps_the_discard_notice() {
     );
     assert!(
         app.status
-            .contains("Unsaved remote state was discarded: notes.json"),
+            .contains("Changes not yet saved on the remote host were discarded: notes.json"),
         "{}",
         app.status
     );
@@ -2845,9 +2845,9 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         "Open iced",
         "/nonexistent/iced/.clew",
         "Language servers",
-        "rust-analyzer: download, builds the project, running its code",
+        "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
-        "About 3,600 AI calls. Also builds the search index.",
+        "About 3,600 AI calls. Also builds the semantic index.",
         "Not now",
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
@@ -2958,7 +2958,7 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
 }
 
-/// A question said rather than typed is marked "Said" over its bubble; a
+/// A question said rather than typed is marked "Spoken" over its bubble; a
 /// typed one is not.
 #[test]
 fn a_spoken_question_is_marked_said() {
@@ -2972,11 +2972,11 @@ fn a_spoken_question_is_marked_said() {
     {
         let mut sim = sim_elem(super::ask_panel(&app, 560.0));
         assert!(shows(&mut sim, "where is the origin?"));
-        assert!(shows(&mut sim, "Said"));
+        assert!(shows(&mut sim, "Spoken"));
     }
     app.proj.ask_turns[0].spoken = false;
     let mut sim = sim_elem(super::ask_panel(&app, 560.0));
-    assert!(!shows(&mut sim, "Said"));
+    assert!(!shows(&mut sim, "Spoken"));
 }
 
 /// A press held on Stop as the answer ends is not one on Ask, let go of
@@ -4958,7 +4958,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     app.remote_ai_opt_in = true;
     app.connect = Some(crate::ConnectUi::default());
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "holds your AI keys"));
+    assert!(shows(&mut sim, "holds your API keys"));
     let sent = click(sim, "Revoke");
     assert!(
         matches!(
@@ -4971,7 +4971,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
         let _ = app.update(msg);
     }
     assert_eq!(app.live_ai_opt_in(), Some(false));
-    assert!(shows(&mut sim_of(&app), "does not hold your AI keys"));
+    assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
     // Locally there is nothing to grant, so nothing is shown.
     app.connection = crate::connect::ConnTarget::Local;
     let mut local = sim_of(&app);
@@ -5334,7 +5334,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         .link
         .lsp_snapshots
         .insert("rust".into(), Err(crate::lsp::client::StatePoisoned));
-    assert!(shows(&mut sim_of(&app), "rust-analyzer ⚠ state unreadable"));
+    assert!(shows(&mut sim_of(&app), "rust-analyzer ⚠ internal error"));
     assert!(
         !underlined(&app),
         "nothing is read past a poisoned snapshot"
@@ -5351,7 +5351,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     assert!(
         text_at(
             &mut sim_of(&app),
-            |t| t.contains("state unreadable after an internal error"),
+            |t| t.contains("internal error — restart this language server"),
             0
         )
         .is_some(),
@@ -5859,12 +5859,12 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
     ));
     let mut sim = sim_elem(super::project_types_body(&app));
     assert!(shows(&mut sim, "4 types · 4 relations · 1 inherit"));
-    assert!(shows(&mut sim, "MOST REFERENCED (NAMED BY OTHERS)"));
+    assert!(shows(&mut sim, "MOST REFERENCED (USED BY THE MOST TYPES)"));
     assert!(shows(&mut sim, "Customer"));
     assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
     assert!(shows(&mut sim, "BASE TYPES (MOST SUBTYPES)"));
     assert!(shows(&mut sim, "1 subtype"));
-    assert!(shows(&mut sim, "MOST DEPENDENCIES (NAMING OTHERS)"));
+    assert!(shows(&mut sim, "MOST DEPENDENCIES (USES THE MOST TYPES)"));
     assert!(shows(&mut sim, "→ 2"), "Order names two");
     drop(sim);
     // A node of the type map opens its definition at its line.
@@ -5982,10 +5982,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     assert_eq!(super::trace_files(&app).len(), 1);
     app.proj.project_calls.graph = std::sync::Arc::new(g);
     let mut sim = sim_elem(super::project_calls_body(&app));
-    assert!(shows(
-        &mut sim,
-        "EXECUTED (THE LAST DEBUG RUN STOPPED HERE)"
-    ));
+    assert!(shows(&mut sim, "WHERE THE LAST DEBUG RUN STOPPED"));
     assert!(shows(&mut sim, "2 stops"));
 }
 
@@ -6949,7 +6946,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
         "/p/build",
         "The toolchain the language server runs from.",
         "The lake found on the PATH",
-        "elan — the project's",
+        "elan (set by the project)",
         "Server programs",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
@@ -7011,7 +7008,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
         "TypeScript and JavaScript",
-        "clew's built-in TypeScript 5",
+        "Clew's built-in TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
         "Zig",
         "zvm · Zig 0.13.0",
@@ -8139,8 +8136,8 @@ fn voice_failures_are_said_in_the_readers_language() {
     app.voice.store = Some(clew_voice::models::Store::new(dir));
     app.voice.download_errors.insert(
         "base.en",
-        "the download is not ggml-base.en.bin as published (13 bytes, not 147951465) — it was \
-         discarded"
+        "the download does not match the published ggml-base.en.bin (13 bytes, not 147951465) — \
+         it was discarded"
             .into(),
     );
     with_lang(Lang::Fr, || {
@@ -8157,7 +8154,7 @@ fn voice_failures_are_said_in_the_readers_language() {
         assert!(
             shows(
                 &mut sim_elem(super::voice_section(&app)),
-                "le téléchargement ne correspond pas au fichier ggml-base.en.bin publié"
+                "le téléchargement ne correspond pas au ggml-base.en.bin publié"
             ),
             "under the model"
         );

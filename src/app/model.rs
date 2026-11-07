@@ -420,7 +420,7 @@ pub struct AskTurn {
     /// unique for the App's whole lifetime.
     pub stream: u64,
     pub question: String,
-    /// The question was said, not typed: marked "Said" over it.
+    /// The question was said, not typed: marked "Spoken" over it.
     pub spoken: bool,
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.
@@ -1287,9 +1287,7 @@ impl LspSlot {
                     Some(e) => format!("⚠ {}", lsp_error_summary(e)),
                     None => s.progress.clone().unwrap_or_else(|| tr!("ready").into()),
                 },
-                Some(Err(_)) => {
-                    tr!("⚠ state unreadable after an internal error — restart it").into()
-                }
+                Some(Err(_)) => tr!("⚠ internal error — restart this language server").into(),
                 None => tr!("ready").into(),
             },
             LspSlot::Failed(e) => tr!("error: {error}", error = e),

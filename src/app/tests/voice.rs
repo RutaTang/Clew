@@ -504,7 +504,7 @@ fn model_downloads_are_verified() {
     assert!(app.voice.downloads.is_empty());
     let error = app.voice.download_errors.get("base.en").cloned().unwrap();
     assert!(
-        error.contains("not ggml-base.en.bin as published"),
+        error.contains("does not match the published ggml-base.en.bin"),
         "{error}"
     );
     assert!(!app.voice.installed(model));

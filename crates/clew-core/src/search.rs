@@ -264,7 +264,7 @@ impl<R: Read> Read for Capped<R> {
             return match self.inner.read(&mut probe)? {
                 0 => Ok(0),
                 _ => Err(std::io::Error::other(format!(
-                    "grew past {} MB while it was being searched (searched up to there)",
+                    "grew past {} MB while it was being searched, so only part of it was searched",
                     self.cap / (1024 * 1024)
                 ))),
             };

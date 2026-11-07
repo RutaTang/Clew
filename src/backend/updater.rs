@@ -132,11 +132,9 @@ pub fn consent_task() -> Task<Message> {
     // hands back the label pressed.
     let yes: &'static str = tr!("Check Automatically");
     let no: &'static str = tr!("Don't Check");
-    let title = tr!("Check for clew updates automatically?");
+    let title = tr!("Check for Clew updates automatically?");
     let description = tr!(
-        "clew can ask GitHub for a newer release each time it starts. Nothing about \
-         your projects is sent. You can change this later in Settings, and check \
-         manually from the clew menu at any time."
+        "Clew can ask GitHub for a newer release each time it starts. Nothing about your projects is sent. You can change this later in Settings, and check manually from the Clew menu at any time."
     );
     Task::perform(
         async move {
@@ -212,7 +210,7 @@ pub fn validate_dmg_url(url: &str) -> Result<(), String> {
     });
     if !release_asset {
         return Err(tr!(
-            "refusing an update download from outside clew's GitHub releases: {url}",
+            "refusing an update download from outside Clew's GitHub releases: {url}",
             url = url
         ));
     }

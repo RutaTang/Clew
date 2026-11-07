@@ -67,8 +67,7 @@ impl App {
                     let running = self.update.available.as_ref().map(|u| u.version);
                     self.status = match running {
                         Some(running) if release.version > running => tr!(
-                            "clew {version} is available — after the update to {running} \
-                             in progress",
+                            "Clew {version} is available — install it once the update to {running} finishes",
                             version = release.version,
                             running = running
                         ),
@@ -94,13 +93,13 @@ impl App {
                 self.update.phase = UpdatePhase::Idle;
                 self.update.progress = None;
                 if manual {
-                    self.status = tr!("clew {version} is available", version = release.version);
+                    self.status = tr!("Clew {version} is available", version = release.version);
                 }
             }
             Ok(_) => {
                 if manual {
                     self.status = tr!(
-                        "clew is up to date (v{version})",
+                        "Clew is up to date (v{version})",
                         version = updater::current_version()
                     );
                 }
@@ -155,7 +154,7 @@ impl App {
         // after clew has quit for a swap that cannot happen.
         if let Some(reason) = self.self_install_blocker() {
             self.status = tr!(
-                "clew can't update itself here: {reason} — opening the release page",
+                "Clew can't update itself here: {reason} — opening the release page",
                 reason = reason
             );
             return Task::done(Message::Content(ContentMsg::OpenLink(release_page)));
@@ -179,7 +178,7 @@ impl App {
         self.update.phase = UpdatePhase::Downloading;
         self.update.progress = Some((0, None));
         self.update.show_notes = false;
-        self.status = tr!("Downloading clew {version}…", version = version);
+        self.status = tr!("Downloading Clew {version}…", version = version);
         let (task, download) = updater::download_task(url, version, self.update.generation);
         self.update.download = Some(download);
         task
@@ -298,7 +297,7 @@ impl App {
     pub(crate) fn on_update_installed(&mut self, result: Result<(), String>) -> Task<Message> {
         match result {
             Ok(()) => {
-                self.status = tr!("Restarting clew to finish the update…").into();
+                self.status = tr!("Restarting Clew to finish the update…").into();
                 Task::none()
             }
             Err(e) => {
@@ -317,8 +316,7 @@ impl App {
     pub(crate) fn on_quit_cancelled(&mut self) {
         if self.update.phase == UpdatePhase::Installing {
             let kept = tr!(
-                "clew was kept open — the update is installed if clew quits within a \
-                 minute; after that, install it again"
+                "Clew stayed open, so the update is not installed yet — quit Clew within a minute to finish, or install it again later"
             );
             self.update.phase = UpdatePhase::Failed(kept.into());
             self.update.progress = None;

@@ -336,7 +336,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
     };
     let toggle =
-        container(row![seg(tr!("Search"), is_search), seg(tr!("Walk"), !is_search)].spacing(1))
+        container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(1))
             .padding(2)
             .style(theme::trough);
 
@@ -753,7 +753,7 @@ const SIDEBAR_GAP: f32 = 12.0;
 
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
-pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked · ignored");
+pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked despite .gitignore");
 
 pub(crate) fn append_tree_rows<'a>(
     rows: &mut Vec<Element<'a, Message>>,
@@ -1519,7 +1519,7 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
-            None => text(tr!("detached"))
+            None => text(tr!("symbol not found"))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),

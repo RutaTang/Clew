@@ -58,7 +58,7 @@ fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
     }
     if let Some(error) = &report.tracked_error {
         parts.push(tr!(
-            "git could not list the tracked files, so ignored ones may be missing ({error})",
+            "git could not list the tracked files, so tracked files that .gitignore matches may be missing ({error})",
             error = error
         ));
     }
@@ -628,7 +628,7 @@ impl App {
             let mut lost: Vec<&str> = left.remote_state_dirty.iter().map(String::as_str).collect();
             lost.sort_unstable();
             discarded.push(tr!(
-                "Unsaved remote state was discarded: {files}",
+                "Changes not yet saved on the remote host were discarded: {files}",
                 files = lost.join(", ")
             ));
         }
@@ -863,7 +863,7 @@ impl App {
 
         if !problems.is_empty() {
             self.status = tr!(
-                "Left untouched, could not read: {problems} — fix or remove the file to use it",
+                "Could not read {problems}, so it was left as is — fix or remove the file to use it",
                 problems = problems.join("; ")
             );
         }

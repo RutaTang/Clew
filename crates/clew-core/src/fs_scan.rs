@@ -224,7 +224,7 @@ impl ScanReport {
         }
         if let Some(e) = &self.tracked_error {
             parts.push(format!(
-                "git could not list the tracked files, so ignored ones may be missing ({e})"
+                "git could not list the tracked files, so tracked files that .gitignore matches may be missing ({e})"
             ));
         }
         (!parts.is_empty()).then(|| parts.join("; "))

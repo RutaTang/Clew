@@ -448,7 +448,7 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             })
             .unwrap_or(0);
         (
-            format!("↻ {}", tr!("Update queued · {seconds}s", seconds = secs)),
+            format!("↻ {}", tr!("Refresh in {seconds}s", seconds = secs)),
             theme::accent(),
             true,
         )

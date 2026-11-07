@@ -245,13 +245,13 @@ impl SavedConnection {
                 if host {
                     tr!("The host is required.")
                 } else {
-                    tr!("The user is required.")
+                    tr!("A user name is required.")
                 }
             } else if v.starts_with('-') {
                 if host {
                     tr!("The host cannot start with “-”.")
                 } else {
-                    tr!("The user cannot start with “-”.")
+                    tr!("The user name cannot start with “-”.")
                 }
             } else if v
                 .chars()
@@ -260,7 +260,7 @@ impl SavedConnection {
                 if host {
                     tr!("The host cannot contain spaces, control characters or “@”.")
                 } else {
-                    tr!("The user cannot contain spaces, control characters or “@”.")
+                    tr!("The user name cannot contain spaces, control characters or “@”.")
                 }
             } else {
                 return Ok(());
@@ -1055,7 +1055,7 @@ pub fn forget_host_key(host_field: &str) -> Result<usize, String> {
 /// — or `None` to leave the file as it is. Returns the file's path.
 fn edit_known_hosts(change: impl FnOnce(&str) -> Option<String>) -> Result<PathBuf, String> {
     let path = known_hosts_path().ok_or(tr!(
-        "clew has no data directory it can hand to ssh, so it cannot remember host keys"
+        "Clew has no data directory it can hand to ssh, so it cannot remember host keys"
     ))?;
     let _serialized = KNOWN_HOSTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _exclusive = clew_core::statefile::lock(&path).map_err(|e| {

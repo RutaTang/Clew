@@ -327,7 +327,7 @@ impl Jdwp {
             .await
             .map_err(|e| format!("the JVM's agent did not shake hands: {e}"))?;
         if &answer != b"JDWP-Handshake" {
-            return Err("the JVM's agent answered something else".into());
+            return Err("the JVM's debug agent gave an unexpected handshake reply".into());
         }
         let (mut read, write) = stream.into_split();
         let pending: Pending = Arc::default();
@@ -1089,7 +1089,7 @@ impl Adapter {
                 Err(_) => return Err("the JVM did not say where its debugger listens".into()),
             },
             _ = exited.wait_for(Option::is_some) => {
-                return Err("the JVM ended before it started — see its output".into());
+                return Err("the JVM exited before its debugger started — see its output".into());
             }
         };
         tokio::spawn(forward(Box::new(stdout), "stdout", self.out.clone()));
@@ -2176,7 +2176,7 @@ impl Frame<'_> {
         args: &[JValue],
     ) -> Result<JValue, String> {
         if !self.calls {
-            return Err("methods are not called for a hover".into());
+            return Err("hovering does not run methods — evaluate the expression instead".into());
         }
         self.vm
             .invoke(object, class, self.thread, method, args)
@@ -2770,7 +2770,7 @@ where
             .await
             .map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("the JVM ended before its debugger listened".into());
+            return Err("the JVM exited before its debugger started listening".into());
         }
         if let Some(at) = line.find("at address:") {
             let address = line[at + "at address:".len()..].trim();

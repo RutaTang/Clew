@@ -378,7 +378,7 @@ impl App {
             _ => {
                 self.status = crate::keymap::local_keys(&tr!(
                     "No {language} server ready (⌘T to search symbols)",
-                    language = lang
+                    language = crate::app::languages::language_name(lang)
                 ));
                 return Task::none();
             }

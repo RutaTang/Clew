@@ -1273,7 +1273,7 @@ fn an_agent_that_ignores_a_cancel_is_started_afresh_for_the_next_question() {
         Some(next),
         "for the question"
     );
-    assert!(app.status.contains("starting it again"), "{}", app.status);
+    assert!(app.status.contains("restarting it"), "{}", app.status);
     // A late notice of a turn already dealt with changes nothing.
     let stamp = app.stamp();
     let _ = app.update(Message::Ask(AskMsg::AcpCancelOverdue { stamp, stream }));

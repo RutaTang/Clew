@@ -1384,7 +1384,7 @@ fn exec_tool_basic(
             if notebook {
                 let Some(nb) = clew_core::notebook::parse(&source) else {
                     return (
-                        format!("cannot read {rel}: not a notebook clew can parse"),
+                        format!("cannot read {rel}: not a notebook Clew can parse"),
                         format!("outline {rel}"),
                         Vec::new(),
                     );

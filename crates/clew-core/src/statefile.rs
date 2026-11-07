@@ -500,7 +500,7 @@ impl std::fmt::Display for StoreError {
             StoreError::Unparseable(e) => write!(f, "cannot be parsed: {e}"),
             StoreError::NewerSchema { found, supported } => write!(
                 f,
-                "was written by a newer clew (schema {found}; this version understands {supported})"
+                "was written by a newer Clew (schema {found}; this version understands {supported})"
             ),
         }
     }

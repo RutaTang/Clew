@@ -308,7 +308,7 @@ impl Adapter {
                 Err(_) => return Err(format!("the node did not connect within {} s", CONNECT_TIMEOUT.as_secs())),
             },
             _ = exited.wait_for(Option::is_some) => {
-                return Err("the node ended before it connected — see its output".into());
+                return Err("Node.js exited before its debugger connected — see its output".into());
             }
         };
         let bridge = Bridge::start(

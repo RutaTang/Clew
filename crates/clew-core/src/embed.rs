@@ -619,7 +619,7 @@ fn request_batch(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("elsewhere");
         return Err(BatchError::Final(format!(
-            "embeddings endpoint redirected to {}; not following — point base_url at the real endpoint",
+            "embeddings endpoint redirected to {}; not following — set the Base URL in Settings to the real endpoint",
             to.lines()
                 .next()
                 .unwrap_or("")
@@ -1681,7 +1681,7 @@ mod tests {
         .expect_err("a proxy that refuses every login yields no embeddings");
         let err = err.message().to_string();
         assert!(
-            err.contains("it takes only NTLM logins, which clew cannot make")
+            err.contains("it accepts only NTLM logins, which Clew does not support")
                 && err.contains("cntlm or px"),
             "{err}"
         );
@@ -1879,7 +1879,7 @@ mod tests {
         let (result, took) = batch(&trickled);
         let err = result.expect_err("a trickled answer outlasted its pace");
         assert!(err.contains("timed out"), "{err}");
-        assert!(err.contains("slower than 4 KiB/s"), "{err}");
+        assert!(err.contains("stayed below 4 KiB/s"), "{err}");
         assert!(took < Duration::from_secs(5), "the pace held for {took:?}");
     }
 

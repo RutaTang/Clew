@@ -736,7 +736,7 @@ impl App {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {
                     self.keymap_notice = Some(tr!(
-                        "Its default is used by “{action}” now — rebind that first",
+                        "Its default shortcut is now used by “{action}” — change that one first",
                         action = crate::i18n::lookup(other.label())
                     ));
                     return Task::none();

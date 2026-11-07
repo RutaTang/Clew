@@ -509,9 +509,10 @@ impl App {
             if last_run {
                 return Task::done(Message::Walk(WalkMsg::GenerateTrace));
             }
-            self.status =
-                tr!("This tour records a debug run — debug the program again to record it anew")
-                    .into();
+            self.status = tr!(
+                "This walkthrough records a debug run — debug the program again to record a new one"
+            )
+            .into();
             return Task::none();
         }
         Task::done(Message::Walk(WalkMsg::Generate(scope)))

@@ -250,7 +250,7 @@ impl Engine {
         else {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("the embedding model could not be spoken to".into());
+            return Err("could not connect to the embedding model".into());
         };
         // Read as it is written, to its end — a pipe left full would stop
         // the model, and one closed early would fail its next write —
@@ -292,7 +292,9 @@ impl Engine {
                         Ok(line) => serde_json::from_str::<Answer>(&line).map_err(|e| {
                             format!("the embedding model said something unreadable: {e}")
                         }),
-                        Err(e) => Err(format!("the embedding model could not be heard: {e}")),
+                        Err(e) => Err(format!(
+                            "the embedding model's reply could not be read: {e}"
+                        )),
                     };
                     let stop = answer.is_err();
                     if tx.send(answer).is_err() || stop {
@@ -353,7 +355,11 @@ impl Engine {
         let line = serde_json::json!({ "embed": { "id": id, "texts": texts } });
         writeln!(self.stdin, "{line}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| Halt::Engine(format!("the embedding model could not be asked: {e}")))?;
+            .map_err(|e| {
+                Halt::Engine(format!(
+                    "could not send the request to the embedding model: {e}"
+                ))
+            })?;
         let started = Instant::now();
         loop {
             if cancelled() {
@@ -447,7 +453,7 @@ fn decode(data: &str, dims: usize, count: usize) -> Result<Vec<Vec<f32>>, String
         })
         .collect();
     if vectors.iter().flatten().any(|x| !x.is_finite()) {
-        return Err("the embedding model made a vector that is not a number".into());
+        return Err("the embedding model returned a vector with invalid values".into());
     }
     Ok(vectors)
 }

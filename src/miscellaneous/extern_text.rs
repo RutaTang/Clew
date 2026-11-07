@@ -112,7 +112,7 @@ pub(crate) const MAP_TITLES: &[&str] = &[
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
     tr_noop!(
-        "each file and an arrow to each file it includes; its detail counts what it pulls in all told — every file that includes it pays for that"
+        "each file and an arrow to each file it includes; its detail counts every file it pulls in, directly or not — which every file that includes it pulls in too"
     ),
     tr_noop!(
         "each method that overrides a virtual method of a base class, with an arrow to the one it overrides"
@@ -136,7 +136,7 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
         "each function that calls or casts to a gen_server, an arrow to the handle_call or handle_cast clause that answers its request"
     ),
     tr_noop!(
-        "each component the container makes; an arrow to what it is given (labelled how), from an interface to what it resolves to, from a configuration to the beans it provides"
+        "each component the container makes; an arrow to each dependency it is given (labelled with how), from an interface to its implementation, and from a configuration to the beans it provides"
     ),
     tr_noop!(
         "each model or entity the ORM maps; an arrow to each it relates to, labelled with the field and how (one-to-many, belongs to, …)"
@@ -157,7 +157,7 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
         "each type and an arrow to each class it is an instance of — instance declarations, deriving clauses and standalone deriving"
     ),
     tr_noop!(
-        "each monad stack a function's type signature runs it in (its layers, outermost first, in the detail), and an arrow from each function to its stack"
+        "each monad stack that functions run in, read from their type signatures (its layers, outermost first, in the detail), and an arrow from each function to its stack"
     ),
     tr_noop!(
         "each component and an arrow to each of the project's components it renders, labelled with the props it passes"
@@ -181,7 +181,7 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
         "where Python picks what to call at run time: getattr with a computed name, dict registries of callables, functions a decorator registers — and the functions they can reach"
     ),
     tr_noop!(
-        "each route — its method and path — with an arrow to the handler it reaches; a handler written in place is the route itself"
+        "each route — its method and path — with an arrow to the handler it reaches; an inline handler is shown as the route itself"
     ),
     tr_noop!(
         "the methods a class has that no def names, and where they come from: modules mixed in, concerns' included blocks and class_methods, define_method, attr_*, delegate, alias, class_eval; calls made by name (send) and the classes that answer any call (method_missing)"
@@ -207,7 +207,7 @@ pub(crate) const MAP_DESCRIPTIONS: &[&str] = &[
         "each function with comptime parameters — a generic type constructor or a generic function — and an arrow to each instantiation the project makes of it, where it is first made"
     ),
     tr_noop!(
-        "each error set and the errors in it; each function and the set its return type names, the errors it returns, the functions whose errors try passes on, and the errors it catches"
+        "each error set and the errors in it; each function and the set its return type names, the errors it returns, the functions whose errors it passes on with “try”, and the errors it catches"
     ),
     tr_noop!(
         "what build.zig builds: each executable, library, test and module and its root source file, the libraries it links, the modules it imports, and the build steps that run it"
@@ -225,6 +225,7 @@ pub(crate) const MAP_KINDS: &[&str] = &[
     tr_noop!("component"),
     tr_noop!("entity"),
     tr_noop!("error"),
+    tr_noop!("error set"),
     tr_noop!("event"),
     tr_noop!("external"),
     tr_noop!("file"),
@@ -250,7 +251,6 @@ pub(crate) const MAP_KINDS: &[&str] = &[
     tr_noop!("re-export"),
     tr_noop!("route"),
     tr_noop!("service"),
-    tr_noop!("set"),
     tr_noop!("stack"),
     tr_noop!("system"),
     tr_noop!("table"),

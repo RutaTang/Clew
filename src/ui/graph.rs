@@ -86,9 +86,9 @@ pub(crate) fn graph_modal_frame<'a>(
             .padding([4, 8])
             .on_press(Message::Graph(GraphMsg::ToggleHeat)),
             if graph_heat {
-                tr!("Colour by language")
+                tr!("Color by language")
             } else {
-                tr!("Colour by change frequency (commits in the recent history)")
+                tr!("Color by change frequency (commits in the recent history)")
             },
             None,
         ));
@@ -150,7 +150,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         }),
         crate::Overlay::ProjectImports => None,
         crate::Overlay::ProjectTypes => app.docs_loading().then(|| {
-            text(tr!("Building the API index…"))
+            text(tr!("Building the API docs…"))
                 .size(ts::SMALL)
                 .color(theme::dim())
                 .into()
@@ -2102,7 +2102,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
     );
     rows.push(
         text(app.precise_summary().unwrap_or_else(|| {
-            tr!("Name-based & approximate — Refine with LSP for exact edges.").to_string()
+            tr!("Name-based & approximate — Refine with LSP for exact calls.").to_string()
         }))
         .size(ts::CAPTION)
         .color(theme::dim())
@@ -2131,9 +2131,7 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 
     let visits = trace_visits(app, g);
     if !visits.is_empty() {
-        rows.push(section_header(tr!(
-            "Executed (the last debug run stopped here)"
-        )));
+        rows.push(section_header(tr!("Where the last debug run stopped")));
         for &(id, stops) in visits.iter().take(40) {
             rows.push(call_symbol_row(app, id, trn!("1 stop", "{n} stops", stops)));
         }
@@ -2197,7 +2195,7 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.type_graph;
     if g.is_empty() {
         let msg = if app.docs_loading() {
-            tr!("Building the API index…")
+            tr!("Building the API docs…")
         } else if app.scanning || app.proj.indexing {
             tr!("Indexing the project…")
         } else {
@@ -2213,7 +2211,7 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
             "{} · {} · {}",
             trn!("1 type", "{n} types", g.node_count()),
             trn!("1 relation", "{n} relations", g.edge_count()),
-            trn!("1 inherits", "{n} inherit", g.inherits_count()),
+            trn!("1 inheritance link", "{n} inherit", g.inherits_count()),
         ))
         .size(ts::BODY)
         .color(theme::accent())
@@ -2222,7 +2220,9 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     const TOP: usize = 12;
     let referenced = g.most_referenced(TOP);
     if !referenced.is_empty() {
-        rows.push(section_header(tr!("Most referenced (named by others)")));
+        rows.push(section_header(tr!(
+            "Most referenced (used by the most types)"
+        )));
         for id in referenced {
             rows.push(type_row(app, id, format!("{} ←", g.fan_in(id))));
         }
@@ -2240,7 +2240,9 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     }
     let dependent = g.most_dependent(TOP);
     if !dependent.is_empty() {
-        rows.push(section_header(tr!("Most dependencies (naming others)")));
+        rows.push(section_header(tr!(
+            "Most dependencies (uses the most types)"
+        )));
         for id in dependent {
             rows.push(type_row(app, id, format!("→ {}", g.fan_out(id))));
         }
@@ -2349,7 +2351,7 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
     ];
     if let Some(e) = &app.proj.maps_error {
         rows.push(
-            text(tr!("The last read failed: {error}", error = e))
+            text(tr!("Could not read the maps: {error}", error = e))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),

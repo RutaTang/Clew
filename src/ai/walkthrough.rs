@@ -346,7 +346,7 @@ pub fn from_trace(root: &Path, program: &str, stops: &[crate::TraceStop]) -> Opt
                 line = line
             ),
             None => tr!(
-                "**Stop {ordinal}** ({reason}) in `{name}`, at the top of the stack.",
+                "**Stop {ordinal}** ({reason}) in `{name}`, not called from project code.",
                 ordinal = ordinal,
                 reason = reason,
                 name = name
@@ -1176,7 +1176,11 @@ mod trace_tests {
             "{}",
             wt.steps[0].narration
         );
-        assert!(wt.steps[0].narration.contains("top of the stack"));
+        assert!(
+            wt.steps[0]
+                .narration
+                .contains("not called from project code")
+        );
         assert!(
             wt.steps[1]
                 .narration

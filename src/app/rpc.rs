@@ -359,7 +359,7 @@ impl AiClient {
             .map_err(CallError::Llm)
         })
         .await
-        .unwrap_or_else(|_| Err(CallError::Internal(tr!("task join failed").into())))
+        .unwrap_or_else(|_| Err(CallError::Internal(tr!("an internal task failed").into())))
     }
 
     /// Embed texts for the index — stopped, like a completion, when this
@@ -397,7 +397,7 @@ impl AiClient {
             })
         })
         .await
-        .unwrap_or_else(|_| Err(tr!("task join failed").into()))
+        .unwrap_or_else(|_| Err(tr!("an internal task failed").into()))
     }
 }
 

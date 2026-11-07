@@ -202,7 +202,7 @@ pub struct StatePoisoned;
 
 impl std::fmt::Display for StatePoisoned {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("clew lost track of this language server after an internal error; restart it")
+        f.write_str("Clew lost track of this language server after an internal error; restart it")
     }
 }
 

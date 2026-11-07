@@ -3223,7 +3223,7 @@ fn context_menu_flow() {
     let _ = app.update(Message::Hover(HoverMsg::ContextGoto(GotoKind::Definition)));
     assert!(app.proj.context_menu.is_none());
     assert!(
-        app.status.contains("No rust server ready"),
+        app.status.contains("No Rust server ready"),
         "the goto was not dispatched: {:?}",
         app.status
     );
@@ -4360,7 +4360,7 @@ async fn exited_lsp_process_clears_its_slot() {
     assert!(!app.proj.link.seen_diag_version.contains_key("rust"));
     assert!(!app.proj.link.seen_inlay_epoch.contains_key("rust"));
     assert!(
-        app.status.contains("rust") && app.status.contains("exited"),
+        app.status.contains("Rust") && app.status.contains("exited"),
         "the death is surfaced, not silent: {:?}",
         app.status
     );
@@ -9485,7 +9485,7 @@ fn a_store_whose_journal_is_full_refuses_the_next_edit() {
         "a refused change was made on screen"
     );
     assert!(
-        app.status.contains("waiting for the server"),
+        app.status.contains("waiting for the host to confirm"),
         "{}",
         app.status
     );
@@ -9879,7 +9879,7 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         close_question(&lost(1, "me@host:/srv/app", &["bookmarks"])),
         question(
             "A change is not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Close, and it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. If you close now, it will be lost."
         )
     );
     let three = lost(
@@ -9891,14 +9891,14 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         close_question(&three),
         question(
             "3 changes are not saved to the host",
-            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. Close, and they are lost."
+            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. If you close now, they will be lost."
         )
     );
     assert_eq!(
         quit_question(std::slice::from_ref(&three)),
         question(
             "3 changes are not saved to the host",
-            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. Quit, and they are lost."
+            "3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app could not be sent to the host. If you quit now, they will be lost."
         )
     );
     let (title, message) = quit_question(&[three, lost(2, "you@other:/x", &["notes"])]);
@@ -9907,7 +9907,7 @@ fn the_questions_say_how_many_edits_to_what_in_which_project() {
         message.contains(
             "\n\n• 3 changes to bookmarks, notes and walkthroughs in me@host:/srv/app\n\
              • 2 changes to notes in you@other:/x\n\n"
-        ) && message.ends_with("Quit, and they are lost."),
+        ) && message.ends_with("If you quit now, they will be lost."),
         "{message}"
     );
 }
@@ -9935,21 +9935,21 @@ fn the_questions_say_when_edits_were_sent_but_not_confirmed() {
         close_question(&sent(1, "me@host:/srv/app")),
         question(
             "A change is not confirmed by the host",
-            "1 change to bookmarks in me@host:/srv/app was not confirmed by the host. Close, and it may be lost."
+            "1 change to bookmarks in me@host:/srv/app was not confirmed by the host. If you close now, it may be lost."
         )
     );
     assert_eq!(
         close_question(&sent(2, "me@host:/srv/app")),
         question(
             "2 changes are not confirmed by the host",
-            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. Close, and they may be lost."
+            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. If you close now, they may be lost."
         )
     );
     assert_eq!(
         quit_question(&[sent(2, "me@host:/srv/app")]),
         question(
             "2 changes are not confirmed by the host",
-            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. Quit, and they may be lost."
+            "2 changes to bookmarks in me@host:/srv/app were not confirmed by the host. If you quit now, they may be lost."
         )
     );
     let (title, message) = quit_question(&[sent(2, "me@host:/srv/app"), sent(1, "you@other:/x")]);
@@ -9959,7 +9959,7 @@ fn the_questions_say_when_edits_were_sent_but_not_confirmed() {
             "Not confirmed by their hosts yet:\n\n\
              • 2 changes to bookmarks in me@host:/srv/app\n\
              • 1 change to bookmarks in you@other:/x\n\n"
-        ) && message.ends_with("Quit, and they may be lost."),
+        ) && message.ends_with("If you quit now, they may be lost."),
         "{message}"
     );
 }
@@ -9993,15 +9993,14 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "4 changes are not saved to the host",
             "4 changes to bookmarks in me@host:/srv/app are not saved to the host: 1 could not \
-             be sent, 2 were sent but not confirmed and 1 could not be saved by the host. Close, \
-             and they may be lost."
+             be sent, 2 were sent but not confirmed and 1 could not be saved by the host. If you close now, they may be lost."
         )
     );
     assert_eq!(
         close_question(&edits("me@host:/srv/app", (0, 0, 2), &[])),
         question(
             "2 changes are not saved to the host",
-            "2 changes to bookmarks in me@host:/srv/app could not be saved by the host. Close, and they are lost."
+            "2 changes to bookmarks in me@host:/srv/app could not be saved by the host. If you close now, they will be lost."
         )
     );
     assert_eq!(
@@ -10012,8 +10011,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         )),
         question(
             "2 changes are not saved to the host",
-            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. Close, and it \
-             is lost. The host could not save the change to the bookmark at a.rs:1: it is lost."
+            "1 change to bookmarks in me@host:/srv/app could not be sent to the host. If you close now, it will be lost. The host could not save the change to the bookmark at a.rs:1: it is lost."
         )
     );
     assert_eq!(
@@ -10033,7 +10031,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
         question(
             "2 changes are not saved to the host",
             "2 changes to bookmarks in me@host:/srv/app are not saved to the host: 1 was sent but \
-             not confirmed and 1 could not be saved by the host. Quit, and they may be lost."
+             not confirmed and 1 could not be saved by the host. If you quit now, they may be lost."
         )
     );
     let (title, message) = quit_question(&[
@@ -10049,7 +10047,7 @@ fn the_questions_say_how_many_for_each_reason_and_name_the_changes_given_up() {
          • 1 change to bookmarks in you@other:/x could not be saved by the host\n\
          • the change to the walkthrough “tour” in you@other:/x: the host could not save it, \
          and it is lost\n\n\
-         Quit, and the others may be lost."
+         If you quit now, the others may be lost."
     );
 }
 
@@ -10148,8 +10146,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     };
     assert_eq!(
         close_question(&waiting).1,
-        "1 change to notes in me@host:/srv/app is waiting for an earlier change. Close, and it is \
-         lost."
+        "1 change to notes in me@host:/srv/app is waiting for an earlier change. If you close now, it will be lost."
     );
     // Several, alone, and in a quit's list among another window's.
     let two = crate::app::remote_state::UnsavedEdits {
@@ -10160,8 +10157,7 @@ fn an_edit_held_back_for_its_turn_is_said_to_wait_for_it() {
     };
     assert_eq!(
         close_question(&two).1,
-        "2 changes to notes in me@host:/srv/app are waiting for an earlier change. Close, and \
-         they are lost."
+        "2 changes to notes in me@host:/srv/app are waiting for an earlier change. If you close now, they will be lost."
     );
     // Among other reasons, counted as they are.
     let mixed = crate::app::remote_state::UnsavedEdits {
@@ -13614,10 +13610,10 @@ fn bookmarks_and_traces_wait_out_a_past_revision_on_screen() {
     assert!(crate::ui::time_travel_pane(&app).is_some(), "precondition");
     let _ = app.update(Message::Reading(ReadingMsg::BookmarkToggled));
     assert!(app.proj.bookmarks.is_empty());
-    assert!(app.status.contains("time travel"), "{}", app.status);
+    assert!(app.status.contains("Time Travel"), "{}", app.status);
     app.status.clear();
     let _ = app.update(Message::Flow(FlowMsg::AtCursor));
-    assert!(app.status.contains("time travel"), "{}", app.status);
+    assert!(app.status.contains("Time Travel"), "{}", app.status);
 }
 
 /// The import map opened before the project's imports are resolved is laid
@@ -15300,8 +15296,10 @@ fn a_refinement_no_server_can_follow_gives_way_to_the_name_based_graph() {
     let builds = settle_graphs(&mut app, batch);
     assert!(!app.proj.project_calls.precise, "the refined graph stayed");
     assert!(
-        app.status.starts_with("No rust server is ready")
-            && app.status.ends_with("refine it with LSP once one is"),
+        app.status.starts_with("No Rust server is ready")
+            && app
+                .status
+                .ends_with("refine it with LSP once a server is ready"),
         "{}",
         app.status
     );
@@ -15954,7 +15952,7 @@ async fn a_refine_pass_that_fails_hands_the_call_graph_back() {
         "the failed pass stayed in flight"
     );
     assert!(!calls.precise, "the failed refinement stayed");
-    assert!(app.status.contains("refine failed"), "{}", app.status);
+    assert!(app.status.contains("refinement failed"), "{}", app.status);
     assert_eq!(builds, 1, "the name-based graph was not rebuilt");
 }
 
@@ -16038,7 +16036,11 @@ async fn a_refine_pass_that_panics_still_ends() {
         "the pass that panicked stayed in flight"
     );
     assert!(!calls.precise, "the refinement stayed");
-    assert!(app.status.contains("the pass panicked"), "{}", app.status);
+    assert!(
+        app.status.contains("it stopped on an internal error"),
+        "{}",
+        app.status
+    );
 }
 
 /// A change to a file whose language server is down cannot be refined in:
@@ -16087,7 +16089,7 @@ async fn a_change_whose_server_is_down_hands_the_refinement_back() {
         "the refinement went on without the python server"
     );
     assert!(
-        app.status.starts_with("No python server is ready"),
+        app.status.starts_with("No Python server is ready"),
         "{}",
         app.status
     );
@@ -16159,7 +16161,7 @@ async fn a_dead_server_still_marked_ready_hands_the_refinement_back() {
         "the refinement went on through a dead python server"
     );
     assert!(
-        app.status.starts_with("No python server is ready"),
+        app.status.starts_with("No Python server is ready"),
         "{}",
         app.status
     );
@@ -16193,7 +16195,7 @@ async fn a_full_refine_leaves_out_the_language_of_a_dead_server() {
     settle_graphs(&mut app, refine);
     assert!(app.proj.project_calls.precise, "{}", app.status);
     let label = app.precise_label().expect("refined");
-    assert!(label.contains("python left out"), "{label}");
+    assert!(label.contains("Python left out"), "{label}");
 }
 
 /// One function a language server fails — an error it would give again —
@@ -16407,7 +16409,7 @@ async fn a_server_that_stops_answering_in_time_is_asked_no_more_in_the_pass() {
     assert_eq!(calls.unrefined.len(), 15, "{}", app.status);
     assert!(
         app.status.contains(&format!(
-            "the python server left {} queries in a row unanswered, and was asked no more",
+            "the python server stopped answering ({} timeouts in a row) and was skipped",
             crate::app::tasks::REFINE_BREAKER_TIMEOUTS
         )),
         "{}",
@@ -16428,7 +16430,7 @@ async fn a_server_that_stops_during_a_refine_hands_it_back() {
     );
     assert!(
         app.status
-            .starts_with("The python server stopped while refining tool.py"),
+            .starts_with("The Python server stopped while refining tool.py"),
         "{}",
         app.status
     );
@@ -16569,7 +16571,7 @@ async fn a_change_waits_for_a_starting_server() {
     );
     assert!(
         app.precise_label()
-            .is_some_and(|label| label.ends_with("waiting for python")),
+            .is_some_and(|label| label.ends_with("waiting for Python")),
         "{:?}",
         app.precise_label()
     );
@@ -16782,7 +16784,7 @@ async fn a_server_just_started_holds_the_files_until_it_says_it_has_loaded() {
     assert_eq!(server.asked("textDocument/prepareCallHierarchy"), 0);
     assert!(
         app.precise_label()
-            .is_some_and(|label| label.ends_with("waiting for rust")),
+            .is_some_and(|label| label.ends_with("waiting for Rust")),
         "{:?}",
         app.precise_label()
     );
@@ -16912,7 +16914,7 @@ async fn a_full_refine_waits_for_a_server_still_loading_the_project() {
     assert_eq!(server.asked("textDocument/prepareCallHierarchy"), 0);
     assert!(
         app.status
-            .starts_with("Waiting for the python server to load the project"),
+            .starts_with("Waiting for the Python server to load the project"),
         "{}",
         app.status
     );
@@ -16921,7 +16923,7 @@ async fn a_full_refine_waits_for_a_server_still_loading_the_project() {
             iced_test::simulator(crate::ui::project_graph_modal(&app, Overlay::ProjectCalls));
         assert!(
             header
-                .find("Waiting for python to load the project…")
+                .find("Waiting for the language servers (Python) to load the project…")
                 .is_ok()
         );
     }
@@ -16933,7 +16935,7 @@ async fn a_full_refine_waits_for_a_server_still_loading_the_project() {
     assert!(app.proj.project_calls.precise, "{}", app.status);
     assert_eq!(
         app.precise_label().as_deref(),
-        Some("● LSP-precise: python, rust")
+        Some("● LSP-precise: Python, Rust")
     );
     assert!(server.prepared(4) > 0);
 }
@@ -16976,7 +16978,7 @@ async fn a_server_loading_the_project_is_waited_for_while_it_reports() {
     assert!(!app.proj.project_calls.precise);
     assert!(
         app.status
-            .starts_with("The python server reported nothing for"),
+            .starts_with("The Python server reported nothing for"),
         "{}",
         app.status
     );
@@ -17012,7 +17014,7 @@ async fn a_server_that_keeps_loading_is_waited_for_no_longer_than_the_bound() {
     assert!(rounds > 1, "handed back at the first bound");
     assert!(
         app.status
-            .starts_with("The python server did not load the project within"),
+            .starts_with("The Python server did not load the project within"),
         "{}",
         app.status
     );
@@ -17042,7 +17044,7 @@ async fn a_server_that_fails_to_start_hands_the_refinement_back() {
         "the refinement waited on for a server that failed"
     );
     assert!(
-        app.status.starts_with("No python server is ready"),
+        app.status.starts_with("No Python server is ready"),
         "{}",
         app.status
     );
@@ -17082,7 +17084,7 @@ async fn a_server_that_does_not_start_in_time_hands_the_refinement_back() {
     );
     assert!(
         app.status
-            .starts_with("The python server did not start within"),
+            .starts_with("The Python server did not start within"),
         "{}",
         app.status
     );
@@ -17108,19 +17110,19 @@ async fn a_refine_with_a_server_down_says_what_it_covers() {
     settle_graphs(&mut app, opened);
     let refine = app.update(Message::Graph(GraphMsg::RefineProjectCalls));
     assert!(
-        app.status.contains("(python left out: no server ready)"),
+        app.status.contains("(Python left out: no server ready)"),
         "{}",
         app.status
     );
     settle_graphs(&mut app, refine);
     assert!(app.proj.project_calls.precise, "precondition: refined");
-    let badge = "● LSP-precise: rust · python left out";
+    let badge = "● LSP-precise: Rust · Python left out";
     let mut header =
         iced_test::simulator(crate::ui::project_graph_modal(&app, Overlay::ProjectCalls));
     assert!(header.find(badge).is_ok(), "{:?}", app.precise_label());
     assert!(
         app.precise_summary()
-            .is_some_and(|s| s.contains("Functions in python are left out")),
+            .is_some_and(|s| s.contains("Functions in Python are left out")),
         "{:?}",
         app.precise_summary()
     );
@@ -17148,7 +17150,7 @@ async fn what_a_refinement_leaves_out_follows_the_project() {
     let refine = app.update(Message::Graph(GraphMsg::RefineProjectCalls));
     settle_graphs(&mut app, refine);
     assert!(app.proj.project_calls.precise, "precondition: refined");
-    assert_eq!(app.precise_label().as_deref(), Some("● LSP-precise: rust"));
+    assert_eq!(app.precise_label().as_deref(), Some("● LSP-precise: Rust"));
 
     // tool.py gains a function: left out.
     let text = "LIMIT = 3\n\n\ndef a():\n    pass\n";
@@ -17156,11 +17158,11 @@ async fn what_a_refinement_leaves_out_follows_the_project() {
     settle_graphs(&mut app, batch);
     assert_eq!(
         app.precise_label().as_deref(),
-        Some("● LSP-precise: rust · python left out")
+        Some("● LSP-precise: Rust · Python left out")
     );
     let summary = app.precise_summary().unwrap_or_default();
     assert!(
-        summary.ends_with("Functions in python are left out: no server was ready to refine them."),
+        summary.ends_with("Functions in Python are left out: no server was ready to refine them."),
         "{summary}"
     );
 
@@ -17169,7 +17171,7 @@ async fn what_a_refinement_leaves_out_follows_the_project() {
     std::fs::remove_file(&tool).unwrap();
     let batch = app.update(rehashed(&app, vec![watch::FileEvent::Deleted(tool)]));
     settle_graphs(&mut app, batch);
-    assert_eq!(app.precise_label().as_deref(), Some("● LSP-precise: rust"));
+    assert_eq!(app.precise_label().as_deref(), Some("● LSP-precise: Rust"));
 }
 
 /// The languages the server panel offers a server for follow the project's
@@ -18068,7 +18070,7 @@ fn a_remote_refinement_the_first_snapshot_hands_back_says_so() {
     assert!(!app.proj.project_calls.precise);
     assert!(
         app.status
-            .starts_with("The project finished indexing after the refine began"),
+            .starts_with("The project finished indexing after refinement began"),
         "{}",
         app.status
     );
@@ -20547,7 +20549,7 @@ fn hover_evaluation_in_the_debuggee_is_off_until_opted_in() {
     );
     let _ = app.update(Message::Debug(DebugMsg::ToggleHoverEval));
     assert!(app.debug_hover_eval);
-    assert!(app.status.contains("evaluates"), "{}", app.status);
+    assert!(app.status.contains("shows its value"), "{}", app.status);
     let _ = app.update(Message::Debug(DebugMsg::ToggleHoverEval));
     assert!(!app.debug_hover_eval);
 }
@@ -22208,7 +22210,7 @@ async fn a_process_feed_nobody_reads_stops_the_process() {
     );
     assert!(!app.server.lsp_procs.contains_key("rust"));
     assert!(
-        app.status.contains("rust") && app.status.contains("Stopped"),
+        app.status.contains("Rust") && app.status.contains("Stopped"),
         "{}",
         app.status
     );
@@ -22936,7 +22938,7 @@ fn a_background_refresh_pays_only_for_what_changed_under_it() {
         paid_auto < paid_first,
         "the refresh paid for {paid_auto} of {paid_first} summaries"
     );
-    assert!(app.status.contains("older prompt"), "{}", app.status);
+    assert!(app.status.contains("out of date"), "{}", app.status);
 
     // Asked for, the outdated summaries are paid for.
     let asked = app.update(Message::Explain(ExplainMsg::RefreshAll));
@@ -23108,7 +23110,7 @@ fn a_refresh_explains_code_that_changed_where_the_watcher_never_looked() {
     }
     let lib = explain::Node::File(root.join("src/lib.rs"));
     assert_eq!(after[&lib], before[&lib], "lib.rs did not change");
-    assert!(!app.status.contains("older prompt"), "{}", app.status);
+    assert!(!app.status.contains("out of date"), "{}", app.status);
     assert_eq!(
         provider.calls(),
         7 + 6,
@@ -23148,7 +23150,7 @@ fn a_reexplain_pays_for_that_node_and_what_quotes_it() {
         assert_eq!(after[&node], before[&node], "{node:?} was paid for");
     }
     assert!(
-        app.status.contains("3 summaries that quote it"),
+        app.status.contains("3 summaries built on it"),
         "{}",
         app.status
     );
@@ -23317,11 +23319,11 @@ fn summaries_from_an_earlier_clew_are_kept_marked_not_billed() {
         "a refresh billed what it could not check"
     );
     assert!(
-        app.status.contains("7 from an earlier version of clew"),
+        app.status.contains("7 from an earlier version of Clew"),
         "{}",
         app.status
     );
-    assert!(!app.status.contains("older prompt"), "{}", app.status);
+    assert!(!app.status.contains("out of date"), "{}", app.status);
     let b_one = fn_node(&root, "src/b.rs", "b_one");
     let shown = crate::app::explain::explanation_text(app.proj.explain.cache.get(&b_one));
     assert!(shown.contains("not checked against the code"), "{shown}");
@@ -23777,7 +23779,7 @@ fn a_pass_that_could_not_read_the_project_changes_nothing() {
     assert_eq!(explain::load(&store, &root), before, "on disk");
     assert_eq!(
         app.status,
-        "Explain stopped: clew failed internally (while reading the project) — try again, \
+        "Explain stopped: Clew failed internally (while reading the project) — try again, \
          and report it if it happens again"
     );
 }
@@ -24544,7 +24546,7 @@ fn a_pass_whose_calls_were_cancelled_says_so() {
     let _ = run_task(app.update(done));
     assert_eq!(
         app.status,
-        "Explain stopped: its calls were cancelled — run it again to finish"
+        "Explain stopped: its requests were cancelled — run it again to finish"
     );
     assert_eq!(*app.proj.explain.cache, before);
 }
@@ -24588,7 +24590,7 @@ fn a_prompt_refused_for_its_length_freezes_nothing_that_quotes_it() {
              model ("
         ) && app
             .status
-            .contains("· 1 explained without the summaries that failed")
+            .contains("· 1 explained without the failed summaries it builds on")
             && !app.status.contains("2 failed"),
         "{}",
         app.status
@@ -24635,7 +24637,7 @@ fn a_summary_that_keeps_failing_is_waited_for_once() {
     );
     assert!(
         app.status
-            .contains("· 1 explained without the summaries that failed"),
+            .contains("· 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -24680,7 +24682,7 @@ fn a_summary_waits_once_a_session_whatever_passes_come_between() {
     );
     assert!(
         app.status
-            .contains("· 1 explained without the summaries that failed"),
+            .contains("· 1 explained without the failed summaries it builds on"),
         "{}",
         app.status
     );
@@ -29144,7 +29146,7 @@ fn a_history_still_loading_gives_way_only_to_a_request_it_would_undo() {
         assert_eq!(
             app.status,
             if gives_way {
-                "Stopped loading the history of notes.txt — you kept working in this one"
+                "Stopped loading the history of notes.txt, as you moved on"
             } else {
                 "Loading history…"
             },
@@ -30322,7 +30324,7 @@ fn a_failed_state_read_is_reported_and_the_stored_trail_kept() {
         state: Handoff::new(crate::app::project::read_or_unread(panicked)),
     }));
     assert!(
-        app.status.contains("could not read") && app.status.contains("boom"),
+        app.status.contains("Could not read") && app.status.contains("boom"),
         "{}",
         app.status
     );
@@ -30978,7 +30980,7 @@ async fn a_remote_refine_stops_asking_at_the_first_failed_round_trip() {
     assert!(!app.proj.project_calls.precise);
     assert!(
         app.status.starts_with(
-            "The LSP refine failed (could not read src/f000.rs from the remote host: the \
+            "LSP refinement failed (could not read src/f000.rs from the remote host: the \
              connection dropped)"
         ),
         "{}",
@@ -31008,8 +31010,8 @@ async fn a_remote_refine_says_why_of_the_file_it_could_not_read() {
     assert_eq!(
         app.status,
         format!(
-            "The LSP refine failed (could not read {HOST_UNREADABLE} from the remote host): the \
-             call graph is name-based again — refine it with LSP for exact edges"
+            "LSP refinement failed (could not read {HOST_UNREADABLE} from the remote host): the \
+             call graph is name-based again — refine it with LSP for exact calls"
         )
     );
 }
@@ -31028,8 +31030,8 @@ async fn a_remote_refine_that_could_not_read_a_file_fails_and_says_which() {
     assert!(!app.proj.project_calls.precise);
     assert_eq!(
         app.status,
-        "The LSP refine failed (could not read src/a.rs from the remote host: the connection \
-         dropped): the call graph is name-based again — refine it with LSP for exact edges"
+        "LSP refinement failed (could not read src/a.rs from the remote host: the connection \
+         dropped): the call graph is name-based again — refine it with LSP for exact calls"
     );
 }
 
@@ -32192,7 +32194,7 @@ fn an_export_waits_for_the_docs_index_its_glossary_needs() {
     };
     assert!(!path.exists(), "nothing written yet");
     assert!(
-        app.status.contains("waiting for the docs index"),
+        app.status.contains("waiting for the API docs"),
         "{}",
         app.status
     );

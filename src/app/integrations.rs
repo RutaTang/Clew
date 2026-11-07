@@ -437,8 +437,8 @@ impl App {
         self.proj.asking = true;
         self.reveal_ask();
         self.status = trn!(
-            "Reaching 1 MCP server…",
-            "Reaching {n} MCP servers…",
+            "Connecting to 1 MCP server…",
+            "Connecting to {n} MCP servers…",
             servers.len()
         );
         let stamp = self.stamp();
@@ -1330,7 +1330,7 @@ impl App {
                 Some((stream, _)) => self.on_ask_stream_ended(
                     stream,
                     clew_protocol::StreamOutcome::Failed(tr!(
-                        "{label} did not stop its last answer",
+                        "{label} did not respond to Stop",
                         label = label
                     )),
                 ),
@@ -1342,7 +1342,7 @@ impl App {
         link.chosen = chosen;
         self.proj.acp = Some(link);
         self.status = tr!(
-            "{label} did not stop its last answer — starting it again",
+            "{label} did not respond to Stop — restarting it",
             label = label
         );
         self.start_acp_agent(config, root)
@@ -1582,7 +1582,11 @@ impl App {
                 turn.extras.approvals.push(Approval {
                     key: ApprovalKey::Acp { id: request.id },
                     mark: None,
-                    title: tr!("{label} asks to {what}", label = label, what = what),
+                    title: tr!(
+                        "{label} asks for permission: {what}",
+                        label = label,
+                        what = what
+                    ),
                     detail: detail.trim().to_string(),
                     options,
                 });
@@ -1733,7 +1737,7 @@ impl App {
                 .and_then(|n| self.acp_agents.iter().find(|a| a.name == n))
             {
                 Some(config) => tr!("Questions go to {label}", label = acp_label(config)),
-                None => tr!("Questions go to clew's own agent").into(),
+                None => tr!("Questions go to Clew's own agent").into(),
             };
         }
         Task::none()

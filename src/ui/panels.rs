@@ -422,7 +422,7 @@ const APPROVE_BUTTON_H: f32 = 30.0;
 const APPROVE_GAP: f32 = 12.0;
 /// Size of what an approval says it does, under its question.
 const APPROVE_DETAIL_SIZE: f32 = 12.0;
-/// Size of the "Said" over a question said rather than typed, and of its
+/// Size of the "Spoken" over a question said rather than typed, and of its
 /// microphone: the design's 11.
 const SAID_SIZE: f32 = 11.0;
 /// Widest the question's bubble grows, of the conversation's text column:
@@ -544,7 +544,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 row![
                     glyph::icon(Glyph::Mic, theme::dim(), SAID_SIZE),
                     ts::set_in(
-                        text(tr!("Said")).color(theme::dim()),
+                        text(tr!("Spoken")).color(theme::dim()),
                         ts::INTER.normal(SAID_SIZE),
                         ts::INTER,
                         SAID_SIZE,
@@ -2008,7 +2008,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                     space().width(6),
-                    text(tr!("ext")).size(ts::CAPTION).color(theme::dim()),
+                    text(tr!("external")).size(ts::CAPTION).color(theme::dim()),
                 ]
                 .align_y(iced::Center),
             )

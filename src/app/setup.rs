@@ -214,7 +214,7 @@ pub(crate) fn servers_line(servers: &[SetupServer]) -> String {
                 Fetch::Install(tool) => takes.push(tr!("install with {tool}", tool = tool)),
             }
             if s.builds {
-                takes.push(tr!("builds the project, running its code").into());
+                takes.push(tr!("builds the project (runs its code)").into());
             }
             if takes.is_empty() {
                 s.name.clone()
@@ -252,12 +252,12 @@ pub(crate) fn about(n: usize) -> String {
 /// told), and whether the search index is built after.
 pub(crate) fn explain_line(llm: bool, calls: Option<Option<usize>>, index: bool) -> String {
     match calls {
-        _ if !llm => tr!("Needs an AI key in Settings.").into(),
+        _ if !llm => tr!("Needs an API key in Settings.").into(),
         None => tr!("Counting…").into(),
         Some(Some(0)) => tr!("Nothing left to explain.").into(),
         Some(Some(n)) if index => trn!(
-            "About {count} AI call. Also builds the search index.",
-            "About {count} AI calls. Also builds the search index.",
+            "About {count} AI call. Also builds the semantic index.",
+            "About {count} AI calls. Also builds the semantic index.",
             n,
             count = about(n)
         ),
@@ -267,7 +267,7 @@ pub(crate) fn explain_line(llm: bool, calls: Option<Option<usize>>, index: bool)
             n,
             count = about(n)
         ),
-        Some(None) if index => tr!("Paid AI calls. Also builds the search index.").into(),
+        Some(None) if index => tr!("Paid AI calls. Also builds the semantic index.").into(),
         Some(None) => tr!("Paid AI calls.").into(),
     }
 }
@@ -589,18 +589,18 @@ mod tests {
         ];
         assert_eq!(
             servers_line(&servers),
-            "rust-analyzer: download, builds the project, running its code, pyright: install with npm"
+            "rust-analyzer: download, builds the project (runs its code), pyright: install with npm"
         );
         // As a list is written in the reader's language.
         crate::i18n::with_lang(crate::i18n::Lang::Zh, || {
             assert_eq!(
                 servers_line(&servers),
-                "rust-analyzer：需下载、构建项目（会运行项目代码）、pyright：使用 npm 安装"
+                "rust-analyzer：需下载、会构建项目（运行其代码）、pyright：使用 npm 安装"
             );
         });
         assert_eq!(
             explain_line(true, Some(Some(3617)), true),
-            "About 3,600 AI calls. Also builds the search index."
+            "About 3,600 AI calls. Also builds the semantic index."
         );
         assert_eq!(
             explain_line(true, Some(Some(12)), false),
@@ -609,7 +609,7 @@ mod tests {
         assert_eq!(explain_line(true, None, true), "Counting…");
         assert_eq!(
             explain_line(false, Some(Some(5)), true),
-            "Needs an AI key in Settings."
+            "Needs an API key in Settings."
         );
         assert_eq!(
             explain_line(true, Some(Some(0)), true),

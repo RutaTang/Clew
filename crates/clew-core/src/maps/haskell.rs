@@ -234,7 +234,7 @@ fn effects(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "haskell.effects",
         "Effect stacks",
-        "each monad stack a function's type signature runs it in (its layers, outermost first, in the detail), and an arrow from each function to its stack",
+        "each monad stack that functions run in, read from their type signatures (its layers, outermost first, in the detail), and an arrow from each function to its stack",
     );
     for source in corpus.in_langs(&[Lang::Haskell]) {
         let Some(tree) = source.tree() else {

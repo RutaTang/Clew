@@ -225,7 +225,7 @@ impl App {
                         self.local_embedding.error = None;
                         self.status = if local::program().is_some() {
                             tr!(
-                                "{model} is ready — code is found by what it does, on this computer",
+                                "{model} is ready — Find by meaning now runs on this computer",
                                 model = MODEL.name
                             )
                         } else {

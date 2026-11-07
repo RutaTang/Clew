@@ -188,7 +188,7 @@ fn the_tour_shows_the_ask_card() {
     let _ = app.update(Message::Tutorial(TutorialMsg::Start));
     let ask_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Ask clew, or tell it what to do")
+        .position(|s| s.title == "Ask Clew, or tell it what to do")
         .expect("an Ask step");
     while app.tutorial.is_some_and(|s| s < ask_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));

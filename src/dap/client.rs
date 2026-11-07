@@ -732,10 +732,8 @@ impl EventSink {
                 text: format!(
                     "{}\n",
                     trn!(
-                        "[clew] 1 byte of output dropped — the program wrote faster than it \
-                         could be shown",
-                        "[clew] {n} bytes of output dropped — the program wrote faster than it \
-                         could be shown",
+                        "[Clew] 1 byte of output dropped — the program wrote faster than it could be shown",
+                        "[Clew] {n} bytes of output dropped — the program wrote faster than it could be shown",
                         n
                     )
                 ),
@@ -788,8 +786,8 @@ fn truncate_chunk(text: String) -> String {
     out.push_str(&text[..cut]);
     out.push('\n');
     out.push_str(&trn!(
-        "[clew] …1 byte truncated",
-        "[clew] …{n} bytes truncated",
+        "[Clew] …1 byte truncated",
+        "[Clew] …{n} bytes truncated",
         dropped
     ));
     out.push('\n');
@@ -911,8 +909,7 @@ impl framing::Protocol for DapWire {
             format!(
                 "{}\n",
                 tr!(
-                    "[clew] the debug adapter's output broke framing ({error}) — ending the \
-                     session",
+                    "[Clew] the debug adapter's output broke framing ({error}) — ending the session",
                     error = error
                 )
             )
@@ -920,7 +917,7 @@ impl framing::Protocol for DapWire {
             format!(
                 "{}\n",
                 tr!(
-                    "[clew] skipped a malformed message from the debug adapter ({error})",
+                    "[Clew] skipped a malformed message from the debug adapter ({error})",
                     error = error
                 )
             )

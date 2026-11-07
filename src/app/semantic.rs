@@ -40,7 +40,10 @@ pub(crate) fn merged_or_built(
         let built = Arc::try_unwrap(built).unwrap_or_else(|a| (*a).clone());
         (
             built,
-            Err(tr!("the merge failed unexpectedly: {error}", error = e)),
+            Err(tr!(
+                "saving the semantic index failed unexpectedly: {error}",
+                error = e
+            )),
         )
     })
 }
@@ -91,7 +94,9 @@ impl App {
         };
         self.drop_foreign_embed_index(&cfg);
         if self.proj.explain.cache.is_empty() {
-            self.status = tr!("Run Explain All first — the index embeds the summaries").into();
+            self.status =
+                tr!("Run Explain All first — the semantic index is built from the summaries")
+                    .into();
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -331,7 +336,7 @@ impl App {
                     .map(|mut v| v.pop().unwrap_or_default())
                 })
                 .await
-                .unwrap_or_else(|_| Err("task join failed".into()))
+                .unwrap_or_else(|_| Err("an internal task failed".into()))
             },
             move |result| {
                 Message::Semantic(SemanticMsg::Results {

@@ -207,8 +207,8 @@ impl App {
                 }
                 self.status = if !fields.is_empty() {
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so it was kept",
-                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        "Settings saved — {fields} was changed in another window, so that value was kept",
+                        "Settings saved — {fields} were changed in another window, so those values were kept",
                         fields.len(),
                         fields = fields.join(", ")
                     )
@@ -672,8 +672,8 @@ mod tests {
                 assert_eq!(
                     app.status,
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so it was kept",
-                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        "Settings saved — {fields} was changed in another window, so that value was kept",
+                        "Settings saved — {fields} were changed in another window, so those values were kept",
                         1,
                         fields = field
                     ),

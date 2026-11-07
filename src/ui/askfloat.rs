@@ -538,9 +538,9 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         let name = v.rel.rsplit('/').next().unwrap_or(&v.rel).to_string();
         match &app.proj.explain.view {
             Some(crate::explain::Node::Function { file, name: f, .. }) if *file == v.abs => {
-                tr!("Reading {file} · {function}", file = name, function = f)
+                tr!("Viewing {file} · {function}", file = name, function = f)
             }
-            _ => tr!("Reading {file}", file = name),
+            _ => tr!("Viewing {file}", file = name),
         }
     });
     // The session's name, which opens the menu of sessions: cut to the room

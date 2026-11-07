@@ -406,7 +406,7 @@ fn answers_read_as_the_popup_shows_them() {
     });
     assert_eq!(
         full.markdown,
-        "```c\nN\n```\n\nexpands to\n\n```c\n10\n```\n\nfrom this definition\n\n```c\n#define N 10\n```\n\nDefined at `a.h:2`.\n\n*Cut short: the expansion grew past clew's limit.*"
+        "```c\nN\n```\n\nexpands to\n\n```c\n10\n```\n\nfrom this definition\n\n```c\n#define N 10\n```\n\nDefined at `a.h:2`.\n\n*Cut short: the expansion grew past Clew's limit.*"
     );
     assert_eq!(full.defined, Some(("a.h".into(), 2)));
     let flag = c_answer(clew_protocol::MacroExpansion {
@@ -461,6 +461,6 @@ fn answers_read_as_the_popup_shows_them() {
     let print = haskell_answer("```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\n*Defined in System.IO*\n\n* * *\n\n```haskell\n_ :: Int -> IO ()\n```\n* * *\n\n```haskell\n_ :: forall a. Show a => a -> IO ()\n```").unwrap();
     assert_eq!(
         print.markdown,
-        "```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\nHere: `Int -> IO ()`\n\n*Defined in System.IO*"
+        "```haskell\nprint :: forall a. Show a => a -> IO ()\n```\n\nAt this use: `Int -> IO ()`\n\n*Defined in System.IO*"
     );
 }

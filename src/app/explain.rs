@@ -472,8 +472,8 @@ impl App {
                 0 => tr!("Nothing to re-explain: it is no longer part of the project").to_string(),
                 1 => tr!("Re-explained").to_string(),
                 paid => trn!(
-                    "Re-explained, and the summary that quotes it",
-                    "Re-explained, and the {n} summaries that quote it",
+                    "Re-explained, along with 1 summary built on it",
+                    "Re-explained, along with {n} summaries built on it",
                     paid - 1
                 ),
             }
@@ -497,8 +497,8 @@ impl App {
             if tally.unquoted > 0 {
                 status.push_str(" · ");
                 status.push_str(&trn!(
-                    "1 explained without the summaries that failed",
-                    "{n} explained without the summaries that failed",
+                    "1 explained without the failed summaries it builds on",
+                    "{n} explained without the failed summaries they build on",
                     tally.unquoted
                 ));
             }
@@ -513,15 +513,15 @@ impl App {
             let mut left = Vec::new();
             if tally.outdated > 0 {
                 left.push(trn!(
-                    "1 written with an older prompt, kept",
-                    "{n} written with an older prompt, kept",
+                    "1 out of date, kept",
+                    "{n} out of date, kept",
                     tally.outdated
                 ));
             }
             if tally.unverified > 0 {
                 left.push(trn!(
-                    "1 from an earlier version of clew, kept unchecked",
-                    "{n} from an earlier version of clew, kept unchecked",
+                    "1 from an earlier version of Clew, kept but not rechecked",
+                    "{n} from an earlier version of Clew, kept but not rechecked",
                     tally.unverified
                 ));
             }
@@ -535,7 +535,7 @@ impl App {
             if !left.is_empty() {
                 status.push_str(" · ");
                 status.push_str(&tr!(
-                    "{list} — Refresh All brings them up to date",
+                    "{list} — Explain All brings them up to date",
                     list = left.join(" · ")
                 ));
             }
@@ -965,7 +965,7 @@ impl App {
                         Ok(explain::detail_prompt(&name, &sig, &body, &callees))
                     })
                     .await
-                    .unwrap_or_else(|_| Err(tr!("task join failed").into())),
+                    .unwrap_or_else(|_| Err(tr!("an internal task failed").into())),
                 };
                 match prompt {
                     // A failed call says what failed and what to do, as a
@@ -1198,7 +1198,7 @@ pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
         Some(c) if is_unchecked(c) => format!(
             "*{}*\n\n{}",
             tr!(
-                "Written by an earlier version of clew, and not checked against the code since — Refresh All explains it again."
+                "Written by an earlier version of Clew, and not checked against the code since — Explain All explains it again."
             ),
             c.summary
         ),

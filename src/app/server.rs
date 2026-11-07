@@ -1352,10 +1352,10 @@ impl App {
                         self.status = match languages.first() {
                             Some(lang) => tr!(
                                 "Stopped the {lang} language server: its output was not being read. It restarts on next use.",
-                                lang = lang
+                                lang = crate::app::languages::language_name(lang)
                             ),
                             None => {
-                                tr!("Stopped a proxied process: its output was not being read.")
+                                tr!("Stopped a background process: its output was not being read.")
                                     .into()
                             }
                         };
@@ -1390,12 +1390,12 @@ impl App {
                     self.status = match code {
                         Some(c) => tr!(
                             "{language} language server exited (code {code}). It restarts on the next request.",
-                            language = language,
+                            language = crate::app::languages::language_name(&language),
                             code = c
                         ),
                         None => tr!(
                             "{language} language server exited. It restarts on the next request.",
-                            language = language
+                            language = crate::app::languages::language_name(&language)
                         ),
                     };
                 }
@@ -1437,8 +1437,7 @@ impl App {
             } => {
                 if protocol != clew_protocol::PROTOCOL_VERSION {
                     return self.on_handshake_failed(tr!(
-                        "clew-server speaks protocol v{server}, this clew speaks v{client} — \
-                         update the server (local: rebuild; remote: it redeploys on reconnect)",
+                        "clew-server speaks protocol v{server}, this Clew speaks v{client} — update the server (local: rebuild; remote: it redeploys on reconnect)",
                         server = protocol,
                         client = clew_protocol::PROTOCOL_VERSION
                     ));
@@ -1449,8 +1448,7 @@ impl App {
                 // as one clear error, instead of a session of silent drops.
                 if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
                     return self.on_handshake_failed(tr!(
-                        "clew-server was built from different protocol sources (server {server}, \
-                         this clew {client}) — rebuild the server (remote: reconnect to redeploy)",
+                        "clew-server was built from different protocol sources (server {server}, this Clew {client}) — rebuild the server (remote: reconnect to redeploy)",
                         server = fingerprint,
                         client = clew_protocol::SCHEMA_FINGERPRINT
                     ));

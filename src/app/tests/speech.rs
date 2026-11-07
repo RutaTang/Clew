@@ -453,7 +453,7 @@ fn what_cannot_be_said_says_why() {
     assert_eq!(voice.texts(), ["That is.", "Third"], "the next was said");
     all_played(&mut app, &output);
     *voice.fail.lock().unwrap() = Some(SayError::Voice(
-        "clew-speak, which speaks for Clew, is not installed beside it".into(),
+        "clew-speak, which reads answers aloud, is not installed next to Clew".into(),
     ));
     asked(&mut app, 2, true);
     delta(&mut app, 2, "This is. That is. Third");
@@ -657,7 +657,7 @@ fn speech_models_download_verified_file_by_file() {
         .get("kokoro-zh")
         .cloned()
         .unwrap();
-    assert!(error.contains("as published"), "{error}");
+    assert!(error.contains("does not match the published"), "{error}");
     assert!(!speech::path(&store, model, last).exists());
     let dir = speech::dir(&store, model);
     assert!(

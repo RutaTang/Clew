@@ -142,7 +142,7 @@ impl PaletteCommand {
             }
             Message::Debug(DebugMsg::Control(_)) => (
                 Glyph::Debug,
-                tr!("This runs the program on, from where it stopped."),
+                tr!("This resumes the program from where it stopped."),
             ),
             Message::Debug(DebugMsg::Stop) => {
                 (Glyph::Debug, tr!("This ends the program being debugged."))
@@ -263,7 +263,7 @@ impl App {
             _ => None,
         };
         out.push(Suggestion::Ask(match about {
-            Some(about) => tr!("Ask Clew about {name}", name = about),
+            Some(about) => tr!("Ask Clew about “{name}”", name = about),
             None => tr!("Ask Clew a question").to_string(),
         }));
         let listed = |title: &str| self.palette.iter().any(|c| c.title == title);
@@ -833,7 +833,7 @@ impl App {
             }
             if self.ask_view != AskView::Expanded {
                 add(
-                    tr_noop!("Ask: Make Large").into(),
+                    tr_noop!("Ask: Expand").into(),
                     None,
                     send(Message::Ask(AskMsg::Expand)),
                 );
@@ -879,13 +879,13 @@ fn sidebar_title(tab: SidebarTab) -> &'static str {
     match tab {
         SidebarTab::Files => tr_noop!("Sidebar: Files"),
         SidebarTab::Search => tr_noop!("Sidebar: Search"),
-        SidebarTab::Semantic => tr_noop!("Sidebar: Find"),
-        SidebarTab::Marks => tr_noop!("Sidebar: Marks"),
+        SidebarTab::Semantic => tr_noop!("Sidebar: Find by Meaning"),
+        SidebarTab::Marks => tr_noop!("Sidebar: Bookmarks"),
         SidebarTab::Trail => tr_noop!("Sidebar: Trail"),
         SidebarTab::Calls => tr_noop!("Sidebar: Calls"),
-        SidebarTab::Flow => tr_noop!("Sidebar: Flow"),
+        SidebarTab::Flow => tr_noop!("Sidebar: Value Flow"),
         SidebarTab::Imports => tr_noop!("Sidebar: Imports"),
-        SidebarTab::Walk => tr_noop!("Sidebar: Walk"),
+        SidebarTab::Walk => tr_noop!("Sidebar: Walkthroughs"),
         SidebarTab::Notes => tr_noop!("Sidebar: Notes"),
         SidebarTab::Docs => tr_noop!("Sidebar: Docs"),
     }

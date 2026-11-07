@@ -181,7 +181,7 @@ impl Synthesizer for System {
         match &self.speakers {
             Some(speakers) => speakers.say(model, dir, text, lang, voice, speed),
             None => Err(SayError::Voice(
-                tr!("clew-speak, which speaks for Clew, is not installed beside it").into(),
+                tr!("clew-speak, which reads answers aloud, is not installed next to Clew").into(),
             )),
         }
     }

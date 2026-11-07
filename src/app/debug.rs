@@ -1681,7 +1681,7 @@ impl App {
             format!(
                 "{}\n",
                 tr!(
-                    "[clew] a child debug session failed to start — {error}",
+                    "[Clew] a child debug session failed to start — {error}",
                     error = error
                 )
             ),
@@ -2498,9 +2498,9 @@ impl App {
             DebugMsg::ToggleHoverEval => {
                 self.debug_hover_eval = !self.debug_hover_eval;
                 self.status = if self.debug_hover_eval {
-                    tr!("Hover now evaluates names in the debuggee").into()
+                    tr!("Hovering a name now shows its value").into()
                 } else {
-                    tr!("Hover evaluation in the debuggee is off").into()
+                    tr!("Hover evaluation is off").into()
                 };
                 Task::none()
             }

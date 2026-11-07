@@ -1226,7 +1226,7 @@ where
             let said = said.trim();
             return Err(match said {
                 "" => "node ended before its inspector listened".to_string(),
-                said => format!("node ended before its inspector listened: {said}"),
+                said => format!("Node.js exited before its debugger started listening: {said}"),
             });
         }
         if let Some(url) = line

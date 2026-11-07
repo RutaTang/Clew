@@ -81,7 +81,7 @@ impl Speaker {
             .spawn()
             .map_err(|e| format!("could not start the voice: {e}"))?;
         let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            return Err("the voice could not be spoken to".into());
+            return Err("could not connect to the voice".into());
         };
         let (tx, answers) = mpsc::channel();
         std::thread::Builder::new()
@@ -91,7 +91,7 @@ impl Speaker {
                     let answer = match line {
                         Ok(line) => serde_json::from_str::<Answer>(&line)
                             .map_err(|e| format!("the voice said something unreadable: {e}")),
-                        Err(e) => Err(format!("the voice could not be heard: {e}")),
+                        Err(e) => Err(format!("the voice's reply could not be read: {e}")),
                     };
                     let stop = answer.is_err();
                     if tx.send(answer).is_err() || stop {
@@ -118,7 +118,7 @@ impl Speaker {
             Ok(Ok(_)) => Err("the voice answered before it was ready".into()),
             Err(mpsc::RecvTimeoutError::Timeout) => Err("the voice took too long to load".into()),
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("the voice ended as it started — its model may be damaged".into())
+                Err("the voice stopped while starting — its model may be damaged".into())
             }
         }
     }
@@ -149,7 +149,7 @@ impl Speaker {
         });
         writeln!(self.stdin, "{request}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| SayError::Voice(format!("the voice stopped listening: {e}")))?;
+            .map_err(|e| SayError::Voice(format!("the voice stopped accepting text: {e}")))?;
         loop {
             match self.answers.recv_timeout(SAY_TIMEOUT) {
                 Ok(Ok(Answer::Audio { id: got, pcm })) if got == id => {

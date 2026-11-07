@@ -186,7 +186,7 @@ impl Action {
             Action::CopySelection => at(MenuSection::Edit, tr_noop!("Copy")),
             Action::FindInFile => at(MenuSection::Edit, tr_noop!("Find…")),
             Action::ProjectSearch => at(MenuSection::Edit, tr_noop!("Find in Files…")),
-            Action::ToggleSplit => at(MenuSection::View, tr_noop!("Split Editor")),
+            Action::ToggleSplit => at(MenuSection::View, tr_noop!("Split View")),
             Action::ZoomIn => at(MenuSection::View, tr_noop!("Zoom In")),
             Action::ZoomOut => at(MenuSection::View, tr_noop!("Zoom Out")),
             Action::ZoomReset => at(MenuSection::View, tr_noop!("Actual Size")),
@@ -352,12 +352,12 @@ impl MenuPlacement {
 /// The titles are in English, whatever the interface speaks: the menu finds
 /// its items' chords by them. They are shown through `crate::i18n::lookup`.
 pub const MENU_RESERVED: [(Chord, &str); 6] = [
-    (Chord::cmd('q'), tr_noop!("Quit clew")),
+    (Chord::cmd('q'), tr_noop!("Quit Clew")),
     (Chord::cmd('w'), tr_noop!("Close Window")),
     (Chord::cmd('n'), tr_noop!("New Window")),
     (Chord::cmd('o'), tr_noop!("Open Folder…")),
     (Chord::cmd(','), tr_noop!("Settings…")),
-    (Chord::cmd('h'), tr_noop!("Hide clew")),
+    (Chord::cmd('h'), tr_noop!("Hide Clew")),
 ];
 
 /// The key part of a chord, normalized so equal chords compare equal:
@@ -948,7 +948,7 @@ mod tests {
         assert_eq!(
             km.conflict(&Chord::cmd('q'), Action::GotoLine)
                 .map(Conflict::label),
-            Some("Quit clew")
+            Some("Quit Clew")
         );
         // An action-owned chord still names the action.
         assert_eq!(

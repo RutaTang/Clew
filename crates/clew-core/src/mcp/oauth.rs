@@ -230,7 +230,7 @@ fn write_store(store: &Store) -> Result<(), String> {
     let path = store_path().ok_or("no data directory")?;
     let text = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
     if text.len() as u64 > MAX_RESPONSE_BYTES {
-        return Err("the sign-ins would not fit their store — sign out of one".into());
+        return Err("too much sign-in data to save — sign out of an MCP server".into());
     }
     crate::statefile::write_atomic_secret(&path, text.as_bytes()).map_err(|e| e.to_string())
 }
@@ -592,7 +592,7 @@ fn register(endpoint: &str, redirect_uri: &str) -> Result<(String, Option<String
     let (status, value) = read_json(response)?;
     if !(200..300).contains(&status) {
         return Err(format!(
-            "registering clew with the authorization server failed: {}",
+            "registering Clew with the authorization server failed: {}",
             oauth_error(&value, status)
         ));
     }
