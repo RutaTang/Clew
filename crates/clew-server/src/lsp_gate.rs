@@ -637,6 +637,41 @@ mod tests {
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
+    /// What the client shows names the language as people read it: "the
+    /// Rust server", not the key `rust` (one it has no name for stays as
+    /// given).
+    #[test]
+    fn a_refusal_names_the_language_as_people_read_it() {
+        assert_eq!(super::shown("rust"), "Rust");
+        assert_eq!(super::shown("no-such-language"), "no-such-language");
+        let root = Scratch::new("lsp-gate-named");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        std::fs::write(
+            root.join(".clew/lsp.toml"),
+            "[rust]\ncommand = \"/opt/ra\"\n",
+        )
+        .unwrap();
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let refused = install_lsp(
+            &out,
+            &approvals,
+            &root,
+            "rust",
+            "",
+            &stop,
+            &Default::default(),
+        );
+        match refused {
+            LspResolution::Unsupported { message } => assert_eq!(
+                message,
+                "the Rust server is set by the project (.clew/lsp.toml), nothing to install"
+            ),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
     /// The pushed-approval lookup tolerates a lock another thread's panic
     /// poisoned (the request loop takes the same lock). That the lock is
     /// released before the trust store is read is

@@ -1957,12 +1957,16 @@ type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 
 /// The whole window, at the app's test size.
 fn sim_of(app: &App) -> Sim<'_> {
+    // The renderer keeps a shader cache under `$XDG_CACHE_HOME`: in the
+    // suite's own directory, never the developer's home.
+    crate::app::tests::isolated_data_dir();
     crate::fonts::load();
     iced_test::Simulator::with_size(Default::default(), WINDOW, super::view(app))
 }
 
 /// One element on its own (default simulator size).
 fn sim_elem(elem: Element<'_, Message>) -> Sim<'_> {
+    crate::app::tests::isolated_data_dir();
     iced_test::simulator(elem)
 }
 
@@ -2760,6 +2764,28 @@ fn forgetting_a_key_keeps_the_discard_notice() {
         "{}",
         app.status
     );
+}
+
+/// Leave to build is given to one project, and its Allow says which, by
+/// the project's folder name.
+#[test]
+fn leave_to_build_names_the_project_it_is_for() {
+    let consent = crate::LspConsent {
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Build {
+            runs: "build scripts".into(),
+            root: PathBuf::from("/work/shop"),
+            host: None,
+        },
+        dest_dir: PathBuf::new(),
+    };
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 3, 0, true));
+    assert!(matches!(
+        click(sim, "Allow in shop").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentAllowed(3))]
+    ));
 }
 
 /// F#8: consent questions are asked one at a time, and the modal says when

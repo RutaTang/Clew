@@ -182,6 +182,25 @@ fn the_card_stands_in_the_corner() {
 }
 
 /// The tour's Ask step shows the card; the steps after it put it away.
+/// The tour speaks of the project by its folder's name.
+#[test]
+fn the_tour_names_the_project() {
+    let app = scanned_app("askfloat-tour-names");
+    let root = &app.proj.project.as_ref().expect("scanned").root;
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    let steps = crate::app::tutorial::steps(&app);
+    for title in [
+        "Welcome to Clew",
+        "The file tree",
+        "The overview",
+        "Project stats",
+        "The call graph",
+    ] {
+        let step = steps.iter().find(|s| s.title == title).expect(title);
+        assert!(step.body.contains(&name), "{title}: {}", step.body);
+    }
+}
+
 #[test]
 fn the_tour_shows_the_ask_card() {
     let mut app = scanned_app("askfloat-tour");
