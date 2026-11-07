@@ -224,6 +224,19 @@ pub(crate) struct ModelDownload {
     pub(crate) _task: iced::task::Handle,
 }
 
+/// One of the voice settings: what is written when it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pref {
+    Model,
+    Language,
+    RunCommands,
+    SendQuestions,
+    Speak,
+    Speed,
+    /// The voice picked for this speech model.
+    Voice(&'static str),
+}
+
 /// The user's voice settings, kept in config.toml's `[voice]`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct VoicePrefs {
@@ -329,25 +342,54 @@ impl VoicePrefs {
         prefs
     }
 
-    fn save(&self) -> Result<(), String> {
-        let mut section = toml::Table::new();
-        section.insert("model".into(), self.model.clone().into());
-        if let Some(language) = &self.language {
-            section.insert("language".into(), language.clone().into());
-        }
-        section.insert("commands".into(), self.run_commands.into());
-        section.insert("send".into(), self.send_questions.into());
-        section.insert("speak".into(), self.speak.into());
-        section.insert("speed".into(), f64::from(self.speed).into());
-        if !self.voices.is_empty() {
-            let voices: toml::Table = self
-                .voices
-                .iter()
-                .map(|(id, voice)| (id.clone(), i64::from(*voice).into()))
-                .collect();
-            section.insert("voices".into(), voices.into());
-        }
-        clew_core::globalconfig::update("voice", section)
+    /// Write `pref` as it is now — that setting alone, into `[voice]` as
+    /// it stands on disk: another window's settings, changed since this one
+    /// read them, are kept.
+    fn save(&self, pref: Pref) -> Result<(), String> {
+        clew_core::globalconfig::edit(|root| {
+            if !root.get("voice").is_some_and(|v| v.is_table()) {
+                root.insert("voice".into(), toml::Table::new().into());
+            }
+            let Some(section) = root.get_mut("voice").and_then(|v| v.as_table_mut()) else {
+                return;
+            };
+            match pref {
+                Pref::Model => {
+                    section.insert("model".into(), self.model.clone().into());
+                }
+                Pref::Language => match &self.language {
+                    Some(language) => {
+                        section.insert("language".into(), language.clone().into());
+                    }
+                    None => {
+                        section.remove("language");
+                    }
+                },
+                Pref::RunCommands => {
+                    section.insert("commands".into(), self.run_commands.into());
+                }
+                Pref::SendQuestions => {
+                    section.insert("send".into(), self.send_questions.into());
+                }
+                Pref::Speak => {
+                    section.insert("speak".into(), self.speak.into());
+                }
+                Pref::Speed => {
+                    section.insert("speed".into(), f64::from(self.speed).into());
+                }
+                Pref::Voice(model) => {
+                    if !section.get("voices").is_some_and(|v| v.is_table()) {
+                        section.insert("voices".into(), toml::Table::new().into());
+                    }
+                    if let (Some(voices), Some(voice)) = (
+                        section.get_mut("voices").and_then(|v| v.as_table_mut()),
+                        self.voices.get(model),
+                    ) {
+                        voices.insert(model.into(), i64::from(*voice).into());
+                    }
+                }
+            }
+        })
     }
 
     /// The voice `model` speaks in: the one picked, else its own default.
@@ -822,7 +864,7 @@ impl App {
                         };
                         if switch {
                             self.voice.prefs.model = id.to_string();
-                            self.save_voice_prefs();
+                            self.save_voice_pref(Pref::Model);
                         }
                     }
                     Err(e) => {
@@ -859,37 +901,37 @@ impl App {
                     };
                 }
                 if rechosen {
-                    self.save_voice_prefs();
+                    self.save_voice_pref(Pref::Model);
                 }
                 Task::none()
             }
             VoiceMsg::PickModel(id) => {
                 if models::find(id).is_some() {
                     self.voice.prefs.model = id.to_string();
-                    self.save_voice_prefs();
+                    self.save_voice_pref(Pref::Model);
                 }
                 Task::none()
             }
             VoiceMsg::SetLanguage(language) => {
                 self.voice.prefs.language = language.map(str::to_string);
-                self.save_voice_prefs();
+                self.save_voice_pref(Pref::Language);
                 Task::none()
             }
             VoiceMsg::SetRunCommands(on) => {
                 self.voice.prefs.run_commands = on;
-                self.save_voice_prefs();
+                self.save_voice_pref(Pref::RunCommands);
                 Task::none()
             }
             VoiceMsg::SetSendQuestions(on) => {
                 self.voice.prefs.send_questions = on;
-                self.save_voice_prefs();
+                self.save_voice_pref(Pref::SendQuestions);
                 Task::none()
             }
         }
     }
 
-    pub(crate) fn save_voice_prefs(&mut self) {
-        if let Err(e) = self.voice.prefs.save() {
+    pub(crate) fn save_voice_pref(&mut self, pref: Pref) {
+        if let Err(e) = self.voice.prefs.save(pref) {
             self.status = tr!("Could not save the voice settings: {error}", error = e);
         }
     }
@@ -1429,9 +1471,9 @@ impl Drop for Claim {
     }
 }
 
-/// Whether the model that goes to `dest` is being downloaded, in any
-/// window.
-fn downloading(dest: &Path) -> bool {
+/// Whether the model that goes to `dest` is being downloaded — or removed
+/// — in any window.
+pub(crate) fn downloading(dest: &Path) -> bool {
     DOWNLOADING
         .lock()
         .unwrap_or_else(|e| e.into_inner())

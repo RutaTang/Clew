@@ -8150,6 +8150,9 @@ fn speaking_shows_with_a_stop() {
     struct Playing;
     impl crate::app::speech::Playing for Playing {
         fn play(&self, _: &[f32], _: u32) {}
+        fn rate(&self) -> u32 {
+            48_000
+        }
         fn queued_seconds(&self) -> f32 {
             1.0
         }

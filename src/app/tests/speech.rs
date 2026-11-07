@@ -30,6 +30,8 @@ struct Voice {
     said: Mutex<Vec<Said>>,
     /// The failure of what it is asked next, once.
     fail: Mutex<Option<SayError>>,
+    /// The rate it speaks at; 1 kHz until a test says otherwise.
+    rate: Mutex<u32>,
     stopped: AtomicUsize,
 }
 
@@ -54,10 +56,15 @@ impl Synthesizer for Voice {
             speed,
         });
         let words = text.split_whitespace().count().max(1);
-        Ok((vec![0.25; words * 100], 1000))
+        let rate = match *self.rate.lock().unwrap() {
+            0 => 1000,
+            rate => rate,
+        };
+        Ok((vec![0.25; words * 100 * rate as usize / 1000], rate))
     }
-    fn stop(&self) {
+    fn stop_while(&self, work: &mut dyn FnMut()) {
         self.stopped.fetch_add(1, Ordering::Relaxed);
+        work();
     }
 }
 
@@ -77,6 +84,8 @@ impl Voice {
 struct OutputScript {
     /// Samples given, sentence by sentence.
     played: Vec<usize>,
+    /// The rate each was given at.
+    rates: Vec<u32>,
     /// Samples it has played: the test says.
     progress: u64,
     /// What it was given that it has not played: taken by `take_rest`.
@@ -92,9 +101,10 @@ struct OutputScript {
 struct Output(Arc<Mutex<OutputScript>>);
 
 impl Playing for Output {
-    fn play(&self, samples: &[f32], _rate: u32) {
+    fn play(&self, samples: &[f32], rate: u32) {
         let mut script = self.0.lock().unwrap();
         script.played.push(samples.len());
+        script.rates.push(rate);
         script.rest.extend_from_slice(samples);
         script.idle = false;
     }
@@ -103,6 +113,9 @@ impl Playing for Output {
     }
     fn take_rest(&self) -> (Vec<f32>, u32) {
         (std::mem::take(&mut self.0.lock().unwrap().rest), 1000)
+    }
+    fn rate(&self) -> u32 {
+        1000
     }
     fn queued_seconds(&self) -> f32 {
         0.0
@@ -667,4 +680,194 @@ fn speech_models_download_verified_file_by_file() {
     assert!(!dir.exists());
     assert_eq!(voice.stopped.load(Ordering::Relaxed), 1);
     assert!(app.status.contains("Removed"), "{}", app.status);
+}
+
+/// A Stop's close can come after the next question was asked by voice: it
+/// stops nothing of the new answer — and an earlier answer that ends late
+/// is not read over the new one, from its start.
+#[test]
+fn a_late_close_of_an_earlier_answer_leaves_the_new_one_be() {
+    let (mut app, voice, _) = speech_app("speech-late-close");
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then");
+    // Stop: the turn stays open until the server says it is closed.
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    asked(&mut app, 2, true);
+    delta(&mut app, 2, "The discount is checked first. Then");
+    assert!(app.voice.speech.is_speaking());
+    let before = voice.texts().len();
+    // The first answer's close lands now.
+    ended(&mut app, 1, StreamOutcome::Stopped);
+    assert!(app.voice.speech.is_speaking(), "the new answer goes on");
+    delta(&mut app, 2, " it is applied. And");
+    assert_eq!(voice.texts().len(), before + 1, "{:?}", voice.texts());
+    // An earlier answer that ends late, Done, is not read at all.
+    let said = voice.texts().len();
+    app.proj.ask_turns[0].streaming = true;
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts().len(), said, "{:?}", voice.texts());
+}
+
+/// With Keep listening on, a voice that fails as the answer ends still
+/// leaves the microphone to open: the reader did not stop it.
+#[test]
+fn keep_listening_survives_a_voice_that_fails() {
+    let (mut app, voice, _) = speech_app("speech-keep-listening-fails");
+    let model = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(model), b"a model").unwrap();
+    app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
+    app.ask_view = AskView::Compact;
+    let _ = app.update(Message::Voice(VoiceMsg::SetKeepListening(true)));
+    asked(&mut app, 1, true);
+    // The answer ends while its sentence is still being made, and that
+    // sentence fails: clew-speak is gone.
+    let _ = app.on_ask_delta(1, "The total adds every price.".into());
+    *voice.fail.lock().unwrap() = Some(SayError::Voice("the voice ended unexpectedly".into()));
+    let task = app.on_ask_stream_ended(1, StreamOutcome::Done);
+    settle(&mut app, task);
+    assert!(!app.voice.speech.is_speaking());
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { .. }),
+        "{:?} — {}",
+        app.voice.phase,
+        app.status
+    );
+}
+
+/// The time an output has nothing to play is no stall: a sentence made
+/// after a long wait, its device still reporting an old hiccup, plays on.
+#[test]
+fn a_wait_between_sentences_is_no_stall() {
+    let (mut app, _voice, output) = speech_app("speech-gap");
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "First one. Then");
+    let tick = |app: &mut App| {
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(app, task);
+    };
+    // All of it played; the device reported a hiccup it played through.
+    {
+        let mut o = output.lock().unwrap();
+        o.progress += 200;
+        o.idle = true;
+        o.error = Some("the speaker failed: an underrun".into());
+    }
+    tick(&mut app);
+    // A long wait for the next sentence (longer than either limit).
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    tick(&mut app);
+    let opened = output.lock().unwrap().opened;
+    // The next sentence comes, and a tick lands before it starts playing.
+    delta(&mut app, 1, " the second one. And");
+    tick(&mut app);
+    assert!(app.voice.speech.is_speaking(), "{}", app.status);
+    assert_eq!(output.lock().unwrap().opened, opened, "not opened again");
+}
+
+/// Speech ends with the conversation it belongs to: a new one, another
+/// session, another project — also once its answer is written.
+#[test]
+fn speech_ends_with_its_conversation() {
+    let (mut app, voice, _) = speech_app("speech-new-session");
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then it rounds.");
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    let task = app.update(Message::Ask(AskMsg::NewSession));
+    settle(&mut app, task);
+    assert!(!app.voice.speech.is_speaking());
+    let _ = voice;
+}
+
+/// Each sentence comes to the output at the output's own rate: made at it
+/// off the UI thread, not on it.
+#[test]
+fn sentences_come_at_the_outputs_rate() {
+    let (mut app, voice, output) = speech_app("speech-rate");
+    *voice.rate.lock().unwrap() = 2000;
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "First one. Second one. Third");
+    let script = output.lock().unwrap();
+    assert!(!script.rates.is_empty());
+    assert!(
+        script.rates.iter().all(|r| *r == 1000),
+        "{:?}",
+        script.rates
+    );
+    // Two words, made as 400 samples at 2 kHz: 200 at the output's 1 kHz.
+    assert_eq!(script.played[0], 200, "{:?}", script.played);
+}
+
+/// An agent turn that fails at once falls back to the index — and the
+/// answer to a question said aloud is said aloud there too.
+#[test]
+fn the_fallback_answer_to_a_spoken_question_is_spoken() {
+    let (mut app, _voice, _) = speech_app("speech-fallback");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.ask_pins.push(crate::app::model::AskPin {
+        rel: "README.md".into(),
+        file: root.join("README.md"),
+        line: 1,
+        code: "# shop".into(),
+    });
+    let stream = app.mint_request_id();
+    asked(&mut app, stream, true);
+    app.proj.link.agent_stream = Some(stream);
+    let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+        stamp: app.stamp(),
+        stream,
+        outcome: StreamOutcome::Failed("agent unavailable".into()),
+    }));
+    assert!(app.proj.asking, "the index took the question over");
+    assert!(app.proj.ask_spoken, "its answer will be spoken");
+}
+
+/// While a voice model's files are removed — or downloaded — in any
+/// window, nothing is said with it: what would be is passed over.
+#[test]
+fn nothing_is_said_with_a_model_being_removed() {
+    let (mut app, voice, _) = speech_app("speech-removing");
+    let store = app.voice.store.clone().unwrap();
+    let model = speech::find("supertonic-3").unwrap();
+    let claim = crate::app::voice::Claim::take(speech::dir(&store, model)).unwrap();
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "First one. Second one. Third");
+    assert!(voice.texts().is_empty());
+    assert!(!app.status.contains("download"), "{}", app.status);
+    drop(claim);
+    // Removing a model being downloaded is refused, saying so.
+    let claim = crate::app::voice::Claim::take(speech::dir(&store, model)).unwrap();
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    settle(&mut app, task);
+    assert!(app.speech_installed(model));
+    assert!(app.status.contains("already downloading"), "{}", app.status);
+    drop(claim);
+}
+
+/// Each window saves the voice setting it changed, and only that: a
+/// window whose settings are older than another's keeps the other's.
+#[test]
+fn windows_keep_each_others_voice_settings() {
+    let data = test_dir("speech-two-windows-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut first, _, _) = speech_app("speech-window-a");
+    let (mut second, _, _) = speech_app("speech-window-b");
+    let _ = first.update(Message::Voice(VoiceMsg::SetSpeed(1.25)));
+    let task = first.update(Message::Voice(VoiceMsg::PickSpeechVoice {
+        model: "supertonic-3",
+        voice: 6,
+    }));
+    settle(&mut first, task);
+    // The second window still reads 1× and the default voice.
+    let _ = second.update(Message::Voice(VoiceMsg::SetSpeak(false)));
+    let _ = second.update(Message::Voice(VoiceMsg::SetRunCommands(false)));
+    let read = VoicePrefs::load();
+    assert_eq!(read.speed, 1.25);
+    assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 6);
+    assert!(!read.speak);
+    assert!(!read.run_commands);
 }

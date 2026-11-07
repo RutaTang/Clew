@@ -62,6 +62,8 @@ pub(crate) const SPEEDS: &[f32] = &[0.8, 0.9, 1.0, 1.1, 1.25, 1.5];
 pub(crate) trait Playing: Send {
     /// Play `samples` (one channel, at `rate` Hz) after what is queued.
     fn play(&self, samples: &[f32], rate: u32);
+    /// The device's rate, in Hz: what is played is made at it beforehand.
+    fn rate(&self) -> u32;
     /// Seconds still to play.
     fn queued_seconds(&self) -> f32;
     /// Samples played since it opened: whether it is playing at all.
@@ -79,6 +81,9 @@ pub(crate) trait Playing: Send {
 impl Playing for Player {
     fn play(&self, samples: &[f32], rate: u32) {
         Player::play(self, samples, rate);
+    }
+    fn rate(&self) -> u32 {
+        Player::rate(self)
     }
     fn queued_seconds(&self) -> f32 {
         Player::queued_seconds(self)
@@ -152,8 +157,9 @@ pub(crate) trait Synthesizer: Send + Sync {
         voice: i32,
         speed: f32,
     ) -> Result<(Vec<f32>, u32), SayError>;
-    /// Let the model go — before its files are removed.
-    fn stop(&self);
+    /// Let the model go and do `work` — remove its files — with nothing
+    /// said meanwhile: what would be is said once `work` is done.
+    fn stop_while(&self, work: &mut dyn FnMut());
 }
 
 /// `clew-speak`, found beside Clew — or not there.
@@ -178,9 +184,10 @@ impl Synthesizer for System {
             )),
         }
     }
-    fn stop(&self) {
-        if let Some(speakers) = &self.speakers {
-            speakers.stop();
+    fn stop_while(&self, work: &mut dyn FnMut()) {
+        match &self.speakers {
+            Some(speakers) => speakers.stop_while(work),
+            None => work(),
         }
     }
 }
@@ -247,7 +254,7 @@ pub(crate) struct Speech {
     /// The answer being read, by its stream, and how far.
     reading: Option<(u64, Reader)>,
     /// An answer the reader stopped: not read again as more of it comes.
-    hushed: Option<u64>,
+    hushed: HashSet<u64>,
     /// Sentences waiting to be made into speech, in order.
     queue: VecDeque<Sentence>,
     /// A sentence is being made.
@@ -284,7 +291,7 @@ impl Speech {
     pub(crate) fn new() -> Self {
         Self {
             reading: None,
-            hushed: None,
+            hushed: HashSet::new(),
             queue: VecDeque::new(),
             making: false,
             round: 0,
@@ -326,7 +333,7 @@ impl Speech {
     /// Stop: nothing more is said of what was being said.
     fn hush(&mut self) {
         if let Some((stream, _)) = self.reading.take() {
-            self.hushed = Some(stream);
+            self.hushed.insert(stream);
         }
         self.queue.clear();
         self.making = false;
@@ -391,13 +398,13 @@ impl App {
                 if !on {
                     self.stop_speaking();
                 }
-                self.save_voice_prefs();
+                self.save_voice_pref(crate::app::voice::Pref::Speak);
                 Task::none()
             }
             VoiceMsg::SetSpeed(speed) => {
                 if (0.5..=2.0).contains(&speed) {
                     self.voice.prefs.speed = speed;
-                    self.save_voice_prefs();
+                    self.save_voice_pref(crate::app::voice::Pref::Speed);
                 }
                 Task::none()
             }
@@ -409,7 +416,7 @@ impl App {
                     return Task::none();
                 }
                 self.voice.prefs.voices.insert(model.to_string(), voice);
-                self.save_voice_prefs();
+                self.save_voice_pref(crate::app::voice::Pref::Voice(found.id));
                 // Heard as it is picked.
                 self.try_speech(found)
             }
@@ -461,16 +468,31 @@ impl App {
                 else {
                     return Task::none();
                 };
+                // Claimed as a download is, in every window, for as long as
+                // its files go: nothing downloads into the folder, and
+                // nothing is said with it — sentences waiting for it are
+                // passed over.
+                let Some(claim) = Claim::take(speech::dir(&store, model)) else {
+                    self.status = tr!(
+                        "{model} is already downloading in another window",
+                        model = crate::i18n::lookup(model.name)
+                    );
+                    return Task::none();
+                };
                 // What is being said with it ends, and so does its hold on
                 // the files — off the UI thread: a sentence being made is
-                // waited for.
+                // waited for, and none is made until the files are gone.
                 self.stop_speaking();
                 let synthesizer = self.voice.speech.synthesizer.clone();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            synthesizer.stop();
-                            speech::remove(&store, model).map_err(|e| e.to_string())
+                            let _claim = claim;
+                            let mut removed = Ok(());
+                            synthesizer.stop_while(&mut || {
+                                removed = speech::remove(&store, model);
+                            });
+                            removed.map_err(|e| e.to_string())
                         })
                         .await
                         .unwrap_or_else(|_| Err(tr!("removing failed unexpectedly").into()))
@@ -506,14 +528,16 @@ impl App {
     /// is ready to be said is said, when it answers a question that was
     /// said and answers are read aloud.
     pub(crate) fn read_answer(&mut self, stream: u64, done: bool) -> Task<Message> {
-        if !self.voice.prefs.speak || self.voice.speech.hushed == Some(stream) {
+        if !self.voice.prefs.speak || self.voice.speech.hushed.contains(&stream) {
             return Task::none();
         }
+        // The newest answer only: one an earlier question gets late — its
+        // close arriving after the next was asked — is not said over it.
         let Some(turn) = self
             .proj
             .ask_turns
-            .iter()
-            .find(|t| t.stream == stream && t.spoken)
+            .last()
+            .filter(|t| t.stream == stream && t.spoken)
         else {
             return Task::none();
         };
@@ -555,10 +579,35 @@ impl App {
         let speech = &mut self.voice.speech;
         let was = speech.is_speaking();
         speech.hush();
-        if coming.is_some() {
-            speech.hushed = coming;
+        if let Some(stream) = coming {
+            speech.hushed.insert(stream);
         }
         was
+    }
+
+    /// The answer on `stream` was stopped: what is said of it — and only of
+    /// it — stops, and no more of it is said. Another answer being said
+    /// goes on: a stopped one can be closed after the next was asked.
+    pub(crate) fn hush_answer(&mut self, stream: u64) {
+        let speech = &mut self.voice.speech;
+        if speech.reading.as_ref().is_some_and(|(s, _)| *s == stream) {
+            speech.hush();
+        }
+        speech.hushed.insert(stream);
+    }
+
+    /// Clew could not go on speaking, saying `why` on the status line.
+    /// Unlike the reader's stop, this keeps what they asked for: with Keep
+    /// listening on, the microphone opens as it would have once all was said.
+    fn give_up_speaking(&mut self, why: String) -> Task<Message> {
+        let listen = self.voice.speech.listen_after;
+        self.voice.speech.hush();
+        self.status = why;
+        if listen {
+            self.resume_listening()
+        } else {
+            Task::none()
+        }
     }
 
     /// Say `model`'s sample, as Settings' Try does: whatever was being said
@@ -591,16 +640,21 @@ impl App {
             return Task::none();
         }
         let Some(store) = self.voice.store.clone() else {
-            if !self.voice.speech.queue.is_empty() {
-                self.voice.speech.hush();
-                self.status = tr!("There is no data directory to keep the voice in").into();
+            if self.voice.speech.queue.is_empty() {
+                return Task::none();
             }
-            return Task::none();
+            return self
+                .give_up_speaking(tr!("There is no data directory to keep the voice in").into());
         };
         while let Some(sentence) = self.voice.speech.queue.pop_front() {
             let Some(model) = only.or_else(|| speech::for_language(sentence.lang)) else {
                 continue;
             };
+            // Being downloaded or removed, in any window: as good as not here.
+            let changing = crate::app::voice::downloading(&speech::dir(&store, model));
+            if changing {
+                continue;
+            }
             if !speech::installed(&store, model) {
                 // Said once a window — the status line is not a nag — and
                 // not at all while it downloads.
@@ -619,13 +673,16 @@ impl App {
             let voice = self.voice.prefs.voice_for(model);
             let speed = self.voice.prefs.speed;
             let synthesizer = self.voice.speech.synthesizer.clone();
-            // No output yet: it opens while the sentence is made.
+            // No output yet: it opens while the sentence is made. Either way
+            // the sentence is made at the device's rate here, off the UI
+            // thread, and only queued there.
             let open = self
                 .voice
                 .speech
                 .output
                 .is_none()
                 .then(|| self.voice.speech.open_output.clone());
+            let device_rate = self.voice.speech.output.as_ref().map(|o| o.rate());
             self.voice.speech.making = true;
             self.voice.speech.quiet_since = None;
             let round = self.voice.speech.round;
@@ -633,18 +690,34 @@ impl App {
                 async move {
                     tokio::task::spawn_blocking(move || {
                         let opening = open.map(|open| std::thread::spawn(move || open()));
-                        let result = synthesizer
-                            .say(model, &dir, &sentence.text, sentence.lang, voice, speed)
-                            .map(|(samples, rate)| Audio {
+                        let said = synthesizer.say(
+                            model,
+                            &dir,
+                            &sentence.text,
+                            sentence.lang,
+                            voice,
+                            speed,
+                        );
+                        let opened: Option<Opening> = opening.map(|opening| {
+                            opening
+                                .join()
+                                .unwrap_or_else(|_| Err(tr!("speaking failed unexpectedly").into()))
+                        });
+                        let device_rate = device_rate.or(match &opened {
+                            Some(Ok(output)) => Some(output.rate()),
+                            _ => None,
+                        });
+                        let result = said.map(|(samples, rate)| match device_rate {
+                            Some(to) if to != rate => Audio {
+                                samples: Arc::new(clew_voice::audio::resample(&samples, rate, to)),
+                                rate: to,
+                            },
+                            _ => Audio {
                                 samples: Arc::new(samples),
                                 rate,
-                            });
-                        let opened = opening.map(|opening| {
-                            Opened::new(opening.join().unwrap_or_else(|_| {
-                                Err(tr!("speaking failed unexpectedly").into())
-                            }))
+                            },
                         });
-                        (result, opened)
+                        (result, opened.map(Opened::new))
                     })
                     .await
                     .unwrap_or_else(|_| {
@@ -688,9 +761,10 @@ impl App {
                 None => self.voice.speech.output = Some(output),
             },
             Some(Err(e)) => {
-                self.voice.speech.hush();
-                self.status = tr!("Can't speak: {error}", error = crate::i18n::message(&e));
-                return Task::none();
+                return self.give_up_speaking(tr!(
+                    "Can't speak: {error}",
+                    error = crate::i18n::message(&e)
+                ));
             }
             None => {}
         }
@@ -702,10 +776,10 @@ impl App {
                     match (self.voice.speech.open_output)() {
                         Ok(output) => self.voice.speech.output = Some(output),
                         Err(e) => {
-                            self.voice.speech.hush();
-                            self.status =
-                                tr!("Can't speak: {error}", error = crate::i18n::message(&e));
-                            return Task::none();
+                            return self.give_up_speaking(tr!(
+                                "Can't speak: {error}",
+                                error = crate::i18n::message(&e)
+                            ));
                         }
                     }
                 }
@@ -713,15 +787,17 @@ impl App {
                     output.play(&audio.samples, audio.rate);
                 }
                 self.voice.speech.quiet_since = None;
+                // How long it plays nothing is counted from now: the wait
+                // for this sentence was not the output's.
+                self.voice.speech.progress = None;
                 self.speak_next()
             }
             // This sentence could not be said; the next can.
             Err(SayError::Sentence(_)) => self.speak_next(),
-            Err(SayError::Voice(e)) => {
-                self.voice.speech.hush();
-                self.status = tr!("Could not speak: {error}", error = crate::i18n::message(&e));
-                Task::none()
-            }
+            Err(SayError::Voice(e)) => self.give_up_speaking(tr!(
+                "Could not speak: {error}",
+                error = crate::i18n::message(&e)
+            )),
         }
     }
 
@@ -737,13 +813,15 @@ impl App {
         // through.
         let played = output.played();
         match speech.progress {
-            Some((before, _)) if before == played => {}
-            Some(_) => {
+            // Nothing played since, though there was something to play.
+            Some((before, _)) if before == played && !output.idle() => {}
+            Some((before, _)) if before != played => {
                 speech.progress = Some((played, Instant::now()));
                 // Playing again: it may be opened again should it stop.
                 speech.reopened = false;
             }
-            None => speech.progress = Some((played, Instant::now())),
+            // Idle — nothing to play is no stall — or just given something.
+            _ => speech.progress = Some((played, Instant::now())),
         }
         let stalled = match speech.progress {
             Some((_, since)) if !output.idle() => since.elapsed(),
@@ -802,12 +880,10 @@ impl App {
                 return self.speak_next();
             }
         }
-        speech.hush();
-        self.status = tr!(
+        self.give_up_speaking(tr!(
             "Stopped speaking: {error}",
             error = crate::i18n::message(&why)
-        );
-        Task::none()
+        ))
     }
 
     /// Download voice model `id`, file by file, each verified as it lands.

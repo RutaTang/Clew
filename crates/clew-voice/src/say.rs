@@ -7,27 +7,52 @@
 
 /// What a sentence is said in, when its script says so: Hangul is Korean,
 /// kana Japanese, Han alone Chinese — or Japanese, where that is what is
-/// being spoken (`usual`: a line of kanji alone). `None`: a Latin, Cyrillic
-/// … script, whose language the caller knows better.
+/// being spoken (`usual`: a line of kanji alone); Greek is Greek, Arabic
+/// Arabic, Devanagari Hindi, and Cyrillic Russian — or the Ukrainian or
+/// Bulgarian usually spoken. `None`: a Latin script, whose language the
+/// caller knows better.
 pub fn script_language(text: &str, usual: Option<&str>) -> Option<&'static str> {
     let (mut hangul, mut kana, mut han) = (false, false, false);
+    let (mut cyrillic, mut greek, mut arabic, mut devanagari) = (false, false, false, false);
     for c in text.chars() {
         match c as u32 {
             0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F => hangul = true,
             0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => kana = true,
             0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF => han = true,
+            0x0400..=0x04FF => cyrillic = true,
+            0x0370..=0x03FF => greek = true,
+            0x0600..=0x06FF => arabic = true,
+            0x0900..=0x097F => devanagari = true,
             _ => {}
         }
     }
+    let usual = usual.and_then(known_language);
     if hangul {
         Some("ko")
-    } else if kana || (han && usual.is_some_and(|l| l.starts_with("ja"))) {
+    } else if kana || (han && usual == Some("ja")) {
         Some("ja")
     } else if han {
         Some("zh")
+    } else if cyrillic {
+        Some(match usual {
+            Some(lang @ ("uk" | "bg")) => lang,
+            _ => "ru",
+        })
+    } else if greek {
+        Some("el")
+    } else if arabic {
+        Some("ar")
+    } else if devanagari {
+        Some("hi")
     } else {
         None
     }
+}
+
+/// Whether `text` holds kana: written in Japanese, whatever else it holds.
+fn has_kana(text: &str) -> bool {
+    text.chars()
+        .any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F))
 }
 
 /// Every language a voice here speaks, as its code.
@@ -133,11 +158,16 @@ pub fn latin_language(text: &str) -> Option<&'static str> {
 
 /// The language to say `sentence` in, from an answer whose words so far
 /// are `answer` (as [`speakable`] says them): its script's
-/// ([`script_language`]); else, for a Latin script, the language the
-/// answer's words are in, or `usual` when it is written in one; else
-/// English.
+/// ([`script_language`]) — Japanese for kanji alone where the answer is
+/// written in Japanese; else, for a Latin script, the language the answer's
+/// words are in, or `usual` when it is written in one; else English.
 pub fn language_for(sentence: &str, answer: &str, usual: Option<&str>) -> &'static str {
     if let Some(lang) = script_language(sentence, usual) {
+        // A line of kanji alone ("概要。") in an answer written in Japanese
+        // is Japanese.
+        if lang == "zh" && has_kana(answer) {
+            return "ja";
+        }
         return lang;
     }
     let latin = |lang: &&str| !matches!(*lang, "zh" | "ja" | "ko");
@@ -687,6 +717,16 @@ mod tests {
         assert_eq!(language_for("합계를 구합니다.", answer, Some("fr")), "ko");
         assert_eq!(language_for("合計を計算します。", answer, None), "ja");
         assert_eq!(language_for("计算总价。", answer, None), "zh");
+        // A heading of kanji alone, in an answer written in Japanese.
+        let japanese = "概要。合計を計算します。";
+        assert_eq!(language_for("概要。", japanese, Some("en")), "ja");
+        assert_eq!(language_for("概要。", "概要。总价。", Some("en")), "zh");
+        // Other scripts the voices speak.
+        assert_eq!(language_for("Итог считается так.", answer, None), "ru");
+        assert_eq!(language_for("Підсумок.", answer, Some("uk")), "uk");
+        assert_eq!(language_for("Το σύνολο.", answer, None), "el");
+        assert_eq!(language_for("المجموع.", answer, None), "ar");
+        assert_eq!(language_for("कुल योग।", answer, None), "hi");
         assert_eq!(known_language("pt_BR"), Some("pt"));
         assert_eq!(known_language("FR-ca"), Some("fr"));
         assert_eq!(known_language("klingon"), None);

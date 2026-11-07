@@ -675,6 +675,8 @@ impl App {
         // provider on THIS machine is aborted — `stop_ask_streams` covers all
         // three, plus a question still being retrieved.
         let stop_ask = self.stop_ask_streams();
+        // And what is said of its answers: the conversation stays behind.
+        self.stop_speaking();
         // The debuggee belongs to the old project: left running, its variables
         // would keep feeding the new project's Ask context. Literally the same
         // teardown the Stop button performs, rather than a copy of it that

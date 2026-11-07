@@ -1050,9 +1050,9 @@ impl App {
         // What is left of an answer said aloud is said — why it failed,
         // too; a Stop stops it.
         let said = if matches!(outcome, StreamOutcome::Stopped) {
-            if self.proj.ask_turns[idx].spoken {
-                self.stop_speaking();
-            }
+            // This answer's speech, not another's: a Stop's close can come
+            // after the next question was asked.
+            self.hush_answer(stream);
             Task::none()
         } else {
             self.read_answer(stream, true)
@@ -1128,6 +1128,8 @@ impl App {
         {
             let reason = reason.clone();
             let question = self.proj.ask_turns[idx].question.clone();
+            // Said aloud, its answer from the index is said aloud too.
+            self.proj.ask_spoken = self.proj.ask_turns[idx].spoken;
             let fallback = self.on_ask_submit_rag(question);
             // `asking` is how the retrieval path says it took the question
             // over. It only appends turns, so `idx` still names this one.
@@ -1143,6 +1145,7 @@ impl App {
             // anyway, so the question vanished and the status named the
             // index instead of what failed. Close it with the agent's own
             // failure, and say both.
+            self.proj.ask_spoken = false;
             let why_not = std::mem::take(&mut self.status);
             let closed = self.on_ask_stream_ended(stream, outcome);
             if !why_not.is_empty() {

@@ -265,6 +265,14 @@ impl Speakers {
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
+    /// Let the model go and do `work` — remove its files — with nothing
+    /// said meanwhile: what is asked to be said waits until `work` is done.
+    pub fn stop_while(&self, work: &mut dyn FnMut()) {
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        *running = None;
+        work();
+    }
+
     /// Let the model go if nothing has been said with it for `idle`, and
     /// nothing is being said now; whether it was let go.
     pub fn stop_if_idle(&self, idle: Duration) -> bool {
