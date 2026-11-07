@@ -1050,6 +1050,7 @@ fn walk(
     // calls reach (`Bindings`): reading the function's text again for
     // every call made the walk quadratic in a long function.
     let mut bindings: HashMap<(usize, String), Bindings> = HashMap::new();
+    let places = Places::read(root, spec.fn_kinds);
     while let Some((node, parent, before, enclosing, inner)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
@@ -1078,8 +1079,7 @@ fn walk(
             let receiver = match &current {
                 Some((_, from)) if method => {
                     let scope = Scope {
-                        root,
-                        fn_kinds: spec.fn_kinds,
+                        places: &places,
                         from: inner.unwrap_or(*from),
                     };
                     receiver_of(node, &callee, &scope, src, lang, &mut bindings)
@@ -1548,10 +1548,32 @@ fn receiver_of(
     if !is_plain_name(receiver) {
         return None;
     }
-    let scan = bindings
-        .entry((scope.from, receiver.to_string()))
-        .or_insert_with(|| Bindings::from(scope.from));
-    match scan.said_before(call.start_byte(), receiver, scope, src, lang) {
+    let places = scope.places;
+    let mut said = |from: usize, to: usize| {
+        bindings
+            .entry((from, receiver.to_string()))
+            .or_insert_with(|| Bindings::from(from, places))
+            .said_before(to, receiver, &Scope { places, from }, src, lang)
+    };
+    let (mut from, mut now) = (scope.from, said(scope.from, call.start_byte()));
+    // A name the function the call is in does not bind is the function's
+    // around it, if it is nested — a closure's captured `store` in
+    // `useEffect(() => store.load())` — as that one says it is bound before
+    // it, and still is at its end: a binding after it may be what the
+    // nested function sees when it runs. Rust's nested `fn`s capture
+    // nothing (its closures are no function here).
+    while now == Said::Nothing && lang != Lang::Rust {
+        let Some((outer, outer_end)) = places.around(from) else {
+            break;
+        };
+        let at_end = said(outer, outer_end);
+        let before = said(outer, from);
+        if before != at_end {
+            return None;
+        }
+        (from, now) = (outer, before);
+    }
+    match now {
         Said::Type(ty, exact) => {
             return (exact || matches!(lang, Lang::Go | Lang::Rust)).then_some(Receiver::Type(ty));
         }
@@ -1597,27 +1619,76 @@ fn is_plain_name(text: &str) -> bool {
         && text.chars().all(|c| c == '_' || c.is_alphanumeric())
 }
 
-/// The function a call is made in: where it starts, and how to tell a
-/// function nested in it, whose names are its own.
-struct Scope<'t> {
-    root: Node<'t>,
-    fn_kinds: &'static [&'static str],
+/// The function a call is made in: where it starts, and the file's
+/// [`Places`], which tell the functions nested in it.
+struct Scope<'p> {
+    places: &'p Places,
     from: usize,
 }
 
-impl Scope<'_> {
-    /// Whether the text at `at` is in a function nested in this one: a name
-    /// bound there is that function's (`def h(): c = Item()` inside the
-    /// function calling `c.total()` binds its own `c`).
-    fn nested(&self, at: usize) -> bool {
-        let mut node = self.root.descendant_for_byte_range(at, at);
-        while let Some(n) = node {
-            if self.fn_kinds.contains(&n.kind()) {
-                return n.start_byte() > self.from;
+/// Where a file's functions are, nested ones too, and the text no name is
+/// bound in — comments and strings — by byte range, read once per file:
+/// telling an occurrence's place by walking the tree down to it and back
+/// up, for every occurrence, made a long function's reading quadratic.
+struct Places {
+    /// Each function's start and end, by start, with the index of the one
+    /// around it.
+    fns: Vec<(usize, usize, Option<usize>)>,
+    /// Comments and strings, none inside another, by start.
+    opaque: Vec<(usize, usize)>,
+}
+
+impl Places {
+    fn read(root: Node, fn_kinds: &[&str]) -> Places {
+        let mut fns = Vec::new();
+        let mut opaque = Vec::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            let kind = node.kind();
+            if kind.contains("comment") || kind.contains("string") {
+                opaque.push((node.start_byte(), node.end_byte()));
+                continue;
             }
-            node = n.parent();
+            if fn_kinds.contains(&kind) {
+                fns.push((node.start_byte(), node.end_byte()));
+            }
+            let mut cursor = node.walk();
+            stack.extend(node.children(&mut cursor));
         }
-        false
+        fns.sort_unstable();
+        opaque.sort_unstable();
+        // Each one's parent: the nearest before it still open at its start.
+        let mut open: Vec<usize> = Vec::new();
+        let fns = fns
+            .iter()
+            .enumerate()
+            .map(|(i, &(start, end))| {
+                while open.last().is_some_and(|&o| fns[o].1 <= start) {
+                    open.pop();
+                }
+                let parent = open.last().copied();
+                open.push(i);
+                (start, end, parent)
+            })
+            .collect();
+        Places { fns, opaque }
+    }
+
+    /// Whether `at` is in a comment or a string.
+    fn opaque(&self, at: usize) -> bool {
+        let i = self.opaque.partition_point(|&(start, _)| start <= at);
+        i > 0 && self.opaque[i - 1].1 > at
+    }
+
+    /// The function around the one that starts at `from`: where it starts
+    /// and ends.
+    fn around(&self, from: usize) -> Option<(usize, usize)> {
+        let i = self.fns.partition_point(|&(start, _, _)| start < from);
+        let (start, _, parent) = *self.fns.get(i)?;
+        if start != from {
+            return None;
+        }
+        parent.map(|p| (self.fns[p].0, self.fns[p].1))
     }
 }
 
@@ -1630,8 +1701,14 @@ pub(crate) struct Bindings {
     /// Where the function starts: a declaration's type is looked for back
     /// to here.
     from: usize,
-    /// At each binding (its offset), what the bindings up to it say.
+    /// At each binding (where it takes effect: its statement's end), what
+    /// the bindings up to it say.
     said: Vec<(usize, Said)>,
+    /// The next of the file's functions ([`Places::fns`]) not yet come to,
+    /// and those come to and still open — the functions nested in this
+    /// one around what is being read.
+    next_fn: usize,
+    open: Vec<usize>,
 }
 
 /// What a name's bindings say ([`Bindings::said_before`]).
@@ -1646,12 +1723,31 @@ enum Said {
 }
 
 impl Bindings {
-    fn from(from: usize) -> Self {
+    fn from(from: usize, places: &Places) -> Self {
         Self {
             upto: from,
             from,
             said: Vec::new(),
+            next_fn: places.fns.partition_point(|&(start, _, _)| start <= from),
+            open: Vec::new(),
         }
+    }
+
+    /// The function nested in this one that `at` is in, if any — `at` never
+    /// less than the last asked about.
+    fn nested_at(&mut self, at: usize, places: &Places) -> Option<(usize, usize)> {
+        while let Some(&(start, _, _)) = places.fns.get(self.next_fn)
+            && start <= at
+        {
+            self.open.push(self.next_fn);
+            self.next_fn += 1;
+        }
+        while self.open.last().is_some_and(|&o| places.fns[o].1 <= at) {
+            self.open.pop();
+        }
+        self.open
+            .last()
+            .map(|&o| (places.fns[o].0, places.fns[o].1))
     }
 
     /// What `name`'s bindings before `to` in `src` say.
@@ -1683,22 +1779,67 @@ impl Bindings {
             let head = &text[..start];
             if head.ends_with(|c: char| word(c) || matches!(c, '.' | '$' | '@' | '>' | ':'))
                 || text[end..].starts_with(word)
-                || scope.nested(self.from + start)
+                || scope.places.opaque(self.from + start)
             {
-                continue; // part of a longer name, a member, or a nested function's own
+                continue; // part of a longer name, a member, a comment or a string
             }
-            let now = match binding_at(head, &text[end..], lang) {
-                Binding::Not => continue,
-                Binding::Unknown => Said::Unknown,
-                Binding::Typed(ty, exact) => match self.said.last().map(|(_, s)| s) {
-                    Some(Said::Type(seen, _)) if *seen != ty => Said::Unknown,
-                    // Built and declared alike: as exact as either says.
-                    Some(Said::Type(_, was)) => Said::Type(ty, exact || *was),
-                    _ => Said::Type(ty, exact),
-                },
+            // What follows it in the file, past what is read so far: a
+            // statement read up to a call in it goes on after the call.
+            let after = &src[self.from + end..];
+            let binding = binding_at(head, after, lang);
+            if binding == Binding::Not {
+                continue;
+            }
+            let now = if let Some((nested, nested_end)) =
+                self.nested_at(self.from + start, scope.places)
+            {
+                // In a function nested in this one: a name it declares is its
+                // own; one it assigns is this one's, given a value when it
+                // runs, which cannot be told. Python's assignment declares,
+                // but where it says the name is not its own.
+                let said_not_own = |kw: &str| {
+                    src[nested..nested_end]
+                        .split(kw)
+                        .skip(1)
+                        .any(|rest| rest.trim_start().starts_with(name))
+                };
+                let own = if lang == Lang::Python {
+                    !(said_not_own("nonlocal ") || said_not_own("global "))
+                } else {
+                    declares_its_own(head, after, lang)
+                };
+                if own {
+                    continue;
+                }
+                Said::Unknown
+            } else {
+                match binding {
+                    Binding::Not => continue,
+                    Binding::Unknown => Said::Unknown,
+                    Binding::Typed(ty, exact) => match self.said.last().map(|(_, s)| s) {
+                        Some(Said::Type(seen, _)) if *seen != ty => Said::Unknown,
+                        // Built and declared alike: as exact as either says.
+                        Some(Said::Type(_, was)) => Said::Type(ty, exact || *was),
+                        _ => Said::Type(ty, exact),
+                    },
+                }
             };
             let unknown = now == Said::Unknown;
-            self.said.push((self.from + start, now));
+            // An assignment is in effect once its statement is over: `item`
+            // in `item = Wrapper(item.unwrap())` is still the one before. A
+            // parameter, a loop's name, a declaration is at once: `cart` in
+            // `cart => cart.total()` is the closure's.
+            let value = after.trim_start_matches([' ', '\t']);
+            let assigned = value.starts_with(":=")
+                || (value.starts_with('=') && !value.starts_with("==") && !value.starts_with("=>"));
+            let in_effect = if assigned {
+                after.find([';', '\n']).unwrap_or(after.len())
+            } else {
+                0
+            };
+            let effect =
+                (self.from + end + in_effect).max(self.said.last().map_or(0, |&(at, _)| at));
+            self.said.push((effect, now));
             if unknown {
                 break;
             }
@@ -1734,6 +1875,90 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             && !before[..before.len() - w.len()]
                 .ends_with(|c: char| c == '_' || c.is_alphanumeric())
     };
+    // In parentheses (or brackets) opened on its line: a call's argument,
+    // keyword or not, binds nothing of the caller's (`show(c=Cart())`); a
+    // parameter's default (`def f(c=Cart())`) is what the caller may well
+    // pass otherwise; one of a pattern's names (`let (c, d) = …`, `if let
+    // Some(c) = …`, `for (i, c) in …`) is bound to what cannot be told.
+    let line = &head[head.rfind('\n').map_or(0, |i| i + 1)..];
+    // The innermost bracket left open on the line: in `(` or `[`, an
+    // argument or a pattern; in a `{` — a block — or none, a statement.
+    let mut open: Vec<char> = Vec::new();
+    for c in line.chars() {
+        match c {
+            '(' | '[' | '{' => open.push(c),
+            ')' | ']' | '}' => {
+                open.pop();
+            }
+            _ => {}
+        }
+    }
+    let depth = i32::from(matches!(open.last(), Some('(' | '[')));
+    let line_rest = &after[..after.find('\n').unwrap_or(after.len())];
+    let assigns = |text: &str| {
+        let bytes = text.as_bytes();
+        bytes.iter().enumerate().any(|(i, &b)| {
+            b == b'='
+                && !matches!(bytes.get(i + 1), Some(b'=' | b'>'))
+                && !matches!(
+                    i.checked_sub(1).map(|j| bytes[j]),
+                    Some(b'=' | b'!' | b'<' | b'>' | b':')
+                )
+        })
+    };
+    let keyword_line = {
+        let line = line.trim_start();
+        [
+            "def ",
+            "fn ",
+            "function ",
+            "func ",
+            "async def ",
+            "pub fn ",
+            "lambda",
+        ]
+        .iter()
+        .any(|k| line.starts_with(k) || line.contains(&format!(" {k}")))
+    };
+    let pattern_line = {
+        let line = line.trim_start();
+        [
+            "let ",
+            "if let ",
+            "while let ",
+            "for ",
+            "const ",
+            "var ",
+            "val ",
+            "match ",
+        ]
+        .iter()
+        .any(|k| line.starts_with(k) || line.contains(&format!(" {k}")))
+    };
+    if depth > 0 {
+        if after.starts_with('=') && !after.starts_with("==") && !after.starts_with("=>") {
+            return if keyword_line || pattern_line {
+                Binding::Unknown
+            } else {
+                Binding::Not
+            };
+        }
+        if pattern_line
+            && (after.starts_with([',', ')', ']', '}']))
+            && (assigns(line_rest) || line_rest.contains(" in "))
+        {
+            return Binding::Unknown;
+        }
+    } else if after.starts_with(',') && assigns(line_rest) {
+        // `c, rest = split()`: the first of several unpacked.
+        return Binding::Unknown;
+    }
+    // `for i, c in …`: a loop's names after the first.
+    if (before.ends_with(',') || before.ends_with('('))
+        && after.trim_start_matches([')', ' ']).starts_with("in ")
+    {
+        return Binding::Unknown;
+    }
     // A loop's, a closure's, a `with`'s or an `except`'s name, or one of
     // several unpacked: bound to what this cannot tell.
     if after.starts_with("=>")
@@ -1746,7 +1971,10 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
             .iter()
             .any(|w| ends_with_word(w))
             && (after.starts_with("of ") || after.starts_with("in ")))
-        || (before.ends_with(',') && after.starts_with('=') && !after.starts_with("=="))
+        || (depth <= 0
+            && before.ends_with(',')
+            && after.starts_with('=')
+            && !after.starts_with("=="))
     {
         return Binding::Unknown;
     }
@@ -1796,6 +2024,29 @@ fn binding_at(head: &str, after: &str, lang: Lang) -> Binding {
         return Binding::Typed(ty, false);
     }
     Binding::Not
+}
+
+/// Whether the occurrence between `head` and `after` declares a name of
+/// its own — `let`, `const`, `var`, `:=`, a declared type, a parameter of
+/// a closure or a loop — rather than assigning one from around it.
+fn declares_its_own(head: &str, after: &str, lang: Lang) -> bool {
+    let before = head.trim_end();
+    let after = after.trim_start_matches([' ', '\t']);
+    let ends_with_word = |w: &str| {
+        before.ends_with(w)
+            && !before[..before.len() - w.len()]
+                .ends_with(|c: char| c == '_' || c.is_alphanumeric())
+    };
+    [
+        "let", "const", "var", "val", "my", "local", "auto", "for", "foreach", "as", "lambda",
+    ]
+    .iter()
+    .any(|w| ends_with_word(w))
+        || after.starts_with(":=")
+        || after.starts_with("=>")
+        || before.ends_with('|')
+        || (after.starts_with('|') && !after.starts_with("||"))
+        || declares(head, lang)
 }
 
 /// Whether `head` ends with a declaration's type, as a C-like language
@@ -1919,9 +2170,13 @@ fn trailing_type(head: &str) -> Option<String> {
         }
         head = head[..cut?].trim_end();
     }
+    // After the last character not of a name — however many bytes it is:
+    // a line before ending in `。` or `→` put the cut inside it.
     let start = head
-        .rfind(|c: char| !(c == '_' || c.is_alphanumeric()))
-        .map_or(0, |i| i + 1);
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c == '_' || c.is_alphanumeric()))
+        .map_or(0, |(i, c)| i + c.len_utf8());
     let ty = &head[start..];
     ty.starts_with(|c: char| c.is_uppercase())
         .then(|| ty.to_string())
@@ -3457,6 +3712,148 @@ def main():
                 "total"
             ),
             [None]
+        );
+    }
+
+    /// A receiver's bindings are read where they are: a closure's captured
+    /// name as the function around it binds it; an assignment in a nested
+    /// function leaves the name untold, a declaration there is its own; a
+    /// binding is in effect after its statement; a pattern's names, a
+    /// keyword argument, a parameter's default, a comment are what they are
+    /// — and a character of several bytes before a name breaks nothing.
+    #[test]
+    fn a_receivers_bindings_are_read_where_they_are() {
+        let receiver = |file: &str, src: &str, callee: &str| {
+            let calls = FileCalls::read(Path::new(file), src).expect(file).calls;
+            calls
+                .into_iter()
+                .find(|c| c.callee == callee)
+                .unwrap_or_else(|| panic!("no call of {callee} in {file}"))
+                .receiver
+        };
+        let typed = |ty: &str| Some(Receiver::Type(ty.into()));
+        // The line before ends in a character of several bytes.
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def load(path):\n    # 读取配置文件。\n    cfg = read(path)\n    cfg.validate()\n",
+                "validate"
+            ),
+            None
+        );
+        // Captured by a closure.
+        assert_eq!(
+            receiver(
+                "a.js",
+                "function f() {\n  const store = new Store();\n  useEffect(() => store.load());\n}\n",
+                "load"
+            ),
+            typed("Store")
+        );
+        // ...but bound again after it: what the closure sees when it runs.
+        assert_eq!(
+            receiver(
+                "a.js",
+                "function f() {\n  let store = new Store();\n  const cb = () => store.load();\n  store = make();\n}\n",
+                "load"
+            ),
+            None
+        );
+        // Assigned in a nested function; declared there, its own.
+        assert_eq!(
+            receiver(
+                "a.js",
+                "function f() {\n  let c = new Cart();\n  reset(() => { c = new Item(); });\n  c.total();\n}\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.js",
+                "function f() {\n  const c = new Cart();\n  reset(() => { const c = new Item(); });\n  c.total();\n}\n",
+                "total"
+            ),
+            typed("Cart")
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f():\n    c = Cart()\n    def g():\n        c = Item()\n    c.total()\n",
+                "total"
+            ),
+            typed("Cart")
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f():\n    c = Cart()\n    def g():\n        nonlocal c\n        c = Item()\n    c.total()\n",
+                "total"
+            ),
+            None
+        );
+        // In the value of its own binding, the name is still the one before.
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def wrap(item):\n    item = Wrapper(item.unwrap())\n",
+                "unwrap"
+            ),
+            None
+        );
+        // One of a pattern's names.
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f():\n    c = Cart()\n    c, rest = split()\n    c.total()\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f(xs):\n    c = Cart()\n    for i, c in enumerate(xs):\n        c.total()\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.rs",
+                "fn f(x: Option<Item>) {\n    let c = Cart::new();\n    if let Some(c) = x {\n        c.total();\n    }\n}\n",
+                "total"
+            ),
+            None
+        );
+        // A comment, a keyword argument, a parameter's default.
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f(c):\n    # c = Cart() usually\n    c.total()\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f(c):\n    show(c=Cart())\n    c.total()\n",
+                "total"
+            ),
+            None
+        );
+        assert_eq!(
+            receiver("a.py", "def f(c=Cart()):\n    c.total()\n", "total"),
+            None
+        );
+        assert_eq!(
+            receiver(
+                "a.py",
+                "def f():\n    c = Cart()\n    show(c=c)\n    c.total()\n",
+                "total"
+            ),
+            typed("Cart")
         );
     }
 

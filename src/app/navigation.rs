@@ -140,6 +140,10 @@ type StyledPreviews = (
     Vec<Option<Vec<(usize, usize)>>>,
 );
 
+/// How many of a search's results have their whole line read for their
+/// marks ([`style_previews`]).
+const LINES_READ_FOR_MARKS: usize = 500;
+
 /// Each preview in its language's colours, and where it marks what
 /// `matcher` matches — found in its whole line, read from its file in a
 /// local project when no pane had it.
@@ -150,10 +154,16 @@ fn style_previews(
 ) -> StyledPreviews {
     let mut lines: Vec<Option<String>> = hits.iter().map(|h| h.line.clone()).collect();
     if local && matcher.is_some() {
+        // Read only where marks can come of it — a preview there is (a
+        // location list's are read after this pass) — and for the first
+        // results only: a search of thousands waited on every one of their
+        // files before any colour showed. The rest are marked in their
+        // previews, as the sidebar does without a line.
         let unread: Vec<(usize, PathBuf, usize)> = hits
             .iter()
             .enumerate()
-            .filter(|(_, h)| h.line.is_none())
+            .take(LINES_READ_FOR_MARKS)
+            .filter(|(_, h)| h.line.is_none() && !h.preview.trim().is_empty())
             .map(|(i, h)| (i, h.abs.clone(), h.line0))
             .collect();
         for (i, line) in read_location_lines(unread) {

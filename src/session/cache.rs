@@ -76,7 +76,11 @@ use crate::incremental::Version;
 /// constructor that is the whole expression, or any value in Go and Rust —
 /// and a name bound again to what cannot be told is untyped; an older entry
 /// kept types that narrowed a call off the override or the builder it made.
-pub(crate) const CACHE_VERSION: u32 = 16;
+/// 17: a closure's captured name is typed as the function around it binds
+/// it; an assignment in a nested function, a pattern's names, a parameter's
+/// default leave a receiver untyped, and a comment or a keyword argument
+/// binds nothing; an older entry typed by them or lost the captured type.
+pub(crate) const CACHE_VERSION: u32 = 17;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).
