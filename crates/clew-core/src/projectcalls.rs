@@ -1028,6 +1028,9 @@ type WalkItem<'t> = (
     Option<Node<'t>>,
     Option<Node<'t>>,
     Option<(Rc<str>, usize)>,
+    // Where the innermost function around the node starts, named or not:
+    // the scope a receiver's name is bound in (a closure's own parameter).
+    Option<usize>,
 );
 
 /// Iterative depth-first walk carrying the nearest enclosing function name. It is
@@ -1042,12 +1045,12 @@ fn walk(
     callable: Option<&HashSet<&str>>,
     out: &mut Vec<CallSite>,
 ) {
-    let mut stack: Vec<WalkItem> = vec![(root, None, None, None)];
+    let mut stack: Vec<WalkItem> = vec![(root, None, None, None, None)];
     // What each function's names are bound to, read once as far as its
     // calls reach (`Bindings`): reading the function's text again for
     // every call made the walk quadratic in a long function.
     let mut bindings: HashMap<(usize, String), Bindings> = HashMap::new();
-    while let Some((node, parent, before, enclosing)) = stack.pop() {
+    while let Some((node, parent, before, enclosing, inner)) = stack.pop() {
         let kind = node.kind();
         if spec.skip_kinds.contains(&kind) {
             continue;
@@ -1063,13 +1066,23 @@ fn walk(
             None
         };
         let current = own.or(enclosing);
+        let inner = if spec.fn_kinds.contains(&kind) {
+            Some(node.start_byte())
+        } else {
+            inner
+        };
 
         if spec.call_kinds.contains(&kind)
             && let Some((callee, method)) = callee_name(node, parent, src, lang)
         {
             let receiver = match &current {
                 Some((_, from)) if method => {
-                    receiver_of(node, &callee, *from, src, lang, &mut bindings)
+                    let scope = Scope {
+                        root,
+                        fn_kinds: spec.fn_kinds,
+                        from: inner.unwrap_or(*from),
+                    };
+                    receiver_of(node, &callee, &scope, src, lang, &mut bindings)
                 }
                 _ => None,
             };
@@ -1088,7 +1101,7 @@ fn walk(
         let mut cursor = node.walk();
         let mut before = None;
         for child in node.children(&mut cursor) {
-            stack.push((child, Some(node), before, current.clone()));
+            stack.push((child, Some(node), before, current.clone(), inner));
             before = Some(child);
         }
     }
@@ -1520,7 +1533,7 @@ fn last_identifier(text: &str) -> Option<String> {
 fn receiver_of(
     call: Node,
     callee: &str,
-    from: usize,
+    scope: &Scope,
     src: &str,
     lang: Lang,
     bindings: &mut HashMap<(usize, String), Bindings>,
@@ -1536,10 +1549,9 @@ fn receiver_of(
         return None;
     }
     let scan = bindings
-        .entry((from, receiver.to_string()))
-        .or_insert_with(|| Bindings::from(from));
-    scan.read_to(call.start_byte(), receiver, src, lang);
-    match scan.said() {
+        .entry((scope.from, receiver.to_string()))
+        .or_insert_with(|| Bindings::from(scope.from));
+    match scan.said_before(call.start_byte(), receiver, scope, src, lang) {
         Said::Type(ty, exact) => {
             return (exact || matches!(lang, Lang::Go | Lang::Rust)).then_some(Receiver::Type(ty));
         }
@@ -1585,23 +1597,45 @@ fn is_plain_name(text: &str) -> bool {
         && text.chars().all(|c| c == '_' || c.is_alphanumeric())
 }
 
-/// What one name's bindings in one function say, read up to a point of it:
-/// grown as later calls in the function need more, so each occurrence of
-/// the name is read once.
+/// The function a call is made in: where it starts, and how to tell a
+/// function nested in it, whose names are its own.
+struct Scope<'t> {
+    root: Node<'t>,
+    fn_kinds: &'static [&'static str],
+    from: usize,
+}
+
+impl Scope<'_> {
+    /// Whether the text at `at` is in a function nested in this one: a name
+    /// bound there is that function's (`def h(): c = Item()` inside the
+    /// function calling `c.total()` binds its own `c`).
+    fn nested(&self, at: usize) -> bool {
+        let mut node = self.root.descendant_for_byte_range(at, at);
+        while let Some(n) = node {
+            if self.fn_kinds.contains(&n.kind()) {
+                return n.start_byte() > self.from;
+            }
+            node = n.parent();
+        }
+        false
+    }
+}
+
+/// One name's bindings in one function, read once as far as its calls
+/// reach: what they say at each of them, so a call is told what the
+/// bindings before it say, whichever of the function's calls is read first.
 pub(crate) struct Bindings {
     /// Read up to here (a byte offset in the file).
     upto: usize,
     /// Where the function starts: a declaration's type is looked for back
     /// to here.
     from: usize,
-    /// The type every binding read so far says, and whether exactly.
-    typed: Option<(String, bool)>,
-    /// Two bindings disagreed, or one said nothing that can be known.
-    unknown: bool,
+    /// At each binding (its offset), what the bindings up to it say.
+    said: Vec<(usize, Said)>,
 }
 
-/// What a name's bindings say ([`Bindings::said`]).
-#[derive(Debug, PartialEq)]
+/// What a name's bindings say ([`Bindings::said_before`]).
+#[derive(Debug, Clone, PartialEq)]
 enum Said {
     /// Bound to this type — exactly (built), or as declared.
     Type(String, bool),
@@ -1616,58 +1650,60 @@ impl Bindings {
         Self {
             upto: from,
             from,
-            typed: None,
-            unknown: false,
+            said: Vec::new(),
         }
     }
 
-    /// Read `name`'s occurrences up to `to` in `src`.
-    fn read_to(&mut self, to: usize, name: &str, src: &str, lang: Lang) {
-        if to <= self.upto || self.unknown {
+    /// What `name`'s bindings before `to` in `src` say.
+    fn said_before(&mut self, to: usize, name: &str, scope: &Scope, src: &str, lang: Lang) -> Said {
+        self.read_to(to, name, scope, src, lang);
+        let before = self.said.partition_point(|&(at, _)| at < to);
+        match before.checked_sub(1) {
+            Some(last) => self.said[last].1.clone(),
+            None => Said::Nothing,
+        }
+    }
+
+    /// Read `name`'s occurrences up to `to` in `src`, once each.
+    fn read_to(&mut self, to: usize, name: &str, scope: &Scope, src: &str, lang: Lang) {
+        let settled = matches!(self.said.last(), Some((_, Said::Unknown)));
+        if to <= self.upto || settled {
             self.upto = self.upto.max(to);
             return;
         }
-        let Some(scope) = src.get(self.from..to) else {
+        let Some(text) = src.get(self.from..to) else {
             return;
         };
         let word = |c: char| c == '_' || c.is_alphanumeric();
         let mut at = self.upto - self.from;
-        while let Some(i) = scope[at..].find(name) {
+        while let Some(i) = text[at..].find(name) {
             let start = at + i;
             let end = start + name.len();
             at = end;
-            let head = &scope[..start];
+            let head = &text[..start];
             if head.ends_with(|c: char| word(c) || matches!(c, '.' | '$' | '@' | '>' | ':'))
-                || scope[end..].starts_with(word)
+                || text[end..].starts_with(word)
+                || scope.nested(self.from + start)
             {
-                continue; // part of a longer name, or a member of something else
+                continue; // part of a longer name, a member, or a nested function's own
             }
-            match binding_at(head, &scope[end..], lang) {
-                Binding::Not => {}
-                Binding::Unknown => {
-                    self.unknown = true;
-                    break;
-                }
-                Binding::Typed(ty, exact) => match &self.typed {
-                    Some((seen, _)) if *seen != ty => {
-                        self.unknown = true;
-                        break;
-                    }
+            let now = match binding_at(head, &text[end..], lang) {
+                Binding::Not => continue,
+                Binding::Unknown => Said::Unknown,
+                Binding::Typed(ty, exact) => match self.said.last().map(|(_, s)| s) {
+                    Some(Said::Type(seen, _)) if *seen != ty => Said::Unknown,
                     // Built and declared alike: as exact as either says.
-                    Some((_, was)) => self.typed = Some((ty, exact || *was)),
-                    None => self.typed = Some((ty, exact)),
+                    Some(Said::Type(_, was)) => Said::Type(ty, exact || *was),
+                    _ => Said::Type(ty, exact),
                 },
+            };
+            let unknown = now == Said::Unknown;
+            self.said.push((self.from + start, now));
+            if unknown {
+                break;
             }
         }
         self.upto = to;
-    }
-
-    fn said(&self) -> Said {
-        match &self.typed {
-            _ if self.unknown => Said::Unknown,
-            Some((ty, exact)) => Said::Type(ty.clone(), *exact),
-            None => Said::Nothing,
-        }
     }
 }
 
@@ -3387,6 +3423,40 @@ def main():
                 "total"
             ),
             None
+        );
+    }
+
+    /// A call is told what the bindings before it say, not those after it,
+    /// whichever of the function's calls is read first; and a name bound in
+    /// a function nested in the caller is that function's own.
+    #[test]
+    fn a_receiver_is_typed_by_the_bindings_before_its_call() {
+        let receivers = |file: &str, src: &str, callee: &str| {
+            let mut calls: Vec<CallSite> = FileCalls::read(Path::new(file), src)
+                .expect(file)
+                .calls
+                .into_iter()
+                .filter(|c| c.callee == callee)
+                .collect();
+            calls.sort_by_key(|c| c.line);
+            calls.into_iter().map(|c| c.receiver).collect::<Vec<_>>()
+        };
+        let item = Some(Receiver::Type("Item".into()));
+        assert_eq!(
+            receivers(
+                "a.py",
+                "def f(c):\n    c.total()\n    c = Item()\n    c.total()\n",
+                "total"
+            ),
+            [None, item.clone()]
+        );
+        assert_eq!(
+            receivers(
+                "a.py",
+                "def f(c):\n    def h():\n        c = Item()\n    c.total()\n",
+                "total"
+            ),
+            [None]
         );
     }
 
