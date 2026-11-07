@@ -110,6 +110,26 @@ pub(crate) fn chrome_tip<'a>(
     tip_at(control, name, shortcut, tooltip::Position::Bottom)
 }
 
+/// An action done again and again — refresh, rebuild, expand every branch,
+/// close — drawn as its icon and named by its tooltip, where a word would
+/// crowd the row. With no message it is drawn, and does nothing.
+pub(crate) fn icon_action<'a>(
+    glyph: crate::glyph::Glyph,
+    name: &'a str,
+    message: Option<Message>,
+) -> Element<'a, Message> {
+    chrome_tip(
+        button(container(crate::glyph::icon(glyph, theme::fg_muted(), 15.0)).center(Fill))
+            .style(theme::icon_button(false))
+            .padding(0)
+            .width(24)
+            .height(24)
+            .on_press_maybe(message),
+        name,
+        None,
+    )
+}
+
 /// [`chrome_tip`], on a given side of the control.
 pub(crate) fn tip_at<'a>(
     control: impl Into<Element<'a, Message>>,

@@ -1581,11 +1581,7 @@ fn tree_head<'a>(
 
 /// Expand every node of a tree.
 fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
-    button(text(tr!("Expand all")).size(ts::SMALL))
-        .style(theme::toolbar_button)
-        .padding([2, 7])
-        .on_press(msg)
-        .into()
+    super::toolbar::icon_action(crate::glyph::Glyph::ExpandAll, tr!("Expand all"), Some(msg))
 }
 
 /// Which way a tree reads (callers or callees, imports or importers): a

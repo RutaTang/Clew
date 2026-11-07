@@ -77,6 +77,8 @@ pub enum Glyph {
     Stop,
     Expand,
     Shrink,
+    /// Two chevrons down: open every branch of a tree.
+    ExpandAll,
     // The window's chrome
     /// The app menu of Windows and Linux (three bars).
     Menu,
@@ -302,6 +304,8 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M14 4 H20 V10'/><path d='M20 4 L13.5 10.5'/>\
              <path d='M10 20 H4 V14'/><path d='M4 20 L10.5 13.5'/>"
         }
+        // Two chevrons, one under the other: open every branch.
+        ExpandAll => "<path d='m7 6 5 5 5-5'/><path d='m7 13 5 5 5-5'/>",
         // Two corners pushed inward: make smaller.
         Shrink => {
             "<path d='M20 10 H14 V4'/><path d='M14 10 L20.5 3.5'/>\

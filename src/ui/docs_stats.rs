@@ -244,7 +244,11 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         },
         Message::Docs(DocsMsg::ToggleShowAll),
     );
-    let refresh = chip("↻".into(), Message::Docs(DocsMsg::Refresh));
+    let refresh = super::toolbar::icon_action(
+        Glyph::Refresh,
+        tr!("Rebuild"),
+        Some(Message::Docs(DocsMsg::Refresh)),
+    );
     let controls = row![group_btn, vis_btn, space().width(Fill), refresh]
         .spacing(4)
         .align_y(iced::Center);
@@ -526,25 +530,13 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                 .size(ts::HEADING)
                 .color(theme::fg()),
             space().width(Fill),
-            // An icon, as the chrome's actions are, named by its tooltip.
-            super::toolbar::chrome_tip(
-                button(
-                    container(crate::glyph::icon(
-                        crate::glyph::Glyph::Refresh,
-                        theme::fg_muted(),
-                        15.0,
-                    ))
-                    .center(Fill),
-                )
-                .style(theme::icon_button(false))
-                .padding(0)
-                // The height of the header's title line: the page below
-                // sits where it did.
-                .width(24)
-                .height(24)
-                .on_press(Message::Overview(OverviewMsg::Generate)),
+            // An icon, as the chrome's actions are, named by its tooltip —
+            // the height of the header's title line: the page below sits
+            // where it did.
+            super::toolbar::icon_action(
+                Glyph::Refresh,
                 tr!("Regenerate"),
-                None,
+                Some(Message::Overview(OverviewMsg::Generate)),
             ),
         ]
         .align_y(iced::Center);
@@ -720,10 +712,11 @@ pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
 /// The code-statistics "home": totals, a language-proportion bar, a per-language
 /// breakdown, and the largest files (each row opens the file).
 pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
-    let refresh = button(text(tr!("Refresh")).size(ts::BODY))
-        .style(theme::toolbar_button)
-        .padding([3, 12])
-        .on_press(Message::Overview(OverviewMsg::RefreshStats));
+    let refresh = super::toolbar::icon_action(
+        Glyph::Refresh,
+        tr!("Refresh"),
+        Some(Message::Overview(OverviewMsg::RefreshStats)),
+    );
 
     // Nothing to show yet: computing, or a project with no counted code.
     let Some(report) = app.proj.stats.report.as_ref().filter(|r| !r.is_empty()) else {

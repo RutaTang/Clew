@@ -8800,3 +8800,106 @@ fn what_is_missing_to_make_embeddings_is_shown() {
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, program), "for the choice on the page");
 }
+
+/// Actions done again and again — refresh the statistics, rebuild the
+/// semantic index, expand every branch of a tree, close the diff — are
+/// icons named by their tooltips, not words; each does what its word did.
+#[test]
+fn repeated_actions_are_icons_that_do_what_they_did() {
+    use crate::{CallsMsg, OverviewMsg, SemanticMsg};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let words_gone = |sim: &mut Sim<'_>, words: &[&str]| {
+        for w in words {
+            assert!(!shows(sim, w), "{w:?} is still a word");
+        }
+    };
+
+    app.proj.stats.report = Some(crate::stats::StatsReport {
+        langs: vec![crate::stats::LangStat {
+            name: "Rust".into(),
+            files: 1,
+            code: 42,
+            comments: 0,
+            blanks: 0,
+        }],
+        ..Default::default()
+    });
+    words_gone(&mut sim_elem(super::stats_home(&app)), &["Refresh"]);
+    let sent = click_right_of(
+        || sim_elem(super::stats_home(&app)),
+        "Code Statistics",
+        |m| matches!(m, Message::Overview(OverviewMsg::RefreshStats)),
+    );
+    assert!(
+        !sent.is_empty(),
+        "the statistics are refreshed from their icon"
+    );
+
+    app.proj.embed_index = crate::embed::Index {
+        model: "m".into(),
+        base_url: "http://emb.test/v1".into(),
+        entries: vec![crate::embed::Entry {
+            node: crate::explain::Node::File(root.join("src/lib.rs")),
+            hash: 1,
+            vec: vec![1.0, 0.0],
+        }],
+    };
+    words_gone(&mut sim_elem(super::semantic_tab(&app)), &["Rebuild"]);
+    // At the start of the row the count ends.
+    let count = text_at(
+        &mut sim_elem(super::semantic_tab(&app)),
+        |t| t == "1 indexed",
+        0,
+    )
+    .expect("the count is on screen");
+    let rebuilt = (0..count.x as u32).step_by(3).any(|x| {
+        let mut sim = sim_elem(super::semantic_tab(&app));
+        sim.point_at(Point::new(x as f32, count.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .into_iter()
+            .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex)))
+    });
+    assert!(rebuilt, "the index is rebuilt from its icon");
+    // The first build is asked for in words.
+    app.proj.embed_index = crate::embed::Index::default();
+    assert!(shows(
+        &mut sim_elem(super::semantic_tab(&app)),
+        "Build index"
+    ));
+
+    let item = crate::lsp::client::CallItem {
+        name: "origin".into(),
+        detail: String::new(),
+        kind: 12,
+        path: root.join("src/lib.rs"),
+        line: 1,
+        character: 0,
+        raw: serde_json::json!({}),
+    };
+    app.proj.call_graph = Some(crate::callgraph::CallTree::new(
+        1,
+        crate::callgraph::Direction::Incoming,
+        "rust",
+        vec![item],
+    ));
+    words_gone(&mut sim_elem(super::calls_tab(&app)), &["Expand all"]);
+    let sent = click_right_of(
+        || sim_elem(super::calls_tab(&app)),
+        "origin",
+        |m| matches!(m, Message::Calls(CallsMsg::ExpandAll)),
+    );
+    assert!(!sent.is_empty(), "the tree is expanded from its icon");
+
+    let abs = root.join("src/lib.rs");
+    app.proj.diff = Some(crate::DiffState::new(abs, "src/lib.rs".into(), Vec::new()));
+    let head = "src/lib.rs  ·  vs HEAD";
+    words_gone(&mut sim_of(&app), &["✕ Close"]);
+    let sent = click_right_of(
+        || sim_of(&app),
+        head,
+        |m| matches!(m, Message::Editor(EditorMsg::ToggleDiff)),
+    );
+    assert!(!sent.is_empty(), "the diff is closed from its icon");
+}

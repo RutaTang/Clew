@@ -470,10 +470,11 @@ pub(crate) fn diff_view<'a>(
                 .size(ts::BODY)
                 .color(theme::accent()),
             space().width(Fill),
-            button(text(format!("✕ {}", tr!("Close"))).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Editor(EditorMsg::ToggleDiff)),
+            super::toolbar::icon_action(
+                crate::glyph::Glyph::Close,
+                tr!("Close"),
+                Some(Message::Editor(EditorMsg::ToggleDiff)),
+            ),
         ]
         .align_y(iced::Center),
     )

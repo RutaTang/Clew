@@ -1657,19 +1657,26 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .size(ts::BASE)
         .padding(7);
 
-    let build_label = if app.proj.building_embeddings {
-        tr!("Building…")
-    } else if n == 0 {
-        tr!("Build index")
-    } else {
-        tr!("Rebuild")
-    };
-    let mut build = button(text(build_label).size(ts::SMALL))
+    let press =
+        (!app.proj.building_embeddings).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    // The first build is asked for in words; building again, as the other
+    // rebuilds are, by its icon.
+    let build: Element<'_, Message> = if n == 0 {
+        button(
+            text(if app.proj.building_embeddings {
+                tr!("Building…")
+            } else {
+                tr!("Build index")
+            })
+            .size(ts::SMALL),
+        )
         .style(theme::toolbar_button)
-        .padding([2, 8]);
-    if !app.proj.building_embeddings {
-        build = build.on_press(Message::Semantic(SemanticMsg::BuildIndex));
-    }
+        .padding([2, 8])
+        .on_press_maybe(press)
+        .into()
+    } else {
+        super::toolbar::icon_action(crate::glyph::Glyph::Refresh, tr!("Rebuild"), press)
+    };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
     let info = text(if app.proj.building_embeddings {
