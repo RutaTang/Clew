@@ -426,6 +426,14 @@ mod tests {
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = std::env::temp_dir().join(format!("clew-speaker-real-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        // The copy goes with the test, whether or not it passes.
+        struct Gone(PathBuf);
+        impl Drop for Gone {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _gone = Gone(dir.clone());
         for file in model.files {
             let to = dir.join(file.path);
             std::fs::create_dir_all(to.parent().unwrap()).unwrap();

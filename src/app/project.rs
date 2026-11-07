@@ -334,12 +334,11 @@ impl App {
         })
     }
 
-    /// Consent to creating `.clew` in `root`: the folder the modal within
-    /// reach asks about, once it has been long enough to be read
-    /// ([`App::may_allow`]).
-    /// The first open answered: the project opens — `with_setup`, with what
-    /// its sheet has ticked (Open); without, with nothing of it done (Not
-    /// now).
+    /// The first open of `root` answered — the folder the sheet within reach
+    /// asks about, once it has been long enough to be read
+    /// ([`App::may_allow`]): the project opens, its `.clew` made —
+    /// `with_setup`, with what its sheet has ticked (Open); without, with
+    /// nothing of it done (Not now).
     pub(crate) fn on_consent_allowed(&mut self, root: PathBuf, with_setup: bool) -> Task<Message> {
         if self.pending_consent.as_ref() != Some(&root)
             || !self.may_allow(&crate::app::model::Question::Project(root.clone()))

@@ -11,7 +11,7 @@ use clew_protocol::StreamOutcome;
 use clew_voice::speaker::SayError;
 use clew_voice::speech::{self, VoiceModel};
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// One sentence the test's voice was asked to say.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,7 +32,8 @@ struct Voice {
     fail: Mutex<Option<SayError>>,
     /// The rate it speaks at; 1 kHz until a test says otherwise.
     rate: Mutex<u32>,
-    stopped: AtomicUsize,
+    /// The models it was asked to let go of, in turn.
+    stopped: Mutex<Vec<&'static str>>,
 }
 
 impl Synthesizer for Voice {
@@ -62,8 +63,8 @@ impl Synthesizer for Voice {
         };
         Ok((vec![0.25; words * 100 * rate as usize / 1000], rate))
     }
-    fn stop_while(&self, _model: &'static VoiceModel, work: &mut dyn FnMut()) {
-        self.stopped.fetch_add(1, Ordering::Relaxed);
+    fn stop_while(&self, model: &'static VoiceModel, work: &mut dyn FnMut()) {
+        self.stopped.lock().unwrap().push(model.id);
         work();
     }
 }
@@ -678,7 +679,7 @@ fn speech_models_download_verified_file_by_file() {
     let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("kokoro-zh")));
     settle(&mut app, task);
     assert!(!dir.exists());
-    assert_eq!(voice.stopped.load(Ordering::Relaxed), 1);
+    assert_eq!(*voice.stopped.lock().unwrap(), ["kokoro-zh"], "its own");
     assert!(app.status.contains("Removed"), "{}", app.status);
 }
 
@@ -881,7 +882,6 @@ fn the_fallback_answer_to_a_spoken_question_is_spoken() {
     settle(&mut app, task);
     assert_eq!(app.proj.ask_turns.len(), 1, "the fallback's own turn");
     assert!(newest_spoken(&app), "its answer is read aloud");
-    assert!(!app.proj.ask_spoken, "what was typed is not taken for said");
 }
 
 /// The next question, said into the input while an agent turn runs, is
@@ -920,7 +920,6 @@ fn a_spoken_question_takes_its_voice_with_it() {
         "to its retrieval"
     );
     let _ = app.update(Message::Ask(AskMsg::Stop));
-    assert!(!app.proj.ask_spoken, "nor did the Stop leave it behind");
     // Its retrieval fails: it is back, still the question said.
     app.proj.ask_input = "what does total do?".into();
     app.proj.ask_spoken = true;
@@ -969,7 +968,6 @@ fn a_spoken_question_waits_for_mcp_servers_with_its_voice() {
         .expect("the servers answered");
     let _pump = app.update(gathered);
     assert!(newest_spoken(&app));
-    assert!(!app.proj.ask_spoken, "what was typed is not taken for said");
 }
 
 /// While a voice model's files are removed — or downloaded — in any

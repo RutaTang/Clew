@@ -95,6 +95,35 @@ fn not_now_opens_the_project_with_nothing_set_up() {
     );
 }
 
+/// Not now answers the sheet's question as Open does: pressed before the
+/// sheet can have been read — a click meant for what was there a moment
+/// before — it opens nothing; once it can have been, the project opens.
+#[test]
+fn not_now_waits_until_the_sheet_can_have_been_read() {
+    let data = test_dir("setup-data-not-now-unread");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = fixture_project("setup-not-now-unread");
+    let mut app = blank_app();
+    let delay = std::time::Duration::from_secs(5);
+    app.asking.delay = delay;
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        root.clone(),
+    ))));
+    let _ = app.update(Message::Noop);
+    let _ = app.update(Message::Project(ProjectMsg::OpenWithoutSetup(root.clone())));
+    assert!(
+        app.pending_consent.is_some() && app.setup.is_some(),
+        "not answered"
+    );
+    assert!(!app.scanning, "nothing opened");
+    assert!(!clew_core::trust::Trust::load().is_root_trusted(None, &root));
+    read_for(&mut app, delay);
+    let _ = app.update(Message::Project(ProjectMsg::OpenWithoutSetup(root.clone())));
+    assert!(app.pending_consent.is_none() && app.scanning, "opened");
+}
+
 /// Open with the servers ticked: the leave to build is recorded at once —
 /// no "Let the language server build this project?" later — and the
 /// downloads wait for the project to be open. Explaining, not ticked,
