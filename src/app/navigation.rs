@@ -446,9 +446,11 @@ impl App {
         enc: viewer::PositionEncoding,
     ) -> Task<Message> {
         // Painting the sidebar supersedes whatever it was waiting for — a
-        // server-side text search included (see `goto_request`).
+        // server-side text search included (see `goto_request`), and a
+        // pause in typing still to end, whose search painted over the list.
         self.proj.search_seq += 1;
         self.proj.link.pending_search = None;
+        self.proj.search.typed += 1;
         let seq = self.proj.search_seq;
         let mut to_read: Vec<(usize, PathBuf, usize, usize)> = Vec::new();
         let hits: Vec<SearchHit> = targets

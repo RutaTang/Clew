@@ -543,8 +543,9 @@ fn model_downloads_are_verified() {
     assert!(!app.voice.installed(model));
 }
 
-/// A model downloaded is the one the voice key hears with — not the one
-/// chosen before, which may not be on this computer — and that is kept.
+/// A model downloaded is the one the voice key hears with when the one
+/// chosen is not on this computer — and that is kept; one chosen and here
+/// stays chosen.
 #[test]
 fn a_downloaded_model_is_the_one_the_voice_key_uses() {
     // A data directory of its own: config.toml is everyone's.
@@ -569,6 +570,17 @@ fn a_downloaded_model_is_the_one_the_voice_key_uses() {
     assert!(app.status.contains("is ready"), "{}", app.status);
     assert_eq!(app.voice.prefs.model, "tiny.en");
     assert_eq!(VoicePrefs::load().model, "tiny.en", "kept");
+    // One chosen and here stays chosen when another finishes downloading
+    // (picked while it downloaded, say): that one is only said to be here.
+    let _ = app.update(Message::Voice(VoiceMsg::Download("base.en")));
+    let base = clew_voice::models::find("base.en").unwrap();
+    std::fs::write(store.path(base), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::Downloaded {
+        id: "base.en",
+        result: Ok(store.path(base)),
+    }));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    assert!(app.status.contains("is downloaded"), "{}", app.status);
     // And the voice key listens with it, as the status says.
     app.voice.reset_for_test();
     script.lock().unwrap().silence = None;

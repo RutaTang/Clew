@@ -448,8 +448,14 @@ impl App {
         for node in nodes {
             tree.push_root(node);
         }
-        // Definitions and references share the cap: the note counts both.
-        let total = defs.len() + refs.len();
+        // Definitions and references share the cap: the note counts both,
+        // the declaration once (references are asked for with it).
+        let total = defs
+            .iter()
+            .chain(&refs)
+            .map(|t| (&t.path, t.line, t.character))
+            .collect::<HashSet<_>>()
+            .len();
         if total > MAX_FLOW_NODES {
             tree.note = Some(tr!(
                 "{total} occurrences; the first {shown} are shown",

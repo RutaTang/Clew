@@ -671,16 +671,23 @@ impl App {
                 match result {
                     Ok(_) => {
                         self.voice.download_errors.remove(id);
-                        self.status = tr!(
-                            "{model} is ready — press the voice key to talk",
-                            model = name
-                        );
                         // The model just downloaded is the one the voice
-                        // key hears with from now on, as that says: kept
-                        // to the one chosen before, the key would send the
-                        // reader back to Settings for a model still not on
-                        // this computer (the first one chosen is Small).
-                        if self.voice.prefs.model != id {
+                        // key hears with when the one chosen is not on this
+                        // computer (the first one chosen, Small, is not):
+                        // kept to it, the key sent the reader back to
+                        // Settings for it. One chosen and here stays chosen
+                        // — one picked while this downloaded included.
+                        let chosen = self.voice.prefs.model();
+                        let switch = chosen.id != id && !self.voice.installed(chosen);
+                        self.status = if switch || chosen.id == id {
+                            tr!(
+                                "{model} is ready — press the voice key to talk",
+                                model = name
+                            )
+                        } else {
+                            tr!("{model} is downloaded", model = name)
+                        };
+                        if switch {
                             self.voice.prefs.model = id.to_string();
                             self.save_voice_prefs();
                         }

@@ -2486,6 +2486,7 @@
  "{matches} · 1 file not searched ({file}: {reason})": "{matches} · 1 个文件未搜索（{file}：{reason}）",
  "{matches} · {n} files not searched ({file}: {reason})": "{matches} · {n} 个文件未搜索（{file}：{reason}）",
  "{mime} ({arg1} MB, too large)": "{mime}（{arg1} MB，过大）",
+ "{model} is downloaded": "{model} 已下载",
  "{model} is ready — press the voice key to talk": "{model} 已就绪，按语音快捷键即可说话",
  "{module} did not compile — see the output": "{module} 编译失败，请查看输出",
  "{month} {day}": "{month}{day}日",

@@ -2486,6 +2486,7 @@
  "{matches} · 1 file not searched ({file}: {reason})": "{matches} · 파일 1개는 검색하지 않음 ({file}: {reason})",
  "{matches} · {n} files not searched ({file}: {reason})": "{matches} · 파일 {n}개는 검색하지 않음 ({file}: {reason})",
  "{mime} ({arg1} MB, too large)": "{mime} ({arg1} MB, 너무 큼)",
+ "{model} is downloaded": "{model} 모델 다운로드 완료",
  "{model} is ready — press the voice key to talk": "{model} 모델 준비 완료 — 음성 키를 누르고 말하세요",
  "{module} did not compile — see the output": "{module} 모듈을 컴파일하지 못함 — 출력을 확인하세요",
  "{month} {day}": "{month} {day}일",

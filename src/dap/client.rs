@@ -89,9 +89,11 @@ pub struct DapClient {
     /// (where the same port number may be someone else's). `None` over stdio.
     addr: Option<SocketAddr>,
     timeout: Duration,
-    /// Set by the first [`Self::disconnect`] of any of this session's
-    /// handles: the session is asked to end once.
-    disconnected: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The session's one `disconnect`, started by the first
+    /// [`Self::disconnect`] of any of its handles and waited for by every
+    /// other: the session is asked to end once, and no handle goes before
+    /// it has ended.
+    disconnect: Arc<std::sync::Mutex<Option<Disconnecting>>>,
 }
 
 impl DapClient {
@@ -294,7 +296,7 @@ impl DapClient {
             rpc,
             addr,
             timeout: REQUEST_TIMEOUT,
-            disconnected: Default::default(),
+            disconnect: Default::default(),
         };
         (client, events)
     }
@@ -565,19 +567,50 @@ impl DapClient {
     /// it saw the run end, and debugpy, which closes its connection once it
     /// has answered one, failed on the second and exited with code 1: its
     /// traceback came up on the status line.
+    ///
+    /// A later caller waits for that one's answer: returning at once, the
+    /// run's stream ended and dropped the events while the app's disconnect
+    /// was still waiting, and the next event the adapter sent as it ended
+    /// the program ended the session — its process killed before it had.
+    /// The request runs on its own, so a caller given up does not take it
+    /// with it for another to send again.
     pub async fn disconnect(&self) -> Result<(), String> {
-        if self
-            .disconnected
-            .swap(true, std::sync::atomic::Ordering::SeqCst)
-        {
-            return Ok(());
+        let mut answer = {
+            let mut slot = self
+                .disconnect
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match slot.as_ref() {
+                Some(answer) => answer.clone(),
+                None => {
+                    let (tell, answer) = tokio::sync::watch::channel(None);
+                    let client = self.clone();
+                    let within = self.timeout.min(DISCONNECT_TIMEOUT);
+                    tokio::spawn(async move {
+                        let ended = client
+                            .request_within(
+                                "disconnect",
+                                json!({ "terminateDebuggee": true }),
+                                within,
+                            )
+                            .await
+                            .map(|_| ());
+                        let _ = tell.send(Some(ended));
+                    });
+                    *slot = Some(answer.clone());
+                    answer
+                }
+            }
+        };
+        match answer.wait_for(Option::is_some).await {
+            Ok(ended) => ended.clone().unwrap_or(Ok(())),
+            Err(_) => Err("the disconnect was given up".into()),
         }
-        let within = self.timeout.min(DISCONNECT_TIMEOUT);
-        self.request_within("disconnect", json!({ "terminateDebuggee": true }), within)
-            .await
-            .map(|_| ())
     }
 }
+
+/// What a session's one `disconnect` came to, once it has an answer.
+type Disconnecting = tokio::sync::watch::Receiver<Option<Result<(), String>>>;
 
 /// Largest single `output` chunk kept from an adapter. A debuggee that writes
 /// megabytes in one `write` arrives as ONE output event, and every cap around
@@ -1367,14 +1400,24 @@ mod tests {
 
     /// A session is asked to disconnect once, however many of its handles
     /// ask: Stop asked from the app and from the run's stream, and debugpy
-    /// crashed on the second.
+    /// crashed on the second. Each handle returns once it has ended.
     #[tokio::test]
     async fn a_session_is_disconnected_once() {
         let (client, _events, mut adapter) = manual_adapter().await;
         let other = client.clone();
+        // Held to the end: with every handle gone, the transport closes.
+        let _held = client.clone();
         let first = tokio::spawn(async move { client.disconnect().await });
         let asked = adapter.next().await;
         assert_eq!(asked["command"], "disconnect");
+        // Asked again before the adapter answers, it waits for that answer:
+        // returning at once, the run's stream let its events go mid-way.
+        let second = tokio::spawn(async move { other.disconnect().await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !second.is_finished(),
+            "returned before the session had ended"
+        );
         adapter
             .send(
                 json!({"seq": 1, "type": "response", "request_seq": asked["seq"],
@@ -1382,7 +1425,7 @@ mod tests {
             )
             .await;
         assert_eq!(first.await.unwrap(), Ok(()));
-        assert_eq!(other.disconnect().await, Ok(()));
+        assert_eq!(second.await.unwrap(), Ok(()));
         assert!(
             tokio::time::timeout(Duration::from_millis(300), adapter.next())
                 .await

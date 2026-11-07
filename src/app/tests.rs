@@ -8572,6 +8572,15 @@ fn an_unreadable_breakpoints_file_is_left_as_it_is() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
     assert!(app.status.contains("version 2"), "{}", app.status);
     assert!(app.debug.breakpoints[&root.join("src/lib.rs")].contains_key(&4));
+    // An empty one — what a crash can leave — holds nothing to lose: it is
+    // written over, where refused, no breakpoint was kept again.
+    std::fs::write(&file, "").unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: root.join("src/lib.rs"),
+        line: 5,
+    }));
+    let kept = crate::app::breakpoints_store::load(&dir);
+    assert_eq!(kept.iter().map(|s| s.line).collect::<Vec<_>>(), [5]);
 }
 
 /// A remote project keeps its breakpoints as a local one does: by its path
@@ -12478,6 +12487,31 @@ async fn each_list_of_places_marks_its_own_requests_name() {
     let _ = app.goto_request(0, 2, 7, GotoKind::TypeDefinition);
     let _ = app.on_definition_result(Ok(vec![at(2), at(0)]));
     assert_eq!(marked(&app), None, "a type's places mark no word");
+}
+
+/// A list of places shown while the search box's typing pause is still to
+/// end stays: the pause's search, run when it ended, painted over it.
+#[test]
+fn a_list_of_places_outlasts_a_pause_in_typing() {
+    let mut app = scanned_app("refs-outlast-pause");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let _ = app.update(Message::Nav(NavMsg::SearchQueryChanged("origin".into())));
+    let typed = app.proj.search.typed;
+    let _ = app.show_locations(
+        "(references)",
+        vec![lsp::client::Target {
+            path: root.join("src/lib.rs"),
+            line: 2,
+            character: 7,
+        }],
+        crate::viewer::PositionEncoding::Utf16,
+    );
+    let _ = app.update(Message::Nav(NavMsg::SearchSettled {
+        stamp: app.stamp(),
+        typed,
+    }));
+    assert_eq!(app.proj.search.listing.as_deref(), Some("(references)"));
+    assert!(!app.proj.search.running, "no search was started over it");
 }
 
 /// A reference in a file open in a pane is previewed from the line as the

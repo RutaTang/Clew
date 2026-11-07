@@ -51,6 +51,11 @@ fn load_checked(dir: &Path) -> std::io::Result<Vec<Saved>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
+    // Empty: what a crash can leave of a file written as it struck. It
+    // holds nothing to lose, where refused, every later change was.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
     match serde_json::from_slice::<BreakpointsFile>(&bytes) {
         Ok(file) if file.version == VERSION => Ok(file
             .breakpoints
@@ -71,8 +76,9 @@ pub(crate) fn load(dir: &Path) -> Vec<Saved> {
     load_checked(dir).unwrap_or_default()
 }
 
-/// Write `list` whole beside the file, then move it over: a crash leaves
-/// the old file or the new, never half of one.
+/// Write `list` whole beside the file, synced to the disk, then move it
+/// over: a crash leaves the old file or the new, never half of one (moved
+/// over unsynced, a crash could leave it empty).
 fn save(dir: &Path, list: &[Saved]) -> std::io::Result<()> {
     clew_core::derived::ensure_private_dir(dir)?;
     let file = BreakpointsFile {
@@ -80,9 +86,7 @@ fn save(dir: &Path, list: &[Saved]) -> std::io::Result<()> {
         breakpoints: list.to_vec(),
     };
     let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
-    let tmp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, dir.join(FILE))
+    clew_core::statefile::write_atomic(&dir.join(FILE), &bytes)
 }
 
 /// Serializes [`edit`]'s read, change and write across this process's

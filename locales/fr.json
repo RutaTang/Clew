@@ -2486,6 +2486,7 @@
  "{matches} · 1 file not searched ({file}: {reason})": "{matches} · {n} fichier ignoré ({file} : {reason})",
  "{matches} · {n} files not searched ({file}: {reason})": "{matches} · {n} fichiers ignorés ({file} : {reason})",
  "{mime} ({arg1} MB, too large)": "{mime} ({arg1} Mo, trop volumineuse)",
+ "{model} is downloaded": "Modèle {model} téléchargé",
  "{model} is ready — press the voice key to talk": "Modèle {model} prêt — appuyez sur la touche vocale pour parler",
  "{module} did not compile — see the output": "la compilation du module {module} a échoué — consultez la sortie",
  "{month} {day}": "{day} {month}",

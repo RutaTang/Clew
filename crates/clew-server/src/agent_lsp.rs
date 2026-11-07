@@ -668,9 +668,14 @@ async fn run_query(
         match kind {
             Semantic::Definition => client.definition(abs, line0, character).await,
             Semantic::References => {
-                client
+                let refs = client
                     .navigate("textDocument/references", abs, line0, character)
+                    .await?;
+                let defs = client
+                    .definition(abs, line0, character)
                     .await
+                    .unwrap_or_default();
+                Ok(without_declarations(refs, &defs))
             }
             Semantic::Hover => {
                 let text = client.hover(abs, line0, character).await?;
@@ -682,6 +687,13 @@ async fn run_query(
     tokio::time::timeout(CALL_TIMEOUT, fut)
         .await
         .map_err(|_| "the language server timed out".to_string())?
+}
+
+/// References less the declarations among them. The client asks for the
+/// declaration with them (without it, pyright leaves out every use reached
+/// through an import): kept, a name used nowhere read as used once.
+fn without_declarations(refs: Vec<Target>, defs: &[Target]) -> Vec<Target> {
+    refs.into_iter().filter(|r| !defs.contains(r)).collect()
 }
 
 /// Resolve and launch the server for `language`, then wait out its initial
@@ -829,6 +841,20 @@ mod tests {
         assert_eq!(byte_col, 13);
         assert_eq!(lsp_character(PositionEncoding::Utf16, line, byte_col), 7);
         assert_eq!(lsp_character(PositionEncoding::Utf8, line, byte_col), 13);
+    }
+
+    /// A name's references are its uses: the declaration the client asks
+    /// for with them (for pyright's sake) is not one of them.
+    #[test]
+    fn references_leave_out_the_declaration() {
+        let at = |line| Target {
+            path: PathBuf::from("/p/a.py"),
+            line,
+            character: 4,
+        };
+        assert_eq!(without_declarations(vec![at(0), at(7)], &[at(0)]), [at(7)]);
+        assert!(without_declarations(vec![at(0)], &[at(0)]).is_empty());
+        assert_eq!(without_declarations(vec![at(3)], &[]), [at(3)]);
     }
 
     #[test]
