@@ -427,10 +427,10 @@ impl App {
     /// Start clew's agent on `question`, with the configured MCP servers'
     /// tools: reached first when there are any, the turn waiting for them
     /// (at most [`GATHER_TIMEOUT`]).
-    pub(crate) fn start_agent_ask(&mut self, question: String) -> Task<Message> {
+    pub(crate) fn start_agent_ask(&mut self, question: String, spoken: bool) -> Task<Message> {
         let servers = self.mcp_servers();
         if servers.is_empty() {
-            return self.start_agent_turn(question, Vec::new(), ToolMap::new());
+            return self.start_agent_turn(question, spoken, Vec::new(), ToolMap::new());
         }
         let token = self.mint_request_id();
         self.proj.inflight.ask_gather = Some(token);
@@ -453,6 +453,7 @@ impl App {
                     stamp: stamp.clone(),
                     token,
                     question: question.clone(),
+                    spoken,
                     gathered,
                 })
             },
@@ -465,6 +466,7 @@ impl App {
         &mut self,
         token: u64,
         question: String,
+        spoken: bool,
         gathered: Vec<mcp::hub::Gathered>,
     ) -> Task<Message> {
         // Stopped or cleared meanwhile: nothing is asked.
@@ -523,13 +525,11 @@ impl App {
             )
         };
         if !self.server.is_up() {
-            if self.proj.ask_input.trim().is_empty() {
-                self.proj.ask_input = question;
-            }
+            self.return_question(question, spoken);
             self.status = tr!("clew-server went away — ask again once it is back").into();
             return Task::none();
         }
-        self.start_agent_turn(question, tools, map)
+        self.start_agent_turn(question, spoken, tools, map)
     }
 
     /// The agent turn on `stream` calls MCP tool `tool`: run it, or ask the

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::app::speech::{Playing, Synthesizer};
-use crate::app::voice::{VoicePhase, VoicePrefs};
+use crate::app::voice::{Claim, ClaimedFor, VoicePhase, VoicePrefs};
 use clew_protocol::StreamOutcome;
 use clew_voice::speaker::SayError;
 use clew_voice::speech::{self, VoiceModel};
@@ -766,6 +766,24 @@ fn a_wait_between_sentences_is_no_stall() {
     assert_eq!(output.lock().unwrap().opened, opened, "not opened again");
 }
 
+/// An output that stops playing is found out while sentences still come
+/// to it: each one given to it is no time it played.
+#[test]
+fn a_stopped_output_is_found_out_while_sentences_come() {
+    let (mut app, _voice, output) = speech_app("speech-stuck-output");
+    asked(&mut app, 1, true);
+    for i in 0..12 {
+        delta(&mut app, 1, &format!("Sentence number {i} is here. "));
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(&mut app, task);
+    }
+    assert!(
+        output.lock().unwrap().opened >= 2,
+        "the stopped output was never found out"
+    );
+}
+
 /// Speech ends with the conversation it belongs to: a new one, another
 /// session, another project — also once its answer is written.
 #[test]
@@ -779,6 +797,24 @@ fn speech_ends_with_its_conversation() {
     settle(&mut app, task);
     assert!(!app.voice.speech.is_speaking());
     let _ = voice;
+}
+
+/// Deleting the session on screen ends what is said of it — another
+/// session's deletion does not.
+#[test]
+fn speech_ends_with_the_session_deleted() {
+    let (mut app, _voice, _) = speech_app("speech-delete-session");
+    app.proj.ask_session = Some(7);
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then it rounds.");
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    let task = app.update(Message::Ask(AskMsg::DeleteSession(8)));
+    settle(&mut app, task);
+    assert!(app.voice.speech.is_speaking(), "another session went");
+    let task = app.update(Message::Ask(AskMsg::DeleteSession(7)));
+    settle(&mut app, task);
+    assert!(!app.voice.speech.is_speaking());
 }
 
 /// Each sentence comes to the output at the output's own rate: made at it
@@ -800,11 +836,10 @@ fn sentences_come_at_the_outputs_rate() {
     assert_eq!(script.played[0], 200, "{:?}", script.played);
 }
 
-/// An agent turn that fails at once falls back to the index — and the
-/// answer to a question said aloud is said aloud there too.
-#[test]
-fn the_fallback_answer_to_a_spoken_question_is_spoken() {
-    let (mut app, _voice, _) = speech_app("speech-fallback");
+/// A project to ask in by retrieval: a selection pinned as its grounding (no
+/// index needed), and a chat model that is never reached.
+fn retrieval_app(tag: &str) -> App {
+    let (mut app, _voice, _) = speech_app(tag);
     let root = app.proj.project.as_ref().unwrap().root.clone();
     app.proj.ask_pins.push(crate::app::model::AskPin {
         rel: "README.md".into(),
@@ -812,16 +847,106 @@ fn the_fallback_answer_to_a_spoken_question_is_spoken() {
         line: 1,
         code: "# shop".into(),
     });
+    app.llm_config_cache = Some(Some(super::unreachable_llm()));
+    app
+}
+
+/// An agent turn on `stream`, for `question` asked aloud or typed, that
+/// fails at once: what falls back to the index, as a task.
+fn agent_fails(app: &mut App, spoken: bool) -> Task<Message> {
     let stream = app.mint_request_id();
-    asked(&mut app, stream, true);
+    asked(app, stream, spoken);
     app.proj.link.agent_stream = Some(stream);
-    let _ = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+    app.update(Message::Ask(AskMsg::AgentTurnEnded {
         stamp: app.stamp(),
         stream,
         outcome: StreamOutcome::Failed("agent unavailable".into()),
-    }));
+    }))
+}
+
+/// Whether the newest turn's question was said aloud — its answer read.
+fn newest_spoken(app: &App) -> bool {
+    app.proj.ask_turns.last().expect("a turn").spoken
+}
+
+/// An agent turn that fails at once falls back to the index — and the
+/// answer to a question said aloud is said aloud there too, whatever is
+/// typed into the input while the index is read.
+#[test]
+fn the_fallback_answer_to_a_spoken_question_is_spoken() {
+    let mut app = retrieval_app("speech-fallback");
+    let task = agent_fails(&mut app, true);
     assert!(app.proj.asking, "the index took the question over");
-    assert!(app.proj.ask_spoken, "its answer will be spoken");
+    let _ = app.update(Message::Ask(AskMsg::InputChanged("and the tax".into())));
+    settle(&mut app, task);
+    assert_eq!(app.proj.ask_turns.len(), 1, "the fallback's own turn");
+    assert!(newest_spoken(&app), "its answer is read aloud");
+    assert!(!app.proj.ask_spoken, "what was typed is not taken for said");
+}
+
+/// The next question, said into the input while an agent turn runs, is
+/// still one said when that turn falls back — and the fallback's answer to
+/// a typed question is not read.
+#[test]
+fn a_question_said_meanwhile_keeps_its_voice() {
+    let mut app = retrieval_app("speech-said-meanwhile");
+    app.proj.ask_input = "and the tax?".into();
+    app.proj.ask_spoken = true;
+    let task = agent_fails(&mut app, false);
+    settle(&mut app, task);
+    assert!(
+        !newest_spoken(&app),
+        "a typed question's answer is not read"
+    );
+    assert_eq!(app.proj.ask_input, "and the tax?");
+    assert!(app.proj.ask_spoken, "the question said meanwhile still is");
+}
+
+/// A question said aloud takes its voice with it when asked: stopped while
+/// the index is read, the next one typed is not taken for one said. One
+/// that fails comes back into the input as said.
+#[test]
+fn a_spoken_question_takes_its_voice_with_it() {
+    let mut app = retrieval_app("speech-flag-taken");
+    app.proj.ask_input = "what does total do?".into();
+    app.proj.ask_spoken = true;
+    let _retrieving = app.update(Message::Ask(AskMsg::Submit));
+    assert!(app.proj.asking);
+    let _ = app.update(Message::Ask(AskMsg::Stop));
+    assert!(!app.proj.ask_spoken, "the stopped question took it");
+    // Its retrieval fails: it is back, still the question said.
+    app.proj.ask_input = "what does total do?".into();
+    app.proj.ask_spoken = true;
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    let stream = app.proj.inflight.ask_retrieval.as_ref().unwrap().0;
+    let _ = app.on_ask_retrieved(
+        stream,
+        "what does total do?".into(),
+        true,
+        None,
+        Err("timed out".into()),
+    );
+    assert_eq!(app.proj.ask_input, "what does total do?");
+    assert!(app.proj.ask_spoken);
+}
+
+/// With MCP servers to reach first, a question said aloud is still one
+/// said once they answer, whatever is typed meanwhile.
+#[test]
+fn a_spoken_question_waits_for_mcp_servers_with_its_voice() {
+    let (mut app, _voice, _) = speech_app("speech-mcp-gather");
+    let token = app.mint_request_id();
+    app.proj.inflight.ask_gather = Some(token);
+    let _rx = super::attach_server(&mut app);
+    let _ = app.update(Message::Ask(AskMsg::InputChanged("typed".into())));
+    let _ = app.update(Message::Ask(AskMsg::McpGathered {
+        stamp: app.stamp(),
+        token,
+        question: "what does total do?".into(),
+        spoken: true,
+        gathered: Vec::new(),
+    }));
+    assert!(newest_spoken(&app));
 }
 
 /// While a voice model's files are removed — or downloaded — in any
@@ -831,19 +956,56 @@ fn nothing_is_said_with_a_model_being_removed() {
     let (mut app, voice, _) = speech_app("speech-removing");
     let store = app.voice.store.clone().unwrap();
     let model = speech::find("supertonic-3").unwrap();
-    let claim = crate::app::voice::Claim::take(speech::dir(&store, model)).unwrap();
+    let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();
     asked(&mut app, 1, true);
     delta(&mut app, 1, "First one. Second one. Third");
     assert!(voice.texts().is_empty());
     assert!(!app.status.contains("download"), "{}", app.status);
     drop(claim);
     // Removing a model being downloaded is refused, saying so.
-    let claim = crate::app::voice::Claim::take(speech::dir(&store, model)).unwrap();
+    let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();
     let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
     settle(&mut app, task);
     assert!(app.speech_installed(model));
     assert!(app.status.contains("already downloading"), "{}", app.status);
     drop(claim);
+}
+
+/// A model being removed says so to a second Remove, here or in another
+/// window, and to a download — not that it is downloading.
+#[test]
+fn a_model_being_removed_says_so() {
+    let (mut app, _voice, _) = speech_app("speech-removed-twice");
+    let removing = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    assert!(app.status.contains("being removed"), "{}", app.status);
+    app.status.clear();
+    let _ = app.update(Message::Voice(VoiceMsg::DownloadSpeech("supertonic-3")));
+    assert!(app.status.contains("being removed"), "{}", app.status);
+    settle(&mut app, removing);
+    assert!(app.status.starts_with("Removed"), "{}", app.status);
+}
+
+/// Removing a model ends what is being said with it — not what another
+/// model says.
+#[test]
+fn removing_a_model_ends_only_what_it_says() {
+    let (mut app, _voice, _) = speech_app("speech-remove-other");
+    install(&app, speech::find("kokoro-zh").unwrap());
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price. Then it rounds.");
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("kokoro-zh")));
+    settle(&mut app, task);
+    assert!(!app.speech_installed(speech::find("kokoro-zh").unwrap()));
+    assert!(
+        app.voice.speech.is_speaking(),
+        "another model's speech goes on"
+    );
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("supertonic-3")));
+    settle(&mut app, task);
+    assert!(!app.voice.speech.is_speaking());
 }
 
 /// Each window saves the voice setting it changed, and only that: a

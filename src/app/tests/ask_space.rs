@@ -32,7 +32,7 @@ fn indexed_ask(tag: &str) -> (App, embed::Space, DataDirOverride) {
 fn begin_indexed_question(app: &mut App) -> u64 {
     // The returned HTTP task is not run: tests supply the endpoint's reply
     // through the production Retrieved message and inspect what may be sent.
-    let _ = app.on_ask_submit_rag("what is Point?".into());
+    let _ = app.on_ask_submit_rag("what is Point?".into(), false);
     assert!(app.proj.asking);
     app.proj.inflight.ask_retrieval.as_ref().unwrap().0
 }
@@ -42,6 +42,7 @@ fn retrieve(app: &mut App, stream: u64, space: Option<embed::Space>) -> Task<Mes
         stamp: app.stamp(),
         stream,
         question: "what is Point?".into(),
+        spoken: false,
         space,
         qvec: Ok(vec![1.0, 0.0]),
     }))
@@ -217,7 +218,7 @@ fn ask_without_vector_retrieval_keeps_live_grounding_across_space_changes() {
         } else {
             app.proj.ask_pins.push(ask_pin(&root));
         }
-        let submitted = app.on_ask_submit_rag("what is Point?".into());
+        let submitted = app.on_ask_submit_rag("what is Point?".into(), false);
         let mut cfg = embed::Config::current_or_default();
         cfg.model = "new-model".into();
         cfg.save().unwrap();
@@ -316,7 +317,7 @@ fn ask_captures_the_space_of_the_real_embedding_request_before_settings_change()
             vec: vec![1.0, 0.0],
         }],
     };
-    let submitted = app.on_ask_submit_rag("what is Point?".into());
+    let submitted = app.on_ask_submit_rag("what is Point?".into(), false);
     let pending = std::thread::spawn(move || run_task(submitted));
     let body = arrived.recv_timeout(Duration::from_secs(10)).unwrap();
     assert!(body.contains("\"model\":\"m\""));

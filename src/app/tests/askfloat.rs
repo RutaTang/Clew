@@ -98,6 +98,7 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
     let mut rx = attach_server(&mut app);
     let _ = app.start_agent_turn(
         "why?".into(),
+        false,
         Vec::new(),
         crate::app::integrations::ToolMap::new(),
     );
@@ -467,9 +468,12 @@ fn going_back_to_the_oldest_session_keeps_it() {
     // A new session's first answer, streaming from the provider here.
     let stream = app.mint_request_id();
     let _ = app.start_ask_stream(
-        stream,
-        "why?".into(),
-        Vec::new(),
+        crate::app::state::PendingAsk {
+            stream,
+            question: "why?".into(),
+            sources: Vec::new(),
+            spoken: false,
+        },
         unreachable_llm(),
         "system".into(),
         vec![llm::ChatMsg::user("why?")],

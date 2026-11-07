@@ -1155,6 +1155,8 @@ pub enum AskMsg {
         /// stopped, cleared or superseded while being embedded is dropped.
         stream: u64,
         question: String,
+        /// The question was said aloud (`AskTurn::spoken`).
+        spoken: bool,
         /// The space used to embed this question. `None` answers from pinned
         /// or live debugger context without semantic retrieval.
         space: Option<embed::Space>,
@@ -1219,6 +1221,8 @@ pub enum AskMsg {
         stamp: Stamp,
         token: u64,
         question: String,
+        /// The question was said aloud (`AskTurn::spoken`).
+        spoken: bool,
         gathered: Vec<clew_core::mcp::hub::Gathered>,
     },
     /// The agent turn on `stream` calls MCP tool `tool` (its model name).

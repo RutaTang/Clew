@@ -28,7 +28,7 @@ use clew_voice::speaker::{SayError, Speakers};
 use clew_voice::speech::{self, VoiceModel};
 
 use crate::app::prelude::*;
-use crate::app::voice::{Claim, ModelDownload, StopOnDrop};
+use crate::app::voice::{Claim, ClaimedFor, ModelDownload, StopOnDrop};
 use crate::*;
 
 /// How often the output is looked at while Clew speaks: as often as the
@@ -279,6 +279,8 @@ pub(crate) struct Speech {
     pub(crate) stall: (Duration, Duration),
     /// The models already said to be missing: said once a window.
     told: HashSet<&'static str>,
+    /// The models what is being said was made with.
+    made_with: HashSet<&'static str>,
     /// Voice models downloading, by id.
     pub downloads: HashMap<&'static str, ModelDownload>,
     /// The last download's failure, by model id.
@@ -303,6 +305,7 @@ impl Speech {
             reopened: false,
             stall: (STALLED_AFTER_ERROR, STALLED),
             told: HashSet::new(),
+            made_with: HashSet::new(),
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
             open_output: Arc::new(open_system_output),
@@ -346,6 +349,7 @@ impl Speech {
         self.level = 0.0;
         self.progress = None;
         self.reopened = false;
+        self.made_with.clear();
     }
 }
 
@@ -472,17 +476,20 @@ impl App {
                 // its files go: nothing downloads into the folder, and
                 // nothing is said with it — sentences waiting for it are
                 // passed over.
-                let Some(claim) = Claim::take(speech::dir(&store, model)) else {
-                    self.status = tr!(
-                        "{model} is already downloading in another window",
-                        model = crate::i18n::lookup(model.name)
-                    );
-                    return Task::none();
+                let claim = match Claim::take(speech::dir(&store, model), ClaimedFor::Removal) {
+                    Ok(claim) => claim,
+                    Err(held) => {
+                        self.status = held.busy(crate::i18n::lookup(model.name));
+                        return Task::none();
+                    }
                 };
-                // What is being said with it ends, and so does its hold on
-                // the files — off the UI thread: a sentence being made is
-                // waited for, and none is made until the files are gone.
-                self.stop_speaking();
+                // What is being said with it ends — what another model says
+                // goes on — and so does the hold on its files, off the UI
+                // thread: a sentence being made is waited for, and none is
+                // made until the files are gone.
+                if self.voice.speech.made_with.contains(model.id) {
+                    self.stop_speaking();
+                }
                 let synthesizer = self.voice.speech.synthesizer.clone();
                 Task::perform(
                     async move {
@@ -684,6 +691,7 @@ impl App {
                 .then(|| self.voice.speech.open_output.clone());
             let device_rate = self.voice.speech.output.as_ref().map(|o| o.rate());
             self.voice.speech.making = true;
+            self.voice.speech.made_with.insert(model.id);
             self.voice.speech.quiet_since = None;
             let round = self.voice.speech.round;
             return Task::perform(
@@ -784,12 +792,17 @@ impl App {
                     }
                 }
                 if let Some(output) = &self.voice.speech.output {
+                    // Given this after playing all it had, how long it plays
+                    // nothing is counted from now: the wait for this
+                    // sentence was not the output's. Given it with some
+                    // still to play, the count goes on — an output that
+                    // stopped is found out however many sentences come.
+                    if output.idle() {
+                        self.voice.speech.progress = None;
+                    }
                     output.play(&audio.samples, audio.rate);
                 }
                 self.voice.speech.quiet_since = None;
-                // How long it plays nothing is counted from now: the wait
-                // for this sentence was not the output's.
-                self.voice.speech.progress = None;
                 self.speak_next()
             }
             // This sentence could not be said; the next can.
@@ -851,6 +864,7 @@ impl App {
         if let Some(output) = speech.output.take() {
             close_later(output);
         }
+        speech.made_with.clear();
         speech.quiet_since = None;
         speech.level = 0.0;
         if speech.listen_after && speech.reading.is_none() {
@@ -898,12 +912,12 @@ impl App {
             self.status = tr!("There is no data directory to keep the model in").into();
             return Task::none();
         };
-        let Some(claim) = Claim::take(speech::dir(&store, model)) else {
-            self.status = tr!(
-                "{model} is already downloading in another window",
-                model = crate::i18n::lookup(model.name)
-            );
-            return Task::none();
+        let claim = match Claim::take(speech::dir(&store, model), ClaimedFor::Download) {
+            Ok(claim) => claim,
+            Err(held) => {
+                self.status = held.busy(crate::i18n::lookup(model.name));
+                return Task::none();
+            }
         };
         self.voice.speech.download_errors.remove(id);
         let present = speech::present_bytes(&store, model);

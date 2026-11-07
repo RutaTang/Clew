@@ -5,54 +5,153 @@
 //! and, as the answer streams in, its sentences handed out once each is
 //! finished ([`Reader`]).
 
-/// What a sentence is said in, when its script says so: Hangul is Korean,
-/// kana Japanese, Han alone Chinese — or Japanese, where that is what is
-/// being spoken (`usual`: a line of kanji alone); Greek is Greek, Arabic
-/// Arabic, Devanagari Hindi, and Cyrillic Russian — or the Ukrainian or
-/// Bulgarian usually spoken. `None`: a Latin script, whose language the
-/// caller knows better.
+/// What a sentence is said in, when its script says so — the script most of
+/// it is written in, not one a symbol borrows (`π`, `Θ(n)`, `Δt` in English;
+/// a quoted word): Hangul is Korean, kana Japanese, Han alone Chinese — or
+/// Japanese, where that is what is being spoken (`usual`: a line of kanji
+/// alone); Greek is Greek, Arabic Arabic, Devanagari Hindi, and Cyrillic
+/// Russian, Ukrainian or Bulgarian, as its letters say. `None`: a Latin
+/// script, whose language the caller knows better.
 pub fn script_language(text: &str, usual: Option<&str>) -> Option<&'static str> {
-    let (mut hangul, mut kana, mut han) = (false, false, false);
-    let (mut cyrillic, mut greek, mut arabic, mut devanagari) = (false, false, false, false);
+    use Script::*;
+    // Characters of Chinese, Japanese and Korean count one by one, as each
+    // is a word or a syllable; letters of the other scripts by the word,
+    // and only a word of two or more: one letter alone is a symbol.
+    let mut chars = [0usize; SCRIPTS];
+    let mut words = [0usize; SCRIPTS];
+    let mut run: Option<(Script, usize)> = None;
     for c in text.chars() {
-        match c as u32 {
-            0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F => hangul = true,
-            0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => kana = true,
-            0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF => han = true,
-            0x0400..=0x04FF => cyrillic = true,
-            0x0370..=0x03FF => greek = true,
-            0x0600..=0x06FF => arabic = true,
-            0x0900..=0x097F => devanagari = true,
-            _ => {}
+        // A combining accent belongs to the letter before it.
+        if matches!(c as u32, 0x0300..=0x036F) {
+            continue;
+        }
+        let script = script_of(c);
+        if let Some(script) = script {
+            chars[script as usize] += 1;
+        }
+        match (script, &mut run) {
+            (Some(s @ (Latin | Cyrillic | Greek | Arabic | Devanagari)), Some((r, len)))
+                if *r == s =>
+            {
+                *len += 1;
+            }
+            (Some(s @ (Latin | Cyrillic | Greek | Arabic | Devanagari)), _) => {
+                end_word(&mut run, &mut words);
+                run = Some((s, 1));
+            }
+            _ => end_word(&mut run, &mut words),
         }
     }
+    end_word(&mut run, &mut words);
+    let cjk = chars[Hangul as usize] + chars[Kana as usize] + chars[Han as usize];
+    let (script, most) = [
+        (Han, cjk),
+        (Cyrillic, words[Cyrillic as usize]),
+        (Greek, words[Greek as usize]),
+        (Arabic, words[Arabic as usize]),
+        (Devanagari, words[Devanagari as usize]),
+    ]
+    .into_iter()
+    .max_by_key(|(_, n)| *n)?;
+    // Mostly Latin, it is in a Latin script. A tie is not: a name in code,
+    // in a sentence of Russian, is still a sentence of Russian.
+    if most == 0 || most < words[Latin as usize] {
+        return None;
+    }
     let usual = usual.and_then(known_language);
-    if hangul {
-        Some("ko")
-    } else if kana || (han && usual == Some("ja")) {
-        Some("ja")
-    } else if han {
-        Some("zh")
-    } else if cyrillic {
-        Some(match usual {
-            Some(lang @ ("uk" | "bg")) => lang,
-            _ => "ru",
-        })
-    } else if greek {
-        Some("el")
-    } else if arabic {
-        Some("ar")
-    } else if devanagari {
-        Some("hi")
-    } else {
-        None
+    Some(match script {
+        Han if chars[Hangul as usize] * 2 >= cjk => "ko",
+        Han if written_in_japanese(text) || usual == Some("ja") => "ja",
+        Han => "zh",
+        Cyrillic => cyrillic_language(text),
+        Greek => "el",
+        Arabic => "ar",
+        _ => "hi",
+    })
+}
+
+/// The scripts told apart (see [`script_of`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Script {
+    Latin,
+    Hangul,
+    Kana,
+    Han,
+    Cyrillic,
+    Greek,
+    Arabic,
+    Devanagari,
+}
+
+const SCRIPTS: usize = Script::Devanagari as usize + 1;
+
+/// The script `c` is a letter of — not a digit, nor punctuation, nor the
+/// middle dot (・) or long-vowel mark (ー) Chinese text borrows from kana.
+fn script_of(c: char) -> Option<Script> {
+    use Script::*;
+    if c.is_numeric() {
+        return None;
+    }
+    Some(match c as u32 {
+        0xAC00..=0xD7AF | 0x1100..=0x11FF | 0x3130..=0x318F => Hangul,
+        0x30FB | 0x30FC | 0xFF70 => return None,
+        0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F => Kana,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0xF900..=0xFAFF => Han,
+        0x0400..=0x052F => Cyrillic,
+        0x037E | 0x0387 => return None,
+        0x0370..=0x03FF | 0x1F00..=0x1FFF => Greek,
+        0x060C | 0x061B | 0x061F | 0x066A..=0x066D | 0x06D4 => return None,
+        0x0600..=0x06FF | 0x0750..=0x077F => Arabic,
+        0x0964 | 0x0965 => return None,
+        0x0900..=0x097F => Devanagari,
+        0x00C0..=0x024F | 0x1E00..=0x1EFF if c.is_alphabetic() => Latin,
+        _ if c.is_ascii_alphabetic() => Latin,
+        _ => return None,
+    })
+}
+
+/// The word being read ends: counted when it is one (two letters or more).
+fn end_word(run: &mut Option<(Script, usize)>, words: &mut [usize; SCRIPTS]) {
+    if let Some((script, len)) = run.take()
+        && len >= 2
+    {
+        words[script as usize] += 1;
     }
 }
 
-/// Whether `text` holds kana: written in Japanese, whatever else it holds.
-fn has_kana(text: &str) -> bool {
-    text.chars()
-        .any(|c| matches!(c as u32, 0x3040..=0x30FF | 0x31F0..=0x31FF | 0xFF66..=0xFF9F))
+/// Whether `text` is written in Japanese: kana beside its kanji, as
+/// Japanese is written — at least a fifth of them — not a word or two of it
+/// quoted in Chinese.
+fn written_in_japanese(text: &str) -> bool {
+    let (mut kana, mut han) = (0usize, 0usize);
+    for c in text.chars() {
+        match script_of(c) {
+            Some(Script::Kana) => kana += 1,
+            Some(Script::Han) => han += 1,
+            _ => {}
+        }
+    }
+    kana > 0 && kana * 5 >= kana + han
+}
+
+/// The language a text in Cyrillic is in, as its letters say: Ukrainian
+/// writes і ї є ґ; Bulgarian has ъ as a vowel (път, България) where Russian
+/// writes it only as the hard sign before е ё ю я, and has no ы э ё.
+/// Else Russian.
+fn cyrillic_language(text: &str) -> &'static str {
+    let letters: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    if letters.iter().any(|c| matches!(c, 'і' | 'ї' | 'є' | 'ґ')) {
+        return "uk";
+    }
+    let russian = letters.iter().any(|c| matches!(c, 'ы' | 'э' | 'ё'));
+    let vowel_hard_sign = letters
+        .windows(2)
+        .any(|w| w[0] == 'ъ' && matches!(w[1], 'а'..='я') && !matches!(w[1], 'е' | 'ю' | 'я'));
+    if vowel_hard_sign && !russian {
+        "bg"
+    } else {
+        "ru"
+    }
 }
 
 /// Every language a voice here speaks, as its code.
@@ -165,7 +264,7 @@ pub fn language_for(sentence: &str, answer: &str, usual: Option<&str>) -> &'stat
     if let Some(lang) = script_language(sentence, usual) {
         // A line of kanji alone ("概要。") in an answer written in Japanese
         // is Japanese.
-        if lang == "zh" && has_kana(answer) {
+        if lang == "zh" && written_in_japanese(answer) {
             return "ja";
         }
         return lang;
@@ -724,9 +823,55 @@ mod tests {
         // Other scripts the voices speak.
         assert_eq!(language_for("Итог считается так.", answer, None), "ru");
         assert_eq!(language_for("Підсумок.", answer, Some("uk")), "uk");
+        assert_eq!(language_for("Підсумок.", answer, None), "uk");
+        assert_eq!(language_for("Функцията връща списък.", answer, None), "bg");
+        assert_eq!(language_for("Объект создан.", answer, None), "ru");
         assert_eq!(language_for("Το σύνολο.", answer, None), "el");
         assert_eq!(language_for("المجموع.", answer, None), "ar");
         assert_eq!(language_for("कुल योग।", answer, None), "hi");
+        // A script a symbol borrows, or a word quotes, is not the
+        // sentence's: most of its words are.
+        let english = "The function returns the area of the circle.";
+        for sentence in [
+            "Multiply the radius by π.",
+            "The search is Θ(n log n).",
+            "The latency is 5 μs.",
+            "Δt is the step between frames.",
+            "The prefix Это means this.",
+        ] {
+            assert_eq!(language_for(sentence, english, None), "en", "{sentence}");
+        }
+        assert_eq!(
+            language_for(
+                "Функция getUserById возвращает пользователя.",
+                english,
+                None
+            ),
+            "ru"
+        );
+        assert_eq!(language_for("Это foo.", english, None), "ru");
+        assert_eq!(language_for("调用 getUserById 函数。", english, None), "zh");
+        assert_eq!(
+            language_for("韩语的“안녕”是你好的意思。", english, None),
+            "zh"
+        );
+        assert_eq!(
+            language_for("이 함수는 价格 를 구합니다.", english, None),
+            "ko"
+        );
+        // Kana Chinese text borrows, or quotes, does not make it Japanese.
+        assert_eq!(
+            language_for("迈克尔・乔丹是篮球运动员。", english, None),
+            "zh"
+        );
+        assert_eq!(language_for("阿・乔丹。", english, None), "zh");
+        assert_eq!(language_for("乔丹ー。", english, None), "zh");
+        let chinese = "这个函数把问候语翻译成日语，比如“こんにちは”。它先读取配置文件，\
+                       然后根据语言代码选择对应的翻译表。如果找不到翻译，就返回原文。计算总价。";
+        assert_eq!(language_for("计算总价。", chinese, None), "zh");
+        // A list of kanji alone, in an answer written in Japanese.
+        let japanese = "主な機能は次のとおりです。\n認証\n決済\n在庫管理";
+        assert_eq!(language_for("在庫管理", japanese, None), "ja");
         assert_eq!(known_language("pt_BR"), Some("pt"));
         assert_eq!(known_language("FR-ca"), Some("fr"));
         assert_eq!(known_language("klingon"), None);

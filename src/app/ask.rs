@@ -295,14 +295,21 @@ impl App {
         // can't run an agent turn).
         if self.server.is_up() && self.ai_on_server() {
             self.proj.ask_input.clear();
-            return self.start_agent_ask(question);
+            let spoken = std::mem::take(&mut self.proj.ask_spoken);
+            return self.start_agent_ask(question, spoken);
         }
-        self.on_ask_submit_rag(question)
+        let spoken = self.proj.ask_spoken;
+        self.on_ask_submit_rag(question, spoken)
     }
 
     /// The pre-agent Ask path: retrieval (embed → top-K) + one streamed
     /// completion. Kept as the fallback when an agent turn can't run.
-    pub(crate) fn on_ask_submit_rag(&mut self, question: String) -> Task<Message> {
+    ///
+    /// `spoken`: the question was said aloud, so its answer is read aloud
+    /// (`AskTurn::spoken`). It travels with the question to its turn: the
+    /// input's own flag (`ask_spoken`) belongs to whatever is typed or said
+    /// into the input meanwhile.
+    pub(crate) fn on_ask_submit_rag(&mut self, question: String, spoken: bool) -> Task<Message> {
         // Semantic retrieval needs an embedding index. But when the
         // debugger is paused or a selection is pinned, that live context
         // is the grounding — allow asking without an index.
@@ -334,6 +341,7 @@ impl App {
         // turn ran, which is theirs to keep.
         if self.proj.ask_input.trim() == question.trim() {
             self.proj.ask_input.clear();
+            self.proj.ask_spoken = false;
         }
         self.reveal_ask();
         self.proj.asking = true;
@@ -367,6 +375,7 @@ impl App {
                             stamp: stamp.clone(),
                             stream,
                             question: question.clone(),
+                            spoken,
                             space: Some(space.clone()),
                             qvec,
                         })
@@ -378,6 +387,7 @@ impl App {
                 stamp,
                 stream,
                 question,
+                spoken,
                 space: None,
                 qvec: Ok(Vec::new()),
             })),
@@ -387,10 +397,12 @@ impl App {
     /// A question that could not be answered goes back into the Ask input,
     /// from which it was cleared at submit — unless the user has typed
     /// something there since, which stays. Failing used to take the question
-    /// with it.
-    fn return_question(&mut self, question: String) {
+    /// with it. Back in the input, it is still the question said aloud, if
+    /// it was one.
+    pub(crate) fn return_question(&mut self, question: String, spoken: bool) {
         if self.proj.ask_input.trim().is_empty() {
             self.proj.ask_input = question;
+            self.proj.ask_spoken = spoken;
         }
     }
 
@@ -398,6 +410,7 @@ impl App {
         &mut self,
         stream: u64,
         question: String,
+        spoken: bool,
         space: Option<embed::Space>,
         qvec: Result<Vec<f32>, String>,
     ) -> Task<Message> {
@@ -424,7 +437,7 @@ impl App {
                 || *space != self.proj.embed_index.space()
             {
                 self.proj.asking = false;
-                self.return_question(question);
+                self.return_question(question, spoken);
                 self.status = tr!("The index changed — ask again when it's ready").into();
                 return Task::none();
             }
@@ -433,7 +446,7 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 self.proj.asking = false;
-                self.return_question(question);
+                self.return_question(question, spoken);
                 self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
@@ -442,7 +455,7 @@ impl App {
         // another window's): the same gate, and the same offer, as a submit.
         if let Err(ask_for_key) = self.require_llm() {
             self.proj.asking = false;
-            self.return_question(question);
+            self.return_question(question, spoken);
             return ask_for_key;
         }
 
@@ -463,7 +476,7 @@ impl App {
             Ok(sources) => sources,
             Err(e) => {
                 self.proj.asking = false;
-                self.return_question(question);
+                self.return_question(question, spoken);
                 self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
@@ -586,6 +599,7 @@ impl App {
             stream,
             question,
             sources,
+            spoken,
         });
         Task::perform(
             async move {
@@ -633,7 +647,7 @@ impl App {
         };
         if messages.is_empty() {
             self.proj.asking = false;
-            self.return_question(pending.question);
+            self.return_question(pending.question, pending.spoken);
             self.status = tr!("Ask failed: the question's context could not be assembled").into();
             return Task::none();
         }
@@ -641,18 +655,11 @@ impl App {
             Ok(cfg) => cfg,
             Err(ask_for_key) => {
                 self.proj.asking = false;
-                self.return_question(pending.question);
+                self.return_question(pending.question, pending.spoken);
                 return ask_for_key;
             }
         };
-        self.start_ask_stream(
-            pending.stream,
-            pending.question,
-            pending.sources,
-            cfg,
-            ASK_SYSTEM.to_string(),
-            messages,
-        )
+        self.start_ask_stream(pending, cfg, ASK_SYSTEM.to_string(), messages)
     }
 
     /// Start a streaming answer for the Ask panel: push a pending turn, then feed
@@ -661,21 +668,25 @@ impl App {
     /// the Task that pumps tokens into `AskMsg::Delta` / `AskMsg::StreamEnded`.
     pub(crate) fn start_ask_stream(
         &mut self,
-        stream_id: u64,
-        question: String,
-        sources: Vec<(explain::Node, f32)>,
+        ask: PendingAsk,
         cfg: llm::Config,
         system: String,
         messages: Vec<llm::ChatMsg>,
     ) -> Task<Message> {
         use iced::futures::SinkExt;
+        let PendingAsk {
+            stream: stream_id,
+            question,
+            sources,
+            spoken,
+        } = ask;
         // `stream_id` was minted when the question was submitted: it is how a
         // delta finds its own turn, and how Stop found the question before
         // any stream existed.
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question,
-            spoken: std::mem::take(&mut self.proj.ask_spoken),
+            spoken,
             answer_md: String::new(),
             answer: Vec::new(),
             sources,
@@ -819,6 +830,7 @@ impl App {
     pub(crate) fn start_agent_turn(
         &mut self,
         question: String,
+        spoken: bool,
         tools: Vec<clew_protocol::ExternalTool>,
         map: crate::app::integrations::ToolMap,
     ) -> Task<Message> {
@@ -860,7 +872,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question: question.clone(),
-            spoken: std::mem::take(&mut self.proj.ask_spoken),
+            spoken,
             answer_md: String::new(),
             answer: Vec::new(),
             sources: Vec::new(),
@@ -1129,8 +1141,8 @@ impl App {
             let reason = reason.clone();
             let question = self.proj.ask_turns[idx].question.clone();
             // Said aloud, its answer from the index is said aloud too.
-            self.proj.ask_spoken = self.proj.ask_turns[idx].spoken;
-            let fallback = self.on_ask_submit_rag(question);
+            let spoken = self.proj.ask_turns[idx].spoken;
+            let fallback = self.on_ask_submit_rag(question, spoken);
             // `asking` is how the retrieval path says it took the question
             // over. It only appends turns, so `idx` still names this one.
             if self.proj.asking {
@@ -1145,7 +1157,6 @@ impl App {
             // anyway, so the question vanished and the status named the
             // index instead of what failed. Close it with the agent's own
             // failure, and say both.
-            self.proj.ask_spoken = false;
             let why_not = std::mem::take(&mut self.status);
             let closed = self.on_ask_stream_ended(stream, outcome);
             if !why_not.is_empty() {
@@ -1435,10 +1446,11 @@ impl App {
             AskMsg::Retrieved {
                 stream,
                 question,
+                spoken,
                 space,
                 qvec,
                 ..
-            } => self.on_ask_retrieved(stream, question, space, qvec),
+            } => self.on_ask_retrieved(stream, question, spoken, space, qvec),
             AskMsg::ContextReady {
                 stream, messages, ..
             } => self.on_ask_context_ready(stream, messages),
@@ -1488,9 +1500,10 @@ impl App {
             AskMsg::McpGathered {
                 token,
                 question,
+                spoken,
                 gathered,
                 ..
-            } => self.on_mcp_gathered(token, question, gathered),
+            } => self.on_mcp_gathered(token, question, spoken, gathered),
             AskMsg::AgentToolCalled {
                 stream,
                 call,

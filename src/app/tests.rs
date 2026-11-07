@@ -12815,26 +12815,26 @@ fn a_question_that_fails_comes_back_and_a_draft_stays() {
         stream
     };
     let stream = retrieving(&mut app);
-    let _ = app.on_ask_retrieved(stream, "why?".into(), None, Err("timed out".into()));
+    let _ = app.on_ask_retrieved(stream, "why?".into(), false, None, Err("timed out".into()));
     assert_eq!(app.proj.ask_input, "why?", "the failed question comes back");
     assert!(app.status.contains("timed out"), "{}", app.status);
 
     app.proj.ask_input = "a draft".into();
     let stream = retrieving(&mut app);
-    let _ = app.on_ask_retrieved(stream, "why?".into(), None, Err("timed out".into()));
+    let _ = app.on_ask_retrieved(stream, "why?".into(), false, None, Err("timed out".into()));
     assert_eq!(app.proj.ask_input, "a draft", "what was typed since stays");
 
     // The fallback from a failed agent turn submits a question the input no
     // longer holds: the input keeps what is in it.
     app.proj.ask_pins.push(ask_pin(&root));
-    let _ = app.on_ask_submit_rag("the earlier question".into());
+    let _ = app.on_ask_submit_rag("the earlier question".into(), false);
     assert_eq!(app.proj.ask_input, "a draft");
     // A plain submit of the input's own question clears it, as before.
     app.proj.inflight.ask_retrieval = None;
     app.proj.inflight.ask_context = None;
     app.proj.asking = false;
     app.proj.ask_input = "the next question".into();
-    let _ = app.on_ask_submit_rag("the next question".into());
+    let _ = app.on_ask_submit_rag("the next question".into(), false);
     assert!(app.proj.ask_input.is_empty());
 }
 
@@ -13209,9 +13209,12 @@ fn stop_aborts_a_local_provider_stream_and_closes_its_turn() {
     let mut app = scanned_app("ask-local-stop");
     let stream = app.mint_request_id();
     let task = app.start_ask_stream(
-        stream,
-        "why?".into(),
-        Vec::new(),
+        PendingAsk {
+            stream,
+            question: "why?".into(),
+            sources: Vec::new(),
+            spoken: false,
+        },
         unreachable_llm(),
         "system".into(),
         vec![llm::ChatMsg::user("why?")],
@@ -13282,9 +13285,12 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
     let mut app = scanned_app("ask-disconnect");
     let local = app.mint_request_id();
     let task = app.start_ask_stream(
-        local,
-        "local?".into(),
-        Vec::new(),
+        PendingAsk {
+            stream: local,
+            question: "local?".into(),
+            sources: Vec::new(),
+            spoken: false,
+        },
         unreachable_llm(),
         "system".into(),
         vec![llm::ChatMsg::user("local?")],
@@ -20292,6 +20298,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
                     stamp: app.stamp(),
                     stream,
                     question: "q".into(),
+                    spoken: false,
                     space: None,
                     qvec: Ok(vec![1.0]),
                 })
@@ -20304,6 +20311,7 @@ fn every_llm_flow_reports_a_missing_key_the_same_way() {
                     stream,
                     question: "q".into(),
                     sources: Vec::new(),
+                    spoken: false,
                 });
                 Message::Ask(AskMsg::ContextReady {
                     stamp: app.stamp(),
@@ -21415,6 +21423,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             stream: 1,
             question: "q".into(),
+            spoken: false,
             space: None,
             qvec: Err("stale".into()),
         }),
@@ -21452,6 +21461,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             token: 1,
             question: "q".into(),
+            spoken: false,
             gathered: Vec::new(),
         }),
         Message::Ask(AskMsg::AgentToolCalled {
@@ -25207,9 +25217,12 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
     ] {
         let stream = app.mint_request_id();
         let task = app.start_ask_stream(
-            stream,
-            "why?".into(),
-            Vec::new(),
+            PendingAsk {
+                stream,
+                question: "why?".into(),
+                sources: Vec::new(),
+                spoken: false,
+            },
             unreachable_llm(),
             "system".into(),
             vec![llm::ChatMsg::user("why?")],
@@ -25230,7 +25243,7 @@ fn a_stopped_server_stream_reads_as_stopped_not_failed() {
     }
 
     let turns = app.proj.ask_turns.len();
-    let task = app.start_agent_ask("how?".into());
+    let task = app.start_agent_ask("how?".into(), false);
     let stream = app.proj.link.agent_stream.expect("an agent turn is open");
     let _ = app.handle_server_event(clew_protocol::Event::AgentDone {
         stream,

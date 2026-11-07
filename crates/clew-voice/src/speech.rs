@@ -340,7 +340,12 @@ pub fn path(store: &Store, model: &VoiceModel, file: &VoiceFile) -> PathBuf {
 /// Whether `model` is all here. Only a verified download is ever renamed
 /// to its name, so each file's presence is enough.
 pub fn installed(store: &Store, model: &VoiceModel) -> bool {
-    model.files.iter().all(|f| is_file(&path(store, model, f)))
+    present(&dir(store, model), model)
+}
+
+/// Whether every file of `model` is in `dir`.
+pub fn present(dir: &Path, model: &VoiceModel) -> bool {
+    model.files.iter().all(|f| is_file(&dir.join(f.path)))
 }
 
 /// The files of `model` not here yet: what a download fetches.

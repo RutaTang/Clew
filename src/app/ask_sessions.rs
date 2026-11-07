@@ -442,6 +442,8 @@ impl App {
     /// card in its place.
     pub(crate) fn delete_ask_session(&mut self, id: u64) -> Task<Message> {
         let stop = if self.proj.ask_session == Some(id) {
+            // What is said of it goes with it.
+            self.stop_speaking();
             let stop = self.stop_ask_streams();
             self.proj.ask_turns.clear();
             self.proj.ask_pins.clear();

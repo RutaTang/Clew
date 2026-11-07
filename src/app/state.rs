@@ -178,6 +178,8 @@ pub struct PendingAsk {
     pub stream: u64,
     pub question: String,
     pub sources: Vec<(explain::Node, f32)>,
+    /// The question was said aloud: its answer is read aloud.
+    pub spoken: bool,
 }
 
 /// The debugger (DAP client): the active session, plus the breakpoints and

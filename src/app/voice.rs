@@ -1306,12 +1306,12 @@ impl App {
             self.status = tr!("There is no data directory to keep the model in").into();
             return Task::none();
         };
-        let Some(claim) = Claim::take(store.path(model)) else {
-            self.status = tr!(
-                "{model} is already downloading in another window",
-                model = crate::i18n::lookup(model.name)
-            );
-            return Task::none();
+        let claim = match Claim::take(store.path(model), ClaimedFor::Download) {
+            Ok(claim) => claim,
+            Err(held) => {
+                self.status = held.busy(crate::i18n::lookup(model.name));
+                return Task::none();
+            }
         };
         self.voice.download_errors.remove(id);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1442,23 +1442,49 @@ fn with_host_only(error: &str) -> String {
 /// The models being downloaded in this process, by the file each becomes:
 /// two windows downloading one model wrote one partial file between them,
 /// and the first to finish moved the other's half-written bytes into place.
-static DOWNLOADING: LazyLock<Mutex<std::collections::HashSet<PathBuf>>> =
-    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+static DOWNLOADING: LazyLock<Mutex<HashMap<PathBuf, ClaimedFor>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-/// A model's download, claimed for the transfer that writes it — held by
-/// that transfer until it ends, finished, failed or stopped.
+/// What a model's files are claimed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimedFor {
+    Download,
+    Removal,
+}
+
+impl ClaimedFor {
+    /// Why `model` cannot be downloaded or removed now: its files are
+    /// claimed for this.
+    pub(crate) fn busy(self, model: &str) -> String {
+        match self {
+            ClaimedFor::Download => tr!(
+                "{model} is already downloading in another window",
+                model = model
+            ),
+            ClaimedFor::Removal => tr!("{model} is being removed", model = model),
+        }
+    }
+}
+
+/// A model's files, claimed for the transfer that writes them or the
+/// removal that deletes them — held until it ends, finished, failed or
+/// stopped.
 pub(crate) struct Claim(PathBuf);
 
 impl Claim {
-    /// Claim the download into `dest`; `None` while another holds it.
-    pub(crate) fn take(dest: PathBuf) -> Option<Claim> {
-        let fresh = DOWNLOADING
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(dest.clone());
+    /// Claim the files that go to `dest`, for `purpose`; while another
+    /// holds them, what for.
+    pub(crate) fn take(dest: PathBuf, purpose: ClaimedFor) -> Result<Claim, ClaimedFor> {
+        {
+            let mut claimed = DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(held) = claimed.get(&dest) {
+                return Err(*held);
+            }
+            claimed.insert(dest.clone(), purpose);
+        }
         // Made only when taken, and after the lock is let go: a claim
         // dropped under it locked it again, and gave up another's.
-        fresh.then(|| Claim(dest))
+        Ok(Claim(dest))
     }
 }
 
@@ -1477,7 +1503,7 @@ pub(crate) fn downloading(dest: &Path) -> bool {
     DOWNLOADING
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .contains(dest)
+        .contains_key(dest)
 }
 
 /// Sets its flag when dropped.

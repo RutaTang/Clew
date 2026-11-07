@@ -238,6 +238,12 @@ impl Speakers {
             .as_mut()
             .is_some_and(|r| r.model == model.id && !r.speaker.ended());
         if !reuse {
+            // Removed while this waited for its turn (it is removed with
+            // this held: `stop_while`): this sentence is passed over, and
+            // what follows is said with a voice that is here.
+            if !crate::speech::present(dir, model) {
+                return Err(SayError::Sentence("the voice is not downloaded".into()));
+            }
             // The one before ends before this one loads: one model in
             // memory at a time.
             *running = None;
@@ -331,21 +337,49 @@ mod tests {
         ));
     }
 
+    /// A folder holding `model`'s files (empty: nothing reads them here).
+    fn model_dir(name: &str, model: &VoiceModel) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("clew-speaker-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in model.files {
+            let path = dir.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"").unwrap();
+        }
+        dir
+    }
+
     /// A program that is not there, or that does not answer as a speaker
     /// does, says so — and nothing waits forever.
     #[test]
     fn a_missing_or_silent_speaker_says_so() {
         let model = &crate::speech::VOICE_MODELS[0];
+        let dir = model_dir("missing", model);
         let speakers = Speakers::new(PathBuf::from("/nonexistent/clew-speak"));
-        let err = speakers
-            .say(model, Path::new("/nowhere"), "hi", "en", 0, 1.0)
-            .unwrap_err();
+        let err = speakers.say(model, &dir, "hi", "en", 0, 1.0).unwrap_err();
         assert!(
             matches!(&err, SayError::Voice(e) if e.contains("could not start the voice")),
             "{err}"
         );
         assert!(!speakers.loaded());
         assert!(!speakers.stop_if_idle(Duration::ZERO));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A model removed while a sentence waited for it (another window
+    /// removed it): that sentence is passed over — not the whole answer,
+    /// as a voice that failed would be.
+    #[test]
+    fn a_model_removed_meanwhile_passes_the_sentence_over() {
+        let model = &crate::speech::VOICE_MODELS[0];
+        let dir = model_dir("removed", model);
+        let speakers = Speakers::new(PathBuf::from("/nonexistent/clew-speak"));
+        speakers.stop_while(&mut || {
+            std::fs::remove_dir_all(&dir).unwrap();
+        });
+        let err = speakers.say(model, &dir, "hi", "en", 0, 1.0).unwrap_err();
+        assert!(matches!(err, SayError::Sentence(_)), "{err}");
+        assert!(!speakers.loaded());
     }
 
     /// A real `clew-speak` and a real model, when the test is pointed at

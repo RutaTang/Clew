@@ -98,6 +98,7 @@ fn an_mcp_call_waits_for_approval_then_its_result_goes_to_the_turn() {
     let mut rx = attach_server(&mut app);
     let _pump = app.start_agent_turn(
         "why?".into(),
+        false,
         external(),
         shout_tools(&rt, mcp::Approve::Ask),
     );
@@ -172,6 +173,7 @@ fn a_declined_or_unknown_mcp_call_is_answered_as_an_error() {
     let mut rx = attach_server(&mut app);
     let _pump = app.start_agent_turn(
         "why?".into(),
+        false,
         external(),
         shout_tools(&rt, mcp::Approve::Ask),
     );
@@ -225,6 +227,7 @@ fn a_trusted_server_runs_at_once_and_stop_drops_its_calls() {
     let mut rx = attach_server(&mut app);
     let _pump = app.start_agent_turn(
         "why?".into(),
+        false,
         external(),
         shout_tools(&rt, mcp::Approve::Always),
     );

@@ -502,6 +502,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the voice could not be spoken to"),
     tr_noop!("the voice ended as it started — its model may be damaged"),
     tr_noop!("the voice ended unexpectedly"),
+    tr_noop!("the voice is not downloaded"),
     tr_noop!("the voice is not running"),
     tr_noop!("the voice said something unreadable: {e}"),
     tr_noop!("the voice stopped listening: {e}"),
