@@ -1054,6 +1054,11 @@ pub struct SearchState {
     /// [`NavMsg::PreviewsStyled`] has brought them; until then (and for a
     /// preview changed since) the preview is drawn plain.
     pub styled: Vec<Vec<(String, Option<u8>)>>,
+    /// Where each hit's preview marks what matched, found in its whole line
+    /// (`search::preview_marks`) and brought with the colours; `None` where
+    /// the line could not be had (a remote file not open here), whose
+    /// preview is marked as matched in itself.
+    pub marks: Vec<Option<Vec<(usize, usize)>>>,
     /// Bumped as the previews are given out to be coloured: only the last
     /// colouring asked for is taken.
     pub styled_gen: u64,

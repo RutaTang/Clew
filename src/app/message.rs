@@ -645,6 +645,9 @@ pub enum NavMsg {
         stamp: Stamp,
         generation: u64,
         styled: Vec<Vec<(String, Option<u8>)>>,
+        /// What each preview marks, as found in its line
+        /// (`SearchState::marks`).
+        marks: Vec<Option<Vec<(usize, usize)>>>,
     },
     /// Jump to the exact line where `caller` calls `callee` (from CALLED BY),
     /// resolved live from the caller file; falls back to the caller's definition.

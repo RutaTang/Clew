@@ -1124,13 +1124,25 @@ fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, M
         Some(spans) => spans,
         None => &plain,
     };
-    let marks = app
+    // Found in the whole line where it could be read; else as matched in
+    // the preview itself.
+    let in_line = app
         .proj
         .search
-        .matcher
-        .as_ref()
-        .map(|m| m.ranges(&shown))
-        .unwrap_or_default();
+        .marks
+        .get(i)
+        .and_then(Option::as_ref)
+        .filter(|_| *shown == *preview);
+    let marks = match in_line {
+        Some(marks) => marks.clone(),
+        None => app
+            .proj
+            .search
+            .matcher
+            .as_ref()
+            .map(|m| m.ranges_in_preview(&shown))
+            .unwrap_or_default(),
+    };
     let pieces = mark_spans(spans, &marks);
     let mark = theme::with_alpha(theme::find(), 0.35);
     let spans: Vec<iced::widget::text::Span<'static, Message>> = pieces

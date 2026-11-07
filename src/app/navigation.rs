@@ -123,6 +123,76 @@ pub(crate) fn location_preview(
         .to_string()
 }
 
+/// A hit's preview as given out to be coloured and marked
+/// ([`App::style_search_previews`]).
+pub(crate) struct PreviewToStyle {
+    lang: Option<&'static str>,
+    preview: String,
+    /// Its whole line, as an open pane has it.
+    line: Option<String>,
+    abs: PathBuf,
+    line0: usize,
+}
+
+/// Each preview's colours and marks, by hit ([`style_previews`]).
+type StyledPreviews = (
+    Vec<Vec<(String, Option<u8>)>>,
+    Vec<Option<Vec<(usize, usize)>>>,
+);
+
+/// Each preview in its language's colours, and where it marks what
+/// `matcher` matches — found in its whole line, read from its file in a
+/// local project when no pane had it.
+fn style_previews(
+    hits: Vec<PreviewToStyle>,
+    matcher: Option<&clew_core::search::PreviewMatcher>,
+    local: bool,
+) -> StyledPreviews {
+    let mut lines: Vec<Option<String>> = hits.iter().map(|h| h.line.clone()).collect();
+    if local && matcher.is_some() {
+        let unread: Vec<(usize, PathBuf, usize)> = hits
+            .iter()
+            .enumerate()
+            .filter(|(_, h)| h.line.is_none())
+            .map(|(i, h)| (i, h.abs.clone(), h.line0))
+            .collect();
+        for (i, line) in read_location_lines(unread) {
+            lines[i] = Some(line);
+        }
+    }
+    let styled = hits
+        .iter()
+        .map(|h| preview_spans(&h.preview, h.lang))
+        .collect();
+    let marks = hits
+        .iter()
+        .zip(&lines)
+        .map(|(h, line)| marks_in_line(matcher?, line.as_deref()?, &h.preview))
+        .collect();
+    (styled, marks)
+}
+
+/// Where `preview`, cut from `line`, marks what `matcher` matches in the
+/// whole line: found in the line, so a pattern anchored at its start or
+/// matching its tabs, a match the cut ends, a whole word the cut's `…`
+/// would make of a longer one, are marked as the search matched them.
+/// `None` when the preview is not this line's (changed since it was cut)
+/// or cannot be placed in it.
+pub(crate) fn marks_in_line(
+    matcher: &clew_core::search::PreviewMatcher,
+    line: &str,
+    preview: &str,
+) -> Option<Vec<(usize, usize)>> {
+    use clew_core::search::{preview_around, preview_marks};
+    let ranges = matcher.ranges(line);
+    // Cut where the search cut it: at its first match, or a reference at
+    // its own name.
+    let at = std::iter::once(None)
+        .chain(ranges.iter().map(|r| Some(r.0)))
+        .find(|&at| preview_around(line, at).trim_end() == preview.trim_end())?;
+    preview_marks(line, at, &ranges)
+}
+
 /// [`read_location_previews`], each line as the file has it: untrimmed, so a
 /// column the language server gives for it lands where it points (a trimmed
 /// line shifts every column by the indentation). A trailing `\r` is dropped.
@@ -575,6 +645,7 @@ impl App {
         self.proj.search.listing = None;
         self.proj.search.matcher = None;
         self.proj.search.styled.clear();
+        self.proj.search.marks.clear();
         // Nor is the count the status line still gives for them.
         if let Some(said) = self.proj.search.said.take() {
             self.settle_status(&[&said]);
@@ -697,34 +768,49 @@ impl App {
     pub(crate) fn style_search_previews(&mut self) -> Task<Message> {
         self.proj.search.styled_gen += 1;
         self.proj.search.styled.clear();
+        self.proj.search.marks.clear();
         let generation = self.proj.search.styled_gen;
-        let previews: Vec<(Option<&'static str>, String)> = self
+        // Each hit with its line as an open pane has it; else, in a local
+        // project, read from its file with the colours — where its marks are
+        // found, as the search found them.
+        let hits: Vec<PreviewToStyle> = self
             .proj
             .search
             .hits
             .iter()
-            .map(|h| (highlight::detect(&h.abs), h.preview.clone()))
+            .map(|h| PreviewToStyle {
+                lang: highlight::detect(&h.abs),
+                preview: h.preview.clone(),
+                line: self
+                    .proj
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.abs == h.abs)
+                    .and_then(|v| v.source_line(h.line.saturating_sub(1)))
+                    .map(str::to_string),
+                abs: h.abs.clone(),
+                line0: h.line.saturating_sub(1),
+            })
             .collect();
-        if previews.is_empty() {
+        if hits.is_empty() {
             return Task::none();
         }
+        let matcher = self.proj.search.matcher.clone();
+        let local = self.local_project_state();
         let stamp = self.stamp();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || {
-                    previews
-                        .iter()
-                        .map(|(lang, preview)| preview_spans(preview, *lang))
-                        .collect::<Vec<_>>()
-                })
-                .await
-                .unwrap_or_default()
+                tokio::task::spawn_blocking(move || style_previews(hits, matcher.as_ref(), local))
+                    .await
+                    .unwrap_or_default()
             },
-            move |styled| {
+            move |(styled, marks)| {
                 Message::Nav(NavMsg::PreviewsStyled {
                     stamp: stamp.clone(),
                     generation,
                     styled,
+                    marks,
                 })
             },
         )
@@ -1089,11 +1175,17 @@ impl App {
                 Task::none()
             }
             NavMsg::PreviewsStyled {
-                generation, styled, ..
+                generation,
+                styled,
+                marks,
+                ..
             } => {
                 let search = &mut self.proj.search;
                 if generation == search.styled_gen && styled.len() == search.hits.len() {
                     search.styled = styled;
+                    if marks.len() == search.hits.len() {
+                        search.marks = marks;
+                    }
                 }
                 Task::none()
             }

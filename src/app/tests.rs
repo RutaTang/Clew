@@ -8253,6 +8253,62 @@ fn previews_are_coloured_and_keep_their_text() {
     assert_eq!(word_at_byte("a + b", 2), None);
 }
 
+/// Each preview marks what the search matched in its whole line, read from
+/// its file: matched in the preview alone — its indentation gone, its tabs
+/// spaced out, cut at a `…` — a pattern anchored at the line's start marked
+/// nothing, and a whole word the cut made of a longer one was marked.
+#[test]
+fn search_marks_are_found_in_the_whole_line() {
+    use clew_core::search::{PreviewMatcher, SearchOptions};
+    let mut app = scanned_app("search-marks-line");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let words = format!("{}xfoo-234567890ab foo", "z".repeat(20));
+    std::fs::write(
+        root.join("tabbed.py"),
+        format!("def f():\n\t\treturn total\n{words}\n"),
+    )
+    .unwrap();
+    let hit = |line: usize, preview: &str| crate::search::SearchHit {
+        abs: root.join("tabbed.py"),
+        rel: "tabbed.py".into(),
+        line,
+        preview: preview.into(),
+    };
+    let matcher = |query: &str, regex: bool, whole_word: bool| {
+        PreviewMatcher::of_search(&SearchOptions {
+            query: query.into(),
+            regex,
+            whole_word,
+            ..SearchOptions::default()
+        })
+    };
+    let style = |app: &mut App| {
+        let task = app.style_search_previews();
+        for m in run_task(task) {
+            let _ = app.update(m);
+        }
+    };
+    // Anchored at the line's start.
+    app.proj.search.matcher = matcher(r"^\s+return", true, false);
+    app.proj.search.hits = vec![hit(2, "return total")];
+    style(&mut app);
+    assert_eq!(app.proj.search.marks, [Some(vec![(0, 6)])]);
+    let alone = app.proj.search.matcher.as_ref().unwrap();
+    assert!(
+        alone.ranges("return total").is_empty(),
+        "the preview alone marks nothing"
+    );
+    // A whole word, not the `foo` of `xfoo-` the cut left standing alone.
+    app.proj.search.matcher = matcher("foo", false, true);
+    app.proj.search.hits = vec![hit(3, "…foo-234567890ab foo")];
+    style(&mut app);
+    assert_eq!(app.proj.search.marks, [Some(vec![(19, 22)])]);
+    // A preview that is not its line's (changed since) is marked in itself.
+    app.proj.search.hits = vec![hit(3, "something else")];
+    style(&mut app);
+    assert_eq!(app.proj.search.marks, [None]);
+}
+
 /// A search's results come coloured, each preview with its matches marked:
 /// they were plain text. Coloured off the UI thread, they are taken only for
 /// the list they were made for.
@@ -8293,6 +8349,7 @@ fn search_results_are_coloured_and_marked() {
         stamp: app.stamp(),
         generation: app.proj.search.styled_gen - 1,
         styled: vec![Vec::new(); app.proj.search.hits.len()],
+        marks: vec![None; app.proj.search.hits.len()],
     });
     let _ = app.update(stale);
     assert!(!app.proj.search.styled[i].is_empty());
@@ -21201,6 +21258,7 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             generation: app.proj.search.styled_gen,
             styled: Vec::new(),
+            marks: Vec::new(),
         }),
         Message::Calls(CallsMsg::Prepared {
             stamp: s(),
