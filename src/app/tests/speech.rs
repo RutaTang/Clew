@@ -62,7 +62,7 @@ impl Synthesizer for Voice {
         };
         Ok((vec![0.25; words * 100 * rate as usize / 1000], rate))
     }
-    fn stop_while(&self, work: &mut dyn FnMut()) {
+    fn stop_while(&self, _model: &'static VoiceModel, work: &mut dyn FnMut()) {
         self.stopped.fetch_add(1, Ordering::Relaxed);
         work();
     }
@@ -910,10 +910,17 @@ fn a_spoken_question_takes_its_voice_with_it() {
     let mut app = retrieval_app("speech-flag-taken");
     app.proj.ask_input = "what does total do?".into();
     app.proj.ask_spoken = true;
-    let _retrieving = app.update(Message::Ask(AskMsg::Submit));
+    let retrieving = app.update(Message::Ask(AskMsg::Submit));
     assert!(app.proj.asking);
+    assert!(!app.proj.ask_spoken, "the question took it");
+    assert!(
+        run_task(retrieving)
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Retrieved { spoken: true, .. }))),
+        "to its retrieval"
+    );
     let _ = app.update(Message::Ask(AskMsg::Stop));
-    assert!(!app.proj.ask_spoken, "the stopped question took it");
+    assert!(!app.proj.ask_spoken, "nor did the Stop leave it behind");
     // Its retrieval fails: it is back, still the question said.
     app.proj.ask_input = "what does total do?".into();
     app.proj.ask_spoken = true;
@@ -934,19 +941,35 @@ fn a_spoken_question_takes_its_voice_with_it() {
 /// said once they answer, whatever is typed meanwhile.
 #[test]
 fn a_spoken_question_waits_for_mcp_servers_with_its_voice() {
-    let (mut app, _voice, _) = speech_app("speech-mcp-gather");
-    let token = app.mint_request_id();
-    app.proj.inflight.ask_gather = Some(token);
+    let data = test_dir("speech-mcp-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    // A server to reach first, which is not there: it answers at once.
+    std::fs::write(
+        data.join("config.toml"),
+        "[mcp.servers.gone]\ncommand = \"/nonexistent/clew-mcp-server\"\n",
+    )
+    .unwrap();
+    let mut app = retrieval_app("speech-mcp-gather");
     let _rx = super::attach_server(&mut app);
+    app.proj.ask_input = "what does total do?".into();
+    app.proj.ask_spoken = true;
+    let gathering = app.update(Message::Ask(AskMsg::Submit));
+    assert!(
+        app.proj.inflight.ask_gather.is_some(),
+        "the servers are reached first"
+    );
     let _ = app.update(Message::Ask(AskMsg::InputChanged("typed".into())));
-    let _ = app.update(Message::Ask(AskMsg::McpGathered {
-        stamp: app.stamp(),
-        token,
-        question: "what does total do?".into(),
-        spoken: true,
-        gathered: Vec::new(),
-    }));
+    // The servers answered (the one there is not): the turn starts — its
+    // pump left alone, as no server answers it here.
+    let gathered = run_task(gathering)
+        .into_iter()
+        .find(|m| matches!(m, Message::Ask(AskMsg::McpGathered { .. })))
+        .expect("the servers answered");
+    let _pump = app.update(gathered);
     assert!(newest_spoken(&app));
+    assert!(!app.proj.ask_spoken, "what was typed is not taken for said");
 }
 
 /// While a voice model's files are removed — or downloaded — in any

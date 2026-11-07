@@ -157,9 +157,10 @@ pub(crate) trait Synthesizer: Send + Sync {
         voice: i32,
         speed: f32,
     ) -> Result<(Vec<f32>, u32), SayError>;
-    /// Let the model go and do `work` — remove its files — with nothing
-    /// said meanwhile: what would be is said once `work` is done.
-    fn stop_while(&self, work: &mut dyn FnMut());
+    /// Let `model` go, if it is loaded, and do `work` — remove its files —
+    /// with nothing said meanwhile: what would be is said once `work` is
+    /// done.
+    fn stop_while(&self, model: &'static VoiceModel, work: &mut dyn FnMut());
 }
 
 /// `clew-speak`, found beside Clew — or not there.
@@ -184,9 +185,9 @@ impl Synthesizer for System {
             )),
         }
     }
-    fn stop_while(&self, work: &mut dyn FnMut()) {
+    fn stop_while(&self, model: &'static VoiceModel, work: &mut dyn FnMut()) {
         match &self.speakers {
-            Some(speakers) => speakers.stop_while(work),
+            Some(speakers) => speakers.stop_while(model, work),
             None => work(),
         }
     }
@@ -496,7 +497,7 @@ impl App {
                         tokio::task::spawn_blocking(move || {
                             let _claim = claim;
                             let mut removed = Ok(());
-                            synthesizer.stop_while(&mut || {
+                            synthesizer.stop_while(model, &mut || {
                                 removed = speech::remove(&store, model);
                             });
                             removed.map_err(|e| e.to_string())

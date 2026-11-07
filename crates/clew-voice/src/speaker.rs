@@ -271,11 +271,15 @@ impl Speakers {
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
-    /// Let the model go and do `work` — remove its files — with nothing
-    /// said meanwhile: what is asked to be said waits until `work` is done.
-    pub fn stop_while(&self, work: &mut dyn FnMut()) {
+    /// Let `model` go, if it is the one loaded, and do `work` — remove its
+    /// files — with nothing said meanwhile: what is asked to be said waits
+    /// until `work` is done. Another model loaded stays: it holds none of
+    /// these files, and what it says goes on once `work` is done.
+    pub fn stop_while(&self, model: &VoiceModel, work: &mut dyn FnMut()) {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        *running = None;
+        if running.as_ref().is_some_and(|r| r.model == model.id) {
+            *running = None;
+        }
         work();
     }
 
@@ -374,7 +378,7 @@ mod tests {
         let model = &crate::speech::VOICE_MODELS[0];
         let dir = model_dir("removed", model);
         let speakers = Speakers::new(PathBuf::from("/nonexistent/clew-speak"));
-        speakers.stop_while(&mut || {
+        speakers.stop_while(model, &mut || {
             std::fs::remove_dir_all(&dir).unwrap();
         });
         let err = speakers.say(model, &dir, "hi", "en", 0, 1.0).unwrap_err();
@@ -425,15 +429,23 @@ mod tests {
         for file in model.files {
             let to = dir.join(file.path);
             std::fs::create_dir_all(to.parent().unwrap()).unwrap();
-            std::fs::hard_link(model_dir.join(file.path), &to).unwrap();
+            // Linked where it can be; copied where the temp folder is on
+            // another file system.
+            let from = model_dir.join(file.path);
+            if std::fs::hard_link(&from, &to).is_err() {
+                std::fs::copy(&from, &to).unwrap();
+            }
         }
         let speakers = std::sync::Arc::new(Speakers::new(program));
         // Loaded, and saying what it is asked.
         let (said, _) = speakers.say(model, &dir, "Loaded.", "en", 0, 1.0).unwrap();
         assert!(!said.is_empty());
+        // Another model removed: this one stays loaded.
+        speakers.stop_while(&crate::speech::VOICE_MODELS[1], &mut || {});
+        assert!(speakers.loaded(), "let go for another model's removal");
         // Removed — and, while it is, a sentence asked for waits its turn.
         let mut waiting = None;
-        speakers.stop_while(&mut || {
+        speakers.stop_while(model, &mut || {
             let (speakers, there) = (speakers.clone(), dir.clone());
             waiting = Some(std::thread::spawn(move || {
                 speakers.say(model, &there, "Waiting.", "en", 0, 1.0)

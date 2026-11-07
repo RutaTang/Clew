@@ -69,30 +69,20 @@ impl Tally {
     fn language(&self, text: &str, usual: Option<&str>) -> Option<&'static str> {
         use Script::*;
         let cjk = self.cjk();
-        let latin = self.words[Latin as usize];
-        // Chinese, Japanese or Korean: more than a character of it, or one
-        // with no Latin words beside it. Its characters are not counted
-        // against Latin words — a name in code, said as its words, would
-        // outnumber them — and its voices say the Latin words among them.
-        // One character in a sentence of English is a quoted one.
-        let script = if cjk >= 2 || (cjk == 1 && latin == 0) {
-            Han
-        } else {
-            let (script, most) = [
-                (Cyrillic, self.words[Cyrillic as usize]),
-                (Greek, self.words[Greek as usize]),
-                (Arabic, self.words[Arabic as usize]),
-                (Devanagari, self.words[Devanagari as usize]),
-            ]
-            .into_iter()
-            .max_by_key(|(_, n)| *n)?;
-            // Mostly Latin, it is in a Latin script. A tie is not: a name
-            // in code, in a sentence of Russian, is still one of Russian.
-            if most == 0 || most < latin {
-                return None;
-            }
-            script
-        };
+        let (script, most) = [
+            (Han, cjk),
+            (Cyrillic, self.words[Cyrillic as usize]),
+            (Greek, self.words[Greek as usize]),
+            (Arabic, self.words[Arabic as usize]),
+            (Devanagari, self.words[Devanagari as usize]),
+        ]
+        .into_iter()
+        .max_by_key(|(_, n)| *n)?;
+        // Mostly Latin, it is in a Latin script. A tie is not: a word of
+        // another script beside one of English is not a quoted one.
+        if most == 0 || most < self.words[Latin as usize] {
+            return None;
+        }
         let usual = usual.and_then(known_language);
         Some(match script {
             Han if self.chars[Hangul as usize] * 2 >= cjk => "ko",
@@ -177,10 +167,8 @@ fn end_word(run: &mut Option<(Script, usize)>, words: &mut [usize; SCRIPTS]) {
     }
 }
 
-/// Whether `text` is written in Japanese: kana beside its kanji, as
-/// Japanese is written — at least a fifth of them — not a word or two of it
-/// quoted in Chinese.
-fn written_in_japanese(text: &str) -> bool {
+/// The kana and the Han characters in `text`.
+fn kana_and_han(text: &str) -> (usize, usize) {
     let (mut kana, mut han) = (0usize, 0usize);
     for c in text.chars() {
         match script_of(c) {
@@ -189,23 +177,64 @@ fn written_in_japanese(text: &str) -> bool {
             _ => {}
         }
     }
+    (kana, han)
+}
+
+/// Whether `text` is written in Japanese: kana beside its kanji, as
+/// Japanese is written — at least a fifth of them — not a word or two of it
+/// quoted in Chinese.
+fn written_in_japanese(text: &str) -> bool {
+    let (kana, han) = kana_and_han(text);
     kana > 0 && kana * 5 >= kana + han
 }
 
-/// The language a text in Cyrillic is in, as its letters say: Ukrainian
-/// writes і ї є ґ; Bulgarian has ъ as a vowel (път, България) where Russian
-/// writes it only as the hard sign before е ё ю я, and has no ы э ё.
-/// Else Russian.
-fn cyrillic_language(text: &str) -> &'static str {
-    let letters: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
-    if letters.iter().any(|c| matches!(c, 'і' | 'ї' | 'є' | 'ґ')) {
-        return "uk";
+/// Characters only Simplified Chinese writes — where Japanese writes 這,
+/// 説, 対, 時, 設, 変, 関… or nothing like them — among the commonest.
+const SIMPLIFIED_ONLY: &str = "这们个么说对时还过让给从吗呢吧该现发实设变环关应码据输调页种样总价进动开运门问题间长东车书语读为买卖购网络";
+
+/// Whether kanji in `sentence` are Japanese, in an answer whose own words
+/// are `context`: the sentence written in Japanese; or kana in it or about
+/// it, where no character only Chinese writes is — a heading of kanji
+/// alone, or one with a single particle (環境変数の設定), in an answer in
+/// Japanese, but not a sentence of a Chinese answer that quotes Japanese.
+fn japanese(sentence: &str, context: &str) -> bool {
+    if written_in_japanese(sentence) {
+        return true;
     }
-    let russian = letters.iter().any(|c| matches!(c, 'ы' | 'э' | 'ё'));
-    let vowel_hard_sign = letters
+    let simplified = |text: &str| text.chars().any(|c| SIMPLIFIED_ONLY.contains(c));
+    if simplified(sentence) || simplified(context) {
+        return false;
+    }
+    kana_and_han(sentence).0 > 0 || kana_and_han(context).0 > 0
+}
+
+/// The letters that tell Cyrillic languages apart, counted: Ukrainian's
+/// і ї є ґ; Russian's ы э ё; Bulgarian's ъ said as a vowel (път,
+/// България), where Russian writes it only as the hard sign before е ё ю я.
+fn cyrillic_letters(text: &str) -> [usize; 3] {
+    let letters: Vec<char> = text.chars().flat_map(char::to_lowercase).collect();
+    let mut counts = [0usize; 3];
+    for c in &letters {
+        match c {
+            'і' | 'ї' | 'є' | 'ґ' => counts[0] += 1,
+            'ы' | 'э' | 'ё' => counts[1] += 1,
+            _ => {}
+        }
+    }
+    counts[2] = letters
         .windows(2)
-        .any(|w| w[0] == 'ъ' && matches!(w[1], 'а'..='я') && !matches!(w[1], 'е' | 'ю' | 'я'));
-    if vowel_hard_sign && !russian {
+        .filter(|w| w[0] == 'ъ' && matches!(w[1], 'а'..='я') && !matches!(w[1], 'е' | 'ю' | 'я'))
+        .count();
+    counts
+}
+
+/// The language a text in Cyrillic is in, as most of its telling letters
+/// say ([`cyrillic_letters`]); Russian where none tells.
+fn cyrillic_language(text: &str) -> &'static str {
+    let [uk, ru, bg] = cyrillic_letters(text);
+    if uk > ru && uk >= bg {
+        "uk"
+    } else if bg > ru && bg > uk {
         "bg"
     } else {
         "ru"
@@ -313,46 +342,56 @@ pub fn latin_language(text: &str) -> Option<&'static str> {
     (best >= 2 && best * 2 > second * 3).then_some(lang)
 }
 
-/// The language to say `sentence` in, from an answer whose words so far
-/// are `answer` (as [`speakable`] says them): its script's
-/// ([`script_language`]) — Japanese for kanji alone where the answer is
-/// written in Japanese; for one mostly in Latin letters with words of
-/// another script, the language of an answer — or conversation, `usual` —
-/// in that script; else, for a Latin script, the language the answer's
+/// The language to say `sentence` in, from the answer's own words so far
+/// — `context`, code left out ([`prose`]): the sentence's script's
+/// ([`script_language`]); else, for a sentence mostly in Latin letters with
+/// words of another script, the script the answer is written in — names in
+/// code said as words outnumber a sentence's own; kanji Japanese where the
+/// answer is, and Cyrillic the language its letters say, the sentence's or
+/// else the answer's; else, for a Latin script, the language the answer's
 /// words are in, or `usual` when it is written in one; else English.
-pub fn language_for(sentence: &str, answer: &str, usual: Option<&str>) -> &'static str {
-    let tally = Tally::of(sentence);
-    if let Some(lang) = tally.language(sentence, usual) {
-        // A line of kanji alone ("概要。") in an answer written in Japanese
-        // is Japanese.
-        if lang == "zh" && written_in_japanese(answer) {
-            return "ja";
-        }
-        return lang;
-    }
+pub fn language_for(sentence: &str, context: &str, usual: Option<&str>) -> &'static str {
     let usual = usual.and_then(known_language);
-    // Mostly Latin letters, with words of another script among them, in an
-    // answer written in that script — or, nothing else in Latin letters to
-    // go by yet, in a conversation held in it: a name in code, said as its
-    // words ("Это функция get User By Id."), in a sentence of that language.
-    let around = Tally::of(answer);
-    let latin_around = around.words[Script::Latin as usize] > tally.words[Script::Latin as usize];
-    if let Some(lang) = around
-        .language(answer, usual)
-        .or(usual.filter(|_| !latin_around))
-        .filter(|lang| !written_in_latin(lang) && tally.holds_words_of(lang))
-    {
-        return lang;
+    let tally = Tally::of(sentence);
+    let lang = tally.language(sentence, usual).or_else(|| {
+        Tally::of(context)
+            .language(context, usual)
+            .filter(|lang| !written_in_latin(lang) && tally.holds_words_of(lang))
+    });
+    match lang {
+        Some("zh") if japanese(sentence, context) => "ja",
+        Some("ru" | "uk" | "bg") if cyrillic_letters(sentence).iter().sum::<usize>() == 0 => {
+            cyrillic_language(context)
+        }
+        Some(lang) => lang,
+        None => latin_language(context)
+            .or_else(|| usual.filter(|lang| written_in_latin(lang)))
+            .unwrap_or("en"),
     }
-    latin_language(answer)
-        .or_else(|| usual.filter(|lang| written_in_latin(lang)))
-        .unwrap_or("en")
 }
 
 /// `markdown` as it would be said, one paragraph, heading or list item a
 /// line: what is only drawn or only read — code blocks, markup, an address
 /// — left out or said in words.
 pub fn speakable(markdown: &str) -> String {
+    said_as(markdown, Code::Said)
+}
+
+/// `markdown`'s own words, as [`speakable`] says them but with code left
+/// out — a name in code, said as words, says nothing of the language the
+/// answer is in: what [`language_for`] tells it by.
+pub fn prose(markdown: &str) -> String {
+    said_as(markdown, Code::Left)
+}
+
+/// What is done with code in what is said: said as its words, or left out.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Code {
+    Said,
+    Left,
+}
+
+fn said_as(markdown: &str, code: Code) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut fence: Option<&str> = None;
     for line in markdown.lines() {
@@ -376,7 +415,7 @@ pub fn speakable(markdown: &str) -> String {
             let cells: Vec<String> = trimmed
                 .trim_matches('|')
                 .split('|')
-                .map(|c| inline(c.trim()))
+                .map(|c| inline(c.trim(), code))
                 .filter(|c| !c.is_empty())
                 .collect();
             if !cells.is_empty() {
@@ -405,7 +444,7 @@ pub fn speakable(markdown: &str) -> String {
         let heading = trimmed.starts_with('#');
         // A list's marker; what it marks is a sentence of its own.
         let (item, text) = list_item(text);
-        let said = inline(text);
+        let said = inline(text, code);
         if said.is_empty() {
             continue;
         }
@@ -465,9 +504,9 @@ fn ends_sentence(text: &str) -> bool {
         .ends_with(['.', '!', '?', ':', ';', '。', '！', '？', '：', '；'])
 }
 
-/// One line's inline markdown as said: code as its words, a link as its
-/// text, an address as "a link", emphasis and emoji dropped.
-fn inline(text: &str) -> String {
+/// One line's inline markdown as said: code as its words (or left out), a
+/// link as its text, an address as "a link", emphasis and emoji dropped.
+fn inline(text: &str, code: Code) -> String {
     let mut out = String::new();
     let mut rest = text;
     while !rest.is_empty() {
@@ -477,7 +516,11 @@ fn inline(text: &str) -> String {
             let fence = &rest[..ticks];
             let body = &rest[ticks..];
             if let Some(end) = body.find(fence) {
-                out.push_str(&code_words(body[..end].trim()));
+                if code == Code::Said {
+                    out.push_str(&code_words(body[..end].trim()));
+                } else {
+                    out.push(' ');
+                }
                 rest = &body[end + ticks..];
                 continue;
             }
@@ -490,7 +533,7 @@ fn inline(text: &str) -> String {
             if let Some(close) = rest[open..].find("](").map(|i| open + i)
                 && let Some(end) = rest[close..].find(')').map(|i| close + i)
             {
-                out.push_str(&inline(&rest[open + 1..close]));
+                out.push_str(&inline(&rest[open + 1..close], code));
                 rest = &rest[end + 1..];
                 continue;
             }
@@ -527,10 +570,10 @@ fn inline(text: &str) -> String {
                 })
                 .map_or(rest.len(), |(i, _)| i);
             let word = &rest[..end];
-            out.push_str(&if is_code_name(word) {
-                code_words(word)
-            } else {
-                word.to_string()
+            out.push_str(&match (is_code_name(word), code) {
+                (true, Code::Said) => code_words(word),
+                (true, Code::Left) => " ".to_string(),
+                (false, _) => word.to_string(),
             });
             rest = &rest[end..];
             continue;
@@ -703,6 +746,7 @@ impl Reader {
     /// `done`: no more is coming.
     pub fn next(&mut self, answer: &str, done: bool) -> Vec<Sentence> {
         let said = speakable(answer);
+        let context = prose(answer);
         let all = sentences(&said);
         let ready = if done {
             all.len()
@@ -715,7 +759,7 @@ impl Reader {
         let fresh = all[self.given..ready]
             .iter()
             .map(|text| Sentence {
-                lang: language_for(text, &said, self.usual),
+                lang: language_for(text, &context, self.usual),
                 text: text.clone(),
             })
             .collect();
@@ -928,27 +972,69 @@ mod tests {
             "ru"
         );
         assert_eq!(language_for("Это foo.", english, None), "ru");
-        // A name in code is said as its words, which can be more than the
-        // sentence's own: the sentence is still in the answer's language,
-        // or the conversation's when the answer has no more to go by.
-        let mixed = "Это функция get User By Id.";
-        let russian = "Это функция get User By Id. Она возвращает пользователя по номеру.";
-        assert_eq!(language_for(mixed, russian, None), "ru");
-        assert_eq!(language_for(mixed, mixed, Some("ru")), "ru");
-        assert_eq!(language_for(mixed, mixed, None), "en");
-        // Chinese, Japanese and Korean too, from the first sentence on:
-        // their characters are not words to be outnumbered, and their
-        // voices say the Latin words among them. One character alone, in
-        // English, is quoted.
-        let chinese = "调用 get User By Id。";
-        assert_eq!(language_for(chinese, chinese, None), "zh");
-        let japanese = "get User By Id を呼ぶ。";
-        assert_eq!(language_for(japanese, japanese, Some("en")), "ja");
-        let korean = "get User By Id 호출.";
-        assert_eq!(language_for(korean, korean, None), "ko");
+        // A name in code is said as its words, which can outnumber the
+        // sentence's own — and the answer's: code never says the language.
+        // As the reader hands sentences out, from an answer's markdown:
+        let read = |markdown: &str, usual: Option<&str>| -> Vec<&'static str> {
+            Reader::new(usual)
+                .next(markdown, true)
+                .into_iter()
+                .map(|s| s.lang)
+                .collect()
+        };
+        assert_eq!(
+            read(
+                "Функция `getUserById` вызывает `fetchUserFromDatabase`. \
+                 Затем `validateUserPermissions` проверяет права.",
+                None
+            ),
+            ["ru", "ru"]
+        );
+        assert_eq!(
+            read("- `src/app/speech.rs` — озвучивание ответов.", Some("en")),
+            ["ru"]
+        );
+        assert_eq!(read("Это функция `getUserById`.", None), ["ru"]);
+        assert_eq!(read("Это функция getUserById.", None), ["ru"]);
+        assert_eq!(
+            read("调用 `getUserById`。然后返回用户。", Some("en")),
+            ["zh", "zh"]
+        );
+        assert_eq!(read("`getUserById` を呼ぶ。", Some("en")), ["ja"]);
+        assert_eq!(read("`getUserById` 호출.", None), ["ko"]);
+        // A word of another script quoted in English stays English.
+        assert_eq!(
+            read("The word 你好 means hello. It is a greeting.", None),
+            ["en", "en"]
+        );
         assert_eq!(
             language_for("The character 中 means middle.", english, None),
             "en"
+        );
+        // A Japanese heading of kanji and one particle, opening an answer
+        // still streaming in, is Japanese.
+        assert_eq!(
+            Reader::new(Some("en"))
+                .next("## 環境変数の設定\n環境変数は", false)
+                .into_iter()
+                .map(|s| s.lang)
+                .collect::<Vec<_>>(),
+            ["ja"]
+        );
+        // Ukrainian and Bulgarian sentences with no letter of their own are
+        // in the answer's language, not Russian.
+        assert_eq!(
+            read("Функція повертає список. Ось приклад коду.", None),
+            ["uk", "uk"]
+        );
+        assert_eq!(
+            read("Функцията връща списък. Това е пример.", None),
+            ["bg", "bg"]
+        );
+        // A Russian answer quoting a word of Ukrainian is still Russian.
+        assert_eq!(
+            read("Слово «їжак» значит ёж. Это пример.", None),
+            ["ru", "ru"]
         );
         let greek = "Η συνάρτηση get User By Id. Επιστρέφει τον χρήστη.";
         assert_eq!(
