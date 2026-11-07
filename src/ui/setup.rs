@@ -36,12 +36,25 @@ pub(crate) fn setup_sheet<'a>(
     let calls = setup.map(|s| s.census.as_ref().map(|c| c.calls));
     let explain_says = explain_line(app.llm_available, calls.flatten(), app.embed_available);
 
+    // What is asked, in the title; the project, by its name, on a line of
+    // its own under it: run into the title, a name that is a word read as
+    // one ("Open shop", "Set up shop").
     let title = match mode {
-        SetupMode::Open => tr!("Open {name}", name = name),
-        SetupMode::Manage => tr!("Set up {name}", name = name),
-        SetupMode::Explain => tr!("Explain {name}?", name = name),
+        SetupMode::Open => tr!("Open project"),
+        SetupMode::Manage => tr!("Set up project"),
+        SetupMode::Explain => tr!("Explain this project?"),
     };
     let title = text(title).size(ts::TITLE).color(theme::fg());
+    let project = row![
+        crate::glyph::icon(crate::glyph::Glyph::Folder, theme::fg_muted(), 16.0),
+        text(name)
+            .size(ts::BASE)
+            .font(crate::fonts::UI_MEDIUM)
+            .color(theme::fg())
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
     // A first open's ×, as Escape: the project is not opened.
     let header: Element<'a, Message> = if mode == SetupMode::Open {
         row![
@@ -56,7 +69,7 @@ pub(crate) fn setup_sheet<'a>(
     } else {
         title.into()
     };
-    let mut body = column![header].spacing(14);
+    let mut body = column![header, project].spacing(14);
 
     if mode == SetupMode::Open {
         body = body.push(

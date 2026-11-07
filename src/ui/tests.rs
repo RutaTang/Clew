@@ -2842,7 +2842,8 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     }
     let mut sim = sim_elem(sheet(&app, &root));
     for said in [
-        "Open iced",
+        "Open project",
+        "iced",
         "/nonexistent/iced/.clew",
         "Language servers",
         "rust-analyzer: download, builds the project, running its code",
@@ -2869,7 +2870,8 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     app.setup.as_mut().unwrap().mode = SetupMode::Explain;
     app.setup.as_mut().unwrap().explain = true;
     let mut sim = sim_elem(sheet(&app, &root));
-    assert!(shows(&mut sim, "Explain iced?"));
+    assert!(shows(&mut sim, "Explain this project?"));
+    assert!(shows(&mut sim, "iced"), "the project, by its name");
     assert!(!shows(&mut sim, "Language servers"));
     assert!(matches!(
         click(sim_elem(sheet(&app, &root)), "Explain").as_slice(),
