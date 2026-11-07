@@ -40,13 +40,25 @@ impl PaletteCommand {
     }
 
     /// Whether running it costs something beyond what the window shows —
-    /// a paid pass over the project, the program started or stepped, a
-    /// breakpoint set in it, another project opened, a file written — so
-    /// that a command run for the user (by voice, by the agent) asks first.
-    /// Everything else only changes what is on screen.
+    /// a paid pass over the project, a program started or ended, another
+    /// project opened, a file written — so that a command run for the user
+    /// (by voice, by the agent) asks first. Everything else only changes
+    /// what is on screen, or steps the program the reader is debugging.
     pub(crate) fn costly(&self) -> bool {
         use keymap::Action;
         match &self.action {
+            // Stepping a program the reader already runs, or marking where
+            // it stops, is what they are doing: no yes for each step. Starting
+            // one, ending it, or evaluating in it as the mouse moves is asked.
+            PaletteAction::Send(Message::Debug(
+                DebugMsg::Control(_)
+                | DebugMsg::BreakpointToggle { .. }
+                | DebugMsg::WatchAdd
+                | DebugMsg::WatchRemoveExpr(_),
+            ))
+            | PaletteAction::AtCaret(Message::Debug(
+                DebugMsg::ToggleBreakpointFromMenu | DebugMsg::ConditionalBreakpointFromMenu,
+            )) => false,
             PaletteAction::Send(message) | PaletteAction::AtCaret(message) => matches!(
                 message,
                 Message::Editor(EditorMsg::RunAction(
@@ -528,7 +540,125 @@ impl App {
                 None,
                 send(Message::Debug(DebugMsg::Stop)),
             );
+            add(
+                if self.debug_hover_eval {
+                    tr_noop!("Debug: Turn Off Hover Evaluation")
+                } else {
+                    tr_noop!("Debug: Turn On Hover Evaluation")
+                }
+                .into(),
+                None,
+                send(Message::Debug(DebugMsg::ToggleHoverEval)),
+            );
         }
+
+        // The find bar, while it is open.
+        if project && self.proj.find.open {
+            for (title, keys, message) in [
+                (
+                    tr_noop!("Find: Next Match"),
+                    Some(crate::keymap::local_keys("↩")),
+                    EditorMsg::FindStep(1),
+                ),
+                (
+                    tr_noop!("Find: Previous Match"),
+                    Some(crate::keymap::local_keys("⇧↩")),
+                    EditorMsg::FindStep(-1),
+                ),
+                (tr_noop!("Find: Close"), None, EditorMsg::FindClosed),
+            ] {
+                add(title.into(), keys, send(Message::Editor(message)));
+            }
+        }
+
+        // Moving through the open file, as its keys do: by a screen, to
+        // either end, folding — for voice above all, which has no keys.
+        if project && self.active_viewer().is_some() {
+            for (title, keys, message) in [
+                (tr_noop!("Scroll Down"), None, EditorMsg::ScrollPages(1)),
+                (tr_noop!("Scroll Up"), None, EditorMsg::ScrollPages(-1)),
+                (
+                    tr_noop!("Go to Top of File"),
+                    Some("gg"),
+                    EditorMsg::MoveCaret(viewer::Motion::FileStart),
+                ),
+                (
+                    tr_noop!("Go to End of File"),
+                    Some("G"),
+                    EditorMsg::MoveCaret(viewer::Motion::FileEnd),
+                ),
+                (tr_noop!("Fold All"), Some("zM"), EditorMsg::FoldAll(true)),
+                (
+                    tr_noop!("Unfold All"),
+                    Some("zR"),
+                    EditorMsg::FoldAll(false),
+                ),
+                (
+                    tr_noop!("Toggle Fold Here"),
+                    Some("za"),
+                    EditorMsg::FoldHere,
+                ),
+            ] {
+                add(
+                    title.into(),
+                    keys.map(String::from),
+                    send(Message::Editor(message)),
+                );
+            }
+            for (title, tab) in [
+                (tr_noop!("Margin: Notes"), MarginTab::Notes),
+                (tr_noop!("Margin: Calls"), MarginTab::Calls),
+                (tr_noop!("Margin: History"), MarginTab::History),
+            ] {
+                add(
+                    title.into(),
+                    None,
+                    send(Message::Window(WindowMsg::MarginTabPicked(tab))),
+                );
+            }
+        }
+        // Each page of Settings, by its name.
+        for (title, page) in [
+            (tr_noop!("Settings: Appearance"), SettingsPage::Appearance),
+            (tr_noop!("Settings: Updates"), SettingsPage::Updates),
+            (
+                tr_noop!("Settings: Language Model"),
+                SettingsPage::LanguageModel,
+            ),
+            (tr_noop!("Settings: Embeddings"), SettingsPage::Embeddings),
+            (tr_noop!("Settings: Voice"), SettingsPage::Voice),
+            (
+                tr_noop!("Settings: Integrations"),
+                SettingsPage::Integrations,
+            ),
+            (tr_noop!("Settings: Languages"), SettingsPage::Languages),
+            (
+                tr_noop!("Settings: Keyboard Shortcuts"),
+                SettingsPage::Shortcuts,
+            ),
+        ] {
+            add(
+                title.into(),
+                None,
+                send(Message::Settings(SettingsMsg::OpenAt(page))),
+            );
+        }
+        // The window itself.
+        add(
+            tr_noop!("Window: Minimize").into(),
+            None,
+            send(Message::Window(WindowMsg::Minimize)),
+        );
+        add(
+            tr_noop!("Window: Maximize or Restore").into(),
+            None,
+            send(Message::Window(WindowMsg::ToggleMaximize)),
+        );
+        add(
+            tr_noop!("Window: Full Screen").into(),
+            None,
+            send(Message::Window(WindowMsg::ToggleFullscreen)),
+        );
 
         // The toolbar's own tools.
         if project {

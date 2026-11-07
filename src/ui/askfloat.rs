@@ -295,7 +295,13 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
             .padding([2, 8])
             .on_press(msg)
     };
-    if let Some(title) = &app.voice.confirm {
+    // While the answer is being said, the microphone is what shows.
+    if let Some(title) = app
+        .voice
+        .confirm
+        .as_ref()
+        .filter(|_| app.voice.phase == VoicePhase::Idle)
+    {
         return Some(
             row![
                 text(tr!(
@@ -964,7 +970,13 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
             .padding([2, 8])
             .on_press(msg)
     };
-    if let Some(title) = &app.voice.confirm {
+    // While the answer is being said, the microphone is what shows.
+    if let Some(title) = app
+        .voice
+        .confirm
+        .as_ref()
+        .filter(|_| app.voice.phase == VoicePhase::Idle)
+    {
         return Some(
             row![
                 text(tr!(

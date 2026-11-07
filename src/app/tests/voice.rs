@@ -795,3 +795,367 @@ fn each_languages_examples_run_what_they_say() {
         });
     }
 }
+
+/// The recognizer hears `words` from now on.
+fn hears(app: &mut App, words: &str) {
+    app.voice.transcriber = Arc::new(Hears {
+        words: words.into(),
+        hints: Mutex::new(Vec::new()),
+        heard_audio: Mutex::new(0),
+    });
+}
+
+/// Say `words`, and land the file a pane then waits for, as the runtime
+/// would.
+fn say_words(app: &mut App, script: &Arc<Mutex<MicScript>>, words: &str) {
+    hears(app, words);
+    say(app, script);
+    let pane = app.proj.active;
+    if let Some(req) = app.proj.link.pane_pending[pane] {
+        let open = app.proj.link.pane_opening[pane]
+            .clone()
+            .filter(|o| o.req == req)
+            .expect("the pane's open is kept");
+        land_active_load(app, open.abs, open.target);
+    }
+}
+
+/// The caret's line in the active pane, 1-based.
+fn caret_line(app: &App) -> Option<usize> {
+    app.active_viewer()?.caret.map(|(line, _)| line + 1)
+}
+
+/// What was done with what was heard.
+fn ran(app: &App) -> Option<&str> {
+    match &app.voice.heard.as_ref()?.outcome {
+        HeardOutcome::Ran(done) => Some(done),
+        _ => None,
+    }
+}
+
+/// A line said is gone to — in figures or in words — and a line said with no
+/// file open goes to Ask, which can say there is none.
+#[test]
+fn a_line_said_is_gone_to() {
+    let (mut app, script, _) = voice_app("voice-line", "");
+    say_words(&mut app, &script, "Go to line 4.");
+    assert!(
+        app.voice
+            .heard
+            .as_ref()
+            .is_some_and(|h| h.outcome == HeardOutcome::Asked),
+        "no file is open"
+    );
+    open_synchronously(&mut app, "src/lib.rs", None);
+    say_words(&mut app, &script, "Go to line 4.");
+    assert_eq!(caret_line(&app), Some(4), "{}", app.status);
+    assert_eq!(ran(&app), Some("Line 4"));
+    say_words(&mut app, &script, "line two");
+    assert_eq!(caret_line(&app), Some(2));
+    // Past the end: the last line.
+    say_words(&mut app, &script, "go to line 900");
+    assert_eq!(
+        caret_line(&app),
+        Some(app.active_viewer().unwrap().lines.len())
+    );
+    // The palette's own "Go to Line…" asks for one; said without a number,
+    // that is what runs.
+    say_words(&mut app, &script, "Go to line");
+    assert_eq!(ran(&app), Some("Go to Line…"));
+}
+
+/// A long file is moved through by voice as by its keys: by a screen, by
+/// lines, to either end; and folded and unfolded.
+#[test]
+fn a_file_is_scrolled_and_folded_by_voice() {
+    let (mut app, script, _) = voice_app("voice-scroll", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let body: String = (0..120)
+        .map(|i| format!("fn f{i}() {{\n    let x = {i};\n}}\n"))
+        .collect();
+    std::fs::write(root.join("src/long.rs"), body).unwrap();
+    scan_synchronously(&mut app, root);
+    open_synchronously(&mut app, "src/long.rs", None);
+    let line_height = app.line_height();
+    app.active_viewer_mut().unwrap().viewport_h = 20.0 * line_height;
+    let scroll = |app: &App| app.active_viewer().unwrap().scroll_y;
+
+    say_words(&mut app, &script, "Scroll down.");
+    assert_eq!(ran(&app), Some("Scroll Down"), "{}", app.status);
+    assert_eq!(scroll(&app), 19.0 * line_height, "a screen, less a line");
+    assert_eq!(caret_line(&app), Some(20), "the caret goes as far");
+    say_words(&mut app, &script, "scroll down 10 lines");
+    assert_eq!(scroll(&app), 29.0 * line_height);
+    say_words(&mut app, &script, "Scroll up five lines.");
+    assert_eq!(scroll(&app), 24.0 * line_height);
+    say_words(&mut app, &script, "scroll up");
+    assert_eq!(scroll(&app), 5.0 * line_height);
+
+    say_words(&mut app, &script, "Go to the end of the file.");
+    assert_eq!(ran(&app), Some("Go to End of File"));
+    assert_eq!(
+        caret_line(&app),
+        Some(app.active_viewer().unwrap().lines.len())
+    );
+    say_words(&mut app, &script, "go to top of file");
+    assert_eq!(caret_line(&app), Some(1));
+
+    say_words(&mut app, &script, "Fold all.");
+    assert_eq!(ran(&app), Some("Fold All"));
+    assert!(!app.active_viewer().unwrap().collapsed.is_empty());
+    say_words(&mut app, &script, "unfold all");
+    assert!(app.active_viewer().unwrap().collapsed.is_empty());
+}
+
+/// The debugger by voice: a breakpoint on a line said, the program stepped
+/// with no yes for each step, a watch added and taken away; starting and
+/// stopping it still asks — and the yes, or the no, can be said.
+#[test]
+fn the_debugger_is_driven_by_voice() {
+    let (mut app, script, _) = voice_app("voice-debug", "");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    say_words(&mut app, &script, "Breakpoint on line 4.");
+    assert_eq!(ran(&app), Some("Breakpoint on line 4"), "{}", app.status);
+    assert!(
+        app.debug
+            .breakpoints
+            .get(&abs)
+            .is_some_and(|b| b.contains_key(&4))
+    );
+    say_words(&mut app, &script, "toggle breakpoint on line four");
+    assert!(
+        !app.debug
+            .breakpoints
+            .get(&abs)
+            .is_some_and(|b| b.contains_key(&4))
+    );
+
+    // Starting asks; "no" says no, "yes" runs it.
+    say_words(&mut app, &script, "Start debugging.");
+    assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+    say_words(&mut app, &script, "No, never mind.");
+    assert_eq!(app.voice.confirm, None);
+    assert!(app.status.contains("Start Debugging"), "{}", app.status);
+    say_words(&mut app, &script, "Start debugging.");
+    say_words(&mut app, &script, "Yes, run it.");
+    assert_eq!(app.voice.confirm, None);
+    assert_eq!(ran(&app), Some("Start Debugging"));
+    // Something else said instead puts the question away and is read as
+    // itself.
+    say_words(&mut app, &script, "Start debugging.");
+    say_words(&mut app, &script, "go to line 2");
+    assert_eq!(app.voice.confirm, None);
+    assert_eq!(caret_line(&app), Some(2));
+
+    // A program stopped: each step runs as said.
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    for (said, title) in [
+        ("Step over.", "Debug: Step Over"),
+        ("step into", "Debug: Step Into"),
+        ("Step out", "Debug: Step Out"),
+        ("continue", "Debug: Continue"),
+    ] {
+        say_words(&mut app, &script, said);
+        assert_eq!(ran(&app), Some(title), "{said}: {}", app.status);
+        assert_eq!(app.voice.confirm, None, "{said}");
+    }
+    say_words(&mut app, &script, "Stop debugging.");
+    assert_eq!(app.voice.confirm.as_deref(), Some("Debug: Stop"));
+    say_words(&mut app, &script, "cancel");
+    assert_eq!(app.voice.confirm, None);
+
+    say_words(&mut app, &script, "Watch cart total.");
+    assert_eq!(app.debug.watches, ["cart total"]);
+    say_words(&mut app, &script, "stop watching cart total");
+    assert!(app.debug.watches.is_empty());
+    say_words(&mut app, &script, "Turn on hover evaluation.");
+    assert_eq!(
+        app.voice.confirm.as_deref(),
+        Some("Debug: Turn On Hover Evaluation"),
+        "evaluating in the program as the mouse moves asks"
+    );
+}
+
+/// Words to look for, a file and a symbol said by name, Settings' pages and
+/// the find bar's matches: each where it is said to be.
+#[test]
+fn what_is_named_is_found_and_opened() {
+    let (mut app, script, _) = voice_app("voice-named", "");
+    // The project's symbols, indexed as the runtime does in a task.
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        indexed: index::build_indexed(&root, files),
+    }));
+    settle_imports(&mut app, indexed);
+    say_words(&mut app, &script, "Open notes dot txt.");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("notes.txt"),
+        "{}",
+        app.status
+    );
+    // An extension misheard: the file of that name.
+    say_words(&mut app, &script, "Open, lib.ide,");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("src/lib.rs"),
+        "{}",
+        app.status
+    );
+    say_words(&mut app, &script, "Go to origin.");
+    assert_eq!(ran(&app), Some("origin"), "{}", app.status);
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.rel, "src/lib.rs");
+    assert_eq!(caret_line(&app), Some(3));
+
+    say_words(&mut app, &script, "Find point.");
+    assert!(app.proj.find.open);
+    assert_eq!(app.proj.find.query, "point");
+    assert_eq!(app.proj.find.matches.len(), 3);
+    say_words(&mut app, &script, "next match");
+    assert_eq!(app.proj.find.current, 1, "{}", app.status);
+    say_words(&mut app, &script, "previous match");
+    assert_eq!(app.proj.find.current, 0);
+    say_words(&mut app, &script, "close find");
+    assert!(!app.proj.find.open);
+
+    say_words(&mut app, &script, "Search for needle.");
+    assert_eq!(app.proj.search.query, "needle");
+    assert_eq!(app.sidebar, SidebarTab::Search);
+
+    say_words(&mut app, &script, "Open the voice settings.");
+    assert!(app.settings.open, "{}", app.status);
+    assert_eq!(app.settings.page, SettingsPage::Voice);
+}
+
+/// The phrases are heard in the reader's language too; whisper is told the
+/// titles, not them.
+#[test]
+fn phrases_are_heard_in_the_readers_language() {
+    use crate::i18n::{Lang, with_lang};
+    with_lang(Lang::Fr, || {
+        let (mut app, script, hears) = voice_app("voice-phrase-fr", "");
+        open_synchronously(&mut app, "src/lib.rs", None);
+        say_words(&mut app, &script, "Aller à la ligne 4.");
+        assert_eq!(caret_line(&app), Some(4), "{}", app.status);
+        drop(hears);
+        say_words(&mut app, &script, "Démarrer le débogage");
+        assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+        say_words(&mut app, &script, "Oui, vas-y.");
+        assert_eq!(ran(&app), Some("Start Debugging"), "{}", app.status);
+    });
+    with_lang(Lang::Zh, || {
+        let (mut app, script, _) = voice_app("voice-phrase-zh", "");
+        open_synchronously(&mut app, "src/lib.rs", None);
+        say_words(&mut app, &script, "跳到第3行。");
+        assert_eq!(caret_line(&app), Some(3), "{}", app.status);
+        say_words(&mut app, &script, "在第2行设置断点");
+        let abs = app.active_viewer().unwrap().abs.clone();
+        assert!(
+            app.debug
+                .breakpoints
+                .get(&abs)
+                .is_some_and(|b| b.contains_key(&2)),
+            "{}",
+            app.status
+        );
+    });
+    let (mut app, script, hears) = voice_app("voice-phrase-hint", "go to line 2");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    say(&mut app, &script);
+    let hints = hears.hints.lock().unwrap();
+    // The titles, and nothing that whisper might hear in what was not
+    // clearly said.
+    assert!(hints[0].contains("Scroll Down"), "{}", hints[0]);
+    assert!(!hints[0].contains("breakpoint on line"), "{}", hints[0]);
+    assert!(
+        !hints[0].split(", ").any(|w| w == "Talk"),
+        "the voice key's own command: {}",
+        hints[0]
+    );
+}
+
+/// Every command the window offers runs when its name is said, in each
+/// language — with a file open, its find bar up and a program stopped in
+/// the debugger, so that every command is offered.
+#[test]
+fn every_command_runs_when_its_name_is_said() {
+    use crate::i18n::{Lang, with_lang};
+    let (mut app, _script, _) = voice_app("voice-every-command", "");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.active_viewer_mut().unwrap().caret = Some((2, 7));
+    let _ = app.update(Message::Editor(EditorMsg::FindOpened));
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    for lang in Lang::ALL {
+        with_lang(lang, || {
+            let commands = app.palette_commands();
+            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+            let mut unheard = Vec::new();
+            for (i, command) in commands.iter().enumerate() {
+                let said = command.shown().trim_end_matches('…');
+                let found = clew_voice::intent::command(said, &titles)
+                    .or_else(|| crate::app::voice::said_as_shown(lang, said, &shown));
+                if found.map(|f| titles[f]) != Some(titles[i]) {
+                    unheard.push(format!("{said:?} → {:?}", found.map(|f| titles[f])));
+                }
+            }
+            assert!(unheard.is_empty(), "{}: {unheard:#?}", lang.code());
+        });
+    }
+    // And as the README says them.
+    let commands = app.palette_commands();
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    for (said, title) in [
+        ("scroll down", "Scroll Down"),
+        ("go to the end of the file", "Go to End of File"),
+        ("fold all", "Fold All"),
+        ("unfold all", "Unfold All"),
+        ("fold here", "Toggle Fold Here"),
+        ("next match", "Find: Next Match"),
+        ("close find", "Find: Close"),
+        ("step over", "Debug: Step Over"),
+        ("continue", "Debug: Continue"),
+        ("voice settings", "Settings: Voice"),
+        ("full screen", "Window: Full Screen"),
+    ] {
+        assert_eq!(
+            clew_voice::intent::command(said, &titles).map(|i| titles[i]),
+            Some(title),
+            "{said:?}"
+        );
+    }
+}

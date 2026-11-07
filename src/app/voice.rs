@@ -393,12 +393,12 @@ impl VoiceState {
     }
 
     /// Back to idle, as before anything was said — the key's last press
-    /// forgotten too, so a test's next press is not taken for a repeat.
+    /// forgotten too, so a test's next press is not taken for a repeat. A
+    /// command waiting for a yes still waits, as it does for a real press.
     #[cfg(test)]
     pub(crate) fn reset_for_test(&mut self) {
         self.phase = VoicePhase::Idle;
         self.listening = None;
-        self.confirm = None;
         self.heard = None;
         self.last_toggle = None;
     }
@@ -597,7 +597,11 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
     if said.is_empty() {
         return None;
     }
-    let mut found = None;
+    // The title as it is written is a better fit than the title without its
+    // category: "Raccourcis clavier" is "Raccourcis clavier…", not
+    // "Réglages : Raccourcis clavier". Two equally good: neither.
+    let mut found: Option<(usize, usize)> = None;
+    let mut tied = false;
     for (index, title) in shown.iter().enumerate() {
         // The title, without its category, without its aside, both.
         let main = title
@@ -609,17 +613,26 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
                 None => t.to_string(),
             }
         };
-        let fits = [*title, main, &plain(title), &plain(main)]
+        let fit = if [*title, &plain(title)]
             .iter()
-            .any(|form| bare(form) == said);
-        if fits {
-            if found.is_some() {
-                return None;
+            .any(|form| bare(form) == said)
+        {
+            0
+        } else if [main, &plain(main)].iter().any(|form| bare(form) == said) {
+            1
+        } else {
+            continue;
+        };
+        match found {
+            Some((best, _)) if best < fit => {}
+            Some((best, _)) if best == fit => tied = true,
+            _ => {
+                found = Some((fit, index));
+                tied = false;
             }
-            found = Some(index);
         }
     }
-    found
+    if tied { None } else { found.map(|(_, i)| i) }
 }
 
 impl App {
@@ -804,7 +817,8 @@ impl App {
 
     /// Open the microphone — once there is a model to hear it with.
     fn start_listening(&mut self) -> Task<Message> {
-        self.voice.confirm = None;
+        // A command waiting for a yes keeps waiting: what is said next can
+        // be the yes (or the no).
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
             self.status = tr!(
@@ -823,7 +837,13 @@ impl App {
                     level: 0.0,
                 };
                 self.voice.heard = None;
-                self.status = tr!("Listening… say a command or a question (Esc cancels)").into();
+                self.status = match &self.voice.confirm {
+                    Some(title) => tr!(
+                        "Listening… say yes to run {command}, or no",
+                        command = crate::i18n::lookup(title)
+                    ),
+                    None => tr!("Listening… say a command or a question (Esc cancels)").into(),
+                };
             }
             Err(e) => {
                 self.status = tr!("Can't listen: {error}", error = e);
@@ -888,13 +908,25 @@ impl App {
             return self.on_transcribed(token, Err(tr!("no data directory for the model").into()));
         };
         // The window's command names, so whisper spells them as they are
-        // spelled here.
-        let hint = self
+        // spelled here — and only those: the longer the hint, the likelier
+        // whisper is to hear it in what was not clearly said. The phrases
+        // said with a value ("go to line 30") use the titles' words.
+        let words: Vec<String> = self
             .palette_commands()
             .iter()
+            // Not the voice key's own "Talk": nobody says it, and whisper
+            // would hear it for "start".
+            .filter(|c| {
+                !matches!(
+                    c.action,
+                    crate::app::palette::PaletteAction::Send(Message::Editor(
+                        EditorMsg::RunAction(crate::keymap::Action::Voice)
+                    ))
+                )
+            })
             .map(|c| c.shown().trim_end_matches('…').to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect();
+        let hint = words.join(", ");
         let options = Options {
             language: self.voice.prefs.language.clone(),
             hint,
@@ -966,7 +998,39 @@ impl App {
             });
             return Task::none();
         }
+        // The answer to a command waiting for a yes; anything else said
+        // instead puts it away and is read as itself.
+        if let Some(title) = self.voice.confirm.take() {
+            match crate::app::spoken::yes_or_no(&text) {
+                Some(true) => {
+                    self.status = tr!(
+                        "“{text}” → {command}",
+                        text = text,
+                        command = crate::i18n::lookup(&title)
+                    );
+                    self.voice.hear(Heard {
+                        text,
+                        outcome: HeardOutcome::Ran(title.clone()),
+                    });
+                    return self.run_palette(&title);
+                }
+                Some(false) => {
+                    self.status = tr!(
+                        "Didn't run {command}",
+                        command = crate::i18n::lookup(&title)
+                    );
+                    self.voice.heard = None;
+                    return Task::none();
+                }
+                None => {}
+            }
+        }
         if self.voice.prefs.run_commands {
+            // A line, a breakpoint's line, words to search for: said with
+            // the value, which a command's title would ask for again.
+            if let Some((done, task)) = self.spoken_first(&text) {
+                return self.did_as_said(text, done, task);
+            }
             let commands = self.palette_commands();
             let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
             // Said in English, or as the palette shows it in the reader's
@@ -1002,6 +1066,10 @@ impl App {
                 });
                 return self.run_palette(&title);
             }
+            // A file, a symbol, words to find: named where no title is.
+            if let Some((done, task)) = self.spoken_after(&text) {
+                return self.did_as_said(text, done, task);
+            }
         }
         // A question: to Ask, with the window open on it.
         self.voice.hear(Heard {
@@ -1025,6 +1093,17 @@ impl App {
             operation::focus(ui::ask_input_id()),
             operation::move_cursor_to_end(ui::ask_input_id()),
         ])
+    }
+
+    /// `text` was done as `done` says ([`App::spoken_first`]): said on the
+    /// status line and the pill, as a command run is.
+    fn did_as_said(&mut self, text: String, done: String, task: Task<Message>) -> Task<Message> {
+        self.status = tr!("“{text}” → {command}", text = text, command = done);
+        self.voice.hear(Heard {
+            text,
+            outcome: HeardOutcome::Ran(done),
+        });
+        task
     }
 
     /// Download model `id` into the store, verified as it lands.

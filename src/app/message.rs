@@ -495,6 +495,20 @@ pub enum EditorMsg {
     /// Toggle "skim" for the active file: fold function/method bodies to
     /// signatures + summaries, or expand them again.
     SkimFile,
+    /// Scroll the active pane by whole screens — down when positive — its
+    /// caret going as far ("Scroll Down", said or picked in the palette).
+    ScrollPages(i32),
+    /// Scroll the active pane by lines, as [`EditorMsg::ScrollPages`] does
+    /// by screens ("scroll down 10 lines").
+    ScrollLines(i32),
+    /// Move the active pane's caret (the top or the end of the file).
+    MoveCaret(crate::viewer::Motion),
+    /// Close (`true`) or open every fold of the active pane (`zM`, `zR`).
+    FoldAll(bool),
+    /// Open or close the fold the caret is in (`za`).
+    FoldHere,
+    /// Go to `line` (1-based) of the active pane's file ("go to line 30").
+    GotoLineNumber(usize),
     /// Toggle a notebook cell's outputs between collapsed and expanded.
     NbToggleOutputs {
         pane: usize,
@@ -2164,6 +2178,12 @@ impl EditorMsg {
             | EditorMsg::FindStep(..)
             | EditorMsg::FindClosed
             | EditorMsg::SkimFile
+            | EditorMsg::ScrollPages(..)
+            | EditorMsg::ScrollLines(..)
+            | EditorMsg::MoveCaret(..)
+            | EditorMsg::FoldAll(..)
+            | EditorMsg::FoldHere
+            | EditorMsg::GotoLineNumber(..)
             | EditorMsg::NbToggleOutputs { .. }
             | EditorMsg::NbExpandAll { .. }
             | EditorMsg::ToggleMarkdownSource(..) => None,

@@ -87,6 +87,7 @@ pub use runtime::note_window_system;
 mod semantic;
 pub(crate) mod server;
 mod settings;
+pub(crate) mod spoken;
 mod timetravel;
 pub(crate) mod tutorial;
 mod update;

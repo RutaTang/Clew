@@ -162,7 +162,7 @@ impl Finder {
 /// Rank `items` against `query`, at most `limit` of them; empty query lists
 /// the first entries as-is. Higher score first, shorter item wins ties.
 /// `paths` scores the way a path is matched (separators weigh more).
-fn rank<'a>(
+pub(crate) fn rank<'a>(
     query: &str,
     items: impl Iterator<Item = &'a str>,
     limit: usize,
