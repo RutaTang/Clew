@@ -77,12 +77,14 @@ struct Hears {
     words: String,
     hints: Mutex<Vec<String>>,
     heard_audio: Mutex<usize>,
+    /// The model file it was last asked to hear with.
+    model: Mutex<Option<PathBuf>>,
 }
 
 impl Transcriber for Hears {
     fn transcribe(
         &self,
-        _model: &Path,
+        model: &Path,
         audio: &[f32],
         options: &Options,
         cancel: &AtomicBool,
@@ -90,6 +92,7 @@ impl Transcriber for Hears {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("cancelled".into());
         }
+        *self.model.lock().unwrap() = Some(model.to_path_buf());
         self.hints.lock().unwrap().push(options.hint.clone());
         *self.heard_audio.lock().unwrap() = audio.len();
         Ok(self.words.clone())
@@ -111,6 +114,7 @@ fn voice_app(tag: &str, words: &str) -> (App, Arc<Mutex<MicScript>>, Arc<Hears>)
         words: words.into(),
         hints: Mutex::new(Vec::new()),
         heard_audio: Mutex::new(0),
+        model: Mutex::new(None),
     });
     app.voice.transcriber = hears.clone();
     (app, script, hears)
@@ -802,6 +806,7 @@ fn hears(app: &mut App, words: &str) {
         words: words.into(),
         hints: Mutex::new(Vec::new()),
         heard_audio: Mutex::new(0),
+        model: Mutex::new(None),
     });
 }
 
@@ -891,6 +896,12 @@ fn a_file_is_scrolled_and_folded_by_voice() {
     say_words(&mut app, &script, "scroll up");
     assert_eq!(scroll(&app), 5.0 * line_height);
 
+    // Near the end, down is still down: on until the last line is the
+    // first in view, as the wheel goes.
+    let rows = app.active_viewer().unwrap().content_rows() as f32;
+    app.active_viewer_mut().unwrap().scroll_y = (rows - 10.0) * line_height;
+    say_words(&mut app, &script, "scroll down");
+    assert_eq!(scroll(&app), (rows - 1.0) * line_height);
     say_words(&mut app, &script, "Go to the end of the file.");
     assert_eq!(ran(&app), Some("Go to End of File"));
     assert_eq!(
@@ -922,6 +933,22 @@ fn the_debugger_is_driven_by_voice() {
             .breakpoints
             .get(&abs)
             .is_some_and(|b| b.contains_key(&4))
+    );
+    // No line 90: nothing set, and said so.
+    say_words(&mut app, &script, "Breakpoint on line 90.");
+    assert!(
+        !app.debug
+            .breakpoints
+            .get(&abs)
+            .is_some_and(|b| b.contains_key(&90))
+    );
+    assert!(app.status.contains("no line 90"), "{}", app.status);
+    assert!(
+        matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Failed(_))
+        ),
+        "not shown as done"
     );
     say_words(&mut app, &script, "toggle breakpoint on line four");
     assert!(
@@ -1032,12 +1059,31 @@ fn what_is_named_is_found_and_opened() {
     assert!(app.proj.find.open);
     assert_eq!(app.proj.find.query, "point");
     assert_eq!(app.proj.find.matches.len(), 3);
-    say_words(&mut app, &script, "next match");
+    say_words(&mut app, &script, "find next");
     assert_eq!(app.proj.find.current, 1, "{}", app.status);
-    say_words(&mut app, &script, "previous match");
+    say_words(&mut app, &script, "find previous");
     assert_eq!(app.proj.find.current, 0);
     say_words(&mut app, &script, "close find");
     assert!(!app.proj.find.open);
+
+    // What is not a file's name, nor words to find, is a question.
+    for question in [
+        "Open it.",
+        "Show me.",
+        "Go to the end.",
+        "Find where the origin is worked out.",
+    ] {
+        say_words(&mut app, &script, question);
+        assert!(
+            app.voice
+                .heard
+                .as_ref()
+                .is_some_and(|h| h.outcome == HeardOutcome::Asked),
+            "{question}: {}",
+            app.status
+        );
+        app.proj.ask_input.clear();
+    }
 
     say_words(&mut app, &script, "Search for needle.");
     assert_eq!(app.proj.search.query, "needle");
@@ -1059,6 +1105,12 @@ fn phrases_are_heard_in_the_readers_language() {
         say_words(&mut app, &script, "Aller à la ligne 4.");
         assert_eq!(caret_line(&app), Some(4), "{}", app.status);
         drop(hears);
+        // A title beginning as a phrase does is the title: "Rechercher les
+        // références" is Find References, not a search for "les références".
+        app.active_viewer_mut().unwrap().caret = Some((2, 7));
+        say_words(&mut app, &script, "Rechercher les références");
+        assert_eq!(ran(&app), Some("Find References"), "{}", app.status);
+        assert!(app.proj.search.query.is_empty());
         say_words(&mut app, &script, "Démarrer le débogage");
         assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
         say_words(&mut app, &script, "Oui, vas-y.");
@@ -1145,12 +1197,20 @@ fn every_command_runs_when_its_name_is_said() {
         ("fold all", "Fold All"),
         ("unfold all", "Unfold All"),
         ("fold here", "Toggle Fold Here"),
-        ("next match", "Find: Next Match"),
+        ("find next", "Find Next"),
+        ("find previous", "Find Previous"),
         ("close find", "Find: Close"),
         ("step over", "Debug: Step Over"),
         ("continue", "Debug: Continue"),
         ("voice settings", "Settings: Voice"),
         ("full screen", "Window: Full Screen"),
+        ("maximize", "Window: Toggle Maximize"),
+        ("maximize the window", "Window: Toggle Maximize"),
+        // The sidebar's tab, as before the margin's were listed.
+        ("notes", "Sidebar: Notes"),
+        ("show calls", "Sidebar: Calls"),
+        ("margin notes", "Margin Notes"),
+        ("margin history", "Margin History"),
     ] {
         assert_eq!(
             clew_voice::intent::command(said, &titles).map(|i| titles[i]),
@@ -1158,4 +1218,77 @@ fn every_command_runs_when_its_name_is_said() {
             "{said:?}"
         );
     }
+}
+
+/// What is said is heard with the model listening began with: one another
+/// window picks meanwhile — not downloaded, say — is the next listen's.
+#[test]
+fn listening_keeps_the_model_it_began_with() {
+    let (mut app, script, hears) = voice_app("voice-model-kept", "hello");
+    let began = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    // Another window's pick, handed to this one by the shell.
+    app.voice.prefs.model = "tiny.en".into();
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(
+        hears.model.lock().unwrap().as_deref(),
+        Some(store.path(began).as_path())
+    );
+}
+
+/// A model downloading is not downloaded again in another window — both
+/// wrote one partial file, and the first to finish moved the other's
+/// half-written bytes into place — and, chosen, it stays chosen when
+/// another one finishes first.
+#[test]
+fn a_model_on_its_way_is_neither_downloaded_twice_nor_passed_over() {
+    let data = test_dir("voice-coming-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, _script, _) = voice_app("voice-coming", "hello");
+    let store = app.voice.store.clone().unwrap();
+    let small = app.voice.prefs.model();
+    std::fs::remove_file(store.path(small)).unwrap();
+    app.voice.fetch = junk_fetch;
+    // The chosen model, on its way in this window (its transfer not run).
+    let small_transfer = app.update(Message::Voice(VoiceMsg::Download(small.id)));
+    assert!(app.voice.downloads.contains_key(small.id));
+    let mut other = blank_app();
+    other.voice.store = Some(store.clone());
+    other.voice.fetch = junk_fetch;
+    let _ = other.update(Message::Voice(VoiceMsg::Download(small.id)));
+    assert!(other.voice.downloads.is_empty(), "downloaded twice");
+    assert!(
+        other.status.contains("already downloading"),
+        "{}",
+        other.status
+    );
+    // Tiny, finished first, does not take its place.
+    let _tiny_transfer = app.update(Message::Voice(VoiceMsg::Download("tiny.en")));
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::Downloaded {
+        id: "tiny.en",
+        result: Ok(store.path(tiny)),
+    }));
+    assert_eq!(app.voice.prefs.model, small.id);
+    assert!(app.status.contains("is downloaded"), "{}", app.status);
+    // Its transfer over, another window may download it.
+    drop(small_transfer);
+    let _ = app.update(Message::Voice(VoiceMsg::CancelDownload(small.id)));
+    let _ = other.update(Message::Voice(VoiceMsg::Download(small.id)));
+    assert!(
+        other.voice.downloads.contains_key(small.id),
+        "{}",
+        other.status
+    );
 }

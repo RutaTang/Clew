@@ -8639,6 +8639,17 @@ fn an_unreadable_breakpoints_file_is_left_as_it_is() {
         line: 6,
     }));
     assert_eq!(std::fs::read_to_string(&file).unwrap(), newer);
+    // Still, what it holds is set again on the next open: refused, none of
+    // the project's breakpoints came back, and nothing said why.
+    app.debug.breakpoints.clear();
+    app.restore_breakpoints();
+    assert!(app.debug.breakpoints[&root.join("src/lib.rs")].contains_key(&1));
+    // Another version's sets none, and says so.
+    std::fs::write(&file, theirs).unwrap();
+    app.debug.breakpoints.clear();
+    app.restore_breakpoints();
+    assert!(app.debug.breakpoints.is_empty());
+    assert!(app.status.contains("version 2"), "{}", app.status);
     // An empty one — what a crash can leave — holds nothing to lose: it is
     // written over, where refused, no breakpoint was kept again.
     std::fs::write(&file, "").unwrap();
@@ -8646,7 +8657,7 @@ fn an_unreadable_breakpoints_file_is_left_as_it_is() {
         path: root.join("src/lib.rs"),
         line: 5,
     }));
-    let kept = crate::app::breakpoints_store::load(&dir);
+    let kept = crate::app::breakpoints_store::load(&dir).unwrap();
     assert_eq!(kept.iter().map(|s| s.line).collect::<Vec<_>>(), [5]);
 }
 

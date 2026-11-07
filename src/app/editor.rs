@@ -1452,7 +1452,10 @@ impl App {
             return Task::none();
         };
         let rows = v.content_rows() as i64;
-        let most = (rows as f32 * line_height - v.viewport_h).max(0.0);
+        // As far as the view scrolls: on past the end until the last line
+        // is the first in view (`ui::panes`' room after the code). Capped a
+        // screen short of that, "scroll down" from near the end moved up.
+        let most = ((rows - 1).max(0)) as f32 * line_height;
         let before = v.scroll_y;
         v.scroll_y = (before + by as f32 * line_height).clamp(0.0, most);
         let moved = ((v.scroll_y - before) / line_height).round() as i64;

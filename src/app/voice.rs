@@ -316,8 +316,10 @@ impl VoicePrefs {
 /// Voice's state in a window.
 pub(crate) struct VoiceState {
     pub phase: VoicePhase,
-    /// The microphone, while listening.
-    listening: Option<Box<dyn Listening>>,
+    /// The microphone, while listening, and the model what it hears is
+    /// for: the one found on this computer when listening began, whatever
+    /// another window picks meanwhile.
+    listening: Option<(Box<dyn Listening>, &'static Model)>,
     /// Stops the transcription in progress.
     cancel: Arc<AtomicBool>,
     /// The last run started, so a late result of an earlier one is dropped.
@@ -691,7 +693,13 @@ impl App {
                         // Settings for it. One chosen and here stays chosen
                         // — one picked while this downloaded included.
                         let chosen = self.voice.prefs.model();
-                        let switch = chosen.id != id && !self.voice.installed(chosen);
+                        // Nor one chosen and still on its way, in any window.
+                        let coming = self
+                            .voice
+                            .store
+                            .as_ref()
+                            .is_some_and(|store| downloading(&store.path(chosen)));
+                        let switch = chosen.id != id && !self.voice.installed(chosen) && !coming;
                         self.status = if switch || chosen.id == id {
                             tr!(
                                 "{model} is ready — press the voice key to talk",
@@ -831,7 +839,7 @@ impl App {
         }
         match (self.voice.open_mic)(MAX_SECONDS) {
             Ok(listening) => {
-                self.voice.listening = Some(listening);
+                self.voice.listening = Some((listening, model));
                 self.voice.phase = VoicePhase::Listening {
                     since: Instant::now(),
                     level: 0.0,
@@ -861,7 +869,7 @@ impl App {
         let VoicePhase::Listening { since, .. } = self.voice.phase else {
             return Task::none();
         };
-        let Some(listening) = self.voice.listening.as_ref() else {
+        let Some((listening, _)) = self.voice.listening.as_ref() else {
             return Task::none();
         };
         if let Some(e) = listening.error() {
@@ -894,7 +902,7 @@ impl App {
     /// Stop listening and turn what was heard into words, off the UI
     /// thread.
     fn stop_listening(&mut self) -> Task<Message> {
-        let Some(listening) = self.voice.listening.take() else {
+        let Some((listening, model)) = self.voice.listening.take() else {
             return Task::none();
         };
         let recording = listening.stop();
@@ -903,7 +911,6 @@ impl App {
         self.voice.phase = VoicePhase::Transcribing { token };
         self.voice.cancel = Arc::new(AtomicBool::new(false));
         self.status = tr!("Transcribing…").into();
-        let model = self.voice.prefs.model();
         let Some(path) = self.voice.store.as_ref().map(|s| s.path(model)) else {
             return self.on_transcribed(token, Err(tr!("no data directory for the model").into()));
         };
@@ -956,7 +963,7 @@ impl App {
     /// Esc: stop listening or transcribing and keep nothing; or say no to
     /// the command that waits for a yes.
     pub(crate) fn cancel_voice(&mut self) {
-        if let Some(listening) = self.voice.listening.take() {
+        if let Some((listening, _)) = self.voice.listening.take() {
             drop(listening.stop());
         }
         if matches!(self.voice.phase, VoicePhase::Transcribing { .. }) {
@@ -1026,11 +1033,6 @@ impl App {
             }
         }
         if self.voice.prefs.run_commands {
-            // A line, a breakpoint's line, words to search for: said with
-            // the value, which a command's title would ask for again.
-            if let Some((done, task)) = self.spoken_first(&text) {
-                return self.did_as_said(text, done, task);
-            }
             let commands = self.palette_commands();
             let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
             // Said in English, or as the palette shows it in the reader's
@@ -1042,7 +1044,7 @@ impl App {
             if let Some(i) = found {
                 let command = &commands[i];
                 let title = command.title.clone();
-                if command.costly() {
+                if command.asks_when_said() {
                     self.status = tr!(
                         "“{text}” → {command}? Confirm or press Esc",
                         text = text,
@@ -1066,8 +1068,9 @@ impl App {
                 });
                 return self.run_palette(&title);
             }
-            // A file, a symbol, words to find: named where no title is.
-            if let Some((done, task)) = self.spoken_after(&text) {
+            // A line, a file, a symbol, words to look for: said with what
+            // no title names.
+            if let Some((done, task)) = self.spoken(&text) {
                 return self.did_as_said(text, done, task);
             }
         }
@@ -1095,14 +1098,32 @@ impl App {
         ])
     }
 
-    /// `text` was done as `done` says ([`App::spoken_first`]): said on the
-    /// status line and the pill, as a command run is.
-    fn did_as_said(&mut self, text: String, done: String, task: Task<Message>) -> Task<Message> {
-        self.status = tr!("“{text}” → {command}", text = text, command = done);
-        self.voice.hear(Heard {
-            text,
-            outcome: HeardOutcome::Ran(done),
-        });
+    /// `text` came to `done` ([`App::spoken`]): said on the status
+    /// line and the pill, as a command run is — or, when it could not be
+    /// done, as a failure is.
+    fn did_as_said(
+        &mut self,
+        text: String,
+        done: crate::app::spoken::Done,
+        task: Task<Message>,
+    ) -> Task<Message> {
+        use crate::app::spoken::Done;
+        match done {
+            Done::Did(done) => {
+                self.status = tr!("“{text}” → {command}", text = text, command = done);
+                self.voice.hear(Heard {
+                    text,
+                    outcome: HeardOutcome::Ran(done),
+                });
+            }
+            Done::Cannot(why) => {
+                self.status = why.clone();
+                self.voice.hear(Heard {
+                    text,
+                    outcome: HeardOutcome::Failed(why),
+                });
+            }
+        }
         task
     }
 
@@ -1118,6 +1139,13 @@ impl App {
             self.status = tr!("There is no data directory to keep the model in").into();
             return Task::none();
         };
+        let Some(claim) = Claim::take(store.path(model)) else {
+            self.status = tr!(
+                "{model} is already downloading in another window",
+                model = crate::i18n::lookup(model.name)
+            );
+            return Task::none();
+        };
         self.voice.download_errors.remove(id);
         let cancel = Arc::new(AtomicBool::new(false));
         let fetch = self.voice.fetch;
@@ -1131,6 +1159,8 @@ impl App {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
                 let worker_cancel = cancel.clone();
                 tokio::task::spawn_blocking(move || {
+                    // Held until this transfer is over, whatever ends it.
+                    let _claim = claim;
                     let result = (|| {
                         let mut install = store
                             .begin(model)
@@ -1238,6 +1268,47 @@ fn with_host_only(error: &str) -> String {
 }
 
 /// Sets its flag when dropped.
+/// The models being downloaded in this process, by the file each becomes:
+/// two windows downloading one model wrote one partial file between them,
+/// and the first to finish moved the other's half-written bytes into place.
+static DOWNLOADING: LazyLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// A model's download, claimed for the transfer that writes it — held by
+/// that transfer until it ends, finished, failed or stopped.
+struct Claim(PathBuf);
+
+impl Claim {
+    /// Claim the download into `dest`; `None` while another holds it.
+    fn take(dest: PathBuf) -> Option<Claim> {
+        let fresh = DOWNLOADING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(dest.clone());
+        // Made only when taken, and after the lock is let go: a claim
+        // dropped under it locked it again, and gave up another's.
+        fresh.then(|| Claim(dest))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        DOWNLOADING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Whether the model that goes to `dest` is being downloaded, in any
+/// window.
+fn downloading(dest: &Path) -> bool {
+    DOWNLOADING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains(dest)
+}
+
 struct StopOnDrop(Arc<AtomicBool>);
 
 impl Drop for StopOnDrop {

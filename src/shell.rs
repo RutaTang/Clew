@@ -545,13 +545,17 @@ impl Clew {
         // (`theme::init` writes the palette every window paints with), so a
         // later window reverted an appearance being previewed, or a binding
         // whose save failed, under the others, which were never told — and
-        // then fired different chords than they did. It joins them instead.
+        // then fired different chords than they did. It joins them instead —
+        // and their voice settings, which a later window read from the file
+        // too: one whose save failed went back to what the file said, and
+        // the new window's next voice change carried that to every window.
         let live = self.windows.values().next().map(|app| {
             (
                 crate::theme::current_light().id,
                 crate::theme::current_dark().id,
                 crate::theme::current_pref(),
                 app.keymap.clone(),
+                app.voice.prefs.clone(),
             )
         });
         let (mut app, init) = if restore {
@@ -559,12 +563,13 @@ impl Clew {
         } else {
             (App::blank(), Task::none())
         };
-        if let Some((light, dark, pref, keymap)) = live {
+        if let Some((light, dark, pref, keymap, voice)) = live {
             crate::theme::set_light_theme(light);
             crate::theme::set_dark_theme(dark);
             crate::theme::apply_pref(pref);
             app.theme_pref = pref;
             app.keymap = keymap;
+            app.voice.prefs = voice;
         }
         let (id, open) = iced::window::open(crate::window_settings());
         // The App targets window operations (close / minimize / fullscreen) at
@@ -2249,6 +2254,25 @@ mod tests {
                 .keymap
                 .chord(crate::keymap::Action::GotoLine),
             chord
+        );
+    }
+
+    /// And on their voice settings: read from the file, a choice whose save
+    /// failed was not the new window's, and its next voice change carried
+    /// the file's back to every window.
+    #[tokio::test]
+    async fn a_new_window_joins_the_open_windows_voice_settings() {
+        let mut rt = Runtime::new();
+        let mut app = blank_app();
+        app.voice.prefs.model = "tiny.en".into();
+        app.voice.prefs.run_commands = false;
+        let first = rt.window(app);
+        rt.send(Shell::NewWindow);
+        let second = rt.clew.focused.expect("the new window");
+        assert!(second != first);
+        assert_eq!(
+            rt.clew.windows[&second].voice.prefs,
+            rt.clew.windows[&first].voice.prefs
         );
     }
 

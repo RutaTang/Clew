@@ -84,10 +84,43 @@ fn load_checked(dir: &Path) -> std::io::Result<Vec<Saved>> {
         .collect())
 }
 
-/// [`load_checked`] for setting them again: a file that cannot be read
-/// sets none.
-pub(crate) fn load(dir: &Path) -> Vec<Saved> {
-    load_checked(dir).unwrap_or_default()
+/// [`load_checked`] for setting them again. A file of this version that
+/// holds what this build does not know (a field added without a new
+/// version) still sets what it can read: only writing it over would lose
+/// that, and refused, none of the project's breakpoints came back. An error
+/// says why none could be read.
+pub(crate) fn load(dir: &Path) -> std::io::Result<Vec<Saved>> {
+    load_checked(dir).or_else(|e| read_past_the_unknown(dir).ok_or(e))
+}
+
+/// The breakpoints in a file of this version, past fields this build does
+/// not know; `None` when it is not one.
+fn read_past_the_unknown(dir: &Path) -> Option<Vec<Saved>> {
+    #[derive(Deserialize)]
+    struct Loose {
+        rel: String,
+        line: usize,
+        #[serde(default)]
+        condition: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct LooseFile {
+        version: u32,
+        breakpoints: Vec<Loose>,
+    }
+    let bytes = std::fs::read(dir.join(FILE)).ok()?;
+    let file = serde_json::from_slice::<LooseFile>(&bytes).ok()?;
+    (file.version == VERSION).then(|| {
+        file.breakpoints
+            .into_iter()
+            .filter(|s| s.line > 0 && clew_core::statefile::safe_rel(&s.rel))
+            .map(|s| Saved {
+                rel: s.rel,
+                line: s.line,
+                condition: s.condition,
+            })
+            .collect()
+    })
 }
 
 /// Write `list` whole beside the file, synced to the disk, then move it
@@ -166,7 +199,14 @@ impl App {
         ) else {
             return;
         };
-        for saved in load(&dir) {
+        let saved = match load(&dir) {
+            Ok(saved) => saved,
+            Err(e) => {
+                self.status = tr!("Could not read the saved breakpoints: {error}", error = e);
+                return;
+            }
+        };
+        for saved in saved {
             self.debug
                 .breakpoints
                 .entry(root.join(&saved.rel))

@@ -94,7 +94,7 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 | "fold all", "unfold all", "fold here" | Folds close and open, as **zM**, **zR** and **za** do |
 | "breakpoint on line 12" | A breakpoint is set (or cleared) on line 12 |
 | "watch total", "stop watching total" | An expression is added to the debugger's watches, or removed |
-| "find quantity", "next match", "close find" | The find bar looks for the words in the open file |
+| "find quantity", "find next", "close find" | The find bar looks for the words in the open file |
 | "search for quantity" | The Search view looks through the whole project |
 | "open cart dot py" | The project's file of that name opens |
 | "go to apply discount" | The symbol of that name opens, however it is spelled (`apply_discount`, `applyDiscount`) |

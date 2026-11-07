@@ -40,25 +40,13 @@ impl PaletteCommand {
     }
 
     /// Whether running it costs something beyond what the window shows —
-    /// a paid pass over the project, a program started or ended, another
-    /// project opened, a file written — so that a command run for the user
-    /// (by voice, by the agent) asks first. Everything else only changes
-    /// what is on screen, or steps the program the reader is debugging.
+    /// a paid pass over the project, the program started, stepped or ended,
+    /// a breakpoint set in it, another project opened, a file written — so
+    /// that a command the agent runs asks the user first. Everything else
+    /// only changes what is on screen.
     pub(crate) fn costly(&self) -> bool {
         use keymap::Action;
         match &self.action {
-            // Stepping a program the reader already runs, or marking where
-            // it stops, is what they are doing: no yes for each step. Starting
-            // one, ending it, or evaluating in it as the mouse moves is asked.
-            PaletteAction::Send(Message::Debug(
-                DebugMsg::Control(_)
-                | DebugMsg::BreakpointToggle { .. }
-                | DebugMsg::WatchAdd
-                | DebugMsg::WatchRemoveExpr(_),
-            ))
-            | PaletteAction::AtCaret(Message::Debug(
-                DebugMsg::ToggleBreakpointFromMenu | DebugMsg::ConditionalBreakpointFromMenu,
-            )) => false,
             PaletteAction::Send(message) | PaletteAction::AtCaret(message) => matches!(
                 message,
                 Message::Editor(EditorMsg::RunAction(
@@ -71,6 +59,26 @@ impl PaletteCommand {
             ),
             PaletteAction::Goto(_) | PaletteAction::Insight => false,
         }
+    }
+
+    /// Whether the reader, saying it, is asked first: what [`Self::costly`]
+    /// says, but for stepping the program they are debugging and marking
+    /// where it stops — what they are doing, said, as a click does it, with
+    /// no yes for each step. Starting one, ending it, or evaluating in it as
+    /// the mouse moves is asked.
+    pub(crate) fn asks_when_said(&self) -> bool {
+        let stepping = matches!(
+            &self.action,
+            PaletteAction::Send(Message::Debug(
+                DebugMsg::Control(_)
+                    | DebugMsg::BreakpointToggle { .. }
+                    | DebugMsg::WatchAdd
+                    | DebugMsg::WatchRemoveExpr(_),
+            )) | PaletteAction::AtCaret(Message::Debug(
+                DebugMsg::ToggleBreakpointFromMenu | DebugMsg::ConditionalBreakpointFromMenu,
+            ))
+        );
+        self.costly() && !stepping
     }
 }
 
@@ -128,9 +136,22 @@ impl PaletteCommand {
             }
         };
         match message {
-            Message::Editor(EditorMsg::RunAction(Action::StartDebug)) | Message::Debug(_) => {
+            Message::Editor(EditorMsg::RunAction(Action::StartDebug))
+            | Message::Debug(DebugMsg::Start) => {
                 (Glyph::Debug, tr!("This builds the program and runs it."))
             }
+            Message::Debug(DebugMsg::Control(_)) => (
+                Glyph::Debug,
+                tr!("This runs the program on, from where it stopped."),
+            ),
+            Message::Debug(DebugMsg::Stop) => {
+                (Glyph::Debug, tr!("This ends the program being debugged."))
+            }
+            Message::Debug(DebugMsg::ToggleHoverEval) => (
+                Glyph::Debug,
+                tr!("This runs code in the program for each name the mouse rests on."),
+            ),
+            Message::Debug(_) => (Glyph::Debug, tr!("This changes where the program stops.")),
             Message::Editor(EditorMsg::RunAction(Action::ExplainAll)) | Message::Explain(_) => (
                 Glyph::Sparkle,
                 tr!("This uses the AI model, which costs money."),
@@ -556,12 +577,12 @@ impl App {
         if project && self.proj.find.open {
             for (title, keys, message) in [
                 (
-                    tr_noop!("Find: Next Match"),
+                    tr_noop!("Find Next"),
                     Some(crate::keymap::local_keys("↩")),
                     EditorMsg::FindStep(1),
                 ),
                 (
-                    tr_noop!("Find: Previous Match"),
+                    tr_noop!("Find Previous"),
                     Some(crate::keymap::local_keys("⇧↩")),
                     EditorMsg::FindStep(-1),
                 ),
@@ -606,9 +627,9 @@ impl App {
                 );
             }
             for (title, tab) in [
-                (tr_noop!("Margin: Notes"), MarginTab::Notes),
-                (tr_noop!("Margin: Calls"), MarginTab::Calls),
-                (tr_noop!("Margin: History"), MarginTab::History),
+                (tr_noop!("Margin Notes"), MarginTab::Notes),
+                (tr_noop!("Margin Calls"), MarginTab::Calls),
+                (tr_noop!("Margin History"), MarginTab::History),
             ] {
                 add(
                     title.into(),
@@ -650,7 +671,7 @@ impl App {
             send(Message::Window(WindowMsg::Minimize)),
         );
         add(
-            tr_noop!("Window: Maximize or Restore").into(),
+            tr_noop!("Window: Toggle Maximize").into(),
             None,
             send(Message::Window(WindowMsg::ToggleMaximize)),
         );
