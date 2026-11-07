@@ -2515,6 +2515,10 @@ fn the_file_finder_finds_a_symbol_and_lands_on_its_name() {
     }));
     // `pub fn origin() -> Point {`: on `origin`, not on `pub`.
     assert_eq!(app.active_viewer().unwrap().caret, Some((2, 7)));
+    // A later jump to that line not made to the name (a search hit, Back)
+    // lands at its start: the name was its own jump's landing.
+    let _ = app.open_file(root.join("src/lib.rs"), Some(3), true);
+    assert_eq!(app.active_viewer().unwrap().caret, Some((2, 0)));
     // Nothing typed: the files alone.
     let _ = app.update(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
     let _ = app.update(Message::Nav(NavMsg::FinderQueryChanged(String::new())));
@@ -12431,6 +12435,80 @@ fn an_update_check_during_a_download_does_not_rearm_the_install() {
         }),
     }));
     assert_eq!(app.update.phase, UpdatePhase::Idle);
+}
+
+/// A list of places marks the name its own request asked about: references
+/// asked for on `origin`, then a definition asked for on `Point` while they
+/// were on their way, marked the references with `Point`. A type's
+/// definitions are places of the type, not of the word asked about: they
+/// mark nothing.
+#[tokio::test]
+async fn each_list_of_places_marks_its_own_requests_name() {
+    let mut app = scanned_app("list-marks-own-name");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(dead_lsp_client(&root).await));
+    let lib = root.join("src/lib.rs");
+    let at = |line: usize| lsp::client::Target {
+        path: lib.clone(),
+        line,
+        character: 0,
+    };
+    let marked = |app: &App| {
+        app.proj
+            .search
+            .matcher
+            .as_ref()
+            .map(|m| m.ranges("origin -> Point"))
+    };
+    // `pub fn origin() -> Point {`: `origin` at 7, `Point` at 19.
+    let _ = app.goto_request(0, 2, 7, GotoKind::References);
+    let _ = app.goto_request(0, 2, 19, GotoKind::Definition);
+    let _ = app.on_references_result(Ok(vec![at(2)]));
+    assert_eq!(marked(&app), Some(vec![(0, 6)]), "the references' own name");
+    let _ = app.on_definition_result(Ok(vec![at(2), at(0)]));
+    assert_eq!(
+        marked(&app),
+        Some(vec![(10, 15)]),
+        "the definition's own name"
+    );
+    let _ = app.goto_request(0, 2, 7, GotoKind::TypeDefinition);
+    let _ = app.on_definition_result(Ok(vec![at(2), at(0)]));
+    assert_eq!(marked(&app), None, "a type's places mark no word");
+}
+
+/// A reference in a file open in a pane is previewed from the line as the
+/// file has it, as one read from disk is: the server counts a tab as one,
+/// and on the view's line, its tabs spaced out, the preview started three
+/// characters early for each tab before the reference.
+#[test]
+fn a_reference_on_a_tabbed_line_is_previewed_where_it_is() {
+    let utf16 = crate::viewer::PositionEncoding::Utf16;
+    let mut app = scanned_app("ref-preview-tabs");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let line = "\t\t\t\t\t\tthe_value_this_line_is_long_enough_to_be_cut = origin()";
+    std::fs::write(root.join("tabbed.go"), format!("package main\n{line}\n")).unwrap();
+    open_synchronously(&mut app, "tabbed.go", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let character = line.find("origin").unwrap();
+    let _ = app.show_locations(
+        "refs",
+        vec![lsp::client::Target {
+            path: abs,
+            line: 1,
+            character,
+        }],
+        utf16,
+    );
+    let preview = &app.proj.search.hits[0].preview;
+    assert_eq!(
+        preview,
+        &crate::app::navigation::location_preview(line, Some(character), utf16)
+    );
+    assert!(preview.contains("origin()"), "{preview}");
 }
 
 /// The Search sidebar has two producers, and a Find References request takes it

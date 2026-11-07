@@ -44,6 +44,9 @@ impl App {
         if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
             anchor.superseded = true;
         }
+        // Where this jump lands on its line: on a name only when the jump
+        // to it asked so (`landing_next`), else at the line's start.
+        self.proj.landing = self.proj.landing_next.take();
         // A package (a Go or Java import names its directory, a C# `using`
         // its namespace: the Imports tab's row, the map's) opens at its first
         // file: neither is a file. Looked up whatever the name: a namespace's

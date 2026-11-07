@@ -305,12 +305,17 @@ impl App {
         };
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
-        self.proj.nav_term = word_at_byte(
+        let word = word_at_byte(
             &source_line,
             viewer::Col(col).to_offset(&source_line, viewer::PositionEncoding::Utf8),
         );
         self.status = format!("{}…", kind.verb());
         let is_references = matches!(kind, GotoKind::References);
+        match kind {
+            GotoKind::References => self.proj.refs_term = word,
+            GotoKind::TypeDefinition => self.proj.goto_term = None,
+            GotoKind::Definition | GotoKind::Implementation => self.proj.goto_term = word,
+        }
         // Mint this request's identity: references paint the Search sidebar
         // (so they share its counter); definitions jump the editor.
         let seq = if is_references {
@@ -373,6 +378,7 @@ impl App {
                     "{count} definitions — pick one in the Search list",
                     count = targets.len()
                 );
+                self.proj.nav_term = self.proj.goto_term.clone();
                 self.show_locations(tr!("(definitions)"), targets, self.proj.goto_encoding)
             }
             Ok(targets) if !targets.is_empty() => {
@@ -382,7 +388,7 @@ impl App {
                 // Clear the "Looking up definition…" progress; the jump itself
                 // is the feedback (otherwise the status stays stuck on it).
                 self.status.clear();
-                self.proj.landing = Some((
+                self.proj.landing_next = Some((
                     abs.clone(),
                     t.line,
                     crate::app::state::LandingAt::Char(t.character, self.proj.goto_encoding),
@@ -411,6 +417,7 @@ impl App {
                     "{n} references — showing them in Search",
                     refs.len()
                 );
+                self.proj.nav_term = self.proj.refs_term.clone();
                 self.show_locations(tr!("(references)"), refs, self.proj.refs_encoding)
             }
             Ok(_) => {
@@ -460,7 +467,10 @@ impl App {
                     .flatten()
                     .find(|v| v.abs == t.path)
                     .filter(|v| t.line < v.lines.len())
-                    .map(|v| location_preview(&v.line_text(t.line + 1), Some(t.character), enc));
+                    // The line as the file has it, where the server's
+                    // character counts: the view's has its tabs spaced out.
+                    .and_then(|v| v.source_line(t.line))
+                    .map(|line| location_preview(line, Some(t.character), enc));
                 if from_pane.is_none() {
                     to_read.push((i, t.path.clone(), t.line, t.character));
                 }
@@ -859,7 +869,7 @@ impl App {
 
     /// A jump to the symbol `name` on `line1` of `abs` lands on its name.
     fn land_on_name(&mut self, abs: &Path, line1: usize, name: String) {
-        self.proj.landing = Some((
+        self.proj.landing_next = Some((
             abs.to_path_buf(),
             line1.saturating_sub(1),
             crate::app::state::LandingAt::Name(name),

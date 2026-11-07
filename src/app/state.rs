@@ -1872,14 +1872,26 @@ pub struct ProjectSession {
     /// The same for the last references request: the encoding its
     /// locations' characters are counted in.
     pub refs_encoding: crate::viewer::PositionEncoding,
-    /// The name a definition or references request was asked about — the
-    /// word under the caret — which the list of its places marks in each
-    /// line (`SearchState::matcher`).
+    /// The name the list of places shown in Search marks in each line
+    /// (`SearchState::matcher`): its request's [`Self::refs_term`] or
+    /// [`Self::goto_term`], taken when its answer is shown.
     pub nav_term: Option<String>,
-    /// Where the last jump to a definition or a symbol lands on its line:
-    /// the file, its 0-based line, and the place there. The caret goes on
-    /// the name, not the line's first column.
+    /// The word under the caret the last references request asked about.
+    /// Kept apart from [`Self::goto_term`]: a definition asked for while
+    /// references are on their way marked their list with its own word.
+    pub refs_term: Option<String>,
+    /// The same for the last definition or implementation request; `None`
+    /// for a type's definition, whose places spell the type, not the word.
+    pub goto_term: Option<String>,
+    /// Where the jump being made lands on its line: the file, its 0-based
+    /// line, and the place there — the caret goes on the name, not the
+    /// line's first column. Set for each jump from [`Self::landing_next`]:
+    /// a later jump to the same line (a search hit, Back) lands at its
+    /// start, as any jump not to a name does.
     pub landing: Option<(PathBuf, usize, LandingAt)>,
+    /// The landing a jump to a definition or a symbol asks for, taken by
+    /// the open it makes next (`open_file`).
+    pub landing_next: Option<(PathBuf, usize, LandingAt)>,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
     /// The token of the `CallsMsg::Prepared` currently awaited, if any.
@@ -2168,7 +2180,10 @@ impl Default for ProjectSession {
             goto_encoding: crate::viewer::PositionEncoding::Utf16,
             refs_encoding: crate::viewer::PositionEncoding::Utf16,
             nav_term: None,
+            refs_term: None,
+            goto_term: None,
             landing: None,
+            landing_next: None,
             call_graph: Default::default(),
             call_pending: Default::default(),
             flow: None,
