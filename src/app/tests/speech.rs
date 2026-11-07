@@ -448,15 +448,15 @@ fn what_cannot_be_said_says_why() {
     let (mut app, voice, output) = speech_app("speech-fails");
     *voice.fail.lock().unwrap() = Some(SayError::Sentence("nothing could be made of it".into()));
     asked(&mut app, 1, true);
-    delta(&mut app, 1, "First one. Second one. Third");
+    delta(&mut app, 1, "This is. That is. Third");
     ended(&mut app, 1, StreamOutcome::Done);
-    assert_eq!(voice.texts(), ["Second one.", "Third"], "the next was said");
+    assert_eq!(voice.texts(), ["That is.", "Third"], "the next was said");
     all_played(&mut app, &output);
     *voice.fail.lock().unwrap() = Some(SayError::Voice(
         "clew-speak, which speaks for Clew, is not installed beside it".into(),
     ));
     asked(&mut app, 2, true);
-    delta(&mut app, 2, "First one. Second one. Third");
+    delta(&mut app, 2, "This is. That is. Third");
     ended(&mut app, 2, StreamOutcome::Done);
     assert!(!app.voice.speech.is_speaking());
     assert!(
@@ -468,7 +468,7 @@ fn what_cannot_be_said_says_why() {
     // No output.
     output.lock().unwrap().absent = true;
     asked(&mut app, 3, true);
-    delta(&mut app, 3, "First one. Second");
+    delta(&mut app, 3, "This is. Second");
     assert!(
         app.status.contains("no speaker or headphones"),
         "{}",
@@ -479,7 +479,7 @@ fn what_cannot_be_said_says_why() {
     output.lock().unwrap().absent = false;
     output.lock().unwrap().rest.clear();
     asked(&mut app, 4, true);
-    delta(&mut app, 4, "First one. Second");
+    delta(&mut app, 4, "This is. Second");
     output.lock().unwrap().error = Some("the speaker failed: an underrun".into());
     let tick = |app: &mut App| {
         let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
@@ -512,7 +512,7 @@ fn what_cannot_be_said_says_why() {
     // One that plays nothing, and says nothing, is taken for stopped too.
     output.lock().unwrap().error = None;
     asked(&mut app, 5, true);
-    delta(&mut app, 5, "First one. Second");
+    delta(&mut app, 5, "This is. Second");
     for _ in 0..2 {
         tick(&mut app);
         std::thread::sleep(std::time::Duration::from_millis(350));
@@ -529,7 +529,7 @@ fn what_cannot_be_said_says_why() {
     let store = app.voice.store.clone().unwrap();
     speech::remove(&store, speech::find("supertonic-3").unwrap()).unwrap();
     asked(&mut app, 1, true);
-    delta(&mut app, 1, "First one. Second");
+    delta(&mut app, 1, "This is. Second");
     assert!(voice.texts().is_empty());
     assert!(app.status.contains("Supertonic 3"), "{}", app.status);
     assert!(!app.voice.speech.is_speaking());
@@ -743,7 +743,7 @@ fn keep_listening_survives_a_voice_that_fails() {
 fn a_wait_between_sentences_is_no_stall() {
     let (mut app, _voice, output) = speech_app("speech-gap");
     asked(&mut app, 1, true);
-    delta(&mut app, 1, "First one. Then");
+    delta(&mut app, 1, "This is. Then");
     let tick = |app: &mut App| {
         let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
         settle(app, task);
@@ -761,7 +761,7 @@ fn a_wait_between_sentences_is_no_stall() {
     tick(&mut app);
     let opened = output.lock().unwrap().opened;
     // The next sentence comes, and a tick lands before it starts playing.
-    delta(&mut app, 1, " the second one. And");
+    delta(&mut app, 1, " this is the second. And");
     tick(&mut app);
     assert!(app.voice.speech.is_speaking(), "{}", app.status);
     assert_eq!(output.lock().unwrap().opened, opened, "not opened again");
@@ -825,7 +825,7 @@ fn sentences_come_at_the_outputs_rate() {
     let (mut app, voice, output) = speech_app("speech-rate");
     *voice.rate.lock().unwrap() = 2000;
     asked(&mut app, 1, true);
-    delta(&mut app, 1, "First one. Second one. Third");
+    delta(&mut app, 1, "This is. That is. Third");
     let script = output.lock().unwrap();
     assert!(!script.rates.is_empty());
     assert!(
@@ -979,7 +979,7 @@ fn nothing_is_said_with_a_model_being_removed() {
     let model = speech::find("supertonic-3").unwrap();
     let claim = Claim::take(speech::dir(&store, model), ClaimedFor::Download).unwrap();
     asked(&mut app, 1, true);
-    delta(&mut app, 1, "First one. Second one. Third");
+    delta(&mut app, 1, "This is. That is. Third");
     assert!(voice.texts().is_empty());
     assert!(!app.status.contains("download"), "{}", app.status);
     drop(claim);
