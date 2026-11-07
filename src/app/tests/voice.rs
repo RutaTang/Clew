@@ -543,6 +543,40 @@ fn model_downloads_are_verified() {
     assert!(!app.voice.installed(model));
 }
 
+/// A model downloaded is the one the voice key hears with — not the one
+/// chosen before, which may not be on this computer — and that is kept.
+#[test]
+fn a_downloaded_model_is_the_one_the_voice_key_uses() {
+    // A data directory of its own: config.toml is everyone's.
+    let data = test_dir("voice-downloaded-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, script, _) = voice_app("voice-downloaded", "hello");
+    let store = app.voice.store.clone().unwrap();
+    let small = app.voice.prefs.model();
+    assert_eq!(small.id, "small-q5_1", "the first one chosen");
+    std::fs::remove_file(store.path(small)).unwrap();
+    // Tiny is downloaded (the transfer itself is left out).
+    app.voice.fetch = junk_fetch;
+    let _ = app.update(Message::Voice(VoiceMsg::Download("tiny.en")));
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::Downloaded {
+        id: "tiny.en",
+        result: Ok(store.path(tiny)),
+    }));
+    assert!(app.status.contains("is ready"), "{}", app.status);
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    assert_eq!(VoicePrefs::load().model, "tiny.en", "kept");
+    // And the voice key listens with it, as the status says.
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    assert!(!app.settings.open);
+}
+
 /// The voice settings are kept in config.toml, and read back.
 #[test]
 fn voice_settings_are_kept() {

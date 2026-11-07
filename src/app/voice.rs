@@ -675,6 +675,15 @@ impl App {
                             "{model} is ready — press the voice key to talk",
                             model = name
                         );
+                        // The model just downloaded is the one the voice
+                        // key hears with from now on, as that says: kept
+                        // to the one chosen before, the key would send the
+                        // reader back to Settings for a model still not on
+                        // this computer (the first one chosen is Small).
+                        if self.voice.prefs.model != id {
+                            self.voice.prefs.model = id.to_string();
+                            self.save_voice_prefs();
+                        }
                     }
                     Err(e) => {
                         self.status = tr!(

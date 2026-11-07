@@ -4274,6 +4274,9 @@ mod font_tests {
     fn a_folded_lines_blame_clears_the_fold_cue() {
         use iced::advanced::Widget;
         use iced::advanced::widget::Tree;
+        // The code face the app draws with, whatever this machine has: in
+        // another face two lines of one length may not measure alike.
+        crate::fonts::load();
         let source = "def add():\n    return 1\n\ndef sub():\n    return 2\n";
         let lines = crate::highlight::plain_lines(source);
         let headers: std::collections::HashSet<usize> = [0, 3].into();

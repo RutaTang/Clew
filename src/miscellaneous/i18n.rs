@@ -949,6 +949,9 @@ mod tests {
             &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
             &mut files,
         );
+        // In one order everywhere: what is found does not hang on the order
+        // the file system lists a folder in.
+        files.sort();
         let mut keys = BTreeMap::new();
         for file in files {
             let text = std::fs::read_to_string(&file).unwrap();
@@ -989,7 +992,13 @@ mod tests {
                         let Some((key, after)) = literal(open) else {
                             break;
                         };
-                        keys.insert(key, kind);
+                        // A key both counted and passed through (a core
+                        // message, `extern_messages`) is a count's form:
+                        // either way its `{n}` is filled in.
+                        let seen = keys.entry(key).or_insert(kind);
+                        if kind == Kind::Count {
+                            *seen = Kind::Count;
+                        }
                         tail = after.trim_start().strip_prefix(',').unwrap_or(after);
                     }
                 }
