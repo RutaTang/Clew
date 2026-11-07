@@ -13,61 +13,109 @@
 /// Russian, Ukrainian or Bulgarian, as its letters say. `None`: a Latin
 /// script, whose language the caller knows better.
 pub fn script_language(text: &str, usual: Option<&str>) -> Option<&'static str> {
-    use Script::*;
-    // Characters of Chinese, Japanese and Korean count one by one, as each
-    // is a word or a syllable; letters of the other scripts by the word,
-    // and only a word of two or more: one letter alone is a symbol.
-    let mut chars = [0usize; SCRIPTS];
-    let mut words = [0usize; SCRIPTS];
-    let mut run: Option<(Script, usize)> = None;
-    for c in text.chars() {
-        // A combining accent belongs to the letter before it.
-        if matches!(c as u32, 0x0300..=0x036F) {
-            continue;
-        }
-        let script = script_of(c);
-        if let Some(script) = script {
-            chars[script as usize] += 1;
-        }
-        match (script, &mut run) {
-            (Some(s @ (Latin | Cyrillic | Greek | Arabic | Devanagari)), Some((r, len)))
-                if *r == s =>
-            {
-                *len += 1;
+    Tally::of(text).language(text, usual)
+}
+
+/// How much of a text each script writes: characters of Chinese, Japanese
+/// and Korean one by one, as each is a word or a syllable; letters of the
+/// other scripts by the word, and only a word of two or more — one letter
+/// alone is a symbol.
+struct Tally {
+    chars: [usize; SCRIPTS],
+    words: [usize; SCRIPTS],
+}
+
+impl Tally {
+    fn of(text: &str) -> Tally {
+        use Script::*;
+        let mut tally = Tally {
+            chars: [0; SCRIPTS],
+            words: [0; SCRIPTS],
+        };
+        let mut run: Option<(Script, usize)> = None;
+        for c in text.chars() {
+            // A combining accent belongs to the letter before it.
+            if matches!(c as u32, 0x0300..=0x036F) {
+                continue;
             }
-            (Some(s @ (Latin | Cyrillic | Greek | Arabic | Devanagari)), _) => {
-                end_word(&mut run, &mut words);
-                run = Some((s, 1));
+            let script = script_of(c);
+            if let Some(script) = script {
+                tally.chars[script as usize] += 1;
             }
-            _ => end_word(&mut run, &mut words),
+            match (script, &mut run) {
+                (Some(s @ (Latin | Cyrillic | Greek | Arabic | Devanagari)), Some((r, len)))
+                    if *r == s =>
+                {
+                    *len += 1;
+                }
+                (Some(s @ (Latin | Cyrillic | Greek | Arabic | Devanagari)), _) => {
+                    end_word(&mut run, &mut tally.words);
+                    run = Some((s, 1));
+                }
+                _ => end_word(&mut run, &mut tally.words),
+            }
+        }
+        end_word(&mut run, &mut tally.words);
+        tally
+    }
+
+    fn cjk(&self) -> usize {
+        use Script::*;
+        self.chars[Hangul as usize] + self.chars[Kana as usize] + self.chars[Han as usize]
+    }
+
+    /// The language of `text`, of which this is the tally, when a script
+    /// other than Latin writes most of it (see [`script_language`]).
+    fn language(&self, text: &str, usual: Option<&str>) -> Option<&'static str> {
+        use Script::*;
+        let cjk = self.cjk();
+        let (script, most) = [
+            (Han, cjk),
+            (Cyrillic, self.words[Cyrillic as usize]),
+            (Greek, self.words[Greek as usize]),
+            (Arabic, self.words[Arabic as usize]),
+            (Devanagari, self.words[Devanagari as usize]),
+        ]
+        .into_iter()
+        .max_by_key(|(_, n)| *n)?;
+        // Mostly Latin, it is in a Latin script. A tie is not: a name in
+        // code, in a sentence of Russian, is still a sentence of Russian.
+        if most == 0 || most < self.words[Latin as usize] {
+            return None;
+        }
+        let usual = usual.and_then(known_language);
+        Some(match script {
+            Han if self.chars[Hangul as usize] * 2 >= cjk => "ko",
+            Han if written_in_japanese(text) || usual == Some("ja") => "ja",
+            Han => "zh",
+            Cyrillic => cyrillic_language(text),
+            Greek => "el",
+            Arabic => "ar",
+            _ => "hi",
+        })
+    }
+
+    /// Whether it holds a word in the script `lang` is written in — or a
+    /// character, for Chinese, Japanese and Korean.
+    fn holds_words_of(&self, lang: &str) -> bool {
+        use Script::*;
+        match lang {
+            "zh" | "ja" | "ko" => self.cjk() > 0,
+            "ru" | "uk" | "bg" => self.words[Cyrillic as usize] > 0,
+            "el" => self.words[Greek as usize] > 0,
+            "ar" => self.words[Arabic as usize] > 0,
+            "hi" => self.words[Devanagari as usize] > 0,
+            _ => false,
         }
     }
-    end_word(&mut run, &mut words);
-    let cjk = chars[Hangul as usize] + chars[Kana as usize] + chars[Han as usize];
-    let (script, most) = [
-        (Han, cjk),
-        (Cyrillic, words[Cyrillic as usize]),
-        (Greek, words[Greek as usize]),
-        (Arabic, words[Arabic as usize]),
-        (Devanagari, words[Devanagari as usize]),
-    ]
-    .into_iter()
-    .max_by_key(|(_, n)| *n)?;
-    // Mostly Latin, it is in a Latin script. A tie is not: a name in code,
-    // in a sentence of Russian, is still a sentence of Russian.
-    if most == 0 || most < words[Latin as usize] {
-        return None;
-    }
-    let usual = usual.and_then(known_language);
-    Some(match script {
-        Han if chars[Hangul as usize] * 2 >= cjk => "ko",
-        Han if written_in_japanese(text) || usual == Some("ja") => "ja",
-        Han => "zh",
-        Cyrillic => cyrillic_language(text),
-        Greek => "el",
-        Arabic => "ar",
-        _ => "hi",
-    })
+}
+
+/// Whether `lang` is written in Latin letters.
+fn written_in_latin(lang: &str) -> bool {
+    !matches!(
+        lang,
+        "zh" | "ja" | "ko" | "ru" | "uk" | "bg" | "el" | "ar" | "hi"
+    )
 }
 
 /// The scripts told apart (see [`script_of`]).
@@ -258,10 +306,13 @@ pub fn latin_language(text: &str) -> Option<&'static str> {
 /// The language to say `sentence` in, from an answer whose words so far
 /// are `answer` (as [`speakable`] says them): its script's
 /// ([`script_language`]) — Japanese for kanji alone where the answer is
-/// written in Japanese; else, for a Latin script, the language the answer's
+/// written in Japanese; for one mostly in Latin letters with words of
+/// another script, the language of an answer — or conversation, `usual` —
+/// in that script; else, for a Latin script, the language the answer's
 /// words are in, or `usual` when it is written in one; else English.
 pub fn language_for(sentence: &str, answer: &str, usual: Option<&str>) -> &'static str {
-    if let Some(lang) = script_language(sentence, usual) {
+    let tally = Tally::of(sentence);
+    if let Some(lang) = tally.language(sentence, usual) {
         // A line of kanji alone ("概要。") in an answer written in Japanese
         // is Japanese.
         if lang == "zh" && written_in_japanese(answer) {
@@ -269,9 +320,22 @@ pub fn language_for(sentence: &str, answer: &str, usual: Option<&str>) -> &'stat
         }
         return lang;
     }
-    let latin = |lang: &&str| !matches!(*lang, "zh" | "ja" | "ko");
+    let usual = usual.and_then(known_language);
+    // Mostly Latin letters, with words of another script among them, in an
+    // answer written in that script — or, nothing else in Latin letters to
+    // go by yet, in a conversation held in it: a name in code, said as its
+    // words ("Это функция get User By Id."), in a sentence of that language.
+    let around = Tally::of(answer);
+    let latin_around = around.words[Script::Latin as usize] > tally.words[Script::Latin as usize];
+    if let Some(lang) = around
+        .language(answer, usual)
+        .or(usual.filter(|_| !latin_around))
+        .filter(|lang| !written_in_latin(lang) && tally.holds_words_of(lang))
+    {
+        return lang;
+    }
     latin_language(answer)
-        .or_else(|| usual.and_then(known_language).filter(latin))
+        .or_else(|| usual.filter(|lang| written_in_latin(lang)))
         .unwrap_or("en")
 }
 
@@ -805,6 +869,10 @@ mod tests {
             "en"
         );
         assert_eq!(
+            language_for("apply discount.", "apply discount.", Some("ru")),
+            "en"
+        );
+        assert_eq!(
             language_for("apply discount.", "apply discount.", Some("xx")),
             "en"
         );
@@ -850,6 +918,26 @@ mod tests {
             "ru"
         );
         assert_eq!(language_for("Это foo.", english, None), "ru");
+        // A name in code is said as its words, which can be more than the
+        // sentence's own: the sentence is still in the answer's language,
+        // or the conversation's when the answer has no more to go by.
+        let mixed = "Это функция get User By Id.";
+        let russian = "Это функция get User By Id. Она возвращает пользователя по номеру.";
+        assert_eq!(language_for(mixed, russian, None), "ru");
+        assert_eq!(language_for(mixed, mixed, Some("ru")), "ru");
+        assert_eq!(language_for(mixed, mixed, None), "en");
+        let greek = "Η συνάρτηση get User By Id. Επιστρέφει τον χρήστη.";
+        assert_eq!(
+            language_for("Η συνάρτηση get User By Id.", greek, None),
+            "el"
+        );
+        // A word of Russian quoted in English stays English, the
+        // conversation's language Russian or not.
+        let quoting = "The function returns the area. The prefix Это means this.";
+        assert_eq!(
+            language_for("The prefix Это means this.", quoting, Some("ru")),
+            "en"
+        );
         assert_eq!(language_for("调用 getUserById 函数。", english, None), "zh");
         assert_eq!(
             language_for("韩语的“안녕”是你好的意思。", english, None),
