@@ -562,7 +562,23 @@ jobs:
             --password "$APPLE_APP_SPECIFIC_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
             --wait
-          xcrun stapler staple "$DMG"
+          # Stapling fetches the ticket Apple has just issued from its CDN, a
+          # second network round trip that can fail on its own: v0.2.0's was
+          # accepted, then lost its connection fetching the ticket ("The
+          # network connection was lost", error 68). The ticket is Apple's
+          # either way, so a few tries with a pause between them; a DMG that
+          # still cannot be stapled fails the build, as before.
+          for attempt in 1 2 3 4 5; do
+            if xcrun stapler staple "$DMG"; then
+              break
+            fi
+            if [[ "$attempt" == 5 ]]; then
+              echo "::error::could not staple the notarization ticket after $attempt tries" >&2
+              exit 1
+            fi
+            echo "::warning::stapling failed (try $attempt of 5); trying again in $((attempt * 15)) s"
+            sleep $((attempt * 15))
+          done
           xcrun stapler validate "$DMG"
           # The exact predicate `macos::install::assess_notarized` evaluates on
           # the user's machine. Asserting it here means a release cannot ship an
