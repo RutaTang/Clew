@@ -548,6 +548,11 @@ pub enum VoiceMsg {
     },
     /// Delete a downloaded speech model.
     RemoveSpeech(&'static str),
+    /// A speech model deleted, or why it could not be.
+    SpeechRemoved {
+        id: &'static str,
+        result: Result<(), String>,
+    },
 }
 
 impl VoiceMsg {
@@ -746,7 +751,8 @@ impl App {
             | VoiceMsg::CancelSpeechDownload(_)
             | VoiceMsg::SpeechDownloadProgress { .. }
             | VoiceMsg::SpeechDownloaded { .. }
-            | VoiceMsg::RemoveSpeech(_)) => self.update_speech(message),
+            | VoiceMsg::RemoveSpeech(_)
+            | VoiceMsg::SpeechRemoved { .. }) => self.update_speech(message),
             VoiceMsg::Toggle => self.on_voice_toggle(),
             VoiceMsg::SetKeepListening(on) => {
                 self.voice.keep_listening = on;

@@ -662,7 +662,8 @@ fn speech_models_download_verified_file_by_file() {
     settle(&mut app, task);
     assert_eq!(app.status, before);
     // Removed: the voice let go of first.
-    let _ = app.update(Message::Voice(VoiceMsg::RemoveSpeech("kokoro-zh")));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveSpeech("kokoro-zh")));
+    settle(&mut app, task);
     assert!(!dir.exists());
     assert_eq!(voice.stopped.load(Ordering::Relaxed), 1);
     assert!(app.status.contains("Removed"), "{}", app.status);

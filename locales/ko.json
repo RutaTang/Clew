@@ -2116,6 +2116,7 @@
  "registering clew with the authorization server failed: {arg1}": "인증 서버에 clew를 등록하지 못함: {arg1}",
  "registry": "레지스트리",
  "remove watch {text}": "{text} 조사식 제거",
+ "removing failed unexpectedly": "제거 중 예기치 않은 오류 발생",
  "repo-specified, nothing to install": "프로젝트에서 지정한 서버라 설치할 것이 없음",
  "request failed": "요청 실패",
  "request failed: {arg1}": "요청 실패: {arg1}",

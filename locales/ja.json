@@ -2116,6 +2116,7 @@
  "registering clew with the authorization server failed: {arg1}": "認可サーバーへの clew の登録に失敗しました: {arg1}",
  "registry": "レジストリ",
  "remove watch {text}": "{text}のウォッチを削除",
+ "removing failed unexpectedly": "削除中に予期しないエラーが発生しました",
  "repo-specified, nothing to install": "プロジェクト指定のため、インストールするものはありません",
  "request failed": "リクエストに失敗しました",
  "request failed: {arg1}": "リクエストに失敗しました: {arg1}",

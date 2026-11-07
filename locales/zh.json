@@ -2116,6 +2116,7 @@
  "registering clew with the authorization server failed: {arg1}": "向授权服务器注册 clew 失败：{arg1}",
  "registry": "注册表",
  "remove watch {text}": "移除监视{text}",
+ "removing failed unexpectedly": "删除意外失败",
  "repo-specified, nothing to install": "由仓库指定，无需安装",
  "request failed": "请求失败",
  "request failed: {arg1}": "请求失败：{arg1}",

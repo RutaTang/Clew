@@ -2116,6 +2116,7 @@
  "registering clew with the authorization server failed: {arg1}": "l’enregistrement de clew auprès du serveur d’autorisation a échoué : {arg1}",
  "registry": "registre",
  "remove watch {text}": "retirer l’espion {text}",
+ "removing failed unexpectedly": "la suppression a échoué de façon inattendue",
  "repo-specified, nothing to install": "défini par le projet, rien à installer",
  "request failed": "échec de la requête",
  "request failed: {arg1}": "échec de la requête : {arg1}",

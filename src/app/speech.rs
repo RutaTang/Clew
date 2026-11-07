@@ -462,15 +462,30 @@ impl App {
                     return Task::none();
                 };
                 // What is being said with it ends, and so does its hold on
-                // the files.
+                // the files — off the UI thread: a sentence being made is
+                // waited for.
                 self.stop_speaking();
-                self.voice.speech.synthesizer.stop();
-                self.status = match speech::remove(&store, model) {
-                    Ok(()) => tr!("Removed {model}", model = crate::i18n::lookup(model.name)),
+                let synthesizer = self.voice.speech.synthesizer.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            synthesizer.stop();
+                            speech::remove(&store, model).map_err(|e| e.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|_| Err(tr!("removing failed unexpectedly").into()))
+                    },
+                    move |result| Message::Voice(VoiceMsg::SpeechRemoved { id, result }),
+                )
+            }
+            VoiceMsg::SpeechRemoved { id, result } => {
+                let name = crate::i18n::lookup(speech::find(id).map_or(id, |m| m.name));
+                self.status = match result {
+                    Ok(()) => tr!("Removed {model}", model = name),
                     Err(e) => tr!(
                         "Could not remove {model}: {error}",
-                        model = crate::i18n::lookup(model.name),
-                        error = e
+                        model = name,
+                        error = crate::i18n::message(&e)
                     ),
                 };
                 Task::none()
