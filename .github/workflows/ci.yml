@@ -34,7 +34,7 @@ env:
 jobs:
   macos:
     name: Build & test · macOS · full workspace
-    runs-on: macos-14 # Apple Silicon, matching the shipped arm64 target
+    runs-on: macos-15 # Apple Silicon, matching the shipped arm64 target
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -221,7 +221,7 @@ jobs:
 
   lint:
     name: Lint · clippy + rustfmt
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
