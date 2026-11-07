@@ -8629,6 +8629,16 @@ fn an_unreadable_breakpoints_file_is_left_as_it_is() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), theirs);
     assert!(app.status.contains("version 2"), "{}", app.status);
     assert!(app.debug.breakpoints[&root.join("src/lib.rs")].contains_key(&4));
+    // One of this version holding what this build does not know (a field
+    // added without a new version) is left as it is too: written again, it
+    // lost that field from every breakpoint.
+    let newer = r#"{"version":1,"breakpoints":[{"rel":"src/lib.rs","line":1,"hit":3}]}"#;
+    std::fs::write(&file, newer).unwrap();
+    let _ = app.update(Message::Debug(DebugMsg::BreakpointToggle {
+        path: root.join("src/lib.rs"),
+        line: 6,
+    }));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), newer);
     // An empty one — what a crash can leave — holds nothing to lose: it is
     // written over, where refused, no breakpoint was kept again.
     std::fs::write(&file, "").unwrap();

@@ -26,7 +26,11 @@ const FILE: &str = "breakpoints.json";
 const VERSION: u32 = 1;
 
 /// One kept breakpoint: where, by the project-relative path, and when.
+/// A field this build does not know makes the file not its own to write
+/// (`load_checked`): read past, it was dropped from every breakpoint as the
+/// file was written again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Saved {
     pub(crate) rel: String,
     /// 1-based, as the gutter numbers it.
@@ -36,6 +40,7 @@ pub(crate) struct Saved {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BreakpointsFile {
     version: u32,
     breakpoints: Vec<Saved>,
@@ -56,18 +61,27 @@ fn load_checked(dir: &Path) -> std::io::Result<Vec<Saved>> {
     if bytes.iter().all(u8::is_ascii_whitespace) {
         return Ok(Vec::new());
     }
-    match serde_json::from_slice::<BreakpointsFile>(&bytes) {
-        Ok(file) if file.version == VERSION => Ok(file
-            .breakpoints
-            .into_iter()
-            .filter(|s| s.line > 0 && clew_core::statefile::safe_rel(&s.rel))
-            .collect()),
-        Ok(file) => Err(std::io::Error::other(format!(
-            "{FILE} is version {}, not {VERSION}",
-            file.version
-        ))),
-        Err(e) => Err(std::io::Error::other(format!("{FILE}: {e}"))),
+    // Its version first, whatever else it holds: another version's file is
+    // said to be one.
+    #[derive(Deserialize)]
+    struct Versioned {
+        version: u32,
     }
+    let unreadable = |e: serde_json::Error| std::io::Error::other(format!("{FILE}: {e}"));
+    let version = serde_json::from_slice::<Versioned>(&bytes)
+        .map_err(unreadable)?
+        .version;
+    if version != VERSION {
+        return Err(std::io::Error::other(format!(
+            "{FILE} is version {version}, not {VERSION}"
+        )));
+    }
+    let file = serde_json::from_slice::<BreakpointsFile>(&bytes).map_err(unreadable)?;
+    Ok(file
+        .breakpoints
+        .into_iter()
+        .filter(|s| s.line > 0 && clew_core::statefile::safe_rel(&s.rel))
+        .collect())
 }
 
 /// [`load_checked`] for setting them again: a file that cannot be read
