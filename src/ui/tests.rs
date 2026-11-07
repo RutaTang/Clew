@@ -8173,7 +8173,6 @@ fn the_unexplained_note_follows_a_language_switch() {
     assert!(said(&app).contains("Pas encore expliqué"), "{}", said(&app));
 }
 
-/// What voice could not do is said in the reader's language: on the card,
 /// Smart Turn in Voice settings: its download says its size; once it is
 /// here, Remove; what went wrong with it is said under it — and that it
 /// cannot run without `clew-speak` beside Clew.
@@ -8214,6 +8213,7 @@ fn smart_turn_is_offered_in_voice_settings() {
     let _ = std::fs::remove_dir_all(store.dir());
 }
 
+/// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]
 fn voice_failures_are_said_in_the_readers_language() {

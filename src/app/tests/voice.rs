@@ -31,8 +31,8 @@ impl Listening for FakeMic {
     fn silence_after_speech(&self) -> Option<f32> {
         self.0.lock().unwrap().silence
     }
-    fn recent(&self, _seconds: f32, _rate: u32) -> Vec<f32> {
-        spoken()
+    fn recent(&self, _seconds: f32) -> (Vec<f32>, u32) {
+        (spoken(), 16_000)
     }
     fn full(&self) -> bool {
         self.0.lock().unwrap().full
@@ -1555,4 +1555,70 @@ fn smart_turn_downloads_verified_and_is_removed() {
     assert!(!clew_voice::turn::installed(&store));
     assert_eq!(*judge.stopped.lock().unwrap(), 1);
     assert!(app.status.contains("removed"), "{}", app.status);
+}
+
+/// Spoken again after a pause was sent to be judged, before any tick has
+/// seen it: the answer that the pause finished a turn is about a pause that
+/// is over, and listening goes on.
+#[test]
+fn speech_back_before_the_answer_keeps_listening() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, _) = turn_app("turn-spoke-again", vec![Ok(0.95)], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    script.lock().unwrap().silence = Some(0.03);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening(), "cut off mid-word");
+}
+
+/// A failed judgement is said under the model until one succeeds; one
+/// from a listening already over is not said at all.
+#[test]
+fn a_judgement_failure_is_said_until_one_succeeds() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, _) = turn_app(
+        "turn-fails-once",
+        vec![Err("took too long".into()), Ok(0.2)],
+        true,
+    );
+    for message in run_task(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05)) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.voice.turn.error.as_deref(), Some("took too long"));
+    let _ = quiet_for(&mut app, &script, 0.02);
+    for message in run_task(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05)) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.voice.turn.error, None, "it answers again");
+    // An answer for the listening before this one.
+    let listen = app.voice.turn.pause.listen;
+    let _ = app.update(Message::Voice(VoiceMsg::Judged {
+        listen: listen - 1,
+        pause: 0,
+        result: Err("long ago".into()),
+    }));
+    assert_eq!(app.voice.turn.error, None);
+}
+
+/// A model being removed — in any window — judges nothing: a pause ends
+/// as without it, whether the removal began before listening or during it.
+#[test]
+fn a_model_being_removed_judges_nothing() {
+    use crate::app::turn::JUDGE_AFTER;
+    use crate::app::voice::{Claim, ClaimedFor};
+    let (mut app, script, judge) = turn_app("turn-removing", vec![Ok(0.9)], true);
+    let store = app.voice.store.clone().unwrap();
+    let removal = Claim::take(clew_voice::turn::path(&store), ClaimedFor::Removal).unwrap();
+    assert_eq!(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05).units(), 0);
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.01);
+    assert!(transcribing(&app));
+    // Begun before listening: not even loaded.
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.turn_model().is_none());
+    drop(removal);
+    assert!(app.turn_model().is_some(), "here again once it is let go");
+    assert!(judge.asked.lock().unwrap().is_empty());
 }

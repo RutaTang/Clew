@@ -47,9 +47,9 @@ pub(crate) trait Listening: Send {
     /// Seconds of quiet since the speaker last spoke; `None` before any
     /// speech.
     fn silence_after_speech(&self) -> Option<f32>;
-    /// The last `seconds` heard, at `rate`: what Smart Turn judges a pause
-    /// by ([`crate::app::turn`]).
-    fn recent(&self, seconds: f32, rate: u32) -> Vec<f32>;
+    /// The last `seconds` heard, and the rate they are at: what Smart Turn
+    /// judges a pause by ([`crate::app::turn`]).
+    fn recent(&self, seconds: f32) -> (Vec<f32>, u32);
     /// Whether it has heard all it may keep.
     fn full(&self) -> bool;
     /// A failure since it started (the device went away).
@@ -65,8 +65,8 @@ impl Listening for Recorder {
     fn silence_after_speech(&self) -> Option<f32> {
         Recorder::silence_after_speech(self)
     }
-    fn recent(&self, seconds: f32, rate: u32) -> Vec<f32> {
-        Recorder::recent(self, seconds, rate)
+    fn recent(&self, seconds: f32) -> (Vec<f32>, u32) {
+        Recorder::recent(self, seconds)
     }
     fn full(&self) -> bool {
         Recorder::full(self)

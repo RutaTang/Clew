@@ -38,7 +38,8 @@ pub struct TurnModel {
     pub license: &'static str,
 }
 
-/// Smart Turn v3.2, for the CPU (int8): 8 MB, a few milliseconds a turn.
+/// Smart Turn v3.2, for the CPU (int8): 8 MB; a pause is judged in about a
+/// tenth of a second, most of it making the spectrogram the model hears.
 pub const MODEL: TurnModel = TurnModel {
     name: "Smart Turn",
     repo: "pipecat-ai/smart-turn-v3",
@@ -101,12 +102,24 @@ pub fn begin(store: &Store) -> std::io::Result<Install> {
     Install::begin(path(store), MODEL.expected())
 }
 
-/// Remove the model from `store`.
+/// Remove the model from `store`. A `clew-speak` loading it reads it in and
+/// lets go within moments, and Windows deletes no file while it is open:
+/// the removal is tried again a few times before it is given up on.
 pub fn remove(store: &Store) -> std::io::Result<()> {
-    match std::fs::remove_dir_all(dir(store)) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        other => other,
+    let mut last = Ok(());
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(400));
+        }
+        last = match std::fs::remove_dir_all(dir(store)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        };
+        if last.is_ok() {
+            break;
+        }
     }
+    last
 }
 
 /// How long loading the model may take.
@@ -114,6 +127,27 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long one judgement may take: past this, the pause is waited out as
 /// it would be without the model.
 const JUDGE_TIMEOUT: Duration = Duration::from_secs(2);
+/// What `clew-speak` exits with when it does not know what it was asked to
+/// run.
+const USAGE: i32 = 2;
+
+/// Why a pause was not judged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fault {
+    /// This pause: what judges it is fine, and judges the next.
+    Pause(String),
+    /// What judges: it ended, or stopped answering — started afresh for the
+    /// next pause.
+    Process(String),
+}
+
+impl std::fmt::Display for Fault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Fault::Pause(e) | Fault::Process(e) => f.write_str(e),
+        }
+    }
+}
 
 /// What `clew-speak turn` answers.
 #[derive(Debug, Deserialize)]
@@ -175,7 +209,10 @@ impl Judge {
                     let answer = match line {
                         Ok(line) => serde_json::from_str::<Answer>(&line)
                             .map_err(|e| format!("{} said something unreadable: {e}", MODEL.name)),
-                        Err(e) => Err(format!("{}'s reply could not be read: {e}", MODEL.name)),
+                        Err(e) => Err(format!(
+                            "the reply from {} could not be read: {e}",
+                            MODEL.name
+                        )),
                     };
                     let stop = answer.is_err();
                     if tx.send(answer).is_err() || stop {
@@ -183,7 +220,7 @@ impl Judge {
                     }
                 }
             });
-        let judge = Judge {
+        let mut judge = Judge {
             child,
             stdin,
             answers,
@@ -199,6 +236,17 @@ impl Judge {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 Err(format!("{} took too long to load", MODEL.name))
             }
+            // A `clew-speak` older than this Clew does not know `turn`: it
+            // says how it is used and ends, as it does for any word it does
+            // not know. Its model is fine.
+            Err(mpsc::RecvTimeoutError::Disconnected)
+                if judge.child.wait().ok().and_then(|s| s.code()) == Some(USAGE) =>
+            {
+                Err(format!(
+                    "the clew-speak beside Clew is older than it and cannot run {}",
+                    MODEL.name
+                ))
+            }
             Err(mpsc::RecvTimeoutError::Disconnected) => Err(format!(
                 "{} stopped while starting — its model may be damaged",
                 MODEL.name
@@ -208,7 +256,8 @@ impl Judge {
 
     /// How likely it is, 0 to 1, that the speaker of `samples` ([`RATE`],
     /// one channel) has finished.
-    pub fn judge(&mut self, samples: &[f32]) -> Result<f32, String> {
+    pub fn judge(&mut self, samples: &[f32]) -> Result<f32, Fault> {
+        use Fault::{Pause, Process};
         self.next += 1;
         let id = self.next;
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
@@ -216,7 +265,7 @@ impl Judge {
         let request = serde_json::json!({ "turn": { "id": id, "audio": audio } });
         writeln!(self.stdin, "{request}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("{} stopped listening: {e}", MODEL.name))?;
+            .map_err(|e| Process(format!("{} stopped taking audio: {e}", MODEL.name)))?;
         let deadline = Instant::now() + JUDGE_TIMEOUT;
         loop {
             let left = deadline.saturating_duration_since(Instant::now());
@@ -225,21 +274,28 @@ impl Judge {
                     return if p.is_finite() {
                         Ok(p.clamp(0.0, 1.0))
                     } else {
-                        Err(format!("{} answered {p}", MODEL.name))
+                        Err(Pause(format!(
+                            "{} answered {p}, not a probability",
+                            MODEL.name
+                        )))
                     };
                 }
-                Ok(Ok(Answer::Failed { id: got, error })) if got == id => return Err(error),
+                // This pause: the next is judged by the same, still loaded.
+                Ok(Ok(Answer::Failed { id: got, error })) if got == id => return Err(Pause(error)),
                 // An answer to a question given up on.
                 Ok(Ok(Answer::Done { .. } | Answer::Failed { .. } | Answer::Ready { .. })) => {}
-                Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(e),
+                Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(Process(e)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     // Not waited for: the pause is waited out without it,
                     // and a fresh one starts for the next.
                     let _ = self.child.kill();
-                    return Err(format!("{} took too long to answer", MODEL.name));
+                    return Err(Process(format!("{} took too long to answer", MODEL.name)));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(format!("{} ended unexpectedly", MODEL.name));
+                    return Err(Process(format!(
+                        "{} ended while it was judging a pause",
+                        MODEL.name
+                    )));
                 }
             }
         }
@@ -277,7 +333,11 @@ impl Judges {
     /// pause is judged at once, not after the model loads.
     pub fn warm(&self, file: &Path) -> Result<(), String> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        if running.as_mut().is_some_and(|(j, _)| !j.ended()) {
+        if let Some((judge, used)) = running.as_mut()
+            && !judge.ended()
+        {
+            // Wanted now: not let go of as idle a moment before it is asked.
+            *used = Instant::now();
             return Ok(());
         }
         *running = None;
@@ -298,10 +358,10 @@ impl Judges {
         };
         let result = judge.judge(samples);
         *used = Instant::now();
-        if result.is_err() {
+        if matches!(result, Err(Fault::Process(_))) {
             *running = None;
         }
-        result
+        result.map_err(|e| e.to_string())
     }
 
     /// Let the model go: what is running ends — and with it its hold on
@@ -395,6 +455,83 @@ mod tests {
         assert!(heard >= 2, "no recordings in {}", wavs.display());
         judges.stop();
         assert!(!judges.loaded());
+    }
+
+    /// A folder removed when the test is done with it.
+    #[cfg(unix)]
+    struct Scratch(PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A program standing in for `clew-speak turn` — `script` — in a
+    /// folder of its own, and where a model would be.
+    #[cfg(unix)]
+    fn stand_in(tag: &str, script: &str) -> (Scratch, PathBuf, PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("clew-turn-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join("clew-speak");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let model = dir.join("model.onnx");
+        (Scratch(dir), program, model)
+    }
+
+    /// Loading the model for a listening counts as using it: it is not let
+    /// go of as idle a moment before the first pause is judged.
+    #[cfg(unix)]
+    #[test]
+    fn warming_counts_as_use() {
+        let (_dir, program, model) = stand_in(
+            "warm",
+            "printf '{\"ready\":{\"seconds\":8}}\\n'; cat >/dev/null",
+        );
+        let judges = Judges::new(program);
+        judges.warm(&model).unwrap();
+        std::thread::sleep(Duration::from_millis(80));
+        judges.warm(&model).unwrap();
+        assert!(!judges.stop_if_idle(Duration::from_millis(60)), "let go");
+        assert!(judges.loaded());
+        judges.stop();
+    }
+
+    /// A pause it could not judge leaves it loaded for the next; one that
+    /// ends is started afresh.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_pause_keeps_what_judges() {
+        let (_dir, program, model) = stand_in(
+            "failed",
+            "printf '{\"ready\":{\"seconds\":8}}\\n'; \
+             while read -r line; do \
+               id=$(printf '%s' \"$line\" | sed 's/.*\"id\":\\([0-9]*\\).*/\\1/'); \
+               printf '{\"failed\":{\"id\":%s,\"error\":\"no answer\"}}\\n' \"$id\"; \
+             done",
+        );
+        let judges = Judges::new(program);
+        assert_eq!(judges.judge(&model, &[0.0; 16]), Err("no answer".into()));
+        assert!(judges.loaded(), "still loaded for the next pause");
+        assert_eq!(judges.judge(&model, &[0.0; 16]), Err("no answer".into()));
+        judges.stop();
+    }
+
+    /// A `clew-speak` too old to know `turn` is said to be that — not a
+    /// damaged model, which would only be downloaded again for nothing.
+    #[cfg(unix)]
+    #[test]
+    fn an_older_clew_speak_is_said_to_be_older() {
+        let (_dir, program, model) = stand_in(
+            "old",
+            "echo 'usage: clew-speak supertonic|kokoro <model dir>' >&2; exit 2",
+        );
+        let error = Judge::start(&program, &model).err().unwrap();
+        assert!(error.contains("older than it"), "{error}");
+        assert!(!error.contains("damaged"), "{error}");
     }
 
     /// Kept in a folder of its own in the store, and only a whole file of

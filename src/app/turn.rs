@@ -106,25 +106,32 @@ pub(crate) struct Pause {
     /// What the model said of it — finished or not; `None` until it
     /// answers, and when it could not.
     verdict: Option<bool>,
+    /// The model this listening judges with, found as it began: its file is
+    /// not looked for again on every tick.
+    model: Option<PathBuf>,
 }
 
 impl App {
-    /// The model's file, when it is here and something can run it.
+    /// The model's file, when it is here, is not being downloaded or
+    /// removed (in any window), and something can run it.
     pub(crate) fn turn_model(&self) -> Option<PathBuf> {
         let store = self.voice.store.as_ref()?;
         self.voice.turn.judges.as_ref()?;
-        smart::installed(store).then(|| smart::path(store))
+        let file = smart::path(store);
+        (!crate::app::voice::downloading(&file) && smart::installed(store)).then_some(file)
     }
 
     /// Listening began: its pauses are judged afresh, and the model loads
     /// meanwhile — off this thread — so the first is judged at once.
     pub(crate) fn turn_listening_began(&mut self) {
+        let model = self.turn_model();
         let pause = &mut self.voice.turn.pause;
         *pause = Pause {
             listen: pause.listen + 1,
+            model: model.clone(),
             ..Pause::default()
         };
-        if let (Some(file), Some(judges)) = (self.turn_model(), self.voice.turn.judges.clone()) {
+        if let (Some(file), Some(judges)) = (model, self.voice.turn.judges.clone()) {
             std::thread::Builder::new()
                 .name("clew-turn-warm".into())
                 .spawn(move || {
@@ -141,7 +148,6 @@ impl App {
         let Some(quiet) = quiet else {
             return (false, Task::none());
         };
-        let model = self.turn_model();
         let pause = &mut self.voice.turn.pause;
         if pause.last_quiet.is_some_and(|last| quiet < last) {
             pause.number += 1;
@@ -149,7 +155,7 @@ impl App {
             pause.verdict = None;
         }
         pause.last_quiet = Some(quiet);
-        let (Some(file), Some(judges)) = (model, self.voice.turn.judges.clone()) else {
+        let (Some(_), Some(judges)) = (&pause.model, self.voice.turn.judges.clone()) else {
             return (quiet >= END_SILENCE, Task::none());
         };
         let ends = match pause.verdict {
@@ -164,16 +170,28 @@ impl App {
         }
         pause.asked = true;
         let (listen, number) = (pause.listen, pause.number);
-        let samples = self
+        // Still here now — not being removed, say, in another window — or
+        // the pause is waited out without it.
+        let Some(file) = self.turn_model() else {
+            return (false, Task::none());
+        };
+        // What was heard, as it was heard: made into the model's rate off
+        // this thread.
+        let (heard, rate) = self
             .voice
             .listening_now()
-            .map(|l| l.recent(smart::SECONDS, smart::RATE))
+            .map(|l| l.recent(smart::SECONDS))
             .unwrap_or_default();
         let task = Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || judges.judge(&file, &samples))
-                    .await
-                    .unwrap_or_else(|_| Err(format!("{} failed unexpectedly", MODEL.name)))
+                tokio::task::spawn_blocking(move || {
+                    let samples = clew_voice::audio::resample(&heard, rate, smart::RATE);
+                    judges.judge(&file, &samples)
+                })
+                .await
+                .unwrap_or_else(|_| {
+                    Err(tr!("{model} failed unexpectedly", model = MODEL.name).to_string())
+                })
             },
             move |result| {
                 Message::Voice(VoiceMsg::Judged {
@@ -195,18 +213,37 @@ impl App {
         number: u64,
         result: Result<f32, String>,
     ) -> Task<Message> {
-        // What went wrong is shown under the model in Settings, and the
-        // pause is waited out as without it.
+        // What went wrong in this listening is shown under the model in
+        // Settings — until it next answers — and the pause is waited out as
+        // without it. An earlier listening's is over and done with.
+        let this_listening = self.voice.turn.pause.listen == listen;
         let p = match result {
-            Ok(p) => Some(p),
+            Ok(p) => {
+                self.voice.turn.error = None;
+                Some(p)
+            }
             Err(e) => {
-                self.voice.turn.error = Some(e);
+                if this_listening {
+                    self.voice.turn.error = Some(e);
+                }
                 None
             }
         };
+        // Spoken again since the last tick: the pause judged is over, though
+        // no tick has said so yet.
+        let quiet_now = self
+            .voice
+            .listening_now()
+            .and_then(|l| l.silence_after_speech());
         let listening = self.voice.is_listening();
         let pause = &mut self.voice.turn.pause;
-        if !listening || pause.listen != listen || pause.number != number {
+        if !listening || !this_listening || pause.number != number {
+            return Task::none();
+        }
+        if quiet_now
+            .zip(pause.last_quiet)
+            .is_some_and(|(now, last)| now < last)
+        {
             return Task::none();
         }
         pause.verdict = p.map(|p| p >= DONE);
