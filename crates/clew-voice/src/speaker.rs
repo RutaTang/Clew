@@ -409,4 +409,40 @@ mod tests {
         let (samples, _) = speakers.say(model, &dir, "Again.", "en", 5, 1.2).unwrap();
         assert!(!samples.is_empty());
     }
+
+    /// A real `clew-speak` and a real model, removed while a sentence
+    /// waited for it: that sentence is passed over, not taken for a voice
+    /// that failed. The model is not touched: what is removed are links to
+    /// its files.
+    #[test]
+    #[ignore = "needs CLEW_SPEAK and CLEW_SPEAK_MODEL"]
+    fn a_real_model_removed_meanwhile_passes_the_sentence_over() {
+        let program = PathBuf::from(std::env::var("CLEW_SPEAK").unwrap());
+        let model_dir = PathBuf::from(std::env::var("CLEW_SPEAK_MODEL").unwrap());
+        let model = &crate::speech::VOICE_MODELS[0];
+        let dir = std::env::temp_dir().join(format!("clew-speaker-real-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for file in model.files {
+            let to = dir.join(file.path);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::hard_link(model_dir.join(file.path), &to).unwrap();
+        }
+        let speakers = std::sync::Arc::new(Speakers::new(program));
+        // Loaded, and saying what it is asked.
+        let (said, _) = speakers.say(model, &dir, "Loaded.", "en", 0, 1.0).unwrap();
+        assert!(!said.is_empty());
+        // Removed — and, while it is, a sentence asked for waits its turn.
+        let mut waiting = None;
+        speakers.stop_while(&mut || {
+            let (speakers, there) = (speakers.clone(), dir.clone());
+            waiting = Some(std::thread::spawn(move || {
+                speakers.say(model, &there, "Waiting.", "en", 0, 1.0)
+            }));
+            std::thread::sleep(Duration::from_millis(300));
+            std::fs::remove_dir_all(&dir).unwrap();
+        });
+        let err = waiting.unwrap().join().unwrap().unwrap_err();
+        assert!(matches!(err, SayError::Sentence(_)), "{err}");
+        assert!(!speakers.loaded());
+    }
 }
