@@ -27514,6 +27514,45 @@ fn the_readers_moves_in_the_steps_file_history_supersede_the_step() {
 }
 
 /// A key pressed with `modifiers`, as the window delivers it.
+/// `zM` closes every fold and `zR` opens them: typed as a keyboard sends
+/// them, the Shift for the capital its own press between the two keys —
+/// which ended the `z` prefix, so neither ever ran.
+#[test]
+fn z_then_shifted_m_or_r_folds_and_unfolds_everything() {
+    use keyboard::key::Named;
+    let mut app = scanned_app("fold-all-keys");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.code_focused = true;
+    assert!(
+        !app.active_viewer().unwrap().folds.is_empty(),
+        "the file has folds"
+    );
+    let press = |app: &mut App, key: keyboard::Key, modifiers| {
+        let _ = app.update(key_press(key, modifiers));
+    };
+    let shift = keyboard::Modifiers::SHIFT;
+    press(
+        &mut app,
+        keyboard::Key::Character("z".into()),
+        keyboard::Modifiers::empty(),
+    );
+    press(&mut app, keyboard::Key::Named(Named::Shift), shift);
+    press(&mut app, keyboard::Key::Character("M".into()), shift);
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.collapsed.len(), v.folds.len(), "zM closed every fold");
+    press(
+        &mut app,
+        keyboard::Key::Character("z".into()),
+        keyboard::Modifiers::empty(),
+    );
+    press(&mut app, keyboard::Key::Named(Named::Shift), shift);
+    press(&mut app, keyboard::Key::Character("R".into()), shift);
+    assert!(
+        app.active_viewer().unwrap().collapsed.is_empty(),
+        "zR opened them"
+    );
+}
+
 fn key_press(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Message {
     Message::Editor(EditorMsg::KeyPressed(key, modifiers))
 }

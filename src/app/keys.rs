@@ -27,6 +27,29 @@ impl App {
         if let Some(action) = self.rebinding {
             return self.capture_rebind(action, &key, modifiers);
         }
+        // A modifier pressed on its own is no key of its own: the Shift
+        // before `R` in `zR` ended the `z` it was typed after.
+        if matches!(
+            key.as_ref(),
+            Key::Named(
+                Named::Shift
+                    | Named::Control
+                    | Named::Alt
+                    | Named::AltGraph
+                    | Named::Super
+                    | Named::Meta
+                    | Named::Hyper
+                    | Named::CapsLock
+                    | Named::NumLock
+                    | Named::ScrollLock
+                    | Named::Fn
+                    | Named::FnLock
+                    | Named::Symbol
+                    | Named::SymbolLock
+            )
+        ) {
+            return Task::none();
+        }
         // The tutorial is modal: → / Enter advance, ← goes back, Esc leaves, and
         // every other key is swallowed so nothing acts behind the overlay.
         if self.tutorial.is_some() {

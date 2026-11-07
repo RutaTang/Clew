@@ -1471,15 +1471,23 @@ fn forward_key(
 /// which is how shortcuts are spelled. iced gives the key without its
 /// modifiers, so Shift+G arrived as "g" — `G` (to the end) began a `g`
 /// prefix that ate the next key — and `$` as "4", `zR` and `zM` as `zr`
-/// and `zm`: none of them ever ran.
+/// and `zm`: none of them ever ran. A letter Caps Lock alone made capital
+/// is the letter pressed: with it on, `j` and `k` did nothing, and `gg` went
+/// to the end of the file.
 fn typed_key(
     key: keyboard::Key,
     modified_key: keyboard::Key,
     modifiers: keyboard::Modifiers,
 ) -> keyboard::Key {
     let chord = modifiers.command() || modifiers.control() || modifiers.alt() || modifiers.logo();
-    match modified_key {
-        keyboard::Key::Character(_) if !chord => modified_key,
+    match &modified_key {
+        keyboard::Key::Character(typed) if !chord => {
+            let capitalized = !modifiers.shift()
+                && matches!(&key, keyboard::Key::Character(pressed)
+                    if pressed.chars().all(char::is_lowercase)
+                        && typed.as_str() == pressed.to_uppercase());
+            if capitalized { key } else { modified_key }
+        }
         _ => key,
     }
 }
@@ -3811,6 +3819,15 @@ mod tests {
             Key::Character("f".into())
         );
         assert_eq!(press("p", "p", Modifiers::LOGO), Key::Character("p".into()));
+        // Caps Lock on: a letter is still the one pressed; Shift's is not.
+        assert_eq!(
+            press("j", "J", Modifiers::empty()),
+            Key::Character("j".into())
+        );
+        assert_eq!(
+            press("g", "G", Modifiers::SHIFT),
+            Key::Character("G".into())
+        );
     }
 
     #[test]
