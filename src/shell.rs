@@ -1266,6 +1266,10 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let before = crate::theme::revision();
             // Same for the keymap: a rebind lands in the acting window's copy.
             let keymap_before = clew.windows.get(&id).map(|app| app.keymap.stamp());
+            // And the voice settings: a model chosen in one window was not
+            // the others', which listened for the old one and, saving any
+            // voice setting of their own, wrote it back over the choice.
+            let voice_before = clew.windows.get(&id).map(|app| app.voice.prefs.clone());
             // And the language, which the menu bar is built in.
             #[cfg(target_os = "macos")]
             let lang_before = crate::i18n::current();
@@ -1291,6 +1295,10 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let keymap_after = clew.windows.get(&id).map(|app| app.keymap.stamp());
             if keymap_before.is_some() && keymap_after != keymap_before {
                 adopt_keymap(clew, id);
+            }
+            let voice_after = clew.windows.get(&id).map(|app| app.voice.prefs.clone());
+            if voice_before.is_some() && voice_after != voice_before {
+                adopt_voice_prefs(clew, id);
             }
             // The menu bar speaks the language it was built in: a language
             // chosen in Settings rebuilds it.
@@ -1429,6 +1437,19 @@ fn adopt_keymap(clew: &mut Clew, from: window::Id) {
     }
     #[cfg(target_os = "macos")]
     crate::macos::menu::rebuild(&keymap);
+}
+
+/// Hand the voice settings of window `from` to every other window
+/// ([`adopt_keymap`]'s way): one model, language and choice everywhere.
+fn adopt_voice_prefs(clew: &mut Clew, from: window::Id) {
+    let Some(prefs) = clew.windows.get(&from).map(|app| app.voice.prefs.clone()) else {
+        return;
+    };
+    for (other, app) in clew.windows.iter_mut() {
+        if *other != from {
+            app.voice.prefs = prefs.clone();
+        }
+    }
 }
 
 /// Whether a key press reaches the window's key handler.
@@ -4158,6 +4179,45 @@ mod tests {
             !crate::window_settings().exit_on_close_request,
             "iced would close the window itself, unasked"
         );
+    }
+
+    /// A voice model chosen in one window is every window's: the others
+    /// listened for the old one, and saving a voice setting of their own
+    /// wrote it back over the choice.
+    #[test]
+    fn a_voice_setting_in_one_window_reaches_every_window() {
+        // The choice is kept in config.toml: a private directory.
+        let data = test_dir("shell-voice");
+        std::fs::create_dir_all(&data).unwrap();
+        let _env = data_dir_override(&data);
+        let mut clew = test_clew();
+        let (acting, other) = (window::Id::unique(), window::Id::unique());
+        for id in [acting, other] {
+            let mut app = blank_app();
+            app.main_window = Some(id);
+            clew.windows.insert(id, app);
+        }
+        let _ = update(
+            &mut clew,
+            Shell::Window(
+                acting,
+                Message::Voice(crate::app::voice::VoiceMsg::PickModel("tiny.en")),
+            ),
+        );
+        assert_eq!(clew.windows[&acting].voice.prefs.model, "tiny.en");
+        assert_eq!(clew.windows[&other].voice.prefs.model, "tiny.en");
+        // The other window's own change keeps the choice.
+        let _ = update(
+            &mut clew,
+            Shell::Window(
+                other,
+                Message::Voice(crate::app::voice::VoiceMsg::SetRunCommands(false)),
+            ),
+        );
+        let kept = crate::app::voice::VoicePrefs::load();
+        assert_eq!(kept.model, "tiny.en");
+        assert!(!kept.run_commands);
+        assert!(!clew.windows[&acting].voice.prefs.run_commands);
     }
 
     /// A rebind in one window used to change that window alone: the others
