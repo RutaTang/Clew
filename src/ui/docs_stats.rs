@@ -526,7 +526,26 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                 .size(ts::HEADING)
                 .color(theme::fg()),
             space().width(Fill),
-            regen(tr!("Regenerate")),
+            // An icon, as the chrome's actions are, named by its tooltip.
+            super::toolbar::chrome_tip(
+                button(
+                    container(crate::glyph::icon(
+                        crate::glyph::Glyph::Refresh,
+                        theme::fg_muted(),
+                        15.0,
+                    ))
+                    .center(Fill),
+                )
+                .style(theme::icon_button(false))
+                .padding(0)
+                // The height of the header's title line: the page below
+                // sits where it did.
+                .width(24)
+                .height(24)
+                .on_press(Message::Overview(OverviewMsg::Generate)),
+                tr!("Regenerate"),
+                None,
+            ),
         ]
         .align_y(iced::Center);
         // The module map, drawn natively (same engine as the Import Graph
