@@ -8756,7 +8756,7 @@ fn what_is_missing_to_make_embeddings_is_shown() {
             basis: None,
         },
     );
-    app.embed_available = clew_core::embed::Config::available();
+    app.refresh_embeddings();
     assert!(!app.embed_available);
     let download = format!("Download {} in Settings → Embeddings", local::MODEL.name);
     let program = "clew-speak, which makes embeddings on this computer, is not installed";
@@ -8777,11 +8777,26 @@ fn what_is_missing_to_make_embeddings_is_shown() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, b"x").unwrap();
     }
+    // As a download that finished does.
+    app.refresh_embeddings();
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, program), "the page says what is missing");
     }
     let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
-    let mut sim = sim_elem(super::semantic_tab(&app));
-    assert!(shows(&mut sim, program), "so does search");
+    {
+        let mut sim = sim_elem(super::semantic_tab(&app));
+        assert!(shows(&mut sim, program), "so does search");
+    }
+    // A service saved, this computer chosen on the page but not saved yet:
+    // the page says what this computer is missing, not the service's.
+    clew_core::embed::Config::from_parts("sk".into(), "m".into(), "http://emb.test/v1".into())
+        .save()
+        .unwrap();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::EmbedHere(true)));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, program), "for the choice on the page");
 }

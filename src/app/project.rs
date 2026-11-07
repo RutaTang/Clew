@@ -438,7 +438,7 @@ impl App {
         // Land on the architecture-overview home (filled from the cache when
         // the project's state has loaded).
         self.proj.overview.showing = true;
-        self.embed_available = embed::Config::available();
+        self.refresh_embeddings();
         // A project open re-reads the AI config (another window may have
         // saved Settings).
         self.invalidate_llm_config();

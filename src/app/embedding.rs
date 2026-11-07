@@ -35,26 +35,29 @@ fn is_file(path: &std::path::Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file())
 }
 
-/// Why no embeddings can be made, said as what to do: the model to
-/// download, the program to install beside Clew — or, for a service, its
-/// endpoint to set.
-pub(crate) fn why_no_embeddings() -> String {
-    if !embed::Config::stored_here() {
-        return tr!("Configure an embedding endpoint in Settings").into();
-    }
-    if !local::installed() {
-        return tr!(
+/// What is missing to make embeddings on this computer, said as what to
+/// do: the model to download, else the program that runs it, to install
+/// beside Clew.
+pub(crate) fn missing_here() -> String {
+    if local::installed() {
+        tr!("clew-speak, which makes embeddings on this computer, is not installed beside Clew")
+            .into()
+    } else {
+        tr!(
             "Download {model} in Settings → Embeddings",
             model = MODEL.name
-        );
-    }
-    if local::program().is_none() {
-        return tr!(
-            "clew-speak, which makes embeddings on this computer, is not installed beside Clew"
         )
-        .into();
     }
-    tr!("Configure an embedding endpoint in Settings").into()
+}
+
+/// Why no embeddings can be made with what is saved, said as what to do:
+/// what is missing on this computer, or a service's endpoint to set.
+pub(crate) fn why_no_embeddings() -> String {
+    if embed::Config::stored_here() {
+        missing_here()
+    } else {
+        tr!("Configure an embedding endpoint in Settings").into()
+    }
 }
 
 impl App {
@@ -65,11 +68,19 @@ impl App {
             .is_some_and(|dir| !crate::app::voice::downloading(&dir) && local::present(&dir))
     }
 
+    /// Whether embeddings can be made with what is saved, and if not, why
+    /// — read again after anything that changes either, not as the window
+    /// is drawn.
+    pub(crate) fn refresh_embeddings(&mut self) {
+        self.embed_available = embed::Config::available();
+        self.embed_missing = why_no_embeddings();
+    }
+
     /// The embedding settings and every window's use of them, after the
     /// model came or went: what is available follows, and the server is
     /// told.
     fn embed_model_changed(&mut self) {
-        self.embed_available = embed::Config::available();
+        self.refresh_embeddings();
         self.send_ai_config();
     }
 
@@ -209,7 +220,7 @@ impl App {
                                 model = MODEL.name
                             )
                         } else {
-                            why_no_embeddings()
+                            missing_here()
                         };
                         self.embed_model_changed();
                     }

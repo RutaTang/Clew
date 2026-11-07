@@ -1141,8 +1141,10 @@ pub struct App {
     /// carrying an older generation is from a superseded spawn (restart, project
     /// switch) and is dropped instead of installing a dead client as Ready.
     pub lsp_gen: std::collections::HashMap<String, u64>,
-    /// Whether an embedding endpoint is configured.
+    /// Whether embeddings can be made with what is saved.
     pub embed_available: bool,
+    /// While they cannot, why, as what to do (`App::refresh_embeddings`).
+    pub embed_missing: String,
     /// Whether the collapsible bottom panel — the debugger's — is shown.
     pub show_bottom: bool,
     /// Where the floating Ask window is.

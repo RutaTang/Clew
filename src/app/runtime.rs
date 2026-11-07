@@ -98,6 +98,7 @@ impl App {
             next_proc_id: 1,
             lsp_gen: std::collections::HashMap::new(),
             embed_available: embed::Config::available(),
+            embed_missing: crate::app::embedding::why_no_embeddings(),
             show_bottom: false,
             ask_view: AskView::Hidden,
             ask_sessions_menu: false,

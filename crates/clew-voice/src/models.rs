@@ -195,11 +195,13 @@ fn parts_of(dir: &Path, name: &str) -> Vec<(PathBuf, Option<Duration>)> {
             if !digits(process) || !digits(n) {
                 return None;
             }
+            // An age that cannot be read — a clock set back, a share whose
+            // clock is ahead — is no age: the file is kept.
             let quiet = fs::symlink_metadata(entry.path())
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.elapsed().ok())
-                .unwrap_or(ABANDONED);
+                .unwrap_or(Duration::ZERO);
             Some((entry.path(), Some(quiet)))
         })
         .collect()
@@ -660,10 +662,18 @@ mod tests {
         fs::create_dir_all(store.dir()).unwrap();
         let killed = store.dir().join("ggml-test.bin.4000001-0.part");
         let running = store.dir().join("ggml-test.bin.4000002-3.part");
+        let ahead = store.dir().join("ggml-test.bin.4000003-0.part");
         let unrelated = store.dir().join("ggml-test.bin.notes.part");
-        for path in [&killed, &running, &unrelated] {
+        for path in [&killed, &running, &ahead, &unrelated] {
             fs::write(path, b"x").unwrap();
         }
+        // Written, by a clock ahead of this one, a moment from now.
+        File::options()
+            .write(true)
+            .open(&ahead)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + ABANDONED)
+            .unwrap();
         File::options()
             .write(true)
             .open(&killed)
@@ -674,6 +684,7 @@ mod tests {
         let mut install = store.begin(model).unwrap();
         assert!(!killed.exists());
         assert!(running.exists() && unrelated.exists());
+        assert!(ahead.exists(), "an age that cannot be read is no age");
         install.write_all(b"x").unwrap();
         install.finish().unwrap();
         store.remove(model).unwrap();

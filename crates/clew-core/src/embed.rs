@@ -1364,15 +1364,6 @@ mod tests {
         assert_eq!(saved.api_key, edited.api_key);
     }
 
-    /// An index built in another embedding space must read as absent: reusing
-    /// it would rank the query by cosine against vectors it shares no geometry
-    /// with, silently and with no way to fix it from the UI.
-    ///
-    /// The project is spelled as clew spells one — resolved, as a project
-    /// root is when it opens — whatever the temp dir's spelling: under one
-    /// with a `..` in it (`TMPDIR=/work/../tmp`) every entry failed the
-    /// lexical check `load` keeps entries by, and the index read as empty
-    /// in its own space.
     /// Vectors made on this computer are kept apart from a service's:
     /// building the one leaves the other as it was, and each loads back
     /// for its own config — the service's were paid for.
@@ -1411,6 +1402,15 @@ mod tests {
         assert_eq!(vecs(&here), [vec![0.0, 1.0, 0.0]], "and the other way");
     }
 
+    /// An index built in another embedding space must read as absent: reusing
+    /// it would rank the query by cosine against vectors it shares no geometry
+    /// with, silently and with no way to fix it from the UI.
+    ///
+    /// The project is spelled as clew spells one — resolved, as a project
+    /// root is when it opens — whatever the temp dir's spelling: under one
+    /// with a `..` in it (`TMPDIR=/work/../tmp`) every entry failed the
+    /// lexical check `load` keeps entries by, and the index read as empty
+    /// in its own space.
     #[test]
     fn index_from_another_model_or_endpoint_is_discarded() {
         let dir = crate::testutil::DataDir::new("embed-index");

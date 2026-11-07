@@ -199,9 +199,11 @@ struct Engine {
     child: Child,
     stdin: ChildStdin,
     answers: mpsc::Receiver<Result<Answer, String>>,
-    /// The last of what it wrote to its standard error: why it ended, when
-    /// it ends unasked.
+    /// The last of what it wrote to its standard error since it was last
+    /// asked (or started): why it ended, when it ends unasked.
     said: Arc<Mutex<String>>,
+    /// What reads it, done once the program and all it started are.
+    hearing: Option<std::thread::JoinHandle<()>>,
     program: PathBuf,
     dir: PathBuf,
     next: u64,
@@ -222,6 +224,9 @@ impl Engine {
         let mut child = crate::spawn::command(program)
             .arg("embed")
             .arg(dir)
+            // A panic said in one line and Rust's note, whatever the
+            // reader's own setting: that line is why it ended.
+            .env("RUST_BACKTRACE", "0")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -238,7 +243,7 @@ impl Engine {
         // the model, and one closed early would fail its next write —
         // keeping its last lines, whatever bytes they are.
         let said = Arc::new(Mutex::new(String::new()));
-        let _ = std::thread::Builder::new()
+        let hearing = std::thread::Builder::new()
             .name("clew-embed-stderr".into())
             .spawn({
                 let said = said.clone();
@@ -263,7 +268,8 @@ impl Engine {
                         }
                     }
                 }
-            });
+            })
+            .ok();
         let (tx, answers) = mpsc::channel();
         let reader = std::thread::Builder::new()
             .name("clew-embed-answers".into())
@@ -286,6 +292,7 @@ impl Engine {
             stdin,
             answers,
             said,
+            hearing,
             program: program.to_path_buf(),
             dir: dir.to_path_buf(),
             next: 0,
@@ -326,6 +333,8 @@ impl Engine {
     ) -> Result<Vec<Vec<f32>>, Halt> {
         self.next += 1;
         let id = self.next;
+        // Why it ends, if it does, is what it says from now.
+        self.said.lock().unwrap_or_else(|e| e.into_inner()).clear();
         let line = serde_json::json!({ "embed": { "id": id, "texts": texts } });
         writeln!(self.stdin, "{line}")
             .and_then(|()| self.stdin.flush())
@@ -362,7 +371,8 @@ impl Engine {
     }
 
     /// Why the program ended, as far as it says: the last line it wrote to
-    /// its standard error, else how it exited.
+    /// its standard error since it was asked — Rust's word on getting a
+    /// backtrace aside — else how it exited.
     fn why_it_ended(&mut self) -> String {
         // It has closed its output; its end is a moment away.
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -373,10 +383,16 @@ impl Engine {
                 _ => break None,
             }
         };
-        // What it wrote last is read a moment after it ends.
-        std::thread::sleep(POLL);
+        // Everything it wrote, read: its standard error closes with it (or
+        // with whatever it started, which is given a moment).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while self.hearing.as_ref().is_some_and(|h| !h.is_finished()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
         let said = self.said.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        match said.lines().rev().find(|l| !l.trim().is_empty()) {
+        let told =
+            |l: &&str| !l.trim().is_empty() && !l.starts_with("note: run with `RUST_BACKTRACE");
+        match said.lines().rev().find(told) {
             Some(line) => line.trim().to_string(),
             None => match status.and_then(|s| s.code()) {
                 Some(code) => format!("exit code {code}"),
@@ -496,11 +512,12 @@ impl Engines {
         let Some(mut slot) = self.slot(purpose, cancelled) else {
             return Err(crate::llm::CANCELLED.into());
         };
-        // Another program or model than the one loaded: that one goes.
-        if slot
-            .as_ref()
-            .is_some_and(|e| e.program != program || e.dir != dir)
-        {
+        // Another program or model than the one loaded, or one that has
+        // ended since it was last asked — killed for its memory while it
+        // waited: that one goes, and one is started.
+        if slot.as_mut().is_some_and(|e| {
+            e.program != program || e.dir != dir || matches!(e.child.try_wait(), Ok(Some(_)))
+        }) {
             *slot = None;
         }
         if slot.is_none() {
@@ -917,6 +934,102 @@ mod tests {
             waited < Duration::from_millis(1200),
             "the search waited {waited:?} of a build of {took:?}"
         );
+    }
+
+    /// Why the model ended is what it said while it was last asked — not
+    /// what it said long before, nor Rust's word on backtraces after a
+    /// panic — and, when it said nothing, how it ended. All it wrote is
+    /// read first, even what something it started writes after it.
+    #[cfg(unix)]
+    #[test]
+    fn why_the_model_ended_is_what_it_said_last() {
+        let dir = crate::testutil::TempDir::new("embed-local");
+        let engines = Engines::new();
+        let ask = |program: &Path| {
+            engines.embed(program, dir.path(), &texts(1), Purpose::Query, &|| false)
+        };
+        let killed = engine(
+            dir.path(),
+            "killed",
+            "if [ $n = 2 ]; then kill -9 $$; fi; echo 'warming up' >&2; vectors",
+        );
+        assert!(ask(&killed).is_ok());
+        // Read, before it is asked again.
+        let read = Instant::now() + Duration::from_secs(5);
+        while !engines
+            .engine
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|e| e.said.lock().unwrap().contains("warming up"))
+            && Instant::now() < read
+        {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let err = ask(&killed).unwrap_err();
+        assert!(err.ends_with("signal: 9 (SIGKILL)"), "{err}");
+        let panicked = engine(
+            dir.path(),
+            "panicked",
+            "if [ $n = 2 ]; then \
+               printf '%s\\n' \"thread 'main' panicked at src/embed.rs:9:9:\" \
+                 'the model file is cut short' \
+                 'note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace' >&2; \
+               exit 101; \
+             fi; vectors",
+        );
+        assert!(ask(&panicked).is_ok());
+        assert_eq!(
+            ask(&panicked).unwrap_err(),
+            "the embedding model ended unexpectedly: the model file is cut short"
+        );
+        // Whatever the reader's own setting for backtraces.
+        let told = dir.path().join("told");
+        crate::testutil::write_script(
+            &told,
+            "echo \"backtraces: ${RUST_BACKTRACE:-unset}\" >&2\nexit 1",
+        );
+        assert_eq!(
+            ask(&told).unwrap_err(),
+            "the embedding model could not start: backtraces: 0"
+        );
+        let late = dir.path().join("late");
+        crate::testutil::write_script(
+            &late,
+            "( exec 1>&-; sleep 0.4; echo 'the last word' >&2 ) &\nexit 3",
+        );
+        assert_eq!(
+            ask(&late).unwrap_err(),
+            "the embedding model could not start: the last word"
+        );
+    }
+
+    /// A model that ended while it waited to be asked — killed for its
+    /// memory — is started again for the next batch, which is made.
+    #[cfg(unix)]
+    #[test]
+    fn a_model_that_ended_while_it_waited_is_started_again() {
+        let dir = crate::testutil::TempDir::new("embed-local");
+        let engines = Engines::new();
+        let program = engine(
+            dir.path(),
+            "engine",
+            "vectors; if [ $n = 1 ]; then exit 0; fi",
+        );
+        let ask = || engines.embed(&program, dir.path(), &texts(1), Purpose::Query, &|| false);
+        assert!(ask().is_ok());
+        let ended = Instant::now() + Duration::from_secs(5);
+        while engines
+            .engine
+            .lock()
+            .unwrap()
+            .as_mut()
+            .is_some_and(|e| matches!(e.child.try_wait(), Ok(None)))
+            && Instant::now() < ended
+        {
+            std::thread::sleep(POLL);
+        }
+        assert_eq!(ask().unwrap().len(), 1);
     }
 
     /// What the model writes to its standard error is read to its end,

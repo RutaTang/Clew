@@ -151,7 +151,7 @@ impl App {
                 // The cached chat config (and the `llm_available` gate) must
                 // follow what was just written.
                 self.invalidate_llm_config();
-                self.embed_available = embed::Config::available();
+                self.refresh_embeddings();
                 self.settings.open = false;
                 // Said where the model is picked; read there, it is done.
                 self.voice.download_errors.clear();

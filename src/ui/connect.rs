@@ -2494,7 +2494,7 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         .local_embedding
         .error
         .clone()
-        .or_else(|| unrunnable.then(crate::app::embedding::why_no_embeddings))
+        .or_else(|| unrunnable.then(crate::app::embedding::missing_here))
         .as_ref()
     {
         rows.push(form::plain(

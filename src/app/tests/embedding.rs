@@ -283,6 +283,8 @@ fn path_with(bin: Option<&Path>) -> clew_core::testutil::EnvVars {
 fn what_is_missing_to_make_embeddings_is_said() {
     let (_dir, _env) = data("embed-missing");
     let _path = path_with(None);
+    // OpenAI's endpoint, below, takes its key from here too.
+    let _key = clew_core::testutil::EnvVars::new().remove("OPENAI_API_KEY");
     assert!(local::program().is_none(), "no clew-speak to be found");
     embed::Config::local().save().unwrap();
     let mut app = blank_app();
@@ -312,6 +314,15 @@ fn what_is_missing_to_make_embeddings_is_said() {
         .unwrap();
     let _ = app.update(Message::Semantic(SemanticMsg::Search));
     assert_eq!(app.status, "Configure an embedding endpoint in Settings");
+    // This computer chosen in Settings, not yet saved: a download that
+    // ends says what this computer is missing, not the service's.
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(true)));
+    let task = app.update(Message::Settings(SettingsMsg::DownloadEmbedModel));
+    settle(&mut app, task);
+    assert_eq!(app.status, program);
 }
 
 /// Vectors no longer made here — a service chosen — and the model this
