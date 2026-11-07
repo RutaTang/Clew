@@ -75,7 +75,7 @@ pub(crate) mod integrations;
 mod keys;
 pub(crate) mod languages;
 mod lsp;
-mod navigation;
+pub(crate) mod navigation;
 pub(crate) use navigation::count_matches;
 mod overview;
 pub(crate) mod palette;

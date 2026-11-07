@@ -40,6 +40,66 @@ pub(crate) fn read_location_previews(
         .collect()
 }
 
+/// A result's preview in its language's colours, as `(text, style)` spans:
+/// the line highlighted on its own (its file is not read for it), and an
+/// ellipsis the preview was cut with left uncoloured, as no part of the
+/// code. Plain, as one span, where the language is unknown.
+pub(crate) fn preview_spans(
+    preview: &str,
+    lang: Option<&'static str>,
+) -> Vec<(String, Option<u8>)> {
+    let shown = highlight::line_in_order(preview);
+    let (lead, rest) = match shown.strip_prefix('…') {
+        Some(rest) => ("…", rest),
+        None => ("", &*shown),
+    };
+    let (code, tail) = match rest.strip_suffix('…') {
+        Some(code) => (code, "…"),
+        None => (rest, ""),
+    };
+    let mut out: Vec<(String, Option<u8>)> = Vec::new();
+    if !lead.is_empty() {
+        out.push((lead.to_string(), None));
+    }
+    match highlight::highlight_lines(code, lang).into_iter().next() {
+        Some(line) => out.extend(line.spans),
+        None if !code.is_empty() => out.push((code.to_string(), None)),
+        None => {}
+    }
+    if !tail.is_empty() {
+        out.push((tail.to_string(), None));
+    }
+    // Drawn only as the text it is: a span set the highlighter changed
+    // (a tab widened, a control replaced) is left for the plain preview.
+    let same = out.iter().map(|(t, _)| t.as_str()).collect::<String>() == *shown;
+    if same {
+        out
+    } else {
+        vec![(shown.into_owned(), None)]
+    }
+}
+
+/// The identifier around byte `at` of `line` (`at` on it, or just past
+/// it): what a definitions or references request was asked about.
+pub(crate) fn word_at_byte(line: &str, at: usize) -> Option<String> {
+    let word = |c: char| c == '_' || c.is_alphanumeric();
+    let at = at.min(line.len());
+    if !line.is_char_boundary(at) {
+        return None;
+    }
+    let start = line[..at]
+        .char_indices()
+        .rev()
+        .take_while(|&(_, c)| word(c))
+        .last()
+        .map_or(at, |(i, _)| i);
+    let end = line[at..]
+        .char_indices()
+        .find(|&(_, c)| !word(c))
+        .map_or(line.len(), |(i, _)| at + i);
+    (end > start).then(|| line[start..end].to_string())
+}
+
 /// A location's line as the Search list shows it: as a search hit's is, from
 /// just before the place it points at, so a hit far along a long line is not
 /// cut off past the list's edge. `character` is in the server's `enc` units.
@@ -245,6 +305,10 @@ impl App {
         };
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
+        self.proj.nav_term = word_at_byte(
+            &source_line,
+            viewer::Col(col).to_offset(&source_line, viewer::PositionEncoding::Utf8),
+        );
         self.status = format!("{}…", kind.verb());
         let is_references = matches!(kind, GotoKind::References);
         // Mint this request's identity: references paint the Search sidebar
@@ -409,6 +473,11 @@ impl App {
             })
             .collect();
         self.proj.search.listing = Some(label.to_string());
+        self.proj.search.matcher = self
+            .proj
+            .nav_term
+            .as_deref()
+            .and_then(search::PreviewMatcher::of_name);
         self.proj.search.ran = true;
         self.proj.search.running = false;
         self.proj.search.error = None;
@@ -422,11 +491,14 @@ impl App {
         // local source of truth; this machine's disk at the remote's path is a
         // different machine's code, and showing ITS line next to a remote hit
         // is worse than showing none.
+        // Coloured with the lines they show now; again once the rest are
+        // read (`LocationPreviews`).
+        let styled = self.style_search_previews();
         if to_read.is_empty() || !self.local_project_state() {
-            return Task::none();
+            return styled;
         }
         let stamp = self.stamp();
-        Task::perform(
+        let read = Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || read_location_previews(to_read, enc))
                     .await
@@ -439,7 +511,8 @@ impl App {
                     previews,
                 })
             },
-        )
+        );
+        Task::batch([styled, read])
     }
 
     /// Kick off a project search from the current query and options.
@@ -488,6 +561,8 @@ impl App {
         self.proj.search.running = false;
         self.proj.search.ran = false;
         self.proj.search.listing = None;
+        self.proj.search.matcher = None;
+        self.proj.search.styled.clear();
         // Nor is the count the status line still gives for them.
         if let Some(said) = self.proj.search.said.take() {
             self.settle_status(&[&said]);
@@ -522,6 +597,7 @@ impl App {
             include: self.proj.search.include.clone(),
             exclude: self.proj.search.exclude.clone(),
         };
+        self.proj.search.matcher = search::PreviewMatcher::of_search(&opts);
 
         // Preferred path: run the search on the clew-server over the protocol.
         // Results come back as `Event::SearchResults` (see `handle_server_event`).
@@ -588,7 +664,7 @@ impl App {
         &mut self,
         report: search::SearchReport,
         skipped_total: usize,
-    ) {
+    ) -> Task<Message> {
         self.proj.search.running = false;
         self.proj.search.error = report.error.clone();
         self.status = match &report.error {
@@ -598,6 +674,48 @@ impl App {
         self.proj.search.said = Some(self.status.clone());
         self.proj.search.hits = report.hits;
         self.proj.search.skipped = report.skipped;
+        self.style_search_previews()
+    }
+
+    /// Colour the Search sidebar's previews, each in its file's language,
+    /// off this thread: a line is highlighted on its own, and two thousand
+    /// of them took a noticeable while. The list is drawn plain until they
+    /// arrive. A list changed meanwhile asks again, and only the colouring
+    /// last asked for is taken.
+    pub(crate) fn style_search_previews(&mut self) -> Task<Message> {
+        self.proj.search.styled_gen += 1;
+        self.proj.search.styled.clear();
+        let generation = self.proj.search.styled_gen;
+        let previews: Vec<(Option<&'static str>, String)> = self
+            .proj
+            .search
+            .hits
+            .iter()
+            .map(|h| (highlight::detect(&h.abs), h.preview.clone()))
+            .collect();
+        if previews.is_empty() {
+            return Task::none();
+        }
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    previews
+                        .iter()
+                        .map(|(lang, preview)| preview_spans(preview, *lang))
+                        .collect::<Vec<_>>()
+                })
+                .await
+                .unwrap_or_default()
+            },
+            move |styled| {
+                Message::Nav(NavMsg::PreviewsStyled {
+                    stamp: stamp.clone(),
+                    generation,
+                    styled,
+                })
+            },
+        )
     }
 
     pub(crate) fn refresh_finder(&mut self) {
@@ -902,7 +1020,7 @@ impl App {
                 // Only the latest submission may paint the Search sidebar.
                 if seq == self.proj.search_seq {
                     let skipped_total = result.skipped.len();
-                    self.apply_search_result(result, skipped_total);
+                    return self.apply_search_result(result, skipped_total);
                 }
                 Task::none()
             }
@@ -953,6 +1071,17 @@ impl App {
                         }
                     }
                     self.proj.search.running = false;
+                    // Coloured again with the lines they now show.
+                    return self.style_search_previews();
+                }
+                Task::none()
+            }
+            NavMsg::PreviewsStyled {
+                generation, styled, ..
+            } => {
+                let search = &mut self.proj.search;
+                if generation == search.styled_gen && styled.len() == search.hits.len() {
+                    search.styled = styled;
                 }
                 Task::none()
             }

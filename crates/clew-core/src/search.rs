@@ -449,10 +449,92 @@ fn escape_regex(s: &str) -> String {
     out
 }
 
+/// Where a search's query, or a symbol's name, stands in the text of a
+/// result's preview: what the results list marks in each preview, matched as
+/// the search matched its line.
+#[derive(Debug, Clone)]
+pub struct PreviewMatcher(RegexMatcher);
+
+impl PreviewMatcher {
+    /// The matcher of a search as `opts` asks for it; `None` for an empty
+    /// query or one that is not a valid pattern.
+    pub fn of_search(opts: &SearchOptions) -> Option<Self> {
+        let query = opts.query.trim();
+        if query.is_empty() {
+            return None;
+        }
+        build_matcher(query, opts).ok().map(Self)
+    }
+
+    /// The matcher of a symbol's own name: the name as a whole word, in its
+    /// case — as a list of the symbol's references reads it.
+    pub fn of_name(name: &str) -> Option<Self> {
+        let opts = SearchOptions {
+            query: name.to_string(),
+            case_sensitive: true,
+            whole_word: true,
+            ..SearchOptions::default()
+        };
+        Self::of_search(&opts)
+    }
+
+    /// The byte ranges of each match in `text`, in order. An empty match (a
+    /// pattern that can match nothing) marks nothing.
+    pub fn ranges(&self, text: &str) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let _ = self.0.find_iter(text.as_bytes(), |m| {
+            if m.end() > m.start() {
+                out.push((m.start(), m.end()));
+            }
+            out.len() < MAX_PREVIEW_MATCHES
+        });
+        out
+    }
+}
+
+/// Most matches a preview marks: enough for any line that fits the sidebar.
+const MAX_PREVIEW_MATCHES: usize = 64;
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::testutil::TempDir;
+
+    /// A preview marks its matches as the search found its line: in the
+    /// search's case and word rules, a pattern read literally unless it is a
+    /// regex; a reference list marks its symbol's name as a whole word.
+    #[test]
+    fn a_preview_marks_its_matches() {
+        let search = |query: &str, f: fn(&mut SearchOptions)| {
+            let mut opts = SearchOptions {
+                query: query.into(),
+                ..SearchOptions::default()
+            };
+            f(&mut opts);
+            PreviewMatcher::of_search(&opts)
+        };
+        let line = "return self.price * self.quantity  # Quantity";
+        // Smart case: a lowercase query matches either case.
+        let m = search("quantity", |_| {}).unwrap();
+        assert_eq!(m.ranges(line), [(25, 33), (37, 45)]);
+        let m = search("quantity", |o| o.case_sensitive = true).unwrap();
+        assert_eq!(m.ranges(line), [(25, 33)]);
+        // Read literally: `.` is a dot.
+        let m = search("self.p", |_| {}).unwrap();
+        assert_eq!(m.ranges(line), [(7, 13)]);
+        let m = search(r"self\.\w+", |o| o.regex = true).unwrap();
+        assert_eq!(m.ranges(line), [(7, 17), (20, 33)]);
+        let m = search("price", |o| o.whole_word = true).unwrap();
+        assert_eq!(m.ranges("prices = price"), [(9, 14)]);
+        assert!(search("  ", |_| {}).is_none());
+        assert!(search("(", |o| o.regex = true).is_none());
+        // A symbol's name: whole word, its own case.
+        let m = PreviewMatcher::of_name("total").unwrap();
+        assert_eq!(m.ranges("subtotal = total() + Total"), [(11, 16)]);
+        // An empty match marks nothing.
+        let m = search("x*", |o| o.regex = true).unwrap();
+        assert!(m.ranges("abc").is_empty());
+    }
 
     #[test]
     fn escapes_regex_metacharacters() {

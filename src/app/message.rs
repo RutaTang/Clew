@@ -639,6 +639,13 @@ pub enum NavMsg {
         seq: u64,
         previews: Vec<(usize, String)>,
     },
+    /// The Search sidebar's previews in their languages' colours, one per
+    /// hit, for the colouring `generation` (`SearchState::styled_gen`).
+    PreviewsStyled {
+        stamp: Stamp,
+        generation: u64,
+        styled: Vec<Vec<(String, Option<u8>)>>,
+    },
     /// Jump to the exact line where `caller` calls `callee` (from CALLED BY),
     /// resolved live from the caller file; falls back to the caller's definition.
     JumpToCall {
@@ -2192,7 +2199,8 @@ impl NavMsg {
             | NavMsg::SearchSettled { stamp, .. }
             | NavMsg::DefinitionResult { stamp, .. }
             | NavMsg::ReferencesResult { stamp, .. }
-            | NavMsg::LocationPreviews { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | NavMsg::LocationPreviews { stamp, .. }
+            | NavMsg::PreviewsStyled { stamp, .. } => Some(Origin::Stamped(stamp)),
             NavMsg::SearchQueryChanged(..)
             | NavMsg::SearchSubmitted
             | NavMsg::SearchToggle(..)

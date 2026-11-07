@@ -1786,8 +1786,7 @@ impl App {
                         skipped,
                     },
                     skipped_total,
-                );
-                Task::none()
+                )
             }
             // Blame for the file this request named. Re-deriving the path
             // from the current root and the reply's `rel` would, after a

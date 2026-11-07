@@ -1054,7 +1054,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     let mut last_rel: Option<&str> = None;
-    for hit in &app.proj.search.hits {
+    for (i, hit) in app.proj.search.hits.iter().enumerate() {
         if last_rel != Some(hit.rel.as_str()) {
             last_rel = Some(hit.rel.as_str());
             rows.push(group_header(&hit.rel));
@@ -1066,13 +1066,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .width(36),
-                    // As the code view draws the line, wherever the preview
-                    // came from — the server's search, a reference read from
-                    // disk or from an open pane: a direction control in it
-                    // reordered it here.
-                    text(crate::highlight::line_in_order(&hit.preview))
-                        .size(ts::BODY)
-                        .wrapping(Wrapping::None),
+                    search_preview(app, i, &hit.preview),
                 ]
                 .spacing(4),
             )
@@ -1106,6 +1100,89 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
             .height(Fill),
     )
     .into()
+}
+
+/// A result's preview: in its language's colours once they have come
+/// (`SearchState::styled`), what the search matched — or the symbol a
+/// reference list is of — marked as the code view marks a find. It was
+/// plain text, and the reader had to look for the match along the line.
+fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, Message> {
+    // As the code view draws the line, wherever the preview came from — the
+    // server's search, a reference read from disk or from an open pane: a
+    // direction control in it reordered it here.
+    let shown = crate::highlight::line_in_order(preview);
+    let styled = app
+        .proj
+        .search
+        .styled
+        .get(i)
+        // Only colours of the text shown: a preview read again since keeps
+        // its plain look until its own arrive.
+        .filter(|spans| spans.iter().map(|(t, _)| t.as_str()).collect::<String>() == *shown);
+    let plain = [(shown.to_string(), None)];
+    let spans: &[(String, Option<u8>)] = match styled {
+        Some(spans) => spans,
+        None => &plain,
+    };
+    let marks = app
+        .proj
+        .search
+        .matcher
+        .as_ref()
+        .map(|m| m.ranges(&shown))
+        .unwrap_or_default();
+    let pieces = mark_spans(spans, &marks);
+    let mark = theme::with_alpha(theme::find(), 0.35);
+    let spans: Vec<iced::widget::text::Span<'static, Message>> = pieces
+        .into_iter()
+        .map(|(piece, style, marked)| {
+            let span = iced::widget::span(piece)
+                .color(
+                    style
+                        .and_then(crate::highlight::style_color)
+                        .unwrap_or(theme::code_fg()),
+                )
+                .size(ts::BODY);
+            if marked {
+                span.background(mark).border(iced::border::rounded(2))
+            } else {
+                span
+            }
+        })
+        .collect();
+    iced::widget::rich_text(spans)
+        .wrapping(Wrapping::None)
+        .into()
+}
+
+/// `spans` cut where `marks` (byte ranges of their joined text) begin and
+/// end: each piece with its style, and whether a mark covers it.
+pub(crate) fn mark_spans(
+    spans: &[(String, Option<u8>)],
+    marks: &[(usize, usize)],
+) -> Vec<(String, Option<u8>, bool)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (text, style) in spans {
+        let end = at + text.len();
+        let mut cuts: Vec<usize> = marks
+            .iter()
+            .flat_map(|&(s, e)| [s, e])
+            .filter(|&c| c > at && c < end && text.is_char_boundary(c - at))
+            .collect();
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut from = at;
+        for c in cuts.into_iter().chain(std::iter::once(end)) {
+            if c > from {
+                let marked = marks.iter().any(|&(s, e)| s <= from && c <= e);
+                out.push((text[from - at..c - at].to_string(), *style, marked));
+                from = c;
+            }
+        }
+        at = end;
+    }
+    out
 }
 
 /// Label a history entry: the symbol name recorded at nav time (stable as lines

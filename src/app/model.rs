@@ -1047,6 +1047,16 @@ pub struct SearchState {
     /// written into the query, so the search box read "(references)" — and
     /// an option toggled, or a glob typed, searched the project for that.
     pub listing: Option<String>,
+    /// What each preview marks: the search's query as it matched, or for a
+    /// reference list the symbol's name. `None` marks nothing.
+    pub matcher: Option<clew_core::search::PreviewMatcher>,
+    /// Each hit's preview in its language's colours, by hit, once
+    /// [`NavMsg::PreviewsStyled`] has brought them; until then (and for a
+    /// preview changed since) the preview is drawn plain.
+    pub styled: Vec<Vec<(String, Option<u8>)>>,
+    /// Bumped as the previews are given out to be coloured: only the last
+    /// colouring asked for is taken.
+    pub styled_gen: u64,
     pub running: bool,
     pub ran: bool,
     pub hits: Vec<SearchHit>,

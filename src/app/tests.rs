@@ -8222,6 +8222,81 @@ fn enter_in_the_file_filter_opens_its_first_file() {
     assert!(sent.is_empty(), "{sent:?}");
 }
 
+/// A result's preview is coloured as its language reads (the ellipsis it
+/// was cut with left plain) and keeps exactly its text; a word under the
+/// caret is the identifier around it.
+#[test]
+fn previews_are_coloured_and_keep_their_text() {
+    use crate::app::navigation::{preview_spans, word_at_byte};
+    let spans = preview_spans("…lf.price * self.quantity", Some("python"));
+    assert_eq!(spans[0], ("…".to_string(), None));
+    assert_eq!(
+        spans.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+        "…lf.price * self.quantity"
+    );
+    let spans = preview_spans("return round(amount, 2)", Some("python"));
+    let style_of = |word: &str| spans.iter().find(|(t, _)| t == word).and_then(|(_, s)| *s);
+    assert!(style_of("return").is_some(), "{spans:?}");
+    assert_ne!(style_of("return"), style_of("round"));
+    // An unknown language: one plain span.
+    assert_eq!(
+        preview_spans("some text", None),
+        [("some text".to_string(), None)]
+    );
+    assert_eq!(word_at_byte("cart = Cart()", 8).as_deref(), Some("Cart"));
+    assert_eq!(word_at_byte("cart = Cart()", 7).as_deref(), Some("Cart"));
+    assert_eq!(word_at_byte("cart = Cart()", 11).as_deref(), Some("Cart"));
+    assert_eq!(word_at_byte("a + b", 2), None);
+}
+
+/// A search's results come coloured, each preview with its matches marked:
+/// they were plain text. Coloured off the UI thread, they are taken only for
+/// the list they were made for.
+#[test]
+fn search_results_are_coloured_and_marked() {
+    let mut app = scanned_app("search-colours");
+    app.proj.search.query = "origin".into();
+    let ran = app.update(Message::Nav(NavMsg::SearchSubmitted));
+    for m in run_task(ran) {
+        for styled in run_task(app.update(m)) {
+            let _ = app.update(styled);
+        }
+    }
+    let search = &app.proj.search;
+    let i = search
+        .hits
+        .iter()
+        .position(|h| h.rel == "src/lib.rs")
+        .expect("lib.rs has an origin");
+    let preview = &search.hits[i].preview;
+    assert_eq!(preview, "pub fn origin() -> Point {");
+    let spans = &search.styled[i];
+    assert!(spans.iter().any(|(_, style)| style.is_some()), "{spans:?}");
+    let marks = search.matcher.as_ref().expect("a matcher").ranges(preview);
+    assert_eq!(marks, [(7, 13)]);
+    let pieces = crate::ui::mark_spans(spans, &marks);
+    assert_eq!(
+        pieces
+            .iter()
+            .filter(|(_, _, marked)| *marked)
+            .map(|(t, _, _)| t.as_str())
+            .collect::<String>(),
+        "origin"
+    );
+
+    // A colouring asked for before a newer one is not taken.
+    let stale = Message::Nav(NavMsg::PreviewsStyled {
+        stamp: app.stamp(),
+        generation: app.proj.search.styled_gen - 1,
+        styled: vec![Vec::new(); app.proj.search.hits.len()],
+    });
+    let _ = app.update(stale);
+    assert!(!app.proj.search.styled[i].is_empty());
+    // Cleared with the results.
+    let _ = app.update(Message::Nav(NavMsg::SearchQueryChanged(String::new())));
+    assert!(app.proj.search.styled.is_empty() && app.proj.search.matcher.is_none());
+}
+
 /// A reference list shown in the Search sidebar leaves the search box as
 /// the reader left it: the list's label was written into it, so the box
 /// read "(references)", and an option toggled or a glob typed then searched
@@ -8244,6 +8319,25 @@ fn a_reference_list_leaves_the_search_box_alone() {
     assert_eq!(app.proj.search.query, "needle");
     assert_eq!(app.proj.search.listing.as_deref(), Some("(references)"));
     assert_eq!(app.proj.search.hits.len(), 1);
+    // Its lines mark the name the references are of.
+    app.proj.nav_term = Some("origin".into());
+    let _ = app.show_locations(
+        "(references)",
+        vec![lsp::client::Target {
+            path: root.join("src/lib.rs"),
+            line: 2,
+            character: 7,
+        }],
+        crate::viewer::PositionEncoding::Utf16,
+    );
+    let marks = app
+        .proj
+        .search
+        .matcher
+        .as_ref()
+        .expect("the name's matcher")
+        .ranges("let o = origin(); // origins");
+    assert_eq!(marks, [(8, 14)]);
 
     // An option toggled searches for what the box says.
     for m in run_task(app.update(Message::Nav(NavMsg::SearchToggle(SearchOpt::Case)))) {
@@ -20990,6 +21084,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: app.proj.search_seq,
             previews: Vec::new(),
+        }),
+        Message::Nav(NavMsg::PreviewsStyled {
+            stamp: s(),
+            generation: app.proj.search.styled_gen,
+            styled: Vec::new(),
         }),
         Message::Calls(CallsMsg::Prepared {
             stamp: s(),
