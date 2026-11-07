@@ -142,6 +142,7 @@ impl App {
                 self.settings.open = false;
                 // Said where the model is picked; read there, it is done.
                 self.voice.download_errors.clear();
+                self.voice.speech.download_errors.clear();
                 self.code_focused = true;
                 // A changed embedding space makes every vector held in memory
                 // unusable, and keeping them is worse than losing them: FIND
@@ -274,6 +275,7 @@ impl App {
         // A model's failed download is said under it, in here; once
         // Settings is closed it has been read, and it goes.
         self.voice.download_errors.clear();
+        self.voice.speech.download_errors.clear();
         // Back to reading, as the finder's close does: the motions the
         // form took from the code are the code's again.
         self.code_focused = true;

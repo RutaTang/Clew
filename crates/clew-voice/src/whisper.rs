@@ -202,6 +202,28 @@ pub fn clean(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// A recording heard by a real model, when the test is pointed at both:
+    /// what it says is printed, and is not nothing.
+    #[test]
+    #[ignore = "needs CLEW_WHISPER_MODEL and CLEW_WHISPER_WAV"]
+    fn a_real_model_hears_a_recording() {
+        let model = std::path::PathBuf::from(std::env::var("CLEW_WHISPER_MODEL").unwrap());
+        let wav = std::fs::read(std::env::var("CLEW_WHISPER_WAV").unwrap()).unwrap();
+        let (samples, rate) = crate::wav::read(&wav).unwrap();
+        let audio = crate::audio::prepare(&samples, rate).expect("speech in it");
+        let whisper = Whisper::load(&model).unwrap();
+        let options = Options {
+            language: std::env::var("CLEW_WHISPER_LANGUAGE").ok(),
+            hint: String::new(),
+            threads: 0,
+        };
+        let text = whisper
+            .transcribe(&audio, &options, &std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        eprintln!("heard: {text}");
+        assert!(!text.trim().is_empty());
+    }
     use super::*;
 
     #[test]

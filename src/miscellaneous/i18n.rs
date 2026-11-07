@@ -1066,6 +1066,10 @@ mod tests {
             written.push(m.name.into());
             written.push(m.about.into());
         }
+        for m in clew_voice::speech::VOICE_MODELS {
+            written.push(m.name.into());
+            written.push(m.about.into());
+        }
         written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
         written.push(clew_core::llm::Provider::Custom.label().into());
         written.extend(
@@ -1573,7 +1577,7 @@ mod tests {
                 }
             }
         }
-        for krate in ["clew-core", "clew-server", "clew-voice"] {
+        for krate in ["clew-core", "clew-server", "clew-speak", "clew-voice"] {
             let mut files = Vec::new();
             walk(&root.join(krate).join("src"), &mut files);
             for path in files {
@@ -1581,7 +1585,15 @@ mod tests {
                 let text = text.split("#[cfg(test)]\nmod tests").next().unwrap();
                 // A `Display` says its message with `write!(f, ..)` and
                 // `f.write_str(..)`.
-                for opener in ["format!(", "Err(", "msg =", "write!(", "f.write_str("] {
+                for opener in [
+                    "format!(",
+                    "Err(",
+                    "SayError::Voice(",
+                    "SayError::Sentence(",
+                    "msg =",
+                    "write!(",
+                    "f.write_str(",
+                ] {
                     for (at, _) in text.match_indices(opener) {
                         let mut after = text[at + opener.len()..].trim_start();
                         // `write!(f, ..)`, the formatter on any line.

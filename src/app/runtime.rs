@@ -266,6 +266,14 @@ impl App {
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
             );
         }
+        // While Clew speaks: the meter, and the moment all is said — when
+        // Keep listening opens the microphone.
+        if self.voice.speech.is_speaking() {
+            subs.push(
+                iced::time::every(crate::app::speech::SPEAK_TICK)
+                    .map(|_| Message::Voice(crate::VoiceMsg::SpeakTick)),
+            );
+        }
         // No per-frame clock for the graph maps: the canvas requests its own
         // redraws (`canvas::Action::request_redraw`) while its simulation
         // moves and stops when it settles. The `window::frames()`

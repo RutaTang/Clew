@@ -16,6 +16,7 @@ mod palette;
 mod remote_state_refresh;
 mod semantic_space;
 mod setup;
+mod speech;
 mod voice;
 mod windowtools;
 

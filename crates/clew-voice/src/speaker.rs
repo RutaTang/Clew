@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::Mutex;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Deserialize;
@@ -30,6 +30,24 @@ enum Answer {
     Audio { id: u64, pcm: String },
     Failed { id: u64, error: String },
     Error(String),
+}
+
+/// Why something could not be said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SayError {
+    /// This sentence: the voice is fine, and what comes next can be said.
+    Sentence(String),
+    /// The voice: it could not start, or it ended, or it stopped answering —
+    /// nothing more will be said until whatever is wrong is put right.
+    Voice(String),
+}
+
+impl std::fmt::Display for SayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SayError::Sentence(e) | SayError::Voice(e) => f.write_str(e),
+        }
+    }
 }
 
 /// One `clew-speak`, with a model loaded.
@@ -62,8 +80,9 @@ impl Speaker {
         let mut child = command
             .spawn()
             .map_err(|e| format!("could not start the voice: {e}"))?;
-        let stdin = child.stdin.take().ok_or("the voice has no input")?;
-        let stdout = child.stdout.take().ok_or("the voice has no output")?;
+        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+            return Err("the voice could not be spoken to".into());
+        };
         let (tx, answers) = mpsc::channel();
         std::thread::Builder::new()
             .name("clew-speak-answers".into())
@@ -122,7 +141,7 @@ impl Speaker {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<Vec<f32>, SayError> {
         self.next += 1;
         let id = self.next;
         let request = serde_json::json!({
@@ -130,20 +149,27 @@ impl Speaker {
         });
         writeln!(self.stdin, "{request}")
             .and_then(|()| self.stdin.flush())
-            .map_err(|e| format!("the voice stopped listening: {e}"))?;
+            .map_err(|e| SayError::Voice(format!("the voice stopped listening: {e}")))?;
         loop {
             match self.answers.recv_timeout(SAY_TIMEOUT) {
-                Ok(Ok(Answer::Audio { id: got, pcm })) if got == id => return decode(&pcm),
-                Ok(Ok(Answer::Failed { id: got, error })) if got == id => return Err(error),
+                Ok(Ok(Answer::Audio { id: got, pcm })) if got == id => {
+                    return decode(&pcm).map_err(SayError::Voice);
+                }
+                Ok(Ok(Answer::Failed { id: got, error })) if got == id => {
+                    return Err(SayError::Sentence(error));
+                }
                 // An answer to an earlier request, given up on.
                 Ok(Ok(Answer::Audio { .. } | Answer::Failed { .. })) => {}
                 Ok(Ok(Answer::Ready { .. })) => {}
-                Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(e),
+                Ok(Ok(Answer::Error(e))) | Ok(Err(e)) => return Err(SayError::Voice(e)),
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err("the voice took too long to speak".into());
+                    // Still making it, maybe: it is not asked again, and what
+                    // it is busy with is not waited for — a fresh one starts.
+                    let _ = self.child.kill();
+                    return Err(SayError::Voice("the voice took too long to speak".into()));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err("the voice ended unexpectedly".into());
+                    return Err(SayError::Voice("the voice ended unexpectedly".into()));
                 }
             }
         }
@@ -176,7 +202,14 @@ fn decode(pcm: &str) -> Result<Vec<f32>, String> {
 /// The `clew-speak` running, for the model last spoken with.
 pub struct Speakers {
     program: PathBuf,
-    running: Mutex<Option<(&'static str, Speaker)>>,
+    running: Mutex<Option<Running>>,
+}
+
+/// The `clew-speak` running: its model, and when it last said something.
+struct Running {
+    model: &'static str,
+    speaker: Speaker,
+    used: Instant,
 }
 
 impl Speakers {
@@ -199,29 +232,58 @@ impl Speakers {
         lang: &str,
         voice: i32,
         speed: f32,
-    ) -> Result<(Vec<f32>, u32), String> {
+    ) -> Result<(Vec<f32>, u32), SayError> {
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         let reuse = running
             .as_mut()
-            .is_some_and(|(id, speaker)| *id == model.id && !speaker.ended());
+            .is_some_and(|r| r.model == model.id && !r.speaker.ended());
         if !reuse {
             // The one before ends before this one loads: one model in
             // memory at a time.
             *running = None;
-            *running = Some((model.id, Speaker::start(&self.program, model, dir)?));
+            *running = Some(Running {
+                model: model.id,
+                speaker: Speaker::start(&self.program, model, dir).map_err(SayError::Voice)?,
+                used: Instant::now(),
+            });
         }
-        let (_, speaker) = running.as_mut().ok_or("the voice is not running")?;
-        let result = speaker.say(text, lang, voice, speed);
-        let rate = speaker.rate();
-        if result.is_err() && speaker.ended() {
+        let Some(r) = running.as_mut() else {
+            return Err(SayError::Voice("the voice is not running".into()));
+        };
+        let result = r.speaker.say(text, lang, voice, speed);
+        let rate = r.speaker.rate();
+        r.used = Instant::now();
+        if matches!(result, Err(SayError::Voice(_))) {
             *running = None;
         }
         result.map(|samples| (samples, rate))
     }
 
-    /// Let the model go: what is running ends.
+    /// Let the model go: what is running ends — and with it its hold on
+    /// the model's files, which Windows will not delete while it lasts.
     pub fn stop(&self) {
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    /// Let the model go if nothing has been said with it for `idle`, and
+    /// nothing is being said now; whether it was let go.
+    pub fn stop_if_idle(&self, idle: Duration) -> bool {
+        let Ok(mut running) = self.running.try_lock() else {
+            return false;
+        };
+        if running.as_ref().is_some_and(|r| r.used.elapsed() >= idle) {
+            *running = None;
+            return true;
+        }
+        false
+    }
+
+    /// Whether a model is loaded.
+    pub fn loaded(&self) -> bool {
+        self.running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
     }
 }
 
@@ -270,7 +332,12 @@ mod tests {
         let err = speakers
             .say(model, Path::new("/nowhere"), "hi", "en", 0, 1.0)
             .unwrap_err();
-        assert!(err.contains("could not start the voice"), "{err}");
+        assert!(
+            matches!(&err, SayError::Voice(e) if e.contains("could not start the voice")),
+            "{err}"
+        );
+        assert!(!speakers.loaded());
+        assert!(!speakers.stop_if_idle(Duration::ZERO));
     }
 
     /// A real `clew-speak` and a real model, when the test is pointed at
@@ -291,6 +358,13 @@ mod tests {
         let (samples, _) = speakers
             .say(model, &dir, "안녕하세요.", "ko", 3, 1.0)
             .unwrap();
+        assert!(!samples.is_empty());
+        // Idle long enough, it is let go; asked again, it starts again.
+        assert!(speakers.loaded());
+        assert!(!speakers.stop_if_idle(Duration::from_secs(600)));
+        assert!(speakers.stop_if_idle(Duration::ZERO));
+        assert!(!speakers.loaded());
+        let (samples, _) = speakers.say(model, &dir, "Again.", "en", 5, 1.2).unwrap();
         assert!(!samples.is_empty());
     }
 }

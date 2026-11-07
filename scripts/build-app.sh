@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Assemble Clew.app — a real macOS app bundle with both binaries and the icon.
+# Assemble Clew.app — a real macOS app bundle with its three programs and the
+# icon.
 #
-# The GUI (clew) and the backend (clew-server) both land in Contents/MacOS/, so
-# the client's sibling-binary lookup (server_bin_path) finds the server inside
-# the bundle with no path config. Ad-hoc signed so it runs locally; Developer ID
+# The GUI (clew), the backend (clew-server) and the voice (clew-speak) all land
+# in Contents/MacOS/, so the client's sibling-binary lookups (server_bin_path,
+# speak_bin_path) find them inside the bundle with no path config. Ad-hoc signed so it runs locally; Developer ID
 # signing + notarization is a separate step for distributing to other machines.
 #
 # Usage: scripts/build-app.sh [--flavor prod|dev|test] [--version X.Y.Z] [--build N] [--debug]
@@ -84,9 +85,10 @@ print(Path(paths.pop()).resolve(strict=True))
 PY
 }
 
-echo "==> Building clew + clew-server ($PROFILE, flavor=$FLAVOR)"
+echo "==> Building clew + clew-server + clew-speak ($PROFILE, flavor=$FLAVOR)"
 CLEW_BIN="$(build_binary clew clew)"
 SERVER_BIN="$(build_binary clew-server clew-server)"
+SPEAK_BIN="$(build_binary clew-speak clew-speak)"
 
 # Regenerate the icon if the vector toolchain is present; otherwise use the
 # committed assets/clew.icns.
@@ -99,17 +101,20 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$CLEW_BIN"   "$APP/Contents/MacOS/clew"
 cp "$SERVER_BIN" "$APP/Contents/MacOS/clew-server"
+# What reads answers aloud: clew looks for it beside itself.
+cp "$SPEAK_BIN"  "$APP/Contents/MacOS/clew-speak"
 cp assets/clew.icns       "$APP/Contents/Resources/clew.icns"
 # The languages clew speaks, each with the microphone prompt in its words.
 cp -R assets/lproj/. "$APP/Contents/Resources/"
 
 # License notices travel with the binaries: the bundled font's license and the
-# texts it refers to, and every Rust crate compiled into clew and clew-server.
+# texts it refers to, the native libraries clew-speak is built with
+# (licenses/SPEECH.md), and every Rust crate compiled into the three programs.
 LICENSES="$APP/Contents/Resources/Licenses"
 mkdir -p "$LICENSES"
 cp assets/NERDFONT-LICENSE.md "$LICENSES/"
 cp -R assets/licenses "$LICENSES/licenses"
-./scripts/third-party-notices.sh "$LICENSES/THIRD-PARTY-NOTICES.txt" clew clew-server
+./scripts/third-party-notices.sh "$LICENSES/THIRD-PARTY-NOTICES.txt" clew clew-server clew-speak
 
 # Fill the plist template for this flavor and version.
 sed -e "s|__APP_NAME__|$APP_NAME|g" -e "s|__BUNDLE_ID__|$BUNDLE_ID|g" \
@@ -120,6 +125,7 @@ sed -e "s|__APP_NAME__|$APP_NAME|g" -e "s|__BUNDLE_ID__|$BUNDLE_ID|g" \
 # nested binary first, then the bundle, so the outer signature seals it.
 echo "==> Ad-hoc signing"
 codesign --force -s - "$APP/Contents/MacOS/clew-server"
+codesign --force -s - "$APP/Contents/MacOS/clew-speak"
 codesign --force -s - "$APP/Contents/MacOS/clew"
 codesign --force -s - "$APP"
 

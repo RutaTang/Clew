@@ -103,6 +103,24 @@ impl Player {
         self.shared.level.store(0, Ordering::Relaxed);
     }
 
+    /// Samples played since it started: what tells a stream that plays
+    /// from one that has stopped.
+    pub fn played(&self) -> u64 {
+        self.shared.played.load(Ordering::Relaxed)
+    }
+
+    /// What is still to be played, taken from it — to be played elsewhere —
+    /// and its rate.
+    pub fn take_rest(&self) -> (Vec<f32>, u32) {
+        let rest = self
+            .shared
+            .queue
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default();
+        (rest, self.rate)
+    }
+
     /// Seconds still to play.
     pub fn queued_seconds(&self) -> f32 {
         let n = self.shared.queue.lock().map_or(0, |q| q.len());
@@ -139,9 +157,9 @@ impl Drop for Player {
 /// Open the default output and start it, playing from a fresh [`Shared`].
 fn open() -> Result<(cpal::Stream, u32, Arc<Shared>), String> {
     let host = cpal::default_host();
-    let device = host
-        .default_output_device()
-        .ok_or("no speaker or headphones are available")?;
+    let Some(device) = host.default_output_device() else {
+        return Err("no speaker or headphones are available".into());
+    };
     let supported = device
         .default_output_config()
         .map_err(|e| format!("the speaker failed: {e}"))?;
@@ -211,4 +229,42 @@ where
         },
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The default output plays what it is given and says when all of it
+    /// has been played — when the test is pointed at one.
+    #[test]
+    #[ignore = "needs an output device: CLEW_TEST_SPEAKER=1"]
+    fn a_real_output_plays() {
+        let player = Player::start().expect("the output opens");
+        let rate = 44_100;
+        let tone: Vec<f32> = (0..rate)
+            .map(|i| 0.3 * (i as f32 * 440.0 * std::f32::consts::TAU / rate as f32).sin())
+            .collect();
+        player.play(&tone, rate as u32);
+        assert!(!player.idle());
+        let mut heard = 0.0f32;
+        for _ in 0..40 {
+            std::thread::sleep(Duration::from_millis(100));
+            heard = heard.max(player.level());
+            eprintln!(
+                "idle={} queued={:.2} level={:.2} error={:?}",
+                player.idle(),
+                player.queued_seconds(),
+                player.level(),
+                player.error()
+            );
+            if player.idle() {
+                break;
+            }
+        }
+        assert!(player.idle(), "all of it played");
+        assert!(player.played() >= u64::from(player.rate()) * 9 / 10);
+        assert!(heard > 0.1, "it was loud: {heard}");
+        assert_eq!(player.error(), None);
+    }
 }

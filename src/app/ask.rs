@@ -218,6 +218,8 @@ impl App {
 
     /// Put Ask away — its pill too — the keyboard back with the code.
     pub(crate) fn close_ask(&mut self) {
+        // Put away, the conversation says no more.
+        self.stop_speaking();
         self.ask_sessions_menu = false;
         self.ask_sessions_query.clear();
         self.ask_view = AskView::Closed;
@@ -265,6 +267,8 @@ impl App {
             self.status = tr!("Still answering — wait, or press Stop").into();
             return Task::none();
         }
+        // A new question: what Clew was saying of the last answer stops.
+        self.stop_speaking();
         // "… now ask your question" has been heeded: it stayed in the status
         // line under the answer.
         let heeded: Vec<String> =
@@ -964,14 +968,17 @@ impl App {
         turn.answer_md.push_str(&text);
         // First token(s): the answer is streaming, not "thinking".
         self.proj.asking = false;
+        // A question said aloud: its answer is said too, as it comes.
+        let said = self.read_answer(stream, false);
         // Follow the growing answer.
-        operation::scroll_to(
+        let follow = operation::scroll_to(
             ui::ask_scroll_id(),
             AbsoluteOffset {
                 x: 0.0,
                 y: f32::MAX,
             },
-        )
+        );
+        Task::batch([said, follow])
     }
 
     pub(crate) fn on_ask_stream_ended(
@@ -1040,14 +1047,25 @@ impl App {
                 y: f32::MAX,
             },
         );
-        // Answered, with Keep listening on: listen for what comes next. A
-        // Stop or a failure leaves the microphone to the reader.
+        // What is left of an answer said aloud is said — why it failed,
+        // too; a Stop stops it.
+        let said = if matches!(outcome, StreamOutcome::Stopped) {
+            if self.proj.ask_turns[idx].spoken {
+                self.stop_speaking();
+            }
+            Task::none()
+        } else {
+            self.read_answer(stream, true)
+        };
+        // Answered, with Keep listening on: listen for what comes next —
+        // once all of it is said. A Stop or a failure leaves the microphone
+        // to the reader.
         let listen = if matches!(outcome, StreamOutcome::Done) {
             self.resume_listening()
         } else {
             Task::none()
         };
-        Task::batch([task, to_bottom, listen])
+        Task::batch([task, to_bottom, said, listen])
     }
 
     /// The agent made a tool call: append its chip to the open turn and keep
@@ -1137,6 +1155,8 @@ impl App {
 
     /// Stop the in-flight answer where it actually runs — the Stop button.
     pub(crate) fn on_agent_stop(&mut self) -> Task<Message> {
+        // Stop is for the answer, as it is written and as it is said.
+        self.stop_speaking();
         self.stop_ask_streams()
     }
 
@@ -1435,6 +1455,7 @@ impl App {
                 // turns alone left `agent_stream` set, so the Stop button
                 // stayed up and the one-at-a-time gate blocked the next
                 // question until the abandoned turn finished.
+                self.stop_speaking();
                 let stop = self.stop_ask_streams();
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();

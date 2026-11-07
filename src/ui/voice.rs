@@ -1,6 +1,7 @@
 //! The settings' Voice section: which speech model listens — each one
 //! downloaded only when the user asks for it, its size said first — the
-//! language spoken, and what is done with the words.
+//! language spoken, and what is done with the words; and how Clew speaks
+//! its answers back: the voice models, the voice, the pace.
 
 use super::*;
 // Explicit macro imports shadow the glob from `super`, disambiguating
@@ -9,8 +10,10 @@ use iced::widget::{column, row};
 
 use super::form;
 use crate::VoiceMsg;
+use crate::app::speech::SPEEDS;
 use crate::app::voice::LANGUAGES;
 use clew_voice::models::{MODELS, Model};
+use clew_voice::speech::{VOICE_MODELS, Voice, VoiceModel};
 
 /// A language as the picker lists it: its English name (`LANGUAGES`),
 /// shown in the interface's language.
@@ -103,6 +106,182 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
     rows.into()
 }
 
+/// A voice of a speech model as the picker lists it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VoiceChoice {
+    model: &'static str,
+    voice: Voice,
+}
+
+impl std::fmt::Display for VoiceChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&voice_name(&self.voice))
+    }
+}
+
+/// What a voice is called: Supertone's F1…M5 as a woman's or a man's
+/// voice and its number; a named one by its name.
+fn voice_name(voice: &Voice) -> String {
+    let mut chars = voice.name.chars();
+    let kind = chars.next();
+    let number: String = chars.collect();
+    if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
+        match kind {
+            Some('F') => return tr!("Female voice {n}", n = number),
+            Some('M') => return tr!("Male voice {n}", n = number),
+            _ => {}
+        }
+    }
+    voice.name.to_string()
+}
+
+/// A pace as the picker lists it: "0.8×", "1×", "1.25×".
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SpeedChoice(f32);
+
+impl std::fmt::Display for SpeedChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let hundredths = (self.0 * 100.0).round() as i32;
+        let places = if hundredths % 10 != 0 {
+            2
+        } else if hundredths % 100 != 0 {
+            1
+        } else {
+            0
+        };
+        let pace = crate::i18n::decimal(f64::from(self.0), places);
+        if hundredths == 100 {
+            f.write_str(&tr!("{pace}× (natural)", pace = pace))
+        } else {
+            write!(f, "{pace}×")
+        }
+    }
+}
+
+/// One speech model's row: what it is and its license, and at its right
+/// whether it is here — Try and Remove — its download, or getting it.
+fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, Message>> {
+    let installed = app.speech_installed(model);
+    let state: Element<'a, Message> = if let Some(d) = app.voice.speech.downloads.get(model.id) {
+        let total = d.total.unwrap_or(model.bytes()).max(1);
+        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
+        row![
+            container(super::meter::eased_bar(
+                share,
+                70.0,
+                4.0,
+                theme::progress,
+                super::meter::PROGRESS,
+            ))
+            .width(70),
+            text(tr!(
+                "{percent}%",
+                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
+            ))
+            .size(ts::SMALL)
+            .color(theme::dim()),
+            form::action(
+                tr!("Cancel"),
+                Some(Message::Voice(VoiceMsg::CancelSpeechDownload(model.id)))
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    } else if installed {
+        row![
+            form::action(
+                tr!("Try"),
+                Some(Message::Voice(VoiceMsg::TrySpeech(model.id)))
+            ),
+            form::action(
+                tr!("Remove"),
+                Some(Message::Voice(VoiceMsg::RemoveSpeech(model.id)))
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    } else {
+        let label = tr!("Download ({size} MB)", size = model.size_mb());
+        let msg = Some(Message::Voice(VoiceMsg::DownloadSpeech(model.id)));
+        // The voice of every language but one: the first to get.
+        if model.speaks("en") {
+            form::primary(&label, msg).into()
+        } else {
+            form::action(&label, msg).into()
+        }
+    };
+    let about = tr!(
+        "{about} {license} license.",
+        about = crate::i18n::lookup(model.about),
+        license = model.license
+    );
+    let mut rows = vec![form::item(
+        crate::i18n::lookup(model.name),
+        Some(about),
+        state,
+    )];
+    if let Some(e) = app.voice.speech.download_errors.get(model.id) {
+        rows.push(form::plain(
+            text(crate::i18n::message(e))
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph),
+        ));
+    }
+    if installed && model.voices.len() > 1 {
+        let choices: Vec<VoiceChoice> = model
+            .voices
+            .iter()
+            .map(|voice| VoiceChoice {
+                model: model.id,
+                voice: *voice,
+            })
+            .collect();
+        let picked = app.voice.prefs.voice_for(model);
+        let selected = choices.iter().find(|c| c.voice.id == picked).copied();
+        rows.push(form::item(
+            tr!("Voice"),
+            None,
+            form::pick(choices, selected, |c: VoiceChoice| {
+                Message::Voice(VoiceMsg::PickSpeechVoice {
+                    model: c.model,
+                    voice: c.voice.id,
+                })
+            }),
+        ));
+    }
+    rows
+}
+
+/// How Clew answers aloud: whether it does, how fast, and the models it
+/// speaks with.
+fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
+    let mut rows = vec![form::toggle(
+        tr!("Read answers aloud"),
+        Some(tr!("Answers to what you ask by voice are said, on this computer.").into()),
+        app.voice.prefs.speak,
+        |v| Message::Voice(VoiceMsg::SetSpeak(v)),
+    )];
+    let speeds: Vec<SpeedChoice> = SPEEDS.iter().map(|s| SpeedChoice(*s)).collect();
+    let selected = speeds
+        .iter()
+        .find(|s| (s.0 - app.voice.prefs.speed).abs() < 0.001)
+        .copied();
+    rows.push(form::item(
+        tr!("Speed"),
+        None,
+        form::pick(speeds, selected, |s: SpeedChoice| {
+            Message::Voice(VoiceMsg::SetSpeed(s.0))
+        }),
+    ));
+    for model in VOICE_MODELS {
+        rows.extend(speech_row(app, model));
+    }
+    rows
+}
+
 /// The settings' Voice section: which model listens, and how what it hears
 /// is used. Its changes take effect, and are saved, at once.
 pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
@@ -146,6 +325,7 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         .into(),
         form::group(tr!("Model"), None, None, models),
         form::group(tr!("Listening"), None, None, listening),
+        form::group(tr!("Speaking"), None, None, speaking_rows(app)),
     ];
     if let Some(store) = &app.voice.store {
         parts.push(

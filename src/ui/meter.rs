@@ -1,6 +1,7 @@
 //! Bars that ease toward what they show, frame by frame: the microphone's
-//! level meter ([`level_meter`]) and a bar for a level or for progress
-//! ([`eased_bar`]).
+//! level meter ([`level_meter`]), the same bars rippling on their own while
+//! what was said is worked out ([`ripple`]), and a bar for a level or for
+//! progress ([`eased_bar`]).
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::widget::{Tree, tree};
@@ -52,6 +53,13 @@ pub(crate) fn level_meter<'a, Message: 'a>(heights: &'a [f32], level: f32) -> El
     })
 }
 
+/// The level meter's bars, `heights` tall at most, with a wave travelling
+/// through them on its own: what was heard is being worked out. Drawn at
+/// the display's rate for as long as it is shown.
+pub(crate) fn ripple<'a, Message: 'a>(heights: &'a [f32]) -> Element<'a, Message> {
+    Element::new(Ripple { heights })
+}
+
 /// A horizontal bar `length` long and `girth` thick, filled to `share`
 /// (0–1) in `style`'s colours — the shown fill eased toward `share` as
 /// `ease` says, frame by frame, asking for frames only until it is there.
@@ -82,6 +90,30 @@ fn share(v: f32) -> f32 {
 struct Meter<'a> {
     heights: &'a [f32],
     level: f32,
+}
+
+struct Ripple<'a> {
+    heights: &'a [f32],
+}
+
+/// When a ripple started, and the frame being drawn.
+#[derive(Default)]
+struct Rippling {
+    since: Option<Instant>,
+    now: Option<Instant>,
+}
+
+/// How long the wave takes to go through the bars and come round again.
+const RIPPLE_PERIOD: f32 = 1.1;
+/// How far behind its neighbour on the left each bar is in the wave, as a
+/// share of the period.
+const RIPPLE_LAG: f32 = 0.11;
+
+/// How tall bar `index` stands `t` seconds into a ripple: from a third of
+/// its height to all of it and back, a little after the bar before.
+fn ripple_gain(t: f32, index: usize) -> f32 {
+    let phase = std::f32::consts::TAU * (t / RIPPLE_PERIOD - index as f32 * RIPPLE_LAG);
+    0.3 + 0.7 * (0.5 + 0.5 * phase.sin())
 }
 
 struct Bar {
@@ -232,6 +264,94 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Meter<'_> {
     }
 }
 
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Ripple<'_> {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Rippling>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(Rippling::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        let n = self.heights.len() as f32;
+        let tallest = self.heights.iter().copied().fold(0.0_f32, f32::max);
+        Size::new(
+            Length::Fixed((2.0 * n - 1.0).max(0.0) * BAR),
+            Length::Fixed(tallest),
+        )
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        let size = <Self as Widget<Message, iced::Theme, iced::Renderer>>::size(self);
+        layout::atomic(limits, size.width, size.height)
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        let Event::Window(iced::window::Event::RedrawRequested(now)) = event else {
+            return;
+        };
+        let state = tree.state.downcast_mut::<Rippling>();
+        state.since.get_or_insert(*now);
+        state.now = Some(*now);
+        // It moves for as long as it is shown — while the words are worked
+        // out, a few seconds.
+        shell.request_redraw();
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        use iced::advanced::Renderer as _;
+        let bounds = layout.bounds();
+        let state = tree.state.downcast_ref::<Rippling>();
+        let t = match (state.since, state.now) {
+            (Some(since), Some(now)) => now.duration_since(since).as_secs_f32(),
+            _ => 0.0,
+        };
+        let color = theme::accent();
+        for (i, &h) in self.heights.iter().enumerate() {
+            let height = (h * ripple_gain(t, i)).max(LEAST);
+            renderer.fill_quad(
+                renderer::Quad {
+                    bounds: Rectangle {
+                        x: bounds.x + i as f32 * 2.0 * BAR,
+                        y: bounds.center_y() - height / 2.0,
+                        width: BAR,
+                        height,
+                    },
+                    border: iced::border::rounded(BAR / 2.0),
+                    snap: false,
+                    ..renderer::Quad::default()
+                },
+                color,
+            );
+        }
+    }
+}
+
 impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Bar {
     fn tag(&self) -> tree::Tag {
         tree::Tag::of::<Shown>()
@@ -340,6 +460,24 @@ mod tests {
         // And it gets there.
         assert_eq!(run(60, 0.5, 0.0, 2.0), 0.5);
         assert_eq!(run(60, 0.0, 1.0, 2.0), 0.0);
+    }
+
+    /// The ripple is a wave going through the bars: each bar rises and
+    /// falls between a third of its height and all of it, as the one
+    /// before it did a moment earlier.
+    #[test]
+    fn a_ripple_travels_through_the_bars() {
+        for step in 0..200 {
+            let t = step as f32 * 0.013;
+            for i in 0..7 {
+                let g = ripple_gain(t, i);
+                assert!((0.3..=1.0001).contains(&g), "{g}");
+                let later = ripple_gain(t + RIPPLE_LAG * RIPPLE_PERIOD, i + 1);
+                assert!((g - later).abs() < 1e-3, "bar {i} at {t}: {g} vs {later}");
+            }
+        }
+        // It moves: not the same twice in a row a frame apart.
+        assert!((ripple_gain(0.1, 0) - ripple_gain(0.1 + 1.0 / 60.0, 0)).abs() > 1e-3);
     }
 
     /// Whether the meter asked for another frame after each of `levels`,

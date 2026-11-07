@@ -30,6 +30,122 @@ pub fn script_language(text: &str, usual: Option<&str>) -> Option<&'static str> 
     }
 }
 
+/// Every language a voice here speaks, as its code.
+const KNOWN: &[&str] = &[
+    "en", "ko", "ja", "zh", "ar", "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hi", "hr",
+    "hu", "id", "it", "lt", "lv", "nl", "pl", "pt", "ro", "ru", "sk", "sl", "sv", "tr", "uk", "vi",
+];
+
+/// `lang` (`fr`, `fr-CA`, `pt_BR`) as the code of a language a voice here
+/// speaks (`fr`, `pt`), when one does.
+pub fn known_language(lang: &str) -> Option<&'static str> {
+    let base = lang
+        .split(['-', '_'])
+        .next()
+        .unwrap_or(lang)
+        .to_ascii_lowercase();
+    KNOWN.iter().copied().find(|code| *code == base)
+}
+
+/// The little words each language in a Latin script uses most, and other
+/// languages rarely: what tells an English answer from a French one.
+const LITTLE_WORDS: &[(&str, &[&str])] = &[
+    (
+        "en",
+        &[
+            "the", "and", "is", "of", "to", "that", "this", "with", "for", "are", "it", "you",
+            "be", "by", "from", "which", "or", "an", "was", "has", "its", "when", "each",
+        ],
+    ),
+    (
+        "fr",
+        &[
+            "le", "les", "et", "est", "des", "une", "du", "que", "qui", "dans", "pour", "pas",
+            "sur", "ce", "cette", "avec", "sont", "au", "aux", "il", "elle", "vous", "nous", "ou",
+            "chaque", "puis",
+        ],
+    ),
+    (
+        "es",
+        &[
+            "el", "los", "las", "y", "es", "del", "por", "para", "con", "una", "lo", "como", "más",
+            "está", "pero", "cada", "su", "sus", "este", "esta",
+        ],
+    ),
+    (
+        "de",
+        &[
+            "der", "die", "das", "und", "ist", "nicht", "ein", "eine", "mit", "zu", "den", "dem",
+            "von", "auf", "für", "sich", "auch", "wird", "sind", "jede", "jeden",
+        ],
+    ),
+    (
+        "it",
+        &[
+            "il", "gli", "è", "di", "che", "per", "non", "della", "delle", "sono", "nel", "questo",
+            "questa", "ogni", "anche", "come", "alla",
+        ],
+    ),
+    (
+        "pt",
+        &[
+            "o", "os", "é", "um", "uma", "não", "do", "da", "dos", "das", "em", "na", "no", "com",
+            "cada", "também", "isso", "são",
+        ],
+    ),
+    (
+        "nl",
+        &[
+            "het", "een", "en", "is", "van", "dat", "niet", "op", "te", "met", "voor", "zijn",
+            "er", "ook", "wordt", "aan", "elke",
+        ],
+    ),
+];
+
+/// The language `text` (in a Latin script) is written in, by its little
+/// words — when there are enough of them to tell, and one language clearly
+/// has the most.
+pub fn latin_language(text: &str) -> Option<&'static str> {
+    let mut counts = [0usize; LITTLE_WORDS.len()];
+    for word in text
+        .split(|c: char| !c.is_alphabetic())
+        .filter(|w| !w.is_empty())
+    {
+        let word = word.to_lowercase();
+        for (count, (_, words)) in counts.iter_mut().zip(LITTLE_WORDS) {
+            if words.contains(&word.as_str()) {
+                *count += 1;
+            }
+        }
+    }
+    let mut ranked: Vec<(usize, &'static str)> = counts
+        .iter()
+        .zip(LITTLE_WORDS)
+        .map(|(count, (lang, _))| (*count, *lang))
+        .collect();
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.0));
+    let (best, lang) = ranked[0];
+    let second = ranked.get(1).map_or(0, |r| r.0);
+    // Two of its words at least, and more than any other language's by a
+    // half: "de la" is French and Spanish both.
+    (best >= 2 && best * 2 > second * 3).then_some(lang)
+}
+
+/// The language to say `sentence` in, from an answer whose words so far
+/// are `answer` (as [`speakable`] says them): its script's
+/// ([`script_language`]); else, for a Latin script, the language the
+/// answer's words are in, or `usual` when it is written in one; else
+/// English.
+pub fn language_for(sentence: &str, answer: &str, usual: Option<&str>) -> &'static str {
+    if let Some(lang) = script_language(sentence, usual) {
+        return lang;
+    }
+    let latin = |lang: &&str| !matches!(*lang, "zh" | "ja" | "ko");
+    latin_language(answer)
+        .or_else(|| usual.and_then(known_language).filter(latin))
+        .unwrap_or("en")
+}
+
 /// `markdown` as it would be said, one paragraph, heading or list item a
 /// line: what is only drawn or only read — code blocks, markup, an address
 /// — left out or said in words.
@@ -353,19 +469,38 @@ fn abbreviation(text: &str) -> bool {
     ) || (last.len() == 1 && last.chars().all(|c| c.is_ascii_alphabetic()))
 }
 
+/// One sentence to say, and the language to say it in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Sentence {
+    pub text: String,
+    pub lang: &'static str,
+}
+
 /// The sentences of an answer as it streams in, each handed out once: the
 /// last one only when the answer is over, as the words still coming may be
 /// its own.
 #[derive(Debug, Default)]
 pub struct Reader {
     given: usize,
+    /// The language usually spoken: what a sentence whose words do not
+    /// tell is said in ([`language_for`]).
+    usual: Option<&'static str>,
 }
 
 impl Reader {
+    /// A reader for an answer in a conversation usually held in `usual`.
+    pub fn new(usual: Option<&str>) -> Reader {
+        Reader {
+            given: 0,
+            usual: usual.and_then(known_language),
+        }
+    }
+
     /// The sentences of `answer` (its markdown so far) not handed out yet;
     /// `done`: no more is coming.
-    pub fn next(&mut self, answer: &str, done: bool) -> Vec<String> {
-        let all = sentences(&speakable(answer));
+    pub fn next(&mut self, answer: &str, done: bool) -> Vec<Sentence> {
+        let said = speakable(answer);
+        let all = sentences(&said);
         let ready = if done {
             all.len()
         } else {
@@ -374,7 +509,13 @@ impl Reader {
         if ready <= self.given {
             return Vec::new();
         }
-        let fresh = all[self.given..ready].to_vec();
+        let fresh = all[self.given..ready]
+            .iter()
+            .map(|text| Sentence {
+                lang: language_for(text, &said, self.usual),
+                text: text.clone(),
+            })
+            .collect();
         self.given = ready;
         fresh
     }
@@ -460,11 +601,14 @@ mod tests {
     /// the last only when the answer is over.
     #[test]
     fn a_streamed_answer_is_read_once() {
+        let texts = |sentences: Vec<Sentence>| -> Vec<String> {
+            sentences.into_iter().map(|s| s.text).collect()
+        };
         let mut reader = Reader::default();
         assert!(reader.next("The total", false).is_empty());
         assert!(reader.next("The total adds them.", false).is_empty());
         assert_eq!(
-            reader.next("The total adds them. Then it", false),
+            texts(reader.next("The total adds them. Then it", false)),
             ["The total adds them."]
         );
         assert!(
@@ -473,7 +617,7 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(
-            reader.next("The total adds them. Then it rounds.", true),
+            texts(reader.next("The total adds them. Then it rounds.", true)),
             ["Then it rounds."]
         );
         assert!(
@@ -484,12 +628,82 @@ mod tests {
         // A code block still open says nothing of what is in it.
         let mut reader = Reader::default();
         assert_eq!(
-            reader.next("Like so:\n```rust\nlet x = 1;\nlet y", false),
+            texts(reader.next("Like so:\n```rust\nlet x = 1;\nlet y", false)),
             Vec::<String>::new()
         );
         assert_eq!(
-            reader.next("Like so:\n```rust\nlet x = 1;\n```\nDone.", true),
+            texts(reader.next("Like so:\n```rust\nlet x = 1;\n```\nDone.", true)),
             ["Like so:", "Done."]
+        );
+    }
+
+    /// A sentence in a Latin script is said in the language the answer's
+    /// little words are in — French, Spanish, German, as well as English —
+    /// else in the one usually spoken, else in English; a script that tells
+    /// its own language is said in it, whatever the rest.
+    #[test]
+    fn each_sentence_is_said_in_its_language() {
+        assert_eq!(
+            latin_language("La fonction calcule le total de chaque article et applique la remise."),
+            Some("fr")
+        );
+        assert_eq!(
+            latin_language("The function adds up the price of each item and applies the discount."),
+            Some("en")
+        );
+        assert_eq!(
+            latin_language("La función suma el precio de cada artículo y aplica el descuento."),
+            Some("es")
+        );
+        assert_eq!(
+            latin_language("Die Funktion addiert den Preis und ist nicht teuer."),
+            Some("de")
+        );
+        // Too few to tell.
+        assert_eq!(latin_language("apply discount"), None);
+        assert_eq!(latin_language("total"), None);
+        // An answer in French, a sentence of it with no little word.
+        let answer = "La fonction calcule le total de chaque article. Ensuite, apply discount.";
+        assert_eq!(language_for("Ensuite, apply discount.", answer, None), "fr");
+        // Nothing tells: the usual language when it is written in Latin
+        // letters, else English.
+        assert_eq!(
+            language_for("apply discount.", "apply discount.", Some("fr")),
+            "fr"
+        );
+        assert_eq!(
+            language_for("apply discount.", "apply discount.", Some("zh")),
+            "en"
+        );
+        assert_eq!(
+            language_for("apply discount.", "apply discount.", Some("xx")),
+            "en"
+        );
+        assert_eq!(
+            language_for("apply discount.", "apply discount.", None),
+            "en"
+        );
+        // A script that tells its own.
+        assert_eq!(language_for("합계를 구합니다.", answer, Some("fr")), "ko");
+        assert_eq!(language_for("合計を計算します。", answer, None), "ja");
+        assert_eq!(language_for("计算总价。", answer, None), "zh");
+        assert_eq!(known_language("pt_BR"), Some("pt"));
+        assert_eq!(known_language("FR-ca"), Some("fr"));
+        assert_eq!(known_language("klingon"), None);
+        // Handed out with it.
+        let mut reader = Reader::new(Some("ko"));
+        assert_eq!(
+            reader.next("Le total est calculé. 합계입니다.", true),
+            [
+                Sentence {
+                    text: "Le total est calculé.".into(),
+                    lang: "fr"
+                },
+                Sentence {
+                    text: "합계입니다.".into(),
+                    lang: "ko"
+                }
+            ]
         );
     }
 }

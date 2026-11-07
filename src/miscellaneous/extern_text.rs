@@ -10,6 +10,7 @@ use crate::tr_noop;
 pub(crate) fn all() -> Vec<&'static str> {
     [
         VOICE_MODELS,
+        SPEECH_MODELS,
         APPROVE,
         PROVIDERS,
         ENTRY_KINDS,
@@ -34,6 +35,16 @@ pub(crate) const VOICE_MODELS: &[&str] = &[
     tr_noop!("Best balance of accuracy and speed, in any language."),
     tr_noop!("Large (Large v3)"),
     tr_noop!("Highest accuracy, for powerful computers."),
+];
+
+/// clew-voice's speech models (`speech::VOICE_MODELS`): each one's name and
+/// what it is for.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) const SPEECH_MODELS: &[&str] = &[
+    tr_noop!("Supertonic 3"),
+    tr_noop!("Natural speech in 31 languages, English, Korean, Japanese and French among them."),
+    tr_noop!("Kokoro (Chinese)"),
+    tr_noop!("Mandarin Chinese, which Supertonic does not speak."),
 ];
 
 /// When an MCP server's tool asks first (clew-core's `Approve::label`).

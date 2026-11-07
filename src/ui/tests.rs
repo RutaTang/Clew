@@ -8142,6 +8142,75 @@ fn voice_failures_are_said_in_the_readers_language() {
     });
 }
 
+/// Clew speaking shows as listening does: on the pill, even with Ask put
+/// away, and in the card's composer — the speaker, how loud, and the
+/// button lit to stop it.
+#[test]
+fn speaking_shows_with_a_stop() {
+    struct Playing;
+    impl crate::app::speech::Playing for Playing {
+        fn play(&self, _: &[f32], _: u32) {}
+        fn queued_seconds(&self) -> f32 {
+            1.0
+        }
+        fn played(&self) -> u64 {
+            0
+        }
+        fn take_rest(&self) -> (Vec<f32>, u32) {
+            (Vec::new(), 1)
+        }
+        fn idle(&self) -> bool {
+            false
+        }
+        fn level(&self) -> f32 {
+            0.5
+        }
+        fn error(&self) -> Option<String> {
+            None
+        }
+    }
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Closed;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
+    {
+        let mut sim = sim_of(&app);
+        let speaking =
+            text_at(&mut sim, |t| t == "Speaking", 0).expect("the pill says Clew speaks");
+        let (right, bottom) = ask_corner_edges();
+        assert!(
+            speaking.x > right - 300.0 && speaking.y > bottom - 60.0,
+            "in the corner: {speaking:?}"
+        );
+    }
+    // The pill says Esc stops it, and its button, lit, does.
+    assert!(shows(&mut sim_of(&app), "Esc"));
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Speaking",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
+        "{sent:?}"
+    );
+    // On the card, in the composer: the same, Esc left to the pill.
+    app.ask_view = crate::AskView::Compact;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Speaking"), "on the card too");
+    assert!(!shows(&mut sim, "Esc"));
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Speaking",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
+        "{sent:?}"
+    );
+}
+
 /// What voice is doing shows in Ask's corner, never in the field at the
 /// top: on the pill while the card is hidden — even put away — and on the
 /// card while it is open; with a way to stop, and for a command that asks
@@ -8158,7 +8227,7 @@ fn voice_shows_what_it_is_doing() {
     };
     {
         let mut sim = sim_of(&app);
-        let listening = text_at(&mut sim, |t| t == "Listening…", 0)
+        let listening = text_at(&mut sim, |t| t == "Listening", 0)
             .expect("the pill says it listens, even put away");
         let (right, bottom) = ask_corner_edges();
         assert!(
@@ -8186,11 +8255,26 @@ fn voice_shows_what_it_is_doing() {
     app.ask_view = crate::AskView::Compact;
     assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");
     app.voice.phase = VoicePhase::Transcribing { token: 1 };
-    assert!(shows(&mut sim_of(&app), "Working out what you said"));
-    assert!(matches!(
-        click(sim_of(&app), "Cancel").as_slice(),
-        [Message::Voice(crate::VoiceMsg::Cancel)]
-    ));
+    assert!(shows(&mut sim_of(&app), "Transcribing"));
+    // On the card, the microphone's place holds the way to cancel; on the
+    // pill, as while listening, Esc.
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Transcribing",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel)),
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel))),
+        "{sent:?}"
+    );
+    app.ask_view = crate::AskView::Hidden;
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Transcribing"));
+        assert!(shows(&mut sim, "Esc"));
+    }
+    app.ask_view = crate::AskView::Compact;
     app.voice.phase = VoicePhase::Idle;
     app.voice.confirm = Some("Explain All".into());
     assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));

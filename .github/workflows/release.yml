@@ -195,7 +195,7 @@ jobs:
         include:
           - os: Linux
             runner: ubuntu-latest
-            packages: -p clew -p clew-voice
+            packages: -p clew -p clew-voice -p clew-speak
     defaults:
       run:
         shell: bash
@@ -477,7 +477,8 @@ jobs:
 
       # Hardened runtime everywhere. The app gets assets/clew.entitlements
       # (the microphone only — see the file for why, and what it takes to
-      # add another); clew-server gets NO entitlements file at all.
+      # add another); clew-server and clew-speak get NO entitlements file at
+      # all (clew-speak plays nothing itself: it hands clew the samples).
       - name: Sign with Developer ID (hardened runtime)
         if: env.SIGN_IDENTITY != ''
         run: |
@@ -486,8 +487,10 @@ jobs:
           ENTITLEMENTS="assets/clew.entitlements"
           # Inner binaries first, then the bundle, so the outer signature
           # seals them.
-          codesign --force --timestamp --options runtime \
-            --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/clew-server"
+          for helper in clew-server clew-speak; do
+            codesign --force --timestamp --options runtime \
+              --sign "$SIGN_IDENTITY" "$APP/Contents/MacOS/$helper"
+          done
           for target in "$APP/Contents/MacOS/clew" "$APP"; do
             codesign --force --timestamp --options runtime \
               --entitlements "$ENTITLEMENTS" \
@@ -643,7 +646,7 @@ jobs:
           for pair in linux-x86_64:x86_64-unknown-linux-gnu; do
             slug="${pair%%:*}"; target="${pair#*:}"
             cargo fetch --locked --target "$target"
-            scripts/third-party-notices.sh "notices/$slug.THIRD-PARTY-NOTICES.txt" --target "$target" clew clew-server
+            scripts/third-party-notices.sh "notices/$slug.THIRD-PARTY-NOTICES.txt" --target "$target" clew clew-server clew-speak
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -651,7 +654,7 @@ jobs:
           path: notices/
           if-no-files-found: error
 
-  # The app for Linux: `clew` and `clew-server` built for release,
+  # The app for Linux: `clew`, `clew-server` and `clew-speak` built for release,
   # with this release's server digests embedded exactly as in the macOS app,
   # packed with their notices. Not signed: clew does not update itself on
   # these systems (its update notice opens the release page), and nothing in
@@ -744,11 +747,13 @@ jobs:
             printf '%s\n' "$LIST"
             echo 'CLEW_SERVER_DIGESTS_END'
           } >> "$GITHUB_ENV"
-      - name: Build clew and clew-server (release)
-        run: cargo build --release --locked -p clew -p clew-server
+      - name: Build clew, clew-server and clew-speak (release)
+        run: cargo build --release --locked -p clew -p clew-server -p clew-speak
       # The archive: one folder, named for the release and the platform, with
-      # both programs (clew looks for its server beside itself) and the
-      # notices. The server must start and speak this release's protocol.
+      # the three programs (clew looks for its server and its voice beside
+      # itself — on Windows the voice's DLLs too, which Cargo put beside
+      # them), the notices and the license texts they refer to. The server
+      # must start and speak this release's protocol; the voice must start.
       - name: Package
         env:
           SLUG: ${{ matrix.slug }}
@@ -764,10 +769,16 @@ jobs:
           if [[ "$RUNNER_OS" == Windows ]]; then EXE=".exe"; fi
           DIR="Clew-$V-$SLUG"
           mkdir "$DIR"
-          cp "target/release/clew$EXE" "target/release/clew-server$EXE" "$DIR/"
+          cp "target/release/clew$EXE" "target/release/clew-server$EXE" \
+            "target/release/clew-speak$EXE" "$DIR/"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            cp target/release/*.dll "$DIR/"
+          fi
           cp "notices/$SLUG.THIRD-PARTY-NOTICES.txt" "$DIR/THIRD-PARTY-NOTICES.txt"
+          cp -R assets/licenses "$DIR/licenses"
           "$DIR/clew-server$EXE" --version | tee version.txt
           grep -q "$PROTO" version.txt
+          "$DIR/clew-speak$EXE" --version
           if [[ "$RUNNER_OS" == Windows ]]; then
             ASSET="$DIR.zip"
             7z a -tzip "$ASSET" "$DIR" >/dev/null

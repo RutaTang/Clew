@@ -192,7 +192,10 @@ fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
     // Half the cores, at least one: the editor goes on drawing meanwhile.
     config.model.num_threads =
         std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1)) as i32;
-    OfflineTts::create(&config).ok_or_else(|| "the model could not be loaded".to_string())
+    match OfflineTts::create(&config) {
+        Some(tts) => Ok(tts),
+        None => Err("the model could not be loaded".into()),
+    }
 }
 
 /// `say`'s text as samples, at the model's rate.
@@ -211,9 +214,10 @@ fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec
                 .collect(),
         );
     }
-    let audio = tts
-        .generate_with_config(&say.text, &config, None::<fn(&[f32], f32) -> bool>)
-        .ok_or_else(|| "nothing could be made of it".to_string())?;
+    let Some(audio) = tts.generate_with_config(&say.text, &config, None::<fn(&[f32], f32) -> bool>)
+    else {
+        return Err("nothing could be made of it".into());
+    };
     Ok(audio.samples().to_vec())
 }
 

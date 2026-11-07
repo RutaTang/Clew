@@ -218,10 +218,10 @@ pub(crate) enum HeardOutcome {
 pub(crate) struct ModelDownload {
     pub done: u64,
     pub total: Option<u64>,
-    cancel: Arc<AtomicBool>,
+    pub(crate) cancel: Arc<AtomicBool>,
     /// Aborts the transfer when dropped — when the window closes with it
     /// running.
-    _task: iced::task::Handle,
+    pub(crate) _task: iced::task::Handle,
 }
 
 /// The user's voice settings, kept in config.toml's `[voice]`.
@@ -236,6 +236,13 @@ pub(crate) struct VoicePrefs {
     pub run_commands: bool,
     /// Ask what is not one at once, rather than leave it in the input.
     pub send_questions: bool,
+    /// Read the answers to questions that were said aloud
+    /// ([`crate::app::speech`]).
+    pub speak: bool,
+    /// How fast Clew speaks: 1 is the voice's own pace.
+    pub speed: f32,
+    /// The voice picked for each speech model, by the model's id.
+    pub voices: std::collections::BTreeMap<String, i32>,
 }
 
 impl Default for VoicePrefs {
@@ -245,6 +252,9 @@ impl Default for VoicePrefs {
             language: None,
             run_commands: true,
             send_questions: true,
+            speak: true,
+            speed: 1.0,
+            voices: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -291,6 +301,31 @@ impl VoicePrefs {
         if let Some(on) = section.get("send").and_then(|v| v.as_bool()) {
             prefs.send_questions = on;
         }
+        if let Some(on) = section.get("speak").and_then(|v| v.as_bool()) {
+            prefs.speak = on;
+        }
+        if let Some(speed) = section
+            .get("speed")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+            .map(|v| v as f32)
+            .filter(|v| (0.5..=2.0).contains(v))
+        {
+            prefs.speed = speed;
+        }
+        if let Some(voices) = section.get("voices").and_then(|v| v.as_table()) {
+            for (id, voice) in voices {
+                let Some(model) = clew_voice::speech::find(id) else {
+                    continue;
+                };
+                if let Some(voice) = voice
+                    .as_integer()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .filter(|v| model.voices.iter().any(|known| known.id == *v))
+                {
+                    prefs.voices.insert(id.clone(), voice);
+                }
+            }
+        }
         prefs
     }
 
@@ -302,7 +337,26 @@ impl VoicePrefs {
         }
         section.insert("commands".into(), self.run_commands.into());
         section.insert("send".into(), self.send_questions.into());
+        section.insert("speak".into(), self.speak.into());
+        section.insert("speed".into(), f64::from(self.speed).into());
+        if !self.voices.is_empty() {
+            let voices: toml::Table = self
+                .voices
+                .iter()
+                .map(|(id, voice)| (id.clone(), i64::from(*voice).into()))
+                .collect();
+            section.insert("voices".into(), voices.into());
+        }
         clew_core::globalconfig::update("voice", section)
+    }
+
+    /// The voice `model` speaks in: the one picked, else its own default.
+    pub(crate) fn voice_for(&self, model: &clew_voice::speech::VoiceModel) -> i32 {
+        self.voices
+            .get(model.id)
+            .copied()
+            .filter(|v| model.voices.iter().any(|known| known.id == *v))
+            .unwrap_or(model.default_voice)
     }
 
     /// The model chosen, from the catalog.
@@ -346,6 +400,8 @@ pub(crate) struct VoiceState {
     pub(crate) open_mic: OpenMic,
     pub(crate) transcriber: Arc<dyn Transcriber>,
     pub(crate) fetch: Fetch,
+    /// Clew's answers, read aloud.
+    pub speech: crate::app::speech::Speech,
 }
 
 /// How long the pill in the corner says what was last heard.
@@ -381,13 +437,14 @@ impl VoiceState {
             open_mic: open_system_mic,
             transcriber: ENGINE.clone(),
             fetch: fetch_over_net,
+            speech: crate::app::speech::Speech::new(),
         }
     }
 
     /// Whether Esc has something of voice's to put away: listening, a
-    /// transcription, a command waiting for a yes.
+    /// transcription, a command waiting for a yes, Clew speaking.
     pub(crate) fn is_busy(&self) -> bool {
-        self.phase != VoicePhase::Idle || self.confirm.is_some()
+        self.phase != VoicePhase::Idle || self.confirm.is_some() || self.speech.is_speaking()
     }
 
     pub(crate) fn is_listening(&self) -> bool {
@@ -454,6 +511,43 @@ pub enum VoiceMsg {
     SetSendQuestions(bool),
     /// Listen again after each answer, or not.
     SetKeepListening(bool),
+    /// A sentence made into speech, for the stop round it was made in — or
+    /// why it could not be.
+    Spoken {
+        round: u64,
+        result: Result<crate::app::speech::Audio, clew_voice::speaker::SayError>,
+        /// The output, opened meanwhile when none was open.
+        opened: Option<crate::app::speech::Opened>,
+    },
+    /// While Clew speaks: the meter, and whether all is said.
+    SpeakTick,
+    /// Stop speaking.
+    StopSpeaking,
+    /// Read answers to spoken questions aloud, or not.
+    SetSpeak(bool),
+    /// How fast Clew speaks.
+    SetSpeed(f32),
+    /// Speak with this voice of this speech model.
+    PickSpeechVoice {
+        model: &'static str,
+        voice: i32,
+    },
+    /// Say a sample with this speech model.
+    TrySpeech(&'static str),
+    /// Download a speech model (the button that says its size).
+    DownloadSpeech(&'static str),
+    CancelSpeechDownload(&'static str),
+    SpeechDownloadProgress {
+        id: &'static str,
+        done: u64,
+        total: Option<u64>,
+    },
+    SpeechDownloaded {
+        id: &'static str,
+        result: Result<(), String>,
+    },
+    /// Delete a downloaded speech model.
+    RemoveSpeech(&'static str),
 }
 
 impl VoiceMsg {
@@ -641,6 +735,18 @@ impl App {
     /// Handle a [`VoiceMsg`].
     pub(crate) fn update_voice(&mut self, message: VoiceMsg) -> Task<Message> {
         match message {
+            message @ (VoiceMsg::Spoken { .. }
+            | VoiceMsg::SpeakTick
+            | VoiceMsg::StopSpeaking
+            | VoiceMsg::SetSpeak(_)
+            | VoiceMsg::SetSpeed(_)
+            | VoiceMsg::PickSpeechVoice { .. }
+            | VoiceMsg::TrySpeech(_)
+            | VoiceMsg::DownloadSpeech(_)
+            | VoiceMsg::CancelSpeechDownload(_)
+            | VoiceMsg::SpeechDownloadProgress { .. }
+            | VoiceMsg::SpeechDownloaded { .. }
+            | VoiceMsg::RemoveSpeech(_)) => self.update_speech(message),
             VoiceMsg::Toggle => self.on_voice_toggle(),
             VoiceMsg::SetKeepListening(on) => {
                 self.voice.keep_listening = on;
@@ -776,7 +882,7 @@ impl App {
         }
     }
 
-    fn save_voice_prefs(&mut self) {
+    pub(crate) fn save_voice_prefs(&mut self) {
         if let Err(e) = self.voice.prefs.save() {
             self.status = tr!("Could not save the voice settings: {error}", error = e);
         }
@@ -802,7 +908,11 @@ impl App {
                 self.status = tr!("Still working out what was said…").into();
                 Task::none()
             }
-            VoicePhase::Idle => self.start_listening(),
+            VoicePhase::Idle => {
+                // Said over Clew, as over a person: it stops, and listens.
+                self.stop_speaking();
+                self.start_listening()
+            }
         }
     }
 
@@ -811,6 +921,12 @@ impl App {
     /// heard or waiting for a yes, and there is a model to hear it with
     /// (this never sends the reader to Settings for one).
     pub(crate) fn resume_listening(&mut self) -> Task<Message> {
+        // Not while Clew speaks: the microphone would hear it. Once all is
+        // said, this is asked again.
+        if self.voice.keep_listening && self.voice.speech.is_speaking() {
+            self.voice.speech.listen_after = true;
+            return Task::none();
+        }
         let ready = self.voice.keep_listening
             && self.ask_view.is_open()
             && self.voice.phase == VoicePhase::Idle
@@ -961,8 +1077,11 @@ impl App {
     }
 
     /// Esc: stop listening or transcribing and keep nothing; or say no to
-    /// the command that waits for a yes.
+    /// the command that waits for a yes; and stop speaking.
     pub(crate) fn cancel_voice(&mut self) {
+        if self.stop_speaking() {
+            self.status = tr!("Stopped speaking").into();
+        }
         if let Some((listening, _)) = self.voice.listening.take() {
             drop(listening.stop());
         }
@@ -1221,6 +1340,11 @@ impl App {
 /// (a CDN's signed one is a paragraph), and how far it got if it got
 /// anywhere.
 pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model) -> String {
+    download_failure_sized(error, written, model.size_mb)
+}
+
+/// [`download_failure`], for a download of `size_mb` MB.
+pub(crate) fn download_failure_sized(error: &str, written: u64, size_mb: u32) -> String {
     let why = if clew_core::net::was_cut_short(error) {
         tr!("the connection closed").to_string()
     } else {
@@ -1232,7 +1356,7 @@ pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model)
     tr!(
         "Stopped at {done} of {total} MB: {why}",
         done = written / 1_000_000,
-        total = model.size_mb,
+        total = size_mb,
         why = why
     )
 }
@@ -1267,7 +1391,6 @@ fn with_host_only(error: &str) -> String {
     format!("{host}{colon}{after}")
 }
 
-/// Sets its flag when dropped.
 /// The models being downloaded in this process, by the file each becomes:
 /// two windows downloading one model wrote one partial file between them,
 /// and the first to finish moved the other's half-written bytes into place.
@@ -1276,11 +1399,11 @@ static DOWNLOADING: LazyLock<Mutex<std::collections::HashSet<PathBuf>>> =
 
 /// A model's download, claimed for the transfer that writes it — held by
 /// that transfer until it ends, finished, failed or stopped.
-struct Claim(PathBuf);
+pub(crate) struct Claim(PathBuf);
 
 impl Claim {
     /// Claim the download into `dest`; `None` while another holds it.
-    fn take(dest: PathBuf) -> Option<Claim> {
+    pub(crate) fn take(dest: PathBuf) -> Option<Claim> {
         let fresh = DOWNLOADING
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -1309,7 +1432,8 @@ fn downloading(dest: &Path) -> bool {
         .contains(dest)
 }
 
-struct StopOnDrop(Arc<AtomicBool>);
+/// Sets its flag when dropped.
+pub(crate) struct StopOnDrop(pub(crate) Arc<AtomicBool>);
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {

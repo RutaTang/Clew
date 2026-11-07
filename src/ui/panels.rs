@@ -1023,6 +1023,22 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     ]
     .spacing(KEEP_LISTENING_GAP)
     .align_y(iced::Center);
+    // While voice listens, works out the words, waits for a yes or Clew
+    // speaks, what it is doing is where the question is typed.
+    // As the pill says it, and the button lit as on the pill.
+    let input: Element<'_, Message> = match super::askfloat::voice_bar(app, false) {
+        Some(bar) => container(bar)
+            .width(Fill)
+            .height(Length::Fixed(ROUND_BUTTON))
+            .padding(Padding {
+                left: 4.0,
+                ..Padding::ZERO
+            })
+            .align_y(iced::Center)
+            .into(),
+        None => input,
+    };
+    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
     // The composer, under a rule across the card: the question as it is
     // typed, Stop while an answer comes in, Keep listening, the microphone
     // and send.

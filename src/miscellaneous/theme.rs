@@ -1927,20 +1927,6 @@ pub fn floating_pill(theme: &Theme) -> container::Style {
     }
 }
 
-/// The microphone's level while it listens: a bar in the accent color on a
-/// faint track.
-pub fn level_meter(_theme: &Theme) -> progress_bar::Style {
-    progress_bar::Style {
-        background: iced::Background::Color(with_alpha(danger(), 0.14)),
-        bar: iced::Background::Color(danger()),
-        border: Border {
-            color: Color::TRANSPARENT,
-            width: 0.0,
-            radius: 2.0.into(),
-        },
-    }
-}
-
 /// Dimmed backdrop behind the modal: over the whole window, its corners
 /// as the window's, so they stay clear.
 pub fn backdrop(_theme: &Theme) -> container::Style {

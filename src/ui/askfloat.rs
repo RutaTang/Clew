@@ -193,7 +193,7 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
 }
 
 /// The pill Ask hides to: what voice is doing while it hears, works out the
-/// words, waits for a yes or has just done what was said — else Ask's own
+/// words, waits for a yes, speaks, or has just done what was said — else Ask's own
 /// face, a click from opening. `None` when Ask is put away and voice has
 /// nothing to say.
 fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
@@ -234,6 +234,11 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );
+    // Clew speaking: the button lit, as while it listens, to stop it.
+    let mic = match voice_lit(app, 26.0, 14.0) {
+        Some(lit) if app.voice.speech.is_speaking() => lit,
+        _ => mic,
+    };
     let face: Element<'_, Message> = match voice {
         Some(said) => said,
         None => {
@@ -285,85 +290,17 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
 /// just heard and what came of it. `None` when it has nothing to say, or the
 /// card says it.
 fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
-    let small = |label: &'static str, msg: Message, primary: bool| {
-        button(text(label).size(ts::SMALL))
-            .style(if primary {
-                theme::primary_button
-            } else {
-                theme::toolbar_button
-            })
-            .padding([2, 8])
-            .on_press(msg)
-    };
-    // While the answer is being said, the microphone is what shows.
-    if let Some(title) = app
-        .voice
-        .confirm
-        .as_ref()
-        .filter(|_| app.voice.phase == VoicePhase::Idle)
-    {
+    // Listening, working out the words, Clew speaking, a command waiting
+    // for a yes.
+    if let Some(bar) = voice_bar(app, true) {
         return Some(
-            row![
-                text(tr!(
-                    "Run “{command}”?",
-                    command = crate::i18n::lookup(title)
-                ))
-                .size(ts::BASE)
-                .color(theme::fg()),
-                small(tr!("Run"), Message::Voice(VoiceMsg::Confirm), true),
-                small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
-            ]
-            .spacing(6)
-            .padding(Padding {
-                left: 6.0,
-                ..Padding::ZERO
-            })
-            .align_y(iced::Center)
-            .into(),
+            container(bar)
+                .padding(Padding {
+                    left: 8.0,
+                    ..Padding::ZERO
+                })
+                .into(),
         );
-    }
-    match app.voice.phase {
-        VoicePhase::Listening { level, .. } => {
-            return Some(
-                row![
-                    container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
-                        container::Style {
-                            background: Some(theme::recording().into()),
-                            border: iced::border::rounded(REC_DOT / 2.0),
-                            ..container::Style::default()
-                        }
-                    }),
-                    text(tr!("Listening…")).size(ts::BASE).color(theme::fg()),
-                    super::meter::level_meter(&PILL_BARS, level),
-                    keycap("Esc".to_string()),
-                ]
-                .spacing(8)
-                .padding(Padding {
-                    left: 8.0,
-                    ..Padding::ZERO
-                })
-                .align_y(iced::Center)
-                .into(),
-            );
-        }
-        VoicePhase::Transcribing { .. } => {
-            return Some(
-                row![
-                    text(tr!("Working out what you said…"))
-                        .size(ts::BASE)
-                        .color(theme::fg_muted()),
-                    small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
-                ]
-                .spacing(6)
-                .padding(Padding {
-                    left: 8.0,
-                    ..Padding::ZERO
-                })
-                .align_y(iced::Center)
-                .into(),
-            );
-        }
-        VoicePhase::Idle => {}
     }
     if !app.voice.heard_fresh() {
         return None;
@@ -957,9 +894,22 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// What voice is doing, as one line: listening (with the level), working
-/// out the words, or a command waiting for a yes. `None` while idle.
-fn voice_status(app: &App) -> Option<Element<'_, Message>> {
+/// What voice is doing, as the pill says it — and the card's composer, in
+/// place of what is typed: listening (the red dot, how loud), transcribing
+/// (the bars rippling on their own), Clew speaking (the speaker, how loud),
+/// a command waiting for a yes (Run, Cancel). The pill (`pill`) says Esc
+/// stops it; the composer has room for no more than what is happening, its
+/// round button the way to stop it ([`voice_lit`]). `None` while voice is
+/// idle.
+pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
+    // A row of what is happening, and on the pill the key that stops it.
+    let with_esc = |line: iced::widget::Row<'static, Message>| -> Element<'static, Message> {
+        if pill {
+            line.push(keycap("Esc".to_string())).into()
+        } else {
+            line.into()
+        }
+    };
     let small = |label: &'static str, msg: Message, primary: bool| {
         button(text(label).size(ts::SMALL))
             .style(if primary {
@@ -970,7 +920,6 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
             .padding([2, 8])
             .on_press(msg)
     };
-    // While the answer is being said, the microphone is what shows.
     if let Some(title) = app
         .voice
         .confirm
@@ -983,8 +932,9 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
                     "Run “{command}”?",
                     command = crate::i18n::lookup(title)
                 ))
-                .size(ts::SMALL)
-                .color(theme::fg()),
+                .size(ts::BASE)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
                 small(tr!("Run"), Message::Voice(VoiceMsg::Confirm), true),
                 small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
             ]
@@ -994,47 +944,105 @@ fn voice_status(app: &App) -> Option<Element<'_, Message>> {
         );
     }
     match app.voice.phase {
-        VoicePhase::Idle => None,
-        VoicePhase::Listening { level, .. } => Some(
+        VoicePhase::Listening { level, .. } => Some(with_esc(
             row![
-                text("●").size(ts::SMALL).color(theme::danger()),
+                container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
+                    container::Style {
+                        background: Some(theme::recording().into()),
+                        border: iced::border::rounded(REC_DOT / 2.0),
+                        ..container::Style::default()
+                    }
+                }),
                 text(tr!("listening now\u{4}Listening"))
-                    .size(ts::SMALL)
-                    .color(theme::fg()),
-                container(super::meter::eased_bar(
-                    level,
-                    64.0,
-                    4.0,
-                    theme::level_meter,
-                    super::meter::LEVEL,
-                ))
-                .width(64),
-                small(tr!("Done"), Message::Voice(VoiceMsg::Stop), true),
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                super::meter::level_meter(&PILL_BARS, level),
             ]
-            .spacing(6)
-            .align_y(iced::Center)
-            .into(),
-        ),
-        VoicePhase::Transcribing { .. } => Some(
+            .spacing(8)
+            .align_y(iced::Center),
+        )),
+        // What was said, being worked out: the bars ripple on their own.
+        VoicePhase::Transcribing { .. } => Some(with_esc(
             row![
-                text(tr!("Working out what you said…"))
-                    .size(ts::SMALL)
-                    .color(theme::dim()),
-                small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
+                text(tr!("transcribing now\u{4}Transcribing"))
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                super::meter::ripple(&PILL_BARS),
             ]
-            .spacing(6)
-            .align_y(iced::Center)
-            .into(),
-        ),
+            .spacing(8)
+            .align_y(iced::Center),
+        )),
+        // Clew speaking, as it listens: the speaker in the dot's place —
+        // the bars rippling while what it says is still being made.
+        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(with_esc(
+            row![
+                glyph::icon(Glyph::Speaker, theme::accent(), 14.0),
+                text(tr!("speaking now\u{4}Speaking"))
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                if app.voice.speech.preparing() {
+                    super::meter::ripple(&PILL_BARS)
+                } else {
+                    super::meter::level_meter(&PILL_BARS, app.voice.speech.level)
+                },
+            ]
+            .spacing(8)
+            .align_y(iced::Center),
+        )),
+        VoicePhase::Idle => None,
     }
 }
 
-/// Voice on the card: what it is doing ([`voice_status`]) or, idle, what
-/// was last heard and what came of it. `None` when there is nothing to say.
+/// The voice key's round button, `side` across, lit in the accent while
+/// voice listens — the microphone, which stops it — or Clew speaks — a
+/// stop; a cross, unlit, while the words are worked out. `None` otherwise:
+/// the microphone as it is at rest.
+pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, Message>> {
+    let (glyph, message, tip, lit) = match app.voice.phase {
+        VoicePhase::Listening { .. } => (Glyph::Mic, VoiceMsg::Toggle, tr!("Stop listening"), true),
+        VoicePhase::Transcribing { .. } => (Glyph::Close, VoiceMsg::Cancel, tr!("Cancel"), false),
+        VoicePhase::Idle if app.voice.speech.is_speaking() => (
+            Glyph::Stop,
+            VoiceMsg::StopSpeaking,
+            tr!("Stop speaking"),
+            true,
+        ),
+        VoicePhase::Idle => return None,
+    };
+    // The voice key does what it does — but for cancelling, which is Esc's.
+    let chord = (!matches!(message, VoiceMsg::Cancel))
+        .then(|| app.keymap.chord(crate::keymap::Action::Voice).caps());
+    let tint = if lit {
+        crate::theme::active().on_accent
+    } else {
+        theme::fg()
+    };
+    let lit = button(container(glyph::icon(glyph, tint, icon)).center(Fill))
+        .style(theme::round_button(lit))
+        .padding(0)
+        .width(Length::Fixed(side))
+        .height(Length::Fixed(side))
+        .on_press(Message::Voice(message));
+
+    Some(tip_at(lit, tip, chord, tooltip::Position::Top))
+}
+
+/// Voice on the card, under its header: what was last heard and what came
+/// of it. What voice is doing — listening, working out the words, Clew
+/// speaking, a command waiting for a yes — is in the composer, where it was
+/// asked for ([`voice_bar`]). `None` when there is nothing to say.
 pub(crate) fn voice_strip(app: &App) -> Option<Element<'_, Message>> {
-    let line: Element<'_, Message> = match voice_status(app) {
-        Some(status) => status,
-        None => {
+    if app.voice.phase != VoicePhase::Idle
+        || app.voice.confirm.is_some()
+        || app.voice.speech.is_speaking()
+    {
+        return None;
+    }
+    let line: Element<'_, Message> = {
+        {
             let heard = app.voice.heard.as_ref()?;
             let (said, color) = match &heard.outcome {
                 HeardOutcome::Ran(title) => (
