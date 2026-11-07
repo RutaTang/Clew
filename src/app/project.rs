@@ -337,13 +337,20 @@ impl App {
     /// Consent to creating `.clew` in `root`: the folder the modal within
     /// reach asks about, once it has been long enough to be read
     /// ([`App::may_allow`]).
-    pub(crate) fn on_consent_allowed(&mut self, root: PathBuf) -> Task<Message> {
+    /// The first open answered: the project opens — `with_setup`, with what
+    /// its sheet has ticked (Open); without, with nothing of it done (Not
+    /// now).
+    pub(crate) fn on_consent_allowed(&mut self, root: PathBuf, with_setup: bool) -> Task<Message> {
         if self.pending_consent.as_ref() != Some(&root)
             || !self.may_allow(&crate::app::model::Question::Project(root.clone()))
         {
             return Task::none();
         }
         self.pending_consent = None;
+        if !with_setup && let Some(setup) = self.setup.as_mut().filter(|s| s.root == root) {
+            setup.servers = false;
+            setup.explain = false;
+        }
         // Consent is recorded outside the project (see `request_open`): a
         // repository must never be able to grant itself permission. It is
         // bound to the host it was granted for.
@@ -1166,7 +1173,8 @@ impl App {
                 self.status = tr!("Project not opened").to_string();
                 Task::none()
             }
-            ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
+            ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root, true),
+            ProjectMsg::OpenWithoutSetup(root) => self.on_consent_allowed(root, false),
             ProjectMsg::SetupShow(mode) => {
                 // A first open's sheet is answered first. There is one sheet:
                 // replaced (⌘⇧E reaches under it), the first open's question

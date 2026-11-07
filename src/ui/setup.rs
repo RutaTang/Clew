@@ -41,7 +41,22 @@ pub(crate) fn setup_sheet<'a>(
         SetupMode::Manage => tr!("Set up {name}", name = name),
         SetupMode::Explain => tr!("Explain {name}?", name = name),
     };
-    let mut body = column![text(title).size(ts::TITLE).color(theme::fg())].spacing(14);
+    let title = text(title).size(ts::TITLE).color(theme::fg());
+    // A first open's ×, as Escape: the project is not opened.
+    let header: Element<'a, Message> = if mode == SetupMode::Open {
+        row![
+            title,
+            space().width(Fill),
+            super::chrome::close_button(Message::Project(ProjectMsg::ConsentDenied(
+                root.to_path_buf()
+            ))),
+        ]
+        .align_y(iced::Center)
+        .into()
+    } else {
+        title.into()
+    };
+    let mut body = column![header].spacing(14);
 
     if mode == SetupMode::Open {
         body = body.push(
@@ -151,10 +166,17 @@ pub(crate) fn setup_sheet<'a>(
             false,
         ),
     };
-    let decline_label = if mode == SetupMode::Open {
-        tr!("Not now")
+    // A first open's Not now opens the project, with nothing set up: an
+    // answer to the question as Open is, so pressed only once it can have
+    // been read. Not opening it at all is the ×, or Escape.
+    let (decline_label, decline, decline_gated) = if mode == SetupMode::Open {
+        (
+            tr!("Not now"),
+            Message::Project(ProjectMsg::OpenWithoutSetup(root.to_path_buf())),
+            true,
+        )
     } else {
-        tr!("Cancel")
+        (tr!("Cancel"), decline, false)
     };
     // Something to do: a first open always opens; Apply needs a tick that
     // does something; Explain, something left to explain.
@@ -173,13 +195,20 @@ pub(crate) fn setup_sheet<'a>(
         .style(theme::primary_button)
         .padding([6, 16])
         .on_press_maybe(ready.then_some(accept_msg));
+    let decline_ready = !decline_gated || asked.ready;
+    let decline_button = button(text(decline_label).size(ts::BASE))
+        .style(theme::toolbar_button)
+        .padding([6, 16])
+        .on_press_maybe(decline_ready.then_some(decline));
+    let decline_button: Element<'a, Message> = if decline_gated {
+        crate::ui::fresh::allow(decline_ready, decline_button)
+    } else {
+        decline_button.into()
+    };
     body = body.push(
         row![
             space().width(Fill),
-            button(text(decline_label).size(ts::BASE))
-                .style(theme::toolbar_button)
-                .padding([6, 16])
-                .on_press(decline),
+            decline_button,
             crate::ui::fresh::allow(ready, accept_button),
         ]
         .spacing(10)

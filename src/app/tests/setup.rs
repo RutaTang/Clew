@@ -16,9 +16,10 @@ fn builds_and_downloads() -> SetupServer {
 }
 
 /// An untrusted folder opens the sheet, not the project; its look at the
-/// project lands in it; Not now opens nothing and records nothing.
+/// project lands in it; closing it (its ×, or Escape) opens nothing and
+/// records nothing.
 #[test]
-fn a_first_open_asks_in_the_sheet_and_not_now_opens_nothing() {
+fn a_first_open_asks_in_the_sheet_and_closing_it_opens_nothing() {
     let data = test_dir("setup-data-deny");
     let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
@@ -52,6 +53,46 @@ fn a_first_open_asks_in_the_sheet_and_not_now_opens_nothing() {
     let trust = clew_core::trust::Trust::load();
     assert!(!trust.is_root_trusted(None, &root));
     assert!(!trust.is_build_trusted(None, &root, "rust-analyzer"));
+}
+
+/// Not now opens the project — and does nothing else the sheet offered,
+/// ticked or not: no leave to build, no downloads, no explaining. Each
+/// server asks as ever when a file of its language opens.
+#[test]
+fn not_now_opens_the_project_with_nothing_set_up() {
+    let data = test_dir("setup-data-not-now");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let root = fixture_project("setup-not-now");
+    let mut app = blank_app();
+    app.llm_available = true;
+    let _ = app.update(Message::Project(ProjectMsg::FolderPicked(Some(
+        root.clone(),
+    ))));
+    let _ = app.update(Message::Project(ProjectMsg::SetupCounted {
+        root: root.clone(),
+        census: Census {
+            servers: vec![builds_and_downloads()],
+            calls: Some(42),
+        },
+    }));
+    let _ = app.update(Message::Project(ProjectMsg::SetupExplain(true)));
+    let setup = app.setup.as_ref().unwrap();
+    assert!(setup.servers && setup.explain, "both ticked");
+    let _ = app.update(Message::Project(ProjectMsg::OpenWithoutSetup(root.clone())));
+    assert!(
+        app.setup.is_none() && app.pending_consent.is_none(),
+        "answered"
+    );
+    assert!(app.scanning, "the project opens");
+    let trust = clew_core::trust::Trust::load();
+    assert!(trust.is_root_trusted(None, &root), "not asked again");
+    assert!(!trust.is_build_trusted(None, &root, "rust-analyzer"));
+    assert!(
+        app.pending_setup.is_none(),
+        "nothing downloaded, nothing explained"
+    );
 }
 
 /// Open with the servers ticked: the leave to build is recorded at once —

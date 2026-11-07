@@ -256,6 +256,9 @@ pub enum ProjectMsg {
     /// Allow creating `.clew` in the folder the consent modal names (see
     /// `crate::app::model::Question`).
     ConsentAllowed(PathBuf),
+    /// The first open's Not now: the project opens, and nothing on the
+    /// setup sheet is done — each server asks as ever when it is needed.
+    OpenWithoutSetup(PathBuf),
     ConsentDenied(PathBuf),
     /// Show the setup sheet over the open project: what to set up, or
     /// Explain All asking first.
@@ -2123,6 +2126,7 @@ impl ProjectMsg {
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
+            | ProjectMsg::OpenWithoutSetup(..)
             | ProjectMsg::ConsentDenied(..)
             | ProjectMsg::SetupShow(..)
             | ProjectMsg::SetupCounted { .. }

@@ -2889,6 +2889,15 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
     ));
+    // A first open's Not now opens the project too, with nothing set up:
+    // an answer as Open is, pressed only once it can have been read.
+    let sim = sim_elem(open_sheet(&root, false));
+    assert!(click(sim, "Not now").is_empty());
+    let sim = sim_elem(open_sheet(&root, true));
+    assert!(matches!(
+        click(sim, "Not now").as_slice(),
+        [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
+    ));
     let pending = crate::PendingLspCommand {
         root: root.clone(),
         host: None,
@@ -4494,10 +4503,12 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
     use iced_test::selector::{Candidate, Selector};
     // `view`, its Allow counting or not, pressed and let go of on the
     // answers labelled `allow` and `decline`.
+    /// An answer's label, and what it sends.
+    type Answer<'s> = (&'s str, fn(&Message) -> bool);
     fn check<'a>(
         view: impl Fn(bool) -> Element<'a, Message>,
-        (allow, allows): (&str, fn(&Message) -> bool),
-        (decline, declines): (&str, fn(&Message) -> bool),
+        (allow, allows): Answer<'_>,
+        decline: Option<Answer<'_>>,
     ) {
         let mut renderer = renderer();
         let mut cache = Cache::default();
@@ -4547,9 +4558,11 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         let _ = frame(true, allow, &press);
         let sent = frame(true, allow, &release);
         assert!(sent.iter().any(allows), "{allow}: {sent:?}");
-        let _ = frame(false, decline, &press);
-        let sent = frame(true, decline, &release);
-        assert!(sent.iter().any(declines), "{decline}: {sent:?}");
+        if let Some((decline, declines)) = decline {
+            let _ = frame(false, decline, &press);
+            let sent = frame(true, decline, &release);
+            assert!(sent.iter().any(declines), "{decline}: {sent:?}");
+        }
     }
 
     let approval = Approval {
@@ -4576,10 +4589,10 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
             "Allow once",
             |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
         ),
-        (
+        Some((
             "Deny",
             |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "no"),
-        ),
+        )),
     );
     let consent = crate::LspConsent {
         language: "rust".into(),
@@ -4596,9 +4609,9 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ("Download", |m| {
             matches!(m, Message::Lsp(LspMsg::ConsentAllowed(7)))
         }),
-        ("Not now", |m| {
+        Some(("Not now", |m| {
             matches!(m, Message::Lsp(LspMsg::ConsentDismissed(7)))
-        }),
+        })),
     );
     let root = PathBuf::from("/nonexistent/clew-ui-allow");
     let pending = crate::PendingLspCommand {
@@ -4617,18 +4630,26 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ("Allow", |m| {
             matches!(m, Message::Lsp(LspMsg::CommandAllowed(8)))
         }),
-        ("Don't allow", |m| {
+        Some(("Don't allow", |m| {
             matches!(m, Message::Lsp(LspMsg::CommandDismissed(8)))
-        }),
+        })),
     );
+    // A first open's Open and Not now both open the project — Not now with
+    // nothing set up — so both are held until the sheet can have been
+    // read; not opening it is the ×, or Escape.
     check(
         |ready| open_sheet(&root, ready),
         ("Open", |m| {
             matches!(m, Message::Project(ProjectMsg::ConsentAllowed(_)))
         }),
+        None,
+    );
+    check(
+        |ready| open_sheet(&root, ready),
         ("Not now", |m| {
-            matches!(m, Message::Project(ProjectMsg::ConsentDenied(_)))
+            matches!(m, Message::Project(ProjectMsg::OpenWithoutSetup(_)))
         }),
+        None,
     );
     let target = port_2222_target();
     let key = scanned_key();
@@ -4637,18 +4658,18 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ("Trust and connect", |m| {
             matches!(m, Message::Connect(ConnectMsg::TrustHost { .. }))
         }),
-        ("Cancel", |m| {
+        Some(("Cancel", |m| {
             matches!(m, Message::Connect(ConnectMsg::TrustCancel))
-        }),
+        })),
     );
     check(
         |ready| super::connect::host_key_changed_prompt(&target, "changed", "host", ready),
         ("Forget the old key", |m| {
             matches!(m, Message::Connect(ConnectMsg::ForgetHostKey { .. }))
         }),
-        ("Cancel", |m| {
+        Some(("Cancel", |m| {
             matches!(m, Message::Connect(ConnectMsg::TrustCancel))
-        }),
+        })),
     );
 }
 
@@ -4696,9 +4717,10 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         keys_in(&super::lsp_command_modal(&pending, 8, 0, true)),
         [8, 1]
     );
+    // A first open's Not now opens the project too: held as Open is.
     assert_eq!(
         keys_in(&open_sheet(&root, true)),
-        [hash(&|h| root.hash(h)), 1]
+        [hash(&|h| root.hash(h)), 1, 1]
     );
     let target = port_2222_target();
     let key = scanned_key();
