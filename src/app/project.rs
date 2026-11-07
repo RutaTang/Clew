@@ -58,7 +58,7 @@ fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
     }
     if let Some(error) = &report.tracked_error {
         parts.push(tr!(
-            "git could not list the tracked files, so tracked files that .gitignore matches may be missing ({error})",
+            "git could not list the tracked files, so ignored files that git tracks may be missing ({error})",
             error = error
         ));
     }
@@ -863,7 +863,7 @@ impl App {
 
         if !problems.is_empty() {
             self.status = tr!(
-                "Could not read {problems}, so it was left as is — fix or remove the file to use it",
+                "Some saved state was left as is because it could not be read: {problems} — fix or remove the file to use it",
                 problems = problems.join("; ")
             );
         }

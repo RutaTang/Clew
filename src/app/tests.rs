@@ -16409,7 +16409,7 @@ async fn a_server_that_stops_answering_in_time_is_asked_no_more_in_the_pass() {
     assert_eq!(calls.unrefined.len(), 15, "{}", app.status);
     assert!(
         app.status.contains(&format!(
-            "the python server stopped answering ({} timeouts in a row) and was skipped",
+            "the Python server stopped answering ({} timeouts in a row) and was skipped",
             crate::app::tasks::REFINE_BREAKER_TIMEOUTS
         )),
         "{}",
@@ -29146,7 +29146,7 @@ fn a_history_still_loading_gives_way_only_to_a_request_it_would_undo() {
         assert_eq!(
             app.status,
             if gives_way {
-                "Stopped loading the history of notes.txt, as you moved on"
+                "Stopped loading the history of notes.txt, since you kept working here"
             } else {
                 "Loading history…"
             },
@@ -30324,7 +30324,9 @@ fn a_failed_state_read_is_reported_and_the_stored_trail_kept() {
         state: Handoff::new(crate::app::project::read_or_unread(panicked)),
     }));
     assert!(
-        app.status.contains("Could not read") && app.status.contains("boom"),
+        app.status
+            .starts_with("Some saved state was left as is because it could not be read: ")
+            && app.status.contains("boom"),
         "{}",
         app.status
     );

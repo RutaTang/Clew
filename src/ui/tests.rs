@@ -636,6 +636,12 @@ fn leaving_a_view_that_replaced_the_code_puts_the_reader_back() {
     let read_to = historical.expect("the historical view is on screen");
     assert!(read_to.y > 100.0 && read_to.x > 100.0, "{read_to:?}");
     app.proj.time_travel.as_mut().unwrap().story = Some(Vec::new());
+    // The story of a block with no name of its own says so, not quoted as
+    // if it were one.
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Story of this block"));
+    assert!(!shows(&mut sim, "“this block”"));
+    drop(sim);
     let (next, _, offset) = turn(
         &app,
         next,
@@ -5884,7 +5890,10 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         &root, &files, &structure,
     ));
     let mut sim = sim_elem(super::project_types_body(&app));
-    assert!(shows(&mut sim, "4 types · 4 relations · 1 inherit"));
+    assert!(shows(
+        &mut sim,
+        "4 types · 4 relations · 1 inheritance link"
+    ));
     assert!(shows(&mut sim, "MOST REFERENCED (USED BY THE MOST TYPES)"));
     assert!(shows(&mut sim, "Customer"));
     assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
@@ -5893,6 +5902,24 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
     assert!(shows(&mut sim, "MOST DEPENDENCIES (USES THE MOST TYPES)"));
     assert!(shows(&mut sim, "→ 2"), "Order names two");
     drop(sim);
+    // None inherits: the count says none — in French too, where nought takes
+    // the singular.
+    let structured = std::mem::replace(
+        &mut app.proj.type_graph,
+        std::sync::Arc::new(crate::typegraph::TypeGraph::build(
+            &root,
+            &files,
+            &Default::default(),
+        )),
+    );
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "· 0 inheritance links"));
+    drop(sim);
+    crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        let mut sim = sim_elem(super::project_types_body(&app));
+        assert!(shows(&mut sim, "· 0 lien d'héritage"));
+    });
+    app.proj.type_graph = structured;
     // A node of the type map opens its definition at its line.
     let layout = crate::graphlayout::layout(
         vec![crate::graphlayout::NodeInput {

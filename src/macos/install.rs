@@ -88,7 +88,7 @@ pub fn self_install_blocker() -> Option<String> {
     }
     if let Err(e) = signing_identity(&bundle) {
         return Some(tr!(
-            "this copy of Clew cannot update itself: its signature could not be checked ({error})",
+            "this copy of Clew cannot update itself ({error})",
             error = e
         ));
     }

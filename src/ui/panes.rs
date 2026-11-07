@@ -419,12 +419,14 @@ pub(crate) fn time_travel_story<'a>(
     tt: &'a TimeTravel,
     story: &'a [crate::PreparedSeg],
 ) -> Element<'a, Message> {
-    let name = tt.scope.symbol_name().unwrap_or(tr!("this block"));
+    // A name is quoted; the block that has none is not.
+    let title = match tt.scope.symbol_name() {
+        Some(name) => tr!("Story of “{name}”", name = name),
+        None => tr!("Story of this block").to_string(),
+    };
     let header = row![
         column![
-            text(tr!("Story of “{name}”", name = name))
-                .size(ts::BODY)
-                .color(theme::accent()),
+            text(title).size(ts::BODY).color(theme::accent()),
             // `git log -L` only follows the block's CURRENT lines, so earlier
             // rewrites may not be attributed — say so, so it's not read as a full
             // biography.

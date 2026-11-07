@@ -427,7 +427,7 @@ fn is_zig_source(program: &str) -> bool {
 fn zig_for(choices: &clew_protocol::LanguageChoices) -> Result<PathBuf, String> {
     match choices.zig.as_deref().filter(|z| !z.trim().is_empty()) {
         Some(chosen) => store::find_program(chosen)
-            .map_err(|why| format!("the Zig program you chose cannot be run: {why}")),
+            .map_err(|why| format!("the Zig toolchain you chose cannot be run: {why}")),
         None => store::find_on_path_unresolved("zig")
             .ok_or_else(|| "zig not found — install Zig to debug a .zig file".to_string()),
     }

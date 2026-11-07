@@ -35,7 +35,6 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("Node's inspector did not answer"),
     tr_noop!("Node's inspector did not answer: {e}"),
     tr_noop!("Node's inspector refused the connection: {arg1}"),
-    tr_noop!("Node.js exited before its debugger connected — see its output"),
     tr_noop!("Node.js exited before its debugger started listening: {said}"),
     tr_noop!("Not interpreted (no breakpoints there): {arg1}\n"),
     tr_noop!(
@@ -202,7 +201,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("git changes unavailable: {e}"),
     tr_noop!("git could not be started: {e}"),
     tr_noop!(
-        "git could not list the tracked files, so tracked files that .gitignore matches may be missing ({e})"
+        "git could not list the tracked files, so ignored files that git tracks may be missing ({e})"
     ),
     tr_noop!("git did not finish within {arg1}s and was stopped"),
     tr_noop!("git exited with status {code}"),
@@ -362,6 +361,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("stream read: {e}"),
     tr_noop!("tar extract failed: {e}"),
     tr_noop!("the Dart SDK you chose cannot be run: {why}"),
+    tr_noop!("the Erlang node exited before its debugger connected — see its output"),
     tr_noop!("the JVM did not answer in time"),
     tr_noop!("the JVM did not say where its debugger listens"),
     tr_noop!("the JVM exited before its debugger started listening"),
@@ -374,7 +374,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the SOCKS proxy {arg1} {why}"),
     tr_noop!("the SOCKS proxy {name} broke off its handshake: {e}"),
     tr_noop!("the SOCKS proxy {name} closed the connection in its handshake"),
-    tr_noop!("the Zig program you chose cannot be run: {why}"),
+    tr_noop!("the Zig toolchain you chose cannot be run: {why}"),
     tr_noop!("the `{name}` tool failed on these arguments — try different ones, or another tool"),
     tr_noop!("the agent did not answer in time"),
     tr_noop!("the agent needs you to sign in: {how}"),

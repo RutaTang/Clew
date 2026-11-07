@@ -99,8 +99,8 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
             continue;
         };
         // Equally well said, the title that says no more than was said wins:
-        // "find" is "Find…", not "Sidebar: Find"; "view docs" is "View
-        // Docs", not "Sidebar: Docs"; "ask" is "Ask", not "Add to Ask".
+        // "view docs" is "View Docs", not "Sidebar: Docs"; "ask" is "Ask",
+        // not "Add to Ask".
         let own = words(text);
         // Its own verbs, not the small words between them: "go to ask" is
         // Ask, "add to ask" Add to Ask.

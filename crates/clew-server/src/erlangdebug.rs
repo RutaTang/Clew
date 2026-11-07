@@ -308,7 +308,7 @@ impl Adapter {
                 Err(_) => return Err(format!("the node did not connect within {} s", CONNECT_TIMEOUT.as_secs())),
             },
             _ = exited.wait_for(Option::is_some) => {
-                return Err("Node.js exited before its debugger connected — see its output".into());
+                return Err("the Erlang node exited before its debugger connected — see its output".into());
             }
         };
         let bridge = Bridge::start(
@@ -882,6 +882,53 @@ impl Bridge {
 mod tests {
     use super::*;
     use crate::dapout::testing::Client;
+
+    /// A node that exits before its debugger connects — the program's
+    /// entry crashed, say — is said to be the Erlang node, with its output
+    /// to read: not some other runtime.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_node_that_ends_at_once_is_said_to_be_erlangs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = clew_core::testutil::TempDir::new("erlang-node-ends");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let program = dir.join("src/app.erl");
+        std::fs::write(&program, "-module(app).\n").unwrap();
+        // erlc that "compiles" each source into an empty .beam; erl that
+        // ends at once.
+        let erlc = dir.join("erlc");
+        std::fs::write(
+            &erlc,
+            "#!/bin/sh\nout=\nwhile [ $# -gt 0 ]; do case \"$1\" in -o) out=\"$2\"; shift 2;; -I) shift 2;; +*) shift;; *) : > \"$out/$(basename \"$1\" .erl).beam\"; shift;; esac; done\n",
+        )
+        .unwrap();
+        let erl = dir.join("erl");
+        std::fs::write(&erl, "#!/bin/sh\nexit 1\n").unwrap();
+        for tool in [&erlc, &erl] {
+            std::fs::set_permissions(tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let (mut client, input, output) = Client::pipes();
+        let running = tokio::spawn(serve(erl, erlc, input, output));
+        client
+            .request("initialize", json!({ "adapterID": "clew" }))
+            .await;
+        let launch = client
+            .send(
+                "launch",
+                json!({ "program": program.to_string_lossy(), "cwd": dir.to_string_lossy() }),
+            )
+            .await;
+        let answer = client.answer(launch).await;
+        assert_eq!(answer["success"], false, "{answer}");
+        let said = answer.to_string();
+        assert!(
+            said.contains("the Erlang node exited before its debugger connected"),
+            "{said}"
+        );
+        assert!(!said.contains("Node.js"), "{said}");
+        drop(client);
+        let _ = running.await;
+    }
 
     /// Commands are Erlang terms: names quoted as atoms, text as strings on
     /// one line, whatever they hold; frames carry their process.

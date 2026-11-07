@@ -753,7 +753,7 @@ const SIDEBAR_GAP: f32 = 12.0;
 
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
-pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked despite .gitignore");
+pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked, though ignored");
 
 pub(crate) fn append_tree_rows<'a>(
     rows: &mut Vec<Element<'a, Message>>,

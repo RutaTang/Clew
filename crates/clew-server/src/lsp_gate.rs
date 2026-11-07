@@ -149,7 +149,8 @@ pub(crate) fn build_refusal(
 ) -> String {
     format!(
         "{} has not been allowed to build this project (it runs {runs}) — open a {} file in Clew to allow it",
-        server.server_name, server.language
+        server.server_name,
+        shown(&server.language)
     )
 }
 
@@ -885,6 +886,7 @@ mod tests {
             resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
+        assert!(message.contains("open a Rust file in Clew"), "{message}");
         approvals.lock().unwrap().insert(
             clew_core::trust::build_key("rust-analyzer"),
             clew_core::trust::build_fingerprint("rust-analyzer"),
@@ -940,6 +942,7 @@ mod tests {
             resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
+        assert!(message.contains("open a Rust file in Clew"), "{message}");
         // The leave as the client pushes it…
         let (key, leave) = (
             clew_core::trust::build_key("rust-analyzer"),

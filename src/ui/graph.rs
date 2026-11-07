@@ -2211,7 +2211,11 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
             "{} · {} · {}",
             trn!("1 type", "{n} types", g.node_count()),
             trn!("1 relation", "{n} relations", g.edge_count()),
-            trn!("1 inheritance link", "{n} inherit", g.inherits_count()),
+            trn!(
+                "{n} inheritance link",
+                "{n} inheritance links",
+                g.inherits_count()
+            ),
         ))
         .size(ts::BODY)
         .color(theme::accent())

@@ -2476,7 +2476,8 @@ impl App {
         let mut refined = tr!("Call graph refined with LSP").to_string();
         if !unanswering.is_empty() {
             let count = unanswering.len();
-            let names = unanswering.into_iter().collect::<Vec<_>>().join(", ");
+            let names =
+                crate::app::languages::language_names(&unanswering.into_iter().collect::<Vec<_>>());
             refined.push_str(" — ");
             refined.push_str(&trn!(
                 "the {names} server stopped answering ({limit} timeouts in a row) and was skipped",
@@ -2561,7 +2562,7 @@ impl App {
                 languages = crate::app::languages::language_names(loading)
             )),
             (starting, loading) => Some(tr!(
-                "for servers to start ({starting}) or finish loading the project ({loading}) before refining the files that changed",
+                "for servers to start ({starting}) and to finish loading the project ({loading}) before refining the files that changed",
                 starting = crate::app::languages::language_names(starting),
                 loading = crate::app::languages::language_names(loading)
             )),

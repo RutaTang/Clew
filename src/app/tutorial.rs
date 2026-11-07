@@ -188,8 +188,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         ),
         // -- The margin beside the code, then the outline --------------------
         TutStep::new(
-            tr!("Explanations beside the code"),
-            tr!("Clew's explanation of each function sits beside it. Explain All fills them in."),
+            tr!("Notes beside the code"),
+            tr!("Clew's note on each function sits beside it. Explain All fills them in."),
             Anchor::RightTop,
         ),
         TutStep::new(
