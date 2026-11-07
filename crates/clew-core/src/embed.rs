@@ -79,7 +79,7 @@ pub struct Config {
 /// as a move to another space and throw away a usable index (see [`Space`]).
 fn model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
     if made_here(emb) {
-        return (local::MODEL.id.to_string(), local::BASE_URL.to_string());
+        return (local::MODEL.key(), local::BASE_URL.to_string());
     }
     service_model_and_base_url(emb)
 }
@@ -126,7 +126,7 @@ fn service_model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
 /// name stamped on an index has to be the model that made it.
 fn local_model_or(model: String, base_url: &str) -> String {
     if base_url == local::BASE_URL {
-        local::MODEL.id.to_string()
+        local::MODEL.key()
     } else {
         model
     }
@@ -178,7 +178,7 @@ impl Config {
     pub fn local() -> Config {
         Config {
             api_key: String::new(),
-            model: local::MODEL.id.to_string(),
+            model: local::MODEL.key(),
             base_url: local::BASE_URL.to_string(),
         }
     }

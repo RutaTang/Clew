@@ -219,6 +219,12 @@ pub(crate) struct ModelDownload {
     pub done: u64,
     pub total: Option<u64>,
     pub(crate) cancel: Arc<AtomicBool>,
+    /// The model's files, claimed for as long as the download is wanted:
+    /// let go when it is cancelled, not when its transfer has wound down —
+    /// a Download straight after a Cancel was refused as "downloading in
+    /// another window". The transfer still stopping writes a partial file
+    /// of its own, and puts nothing in place once cancelled.
+    pub(crate) _claim: Claim,
     /// Aborts the transfer when dropped — when the window closes with it
     /// running.
     pub(crate) _task: iced::task::Handle,
@@ -1326,8 +1332,6 @@ impl App {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
                 let worker_cancel = cancel.clone();
                 tokio::task::spawn_blocking(move || {
-                    // Held until this transfer is over, whatever ends it.
-                    let _claim = claim;
                     let result = (|| {
                         let mut install = store
                             .begin(model)
@@ -1350,6 +1354,11 @@ impl App {
                             &mut install,
                             &mut progress,
                         ) {
+                            // Cancelled as it ended: not put in place — the
+                            // model may be being removed by now.
+                            Ok(_) if worker_cancel.load(Ordering::Relaxed) => {
+                                Err(clew_core::llm::CANCELLED.to_string())
+                            }
                             Ok(_) => install.finish(),
                             Err(e) => Err(download_failure(&e, install.written(), model)),
                         }
@@ -1371,6 +1380,7 @@ impl App {
                 done: 0,
                 total: None,
                 cancel,
+                _claim: claim,
                 _task: handle.abort_on_drop(),
             },
         );

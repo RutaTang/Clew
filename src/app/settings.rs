@@ -172,7 +172,22 @@ impl App {
                 if !embed::Config::stored_here() {
                     embed::local::let_go();
                 }
-                let dropped = space_changed && !self.proj.embed_index.entries.is_empty();
+                // A build embedding in the space just left stops now: every
+                // batch still to come would be paid for (or made on this
+                // computer) and then thrown away — its vectors are of a
+                // space this window no longer searches in. One whose vectors
+                // are all made, being merged into its own space's file, is
+                // let finish: what it paid for is kept there, and a build
+                // asked for meanwhile waits for it, as any does.
+                let stopped = space_changed
+                    && self.proj.building_embeddings
+                    && self.proj.inflight.embed_build.is_some();
+                if stopped {
+                    self.proj.inflight.embed_build = None;
+                    self.proj.building_embeddings = false;
+                    self.proj.embed_build_pending = false;
+                }
+                let dropped = stopped || space_changed && !self.proj.embed_index.entries.is_empty();
                 if space_changed {
                     self.retire_semantic_search();
                     self.proj.semantic_results.clear();

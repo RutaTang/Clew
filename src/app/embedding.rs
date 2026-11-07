@@ -13,11 +13,14 @@ use crate::app::prelude::*;
 use crate::app::voice::{Claim, ClaimedFor, ModelDownload, StopOnDrop};
 use crate::*;
 
-/// EmbeddingGemma's download, while it runs, and why the last one failed.
+/// EmbeddingGemma's download, while it runs, and why the last one failed;
+/// and whether the program that runs it is here, as last looked for
+/// (`App::refresh_embeddings`), not as the window is drawn.
 #[derive(Default)]
 pub(crate) struct LocalEmbedding {
     pub(crate) download: Option<ModelDownload>,
     pub(crate) error: Option<String>,
+    pub(crate) program: bool,
 }
 
 /// What a download of `file` must turn out to be.
@@ -74,6 +77,7 @@ impl App {
     pub(crate) fn refresh_embeddings(&mut self) {
         self.embed_available = embed::Config::available();
         self.embed_missing = why_no_embeddings();
+        self.local_embedding.program = local::program().is_some();
     }
 
     /// The embedding settings and every window's use of them, after the
@@ -117,7 +121,6 @@ impl App {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
                 let worker_cancel = cancel.clone();
                 tokio::task::spawn_blocking(move || {
-                    let _claim = claim;
                     let total = MODEL.bytes();
                     let result = (|| {
                         let mut before = present;
@@ -145,6 +148,11 @@ impl App {
                                 &mut install,
                                 &mut progress,
                             ) {
+                                // Cancelled as it ended: not put in place —
+                                // the model may be being removed by now.
+                                Ok(_) if worker_cancel.load(Ordering::Relaxed) => {
+                                    return Err(clew_core::llm::CANCELLED.into());
+                                }
                                 Ok(_) => {
                                     install.finish()?;
                                 }
@@ -176,6 +184,7 @@ impl App {
             done: present,
             total: Some(MODEL.bytes()),
             cancel,
+            _claim: claim,
             _task: handle.abort_on_drop(),
         });
         self.status = tr!(

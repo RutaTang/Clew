@@ -166,6 +166,11 @@ impl App {
         &mut self,
         result: Result<embed::Index, EmbedBuildFailed>,
     ) -> Task<Message> {
+        // A build stopped (another source chosen) whose answer was already
+        // on its way: nothing of it is wanted.
+        if !self.proj.building_embeddings {
+            return Task::none();
+        }
         // The build's task is over: nothing left to abort.
         self.proj.inflight.embed_build = None;
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {

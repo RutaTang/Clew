@@ -2489,7 +2489,7 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         state,
     )];
     // Here, but nothing to run it with.
-    let unrunnable = app.embed_model_installed() && clew_core::embed::local::program().is_none();
+    let unrunnable = app.embed_model_installed() && !app.local_embedding.program;
     if let Some(e) = app
         .local_embedding
         .error

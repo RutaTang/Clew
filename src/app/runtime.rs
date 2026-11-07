@@ -104,7 +104,10 @@ impl App {
             ask_sessions_menu: false,
             ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
-            local_embedding: Default::default(),
+            local_embedding: crate::app::embedding::LocalEmbedding {
+                program: clew_core::embed::local::program().is_some(),
+                ..Default::default()
+            },
             debug: DebugState::default(),
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
@@ -535,6 +538,11 @@ impl App {
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.
                     self.invalidate_llm_config();
+                    // Or downloaded or removed the embedding model, or chosen
+                    // another source: what can be made follows, and the
+                    // server is told what is in effect now.
+                    self.refresh_embeddings();
+                    self.send_ai_config();
                     // A compositing manager may have come or gone meanwhile
                     // (a desktop's switch for games, say).
                     return self.ask_composited();

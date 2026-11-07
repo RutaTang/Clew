@@ -324,8 +324,12 @@ impl App {
         let grounded = self.debug_context().is_some() || !self.proj.ask_pins.is_empty();
         if !has_index && !grounded {
             // Be specific when a pass is already building the index, so a
-            // question asked mid-"Explain All" doesn't read as a silent no-op.
-            self.status = if self.proj.explain.running || self.proj.building_embeddings {
+            // question asked mid-"Explain All" doesn't read as a silent no-op
+            // — and when no embeddings can be made, say what is missing, not
+            // to build an index that may well be there.
+            self.status = if ecfg.is_none() {
+                crate::app::embedding::why_no_embeddings()
+            } else if self.proj.explain.running || self.proj.building_embeddings {
                 tr!("Building the semantic index — ask again when it's ready").into()
             } else {
                 tr!("Build the semantic index first (Find by meaning → Build index)").into()

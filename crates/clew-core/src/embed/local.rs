@@ -91,6 +91,14 @@ impl LocalModel {
         (self.bytes() / 1_000_000) as u32
     }
 
+    /// What the model is called where it matters that it is this one: its
+    /// folder, and the space its vectors are stamped with — its pinned
+    /// revision in it, so another revision is another model, its vectors
+    /// never ranked against these and its files never read for them.
+    pub fn key(&self) -> String {
+        format!("{}-{}", self.id, &self.revision[..12])
+    }
+
     /// Where `file` is published, at the pinned revision.
     pub fn url(&self, file: &ModelFile) -> String {
         format!(
@@ -100,9 +108,14 @@ impl LocalModel {
     }
 }
 
-/// Where the model is kept: `<data directory>/embed/<id>`.
+/// Where the models made here are kept: `<data directory>/embed`.
+fn root() -> Option<PathBuf> {
+    crate::lsp::store::data_root().map(|root| root.join("embed"))
+}
+
+/// Where the model is kept: `<data directory>/embed/<key>`.
 pub fn dir() -> Option<PathBuf> {
-    crate::lsp::store::data_root().map(|root| root.join("embed").join(MODEL.id))
+    root().map(|root| root.join(MODEL.key()))
 }
 
 /// Whether every file of the model is in `dir`. Only a verified download
@@ -161,7 +174,7 @@ pub fn prompted(purpose: Purpose, text: &str) -> String {
 }
 
 /// How long the model may take to load: a cold disk, a slow computer.
-const READY_TIMEOUT: Duration = Duration::from_secs(120);
+pub const READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How long one batch may take before the model is taken for stuck.
 const BATCH_TIMEOUT: Duration = Duration::from_secs(300);
@@ -635,16 +648,44 @@ pub fn let_go() -> bool {
 }
 
 /// Remove the model's files, and whatever a download of it left — the
-/// model let go of first.
+/// model let go of first. Another revision's are another Clew's (an older
+/// one, still installed, may share this data folder), and are left.
 pub fn remove() -> std::io::Result<()> {
     unload();
     let Some(dir) = dir() else {
         return Ok(());
     };
-    match std::fs::remove_dir_all(dir) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+    // Another program may be reading the files in (the server loading its
+    // own copy), and Windows does not delete a file while it is open: a
+    // load reads them in and lets go within moments, so it is tried again.
+    retrying(
+        5,
+        Duration::from_millis(400),
+        || match std::fs::remove_dir_all(&dir) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        },
+    )
+}
+
+/// `attempt` until it succeeds, `tries` times at most, `pause` apart; its
+/// last answer.
+fn retrying(
+    tries: usize,
+    pause: Duration,
+    mut attempt: impl FnMut() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let mut last = Ok(());
+    for i in 0..tries {
+        last = attempt();
+        if last.is_ok() {
+            break;
+        }
+        if i + 1 < tries {
+            std::thread::sleep(pause);
+        }
     }
+    last
 }
 
 #[cfg(test)]
@@ -671,6 +712,55 @@ mod tests {
             assert!(MODEL.url(file).starts_with("https://huggingface.co/"));
         }
         assert_eq!(MODEL.size_mb(), 217);
+    }
+
+    /// The model's name where it matters carries its pinned revision: its
+    /// folder, and the space its vectors are stamped with.
+    #[test]
+    fn another_revision_is_another_model() {
+        assert!(MODEL.key().starts_with(MODEL.id));
+        assert!(MODEL.key().ends_with(&MODEL.revision[..12]));
+        let data = crate::testutil::DataDir::new("embed-key");
+        assert!(dir().unwrap().ends_with(MODEL.key()));
+        assert_eq!(crate::embed::Config::local().space().model, MODEL.key());
+        // Removing the model removes this revision's files; another
+        // revision's are another Clew's, sharing the data folder.
+        let other = data
+            .join("embed")
+            .join(format!("{}-000000000000", MODEL.id));
+        std::fs::create_dir_all(other.join("onnx")).unwrap();
+        std::fs::write(other.join("onnx/model_q4.onnx"), b"x").unwrap();
+        std::fs::create_dir_all(dir().unwrap().join("onnx")).unwrap();
+        remove().unwrap();
+        assert!(!dir().unwrap().exists());
+        assert!(
+            other.join("onnx/model_q4.onnx").exists(),
+            "another Clew's model"
+        );
+    }
+
+    /// An attempt is made again, a few times, until it succeeds — and its
+    /// last failure is said when it never does.
+    #[test]
+    fn a_removal_is_tried_again() {
+        let mut calls = 0;
+        let answer = retrying(5, Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::other("in use"))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(answer.is_ok());
+        assert_eq!(calls, 3);
+        let mut calls = 0;
+        let answer = retrying(4, Duration::ZERO, || {
+            calls += 1;
+            Err(std::io::Error::other("in use"))
+        });
+        assert_eq!(answer.unwrap_err().to_string(), "in use");
+        assert_eq!(calls, 4);
     }
 
     /// Each text is read with the prompt for what it is for.

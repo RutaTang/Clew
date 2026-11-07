@@ -71,7 +71,7 @@ fn choosing_this_computer_keeps_the_service_as_it_was() {
     let now = embed::Config::current_or_default();
     assert!(now.is_local());
     assert_eq!(now.space(), embed::stored_space());
-    assert_eq!(embed::stored_space().model, MODEL.id);
+    assert_eq!(embed::stored_space().model, MODEL.key());
     // Not downloaded: nothing to make vectors with yet.
     assert!(!app.embed_available);
     // Opened again: the choice, and the service's fields under it.
@@ -425,4 +425,233 @@ fn going_back_to_the_service_finds_its_index() {
         .collect();
     assert_eq!(vecs, [vec![1.0, 0.0]], "{}", app.status);
     assert_eq!(app.proj.embed_index.space(), service.space());
+}
+
+/// A build running when another source is chosen stops at once, at the
+/// endpoint — every batch still to come would be paid for and thrown away,
+/// its vectors of the space left — not left running to its end.
+#[test]
+fn choosing_another_source_stops_the_build_running() {
+    use std::time::{Duration, Instant};
+    let (base, arrived, closed) = clew_core::testutil::silent_http_endpoint();
+    let _env = embeddings_at("embed-build-switch-data", &base);
+    let mut app = scanned_app("embed-build-switch");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.explain.cache.insert(
+        explain::Node::File(root.join("src/lib.rs")),
+        explain::Cached {
+            summary: "Defines a point and its origin.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let build = app.update(Message::Semantic(SemanticMsg::BuildIndex));
+    assert!(app.proj.building_embeddings, "{}", app.status);
+    let running = std::thread::spawn(move || run_task(build));
+    arrived
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the build never reached the endpoint");
+    let switched_at = Instant::now();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(true)));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(!app.proj.building_embeddings);
+    assert!(app.status.contains("cleared"), "{}", app.status);
+    let (gone, at) = closed
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the build kept its connection");
+    assert!(gone);
+    assert!(
+        at.saturating_duration_since(switched_at) < Duration::from_secs(2),
+        "the connection closed {:?} after the switch",
+        at.saturating_duration_since(switched_at)
+    );
+    assert!(
+        running.join().expect("the build's task").is_empty(),
+        "the stopped build still delivered a result"
+    );
+    // Its answer, had it been on its way already, is nobody's.
+    let late = app.update(Message::Semantic(SemanticMsg::IndexBuilt {
+        stamp: app.stamp(),
+        result: Ok(embed::Index {
+            model: "m".into(),
+            base_url: base.clone(),
+            entries: vec![embed::Entry {
+                node: explain::Node::File(root.join("src/lib.rs")),
+                hash: 1,
+                vec: vec![1.0, 0.0],
+            }],
+        }),
+    }));
+    assert!(run_task(late).is_empty(), "merged, though stopped");
+    assert!(app.proj.embed_index.entries.is_empty());
+    assert!(!app.proj.building_embeddings);
+}
+
+/// A build whose vectors are all made, being merged into its own space's
+/// file, is let finish when another source is chosen — what it paid for is
+/// kept there — and a build asked for meanwhile waits for it, as any does.
+#[test]
+fn a_build_being_merged_is_let_finish_when_the_source_changes() {
+    let _env = embeddings_at("embed-merge-switch-data", "http://127.0.0.1:1/v1");
+    let mut app = scanned_app("embed-merge-switch");
+    // Its vectors made: no task left to stop, the merge on its way.
+    app.proj.building_embeddings = true;
+    assert!(app.proj.inflight.embed_build.is_none());
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(
+        SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(true)));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(app.proj.building_embeddings, "a merge is not stopped");
+    let _ = app.update(Message::Semantic(SemanticMsg::BuildIndex));
+    assert!(app.proj.embed_build_pending, "a build waits for the merge");
+    let landed = app.update(Message::Semantic(SemanticMsg::IndexMerged {
+        stamp: app.stamp(),
+        index: Handoff::new(embed::Index::default()),
+        saved: Ok(()),
+    }));
+    assert!(!app.proj.building_embeddings);
+    assert!(
+        run_task(landed)
+            .iter()
+            .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex))),
+        "the waiting build goes once the merge lands"
+    );
+}
+
+/// Another window chose another source: this one tells its server when it
+/// comes to the front, so the server's agent does not go on making vectors
+/// with the one left — paying a service, or holding a model.
+#[test]
+fn the_server_hears_of_another_windows_source_on_focus() {
+    let _env = embeddings_at("embed-focus-server-data", "http://emb-a.test/v1");
+    let mut app = scanned_app("embed-focus-server");
+    let mut rx = attach_server(&mut app);
+    embed::Config::from_parts("sk".into(), "m".into(), "http://emb-b.test/v1".into())
+        .save()
+        .unwrap();
+    while rx.try_recv().is_ok() {}
+    let _ = app.update(Message::Window(WindowMsg::FocusChanged(true)));
+    let told = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|m| match m.request {
+        clew_protocol::Request::SetAiConfig { embed, .. } => Some(embed),
+        _ => None,
+    });
+    let told = told.expect("the server was not told");
+    assert_eq!(
+        told.map(|e| e.base_url).as_deref(),
+        Some("http://emb-b.test/v1")
+    );
+}
+
+/// Asked with no way to make embeddings — the model not here — Ask says
+/// what is missing, not to build an index it may well have.
+#[cfg(unix)]
+#[test]
+fn ask_says_what_is_missing_to_make_embeddings() {
+    let (_dir, _env) = data("embed-ask");
+    let _path = path_with(None);
+    embed::Config::local().save().unwrap();
+    let mut app = blank_app();
+    app.proj.embed_index = embed::Index {
+        model: MODEL.key(),
+        base_url: local::BASE_URL.into(),
+        entries: vec![embed::Entry {
+            node: clew_core::explain::Node::File("cart.py".into()),
+            hash: 1,
+            vec: vec![1.0, 0.0],
+        }],
+    };
+    let _ = app.on_ask_submit_rag("where is the total?".into(), false);
+    assert_eq!(
+        app.status,
+        format!("Download {} in Settings → Embeddings", MODEL.name)
+    );
+}
+
+/// The model downloaded in another window: this one sees it when it comes
+/// to the front — embeddings can be made, and none are said to be missing.
+#[cfg(unix)]
+#[test]
+fn a_model_another_window_downloaded_is_seen_on_focus() {
+    let (dir, _env) = data("embed-focus");
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    clew_core::testutil::fake_embedder(&bin.join("clew-speak"), "vectors");
+    let _path = path_with(Some(&bin));
+    embed::Config::local().save().unwrap();
+    let mut app = blank_app();
+    app.refresh_embeddings();
+    assert!(!app.embed_available);
+    install_all(&local::dir().unwrap());
+    let _ = app.update(Message::Window(WindowMsg::FocusChanged(true)));
+    assert!(app.embed_available, "{}", app.embed_missing);
+}
+
+/// Cancelled, a download can be asked for again at once — not refused as
+/// "already downloading in another window" while the cancelled transfer
+/// winds down. So for every model downloaded here.
+#[test]
+fn a_cancelled_download_can_be_asked_for_again_at_once() {
+    let (dir, _env) = data("embed-again");
+    let mut app = blank_app();
+    app.voice.store = Some(clew_voice::models::Store::new(dir.join("voice")));
+    app.voice.fetch = junk_fetch;
+    // Each first transfer is started and not yet run: what it holds, it
+    // holds still, as one winding down does.
+    let first = app.update(Message::Settings(SettingsMsg::DownloadEmbedModel));
+    let _ = app.update(Message::Settings(SettingsMsg::CancelEmbedDownload));
+    let again = app.update(Message::Settings(SettingsMsg::DownloadEmbedModel));
+    assert!(app.local_embedding.download.is_some(), "{}", app.status);
+    let _ = app.update(Message::Settings(SettingsMsg::CancelEmbedDownload));
+    drop((first, again));
+
+    let id = clew_voice::models::MODELS[0].id;
+    let first = app.update(Message::Voice(VoiceMsg::Download(id)));
+    let _ = app.update(Message::Voice(VoiceMsg::CancelDownload(id)));
+    let again = app.update(Message::Voice(VoiceMsg::Download(id)));
+    assert!(app.voice.downloads.contains_key(id), "{}", app.status);
+    let _ = app.update(Message::Voice(VoiceMsg::CancelDownload(id)));
+    drop((first, again));
+
+    let id = clew_voice::speech::VOICE_MODELS[0].id;
+    let first = app.update(Message::Voice(VoiceMsg::DownloadSpeech(id)));
+    let _ = app.update(Message::Voice(VoiceMsg::CancelSpeechDownload(id)));
+    let again = app.update(Message::Voice(VoiceMsg::DownloadSpeech(id)));
+    assert!(
+        app.voice.speech.downloads.contains_key(id),
+        "{}",
+        app.status
+    );
+    let _ = app.update(Message::Voice(VoiceMsg::CancelSpeechDownload(id)));
+    drop((first, again));
+}
+
+/// A transfer cancelled as it ended is not put in place — the model may be
+/// being removed by then — so it is never checked or renamed in.
+#[test]
+fn a_transfer_cancelled_as_it_ended_is_not_put_in_place() {
+    fn cancels_as_it_ends(
+        _url: &str,
+        _max_bytes: u64,
+        cancel: &AtomicBool,
+        sink: &mut dyn std::io::Write,
+        _progress: &mut dyn FnMut(u64, Option<u64>),
+    ) -> Result<u64, String> {
+        sink.write_all(b"not the file").map_err(|e| e.to_string())?;
+        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        Ok(12)
+    }
+    let (_data, _env) = data("embed-cancel-ends");
+    let mut app = blank_app();
+    app.voice.fetch = cancels_as_it_ends;
+    let task = app.update(Message::Settings(SettingsMsg::DownloadEmbedModel));
+    settle(&mut app, task);
+    let error = app.local_embedding.error.clone().unwrap_or_default();
+    assert!(!error.contains("as published"), "it was checked: {error}");
+    let dir = local::dir().unwrap();
+    assert!(!MODEL.files.iter().any(|f| dir.join(f.path).exists()));
 }

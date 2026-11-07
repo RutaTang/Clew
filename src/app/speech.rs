@@ -932,7 +932,6 @@ impl App {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
                 let worker_cancel = cancel.clone();
                 tokio::task::spawn_blocking(move || {
-                    let _claim = claim;
                     let total = model.bytes();
                     let result = (|| {
                         let mut before = present;
@@ -959,6 +958,11 @@ impl App {
                                 &mut install,
                                 &mut progress,
                             ) {
+                                // Cancelled as it ended: not put in place —
+                                // the model may be being removed by now.
+                                Ok(_) if worker_cancel.load(Ordering::Relaxed) => {
+                                    return Err(clew_core::llm::CANCELLED.into());
+                                }
                                 Ok(_) => {
                                     install.finish()?;
                                 }
@@ -991,6 +995,7 @@ impl App {
                 done: present,
                 total: Some(model.bytes()),
                 cancel,
+                _claim: claim,
                 _task: handle.abort_on_drop(),
             },
         );

@@ -13249,6 +13249,8 @@ fn stop_aborts_a_local_provider_stream_and_closes_its_turn() {
 /// so it vanished, and the status blamed the missing index alone.
 #[test]
 fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
+    // A service set up, and no index built with it yet.
+    let _env = embeddings_at("ask-agent-fallback-data", "http://127.0.0.1:1/v1");
     let mut app = scanned_app("ask-agent-fallback");
     let stream = app.mint_request_id();
     app.proj.ask_turns.push(AskTurn {

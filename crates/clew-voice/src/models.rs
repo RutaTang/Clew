@@ -167,11 +167,27 @@ pub struct Store {
 /// half-written bytes. `<name>.part` is what earlier versions wrote.
 const PART: &str = ".part";
 
-/// A partial file not written to for this long is a download that ended
-/// without cleaning up after itself — its program was killed — and the
-/// next download of the model removes it. One still downloading writes far
-/// more often: each read of its transfer gives up long before this.
+/// A download holds its partial file locked for as long as it writes it,
+/// and the lock goes with its program: a partial file nobody holds is one
+/// whose download ended without cleaning up after itself — its program was
+/// killed — and the next download of the model removes it at once. Where
+/// files cannot be locked (some network shares), a partial file is told
+/// abandoned by not having been written to for this long instead; one
+/// still downloading writes far more often, each read of its transfer
+/// giving up long before this.
 const ABANDONED: Duration = Duration::from_secs(60 * 60);
+
+/// Whether the partial file at `path` is being written by a download:
+/// `Some(true)` while one holds it, `Some(false)` when none does, `None`
+/// when that cannot be told here.
+fn held(path: &Path) -> Option<bool> {
+    let file = File::open(path).ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(false),
+        Err(std::fs::TryLockError::WouldBlock) => Some(true),
+        Err(std::fs::TryLockError::Error(_)) => None,
+    }
+}
 
 /// The partial files of downloads of `name` in `dir`: this version's, with
 /// how long since each was written to, and an earlier version's (`None`).
@@ -321,7 +337,14 @@ impl Install {
         let name = name.to_string_lossy();
         // What downloads that were killed left, and an earlier version's.
         for (path, quiet) in parts_of(dir, &name) {
-            if quiet.is_none_or(|quiet| quiet >= ABANDONED) {
+            let abandoned = match quiet {
+                None => true,
+                Some(quiet) => match held(&path) {
+                    Some(held) => !held,
+                    None => quiet >= ABANDONED,
+                },
+            };
+            if abandoned {
                 let _ = fs::remove_file(path);
             }
         }
@@ -340,6 +363,9 @@ impl Install {
             .write(true)
             .create_new(true)
             .open(&part)?;
+        // Held while it is written ([`held`]); where it cannot be, its age
+        // tells instead.
+        let _ = file.try_lock();
         Ok(Install {
             hasher: Hasher::of(&expected.checksum),
             expected,
@@ -358,11 +384,14 @@ impl Install {
     /// Check what was written against the model's checksum and, if it is
     /// the model, put it in place. Returns where it is.
     pub fn finish(mut self) -> Result<PathBuf, String> {
+        // Held until it is in place — let go before, another download
+        // would take it for one whose program was killed, and remove it —
+        // and closed after (it goes before the partial file is removed, on
+        // the way out of a download that fails).
         let mut file = self.file.take().ok_or("the download was already closed")?;
         file.flush()
             .and_then(|()| file.sync_all())
             .map_err(|e| format!("could not save the model: {e}"))?;
-        drop(file);
         let expected = self.expected.checksum;
         if let Some(bytes) = self.expected.bytes.filter(|b| *b != self.written) {
             return Err(format!(
@@ -383,6 +412,10 @@ impl Install {
             ));
         }
         fs::rename(&self.part, &self.dest).map_err(|e| format!("could not save the model: {e}"))?;
+        // In place: let go at once, before the file is even closed — a
+        // program loading it a moment from now finds no lock in its way.
+        let _ = file.unlock();
+        drop(file);
         Ok(self.dest.clone())
     }
 }
@@ -653,38 +686,28 @@ mod tests {
         let _ = fs::remove_dir_all(store.dir());
     }
 
-    /// What a killed download left is removed by the next download once it
-    /// has gone unwritten for long; one still being written is not. Removing
-    /// the model removes them all.
+    /// What a killed download left — its partial file held by nobody — is
+    /// removed by the next download at once, however recently it was
+    /// written; one still being written, held, is not. Removing the model
+    /// removes them all.
     #[test]
     fn what_a_killed_download_left_is_removed() {
         let store = temp_store("killed");
         fs::create_dir_all(store.dir()).unwrap();
         let killed = store.dir().join("ggml-test.bin.4000001-0.part");
         let running = store.dir().join("ggml-test.bin.4000002-3.part");
-        let ahead = store.dir().join("ggml-test.bin.4000003-0.part");
         let unrelated = store.dir().join("ggml-test.bin.notes.part");
-        for path in [&killed, &running, &ahead, &unrelated] {
+        for path in [&killed, &running, &unrelated] {
             fs::write(path, b"x").unwrap();
         }
-        // Written, by a clock ahead of this one, a moment from now.
-        File::options()
-            .write(true)
-            .open(&ahead)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() + ABANDONED)
-            .unwrap();
-        File::options()
-            .write(true)
-            .open(&killed)
-            .unwrap()
-            .set_modified(std::time::SystemTime::now() - ABANDONED - Duration::from_secs(60))
-            .unwrap();
+        // Being written: held, as a download holds it.
+        let writer = File::open(&running).unwrap();
+        writer.try_lock().unwrap();
         let model = model_of(b"x");
         let mut install = store.begin(model).unwrap();
-        assert!(!killed.exists());
+        assert!(!killed.exists(), "killed a moment ago, and removed");
         assert!(running.exists() && unrelated.exists());
-        assert!(ahead.exists(), "an age that cannot be read is no age");
+        drop(writer);
         install.write_all(b"x").unwrap();
         install.finish().unwrap();
         store.remove(model).unwrap();
