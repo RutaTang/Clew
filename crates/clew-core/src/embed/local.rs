@@ -318,7 +318,9 @@ impl Engine {
                     return Err("the embedding model took too long to load".into());
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let why = engine.why_it_ended();
+                    let Some(why) = engine.why_it_ended(cancelled) else {
+                        return Err(crate::llm::CANCELLED.into());
+                    };
                     return Err(format!("the embedding model could not start: {why}"));
                 }
             }
@@ -361,7 +363,9 @@ impl Engine {
                     ));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    let why = self.why_it_ended();
+                    let Some(why) = self.why_it_ended(cancelled) else {
+                        return Err(Halt::Engine(crate::llm::CANCELLED.into()));
+                    };
                     return Err(Halt::Engine(format!(
                         "the embedding model ended unexpectedly: {why}"
                     )));
@@ -372,14 +376,21 @@ impl Engine {
 
     /// Why the program ended, as far as it says: the last line it wrote to
     /// its standard error since it was asked — Rust's word on getting a
-    /// backtrace aside — else how it exited.
-    fn why_it_ended(&mut self) -> String {
+    /// backtrace aside — else how it exited. `None` once waiting for that
+    /// stops being wanted: what it was for — a search replaced, a project
+    /// left — is not held up by why a model it no longer wants ended.
+    fn why_it_ended(&mut self, cancelled: &dyn Fn() -> bool) -> Option<String> {
         // It has closed its output; its end is a moment away.
         let deadline = Instant::now() + Duration::from_secs(1);
         let status = loop {
             match self.child.try_wait() {
                 Ok(Some(status)) => break Some(status),
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(POLL),
+                Ok(None) if Instant::now() < deadline => {
+                    if cancelled() {
+                        return None;
+                    }
+                    std::thread::sleep(POLL);
+                }
                 _ => break None,
             }
         };
@@ -387,18 +398,21 @@ impl Engine {
         // with whatever it started, which is given a moment).
         let deadline = Instant::now() + Duration::from_secs(2);
         while self.hearing.as_ref().is_some_and(|h| !h.is_finished()) && Instant::now() < deadline {
+            if cancelled() {
+                return None;
+            }
             std::thread::sleep(Duration::from_millis(10));
         }
         let said = self.said.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let told =
             |l: &&str| !l.trim().is_empty() && !l.starts_with("note: run with `RUST_BACKTRACE");
-        match said.lines().rev().find(told) {
+        Some(match said.lines().rev().find(told) {
             Some(line) => line.trim().to_string(),
             None => match status.and_then(|s| s.code()) {
                 Some(code) => format!("exit code {code}"),
                 None => status.map_or_else(|| "still running".to_string(), |s| s.to_string()),
             },
-        }
+        })
     }
 }
 
@@ -1002,6 +1016,37 @@ mod tests {
             ask(&late).unwrap_err(),
             "the embedding model could not start: the last word"
         );
+    }
+
+    /// A model that closes its output and lingers is waited for, to say why
+    /// it ended — but not once that stops being wanted: a cancel ends the
+    /// wait at once, and the model is let go.
+    #[cfg(unix)]
+    #[test]
+    fn a_cancel_does_not_wait_for_why_the_model_ended() {
+        let dir = crate::testutil::TempDir::new("embed-local");
+        let engines = Engines::new();
+        let lingers = engine(
+            dir.path(),
+            "lingers",
+            "if [ $n = 2 ]; then exec 1>&-; exec sleep 10; fi; vectors",
+        );
+        let never = || false;
+        assert!(
+            engines
+                .embed(&lingers, dir.path(), &texts(1), Purpose::Query, &never)
+                .is_ok()
+        );
+        let asked = Instant::now();
+        let cancel_at = asked + Duration::from_millis(400);
+        let cancelled = || Instant::now() >= cancel_at;
+        let err = engines
+            .embed(&lingers, dir.path(), &texts(1), Purpose::Query, &cancelled)
+            .unwrap_err();
+        let waited = asked.elapsed();
+        assert_eq!(err, crate::llm::CANCELLED);
+        assert!(waited < Duration::from_millis(1500), "waited {waited:?}");
+        assert!(!engines.loaded(), "let go");
     }
 
     /// A model that ended while it waited to be asked — killed for its
