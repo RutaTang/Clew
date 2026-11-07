@@ -697,12 +697,29 @@ impl App {
                 Task::none()
             }
             VoiceMsg::RemoveModel(id) => {
+                let mut rechosen = false;
                 if let (Some(model), Some(store)) = (models::find(id), self.voice.store.as_ref()) {
                     let name = crate::i18n::lookup(model.name);
                     self.status = match store.remove(model) {
-                        Ok(()) => tr!("Removed {model}", model = name),
+                        Ok(()) => {
+                            // The model the voice key hears with, removed
+                            // while another is still on this computer: that
+                            // one is used now, rather than the key asking to
+                            // download again the one just removed.
+                            if self.voice.prefs.model == model.id
+                                && let Some(other) =
+                                    models::MODELS.iter().find(|m| store.installed(m))
+                            {
+                                self.voice.prefs.model = other.id.to_string();
+                                rechosen = true;
+                            }
+                            tr!("Removed {model}", model = name)
+                        }
                         Err(e) => tr!("Could not remove {model}: {error}", model = name, error = e),
                     };
+                }
+                if rechosen {
+                    self.save_voice_prefs();
                 }
                 Task::none()
             }

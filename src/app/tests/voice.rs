@@ -577,6 +577,38 @@ fn a_downloaded_model_is_the_one_the_voice_key_uses() {
     assert!(!app.settings.open);
 }
 
+/// The model the voice key hears with, removed while another is on this
+/// computer: that one is used, not the removed one asked for again. With
+/// none left, the choice stays (Settings offers it to download).
+#[test]
+fn removing_the_chosen_model_uses_one_still_here() {
+    let data = test_dir("voice-removed-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, script, _) = voice_app("voice-removed", "hello");
+    let store = app.voice.store.clone().unwrap();
+    let small = app.voice.prefs.model();
+    assert!(app.voice.installed(small));
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveModel("small-q5_1")));
+    assert!(!app.voice.installed(small));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    assert_eq!(VoicePrefs::load().model, "tiny.en", "kept");
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    // Removing one not chosen leaves the choice alone.
+    std::fs::write(store.path(small), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveModel("small-q5_1")));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    // The last one gone: still chosen, to download again.
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveModel("tiny.en")));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+}
+
 /// The voice settings are kept in config.toml, and read back.
 #[test]
 fn voice_settings_are_kept() {
