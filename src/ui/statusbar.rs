@@ -256,15 +256,19 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // wide as the widest of starting and ready.
         let at_rest = [named(tr!("starting…")), named(tr!("ready"))];
         let busy = v.lang_key.is_some_and(|k| app.lsp_busy(k));
-        let lsp_text: Element<'_, Message> = if busy {
+        // What it says, and the whole of it when that is cut short.
+        let (lsp_text, whole): (Element<'_, Message>, Option<String>) = if busy {
             let width =
                 super::steady::widest(&[&at_rest[0], &at_rest[1]], ts::SMALL, crate::fonts::UI)
                     .max(LSP_BUSY_W);
             let said = super::steady::cut(&said, width, ts::SMALL, crate::fonts::UI);
-            container(status_text(said).wrapping(iced::widget::text::Wrapping::None))
-                .width(width)
-                .clip(true)
-                .into()
+            (
+                container(status_text(said).wrapping(iced::widget::text::Wrapping::None))
+                    .width(width)
+                    .clip(true)
+                    .into(),
+                None,
+            )
         } else {
             // A server that could not be had says why at length ("'cargo' is
             // required to install this server but was not found on PATH;
@@ -278,13 +282,31 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 &[&at_rest[0], &at_rest[1]],
                 ts::SMALL,
             );
-            if shown == said {
-                slot
-            } else {
-                super::toolbar::tip_at(slot, said, None, tooltip::Position::Top)
-            }
+            (slot, (shown != said).then_some(said))
         };
-        bar = bar.push(lsp_text);
+        // A server's state opens the page that lists them, where what it
+        // says to do ("…, or choose where it is") is done — as the place
+        // opens Connect. Padded alike whether or not there is one, so the
+        // words stand where they stood when a file of another language is
+        // shown.
+        let mut lsp_button = button(lsp_text)
+            .style(theme::icon_button(false))
+            .padding([2, 8]);
+        if server.is_some() {
+            lsp_button = lsp_button.on_press(Message::Settings(SettingsMsg::OpenAt(
+                crate::SettingsPage::Languages,
+            )));
+        }
+        let open = tr!("Open Settings → Language servers");
+        let tip = match (server.is_some(), whole) {
+            (true, Some(whole)) => Some(format!("{whole}\n{open}")),
+            (true, None) => Some(open.to_string()),
+            (false, whole) => whole,
+        };
+        bar = bar.push(match tip {
+            Some(tip) => super::toolbar::tip_at(lsp_button, tip, None, tooltip::Position::Top),
+            None => lsp_button.into(),
+        });
         // Diagnostic counts for this file, from the same snapshot.
         let diags = v
             .lang_key

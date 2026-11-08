@@ -753,9 +753,29 @@ pub struct ExplainState {
     pub showing_detail: bool,
 }
 
+/// What the Language model page's Test connection found, for the fields as
+/// they stood when it was asked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ConnectionTest {
+    #[default]
+    Untried,
+    /// On its way; its number, so an answer for fields changed since is
+    /// dropped.
+    Testing(u64),
+    /// The model named answered.
+    Answered(String),
+    /// Why it could not be reached, in English: said in the language spoken
+    /// when it is shown (`i18n::message`).
+    Failed(String),
+}
+
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
 /// endpoint fields. Defaults to a closed modal with the Anthropic provider.
 pub struct SettingsDraft {
+    /// The Language model page's Test connection, for the fields as they
+    /// stand; and the number of the last one asked.
+    pub connection_test: ConnectionTest,
+    pub connection_tests: u64,
     pub open: bool,
     pub provider: llm::Provider,
     pub key: String,
@@ -848,6 +868,8 @@ impl SettingsPage {
 impl Default for SettingsDraft {
     fn default() -> Self {
         Self {
+            connection_test: ConnectionTest::Untried,
+            connection_tests: 0,
             open: false,
             provider: llm::Provider::Anthropic,
             key: String::new(),
@@ -1638,6 +1660,11 @@ pub struct ProjectSession {
     pub derived_dir: Option<PathBuf>,
     /// Languages actually present in the project that clew can serve.
     pub project_languages: Vec<String>,
+    /// Of those, the ones the project's own code is written in
+    /// (`setup::setup_languages`): not a lone script in a vendored folder,
+    /// nor its JSON. What Settings → Language servers lists, with any
+    /// language whose server was asked for.
+    pub code_languages: Vec<String>,
     /// What the last look found its language servers still take to set up
     /// (`App::look_for_missing_setup`), and which look that was: a look
     /// begun before the latest one saw less.
@@ -2184,6 +2211,7 @@ impl Default for ProjectSession {
             project: None,
             derived_dir: Default::default(),
             project_languages: Default::default(),
+            code_languages: Default::default(),
             setup_missing: Vec::new(),
             setup_look: 0,
             setting_up: Vec::new(),

@@ -227,6 +227,29 @@ impl Config {
 }
 
 impl Config {
+    /// The configuration a settings form's fields stand for, before they are
+    /// saved: blanks filled as [`Config::from_parts`] fills them, and a blank
+    /// key read from the provider's environment variable under the rule a
+    /// saved one is read by — only for the provider's own endpoint.
+    pub fn from_form(
+        provider: Provider,
+        api_key: String,
+        model: String,
+        base_url: String,
+    ) -> Config {
+        let mut cfg = Config::from_parts(provider, api_key, model, base_url);
+        if cfg.api_key.is_empty()
+            && let Some(key) = env_key_for_endpoint(
+                provider.env_key(),
+                &cfg.base_url,
+                provider.default_base_url(),
+            )
+        {
+            cfg.api_key = key;
+        }
+        cfg
+    }
+
     /// The stored settings regardless of whether a key is present — used to
     /// pre-fill the settings form. Defaults to Anthropic with an empty key.
     pub fn current_or_default() -> Config {

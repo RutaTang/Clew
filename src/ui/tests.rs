@@ -10742,3 +10742,56 @@ fn a_picked_node_is_said_over_the_map_which_fills_the_window() {
         "{sent:?}"
     );
 }
+
+/// L9: what a language's server says in the status bar opens the page that
+/// lists the servers — where what it says to do ("…, or choose where it
+/// is") is done — and says so where the pointer rests. With no server to
+/// speak of, the language's name opens nothing.
+#[test]
+fn a_servers_state_in_the_status_bar_opens_its_settings_page() {
+    let mut app = reader_app();
+    let click_status = |app: &App| {
+        let mut sim = sim_of(app);
+        let bounds = text_at(&mut sim, |t| t.starts_with("Rust"), 0)
+            .expect("the file's language is in the status bar");
+        sim.point_at(bounds.center());
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    let opens = |sent: &[Message]| {
+        sent.iter().any(|m| {
+            matches!(
+                m,
+                Message::Settings(crate::SettingsMsg::OpenAt(crate::SettingsPage::Languages))
+            )
+        })
+    };
+    let sent = click_status(&app);
+    assert!(!opens(&sent), "a language with no server opened: {sent:?}");
+    app.proj.link.lsp.insert(
+        "rust".into(),
+        crate::LspSlot::Unsupported(
+            "'rust-analyzer' not found on PATH — install its toolchain, or choose where it is"
+                .into(),
+        ),
+    );
+    let sent = click_status(&app);
+    assert!(opens(&sent), "{sent:?}");
+}
+
+/// L9: a provider of the user's own has no defaults for its empty fields to
+/// stand for: they say what goes in them. Another provider's say what a
+/// blank one means.
+#[test]
+fn a_custom_providers_fields_say_what_goes_in_them() {
+    use crate::llm::Provider;
+    let (model, endpoint) = super::connect::model_field_hints(Provider::Custom);
+    assert_eq!(model, "The model's name, e.g. llama3.1");
+    assert_eq!(endpoint, "Its endpoint, e.g. http://localhost:11434/v1");
+    for provider in [Provider::Anthropic, Provider::OpenAI] {
+        assert_eq!(
+            super::connect::model_field_hints(provider),
+            (provider.default_model(), provider.default_base_url())
+        );
+    }
+}

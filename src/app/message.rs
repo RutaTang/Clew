@@ -1943,6 +1943,14 @@ pub enum SettingsMsg {
     Close,
     /// Show one of Settings' pages.
     Page(SettingsPage),
+    /// Ask the model the Language model page's fields name for a word, to
+    /// see that they reach it.
+    TestConnection,
+    /// What Test connection `number` found: the model's name, or why not.
+    ConnectionTested {
+        number: u64,
+        result: Result<String, String>,
+    },
     /// LLM settings draft edits.
     ProviderPicked(llm::Provider),
     KeyChanged(String),
@@ -2781,6 +2789,8 @@ impl SettingsMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             SettingsMsg::SetThemePref(..)
+            | SettingsMsg::TestConnection
+            | SettingsMsg::ConnectionTested { .. }
             | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged
             | SettingsMsg::ThemeResynced

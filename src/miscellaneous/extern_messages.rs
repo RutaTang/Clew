@@ -11,11 +11,9 @@ use crate::tr_noop;
 /// Every such message, as its crate writes it.
 pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("'{arg1}' not found in archive"),
+    tr_noop!("'{binary}' not found on PATH — {arg1}, or choose where it is"),
     tr_noop!(
-        "'{binary}' not found on PATH — {arg1}, or choose where it is in Settings → Languages"
-    ),
-    tr_noop!(
-        "'{tool}' is required to install this server but was not found on PATH; install it, or set a custom `command` in .clew/lsp.toml"
+        "'{tool}' is required to install this server but was not found on PATH; install it, or choose a server program of your own"
     ),
     tr_noop!("1 unreadable entry (first: {error})"),
     tr_noop!("ACP agent `{name}`: {why}"),
@@ -497,7 +495,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the server chose MCP {version}, which Clew does not speak"),
     tr_noop!("the server did not answer in time"),
     tr_noop!("the server does not say where to sign in (no protected resource metadata)"),
-    tr_noop!("the server needs you to sign in (HTTP {status}) — Settings → MCP servers → Sign in"),
+    tr_noop!("the server needs you to sign in (HTTP {status}) — Settings → Integrations → Sign in"),
     tr_noop!("the server redirected to {arg1} — configure that URL instead"),
     tr_noop!(
         "the server refused the request (HTTP {status}) — it needs credentials: add them as a header (e.g. Authorization) in the server's settings"
@@ -632,7 +630,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("{arg1} took too long to answer"),
     tr_noop!("{arg1} took too long to load"),
     tr_noop!(
-        "{arg1} {arg2} is not available: Clew ships a verified {arg3} only at {arg4}. Remove the `version` from .clew/lsp.toml, or set an explicit `command`."
+        "{arg1} {arg2} is not available: Clew ships a verified {arg3} only at {arg4}. Remove the version from .clew/lsp.toml, or set a command of your own there."
     ),
     tr_noop!("{arg1} — the first {MAX_NODES} shown of {arg2}"),
     tr_noop!("{arg1}: a staged copy that does not match the approval could not be removed: {e}"),
@@ -727,11 +725,11 @@ pub(crate) const PARTS: &[&str] = &[
     tr_noop!("accepted no data"),
     tr_noop!("install the Dart or Flutter SDK"),
     tr_noop!("install Lean with elan"),
-    tr_noop!("install Eclipse JDT LS (e.g. `brew install jdtls`)"),
-    tr_noop!("install it with `gem install ruby-lsp`"),
-    tr_noop!("install it with `dotnet tool install --global csharp-ls`"),
+    tr_noop!("install Eclipse JDT LS (with Homebrew: “brew install jdtls”)"),
+    tr_noop!("install it with “gem install ruby-lsp”"),
+    tr_noop!("install it with “dotnet tool install --global csharp-ls”"),
     tr_noop!("install the Erlang Language Platform (elp) from its releases"),
-    tr_noop!("install it with ghcup (`ghcup install hls`)"),
+    tr_noop!("install it with “ghcup install hls”"),
     tr_noop!("install its toolchain"),
     tr_noop!("percent-encoding any character in them that is not a letter or a digit"),
     tr_noop!(

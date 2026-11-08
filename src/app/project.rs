@@ -443,6 +443,7 @@ impl App {
         // saved Settings).
         self.invalidate_llm_config();
         self.proj.project_languages = served_languages(&result.files);
+        self.proj.code_languages = super::setup::setup_languages(&result.files);
         self.proj.file_languages = file_languages(&result.files);
         let files = Arc::new(result.files);
         self.proj.project = Some(Project {
@@ -908,6 +909,7 @@ impl App {
             p.files = Arc::new(result.files);
             p.truncated = result.truncated;
             self.proj.project_languages = served_languages(&p.files);
+            self.proj.code_languages = super::setup::setup_languages(&p.files);
             self.proj.file_languages = file_languages(&p.files);
         }
         // A language whose first file came, or whose last went: what its
@@ -995,6 +997,7 @@ impl App {
         );
         let configs_changed = configs(&project.files) != configs_before;
         self.proj.project_languages = served_languages(&project.files);
+        self.proj.code_languages = super::setup::setup_languages(&project.files);
         self.proj.file_languages = file_languages(&project.files);
         // Marked in the tree, as a local rescan marks them.
         self.proj.tracked_ignored = tracked_ignored.into_iter().collect();

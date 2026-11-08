@@ -33,6 +33,28 @@ pub(crate) fn language_names<S: AsRef<str>>(keys: &[S]) -> String {
 }
 
 impl App {
+    /// The languages Settings → Language servers lists, each with its
+    /// server: those the project's code is written in, those given a server
+    /// program of the user's own, and any other of the project's whose
+    /// server was asked for (a file of it opened) — not every language one
+    /// stray file is in.
+    pub(crate) fn listed_languages(&self) -> Vec<String> {
+        let mut rows = self.proj.code_languages.clone();
+        if let Some(servers) = &self.proj.lang_choices.servers {
+            rows.extend(servers.keys().cloned());
+        }
+        rows.extend(
+            self.proj
+                .project_languages
+                .iter()
+                .filter(|l| self.proj.link.lsp.contains_key(*l))
+                .cloned(),
+        );
+        rows.sort();
+        rows.dedup();
+        rows
+    }
+
     /// Read the user's choices for the open project's languages, off the UI
     /// thread; they land as `LanguagesMsg::ChoicesLoaded`. Language servers
     /// asked for meanwhile wait for them (`ensure_lsp`).

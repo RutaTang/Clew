@@ -115,7 +115,7 @@ Voice works the same on macOS and Linux, as does everything else in Clew's windo
 
 To analyze code well, Clew tailors its support to each language's characteristics. Its features fully support Rust, Python, TypeScript/JavaScript, Go, Dart, Java, C#, PHP, Ruby, Erlang, Haskell and Zig; C and C++, Lean 4 and SQL get most of them, and other languages get some basic support for now, such as syntax highlighting. More languages are coming.
 
-**Settings → Languages in this project** shows, for the open project, each language's server and how it stands, and lets you set each language up — every setting shows what is in effect before what you can pick:
+**Settings → Language servers** shows, for the open project, each language's server and how it stands, and lets you set each language up — every setting shows what is in effect before what you can pick:
 
 - **Python** — the interpreter the language server and debugger use, and who named it (your choice, the project's `.clew/lsp.toml`, a virtualenv found in the project). Pick another from the environments Clew finds (the project's own, Poetry, Pipenv, conda, pyenv, uv, or a `python3` on your `PATH`), or give a path.
 - **Rust** — the Cargo features rust-analyzer loads the project with (every package's features are listed from its `Cargo.toml`; or all of them, with or without the defaults), and the target it checks for.

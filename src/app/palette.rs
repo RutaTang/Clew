@@ -654,7 +654,10 @@ impl App {
                 tr_noop!("Settings: Integrations"),
                 SettingsPage::Integrations,
             ),
-            (tr_noop!("Settings: Languages"), SettingsPage::Languages),
+            (
+                tr_noop!("Settings: Language Servers"),
+                SettingsPage::Languages,
+            ),
             (
                 tr_noop!("Settings: Keyboard Shortcuts"),
                 SettingsPage::Shortcuts,

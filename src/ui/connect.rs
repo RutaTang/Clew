@@ -69,15 +69,33 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         Message::Settings(SettingsMsg::KeyChanged(v))
     })
     .secure(true);
-    let model = input(
-        app.settings.provider.default_model(),
-        &app.settings.model,
-        |v| Message::Settings(SettingsMsg::ModelChanged(v)),
+    let (model_hint, base_hint) = model_field_hints(app.settings.provider);
+    let model = input(model_hint, &app.settings.model, |v| {
+        Message::Settings(SettingsMsg::ModelChanged(v))
+    });
+    let base = input(base_hint, &app.settings.base_url, |v| {
+        Message::Settings(SettingsMsg::BaseUrlChanged(v))
+    });
+    // What Test connection found, under its button.
+    let tested = match &app.settings.connection_test {
+        crate::app::state::ConnectionTest::Untried => None,
+        crate::app::state::ConnectionTest::Testing(_) => Some(tr!("Testing…").to_string()),
+        crate::app::state::ConnectionTest::Answered(model) => {
+            Some(tr!("Connected: {model} answered.", model = model))
+        }
+        crate::app::state::ConnectionTest::Failed(why) => Some(crate::i18n::message(why)),
+    };
+    let testing = matches!(
+        app.settings.connection_test,
+        crate::app::state::ConnectionTest::Testing(_)
     );
-    let base = input(
-        app.settings.provider.default_base_url(),
-        &app.settings.base_url,
-        |v| Message::Settings(SettingsMsg::BaseUrlChanged(v)),
+    let test = form::item(
+        tr!("Connection"),
+        tested,
+        form::action(
+            tr!("Test connection"),
+            (!testing).then_some(Message::Settings(SettingsMsg::TestConnection)),
+        ),
     );
 
     // Embeddings (semantic search) — an OpenAI-compatible endpoint.
@@ -187,6 +205,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 form::field(tr!("API key"), None, key),
                 form::field(tr!("Model"), None, model),
                 form::field(tr!("Base URL"), None, base),
+                test,
             ],
         )]),
         SettingsPage::Embeddings => {
@@ -487,17 +506,26 @@ fn about_with(about: &str, sets: Option<String>) -> Option<String> {
 /// program of their own — from what was found where the project is
 /// (`App::refresh_language_options`). A pick is saved at once, for this
 /// project on this machine, and never written into the project.
+/// What the model and endpoint fields say while empty: the provider's
+/// defaults, which a blank field stands for. A provider of the user's own has
+/// none to show: its fields say what goes in them instead of standing empty.
+pub(crate) fn model_field_hints(provider: crate::llm::Provider) -> (&'static str, &'static str) {
+    if provider == crate::llm::Provider::Custom {
+        (
+            tr!("The model's name, e.g. llama3.1"),
+            tr!("Its endpoint, e.g. http://localhost:11434/v1"),
+        )
+    } else {
+        (provider.default_model(), provider.default_base_url())
+    }
+}
+
 pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
     if app.proj.project.is_none() {
         return space().height(0).into();
     }
     let choices = &app.proj.lang_choices;
-    let mut rows = app.proj.project_languages.clone();
-    if let Some(servers) = &choices.servers {
-        rows.extend(servers.keys().cloned());
-    }
-    rows.sort();
-    rows.dedup();
+    let rows = app.listed_languages();
     let mut servers = Vec::new();
     for language in &rows {
         let server = match choices.servers.as_ref().and_then(|s| s.get(language)) {

@@ -1054,6 +1054,38 @@ mod tests {
         }
     }
 
+    /// A text that sends the reader to a page of Settings ("… in Settings →
+    /// Voice") names one there is, by its title, and in every language by
+    /// the title that page has in it: a page renamed left "Settings →
+    /// Languages" pointing at nothing, and a group named as a page did too.
+    #[test]
+    fn every_settings_page_a_text_names_is_one() {
+        let titles: Vec<&str> = crate::SettingsPage::ALL.map(|p| p.title()).into();
+        let keys = source_keys();
+        let naming: Vec<(&String, &str)> = keys
+            .keys()
+            .filter_map(|k| {
+                let after = k.split_once("Settings → ")?.1;
+                let title = titles.iter().find(|t| after.starts_with(**t));
+                assert!(title.is_some(), "{k:?} names no page of Settings");
+                title.map(|t| (k, *t))
+            })
+            .collect();
+        assert!(naming.len() >= 3, "{naming:?}");
+        for lang in Lang::ALL.into_iter().filter(|l| *l != Lang::En) {
+            let catalog = catalog_entries(lang);
+            for (key, title) in &naming {
+                let page = &catalog[*title];
+                assert!(
+                    catalog[*key].contains(page.as_str()),
+                    "{}: {:?} does not name the page as its title does ({page:?})",
+                    lang.code(),
+                    catalog[*key]
+                );
+            }
+        }
+    }
+
     /// What other crates write and the app shows through `lookup` is
     /// listed in `extern_text`, word for word — so the catalogs carry it.
     #[test]

@@ -3153,7 +3153,7 @@ fn opening_rust_prompts_for_server_download() {
 }
 
 /// What a language-server slot says is said in the language spoken when it
-/// is shown, in the status bar and on Settings → Languages alike. The slot
+/// is shown, in the status bar and on Settings → Language servers alike. The slot
 /// keeps the English — clew's own words, clew-core's or the host's — where
 /// it kept a translation made as it was set, which stayed in that language
 /// after a switch until the project was reopened; and clew-core's words
@@ -33828,4 +33828,135 @@ fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
     let covered: usize = menu.iter().map(|(_, n)| n).sum();
     assert_eq!(covered, crate::ui::TOOLS_MENU_ROWS.len());
     assert!(all.len() <= 34, "{} steps", all.len());
+}
+
+/// L9: Test connection asks the model the Language model page's fields
+/// name, as they stand, for a word, and says what it found: the model
+/// answered, or why not. A form naming no model or endpoint says so without
+/// asking; an answer for fields changed since is not taken; Settings opened
+/// again has forgotten what was found.
+#[test]
+fn test_connection_asks_the_fields_model_and_says_what_it_found() {
+    use crate::app::state::ConnectionTest;
+    let dir = test_dir("settings-test-connection");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _env = data_dir_override(&dir);
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let test = |app: &mut App| {
+        let task = app.update(Message::Settings(SettingsMsg::TestConnection));
+        run_task(task)
+    };
+    // A provider of the user's own with nothing named: said, not asked.
+    app.settings.provider = llm::Provider::Custom;
+    app.settings.model.clear();
+    app.settings.base_url.clear();
+    assert!(test(&mut app).is_empty(), "nothing to ask was asked");
+    assert_eq!(
+        app.settings.connection_test,
+        ConnectionTest::Failed("Name the model and its endpoint first.".into())
+    );
+
+    // An endpoint that answers: the model named in the field is the one
+    // asked, saved or not.
+    let endpoint = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = endpoint.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        use std::io::Write;
+        let (mut conn, _) = endpoint.accept().unwrap();
+        let asked = clew_core::testutil::read_http_request(&mut conn);
+        let body = r#"{"choices":[{"message":{"content":"OK"},"finish_reason":"stop"}]}"#;
+        let _ = conn.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                 content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .as_bytes(),
+        );
+        asked
+    });
+    app.settings.model = "model-in-the-field".into();
+    app.settings.base_url = format!("http://127.0.0.1:{port}/v1");
+    app.settings.key = "sk-test".into();
+    let task = app.update(Message::Settings(SettingsMsg::TestConnection));
+    assert!(
+        matches!(app.settings.connection_test, ConnectionTest::Testing(_)),
+        "{:?}",
+        app.settings.connection_test
+    );
+    for msg in run_task(task) {
+        let _ = app.update(msg);
+    }
+    let asked = server.join().unwrap();
+    assert!(asked.contains("model-in-the-field"), "{asked}");
+    assert_eq!(
+        app.settings.connection_test,
+        ConnectionTest::Answered("model-in-the-field".into())
+    );
+
+    // Nothing listening: why, from the call.
+    app.settings.base_url = "http://127.0.0.1:9/v1".into();
+    for msg in test(&mut app) {
+        let _ = app.update(msg);
+    }
+    assert!(
+        matches!(&app.settings.connection_test, ConnectionTest::Failed(why) if !why.is_empty()),
+        "{:?}",
+        app.settings.connection_test
+    );
+
+    // A field changed while it is on its way: its answer is about fields
+    // that are not there any more.
+    let task = app.update(Message::Settings(SettingsMsg::TestConnection));
+    let _ = app.update(Message::Settings(SettingsMsg::ModelChanged(
+        "another-model".into(),
+    )));
+    assert_eq!(app.settings.connection_test, ConnectionTest::Untried);
+    for msg in run_task(task) {
+        let _ = app.update(msg);
+    }
+    assert_eq!(
+        app.settings.connection_test,
+        ConnectionTest::Untried,
+        "an answer for fields since changed was taken"
+    );
+
+    // Closed and opened again: the fields are filled anew, and what was
+    // found about the old ones is gone.
+    let _ = test(&mut app);
+    assert_ne!(app.settings.connection_test, ConnectionTest::Untried);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert_eq!(app.settings.connection_test, ConnectionTest::Untried);
+}
+
+/// L9: Settings → Language servers lists the languages the project's code
+/// is written in — not one a lone script in a vendored folder is in — and
+/// any other of the project's whose server was asked for, a file of it
+/// opened.
+#[test]
+fn the_language_servers_page_lists_the_languages_the_code_is_in() {
+    let root = fixture_project("lang-page-rows");
+    std::fs::create_dir_all(root.join("vendor/tool")).unwrap();
+    std::fs::write(root.join("vendor/tool/run.py"), "print('vendored')\n").unwrap();
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    assert!(
+        app.proj.project_languages.iter().any(|l| l == "python"),
+        "precondition: the project has a Python file: {:?}",
+        app.proj.project_languages
+    );
+    assert_eq!(app.listed_languages(), vec!["rust".to_string()]);
+    // The script opened: its server was asked for, and how it stands is
+    // listed.
+    app.proj.link.lsp.insert(
+        "python".into(),
+        LspSlot::Unsupported("no server for this language".into()),
+    );
+    assert_eq!(
+        app.listed_languages(),
+        vec!["python".to_string(), "rust".to_string()]
+    );
 }
