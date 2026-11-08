@@ -2945,7 +2945,7 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
         "About 3,600 AI calls. Also builds the semantic index.",
-        "Not now",
+        "Skip setup",
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
     }
@@ -2974,6 +2974,166 @@ fn the_setup_sheet_says_what_each_choice_takes() {
     ));
 }
 
+/// The first-open sheet holds still while it looks at the project: the
+/// servers' row is there from the first frame, ticked as it will be, and
+/// keeps its room, so the look landing — with a server to set up or none —
+/// neither ticks anything nor moves Open; Open waits for the look (it sets
+/// up what the look found), Skip setup does not; and its × says that it
+/// does not open the project, beside Skip setup, which does.
+#[test]
+fn the_setup_sheet_holds_still_while_it_looks() {
+    use crate::app::setup::{Census, Fetch, ProjectSetup, SetupMode, SetupServer};
+    let mut app = reader_app();
+    let root = PathBuf::from("/nonexistent/iced");
+    app.setup = Some(ProjectSetup {
+        mode: SetupMode::Open,
+        root: root.clone(),
+        servers: true,
+        explain: false,
+        census: None,
+    });
+    fn sheet<'a>(
+        app: &'a crate::app::state::App,
+        root: &'a std::path::Path,
+    ) -> Element<'a, Message> {
+        super::setup::setup_sheet(app, root, app.setup.as_ref(), true)
+    }
+    let open_at = |app: &crate::app::state::App| {
+        let mut sim = sim_elem(sheet(app, &root));
+        text_at(&mut sim, |t| t == "Open", 0).expect("Open")
+    };
+    let mut sim = sim_elem(sheet(&app, &root));
+    assert!(shows(&mut sim, "Language servers"));
+    assert!(shows(&mut sim, "Checking the project"));
+    assert!(!shows(&mut sim, "Not now"));
+    drop(sim);
+    let row = |app: &crate::app::state::App| {
+        super::setup::servers_row(app.setup.as_ref(), SetupMode::Open, false)
+            .map(|(on, changeable, _)| (on, changeable))
+    };
+    assert_eq!(row(&app), Some((true, false)), "ticked as it will be");
+    assert!(
+        click(sim_elem(sheet(&app, &root)), "Open").is_empty(),
+        "Open waits for the look"
+    );
+    assert!(
+        click(sim_elem(sheet(&app, &root)), "Language servers").is_empty(),
+        "nothing to choose yet"
+    );
+    assert!(matches!(
+        click(sim_elem(sheet(&app, &root)), "Skip setup").as_slice(),
+        [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
+    ));
+    let looking = open_at(&app);
+
+    // A server to set up: listed, still ticked, Open where it was.
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: vec![SetupServer {
+            language: "rust".into(),
+            name: "rust-analyzer".into(),
+            fetch: Fetch::Download,
+            builds: false,
+        }],
+        calls: Some(40),
+    });
+    let mut sim = sim_elem(sheet(&app, &root));
+    assert!(shows(&mut sim, "rust-analyzer: download"));
+    drop(sim);
+    assert_eq!(open_at(&app), looking, "the look landing moved Open");
+    assert_eq!(row(&app), Some((true, true)));
+    // Servers a line and more long: still in the room the line kept.
+    let two = Census {
+        servers: vec![
+            SetupServer {
+                language: "rust".into(),
+                name: "rust-analyzer".into(),
+                fetch: Fetch::Download,
+                builds: true,
+            },
+            SetupServer {
+                language: "c".into(),
+                name: "clangd".into(),
+                fetch: Fetch::Download,
+                builds: false,
+            },
+            SetupServer {
+                language: "zig".into(),
+                name: "zls".into(),
+                fetch: Fetch::Download,
+                builds: true,
+            },
+        ],
+        calls: Some(40),
+    };
+    let one = app.setup.as_mut().unwrap().census.replace(two);
+    let lines = {
+        let mut sim = sim_elem(sheet(&app, &root));
+        text_at(&mut sim, |t| t.starts_with("rust-analyzer: download"), 0).expect("the list")
+    };
+    assert!(
+        lines.height > 20.0 && lines.height < 40.0,
+        "the list takes two lines: {lines:?}"
+    );
+    assert_eq!(open_at(&app), looking, "two lines of servers moved Open");
+    app.setup.as_mut().unwrap().census = one;
+    assert!(
+        matches!(
+            click(sim_elem(sheet(&app, &root)), "Language servers").as_slice(),
+            [Message::Project(ProjectMsg::SetupServers(false))]
+        ),
+        "ticked as it was"
+    );
+    assert!(matches!(
+        click(sim_elem(sheet(&app, &root)), "Open").as_slice(),
+        [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
+    ));
+
+    // None to set up: said, not taken away from under Open.
+    app.setup.as_mut().unwrap().census = Some(Census {
+        servers: Vec::new(),
+        calls: Some(40),
+    });
+    app.setup.as_mut().unwrap().servers = false;
+    let mut sim = sim_elem(sheet(&app, &root));
+    assert!(shows(&mut sim, "Language servers"));
+    assert!(shows(&mut sim, "Ready."));
+    drop(sim);
+    assert_eq!(open_at(&app), looking, "the row left from under Open");
+    assert_eq!(row(&app), Some((true, false)), "done, not declined");
+    // On another machine the look has nothing to say from the first frame:
+    // no row, which is no change.
+    assert_eq!(
+        super::setup::servers_row(app.setup.as_ref(), SetupMode::Open, true),
+        None
+    );
+
+    // The ×: closes without opening, and says so.
+    let title = {
+        let mut sim = sim_elem(sheet(&app, &root));
+        text_at(&mut sim, |t| t == "Open iced", 0).expect("the title")
+    };
+    let mut said = false;
+    for dx in (0..120).map(|i| i as f32 * 4.0) {
+        let at = Point::new(title.x + title.width + dx, title.center_y());
+        super::tip::warm_now();
+        let mut sim = sim_elem(sheet(&app, &root));
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        if shows(&mut sim, "Close without opening") {
+            said = true;
+            let _ = sim.simulate(iced_test::simulator::click());
+            assert!(matches!(
+                sent_by(sim).as_slice(),
+                [Message::Project(ProjectMsg::ConsentDenied(r))] if *r == root
+            ));
+            break;
+        }
+    }
+    assert!(said, "the × does not say it closes without opening");
+}
+
 /// Every question's Allow is drawn disabled until it can have been read:
 /// a click on it sends nothing; its decline is pressed at once.
 #[test]
@@ -2986,13 +3146,13 @@ fn an_unread_questions_allow_sends_nothing() {
         click(sim, "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
     ));
-    // A first open's Not now opens the project too, with nothing set up:
-    // an answer as Open is, pressed only once it can have been read.
+    // A first open's Skip setup opens the project too, with nothing set
+    // up: an answer as Open is, pressed only once it can have been read.
     let sim = sim_elem(open_sheet(&root, false));
-    assert!(click(sim, "Not now").is_empty());
+    assert!(click(sim, "Skip setup").is_empty());
     let sim = sim_elem(open_sheet(&root, true));
     assert!(matches!(
-        click(sim, "Not now").as_slice(),
+        click(sim, "Skip setup").as_slice(),
         [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let pending = crate::PendingLspCommand {

@@ -248,6 +248,12 @@ pub(crate) const CLOSE_SIDE: f32 = 28.0;
 /// The × at the end of a panel's title (Settings, Connect, Glossary, the
 /// language servers): quiet until the pointer is over it, named in its tip.
 pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
+    close_button_saying(msg, tr!("Close"))
+}
+
+/// A [`close_button`] whose tip says what closing does, where that is more
+/// than closing (the first-open sheet's: the project is not opened).
+pub(crate) fn close_button_saying<'a>(msg: Message, tip: &'a str) -> Element<'a, Message> {
     super::chrome_tip(
         button(container(glyph::icon(Glyph::Close, theme::fg_muted(), 14.0)).center(Fill))
             .style(theme::icon_button(false))
@@ -255,7 +261,7 @@ pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
             .height(CLOSE_SIDE)
             .padding(0)
             .on_press(msg),
-        tr!("Close"),
+        tip,
         Some("Esc".to_string()),
     )
 }

@@ -196,6 +196,67 @@ impl ServerLook {
     }
 }
 
+/// Folders whose files are not the project's own code: others' code kept in
+/// its tree, and the inputs of its tests.
+const NOT_ITS_OWN_CODE: &[&str] = &[
+    "vendor",
+    "third_party",
+    "third-party",
+    "3rdparty",
+    "fixture",
+    "fixtures",
+    "__fixtures__",
+    "testdata",
+    "test_data",
+    "test-data",
+    "__snapshots__",
+];
+
+/// Data formats: their servers are set up when one of their files is
+/// opened, not asked about for the project.
+const DATA_LANGUAGES: &[&str] = &["json", "toml"];
+
+/// A language with at least this many files of the project's own code is
+/// one it is written in, whatever its share.
+const LANGUAGE_FILES: usize = 5;
+
+/// The languages the project is written in, whose servers setting it up
+/// offers (the sheet, the status bar's Set up): served by clew, in the
+/// project's own code — not a test's fixture or a vendored library — and
+/// more than a file or two of it, as a share. One `.php` among a Rust
+/// project's fixtures is not a reason to install a PHP server: opening it
+/// asks for one then.
+pub(crate) fn setup_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for f in files {
+        let theirs = f
+            .rel
+            .split(['/', '\\'])
+            .rev()
+            .skip(1)
+            .any(|dir| NOT_ITS_OWN_CODE.contains(&dir));
+        if theirs {
+            continue;
+        }
+        let Some(language) = highlight::detect(&f.abs) else {
+            continue;
+        };
+        if DATA_LANGUAGES.contains(&language)
+            || lsp::registry::default_for_language(language).is_none()
+        {
+            continue;
+        }
+        *counts.entry(language.to_string()).or_default() += 1;
+    }
+    let total: usize = counts.values().sum();
+    counts
+        .into_iter()
+        // At least 1 in 20 of the code's files, or a few of them.
+        .filter(|(_, n)| *n >= LANGUAGE_FILES || n * 20 >= total)
+        .map(|(language, _)| language)
+        .collect()
+}
+
 /// A look at the project at `root` — its files listed, or `files` when they
 /// already are: the servers it needs and about what explaining it costs.
 /// Blocking: reads files.
@@ -206,7 +267,7 @@ pub(crate) fn census(
 ) -> Census {
     let files = files.unwrap_or_else(|| Arc::new(fs_scan::scan(root.to_path_buf()).files));
     Census {
-        servers: look.servers_for(root, &crate::app::project::served_languages(&files)),
+        servers: look.servers_for(root, &setup_languages(&files)),
         calls: Some(estimate_calls(&files)),
     }
 }
@@ -480,14 +541,21 @@ impl App {
         if self.proj.inflight.state_loading || self.proj.inflight.choices_loading {
             return Task::none();
         }
-        let languages = self.proj.project_languages.clone();
+        let files = self
+            .proj
+            .project
+            .as_ref()
+            .map(|p| p.files.clone())
+            .unwrap_or_default();
         let look = self.server_look(&root);
         let (stamp, seq) = (self.stamp(), self.proj.setup_look);
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || look.servers_for(&root, &languages))
-                    .await
-                    .unwrap_or_default()
+                tokio::task::spawn_blocking(move || {
+                    look.servers_for(&root, &setup_languages(&files))
+                })
+                .await
+                .unwrap_or_default()
             },
             move |servers| {
                 Message::Project(ProjectMsg::MissingSetupFound {
@@ -714,6 +782,58 @@ mod tests {
     }
 
     /// Counts are said "about": two figures past a hundred, grouped.
+    /// Setting a project up offers the servers of what it is written in:
+    /// not a test fixture's language or a vendored library's, not a data
+    /// format's, and not a language of a file or two among many.
+    #[test]
+    fn setup_offers_the_languages_the_project_is_written_in() {
+        let root = Path::new("/p");
+        let files: Vec<fs_scan::FileEntry> = (0..40)
+            .map(|i| entry(root, &format!("src/m{i}.rs")))
+            .chain(
+                [
+                    "tests/fixtures/langs/a.php",
+                    "tests/fixtures/langs/a.zig",
+                    "vendor/tree-sitter/src/parser.c",
+                    "vendor/tree-sitter/src/scanner.c",
+                    "third_party/x/y.go",
+                    "Cargo.toml",
+                    "crates/a/Cargo.toml",
+                    "locales/fr.json",
+                    "server/debug/dap.erl",
+                ]
+                .map(|rel| entry(root, rel)),
+            )
+            .collect();
+        assert_eq!(setup_languages(&files), ["rust"]);
+        // A few files of a language are a part of the project, whatever its
+        // share; and in a small one, a single file can be.
+        let mut more = files.clone();
+        more.extend((0..5).map(|i| entry(root, &format!("web/p{i}.py"))));
+        assert_eq!(setup_languages(&more), ["python", "rust"]);
+        let small = [entry(root, "build.zig"), entry(root, "src/main.rs")];
+        assert_eq!(setup_languages(&small), ["rust", "zig"]);
+        // Each rule on its own, where the share would not decide: a small
+        // project's fixture, vendored code and manifest are not languages
+        // it is written in.
+        let small_with = |rel: &str| [entry(root, "src/main.rs"), entry(root, rel)];
+        for theirs in [
+            "tests/fixtures/a.php",
+            "testdata/b.go",
+            "vendor/lib/c.c",
+            "Cargo.toml",
+            "package.json",
+        ] {
+            assert_eq!(setup_languages(&small_with(theirs)), ["rust"], "{theirs}");
+        }
+        // A fixture's folder is only one when it is a folder: a file named
+        // so is code.
+        assert_eq!(
+            setup_languages(&small_with("src/vendor.py")),
+            ["python", "rust"]
+        );
+    }
+
     #[test]
     fn counts_are_said_about() {
         assert_eq!(about(7), "7");
