@@ -3150,10 +3150,12 @@ mod tests {
     #[test]
     fn fit_puts_the_camera_back() {
         let l = layout(3);
-        let mut st = GraphState::default();
-        st.zoom_target = 3.0;
-        st.pan = iced::Vector::new(120.0, -40.0);
-        st.yaw = 2.0;
+        let mut st = GraphState {
+            zoom_target: 3.0,
+            pan: iced::Vector::new(120.0, -40.0),
+            yaw: 2.0,
+            ..Default::default()
+        };
         let c = canvas(&l, true, false).with_fit(1);
         let redraw = iced::Event::Window(iced::window::Event::RedrawRequested(
             std::time::Instant::now(),
