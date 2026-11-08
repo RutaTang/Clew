@@ -1387,7 +1387,7 @@ impl App {
     /// Whether the status line says an edit of the journal is not saved:
     /// tried again ([`retrying_status`]), or lost ([`lost_status`]) — as it
     /// still holds the words it was said in, whatever language that was.
-    fn says_not_saved(&self) -> bool {
+    pub(crate) fn says_not_saved(&self) -> bool {
         let says = |said: Option<&str>| said == Some(self.status.as_str());
         says(
             self.proj

@@ -167,6 +167,8 @@ impl App {
             pending_z: false,
             modifiers: keyboard::Modifiers::default(),
             status: tr!("Open a folder to start reading").to_string(),
+            status_seen: tr!("Open a folder to start reading").to_string(),
+            status_since: None,
             waiting_said: None,
             main_window: None,
             tutorial: None,
@@ -261,6 +263,9 @@ impl App {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(400)).map(|_| Message::Tick),
             );
+        } else if self.status_may_expire() {
+            // A notice on the status line, to be taken away once read.
+            subs.push(iced::time::every(STATUS_CHECK).map(|_| Message::Tick));
         }
         // The level meter and the pause that ends listening, read only while
         // the microphone is open — and the moment the pill says what was
@@ -431,7 +436,48 @@ impl App {
         }
     }
 
+    /// Note what the status line says now: when it says something new, the
+    /// time it began to (see `status_since`).
+    pub(crate) fn note_status(&mut self) {
+        if self.status != self.status_seen {
+            self.status_seen.clone_from(&self.status);
+            self.status_since = (!self.status.is_empty()).then(std::time::Instant::now);
+        }
+    }
+
+    /// Whether what the status line says tells of something still going on —
+    /// work under way ("Loading…"), a wait, an edit not saved, a link that
+    /// failed — and so stands for as long as it does.
+    fn status_stands(&self) -> bool {
+        let calls = &self.proj.project_calls;
+        self.status.ends_with('…')
+            || self.status.ends_with("...")
+            || self.waiting_said.is_some()
+            || self.says_not_saved()
+            || self.handshake_failure.as_deref() == Some(self.status.as_str())
+            || calls.refine_wait.is_some()
+            || calls.refine_full_wait.is_some()
+    }
+
+    /// Whether the status line says a notice that will be taken away.
+    pub(crate) fn status_may_expire(&self) -> bool {
+        self.status_since.is_some() && !self.status_stands()
+    }
+
+    /// Take a notice off the status line once it has been up for
+    /// `STATUS_LIFETIME`: the line goes back to the project's counts.
+    pub(crate) fn expire_status(&mut self) {
+        let due = self
+            .status_since
+            .is_some_and(|since| since.elapsed() >= STATUS_LIFETIME);
+        if due && self.status_may_expire() {
+            self.status.clear();
+            self.note_status();
+        }
+    }
+
     pub(crate) fn on_tick(&mut self) -> Task<Message> {
+        self.expire_status();
         // Journaled edits held back after a transient failure, once due.
         self.send_remote_edits();
         // Snapshot each ready server's diagnostics + inlay-refresh epoch.
@@ -796,6 +842,12 @@ impl App {
 /// The View menu's choices, as the global config's root keeps them: a
 /// minimap or blame turned on is there next launch (they were this
 /// session's only, unlike the theme).
+/// How long a notice stays on the status line: long enough to be read.
+pub(crate) const STATUS_LIFETIME: std::time::Duration = std::time::Duration::from_secs(12);
+/// How often a notice on the status line is looked at to see whether its
+/// time is up.
+const STATUS_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 pub(crate) const VIEW_SUMMARIES: &str = "view_inline_summaries";
 pub(crate) const VIEW_BANNER: &str = "view_file_banner";
 pub(crate) const VIEW_INLAY_HINTS: &str = "view_inlay_hints";

@@ -33292,3 +33292,38 @@ fn the_update_question_waits_for_the_setup_sheet() {
     assert!(!app.update.consent_waits);
     assert!(app.ask_update_consent().is_none(), "asked once");
 }
+
+/// A notice on the status line goes once it has been up long enough to be
+/// read, and the line says the project's counts again; one telling of work
+/// under way stands. A notice used to stay until something else was said —
+/// "Copied 3 lines" over the counts all afternoon.
+#[test]
+fn a_notice_on_the_status_line_goes_once_read() {
+    use crate::app::runtime::STATUS_LIFETIME;
+    use std::time::{Duration, Instant};
+    let mut app = scanned_app("status-notice-goes");
+    let long_ago = || Instant::now() - STATUS_LIFETIME - Duration::from_secs(1);
+    app.status = "Copied 3 lines".into();
+    let _ = app.update(Message::Noop);
+    assert!(app.status_may_expire(), "the window waits for it to go");
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.status, "Copied 3 lines", "it went before it was read");
+    app.status_since = Some(long_ago());
+    let _ = app.update(Message::Tick);
+    assert!(app.status.is_empty(), "it stayed: {}", app.status);
+    assert!(!app.status_may_expire());
+
+    // Work under way is said until it is done.
+    app.status = "Loading src/main.rs…".into();
+    let _ = app.update(Message::Noop);
+    app.status_since = Some(long_ago());
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.status, "Loading src/main.rs…");
+    assert!(!app.status_may_expire());
+
+    // A notice said again is timed from then.
+    app.status = "Copied 3 lines".into();
+    let _ = app.update(Message::Noop);
+    let _ = app.update(Message::Tick);
+    assert_eq!(app.status, "Copied 3 lines");
+}

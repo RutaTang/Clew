@@ -1291,6 +1291,13 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
+    /// What the status line said as the last message was handled, and since
+    /// when (`App::note_status`): a notice goes once it has been read
+    /// (`STATUS_LIFETIME`), so "Copied 3 lines" does not stand over the
+    /// counts all afternoon. `None` for the words the window opened with,
+    /// and for an empty line.
+    pub status_seen: String,
+    pub status_since: Option<std::time::Instant>,
     /// What the status line said last, in the wait a close or a quit is in,
     /// of the window waiting for its host (`App::show_waiting`): said once,
     /// it is not said again over what the line says since, unless that is

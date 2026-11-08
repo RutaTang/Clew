@@ -52,6 +52,9 @@ impl App {
             Some(ask) => Task::batch([task, ask]),
             None => task,
         };
+        // A notice on the status line is timed from when it was first said,
+        // whichever message said it.
+        self.note_status();
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {
