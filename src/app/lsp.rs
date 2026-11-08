@@ -131,7 +131,10 @@ impl App {
                 // by locking every server's state three more times.
                 LspSlot::Ready(_) => match self.proj.link.lsp_snapshots.get(lang) {
                     Some(Ok(snap)) => {
+                        // Diagnostics on their way from a server that says
+                        // no more of its work: read when they come.
                         snap.progress.is_some()
+                            || snap.awaiting_diagnostics
                             || self.proj.link.seen_diag_version.get(lang).copied()
                                 != Some(snap.diag_version)
                             || self.proj.link.seen_inlay_epoch.get(lang).copied()

@@ -197,20 +197,20 @@ impl Action {
             Action::GotoLine => at(MenuSection::Go, tr_noop!("Go to Line…")),
             Action::ToggleBookmark => at(MenuSection::Go, tr_noop!("Toggle Bookmark")),
             Action::TraceValue => at(MenuSection::Go, tr_noop!("Trace Value")),
-            Action::ToggleAsk => at(MenuSection::View, tr_noop!("Ask")),
-            Action::StartDebug => at(MenuSection::View, tr_noop!("Start Debugging")),
-            Action::CallGraph => at(MenuSection::View, tr_noop!("Call Graph")),
-            Action::ImportGraph => at(MenuSection::View, tr_noop!("Import Graph")),
-            Action::TypeGraph => at(MenuSection::View, tr_noop!("Type Map")),
-            Action::ProjectMaps => at(MenuSection::View, tr_noop!("Project Maps")),
-            Action::ExplainAll => at(MenuSection::View, tr_noop!("Explain All")),
-            Action::ToggleDiff => at(MenuSection::View, tr_noop!("Diff vs HEAD")),
-            Action::TimeTravel => at(MenuSection::View, tr_noop!("Time Travel")),
-            Action::Walkthrough => at(MenuSection::View, tr_noop!("Walkthroughs")),
+            Action::ToggleAsk => at(MenuSection::Tools, tr_noop!("Ask")),
+            Action::StartDebug => at(MenuSection::Tools, tr_noop!("Start Debugging")),
+            Action::CallGraph => at(MenuSection::Tools, tr_noop!("Call Graph")),
+            Action::ImportGraph => at(MenuSection::Tools, tr_noop!("Import Graph")),
+            Action::TypeGraph => at(MenuSection::Tools, tr_noop!("Type Map")),
+            Action::ProjectMaps => at(MenuSection::Tools, tr_noop!("Project Maps")),
+            Action::ExplainAll => at(MenuSection::Tools, tr_noop!("Explain All")),
+            Action::ToggleDiff => at(MenuSection::Tools, tr_noop!("Diff vs HEAD")),
+            Action::TimeTravel => at(MenuSection::Tools, tr_noop!("Time Travel")),
+            Action::Walkthrough => at(MenuSection::Tools, tr_noop!("Walkthroughs")),
             Action::LspServers => at(MenuSection::View, tr_noop!("Language Servers…")),
             Action::Shortcuts => at(MenuSection::View, tr_noop!("Keyboard Shortcuts…")),
             Action::CommandPalette => at(MenuSection::View, tr_noop!("Command Palette…")),
-            Action::Voice => at(MenuSection::View, tr_noop!("Talk")),
+            Action::Voice => at(MenuSection::Tools, tr_noop!("Talk")),
         }
     }
 
@@ -306,18 +306,30 @@ pub fn local_keys(text: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MenuSection {
     Edit,
+    /// How the window shows what it shows: split, zoom, and the pages that
+    /// set how things look and are run.
     View,
+    /// What opens a tool on the code: Ask, the debugger, the graphs and
+    /// maps, Explain All, the diff, Time Travel, walkthroughs, voice. Under
+    /// View they were mixed in with zoom and split.
+    Tools,
     Go,
 }
 
 impl MenuSection {
-    pub const ALL: [MenuSection; 3] = [MenuSection::Edit, MenuSection::View, MenuSection::Go];
+    pub const ALL: [MenuSection; 4] = [
+        MenuSection::Edit,
+        MenuSection::View,
+        MenuSection::Tools,
+        MenuSection::Go,
+    ];
 
     /// The menu's title, in the reader's language: only ever shown.
     pub fn title(self) -> &'static str {
         match self {
             MenuSection::Edit => tr!("Edit"),
             MenuSection::View => tr!("View"),
+            MenuSection::Tools => tr!("Tools"),
             MenuSection::Go => tr!("Go"),
         }
     }

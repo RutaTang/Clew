@@ -2121,6 +2121,20 @@ pub fn overlay_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollabl
     style
 }
 
+/// [`overlay_scrollbar`] whose scroller shows at rest, faintly: for a menu
+/// whose rows can run past the window, the one cue that more are below.
+pub fn cue_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = overlay_scrollbar(theme, status);
+    if let scrollable::Status::Active { .. } = status {
+        let scroller = scrollable::Scroller {
+            background: with_alpha(active().scrollbar, 0.35).into(),
+            border: iced::border::rounded(3),
+        };
+        style.vertical_rail.scroller = scroller;
+    }
+    style
+}
+
 /// Accent-filled primary action button (modals).
 pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {

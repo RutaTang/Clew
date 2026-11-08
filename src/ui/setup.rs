@@ -244,14 +244,23 @@ pub(crate) fn setup_sheet<'a>(
     } else {
         decline_button.into()
     };
+    // Held while the look is on its way, it says why where the pointer
+    // rests: inert with nothing said, it read as broken (L24).
+    let accept_button = crate::ui::fresh::allow(ready, accept_button);
+    let accept_button = if looking {
+        super::toolbar::tip_at(
+            accept_button,
+            tr!("Ready once the project is checked"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
+    } else {
+        accept_button
+    };
     body = body.push(
-        row![
-            space().width(Fill),
-            decline_button,
-            crate::ui::fresh::allow(ready, accept_button),
-        ]
-        .spacing(10)
-        .align_y(iced::Center),
+        row![space().width(Fill), decline_button, accept_button,]
+            .spacing(10)
+            .align_y(iced::Center),
     );
 
     let panel = container(body)

@@ -162,11 +162,18 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         },
         ts::SMALL,
     );
+    // A chevron after it, as the target picker has: it opens something —
+    // Connect — which nothing said until the pointer rested on it (L23).
+    let opens = glyph::icon(Glyph::ChevronDown, theme::dim(), 11.0);
     let conn_indicator = super::tip::tip(
-        button(row![dot, place_text,].spacing(7).align_y(iced::Center))
-            .style(theme::icon_button(false))
-            .padding([2, 8])
-            .on_press(Message::Connect(ConnectMsg::Open)),
+        button(
+            row![dot, place_text, opens]
+                .spacing(7)
+                .align_y(iced::Center),
+        )
+        .style(theme::icon_button(false))
+        .padding([2, 8])
+        .on_press(Message::Connect(ConnectMsg::Open)),
         // The design's tooltip bubble.
         container(
             text(tr!("Connect to a remote host"))

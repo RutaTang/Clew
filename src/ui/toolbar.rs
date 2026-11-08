@@ -605,16 +605,28 @@ fn search_field(app: &App) -> Element<'_, Message> {
     let face = button(
         row![
             glyph::icon(Glyph::Search, theme::fg_muted(), 15.0),
-            container(ts::set_in(
-                text(tr!("Search files, symbols and commands"))
+            // Cut to the room the field leaves it, with an ellipsis: clipped,
+            // it stopped mid-word at its edge.
+            container(iced::widget::responsive(|room| {
+                let label = tr!("Search files, symbols and commands");
+                ts::set_in(
+                    text(super::steady::cut(
+                        label,
+                        room.width,
+                        ts::BASE,
+                        crate::fonts::UI,
+                    ))
                     .font(crate::fonts::in_control(crate::fonts::UI))
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
-                FIELD_H - 2.0,
-                ts::INTER,
-                ts::BASE,
-            ))
+                    FIELD_H - 2.0,
+                    ts::INTER,
+                    ts::BASE,
+                )
+                .into()
+            }))
             .width(Fill)
+            .height(Length::Fixed(FIELD_H - 2.0))
             .clip(true),
             control_keycap(chord),
         ]
@@ -1408,21 +1420,6 @@ impl ViewRow {
     }
 }
 
-/// Whether `message` is a pick from the View menu, which closes it.
-pub(crate) fn closes_view_menu(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::Window(WindowMsg::ToggleInlineSummaries)
-            | Message::Window(WindowMsg::ToggleFileBanner)
-            | Message::Explain(ExplainMsg::ToggleBlocks)
-            | Message::Lsp(LspMsg::ToggleInlayHints)
-            | Message::Window(WindowMsg::ToggleInlineBlame)
-            | Message::Window(WindowMsg::ToggleIndentGuides)
-            | Message::Window(WindowMsg::ToggleMinimap)
-            | Message::Window(WindowMsg::ToggleRightPanel)
-    )
-}
-
 /// Distance of the View menu from the window's top edge: under the file
 /// tools it opens from.
 pub(crate) fn view_menu_top(app: &App) -> f32 {
@@ -1507,12 +1504,23 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     app.proj.explain.view,
                     Some(crate::explain::Node::Function { .. })
                 );
-            menu_item(
+            let item = menu_item(
                 Some(glyph),
                 label.into(),
                 check(on),
                 enabled.then(|| r.message()),
-            )
+            );
+            // Inert, it says why where the pointer rests.
+            if enabled {
+                item
+            } else {
+                tip_at(
+                    item,
+                    tr!("Explain a function to read its explanation in blocks"),
+                    None,
+                    tooltip::Position::Right,
+                )
+            }
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
@@ -1587,8 +1595,8 @@ pub(crate) fn closes_app_menu(message: &Message) -> bool {
 
 /// The app menu of Windows and Linux, from the top bar's ☰: what macOS keeps
 /// in its menu bar — opening a folder or a host, Settings, and every keymap
-/// action under the title the menu bar gives it (Edit, View, Go), each with
-/// its shortcut.
+/// action under the title the menu bar gives it (Edit, View, Tools, Go),
+/// each with its shortcut.
 pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (glyph, label, chord, msg) in app_menu_head(app) {
@@ -1631,10 +1639,12 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
         Some(Message::Window(WindowMsg::Close)),
     ));
     let max_h = (app.window_height - TOOLBAR_H - 24.0).max(160.0);
+    // Its scroller shows at rest: in a short window, the rows that run
+    // past its bottom had nothing to say they were there.
     let panel = container(
         scrollable(Column::with_children(items).spacing(MENU_ROW_SPACING))
             .direction(thin_scroll())
-            .style(theme::overlay_scrollbar),
+            .style(theme::cue_scrollbar),
     )
     .width(app_menu_w(app))
     .max_height(max_h)

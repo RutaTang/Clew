@@ -230,11 +230,13 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         return if app.docs_loading() {
             empty_state(Glyph::Sparkle, tr!("Building docs…"), "", None)
         } else {
+            // Nothing was built to build again: the project is read for its
+            // doc comments once more.
             empty_state(
                 Glyph::Note,
                 tr!("No documentation"),
                 "",
-                Some((tr!("Rebuild"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
     }
@@ -1006,7 +1008,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             (
                 tr!("No terms yet"),
                 "",
-                Some((tr!("Rebuild"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
         return container(

@@ -3204,6 +3204,19 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let looking = open_at(&app);
+    // Held, Open says why where the pointer rests (L24).
+    let why = "Ready once the project is checked";
+    let says_why = |app: &crate::app::state::App| {
+        let at = open_at(app).center();
+        super::tip::warm_now();
+        let mut sim = sim_elem(sheet(app, &root));
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        shows(&mut sim, why)
+    };
+    assert!(says_why(&app), "a held Open says nothing of why");
 
     // A server to set up: listed, still ticked, Open where it was.
     app.setup.as_mut().unwrap().census = Some(Census {
@@ -3266,6 +3279,7 @@ fn the_setup_sheet_holds_still_while_it_looks() {
         click(sim_elem(sheet(&app, &root)), "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
     ));
+    assert!(!says_why(&app), "Open, ready, still says it is held");
 
     // None to set up: said, not taken away from under Open.
     app.setup.as_mut().unwrap().census = Some(Census {
@@ -7590,13 +7604,15 @@ fn the_glossary_page_lists_terms_by_kind() {
     }
     assert!(!app.proj.glossary.showing);
 
-    // With no terms the page says what a term is and offers a rebuild.
+    // With no terms the page says so and offers to look again: not to
+    // rebuild what was never built (L17).
     app.proj.docs.files.clear();
     app.proj.docs.generation += 1;
     app.explain_cache_mut().clear();
     let _ = app.update(Message::Glossary(GlossaryMsg::Open));
     assert!(on_page(&app, "No terms yet"));
-    let sent = click(sim_of(&app), "Rebuild");
+    assert!(!on_page(&app, "Rebuild"));
+    let sent = click(sim_of(&app), "Look again");
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Docs(DocsMsg::Refresh))),
@@ -9373,7 +9389,7 @@ fn blocks_are_the_view_menus_not_the_notes() {
 }
 
 /// The margin is shown and hidden from the View menu — the bars carry no
-/// toggle for it — and a pick closes the menu.
+/// toggle for it — and the menu stays up for the next switch (L21).
 #[test]
 fn the_view_menu_shows_and_hides_the_margin() {
     let mut app = reader_app();
@@ -9389,7 +9405,7 @@ fn the_view_menu_shows_and_hides_the_margin() {
         let _ = app.update(m);
     }
     assert_eq!(app.show_right_panel, !shown, "toggled");
-    assert!(!app.show_view_menu, "the pick closed the menu");
+    assert!(app.show_view_menu, "the switch put the menu away");
     let mut sim = sim_of(&app);
     assert!(!shows(&mut sim, "Toggle panel"), "no toggle in the bars");
 }
@@ -10932,5 +10948,158 @@ fn the_find_bar_hides_no_code() {
             Message::Editor(EditorMsg::FindToggle(crate::SearchOpt::Regex))
         )),
         "{sent:?}"
+    );
+}
+
+/// L15: the top bar's search field says what it searches, cut to the room
+/// it has with an ellipsis: clipped at its edge, it stopped mid-word.
+#[test]
+fn the_search_fields_words_end_in_an_ellipsis_when_cut() {
+    let label = "Search files, symbols and commands";
+    let shown = |width: f32| {
+        let mut app = reader_app();
+        app.window_width = width;
+        let mut sim = sim_sized(&app, Size::new(width, WINDOW.height));
+        let found = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let into = found.clone();
+        let _ = sim.find(move |c: iced_test::selector::Candidate<'_>| match c {
+            iced_test::selector::Candidate::Text { content, .. }
+                if content.starts_with("Search") =>
+            {
+                *into.lock().unwrap() = Some(content.to_string());
+                Some(())
+            }
+            _ => None,
+        });
+        let shown = found.lock().unwrap().clone();
+        shown.expect("the search field says what it searches")
+    };
+    assert_eq!(shown(WINDOW.width), label, "whole, where it fits");
+    let narrow = shown(640.0);
+    assert!(narrow.ends_with('…'), "{narrow:?}");
+    assert!(
+        label.starts_with(narrow.trim_end_matches('…')),
+        "{narrow:?}"
+    );
+}
+
+/// L17: the Docs view with nothing in it offers to look again, not to
+/// rebuild what was never built.
+#[test]
+fn an_empty_docs_view_offers_to_look_again() {
+    let mut app = reader_app();
+    app.proj.docs.files.clear();
+    assert!(!app.docs_loading(), "precondition");
+    let mut sim = sim_elem(super::docs_stats::docs_tab(&app));
+    assert!(shows(&mut sim, "No documentation"));
+    assert!(!shows(&mut sim, "Rebuild"));
+    assert!(matches!(
+        click(sim_elem(super::docs_stats::docs_tab(&app)), "Look again").as_slice(),
+        [Message::Docs(DocsMsg::Refresh)]
+    ));
+}
+
+/// L21: the View menu's row that is inert — blocks, with no function
+/// explained — says why where the pointer rests.
+#[test]
+fn the_view_menus_inert_row_says_why() {
+    let mut app = reader_app();
+    app.show_view_menu = true;
+    let mut sim = sim_of(&app);
+    let row = text_at(&mut sim, |t| t == "Explanation in blocks", 0).expect("the row");
+    let why = "Explain a function to read its explanation in blocks";
+    assert!(!shows(&mut sim, why), "said before the pointer rests on it");
+    super::tip::warm_now();
+    let mut sim = sim_of(&app);
+    sim.point_at(row.center());
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: row.center(),
+    })]);
+    assert!(shows(&mut sim, why));
+    // A row that does something says nothing of the kind.
+    let minimap = text_at(&mut sim_of(&app), |t| t == "Minimap", 0).expect("the row");
+    super::tip::warm_now();
+    let mut sim = sim_of(&app);
+    sim.point_at(minimap.center());
+    let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+        position: minimap.center(),
+    })]);
+    assert!(!shows(&mut sim, why));
+}
+
+/// L16: the ☰ menu keeps its tools under a Tools heading of their own,
+/// between View and Go — under View they were mixed in with zoom and
+/// split — and, when it runs past a short window, its scroller shows at
+/// rest, the one cue that more rows are below.
+#[test]
+fn the_app_menu_keeps_its_tools_apart_and_shows_it_scrolls() {
+    let mut app = reader_app();
+    app.show_app_menu = true;
+    // Tall enough for every row to be drawn.
+    app.window_height = 2400.0;
+    let mut sim = sim_sized(&app, Size::new(WINDOW.width, app.window_height));
+    let y = |sim: &mut Sim<'_>, label: &'static str| {
+        text_at(sim, move |t| t == label, 0)
+            .unwrap_or_else(|| panic!("{label:?} is not in the menu"))
+            .y
+    };
+    let (view, tools, go) = (y(&mut sim, "View"), y(&mut sim, "Tools"), y(&mut sim, "Go"));
+    assert!(view < tools && tools < go, "{view} {tools} {go}");
+    // Rows named nowhere else on screen (the file's header has its own
+    // Time Travel).
+    for tool in [
+        "Call Graph",
+        "Project Maps",
+        "Explain All",
+        "Start Debugging",
+    ] {
+        let at = y(&mut sim, tool);
+        assert!(tools < at && at < go, "{tool} is not under Tools");
+    }
+    for viewing in ["Split View", "Zoom In"] {
+        let at = y(&mut sim, viewing);
+        assert!(view < at && at < tools, "{viewing} is not under View");
+    }
+    // At rest, the cue's scroller is drawn; the panels' overlay one is not.
+    let rest = iced::widget::scrollable::Status::Active {
+        is_horizontal_scrollbar_disabled: true,
+        is_vertical_scrollbar_disabled: false,
+    };
+    let theme = iced::Theme::Dark;
+    let drawn = |style: iced::widget::scrollable::Style| {
+        !matches!(
+            style.vertical_rail.scroller.background,
+            iced::Background::Color(c) if c.a == 0.0
+        )
+    };
+    assert!(drawn(crate::theme::cue_scrollbar(&theme, rest)));
+    assert!(!drawn(crate::theme::overlay_scrollbar(&theme, rest)));
+}
+
+/// L23: the status bar's place — "Local · Up to date" — opens Connect, and
+/// says so before the pointer rests on it: a chevron after it, as the
+/// target picker has, a click on which opens Connect too.
+#[test]
+fn the_status_bars_place_shows_it_opens_something() {
+    let app = reader_app();
+    let mut sim = sim_of(&app);
+    let place = text_at(&mut sim, |t| t.starts_with("Local · "), 0).expect("the place");
+    // Past the room its words have — as wide as the widest of its states
+    // — where only the chevron is.
+    let states = [
+        "Local · Scanning…",
+        "Local · Indexing…",
+        "Local · Up to date",
+    ];
+    let room = super::steady::widest(&states, super::ts::SMALL, crate::fonts::UI);
+    let at = Point::new(place.x + room + 12.0, place.center_y());
+    let mut sim = sim_of(&app);
+    sim.point_at(at);
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Connect(ConnectMsg::Open))),
+        "nothing past its words: {sent:?}"
     );
 }

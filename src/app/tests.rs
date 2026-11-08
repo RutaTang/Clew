@@ -20495,11 +20495,16 @@ fn every_tools_menu_row_dismisses_the_menu() {
     app.show_tools_menu = true;
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
-    // The View menu's rows close it too; and the menus open one at a time.
+    // The View menu's rows are switches: it stays up as they are flipped
+    // (L21), several in a row; and the menus open one at a time.
     app.settings.open = false;
     app.show_view_menu = true;
+    let minimap = app.show_minimap;
     let _ = app.update(Message::Window(WindowMsg::ToggleMinimap));
-    assert!(!app.show_view_menu, "picking a View row left the menu open");
+    let _ = app.update(Message::Window(WindowMsg::ToggleIndentGuides));
+    assert!(app.show_view_menu, "flipping a View row put the menu away");
+    assert_ne!(app.show_minimap, minimap);
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewMenu));
     let _ = app.update(Message::Window(WindowMsg::ToggleViewMenu));
     let _ = app.update(Message::Window(WindowMsg::ToggleToolsMenu));
     assert!(app.show_tools_menu && !app.show_view_menu);
@@ -34026,4 +34031,64 @@ fn a_find_option_toggled_finds_again() {
     )));
     assert!(!app.proj.find.invalid);
     assert_eq!(app.proj.find.matches.len(), 1);
+}
+
+/// L25: a document sent to a server idle by then — pyright, for one — keeps
+/// the window polling until the server has published what it finds in it.
+/// It says no more of its work, nothing else woke the window, and the
+/// status bar read ✘ 0 ⚠ 0 for a file with two errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_window_polls_until_a_sent_documents_diagnostics_come() {
+    let mut app = scanned_app("lsp-diagnostics-wait");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let (client, server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(client.clone()));
+    let settle = |app: &mut App| {
+        app.sync_lsp_snapshots();
+        let _ = app.on_tick();
+        app.sync_lsp_snapshots();
+    };
+    settle(&mut app);
+    assert!(!app.wants_tick(), "precondition: idle, nothing awaited");
+    let lib = root.join("src/lib.rs");
+    client.did_open(&lib, "rust", 1, "pub fn origin() {}\n");
+    settle(&mut app);
+    assert!(
+        app.wants_tick(),
+        "a sent document's diagnostics went unawaited"
+    );
+    // The server says what it found: read, and the polling ends.
+    let published = client.snapshot().unwrap().diag_version;
+    server
+        .notify
+        .send(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {
+                "uri": lsp::client::path_to_uri(&lib),
+                "diagnostics": [{
+                    "range": {
+                        "start": {"line": 0, "character": 0},
+                        "end": {"line": 0, "character": 3}
+                    },
+                    "severity": 1,
+                    "message": "boom"
+                }]
+            }
+        }))
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while client.snapshot().unwrap().diag_version == published {
+        assert!(std::time::Instant::now() < deadline, "never published");
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    settle(&mut app);
+    assert!(!app.wants_tick(), "still polling once they came");
+    match app.proj.link.lsp_snapshots.get("rust") {
+        Some(Ok(snapshot)) => assert_eq!(snapshot.diagnostics(&lib).len(), 1),
+        _ => panic!("no snapshot"),
+    }
 }

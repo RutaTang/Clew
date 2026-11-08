@@ -382,12 +382,11 @@ impl App {
         if self.show_tools_menu && crate::app::tutorial::closes_tools_menu(&message) {
             self.show_tools_menu = false;
         }
-        // So does a pick from the app menu, or from the View menu.
+        // So does a pick from the app menu. The View menu's rows are
+        // switches, and stay up as they are flipped, several in a row: it
+        // goes as a click away from it, or Escape, puts it away.
         if self.show_app_menu && crate::ui::closes_app_menu(&message) {
             self.show_app_menu = false;
-        }
-        if self.show_view_menu && crate::ui::closes_view_menu(&message) {
-            self.show_view_menu = false;
         }
         match message {
             Message::Server(message) => self.update_server(message),

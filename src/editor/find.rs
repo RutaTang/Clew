@@ -81,6 +81,7 @@ fn line_text(line: &HlLine) -> String {
 
 /// All matches of `query` across `lines`, in document order, its case
 /// mattering once it has a capital in it.
+#[cfg(test)]
 pub fn find_matches(query: &str, lines: &[HlLine]) -> Vec<Match> {
     find_matches_cased(query, lines, false)
 }

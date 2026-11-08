@@ -348,14 +348,18 @@ fn section_frame(section: MenuSection) -> (Vec<Entry>, Vec<Entry>) {
                 command(tr_noop!("Toggle Margin"), TOGGLE_RIGHT),
             ],
             vec![
-                command(tr_noop!("Overview"), OVERVIEW),
-                command(tr_noop!("Stats"), STATS),
-                Entry::Separator,
                 command(tr_noop!("Appearance: System"), THEME_SYSTEM),
                 command(tr_noop!("Appearance: Light"), THEME_LIGHT),
                 command(tr_noop!("Appearance: Dark"), THEME_DARK),
                 Entry::Separator,
                 command(tr_noop!("Toggle Full Screen"), FULLSCREEN),
+            ],
+        ),
+        MenuSection::Tools => (
+            Vec::new(),
+            vec![
+                command(tr_noop!("Overview"), OVERVIEW),
+                command(tr_noop!("Stats"), STATS),
             ],
         ),
         MenuSection::Go => (Vec::new(), Vec::new()),
