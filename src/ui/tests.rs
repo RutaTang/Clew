@@ -9251,7 +9251,7 @@ fn voice_shows_what_it_is_doing() {
     }
     app.ask_view = crate::AskView::Compact;
     app.voice.phase = VoicePhase::Idle;
-    app.voice.confirm = Some("Explain All".into());
+    app.voice.confirm = Some(crate::app::voice::Waiting::Command("Explain All".into()));
     assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));
     assert!(matches!(
         click(sim_of(&app), "Run").as_slice(),

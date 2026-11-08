@@ -72,7 +72,12 @@ pub(crate) fn setup_sheet<'a>(
             title,
             space().width(Fill),
             super::chrome::close_button_saying(
-                Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
+                // "No" to opening it.
+                super::heard::answer(
+                    tr!("Close without opening"),
+                    super::heard::Answer::No,
+                    Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
+                ),
                 tr!("Close without opening"),
             ),
         ]
@@ -112,6 +117,9 @@ pub(crate) fn setup_sheet<'a>(
             .size(16)
             .spacing(10)
             .text_size(ts::BASE);
+        if let Some(toggle) = toggle {
+            super::heard::switch(label, on, toggle);
+        }
         column![
             match toggle {
                 Some(toggle) => tick.on_toggle(toggle),
@@ -165,8 +173,11 @@ pub(crate) fn setup_sheet<'a>(
                         )
                         .style(theme::icon_button(false))
                         .padding([2, 6])
-                        .on_press(Message::Settings(
-                            crate::SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel),
+                        .on_press(super::heard::said(
+                            tr!("Add an API Key…"),
+                            Message::Settings(crate::SettingsMsg::OpenAt(
+                                crate::SettingsPage::LanguageModel,
+                            )),
                         )),
                     )
                     .padding(Padding {
@@ -233,12 +244,22 @@ pub(crate) fn setup_sheet<'a>(
     let accept_button = button(text(accept).size(ts::BASE))
         .style(theme::primary_button)
         .padding([6, 16])
-        .on_press_maybe(ready.then_some(accept_msg));
+        .on_press_maybe(
+            ready.then(|| super::heard::answer(accept, super::heard::Answer::Yes, accept_msg)),
+        );
     let decline_ready = !decline_gated || asked.ready;
     let decline_button = button(text(decline_label).size(ts::BASE))
         .style(theme::toolbar_button)
         .padding([6, 16])
-        .on_press_maybe(decline_ready.then_some(decline));
+        .on_press_maybe(decline_ready.then(|| {
+            // Skip setup opens the project: no "no" to opening it, which
+            // the × is; Cancel is.
+            if decline_gated {
+                super::heard::said(decline_label, decline)
+            } else {
+                super::heard::answer(decline_label, super::heard::Answer::No, decline)
+            }
+        }));
     let decline_button: Element<'a, Message> = if decline_gated {
         crate::ui::fresh::allow(decline_ready, decline_button)
     } else {

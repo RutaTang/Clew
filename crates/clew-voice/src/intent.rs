@@ -15,10 +15,62 @@ use std::cmp::Reverse;
 
 /// Words that only say "do it", on either side.
 const VERBS: &[&str] = &[
-    "go", "to", "run", "toggle", "view", "switch", "bring", "up", "launch", "start", "add", "set",
-    "put", "use", "turn", "change", "do", "execute", "jump", "navigate", "take", "me", "i", "want",
-    "would", "like", "can", "could", "you", "please", "hey", "ok", "okay", "clew", "clue", "now",
-    "just", "lets", "the", "a", "an", "my", "this", "that", "into", "for",
+    "go",
+    "to",
+    "run",
+    "toggle",
+    "view",
+    "switch",
+    "bring",
+    "up",
+    "launch",
+    "start",
+    "add",
+    "set",
+    "put",
+    "use",
+    "turn",
+    "change",
+    "do",
+    "execute",
+    "jump",
+    "navigate",
+    "take",
+    "me",
+    "i",
+    "want",
+    "would",
+    "like",
+    "can",
+    "could",
+    "you",
+    "please",
+    "hey",
+    "ok",
+    "okay",
+    "clew",
+    "clue",
+    "now",
+    "just",
+    "lets",
+    "the",
+    "a",
+    "an",
+    "my",
+    "this",
+    "that",
+    "into",
+    "for",
+    // The app itself, which every command is of ("change the app's
+    // language"), and pressing what is named.
+    "app",
+    "apps",
+    "application",
+    "applications",
+    "clews",
+    "click",
+    "press",
+    "tap",
 ];
 
 /// Of [`VERBS`], the small words that only link the others.
@@ -427,6 +479,19 @@ mod tests {
         ] {
             assert_eq!(said(utterance), Some(title), "{utterance:?}");
         }
+    }
+
+    /// The app itself is no word of a command: "change the app's theme to
+    /// dark" is the theme; "click" before a name presses it.
+    #[test]
+    fn the_app_and_a_click_say_nothing_more() {
+        assert_eq!(said("change the app's theme to dark"), Some("Theme: Dark"));
+        assert_eq!(
+            said("set the application theme to light"),
+            Some("Theme: Light")
+        );
+        assert_eq!(said("click glossary"), Some("Glossary"));
+        assert_eq!(said("press the call graph"), Some("Call Graph"));
     }
 
     /// "debugging" is "debug" to the speaker, and so to the matcher.

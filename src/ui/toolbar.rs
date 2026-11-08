@@ -135,7 +135,9 @@ pub(crate) fn busy_action<'a>(
     } else {
         crate::glyph::icon(glyph, theme::fg_muted(), 15.0)
     };
-    let message = message.filter(|_| !busy);
+    let message = message
+        .filter(|_| !busy)
+        .map(|m| super::heard::said(name, m));
     chrome_tip(
         button(container(icon).center(Fill))
             .style(theme::icon_button(false))
@@ -562,7 +564,7 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
                 .padding(0)
                 .width(Length::Fixed(WIN_BTN_W))
                 .height(Fill)
-                .on_press(msg),
+                .on_press(super::heard::said(label, msg)),
             label,
             None,
         )
@@ -878,7 +880,8 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         let able =
             app.proj.project.is_some() || matches!(tool, StripTool::More | StripTool::Settings);
         tip_at(
-            strip_button(glyph, tint, on, able).on_press_maybe(able.then_some(msg)),
+            strip_button(glyph, tint, on, able)
+                .on_press_maybe(able.then(|| super::heard::said(label, msg))),
             label,
             shortcut,
             tooltip::Position::Left,
@@ -911,7 +914,7 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
                 let (glyph, label, msg) = tools_row(app, row);
                 tip_at(
                     strip_button(glyph, theme::fg_muted(), false, msg.is_some())
-                        .on_press_maybe(msg),
+                        .on_press_maybe(msg.map(|m| super::heard::said(&label, m))),
                     label,
                     tools_row_action(row).and_then(caps),
                     tooltip::Position::Left,
@@ -1188,7 +1191,7 @@ fn menu_item<'a>(
         row![
             container(gutter).width(15),
             ts::set_in(
-                text(label).wrapping(Wrapping::None),
+                text(label.clone()).wrapping(Wrapping::None),
                 MENU_ROW_H,
                 ts::INTER,
                 ts::BASE
@@ -1205,7 +1208,7 @@ fn menu_item<'a>(
     .height(Length::Fixed(MENU_ROW_H))
     .padding([0, 9]);
     if let Some(msg) = msg {
-        b = b.on_press(msg);
+        b = b.on_press(super::heard::said(&label, msg));
     }
     b.into()
 }
@@ -1684,7 +1687,10 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             .style(theme::menu_row)
             .width(Fill)
             .padding([5, 8])
-            .on_press(Message::Reading(ReadingMsg::TargetSelected(t)))
+            .on_press(super::heard::said(
+                &super::statusbar::target_label(&t),
+                Message::Reading(ReadingMsg::TargetSelected(t.clone())),
+            ))
             .into()
         })
         .collect();

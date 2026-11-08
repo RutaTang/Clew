@@ -586,7 +586,10 @@ fn setup_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
     let chip = button(quiet)
         .style(theme::icon_button(false))
         .padding([2, 8])
-        .on_press(Message::Project(ProjectMsg::SetUpMissing));
+        .on_press(super::heard::said(
+            tr!("Set up missing language servers"),
+            Message::Project(ProjectMsg::SetUpMissing),
+        ));
     Some((
         super::toolbar::tip_at(chip, tip, None, tooltip::Position::Top),
         width,
@@ -677,7 +680,10 @@ fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
         button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
             .style(theme::icon_button(false))
             .padding([1, 4])
-            .on_press(Message::Explain(ExplainMsg::Cancel)),
+            .on_press(super::heard::said(
+                tr!("Stop explaining"),
+                Message::Explain(ExplainMsg::Cancel),
+            )),
     );
     let chip: Element<'_, Message> = if short {
         super::toolbar::tip_at(chip, whole, None, tooltip::Position::Top)
@@ -757,7 +763,10 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
         .style(theme::icon_button(false))
         .padding([2, 8]);
     if enabled {
-        b = b.on_press(Message::Explain(ExplainMsg::RefreshAll));
+        b = b.on_press(super::heard::said(
+            &label,
+            Message::Explain(ExplainMsg::RefreshAll),
+        ));
     }
     Some(b.into())
 }

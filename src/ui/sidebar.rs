@@ -62,6 +62,8 @@ pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
 }
 
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
+    // The view's rows a list voice counts down: "open the third one".
+    super::heard::list();
     // The views as a segmented row of icons, each naming itself on hover;
     // the chosen one raised as a chip.
     let segment = |glyph: Glyph, chosen: bool, name: &'static str, msg: Message| {
@@ -85,7 +87,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
             .padding(0)
             .width(Fill)
             .height(Length::Fixed(28.0))
-            .on_press(msg),
+            .on_press(super::heard::said(name, msg)),
             name,
             None,
             tooltip::Position::Bottom,
@@ -120,9 +122,10 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 13.0))
                         .style(theme::icon_button(false))
                         .padding(5)
-                        .on_press(Message::Window(WindowMsg::SidebarTabPicked(
-                            SidebarTab::Files,
-                        ))),
+                        .on_press(super::heard::said(
+                            tr!("Close"),
+                            Message::Window(WindowMsg::SidebarTabPicked(SidebarTab::Files,))
+                        )),
                     tr!("Back to the files"),
                     None,
                     tooltip::Position::Bottom,
@@ -169,7 +172,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
                         .style(theme::toolbar_button)
                         .padding(3)
-                        .on_press(cleared.clone()),
+                        .on_press(super::heard::said(tr!("Clear filter"), cleared.clone())),
                     tr!("Clear filter"),
                     None,
                     tooltip::Position::Bottom,
@@ -242,7 +245,10 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
-            .on_press(Message::Walk(WalkMsg::GenerateDiff)),
+            .on_press(super::heard::said(
+                tr!("Review branch changes"),
+                Message::Walk(WalkMsg::GenerateDiff)
+            )),
     ]
     .spacing(4);
     // The last debug run, once it stopped somewhere: a tour of the path it
@@ -263,7 +269,10 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
-            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+            .on_press(super::heard::said(
+                tr!("Walk the last run"),
+                Message::Walk(WalkMsg::GenerateTrace),
+            )),
         );
     }
     let review = container(actions).padding(Padding {
@@ -340,7 +349,9 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
         .style(theme::segment(active))
         .padding([5, 0])
         .width(Fill)
-        .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
+        .on_press_maybe(
+            (!active).then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
+        )
     };
     let toggle =
         container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(2))
@@ -368,7 +379,10 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             button(text(tr!("Generate")).size(ts::SMALL))
                 .style(theme::secondary_button)
                 .padding([5, 10])
-                .on_press(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone()))),
+                .on_press(super::heard::said(
+                    tr!("Generate"),
+                    Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())),
+                )),
         );
     }
     container(column![toggle, field].spacing(8))
@@ -470,11 +484,14 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             bottom: 6.0,
             left: 8.0,
         })
-        .on_press(if is_open {
-            Message::Walk(WalkMsg::Back)
-        } else {
-            Message::Walk(WalkMsg::Open(wt.scope.clone()))
-        });
+        .on_press(super::heard::row(
+            || scope_label(&wt.scope),
+            if is_open {
+                Message::Walk(WalkMsg::Back)
+            } else {
+                Message::Walk(WalkMsg::Open(wt.scope.clone()))
+            },
+        ));
         let tour_row: Element<'_, Message> = if busy {
             title.into()
         } else {
@@ -483,11 +500,19 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     button(text("↻").size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 9])
-                        .on_press(Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))),
+                        .on_press(super::heard::said_to(
+                            tr!("Regenerate"),
+                            &scope_label(&wt.scope),
+                            Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))
+                        )),
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
                         .padding([7, 9])
-                        .on_press(Message::Walk(WalkMsg::Delete(wt.scope.clone()))),
+                        .on_press(super::heard::said_to(
+                            tr!("Delete"),
+                            &scope_label(&wt.scope),
+                            Message::Walk(WalkMsg::Delete(wt.scope.clone()))
+                        )),
                 ]
                 .spacing(2),
             )
@@ -533,10 +558,13 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         bottom: 4.0,
                         left: 22.0,
                     })
-                    .on_press(Message::Walk(WalkMsg::Goto {
-                        scope: wt.scope.clone(),
-                        step: si,
-                    })),
+                    .on_press(super::heard::row(
+                        || step.title.clone(),
+                        Message::Walk(WalkMsg::Goto {
+                            scope: wt.scope.clone(),
+                            step: si,
+                        }),
+                    )),
                 );
             }
         }
@@ -569,7 +597,10 @@ pub(crate) fn walk_narration<'a>(
         button(text("‹").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
-            .on_press(Message::Walk(WalkMsg::Step(-1))),
+            .on_press(super::heard::said(
+                tr!("Previous step"),
+                Message::Walk(WalkMsg::Step(-1))
+            )),
         // As wide as it reads at the last step: the ‹ before it moved as
         // the count gained a digit, under the pointer stepping through.
         {
@@ -584,7 +615,10 @@ pub(crate) fn walk_narration<'a>(
         button(text("›").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
-            .on_press(Message::Walk(WalkMsg::Step(1))),
+            .on_press(super::heard::said(
+                tr!("Next step"),
+                Message::Walk(WalkMsg::Step(1))
+            )),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -831,10 +865,13 @@ fn filtered_file_rows<'a>(
             .style(theme::list_row(is_current))
             .width(Fill)
             .padding([4, 8])
-            .on_press(Message::Editor(EditorMsg::OpenRel {
-                rel: f.rel.clone(),
-                line: None,
-            }))
+            .on_press(super::heard::row(
+                || f.rel.clone(),
+                Message::Editor(EditorMsg::OpenRel {
+                    rel: f.rel.clone(),
+                    line: None,
+                }),
+            ))
             .into(),
         );
     }
@@ -910,7 +947,10 @@ pub(crate) fn append_tree_rows<'a>(
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
-                .on_press(Message::Project(ProjectMsg::ToggleDir(rel.clone())))
+                .on_press(super::heard::row(
+                    || name.to_string(),
+                    Message::Project(ProjectMsg::ToggleDir(rel.clone())),
+                ))
                 .into(),
         );
         if expanded {
@@ -972,7 +1012,10 @@ pub(crate) fn append_tree_rows<'a>(
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
-                .on_press(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
+                .on_press(super::heard::row(
+                    || name.to_string(),
+                    Message::Editor(EditorMsg::OpenRel { rel, line: None }),
+                ))
                 .into(),
         );
     }
@@ -1056,7 +1099,7 @@ pub(crate) fn empty_state<'a>(
             button(text(label.to_string()).size(ts::BASE))
                 .style(theme::toolbar_button)
                 .padding([7, 16])
-                .on_press(msg),
+                .on_press(super::heard::said(label, msg)),
         );
     }
     center(col).padding(20).into()
@@ -1114,7 +1157,10 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 .padding(0)
                 .width(Length::Fixed(OPTION_SIDE))
                 .height(Length::Fixed(OPTION_SIDE))
-                .on_press(Message::Nav(NavMsg::SearchToggle(opt))),
+                .on_press(super::heard::said(
+                    tip,
+                    Message::Nav(NavMsg::SearchToggle(opt)),
+                )),
             tip,
             None,
             tooltip::Position::Bottom,
@@ -1206,11 +1252,14 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 bottom: 1.0,
                 left: 8.0,
             })
-            .on_press(Message::Editor(EditorMsg::OpenAbs {
-                abs: hit.abs.clone(),
-                line: Some(hit.line),
-                push: true,
-            }))
+            .on_press(super::heard::row(
+                || format!("{} {}", hit.rel, hit.line),
+                Message::Editor(EditorMsg::OpenAbs {
+                    abs: hit.abs.clone(),
+                    line: Some(hit.line),
+                    push: true,
+                }),
+            ))
             .into(),
         );
     }
@@ -1379,7 +1428,10 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         button(text(tr!("Clear")).size(ts::CAPTION).color(theme::dim()))
             .style(theme::list_row(false))
             .padding([1, 6])
-            .on_press(Message::Reading(ReadingMsg::HistoryClear)),
+            .on_press(super::heard::said(
+                tr!("Clear the trail"),
+                Message::Reading(ReadingMsg::HistoryClear)
+            )),
     ]
     .align_y(iced::Center)
     .padding(Padding {
@@ -1468,10 +1520,13 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             bottom: 3.0,
             left: 6.0,
         })
-        .on_press(Message::Reading(ReadingMsg::HistoryJump {
-            id: v.id,
-            loc: v.loc.clone(),
-        }));
+        .on_press(super::heard::row(
+            || loc_label(&v.loc, v.label.as_deref()),
+            Message::Reading(ReadingMsg::HistoryJump {
+                id: v.id,
+                loc: v.loc.clone(),
+            }),
+        ));
 
         rows.push(jump.into());
     }
@@ -1558,17 +1613,22 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::BookmarkNoteEdit(
-                bm.rel.clone(),
-                bm.line,
-            )));
+            .on_press(super::heard::said_to(
+                tr!("Edit note"),
+                &format!("{} {}", bm.rel, bm.line),
+                Message::Reading(ReadingMsg::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
+            ));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::BookmarkRemoved {
-                rel: bm.rel.clone(),
-                line: bm.line,
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Remove"),
+                &format!("{} {}", bm.rel, bm.line),
+                Message::Reading(ReadingMsg::BookmarkRemoved {
+                    rel: bm.rel.clone(),
+                    line: bm.line,
+                }),
+            ));
         rows.push(
             button(row![main, pencil, close].spacing(2).align_y(iced::Center))
                 .style(theme::list_row(false))
@@ -1579,10 +1639,13 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                     bottom: 2.0,
                     left: 8.0,
                 })
-                .on_press(Message::Editor(EditorMsg::OpenRel {
-                    rel: bm.rel.clone(),
-                    line: Some(bm.line),
-                }))
+                .on_press(super::heard::row(
+                    || format!("{} {}", bm.rel, bm.line),
+                    Message::Editor(EditorMsg::OpenRel {
+                        rel: bm.rel.clone(),
+                        line: Some(bm.line),
+                    }),
+                ))
                 .into(),
         );
     }
@@ -1658,10 +1721,14 @@ fn notes_list(app: &App) -> Element<'_, Message> {
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Understood"),
+                &n.symbol,
+                Message::Reading(ReadingMsg::NoteToggleUnderstood {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
 
         // Symbol name + its live location (or a "detached" flag when orphaned).
         let loc: Element<'_, Message> = match line {
@@ -1719,17 +1786,25 @@ fn notes_list(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::NoteEditStart {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Edit note"),
+                &n.symbol,
+                Message::Reading(ReadingMsg::NoteEditStart {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::NoteRemove {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Remove"),
+                &n.symbol,
+                Message::Reading(ReadingMsg::NoteRemove {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
         // The name area jumps; the toggle/pencil/✕ capture their own clicks.
         let jump = button(main)
             .style(theme::list_row(false))
@@ -1740,10 +1815,13 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 bottom: 2.0,
                 left: 4.0,
             })
-            .on_press(Message::Reading(ReadingMsg::NoteJump {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::row(
+                || n.symbol.clone(),
+                Message::Reading(ReadingMsg::NoteJump {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
         rows.push(
             row![toggle, jump, pencil, close]
                 .spacing(1)
@@ -1833,7 +1911,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         )
         .style(theme::toolbar_button)
         .padding([2, 8])
-        .on_press_maybe(press)
+        .on_press_maybe(press.map(|m| super::heard::said(tr!("Build index"), m)))
         .into()
     } else {
         super::toolbar::busy_action(
@@ -1854,7 +1932,10 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         )
         .style(theme::icon_button(false))
         .padding([2, 6])
-        .on_press(super::toolbar::explain_all_message(app))
+        .on_press(super::heard::said(
+            tr!("Explain All…"),
+            super::toolbar::explain_all_message(app),
+        ))
         .into()
     } else {
         text(if n > 0 {
@@ -1901,7 +1982,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             button(
                 column![
                     row![
-                        text(label)
+                        text(label.clone())
                             .size(ts::BODY)
                             .color(theme::accent())
                             .wrapping(Wrapping::None),
@@ -1921,7 +2002,10 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 6])
-            .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
+            .on_press(super::heard::row(
+                || label.clone(),
+                Message::Semantic(SemanticMsg::OpenNode(node.clone())),
+            ))
             .into(),
         );
     }

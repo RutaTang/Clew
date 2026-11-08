@@ -179,7 +179,10 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
 fn a_costly_command_asks_first() {
     let (mut app, script, _) = voice_app("voice-costly", "explain all");
     say(&mut app, &script);
-    assert_eq!(app.voice.confirm.as_deref(), Some("Explain All"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
     assert!(!app.settings.open, "nothing ran yet");
     assert!(app.voice.is_busy());
     // Esc: no.
@@ -187,14 +190,17 @@ fn a_costly_command_asks_first() {
         keyboard::Key::Named(keyboard::key::Named::Escape),
         keyboard::Modifiers::empty(),
     ));
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert!(!app.settings.open);
     // Again, and yes: it runs (with no key to pay for it, Settings asks
     // for one).
     say(&mut app, &script);
-    assert_eq!(app.voice.confirm.as_deref(), Some("Explain All"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
     let _ = app.update(Message::Voice(VoiceMsg::Confirm));
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert!(app.settings.open, "the pass asked for a key");
     assert_eq!(
         app.voice.heard.as_ref().map(|h| &h.outcome),
@@ -319,7 +325,10 @@ fn keep_listening_listens_again_after_a_command() {
     let (mut app, script, _) = voice_app("voice-keep-confirm", "explain all");
     app.voice.keep_listening = true;
     say(&mut app, &script);
-    assert_eq!(app.voice.confirm.as_deref(), Some("Explain All"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
     assert!(app.voice.is_listening());
     assert!(app.status.contains("say yes"), "{}", app.status);
     // Nothing said for long: listened past, quietly.
@@ -1062,19 +1071,22 @@ fn the_debugger_is_driven_by_voice() {
 
     // Starting asks; "no" says no, "yes" runs it.
     say_words(&mut app, &script, "Start debugging.");
-    assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Start Debugging")
+    );
     say_words(&mut app, &script, "No, never mind.");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert!(app.status.contains("Start Debugging"), "{}", app.status);
     say_words(&mut app, &script, "Start debugging.");
     say_words(&mut app, &script, "Yes, run it.");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert_eq!(ran(&app), Some("Start Debugging"));
     // Something else said instead puts the question away and is read as
     // itself.
     say_words(&mut app, &script, "Start debugging.");
     say_words(&mut app, &script, "go to line 2");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert_eq!(caret_line(&app), Some(2));
 
     // A program stopped: each step runs as said.
@@ -1100,12 +1112,15 @@ fn the_debugger_is_driven_by_voice() {
     ] {
         say_words(&mut app, &script, said);
         assert_eq!(ran(&app), Some(title), "{said}: {}", app.status);
-        assert_eq!(app.voice.confirm, None, "{said}");
+        assert!(app.voice.confirm.is_none(), "{said}");
     }
     say_words(&mut app, &script, "Stop debugging.");
-    assert_eq!(app.voice.confirm.as_deref(), Some("Debug: Stop"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Debug: Stop")
+    );
     say_words(&mut app, &script, "cancel");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
 
     say_words(&mut app, &script, "Watch cart total.");
     assert_eq!(app.debug.watches, ["cart total"]);
@@ -1113,7 +1128,7 @@ fn the_debugger_is_driven_by_voice() {
     assert!(app.debug.watches.is_empty());
     say_words(&mut app, &script, "Turn on hover evaluation.");
     assert_eq!(
-        app.voice.confirm.as_deref(),
+        app.voice.confirm.as_ref().map(|w| w.said()),
         Some("Debug: Turn On Hover Evaluation"),
         "evaluating in the program as the mouse moves asks"
     );
@@ -1214,7 +1229,14 @@ fn phrases_are_heard_in_the_readers_language() {
         assert_eq!(ran(&app), Some("Find References"), "{}", app.status);
         assert!(app.proj.search.query.is_empty());
         say_words(&mut app, &script, "Démarrer le débogage");
-        assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+        assert!(
+            matches!(
+                &app.voice.confirm,
+                Some(crate::app::voice::Waiting::Command(t)) if t == "Start Debugging"
+            ),
+            "{:?}",
+            app.voice.confirm
+        );
         say_words(&mut app, &script, "Oui, vas-y.");
         assert_eq!(ran(&app), Some("Start Debugging"), "{}", app.status);
     });
@@ -1759,4 +1781,223 @@ fn the_voice_key_says_which_model_is_missing() {
     );
     assert!(app.settings.open);
     assert_eq!(app.settings.page, SettingsPage::Voice);
+}
+
+/// The sentence that found nothing: the interface's language changed as
+/// it is said — its name misheard — by the command the palette and the
+/// agent run too. (Made, it would change every test's language: what it
+/// makes is checked, not made.)
+#[test]
+fn the_apps_language_is_changed_as_it_is_said() {
+    use crate::i18n::{Lang, LangPref};
+    let app = blank_app();
+    let settings = app.settings_choices();
+    for said in [
+        "change the app's language to frensh",
+        "Change the app's language to French.",
+        "switch to French",
+    ] {
+        let (s, c) = crate::app::choices::chosen(said, &settings).expect(said);
+        let choice = &settings[s].choices[c];
+        assert_eq!(choice.title, "Language: French", "{said:?}");
+        assert!(
+            matches!(
+                choice.message,
+                Message::Settings(SettingsMsg::SetLanguage(LangPref::Chosen(Lang::Fr)))
+            ),
+            "{said:?}: {:?}",
+            choice.message
+        );
+    }
+    // The palette lists it, for the keyboard and for the agent.
+    let palette = app.palette_commands();
+    let french = palette
+        .iter()
+        .find(|c| c.title == "Language: French")
+        .expect("the palette offers the language");
+    assert!(matches!(
+        french.action,
+        crate::app::palette::PaletteAction::Send(Message::Settings(SettingsMsg::SetLanguage(
+            LangPref::Chosen(Lang::Fr)
+        )))
+    ));
+    assert!(!french.costly(), "the agent runs it without asking");
+}
+
+/// A setting said is changed — the window's own, here, as the language
+/// is every window's — and a switch is turned off and on by its name.
+#[test]
+fn a_setting_said_is_changed() {
+    let (mut app, script, _) = voice_app("voice-setting", "");
+    assert!(app.voice.prefs.speak);
+    say_words(&mut app, &script, "Turn off read answers aloud.");
+    assert!(!app.voice.prefs.speak, "{}", app.status);
+    assert_eq!(ran(&app), Some("Read answers aloud: Off"));
+    say_words(&mut app, &script, "turn read answers aloud back on");
+    assert!(app.voice.prefs.speak, "{}", app.status);
+    say_words(&mut app, &script, "set the voice language to French");
+    assert_eq!(
+        app.voice.prefs.language.as_deref(),
+        Some("fr"),
+        "{}",
+        app.status
+    );
+    // Spoken commands off, what is said goes to Ask — but for turning them
+    // back on, which nothing else said could.
+    say_words(&mut app, &script, "turn off spoken commands");
+    assert!(!app.voice.prefs.run_commands, "{}", app.status);
+    app.voice.prefs.send_questions = false;
+    say_words(&mut app, &script, "dark mode");
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Asked)
+    );
+    app.proj.ask_input.clear();
+    say_words(&mut app, &script, "turn spoken commands on");
+    assert!(app.voice.prefs.run_commands, "{}", app.status);
+}
+
+/// A dialog takes what is said as it takes the pointer: a note's words
+/// typed into it, its Save said by name; Settings put away by "close".
+#[test]
+fn a_dialog_is_filled_and_answered_by_voice() {
+    let (mut app, script, _) = voice_app("voice-dialog", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let seed = vec![bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "fn".into(),
+        note: None,
+    }];
+    bookmarks::save(&root, &seed).unwrap();
+    app.proj.bookmarks = bookmarks::load(&root);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteEdit(
+        "src/lib.rs".into(),
+        3,
+    )));
+    // What only opens as a yes does ("run …") is no answer to the
+    // question on top: it is the note's words.
+    say_words(&mut app, &script, "run the tests");
+    assert!(app.proj.note_edit.is_some(), "{}", app.status);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteInput(
+        String::new(),
+    )));
+    say_words(&mut app, &script, "Why this line matters.");
+    say_words(&mut app, &script, "and what it returns");
+    say_words(&mut app, &script, "Save");
+    assert!(app.proj.note_edit.is_none(), "{}", app.status);
+    assert_eq!(
+        app.proj.bookmarks.first().and_then(|b| b.note.as_deref()),
+        Some("Why this line matters and what it returns")
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert!(app.settings.open);
+    say_words(&mut app, &script, "close");
+    assert!(!app.settings.open, "{}", app.status);
+    // Put away as Esc does, by a word no button of it carries.
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    say_words(&mut app, &script, "never mind");
+    assert!(!app.settings.open, "{}", app.status);
+}
+
+/// A row of the list in view is picked by its place in it, as it is
+/// counted down the list.
+#[test]
+fn a_rows_place_in_the_list_picks_it() {
+    let (mut app, script, _) = voice_app("voice-row", "");
+    let _ = app.update(Message::Window(WindowMsg::SidebarTabPicked(
+        SidebarTab::Files,
+    )));
+    let _ = app.update(Message::Window(WindowMsg::FileFilterChanged("s".into())));
+    let listed: Vec<String> = crate::ui::filtered_files(app.proj.project.as_ref().unwrap(), "s")
+        .map(|f| f.rel.clone())
+        .collect();
+    assert!(listed.len() >= 2, "{listed:?}");
+    say_words(&mut app, &script, "open the second one");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.clone()),
+        Some(listed[1].clone()),
+        "{}",
+        app.status
+    );
+    // Opened, a file may ask about its language's server: a question on
+    // top takes what is said, and is answered so.
+    if crate::ui::active_overlay(&app).is_some() {
+        say_words(&mut app, &script, "not now");
+        assert!(crate::ui::active_overlay(&app).is_none(), "{}", app.status);
+    }
+    say_words(&mut app, &script, "the first result");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.clone()),
+        Some(listed[0].clone()),
+        "{}",
+        app.status
+    );
+}
+
+/// What undoes something waits for a yes when it is said — a word may
+/// have been misheard — and a no leaves it.
+#[test]
+fn what_undoes_waits_for_a_yes() {
+    let (mut app, script, _) = voice_app("voice-undoes", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let seed = vec![bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "fn".into(),
+        note: None,
+    }];
+    bookmarks::save(&root, &seed).unwrap();
+    app.proj.bookmarks = bookmarks::load(&root);
+    let _ = app.update(Message::Window(WindowMsg::SidebarTabPicked(
+        SidebarTab::Marks,
+    )));
+    say_words(&mut app, &script, "remove src/lib.rs 3");
+    assert!(
+        matches!(
+            &app.voice.confirm,
+            Some(crate::app::voice::Waiting::Press { .. })
+        ),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.proj.bookmarks.len(), 1, "not before a yes");
+    say_words(&mut app, &script, "no");
+    assert_eq!(app.proj.bookmarks.len(), 1);
+    say_words(&mut app, &script, "remove src/lib.rs 3");
+    say_words(&mut app, &script, "yes");
+    assert!(app.proj.bookmarks.is_empty(), "{}", app.status);
+}
+
+/// What is on screen is the reader's to press by voice, never the agent's:
+/// a question's answers are no palette command.
+#[test]
+fn what_is_on_screen_is_not_the_agents() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
+    let targets = crate::ui::heard::gather(&app);
+    assert!(
+        targets.iter().any(|t| t.title.starts_with("Download")),
+        "{:?}",
+        targets.iter().map(|t| &t.title).collect::<Vec<_>>()
+    );
+    // A switch by its name and state, and a picker's every choice.
+    for title in [
+        "Run spoken commands: Off",
+        "Run spoken commands: On",
+        "1.25×",
+    ] {
+        assert!(targets.iter().any(|t| t.title == title), "{title}");
+    }
+    // Each model's Download named with it, as every model has one.
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.title.starts_with("Download") && t.title.ends_with(": Large Turbo")),
+        "{:?}",
+        targets.iter().map(|t| &t.title).collect::<Vec<_>>()
+    );
+    let palette = app.palette_commands();
+    assert!(!palette.iter().any(|c| c.title.starts_with("Download")));
 }

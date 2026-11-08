@@ -25,7 +25,7 @@ pub(crate) fn graph_modal_frame<'a>(
             button(glyph::icon(g, theme::fg_muted(), 16.0))
                 .style(theme::toolbar_button)
                 .padding([4, 8])
-                .on_press(msg),
+                .on_press(super::heard::said(tip, msg)),
             tip,
             None,
         )
@@ -61,14 +61,14 @@ pub(crate) fn graph_modal_frame<'a>(
     // words — shapes for 2D and the map read as ◇ and ▽.
     let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
         let seg = |(label, on): (String, bool)| {
-            button(text(label).size(ts::SMALL).color(if on {
+            button(text(label.clone()).size(ts::SMALL).color(if on {
                 theme::fg()
             } else {
                 theme::fg_muted()
             }))
             .style(theme::toggle(on))
             .padding([4, 8])
-            .on_press_maybe((!on).then(|| msg.clone()))
+            .on_press_maybe((!on).then(|| super::heard::said(&label, msg.clone())))
         };
         row![seg(a), seg(b)].spacing(2).into()
     };
@@ -96,7 +96,10 @@ pub(crate) fn graph_modal_frame<'a>(
             }))
             .style(theme::toggle(graph_heat))
             .padding([4, 8])
-            .on_press(Message::Graph(GraphMsg::ToggleHeat)),
+            .on_press(super::heard::said(
+                tr!("Heat"),
+                Message::Graph(GraphMsg::ToggleHeat),
+            )),
             if graph_heat {
                 tr!("Color by language")
             } else {
@@ -142,6 +145,8 @@ pub(crate) fn graph_modal_frame<'a>(
 }
 
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
+    // Its list's rows counted from 1, as voice picks them.
+    super::heard::list();
     let title = match overlay {
         crate::Overlay::ProjectImports => tr!("Project Import Graph"),
         crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
@@ -174,12 +179,12 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             button(text(tr!("Refine with LSP")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
-                .on_press_maybe(
-                    app.proj
-                        .project
-                        .is_some()
-                        .then_some(Message::Graph(GraphMsg::RefineProjectCalls)),
-                )
+                .on_press_maybe(app.proj.project.is_some().then(|| {
+                    super::heard::said(
+                        tr!("Refine with LSP"),
+                        Message::Graph(GraphMsg::RefineProjectCalls),
+                    )
+                }))
                 .into()
         }),
         crate::Overlay::ProjectImports => None,
@@ -227,7 +232,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
                 button(text(tr!("Open")).size(ts::SMALL))
                     .style(theme::primary_button)
                     .padding([3, 12])
-                    .on_press((*pick.open).clone()),
+                    .on_press(super::heard::said(tr!("Open"), (*pick.open).clone())),
             ]
             .spacing(10)
             .align_y(iced::Center)
@@ -2032,9 +2037,10 @@ pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a
         bottom: 2.0,
         left: 10.0,
     })
-    .on_press(Message::Graph(GraphMsg::OverlayOpenImports(
-        path.to_path_buf(),
-    )))
+    .on_press(super::heard::row(
+        || path.display().to_string(),
+        Message::Graph(GraphMsg::OverlayOpenImports(path.to_path_buf())),
+    ))
     .into()
 }
 
@@ -2209,10 +2215,13 @@ pub(crate) fn call_symbol_row<'a>(
         bottom: 2.0,
         left: 10.0,
     })
-    .on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-        abs: n.file.clone(),
-        line: n.line,
-    }))
+    .on_press(super::heard::row(
+        || n.name.clone(),
+        Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: n.file.clone(),
+            line: n.line,
+        }),
+    ))
     .into()
 }
 
@@ -2368,7 +2377,10 @@ pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
                 button(text(tr!("Build the API Index")).size(ts::BODY))
                     .style(theme::primary_button)
                     .padding([4, 12])
-                    .on_press(Message::Docs(DocsMsg::Refresh)),
+                    .on_press(super::heard::said(
+                        tr!("Build the API Index"),
+                        Message::Docs(DocsMsg::Refresh),
+                    )),
             );
         }
         return container(said).padding(8).into();
@@ -2461,9 +2473,20 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         // too, a line above.
         0 => None,
         _ => Some(
-            pick_list(choices, selected, |c: MapChoice| {
-                Message::Graph(GraphMsg::SelectMap(c.id))
-            })
+            {
+                // Each map said by its name.
+                if super::heard::gathering() {
+                    for c in &choices {
+                        super::heard::said(
+                            &c.title,
+                            Message::Graph(GraphMsg::SelectMap(c.id.clone())),
+                        );
+                    }
+                }
+                pick_list(choices, selected, |c: MapChoice| {
+                    Message::Graph(GraphMsg::SelectMap(c.id))
+                })
+            }
             .style(theme::pick)
             .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
@@ -2564,10 +2587,13 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 .width(Fill)
                 .padding([3, 8]);
             if !n.file.is_empty() {
-                button = button.on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-                    abs: root.join(&n.file),
-                    line: n.line.max(1),
-                }));
+                button = button.on_press(super::heard::row(
+                    || n.label.clone(),
+                    Message::Graph(GraphMsg::OverlayOpenAt {
+                        abs: root.join(&n.file),
+                        line: n.line.max(1),
+                    }),
+                ));
             }
             rows.push(button.into());
             let mut lines: Vec<String> = n
@@ -2632,10 +2658,13 @@ pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Me
     .style(theme::list_row(false))
     .width(Fill)
     .padding([3, 8])
-    .on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-        abs: t.file.clone(),
-        line: t.line,
-    }))
+    .on_press(super::heard::row(
+        || t.name.clone(),
+        Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: t.file.clone(),
+            line: t.line,
+        }),
+    ))
     .into()
 }
 
@@ -2803,7 +2832,10 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding([3, 8])
-                .on_press(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 1 }))
+                .on_press(super::heard::row(
+                    || path.display().to_string(),
+                    Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 1 }),
+                ))
                 .into(),
         );
     }

@@ -343,7 +343,7 @@ fn file_tool<'a>(
     )
     .style(theme::icon_button(on))
     .padding([0.0, FILE_TOOL_PAD_X])
-    .on_press(msg);
+    .on_press(super::heard::said(label, msg));
     // Said short, its name is in its tooltip, with its shortcut.
     match shortcut {
         Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
@@ -604,7 +604,7 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         let current = i == last;
         line = line.push(
             button(ts::set_in(
-                text(name)
+                text(name.clone())
                     .font(crate::fonts::in_control(if current {
                         crate::fonts::UI_MEDIUM
                     } else {
@@ -622,10 +622,13 @@ fn trail_row(app: &App) -> Element<'_, Message> {
             ))
             .style(theme::icon_button(false))
             .padding([0, 5])
-            .on_press(Message::Reading(ReadingMsg::HistoryJump {
-                id,
-                loc: loc.clone(),
-            })),
+            .on_press(super::heard::said(
+                &name.to_string(),
+                Message::Reading(ReadingMsg::HistoryJump {
+                    id,
+                    loc: loc.clone(),
+                }),
+            )),
         );
     }
     container(line)

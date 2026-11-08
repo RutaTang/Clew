@@ -100,6 +100,13 @@ claude mcp add clew -- /Applications/Clew.app/Contents/MacOS/clew-server mcp
 | "open cart dot py" | The project's file of that name opens |
 | "go to apply discount" | The symbol of that name opens, however it is spelled (`apply_discount`, `applyDiscount`) |
 | "voice settings", "full screen" | Settings opens at that page; the window changes |
+| "change the app's language to French", "dark mode", "use one dark", "turn off read answers aloud", "use OpenAI" | The setting changes, as its control in Settings changes it — said in any of the window's languages ("把语言改成英文", "言語をフランス語に変更して") |
+| "download", "not now", "trust and connect", "yes", "no" | The dialog on top answers: its buttons by their names, its question by a yes or a no |
+| "open the third result", "the second one", "第三个" | The row of the list in view is picked by its place in it |
+| "close", "cancel", "never mind" | What is on top goes away, as with **Esc**: a dialog, a menu, Time Travel, the find bar, Ask |
+| "search by meaning for where the total is worked out", "filter files by cart", "walk me through checkout" | The views that take words are filled and run |
+
+**Hands-free.** Whatever the window shows can be pressed by saying it: a dialog's buttons, a setting's switch or choice, Ask's answers to the agent's questions, a list's rows — by the words on them, or by the name of what they belong to when several rows have the same button ("remove rust-analyzer"). A dialog on top takes what you say as it takes the pointer, and a note or a condition being written takes your words as its text, until you say its **Save**. What removes or forgets something waits for a yes first, as a word may have been misheard; a question that asks to be read is not answered before it can be. These are yours alone: the agent in Ask reaches the palette's commands and the settings, never a question's Allow.
 
 **On your machine.** The microphone is read through the system's own audio (Core Audio, WASAPI, ALSA — which PipeWire and PulseAudio serve), the audio is resampled to 16 kHz, cut to where there is speech, and transcribed by whisper.cpp on this computer, on the GPU through Metal on a Mac and on the CPU elsewhere. Nothing is sent anywhere; only a question you choose to ask goes to your language model, as typed ones do.
 

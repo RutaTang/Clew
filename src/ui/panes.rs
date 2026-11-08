@@ -191,7 +191,10 @@ pub(crate) fn time_travel_banner<'a>(
     )
     .style(theme::toolbar_button)
     .padding([2, 8])
-    .on_press(Message::TimeTravel(TimeTravelMsg::Exit));
+    .on_press(super::heard::said(
+        tr!("Exit Time Travel"),
+        Message::TimeTravel(TimeTravelMsg::Exit),
+    ));
 
     let Some(c) = commit else {
         let head = row![
@@ -258,7 +261,10 @@ pub(crate) fn time_travel_banner<'a>(
         )
         .style(theme::toolbar_button)
         .padding([2, 8])
-        .on_press(Message::TimeTravel(TimeTravelMsg::Why))
+        .on_press(super::heard::said(
+            tr!("What & why?"),
+            Message::TimeTravel(TimeTravelMsg::Why),
+        ))
         .into()
     };
 
@@ -321,8 +327,18 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     let last = n.saturating_sub(1);
     // `then` (lazy) — not `then_some` — so `idx - 1` isn't evaluated (underflowing
     // usize) when idx is 0.
-    let older = (tt.idx < last).then(|| Message::TimeTravel(TimeTravelMsg::Goto(tt.idx + 1)));
-    let newer = (tt.idx > 0).then(|| Message::TimeTravel(TimeTravelMsg::Goto(tt.idx - 1)));
+    let older = (tt.idx < last).then(|| {
+        super::heard::said(
+            tr!("Older"),
+            Message::TimeTravel(TimeTravelMsg::Goto(tt.idx + 1)),
+        )
+    });
+    let newer = (tt.idx > 0).then(|| {
+        super::heard::said(
+            tr!("Newer"),
+            Message::TimeTravel(TimeTravelMsg::Goto(tt.idx - 1)),
+        )
+    });
     let step = |g: Glyph, msg: Option<Message>| {
         let on = msg.is_some();
         let mut b = button(glyph::icon(
@@ -357,7 +373,10 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     )
     .style(theme::toolbar_button)
     .padding([2, 8])
-    .on_press(Message::TimeTravel(TimeTravelMsg::ToggleScope));
+    .on_press(super::heard::said(
+        tr!("Change scope"),
+        Message::TimeTravel(TimeTravelMsg::ToggleScope),
+    ));
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
@@ -379,7 +398,10 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
             button(text(label).size(ts::SMALL).color(color))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
-                .on_press(Message::TimeTravel(TimeTravelMsg::Story))
+                .on_press(super::heard::said(
+                    label,
+                    Message::TimeTravel(TimeTravelMsg::Story),
+                ))
                 .into()
         }
     } else {
@@ -464,7 +486,10 @@ pub(crate) fn time_travel_story<'a>(
         button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
             .style(theme::toolbar_button)
             .padding([4, 6])
-            .on_press(Message::TimeTravel(TimeTravelMsg::Story)),
+            .on_press(super::heard::said(
+                tr!("Hide story"),
+                Message::TimeTravel(TimeTravelMsg::Story)
+            )),
     ]
     .align_y(iced::Center);
     let body = scrollable(
@@ -790,7 +815,10 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
                 .padding(0)
                 .width(Length::Fixed(FIND_OPTION_SIDE))
                 .height(Length::Fixed(FIND_OPTION_SIDE))
-                .on_press(Message::Editor(EditorMsg::FindToggle(opt))),
+                .on_press(super::heard::said(
+                    tip,
+                    Message::Editor(EditorMsg::FindToggle(opt)),
+                )),
             tip,
             None,
             tooltip::Position::Bottom,
@@ -917,11 +945,11 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
         button(text(primary.0.to_string()).size(ts::EMPHASIS))
             .style(theme::primary_button)
             .padding([8, 20])
-            .on_press(primary.1),
+            .on_press(super::heard::said(primary.0, primary.1)),
         button(text(secondary.0.to_string()).size(ts::EMPHASIS))
             .style(theme::secondary_button)
             .padding([8, 20])
-            .on_press(secondary.1),
+            .on_press(super::heard::said(secondary.0, secondary.1)),
     ]
     .spacing(10);
 
@@ -1204,7 +1232,10 @@ pub(crate) fn file_banner<'a>(summary: String, file: crate::explain::Node) -> El
                 .style(theme::toolbar_button)
                 .padding([2, 6])
                 .width(Fill)
-                .on_press(Message::Explain(ExplainMsg::Show(file))),
+                .on_press(super::heard::said(
+                    tr!("Show the file's note"),
+                    Message::Explain(ExplainMsg::Show(file))
+                )),
                 tr!("Show the file's note"),
                 None,
                 tooltip::Position::Bottom,
@@ -1507,7 +1538,7 @@ fn plain_note<'a>(
 ) -> Element<'a, Message> {
     button(
         column![
-            note_head(name, meta, true, false),
+            note_head(name.clone(), meta, true, false),
             text(summary)
                 .size(super::explain_view::NOTE_SIZE)
                 .line_height(super::explain_view::NOTE_LINE_HEIGHT)
@@ -1519,7 +1550,10 @@ fn plain_note<'a>(
     .width(Fill)
     .height(Fill)
     .padding([3.0, 14.0 + NOTE_EDGE])
-    .on_press(Message::Editor(EditorMsg::OutlineJump(line)))
+    .on_press(super::heard::row(
+        || name.clone(),
+        Message::Editor(EditorMsg::OutlineJump(line)),
+    ))
     .into()
 }
 
@@ -1673,6 +1707,7 @@ fn active_note<'a>(
 ) -> Element<'a, Message> {
     let code = matches!(of, NoteOf::Function { .. });
     let action = |glyph: Glyph, label: String, accent: bool, msg: Message| {
+        let msg = super::heard::said(&label, msg);
         let tint = if accent {
             theme::accent()
         } else {
@@ -1833,7 +1868,10 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
     .style(theme::menu_row)
     .width(Fill)
     .padding([6, 8])
-    .on_press(Message::Calls(CallsMsg::OfFunction));
+    .on_press(super::heard::said(
+        tr!("Calls of this function"),
+        Message::Calls(CallsMsg::OfFunction),
+    ));
     scrollable(
         column![Column::with_children(rows).spacing(8).width(Fill), open,]
             .spacing(10)
@@ -1906,9 +1944,10 @@ fn margin_history(app: &App) -> Element<'_, Message> {
                     .style(theme::menu_row)
                     .width(Fill)
                     .padding([6, 10])
-                    .on_press(Message::TimeTravel(TimeTravelMsg::StartAt {
-                        sha: c.sha.clone(),
-                    })),
+                    .on_press(super::heard::row(
+                        || c.subject.clone(),
+                        Message::TimeTravel(TimeTravelMsg::StartAt { sha: c.sha.clone() }),
+                    )),
                 );
             }
         }
@@ -1919,7 +1958,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         button(text(title).size(ts::SMALL).color(theme::accent()))
             .style(theme::icon_button(false))
             .padding([3, 6])
-            .on_press(msg)
+            .on_press(super::heard::said(title, msg))
     };
     let mut links = row![].spacing(6);
     if in_function {
@@ -2145,10 +2184,14 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::icon_button(false))
             .padding([4, 4])
-            .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
-                rel: v.rel.clone(),
-                symbol: symbol.name.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Understood"),
+                &symbol.name,
+                Message::Reading(ReadingMsg::NoteToggleUnderstood {
+                    rel: v.rel.clone(),
+                    symbol: symbol.name.clone(),
+                }),
+            ));
         let pencil = button(glyph::icon(
             Glyph::Edit,
             if has_text {
@@ -2160,10 +2203,14 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         ))
         .style(theme::icon_button(false))
         .padding([4, 4])
-        .on_press(Message::Reading(ReadingMsg::NoteEditStart {
-            rel: v.rel.clone(),
-            symbol: symbol.name.clone(),
-        }));
+        .on_press(super::heard::said_to(
+            tr!("Edit note"),
+            &symbol.name,
+            Message::Reading(ReadingMsg::NoteEditStart {
+                rel: v.rel.clone(),
+                symbol: symbol.name.clone(),
+            }),
+        ));
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
         let jump = button(
@@ -2179,7 +2226,10 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             bottom: 2.0,
             left: 2.0,
         })
-        .on_press(Message::Editor(EditorMsg::OutlineJump(symbol.line)));
+        .on_press(super::heard::row(
+            || symbol.name.clone(),
+            Message::Editor(EditorMsg::OutlineJump(symbol.line)),
+        ));
         rows.push(jump.into());
     }
 

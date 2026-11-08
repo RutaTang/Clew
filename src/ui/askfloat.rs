@@ -284,7 +284,10 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
                 button(face)
                     .style(theme::pill_face)
                     .padding([4, 8])
-                    .on_press(Message::Ask(AskMsg::Open)),
+                    .on_press(super::heard::said(
+                        tr!("Open Ask"),
+                        Message::Ask(AskMsg::Open),
+                    )),
                 tr!("Ask"),
                 Some(app.keymap.chord(crate::keymap::Action::ToggleAsk).caps()),
                 tooltip::Position::Top,
@@ -540,7 +543,7 @@ fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Messag
             .width(Length::Fixed(HEADER_BUTTON))
             .height(Length::Fixed(HEADER_BUTTON))
             .padding(0)
-            .on_press(msg),
+            .on_press(super::heard::said(tip, msg)),
         tip,
         None,
         tooltip::Position::Bottom,
@@ -624,7 +627,10 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         }
     })
     .padding([4, 6])
-    .on_press(Message::Ask(AskMsg::SessionsMenu(!menu_open)));
+    .on_press(super::heard::said(
+        tr!("Sessions"),
+        Message::Ask(AskMsg::SessionsMenu(!menu_open)),
+    ));
     let mut header = row![glyph::icon(Glyph::Message, theme::accent(), 15.0), title]
         .spacing(6)
         .align_y(iced::Center);
@@ -804,6 +810,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     .style(theme::field(!app.ask_sessions_query.is_empty()));
     let found = app.found_ask_sessions();
     let mut list = Column::new().spacing(1);
+    super::heard::list();
     for (session, how) in &found {
         let current = app.proj.ask_session == Some(session.id);
         let questions = session.turns.len();
@@ -852,7 +859,10 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         .style(theme::menu_row)
         .padding([6, 9])
         .width(Fill)
-        .on_press(Message::Ask(AskMsg::SwitchSession(session.id)));
+        .on_press(super::heard::row(
+            || crate::app::ask_sessions::shown_title(&session.title).to_string(),
+            Message::Ask(AskMsg::SwitchSession(session.id)),
+        ));
         let mut line = row![pick].spacing(2).align_y(iced::Center);
         if !current {
             line = line.push(tip_at(
@@ -861,7 +871,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                     .width(Length::Fixed(24.0))
                     .height(Length::Fixed(24.0))
                     .padding(0)
-                    .on_press(Message::Ask(AskMsg::DeleteSession(session.id))),
+                    .on_press(super::heard::said_to(
+                        tr!("Forget"),
+                        crate::app::ask_sessions::shown_title(&session.title),
+                        Message::Ask(AskMsg::DeleteSession(session.id)),
+                    )),
                 tr!("Forget this session"),
                 None,
                 tooltip::Position::Right,
@@ -941,24 +955,30 @@ pub(crate) fn voice_bar(app: &App) -> Option<Element<'_, Message>> {
                 theme::toolbar_button
             })
             .padding([2, 8])
-            .on_press(msg)
+            .on_press(super::heard::said(label, msg))
     };
-    if let Some(title) = app
+    if let Some(waiting) = app
         .voice
         .confirm
         .as_ref()
         .filter(|_| app.voice.phase == VoicePhase::Idle)
     {
+        use crate::app::voice::Waiting;
+        // A command is run; a button pressed by a word is pressed.
+        let (asked, go) = match waiting {
+            Waiting::Command(_) => (
+                tr!("Run “{command}”?", command = waiting.said()),
+                tr!("Run"),
+            ),
+            Waiting::Press { .. } => (tr!("{command}?", command = waiting.said()), tr!("Yes")),
+        };
         return Some(
             row![
-                text(tr!(
-                    "Run “{command}”?",
-                    command = crate::i18n::lookup(title)
-                ))
-                .size(ts::BASE)
-                .color(theme::fg())
-                .wrapping(Wrapping::None),
-                small(tr!("Run"), Message::Voice(VoiceMsg::Confirm), true),
+                text(asked)
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                small(go, Message::Voice(VoiceMsg::Confirm), true),
                 small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
             ]
             .spacing(6)
@@ -1082,7 +1102,7 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
         .padding(0)
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
-        .on_press(Message::Voice(message));
+        .on_press(super::heard::said(tip, Message::Voice(message)));
 
     Some(tip_at(lit, tip, chord, tooltip::Position::Top))
 }

@@ -167,7 +167,11 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
         if busy {
             b
         } else {
-            b.on_press(Message::Updater(UpdaterMsg::InstallStart))
+            b.on_press(super::heard::answer(
+                tr!("Update now"),
+                super::heard::Answer::Yes,
+                Message::Updater(UpdaterMsg::InstallStart),
+            ))
         }
     };
 
@@ -185,7 +189,11 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
                 button(text(tr!("Later")).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Updater(UpdaterMsg::CloseNotes)),
+                    .on_press(super::heard::answer(
+                        tr!("Later"),
+                        super::heard::Answer::No,
+                        Message::Updater(UpdaterMsg::CloseNotes),
+                    )),
                 update_now,
             ]
             .spacing(10)
@@ -213,7 +221,7 @@ fn dot() -> Element<'static, Message> {
 fn action_button(label: &'static str, msg: Message, primary: bool) -> Element<'static, Message> {
     let b = button(text(label).size(ts::BODY))
         .padding([4, 12])
-        .on_press(msg);
+        .on_press(super::heard::said(label, msg));
     if primary {
         b.style(theme::primary_button).into()
     } else {
@@ -230,6 +238,9 @@ fn dismiss_button() -> Element<'static, Message> {
     ))
     .style(theme::toolbar_button)
     .padding([2, 6])
-    .on_press(Message::Updater(UpdaterMsg::BannerDismissed))
+    .on_press(super::heard::said(
+        tr!("Dismiss"),
+        Message::Updater(UpdaterMsg::BannerDismissed),
+    ))
     .into()
 }

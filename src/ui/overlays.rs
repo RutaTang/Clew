@@ -194,7 +194,7 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
         .style(theme::list_row(false))
         .width(Fill)
         .padding([5, 12])
-        .on_press_maybe(r.able.then_some(r.msg));
+        .on_press_maybe(r.able.then(|| super::heard::said(r.label, r.msg)));
         if r.able {
             b.into()
         } else {

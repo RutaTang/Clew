@@ -152,7 +152,10 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
             button(text(tr!("Close")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::TimeTravel(TimeTravelMsg::BlameWhyClose)),
+                .on_press(super::heard::said(
+                    tr!("Close"),
+                    Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
+                )),
         ]);
 
     let panel = container(col)
@@ -188,14 +191,20 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
             button(text(tr!("Open Definition")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::Hover(HoverMsg::InsightOpenDefinition)),
+                .on_press(super::heard::said(
+                    tr!("Open Definition"),
+                    Message::Hover(HoverMsg::InsightOpenDefinition),
+                )),
         );
     }
     buttons = buttons.push(
         button(text(tr!("Close")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([4, 12])
-            .on_press(Message::Hover(HoverMsg::InsightClose)),
+            .on_press(super::heard::said(
+                tr!("Close"),
+                Message::Hover(HoverMsg::InsightClose),
+            )),
     );
     let col = Column::new()
         .spacing(8)
@@ -242,7 +251,13 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             ts::field_in(
                 text_input(placeholder, &app.proj.finder.query)
                     .id(finder_input_id())
-                    .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
+                    .on_input({
+                        // What is said that names no row is typed in it.
+                        super::heard::field(&app.proj.finder.query, |v| {
+                            Message::Nav(NavMsg::FinderQueryChanged(v))
+                        });
+                        |v| Message::Nav(NavMsg::FinderQueryChanged(v))
+                    })
                     .on_submit(Message::Nav(NavMsg::FinderConfirm))
                     .style(theme::bare_input),
                 FINDER_INPUT_H,
@@ -263,6 +278,8 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     });
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    // Its rows a list voice counts down (`heard::row`).
+    super::heard::list();
     if app.proj.finder.is_commands() {
         finder_command_rows(app, &mut rows);
     } else if let Some(n) = app.proj.finder.goto_line() {
@@ -402,8 +419,11 @@ fn finder_footer<'a>() -> Element<'a, Message> {
 fn finder_row<'a>(
     content: impl Into<Element<'a, Message>>,
     selected: bool,
+    label: String,
     pick: Message,
 ) -> Element<'a, Message> {
+    // Said by what it shows, or by its place in the list.
+    let pick = super::heard::row(move || label, pick);
     button(
         container(content)
             .height(Fill)
@@ -462,6 +482,7 @@ fn bar_row<'a>(
         Some(keys) => super::toolbar::row_keycap(keys),
         None => slot(),
     };
+    let label = title.clone();
     finder_row(
         row![
             glyph::icon(glyph, tint, 15.0),
@@ -478,6 +499,7 @@ fn bar_row<'a>(
         .spacing(11)
         .align_y(iced::Center),
         selected,
+        label,
         pick,
     )
 }
@@ -564,7 +586,7 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             rows.push(bar_row(
                 Glyph::Prompt,
                 theme::dim(),
-                crate::i18n::lookup(&command.title).to_string(),
+                command.shown().to_string(),
                 None,
                 command.keys.clone(),
                 selected,
@@ -668,6 +690,7 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
             .spacing(FILE_ROW_GAP)
             .align_y(iced::Center),
             pos == app.proj.finder.selected,
+            entry.rel.clone(),
             Message::Nav(NavMsg::FinderPick {
                 abs: entry.abs.clone(),
                 line: None,
@@ -690,13 +713,14 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
         };
         rows.push(finder_row(
             row![
-                text(crate::i18n::lookup(&command.title).to_string()).size(ts::READING),
+                text(command.shown().to_string()).size(ts::READING),
                 space().width(Fill),
                 keys,
             ]
             .spacing(10)
             .align_y(iced::Center),
             pos == app.proj.finder.selected,
+            command.shown().to_string(),
             Message::Nav(NavMsg::PaletteRun(command.title.clone())),
         ));
     }
@@ -741,6 +765,7 @@ fn symbol_row<'a>(entry: &'a crate::index::SymbolEntry, selected: bool) -> Eleme
         .spacing(SYMBOL_ROW_GAP)
         .align_y(iced::Center),
         selected,
+        entry.name.clone(),
         Message::Nav(NavMsg::FinderPick {
             abs: entry.abs.clone(),
             line: Some(entry.line),

@@ -287,7 +287,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             button(text(tr!("Reset all")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([3, 12])
-                .on_press(Message::Window(WindowMsg::RebindResetAll)),
+                .on_press(super::heard::said(
+                    tr!("Reset all"),
+                    Message::Window(WindowMsg::RebindResetAll),
+                )),
         );
     }
     // No Save: what is changed here is kept — as it changes, or (a typed
@@ -319,7 +322,10 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         .style(theme::list_row(on))
         .padding([7, 10])
         .width(Fill)
-        .on_press(Message::Settings(SettingsMsg::Page(p)))
+        .on_press(super::heard::said(
+            crate::i18n::lookup(p.title()),
+            Message::Settings(SettingsMsg::Page(p)),
+        ))
         .into()
     };
     let nav = container(
@@ -559,8 +565,13 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
                 .unwrap_or_else(|| tr!("no server").to_string()),
         };
         let (status, action) = app.lsp_row(language);
+        let named = crate::highlight::lang_name(language)
+            .map(str::to_string)
+            .unwrap_or_else(|| language.clone());
         let action: Element<'_, Message> = match action {
-            Some((label, msg)) => form::action(label, Some(msg)).into(),
+            Some((label, msg)) => {
+                super::heard::about(&named, || form::action(label, Some(msg))).into()
+            }
             None => space().width(0).into(),
         };
         servers.push(form::item(
@@ -751,13 +762,15 @@ pub(crate) fn installed_servers(app: &App) -> Element<'_, Message> {
                     srv.version,
                     super::explain_view::human_size(srv.bytes)
                 )),
-                form::action(
-                    tr!("Remove"),
-                    Some(Message::Lsp(crate::LspMsg::Remove {
-                        name: srv.name.clone(),
-                        version: srv.version.clone(),
-                    })),
-                ),
+                super::heard::about(&srv.name, || {
+                    form::action(
+                        tr!("Remove"),
+                        Some(Message::Lsp(crate::LspMsg::Remove {
+                            name: srv.name.clone(),
+                            version: srv.version.clone(),
+                        })),
+                    )
+                }),
             )
         })
         .collect::<Vec<_>>();
@@ -1413,11 +1426,11 @@ fn servers_block(app: &App) -> Element<'_, Message> {
                 ]
                 .spacing(2)
                 .width(Fill),
-                form::action(
+                super::heard::about(name, || form::action(
                     tr!("Edit"),
                     Some(Message::Languages(L::ServerLanguage(language.clone())))
-                ),
-                form::action(tr!("Reset"), Some(remove)),
+                )),
+                super::heard::about(name, || form::action(tr!("Reset"), Some(remove))),
             ]
             .spacing(6)
             .align_y(iced::Center),
@@ -1508,92 +1521,109 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
 
     let mut servers = Vec::new();
     for server in &draft.mcp {
-        let (status, color) = match draft.statuses.get(&server.name) {
-            _ if !server.enabled => (tr!("Off").to_string(), theme::dim()),
-            Some(Status::Connected { info, tools }) => (
-                if info.name.is_empty() {
-                    trn!("Connected · 1 tool", "Connected · {n} tools", *tools)
-                } else {
-                    trn!(
-                        "Connected to {server} · 1 tool",
-                        "Connected to {server} · {n} tools",
-                        *tools,
-                        server = info.name
+        // Each server's controls said with its name: "Remove: github".
+        let row = super::heard::about(&server.name, || {
+            let (status, color) = match draft.statuses.get(&server.name) {
+                _ if !server.enabled => (tr!("Off").to_string(), theme::dim()),
+                Some(Status::Connected { info, tools }) => (
+                    if info.name.is_empty() {
+                        trn!("Connected · 1 tool", "Connected · {n} tools", *tools)
+                    } else {
+                        trn!(
+                            "Connected to {server} · 1 tool",
+                            "Connected to {server} · {n} tools",
+                            *tools,
+                            server = info.name
+                        )
+                    },
+                    theme::success(),
+                ),
+                Some(Status::Connecting) => (tr!("Connecting…").to_string(), theme::dim()),
+                Some(Status::Failed(why)) => (crate::i18n::message(why), theme::danger()),
+                Some(Status::Idle) | None => (tr!("Not connected yet").to_string(), theme::dim()),
+            };
+            let name = server.name.clone();
+            if super::heard::gathering() {
+                for a in clew_core::mcp::Approve::ALL {
+                    super::heard::said(
+                        &ApproveChoice(a).to_string(),
+                        Message::Integrations(M::McpApprove(server.name.clone(), a)),
+                    );
+                }
+            }
+            let policy = pick_list(
+                clew_core::mcp::Approve::ALL.map(ApproveChoice),
+                Some(ApproveChoice(server.approve)),
+                move |a: ApproveChoice| Message::Integrations(M::McpApprove(name.clone(), a.0)),
+            )
+            .style(theme::pick)
+            .menu_style(theme::pick_menu)
+            .text_size(ts::BODY)
+            .padding([4, 8]);
+            // An HTTP server reached without a header of the user's signs in.
+            let oauth = matches!(
+                &server.transport,
+                clew_core::mcp::Transport::Http { headers, .. }
+                    if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            );
+            let mut actions = row![policy, space().width(Fill)]
+                .spacing(6)
+                .align_y(iced::Center);
+            if oauth {
+                actions = actions.push(if draft.signed_in.contains(&server.name) {
+                    small(
+                        tr!("Sign out"),
+                        Message::Integrations(M::McpSignOut(server.name.clone())),
                     )
-                },
-                theme::success(),
-            ),
-            Some(Status::Connecting) => (tr!("Connecting…").to_string(), theme::dim()),
-            Some(Status::Failed(why)) => (crate::i18n::message(why), theme::danger()),
-            Some(Status::Idle) | None => (tr!("Not connected yet").to_string(), theme::dim()),
-        };
-        let name = server.name.clone();
-        let policy = pick_list(
-            clew_core::mcp::Approve::ALL.map(ApproveChoice),
-            Some(ApproveChoice(server.approve)),
-            move |a: ApproveChoice| Message::Integrations(M::McpApprove(name.clone(), a.0)),
-        )
-        .style(theme::pick)
-        .menu_style(theme::pick_menu)
-        .text_size(ts::BODY)
-        .padding([4, 8]);
-        // An HTTP server reached without a header of the user's signs in.
-        let oauth = matches!(
-            &server.transport,
-            clew_core::mcp::Transport::Http { headers, .. }
-                if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-        );
-        let mut actions = row![policy, space().width(Fill)]
-            .spacing(6)
-            .align_y(iced::Center);
-        if oauth {
-            actions = actions.push(if draft.signed_in.contains(&server.name) {
-                small(
-                    tr!("Sign out"),
-                    Message::Integrations(M::McpSignOut(server.name.clone())),
-                )
-            } else {
-                small(
-                    tr!("Sign in"),
-                    Message::Integrations(M::McpSignIn(server.name.clone())),
-                )
-            });
-        }
-        actions = actions
-            .push(small(
-                tr!("Test"),
-                Message::Integrations(M::McpTest(server.name.clone())),
-            ))
-            .push(small(
-                tr!("Remove"),
-                Message::Integrations(M::McpRemove(server.name.clone())),
-            ));
-        let name = server.name.clone();
-        let on = server.enabled;
-        servers.push(form::plain(
-            column![
-                row![
-                    column![
-                        text(server.name.clone())
-                            .size(ts::BASE)
-                            .font(crate::fonts::UI_MEDIUM)
-                            .color(theme::fg()),
-                        form::path(server.summary()),
-                        text(status)
-                            .size(ts::SMALL)
-                            .color(color)
-                            .wrapping(Wrapping::WordOrGlyph),
+                } else {
+                    small(
+                        tr!("Sign in"),
+                        Message::Integrations(M::McpSignIn(server.name.clone())),
+                    )
+                });
+            }
+            actions = actions
+                .push(small(
+                    tr!("Test"),
+                    Message::Integrations(M::McpTest(server.name.clone())),
+                ))
+                .push(small(
+                    tr!("Remove"),
+                    Message::Integrations(M::McpRemove(server.name.clone())),
+                ));
+            let name = server.name.clone();
+            let on = server.enabled;
+            form::plain(
+                column![
+                    row![
+                        column![
+                            text(server.name.clone())
+                                .size(ts::BASE)
+                                .font(crate::fonts::UI_MEDIUM)
+                                .color(theme::fg()),
+                            form::path(server.summary()),
+                            text(status)
+                                .size(ts::SMALL)
+                                .color(color)
+                                .wrapping(Wrapping::WordOrGlyph),
+                        ]
+                        .spacing(3)
+                        .width(Fill),
+                        {
+                            super::heard::switch(&server.name, on, |v| {
+                                Message::Integrations(M::McpEnable(server.name.clone(), v))
+                            });
+                            form::switch(on, Message::Integrations(M::McpEnable(name, !on)))
+                        },
                     ]
-                    .spacing(3)
-                    .width(Fill),
-                    form::switch(on, Message::Integrations(M::McpEnable(name, !on))),
+                    .spacing(12)
+                    .align_y(iced::alignment::Vertical::Top),
+                    actions,
                 ]
-                .spacing(12)
-                .align_y(iced::alignment::Vertical::Top),
-                actions,
-            ]
-            .spacing(10),
-        ));
+                .spacing(10),
+            )
+        });
+        servers.push(row);
     }
     let add_mcp = form::group(
         tr!("Add an MCP server"),
@@ -1651,6 +1681,17 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
             .text_size(ts::BODY)
             .size(15)
             .spacing(6);
+        super::heard::about(&crate::app::integrations::acp_label(agent), || {
+            super::heard::switch(tr!("Share my MCP servers"), agent.share_mcp, |on| {
+                Message::Integrations(M::AcpShareMcp(agent.name.clone(), on))
+            })
+        });
+        let remove = super::heard::about(&crate::app::integrations::acp_label(agent), || {
+            small(
+                tr!("Remove"),
+                Message::Integrations(M::AcpRemove(agent.name.clone())),
+            )
+        });
         agents.push(form::plain(
             row![
                 column![
@@ -1663,10 +1704,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 .spacing(3)
                 .width(Fill),
                 share,
-                small(
-                    tr!("Remove"),
-                    Message::Integrations(M::AcpRemove(agent.name.clone()))
-                ),
+                remove,
             ]
             .spacing(10)
             .align_y(iced::Center),
@@ -1807,7 +1845,11 @@ pub(crate) fn connect_modal<'a>(app: &'a App) -> Element<'a, Message> {
                 button(text(tr!("Cancel")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([4, 14])
-                    .on_press(Message::Connect(ConnectMsg::Close)),
+                    .on_press(super::heard::answer(
+                        tr!("Cancel"),
+                        super::heard::Answer::No,
+                        Message::Connect(ConnectMsg::Close)
+                    )),
             ]
             .spacing(6)
             .align_x(iced::Center),
@@ -1919,16 +1961,24 @@ pub(crate) fn trust_host_prompt<'a>(
             button(text(tr!("Cancel")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([6, 14])
-                .on_press(Message::Connect(ConnectMsg::TrustCancel)),
+                .on_press(super::heard::answer(
+                    tr!("Cancel"),
+                    super::heard::Answer::No,
+                    Message::Connect(ConnectMsg::TrustCancel)
+                )),
             crate::ui::fresh::allow(
                 ready,
                 button(text(tr!("Trust and connect")).size(ts::BODY))
                     .style(theme::primary_button)
                     .padding([6, 14])
                     .on_press_maybe(ready.then(|| {
-                        Message::Connect(ConnectMsg::TrustHost {
-                            fingerprint: key.fingerprint.clone(),
-                        })
+                        super::heard::answer(
+                            tr!("Trust and connect"),
+                            super::heard::Answer::Yes,
+                            Message::Connect(ConnectMsg::TrustHost {
+                                fingerprint: key.fingerprint.clone(),
+                            }),
+                        )
                     }))
             ),
         ]
@@ -1985,16 +2035,24 @@ pub(crate) fn host_key_changed_prompt<'a>(
             button(text(tr!("Cancel")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([6, 14])
-                .on_press(Message::Connect(ConnectMsg::TrustCancel)),
+                .on_press(super::heard::answer(
+                    tr!("Cancel"),
+                    super::heard::Answer::No,
+                    Message::Connect(ConnectMsg::TrustCancel)
+                )),
             crate::ui::fresh::allow(
                 ready,
                 button(text(tr!("Forget the old key")).size(ts::BODY))
                     .style(theme::toolbar_button)
                     .padding([6, 14])
                     .on_press_maybe(ready.then(|| {
-                        Message::Connect(ConnectMsg::ForgetHostKey {
-                            host: forget_host.to_string(),
-                        })
+                        super::heard::answer(
+                            tr!("Forget the old key"),
+                            super::heard::Answer::Yes,
+                            Message::Connect(ConnectMsg::ForgetHostKey {
+                                host: forget_host.to_string(),
+                            }),
+                        )
                     }))
             ),
         ]
@@ -2023,7 +2081,10 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
             button(text(tr!("Revoke")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
-                .on_press(Message::Connect(ConnectMsg::RevokeAiKeys)),
+                .on_press(super::heard::said(
+                    tr!("Revoke"),
+                    Message::Connect(ConnectMsg::RevokeAiKeys)
+                )),
         ]
         .spacing(8)
         .align_y(iced::Center)
@@ -2063,6 +2124,7 @@ pub(crate) fn connect_picker<'a>(
     if !app.saved_connections.is_empty() {
         head = head.push(section_header(tr!("Saved hosts")));
         let mut list = Column::new().spacing(2);
+        super::heard::list();
         for conn in &app.saved_connections {
             // By identity: the list is re-merged from disk whenever any
             // window saves a host, so a row's index can name another host.
@@ -2089,17 +2151,21 @@ pub(crate) fn connect_picker<'a>(
             .style(theme::list_row(false))
             .width(Fill)
             .padding([5, 10])
-            .on_press(Message::Connect(ConnectMsg::ToSaved {
-                user_host: user_host.clone(),
-                port,
-            }));
+            .on_press(super::heard::row(
+                || title.clone(),
+                Message::Connect(ConnectMsg::ToSaved {
+                    user_host: user_host.clone(),
+                    port,
+                }),
+            ));
             let remove = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
                 .style(theme::toolbar_button)
                 .padding([5, 8])
-                .on_press(Message::Connect(ConnectMsg::RemoveSaved {
-                    user_host,
-                    port,
-                }));
+                .on_press(super::heard::said_to(
+                    tr!("Forget"),
+                    &title,
+                    Message::Connect(ConnectMsg::RemoveSaved { user_host, port }),
+                ));
             list = list.push(row![open, remove].spacing(4).align_y(iced::Center));
         }
         head = head.push(list);
@@ -2178,7 +2244,12 @@ pub(crate) fn connect_picker<'a>(
         iced::widget::checkbox(ui.send_ai_keys)
             .style(theme::check)
             .label(tr!("Send my API keys to this host"))
-            .on_toggle(|v| Message::Connect(ConnectMsg::ToggleAiKeys(v)))
+            .on_toggle({
+                super::heard::switch(tr!("Send my API keys to this host"), ui.send_ai_keys, |v| {
+                    Message::Connect(ConnectMsg::ToggleAiKeys(v))
+                });
+                |v| Message::Connect(ConnectMsg::ToggleAiKeys(v))
+            })
             .size(14)
             .text_size(ts::BODY)
             .spacing(8),
@@ -2198,7 +2269,10 @@ pub(crate) fn connect_picker<'a>(
             button(text(tr!("Connect")).size(ts::BASE))
                 .style(theme::primary_button)
                 .padding([6, 18])
-                .on_press(Message::Connect(ConnectMsg::Submit)),
+                .on_press(super::heard::said(
+                    tr!("Connect"),
+                    Message::Connect(ConnectMsg::Submit)
+                )),
         ]
         .spacing(12)
         .align_y(iced::Center),
@@ -2211,7 +2285,10 @@ pub(crate) fn connect_picker<'a>(
             button(text(tr!("Disconnect and read local code")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::Connect(ConnectMsg::Disconnect)),
+                .on_press(super::heard::said(
+                    tr!("Disconnect and read local code"),
+                    Message::Connect(ConnectMsg::Disconnect)
+                )),
         ]);
     }
 
@@ -2246,7 +2323,10 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
         .style(theme::toolbar_button)
         .padding([4, 10]);
     if let Some(parent) = &browser.parent {
-        up = up.on_press(Message::Connect(ConnectMsg::BrowseTo(parent.clone())));
+        up = up.on_press(super::heard::said(
+            tr!("Up"),
+            Message::Connect(ConnectMsg::BrowseTo(parent.clone())),
+        ));
     }
     let path_bar = row![
         up,
@@ -2276,6 +2356,7 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
                 .into(),
         );
     }
+    super::heard::list();
     for entry in &browser.entries {
         if entry.is_dir {
             let (glyph, color) = crate::icons::folder_icon(false);
@@ -2293,10 +2374,10 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding([4, 8])
-                .on_press(Message::Connect(ConnectMsg::BrowseTo(remote_join(
-                    &browser.cwd,
-                    &entry.name,
-                ))))
+                .on_press(super::heard::row(
+                    || entry.name.clone(),
+                    Message::Connect(ConnectMsg::BrowseTo(remote_join(&browser.cwd, &entry.name))),
+                ))
                 .into(),
             );
         } else {
@@ -2352,7 +2433,10 @@ pub(crate) fn remote_browser_view(browser: &crate::RemoteBrowser) -> Element<'_,
         button(text(tr!("Open")).size(ts::BASE))
             .style(theme::primary_button)
             .padding([6, 18])
-            .on_press(Message::Connect(ConnectMsg::OpenHere)),
+            .on_press(super::heard::said(
+                tr!("Open"),
+                Message::Connect(ConnectMsg::OpenHere)
+            )),
     ]
     .spacing(8)
     .align_y(iced::Center);

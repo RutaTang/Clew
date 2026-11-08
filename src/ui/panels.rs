@@ -80,7 +80,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if enabled {
-            b = b.on_press(msg);
+            b = b.on_press(super::heard::said(label, msg));
         }
         b
     };
@@ -161,10 +161,13 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .padding([1, 6]);
         if let Some(p) = f.path.clone() {
-            b = b.on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-                abs: p,
-                line: f.line,
-            }));
+            b = b.on_press(super::heard::said(
+                &f.name,
+                Message::Graph(GraphMsg::OverlayOpenAt {
+                    abs: p,
+                    line: f.line,
+                }),
+            ));
         }
         stack_rows.push(b.into());
     }
@@ -238,7 +241,11 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                     .style(theme::list_row(false))
                     .padding([0, 4])
-                    .on_press(Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone()))),
+                    .on_press(super::heard::said_to(
+                        tr!("Remove"),
+                        expr,
+                        Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
+                    )),
                 text(expr.clone()).size(ts::SMALL).color(theme::accent()),
                 text(" = ").size(ts::SMALL).color(theme::dim()),
                 text(val)
@@ -303,7 +310,10 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
         button(text(tr!("Walk this run")).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([2, 8])
-            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+            .on_press(super::heard::said(
+                tr!("Walk this run"),
+                Message::Walk(WalkMsg::GenerateTrace),
+            )),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -532,7 +542,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                     )
                     .style(theme::list_row(false))
                     .padding([3, 8])
-                    .on_press(Message::Ask(AskMsg::Suggested(q)))
+                    .on_press(super::heard::said(
+                        &strip_backticks(&q),
+                        Message::Ask(AskMsg::Suggested(q.clone())),
+                    ))
                     .into()
                 })
                 .collect();
@@ -840,11 +853,18 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         )
                         .style(theme::toolbar_button)
                         .padding([0, 4])
-                        .on_press(Message::Ask(AskMsg::PinGoto(key))),
+                        .on_press(super::heard::said(
+                            &format!("{} {}", pin.rel, pin.line),
+                            Message::Ask(AskMsg::PinGoto(key)),
+                        )),
                         button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                             .style(theme::toolbar_button)
                             .padding([0, 6])
-                            .on_press(Message::Ask(AskMsg::Unpin(key))),
+                            .on_press(super::heard::said_to(
+                                tr!("Remove"),
+                                &pin.rel,
+                                Message::Ask(AskMsg::Unpin(key)),
+                            )),
                     ]
                     .spacing(2)
                     .align_y(iced::Center),
@@ -947,7 +967,14 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     };
     let ask_btn = round(send_glyph, send_tint)
         .style(theme::round_button(true))
-        .on_press(send_msg);
+        .on_press(super::heard::said(
+            if streaming && !typed {
+                send_tip
+            } else {
+                tr!("Send")
+            },
+            send_msg,
+        ));
     let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed.
     let listening = app.voice.is_listening();
@@ -1116,12 +1143,18 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         button(text(tr!("Send now")).size(ts::SMALL))
                             .style(theme::toolbar_button)
                             .padding([2, 8])
-                            .on_press(Message::Ask(AskMsg::SendQueuedNow(at))),
+                            .on_press(super::heard::said(
+                                tr!("Send now"),
+                                Message::Ask(AskMsg::SendQueuedNow(at)),
+                            )),
                         super::toolbar::tip_at(
                             button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
                                 .style(theme::icon_button(false))
                                 .padding([3, 4])
-                                .on_press(Message::Ask(AskMsg::DropQueued(at))),
+                                .on_press(super::heard::said(
+                                    tr!("Remove queued question"),
+                                    Message::Ask(AskMsg::DropQueued(at)),
+                                )),
                             tr!("Remove from the queue"),
                             None,
                             tooltip::Position::Top,
@@ -1317,7 +1350,19 @@ pub(crate) fn approval_card<'a>(
             })
             .height(Length::Fixed(APPROVE_BUTTON_H))
             .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
-            .on_press_maybe((ready || !option.allows).then_some(answer));
+            .on_press_maybe((ready || !option.allows).then(|| {
+                // "Yes" allows as the first that allows does, "no" declines;
+                // each also by its words ("Allow always").
+                super::heard::answer(
+                    &option.label,
+                    if option.allows {
+                        super::heard::Answer::Yes
+                    } else {
+                        super::heard::Answer::No
+                    },
+                    answer,
+                )
+            }));
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
             } else {
@@ -1378,11 +1423,14 @@ pub(crate) fn approval_card<'a>(
             )
             .style(theme::toolbar_button)
             .padding([3, 10])
-            .on_press(Message::Ask(AskMsg::AnswersPage {
-                stream,
-                key: approval.key,
-                page: (page + 1) % pages,
-            }))
+            .on_press(super::heard::said(
+                tr!("More answers"),
+                Message::Ask(AskMsg::AnswersPage {
+                    stream,
+                    key: approval.key,
+                    page: (page + 1) % pages,
+                }),
+            ))
             .into(),
         );
     }
@@ -1690,7 +1738,7 @@ fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a
             button(text(label).size(ts::SMALL))
                 .style(theme::segment(chosen))
                 .padding([1, 7])
-                .on_press_maybe((!chosen).then_some(msg))
+                .on_press_maybe((!chosen).then(|| super::heard::said(label, msg)))
                 .into()
         }))
         .spacing(1),
@@ -1705,6 +1753,8 @@ fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a
 /// branched on, member access, read), each opening its line; a `Passed`
 /// row unfolds into the callee's parameter and ITS occurrences.
 pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them.
+    super::heard::list();
     let Some(tree) = &app.proj.flow else {
         return empty_state(Glyph::Search, tr!("No value trace yet"), "", None);
     };
@@ -1720,7 +1770,10 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
             button(text(tr!("Clear")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 7])
-                .on_press(Message::Flow(crate::FlowMsg::Clear))
+                .on_press(super::heard::said(
+                    tr!("Clear"),
+                    Message::Flow(crate::FlowMsg::Clear),
+                ))
                 .into(),
         ],
         None,
@@ -1738,7 +1791,10 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
                     button(text(tr!("Trace again")).size(ts::SMALL))
                         .style(theme::toolbar_button)
                         .padding([2, 7])
-                        .on_press(Message::Flow(crate::FlowMsg::Retrace)),
+                        .on_press(super::heard::said(
+                            tr!("Trace again"),
+                            Message::Flow(crate::FlowMsg::Retrace)
+                        )),
                 ]
                 .spacing(6)
                 .align_y(iced::Center),
@@ -1849,11 +1905,14 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         .style(theme::list_row(false))
         .width(Fill)
         .padding([3, 6])
-        .on_press(Message::Editor(EditorMsg::OpenAbs {
-            abs: node.abs.clone(),
-            line: Some(node.line + 1),
-            push: true,
-        }));
+        .on_press(super::heard::row(
+            || node.text.clone(),
+            Message::Editor(EditorMsg::OpenAbs {
+                abs: node.abs.clone(),
+                line: Some(node.line + 1),
+                push: true,
+            }),
+        ));
     container(row![unfold, open].spacing(2).align_y(iced::Center))
         .padding(Padding {
             top: 0.0,
@@ -1868,6 +1927,8 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees
 /// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them.
+    super::heard::list();
     let Some(tree) = &app.proj.call_graph else {
         // How to fill it: the tab alone gave no way in.
         return empty_state(
@@ -1951,11 +2012,14 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         .style(theme::list_row(false))
         .width(Fill)
         .padding([1, 4])
-        .on_press(Message::Editor(EditorMsg::OpenAbs {
-            abs: node.item.path.clone(),
-            line: Some(node.item.line + 1),
-            push: true,
-        }));
+        .on_press(super::heard::row(
+            || node.item.name.clone(),
+            Message::Editor(EditorMsg::OpenAbs {
+                abs: node.item.path.clone(),
+                line: Some(node.item.line + 1),
+                push: true,
+            }),
+        ));
 
         let badge = text(kind)
             .size(ts::CAPTION)
@@ -2016,6 +2080,8 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
 /// The import tree: a header with the focus file + an Imports/Importers toggle,
 /// a cycles banner, then the lazily-expanded (but synchronous) tree.
 pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them.
+    super::heard::list();
     use crate::imports::Target;
 
     let Some(tree) = &app.proj.import_tree else {
@@ -2093,11 +2159,14 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([1, 4])
-            .on_press(Message::Editor(EditorMsg::OpenAbs {
-                abs: path.clone(),
-                line: None,
-                push: true,
-            }))
+            .on_press(super::heard::row(
+                || node.label.clone(),
+                Message::Editor(EditorMsg::OpenAbs {
+                    abs: path.clone(),
+                    line: None,
+                    push: true,
+                }),
+            ))
             .into(),
             Target::External(_) => container(
                 row![
@@ -2220,7 +2289,10 @@ fn push_var_rows<'a>(
             button(line)
                 .style(theme::list_row(false))
                 .padding(0)
-                .on_press(Message::Debug(DebugMsg::ToggleVar(reference)))
+                .on_press(super::heard::said(
+                    &v.name,
+                    Message::Debug(DebugMsg::ToggleVar(reference)),
+                ))
                 .into()
         } else {
             line.into()

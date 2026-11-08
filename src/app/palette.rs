@@ -31,12 +31,17 @@ pub(crate) struct PaletteCommand {
     /// Its key, when it has one: a chord (`⌘⇧C`) or a reading key (`gd`).
     pub(crate) keys: Option<String>,
     pub(crate) action: PaletteAction,
+    /// What the row says, when its title is made of parts the catalogs
+    /// translate one by one ("Language: French" — "Langue : Français").
+    pub(crate) shown_as: Option<String>,
 }
 
 impl PaletteCommand {
     /// What the row says: its title, in the reader's language.
     pub(crate) fn shown(&self) -> &str {
-        crate::i18n::lookup(&self.title)
+        self.shown_as
+            .as_deref()
+            .unwrap_or_else(|| crate::i18n::lookup(&self.title))
     }
 
     /// Whether running it costs something beyond what the window shows —
@@ -446,6 +451,7 @@ impl App {
                 title,
                 keys,
                 action,
+                shown_as: None,
             });
         };
         let send = PaletteAction::Send;
@@ -863,17 +869,17 @@ impl App {
             send(Message::Connect(ConnectMsg::Open)),
         );
 
-        // The appearance.
-        for (pref, title) in [
-            (theme::ThemePref::Light, tr_noop!("Theme: Light")),
-            (theme::ThemePref::Dark, tr_noop!("Theme: Dark")),
-            (theme::ThemePref::System, tr_noop!("Theme: Match System")),
-        ] {
-            add(
-                title.into(),
-                None,
-                send(Message::Settings(SettingsMsg::SetThemePref(pref))),
-            );
+        // Every setting's every choice: the language, the theme, how voice
+        // listens and speaks ("Language: French", "Read answers aloud: Off").
+        for setting in self.settings_choices() {
+            for choice in setting.choices {
+                out.push(PaletteCommand {
+                    title: choice.title,
+                    keys: None,
+                    action: PaletteAction::Send(choice.message),
+                    shown_as: Some(choice.shown),
+                });
+            }
         }
         out
     }

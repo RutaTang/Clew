@@ -226,6 +226,7 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 /// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
 /// an item opens its doc page in the main pane.
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
+    super::heard::list();
     if app.proj.docs.files.is_empty() {
         return if app.docs_loading() {
             empty_state(Glyph::Sparkle, tr!("Building docs…"), "", None)
@@ -250,10 +251,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         .padding(6)
         .width(Fill);
     let chip = |label: String, msg: Message| {
-        button(text(label).size(ts::SMALL))
+        button(text(label.clone()).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 8])
-            .on_press(msg)
+            .on_press(super::heard::said(&label, msg))
     };
     let group_btn = chip(
         if app.docs_view.by_module {
@@ -344,7 +345,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 8])
-            .on_press(Message::Docs(DocsMsg::ToggleFile(label.clone())))
+            .on_press(super::heard::row(
+                || label.clone(),
+                Message::Docs(DocsMsg::ToggleFile(label.clone())),
+            ))
             .into(),
         );
         if expanded {
@@ -370,10 +374,13 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                     .style(theme::list_row(is_sel))
                     .width(Fill)
                     .padding([3, 8])
-                    .on_press(Message::Docs(DocsMsg::Select {
-                        rel: rel.to_string(),
-                        item: ii,
-                    }))
+                    .on_press(super::heard::row(
+                        || item.name.clone(),
+                        Message::Docs(DocsMsg::Select {
+                            rel: rel.to_string(),
+                            item: ii,
+                        }),
+                    ))
                     .into(),
                 );
             }
@@ -450,10 +457,13 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         button(text(tr!("View source")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
-            .on_press(Message::Editor(EditorMsg::OpenRel {
-                rel: page.rel.clone(),
-                line: top_line,
-            })),
+            .on_press(super::heard::said(
+                tr!("View source"),
+                Message::Editor(EditorMsg::OpenRel {
+                    rel: page.rel.clone(),
+                    line: top_line,
+                })
+            )),
         super::chrome::close_button(Message::Docs(DocsMsg::ClosePage)),
     ]
     .spacing(8)
@@ -621,7 +631,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         button(text(label).size(ts::BODY))
             .style(theme::primary_button)
             .padding([5, 14])
-            .on_press(msg)
+            .on_press(super::heard::said(label, msg))
     };
     let (why, action) = if !app.llm_available {
         (
@@ -936,11 +946,14 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                 left: 8.0,
             });
         if let Some(root) = &root {
-            b = b.on_press(Message::Editor(EditorMsg::OpenAbs {
-                abs: root.join(&f.rel),
-                line: None,
-                push: true,
-            }));
+            b = b.on_press(super::heard::row(
+                || f.rel.clone(),
+                Message::Editor(EditorMsg::OpenAbs {
+                    abs: root.join(&f.rel),
+                    line: None,
+                    push: true,
+                }),
+            ));
         }
         files = files.push(b);
     }
@@ -988,6 +1001,7 @@ pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
 pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
+    super::heard::list();
     use crate::app::glossary::TermKind;
     let glossary = app.glossary();
     let header = row![
@@ -1075,7 +1089,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                 button(text(term.name.clone()).size(ts::BASE).color(theme::fg()))
                     .style(theme::toolbar_button)
                     .padding([2, 6])
-                    .on_press(open),
+                    .on_press(super::heard::row(|| term.name.clone(), open)),
                 text(term.shown_badge().to_string())
                     .size(ts::SMALL)
                     .color(theme::accent())

@@ -29,6 +29,12 @@ impl std::fmt::Display for LanguageChoice {
 /// One model's row: picked or not (a radio's mark), what it is, and at
 /// its right whether it is here — its download, or getting it.
 fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
+    // Its Download, Remove and Cancel said with its name, as every model
+    // has them: "Download Whisper Small".
+    super::heard::about(crate::i18n::lookup(model.name), || model_row_of(app, model))
+}
+
+fn model_row_of<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
     let picked = app.voice.prefs.model == model.id;
     let installed = app.voice.installed(model);
     let state: Element<'a, Message> = if let Some(d) = app.voice.downloads.get(model.id) {
@@ -113,17 +119,7 @@ impl std::fmt::Display for VoiceChoice {
 /// What a voice is called: Supertone's F1…M5 as a woman's or a man's
 /// voice and its number; a named one by its name.
 fn voice_name(voice: &Voice) -> String {
-    let mut chars = voice.name.chars();
-    let kind = chars.next();
-    let number: String = chars.collect();
-    if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
-        match kind {
-            Some('F') => return tr!("Female voice {n}", n = number),
-            Some('M') => return tr!("Male voice {n}", n = number),
-            _ => {}
-        }
-    }
-    voice.name.to_string()
+    crate::app::choices::voice_called(crate::i18n::current(), voice.name)
 }
 
 /// A pace as the picker lists it: "0.8×", "1×", "1.25×".
@@ -152,6 +148,12 @@ impl std::fmt::Display for SpeedChoice {
 /// One speech model's row: what it is and its license, and at its right
 /// whether it is here — Try and Remove — its download, or getting it.
 fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, Message>> {
+    super::heard::about(crate::i18n::lookup(model.name), || {
+        speech_row_of(app, model)
+    })
+}
+
+fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, Message>> {
     let installed = app.speech_installed(model);
     let state: Element<'a, Message> = if let Some(d) = app.voice.speech.downloads.get(model.id) {
         getting(
@@ -258,6 +260,10 @@ pub(crate) fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a,
 /// whether it is here — Remove — its download, or getting it; and what
 /// last went wrong with it.
 fn turn_rows(app: &App) -> Vec<Element<'_, Message>> {
+    super::heard::about(clew_voice::turn::MODEL.name, || turn_rows_of(app))
+}
+
+fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
     use clew_voice::turn::{self as smart, MODEL};
     let installed = app.voice.store.as_ref().is_some_and(smart::installed);
     let state: Element<'_, Message> = if let Some(d) = &app.voice.turn.download {

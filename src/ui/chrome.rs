@@ -178,6 +178,15 @@ pub(crate) struct Prompt<'a> {
 
 /// Build a [`Prompt`] dialog. Enter submits, Esc / a backdrop click cancels.
 pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
+    // What is said is its words; its Save is "yes", its Cancel "no".
+    super::heard::field(p.value, p.on_input);
+    let cancel = super::heard::answer(tr!("Cancel"), super::heard::Answer::No, p.cancel.clone());
+    let submit = super::heard::answer(p.submit_label, super::heard::Answer::Yes, p.submit.clone());
+    let p = Prompt {
+        cancel,
+        submit,
+        ..p
+    };
     let panel = container(
         column![
             text(p.title).size(ts::EMPHASIS).color(theme::fg()),
@@ -264,6 +273,7 @@ pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
 /// A [`close_button`] whose tip says what closing does, where that is more
 /// than closing (the first-open sheet's: the project is not opened).
 pub(crate) fn close_button_saying<'a>(msg: Message, tip: &'a str) -> Element<'a, Message> {
+    let msg = super::heard::said(tip, msg);
     super::chrome_tip(
         button(container(glyph::icon(Glyph::Close, theme::fg_muted(), 14.0)).center(Fill))
             .style(theme::icon_button(false))

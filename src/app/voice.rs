@@ -220,6 +220,48 @@ pub(crate) enum HeardOutcome {
     Failed(String),
 }
 
+/// What was heard and waits for a yes before it is done.
+#[derive(Debug, Clone)]
+pub(crate) enum Waiting {
+    /// A palette command, by its title.
+    Command(String),
+    /// Something on screen ([`crate::ui::heard`]): as it is shown, and
+    /// what its press sends.
+    Press {
+        shown: String,
+        message: Box<Message>,
+    },
+}
+
+impl Waiting {
+    /// What it is called, in the reader's language.
+    pub(crate) fn said(&self) -> &str {
+        match self {
+            Waiting::Command(title) => crate::i18n::lookup(title),
+            Waiting::Press { shown, .. } => shown,
+        }
+    }
+
+    /// What the pill says was done, once it is: a command's title, which
+    /// the pill shows translated, or what was pressed as it was shown.
+    fn done(&self) -> String {
+        match self {
+            Waiting::Command(title) => title.clone(),
+            Waiting::Press { shown, .. } => shown.clone(),
+        }
+    }
+}
+
+impl App {
+    /// Do what waited for a yes.
+    fn run_waiting(&mut self, waiting: Waiting) -> Task<Message> {
+        match waiting {
+            Waiting::Command(title) => self.run_palette(&title),
+            Waiting::Press { message, .. } => self.update(*message),
+        }
+    }
+}
+
 /// A model being downloaded.
 pub(crate) struct ModelDownload {
     pub done: u64,
@@ -439,8 +481,8 @@ pub(crate) struct VoiceState {
     /// When it was heard: the pill in the corner says it for a moment
     /// ([`HEARD_SHOWN`]).
     pub heard_at: Option<Instant>,
-    /// A command heard that asks before it runs: its title.
-    pub confirm: Option<String>,
+    /// A command heard that asks before it runs.
+    pub confirm: Option<Waiting>,
     /// Models downloading, by id.
     pub downloads: HashMap<&'static str, ModelDownload>,
     /// The last download's failure, by model id.
@@ -869,12 +911,12 @@ impl App {
                 }
             }
             VoiceMsg::Confirm => match self.voice.confirm.take() {
-                Some(title) => {
+                Some(waiting) => {
                     self.voice.heard = self.voice.heard.take().map(|h| Heard {
-                        outcome: HeardOutcome::Ran(title.clone()),
+                        outcome: HeardOutcome::Ran(waiting.done()),
                         ..h
                     });
-                    self.run_palette(&title)
+                    self.run_waiting(waiting)
                 }
                 None => Task::none(),
             },
@@ -1123,9 +1165,9 @@ impl App {
                 self.turn_listening_began();
                 self.voice.heard = None;
                 self.status = match &self.voice.confirm {
-                    Some(title) => tr!(
+                    Some(waiting) => tr!(
                         "Listening… say yes to run {command}, or no",
-                        command = crate::i18n::lookup(title)
+                        command = waiting.said()
                     ),
                     None => tr!("Listening… say a command or a question (Esc cancels)").into(),
                 };
@@ -1304,25 +1346,22 @@ impl App {
         }
         // The answer to a command waiting for a yes; anything else said
         // instead puts it away and is read as itself.
-        if let Some(title) = self.voice.confirm.take() {
+        if let Some(waiting) = self.voice.confirm.take() {
             match crate::app::spoken::yes_or_no(&text) {
                 Some(true) => {
                     self.status = tr!(
                         "“{text}” → {command}",
                         text = text,
-                        command = crate::i18n::lookup(&title)
+                        command = waiting.said()
                     );
                     self.voice.hear(Heard {
                         text,
-                        outcome: HeardOutcome::Ran(title.clone()),
+                        outcome: HeardOutcome::Ran(waiting.done()),
                     });
-                    return self.run_palette(&title);
+                    return self.run_waiting(waiting);
                 }
                 Some(false) => {
-                    self.status = tr!(
-                        "Didn't run {command}",
-                        command = crate::i18n::lookup(&title)
-                    );
+                    self.status = tr!("Didn't run {command}", command = waiting.said());
                     self.voice.heard = None;
                     return Task::none();
                 }
@@ -1330,46 +1369,11 @@ impl App {
             }
         }
         if self.voice.prefs.run_commands {
-            let commands = self.palette_commands();
-            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-            // Said in English, or as the palette shows it in the reader's
-            // language.
-            let found = clew_voice::intent::command(&text, &titles).or_else(|| {
-                let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
-                said_as_shown(crate::i18n::current(), &text, &shown)
-            });
-            if let Some(i) = found {
-                let command = &commands[i];
-                let title = command.title.clone();
-                if command.asks_when_said() {
-                    self.status = tr!(
-                        "“{text}” → {command}? Confirm or press Esc",
-                        text = text,
-                        command = crate::i18n::lookup(&title)
-                    );
-                    self.voice.confirm = Some(title.clone());
-                    self.voice.hear(Heard {
-                        text,
-                        outcome: HeardOutcome::Confirm(title),
-                    });
-                    return Task::none();
-                }
-                self.status = tr!(
-                    "“{text}” → {command}",
-                    text = text,
-                    command = crate::i18n::lookup(&title)
-                );
-                self.voice.hear(Heard {
-                    text,
-                    outcome: HeardOutcome::Ran(title.clone()),
-                });
-                return self.run_palette(&title);
+            if let Some(task) = self.heard_command(&text) {
+                return task;
             }
-            // A line, a file, a symbol, words to look for: said with what
-            // no title names.
-            if let Some((done, task)) = self.spoken(&text) {
-                return self.did_as_said(text, done, task);
-            }
+        } else if let Some(task) = self.heard_commands_back_on(&text) {
+            return task;
         }
         // A question: to Ask. Sent, it is answered where Ask is — the card
         // is not opened over the code for it: the pill says it is being
@@ -1397,6 +1401,105 @@ impl App {
             operation::focus(ui::ask_input_id()),
             operation::move_cursor_to_end(ui::ask_input_id()),
         ])
+    }
+
+    /// Do the command `text` names, if it names one: the question on
+    /// screen answered, a dialog's button, what is on top put away; a
+    /// palette command; a setting's choice; a button, a choice or a list's
+    /// row on screen; a phrase with a value. `None` leaves it to Ask.
+    fn heard_command(&mut self, text: &str) -> Option<Task<Message>> {
+        // What is on screen, as it is drawn now.
+        let targets = crate::ui::heard::gather(self);
+        // A dialog takes the voice before anything, as it takes the pointer.
+        if let Some(task) = self.heard_on_screen(text, &targets, true) {
+            return Some(task);
+        }
+        let commands = self.palette_commands();
+        let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+        // Said in English, or as the palette shows it in the reader's
+        // language.
+        let found = clew_voice::intent::command(text, &titles).or_else(|| {
+            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+            said_as_shown(crate::i18n::current(), text, &shown)
+        });
+        if let Some(i) = found {
+            let command = &commands[i];
+            let title = command.title.clone();
+            // What the pill says it ran: the title the reader sees, made of
+            // parts where the catalogs translate it so.
+            let said = if command.shown_as.is_some() {
+                command.shown().to_string()
+            } else {
+                title.clone()
+            };
+            if command.asks_when_said() {
+                self.status = tr!(
+                    "“{text}” → {command}? Confirm or press Esc",
+                    text = text,
+                    command = crate::i18n::lookup(&said)
+                );
+                self.voice.confirm = Some(Waiting::Command(title));
+                self.voice.hear(Heard {
+                    text: text.to_string(),
+                    outcome: HeardOutcome::Confirm(said),
+                });
+                return Some(Task::none());
+            }
+            self.status = tr!(
+                "“{text}” → {command}",
+                text = text,
+                command = crate::i18n::lookup(&said)
+            );
+            self.voice.hear(Heard {
+                text: text.to_string(),
+                outcome: HeardOutcome::Ran(said),
+            });
+            return Some(self.run_palette(&title));
+        }
+        // A setting's choice, said as anyone says it: "change the app's
+        // language to French".
+        if let Some(task) = self.heard_choice(text, |_| true) {
+            return Some(task);
+        }
+        // What is on screen, by its name or its place in a list.
+        if let Some(task) = self.heard_on_screen(text, &targets, false) {
+            return Some(task);
+        }
+        // A line, a file, a symbol, words to look for: said with what no
+        // title names.
+        if let Some((done, task)) = self.spoken(text) {
+            return Some(self.did_as_said(text.to_string(), done, task));
+        }
+        None
+    }
+
+    /// Spoken commands turned off, what is said goes to Ask — but for
+    /// turning them back on, which nothing else hands-free could do.
+    fn heard_commands_back_on(&mut self, text: &str) -> Option<Task<Message>> {
+        self.heard_choice(text, |m| {
+            matches!(m, Message::Voice(VoiceMsg::SetRunCommands(true)))
+        })
+    }
+
+    /// Make the setting's choice `text` asks for ([`crate::app::choices::
+    /// chosen`]), if `wanted` takes it.
+    fn heard_choice(
+        &mut self,
+        text: &str,
+        wanted: impl Fn(&Message) -> bool,
+    ) -> Option<Task<Message>> {
+        let settings = self.settings_choices();
+        let (s, c) = crate::app::choices::chosen(text, &settings)?;
+        let choice = settings[s].choices[c].clone();
+        if !wanted(&choice.message) {
+            return None;
+        }
+        self.status = tr!("“{text}” → {command}", text = text, command = choice.shown);
+        self.voice.hear(Heard {
+            text: text.to_string(),
+            outcome: HeardOutcome::Ran(choice.shown),
+        });
+        Some(self.update(choice.message))
     }
 
     /// `text` came to `done` ([`App::spoken`]): said on the status

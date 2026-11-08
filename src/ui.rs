@@ -79,6 +79,7 @@ mod updater;
 pub(crate) use updater::*;
 mod askfloat;
 mod form;
+pub(crate) mod heard;
 mod meter;
 mod setup;
 pub(crate) use askfloat::*;
@@ -535,6 +536,7 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// deeper), its scrollable was rebuilt at offset 0 and reported that offset,
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
+    heard::layer(heard::Layer::Window);
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
     let frame = app.window_frame;
@@ -574,8 +576,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // the overlay layer (at most one overlay), so the palette or a menu
     // opens above Ask too; and, above everything, the tutorial — whose
     // callout stays on top while it drives the UI underneath.
+    // Each layer said as it is built, for what voice may press
+    // (`heard::gather`): a dialog holding the keys leaves nothing under it.
+    heard::layer(heard::Layer::Ask);
     let ask = ask_layer(app);
-    let overlay = active_overlay(app).map_or_else(slot, |o| o.view(app));
+    let overlay = active_overlay(app).map_or_else(slot, |o| {
+        heard::layer(if o.holds_keys() {
+            heard::Layer::Overlay
+        } else {
+            heard::Layer::Window
+        });
+        o.view(app)
+    });
+    heard::layer(heard::Layer::Tutorial);
     let tutorial = if app.tutorial.is_some() {
         tutorial_overlay(app)
     } else {

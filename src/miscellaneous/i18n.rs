@@ -481,6 +481,54 @@ pub fn lookup(english: &str) -> &str {
     })
 }
 
+/// `english` in `lang`, as [`lookup`] gives it in the language spoken now:
+/// how a reader of `lang` calls a thing, whatever the interface speaks.
+pub fn lookup_in(lang: Lang, english: &str) -> &str {
+    let found = match lang {
+        Lang::En => None,
+        lang => catalog(lang).get(english).copied(),
+    };
+    found.unwrap_or_else(|| {
+        english
+            .rsplit_once('\u{4}')
+            .map_or(english, |(_, text)| text)
+    })
+}
+
+/// The English `shown` was translated from, in the language spoken now —
+/// what a reader may say for a control that shows it, in English — or
+/// `None` when it is no catalog's translation (or the interface speaks
+/// English). Of two texts translated alike, the first in order, the same
+/// every time.
+pub fn english_of(shown: &str) -> Option<&'static str> {
+    type Back = HashMap<&'static str, &'static str>;
+    static BACK: [OnceLock<Back>; 5] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
+    let lang = current();
+    if lang == Lang::En {
+        return None;
+    }
+    let back = BACK[usize::from(lang.to_u8())].get_or_init(|| {
+        let mut back = Back::new();
+        for (english, text) in catalog(lang) {
+            let english: &'static str = english.as_str();
+            // Its words without the sense they are meant in.
+            let english = english.rsplit_once('\u{4}').map_or(english, |(_, t)| t);
+            let kept = back.entry(*text).or_insert(english);
+            if english < *kept {
+                *kept = english;
+            }
+        }
+        back
+    });
+    back.get(shown).copied()
+}
+
 /// `template` with each `{name}` replaced by its argument's value. `{{`
 /// and `}}` are braces.
 pub fn format(template: &str, args: &[(&str, &dyn Display)]) -> String {
@@ -1128,6 +1176,19 @@ mod tests {
     fn catalog_entries(lang: Lang) -> HashMap<String, String> {
         serde_json::from_str(source(lang).unwrap())
             .unwrap_or_else(|e| panic!("{} catalog does not parse: {e}", lang.code()))
+    }
+
+    /// What a control shows in the reader's language is known by the
+    /// English it was translated from, and by itself in English.
+    #[test]
+    fn a_translation_is_known_by_its_english() {
+        with_lang(Lang::Fr, || {
+            assert_eq!(english_of("Annuler"), Some("Cancel"));
+            assert_eq!(english_of("no such text"), None);
+            assert_eq!(lookup_in(Lang::Zh, "Cancel"), "取消");
+            assert_eq!(lookup_in(Lang::En, "Cancel"), "Cancel");
+        });
+        assert_eq!(english_of("Cancel"), None, "English is its own");
     }
 
     /// Every piece of text the program shows has a translation in every

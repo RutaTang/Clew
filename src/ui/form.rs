@@ -176,7 +176,9 @@ pub(crate) fn choice_with<'a>(
     msg: Message,
     trailing: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
-    let mut words = column![text(name.into()).size(ts::BASE).color(theme::fg())].spacing(2);
+    let name = name.into();
+    let msg = super::heard::said(&name, msg);
+    let mut words = column![text(name).size(ts::BASE).color(theme::fg())].spacing(2);
     if let Some(detail) = detail {
         words = words.push(detail);
     }
@@ -266,11 +268,14 @@ pub(crate) fn toggle<'a>(
     on: bool,
     msg: fn(bool) -> Message,
 ) -> Element<'a, Message> {
+    let name = name.into();
+    super::heard::switch(&name, on, msg);
     item(name, about, switch(on, msg(!on)))
 }
 
 /// A button of a row: the fields' rounded well, a shade deeper.
 pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+    let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
         .style(theme::secondary_button)
         .padding([5, 12])
@@ -279,6 +284,7 @@ pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> iced::widget::But
 
 /// A row's main button (Add, Download): filled with the accent.
 pub(crate) fn primary<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+    let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
         .style(theme::primary_button)
         .padding([5, 12])
@@ -305,6 +311,12 @@ where
     L: std::borrow::Borrow<[T]> + 'a,
     V: std::borrow::Borrow<T> + 'a,
 {
+    // Each choice said by what the list shows for it.
+    if super::heard::gathering() {
+        for option in std::borrow::Borrow::<[T]>::borrow(&options) {
+            super::heard::said(&option.to_string(), on_select(option.clone()));
+        }
+    }
     pick_list(options, selected, on_select)
         .style(theme::pick)
         .menu_style(theme::pick_menu)
@@ -338,6 +350,7 @@ pub(crate) fn segmented<'a>(
 ) -> Element<'a, Message> {
     container(
         Row::with_children(segments.into_iter().map(|(label, chosen, msg)| {
+            let msg = super::heard::said(&label, msg);
             button(text(label).size(ts::BODY))
                 .style(theme::segment(chosen))
                 .padding([4, 14])

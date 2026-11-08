@@ -86,6 +86,8 @@ mod reading;
 mod remote_state;
 mod runtime;
 pub use runtime::note_window_system;
+pub(crate) mod choices;
+pub(crate) mod onscreen;
 mod semantic;
 pub(crate) mod server;
 mod settings;

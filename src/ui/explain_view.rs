@@ -1,5 +1,6 @@
 //! Explanation rendering (markdown/SVG), consent modals, section header.
 
+use super::heard;
 use super::*;
 // Explicit macro imports shadow the glob from `super`, disambiguating
 // iced's column!/row! from the prelude macros of the same name.
@@ -449,7 +450,7 @@ pub(crate) fn call_flow_rows<'a>(
                     .style(theme::list_row(false))
                     .width(Fill)
                     .padding([3, 6])
-                    .on_press(msg)
+                    .on_press(heard::said(&n.name, msg))
                     .into(),
             );
         }
@@ -578,11 +579,14 @@ fn reached_from_rows<'a>(
                 button(label)
                     .style(theme::list_row(false))
                     .padding([1, 4])
-                    .on_press(Message::Semantic(SemanticMsg::OpenNode(Node::Function {
-                        file: n.file.clone(),
-                        name: n.name.clone(),
-                        ordinal: g.ordinals().get(step).copied().unwrap_or(0),
-                    })))
+                    .on_press(heard::said(
+                        &n.name,
+                        Message::Semantic(SemanticMsg::OpenNode(Node::Function {
+                            file: n.file.clone(),
+                            name: n.name.clone(),
+                            ordinal: g.ordinals().get(step).copied().unwrap_or(0),
+                        })),
+                    ))
                     .into(),
             );
             steps.push(text("›").size(ts::SMALL).color(theme::dim()).into());
@@ -655,7 +659,10 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding([3, 6])
-                .on_press(Message::Explain(ExplainMsg::Show(n.clone())))
+                .on_press(heard::said(
+                    label,
+                    Message::Explain(ExplainMsg::Show(n.clone())),
+                ))
                 .into(),
             );
         }
@@ -665,7 +672,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
         button(text(label.to_string()).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([2, 8])
-            .on_press(msg)
+            .on_press(heard::said(label, msg))
     };
     let mut actions: Vec<Element<'_, Message>> = Vec::new();
     // Functions get a summary ⇄ per-block-detail toggle.
@@ -912,24 +919,33 @@ pub(crate) fn lsp_consent_modal(
                 button(text(tr!("Not now")).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
+                    .on_press(heard::answer(
+                        tr!("Not now"),
+                        heard::Answer::No,
+                        Message::Lsp(LspMsg::ConsentDismissed(number))
+                    )),
+                // Each Allow offered to the voice only once it can be
+                // pressed: read first, said yes to after.
                 consent.on_path.as_ref().map(|_| crate::ui::fresh::allow(
                     ready,
                     button(text(tr!("Use that one")).size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 16])
-                        .on_press_maybe(
-                            ready.then_some(Message::Lsp(LspMsg::ConsentUsePath(number)))
-                        )
+                        .on_press_maybe(ready.then(|| heard::said(
+                            tr!("Use that one"),
+                            Message::Lsp(LspMsg::ConsentUsePath(number))
+                        )))
                 )),
                 crate::ui::fresh::allow(
                     ready,
-                    button(text(action).size(ts::BASE))
+                    button(text(action.clone()).size(ts::BASE))
                         .style(theme::primary_button)
                         .padding([6, 16])
-                        .on_press_maybe(
-                            ready.then_some(Message::Lsp(LspMsg::ConsentAllowed(number)))
-                        )
+                        .on_press_maybe(ready.then(|| heard::answer(
+                            &action,
+                            heard::Answer::Yes,
+                            Message::Lsp(LspMsg::ConsentAllowed(number))
+                        )))
                 ),
             ]
             .spacing(10)
@@ -1058,15 +1074,21 @@ pub(crate) fn lsp_command_modal(
                 button(text(decline).size(ts::BASE))
                     .style(theme::primary_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::CommandDismissed(number))),
+                    .on_press(heard::answer(
+                        decline,
+                        heard::Answer::No,
+                        Message::Lsp(LspMsg::CommandDismissed(number))
+                    )),
                 crate::ui::fresh::allow(
                     ready,
                     button(text(accept).size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 16])
-                        .on_press_maybe(
-                            ready.then_some(Message::Lsp(LspMsg::CommandAllowed(number)))
-                        )
+                        .on_press_maybe(ready.then(|| heard::answer(
+                            accept,
+                            heard::Answer::Yes,
+                            Message::Lsp(LspMsg::CommandAllowed(number))
+                        )))
                 ),
             ]
             .spacing(10)
