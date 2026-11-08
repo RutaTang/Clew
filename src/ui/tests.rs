@@ -9752,3 +9752,38 @@ fn the_version_line_names_clew() {
     let version = format!("Clew {}", crate::updater::current_version());
     assert!(shows(&mut sim_of(&app), &version), "{version}");
 }
+
+/// A streaming answer shows what has settled drawn, and only the paragraph
+/// being written as its words: the whole of it was its raw text, `##` and
+/// all. What grounded it is shown once it is whole.
+#[test]
+fn a_streaming_answer_shows_its_settled_blocks_drawn() {
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Expanded;
+    let settled = "## How it works\n\n";
+    let md = format!("{settled}It reads the fi");
+    let (answer, _) = app.prepare_segments(settled);
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 3,
+        question: "how?".into(),
+        answer_md: md,
+        answer,
+        settled: settled.len(),
+        sources: vec![(
+            crate::explain::Node::File(PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs")),
+            0.87,
+        )],
+        streaming: true,
+        ..Default::default()
+    });
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "It reads the fi▍"));
+        assert!(!shows(&mut sim, "## How"), "the heading is drawn as typed");
+        assert!(!shows(&mut sim, "Sources"), "sources under half an answer");
+    }
+    app.proj.ask_turns[0].streaming = false;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Sources"));
+    assert!(!shows(&mut sim, "87%"), "a score read as a grade");
+}

@@ -6106,6 +6106,7 @@ fn project_switch_clears_ask_history_and_pins() {
         spoken: false,
         answer_md: "returns Point".into(),
         answer: Vec::new(),
+        settled: 0,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: false,
@@ -7175,6 +7176,7 @@ fn a_delta_from_a_superseded_stream_never_lands_in_another_turn() {
         spoken: false,
         answer_md: String::new(),
         answer: Vec::new(),
+        settled: 0,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -13257,6 +13259,7 @@ fn an_agent_failure_with_nothing_to_fall_back_to_keeps_the_question() {
         spoken: false,
         answer_md: String::new(),
         answer: Vec::new(),
+        settled: 0,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -13304,6 +13307,7 @@ fn a_disconnect_closes_server_turns_with_their_text_and_spares_the_local_stream(
         spoken: false,
         answer_md: "Half an answer".into(),
         answer: Vec::new(),
+        settled: 0,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -21973,6 +21977,7 @@ fn fill_project_session(app: &mut App) {
         spoken: false,
         answer_md: "a".into(),
         answer: Vec::new(),
+        settled: 0,
         sources: Vec::new(),
         steps: Vec::new(),
         streaming: true,
@@ -22647,6 +22652,7 @@ fn a_stopped_agent_turn_never_falls_back_to_a_paid_answer() {
             spoken: false,
             answer_md: String::new(),
             answer: Vec::new(),
+            settled: 0,
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
@@ -33440,4 +33446,64 @@ fn a_save_names_the_provider_without_nested_parentheses() {
         app.status
     );
     assert!(!app.status.contains("(Custom"), "{}", app.status);
+}
+
+/// A streaming answer is drawn as it will stay, block by block, as each
+/// ends: it was raw text until the end — `##`, backticks and `-` as typed —
+/// and then redrawn at once, the whole answer jumping. What is drawn is
+/// never prepared again: the end adds the rest to it.
+#[test]
+fn a_streaming_answer_is_drawn_block_by_block() {
+    let mut app = scanned_app("ask-stream-settles");
+    app.proj.ask_turns.push(AskTurn {
+        stream: 5,
+        question: "how?".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let delta = |app: &mut App, text: &str| {
+        let _ = app.update(Message::Ask(AskMsg::Delta {
+            stamp: app.stamp(),
+            stream: 5,
+            text: text.into(),
+        }));
+    };
+    delta(&mut app, "## How it works\n");
+    assert!(
+        app.proj.ask_turns[0].answer.is_empty(),
+        "a heading still being written"
+    );
+    delta(&mut app, "\nIt reads `the file`");
+    let turn = &app.proj.ask_turns[0];
+    assert_eq!(turn.settled, "## How it works\n\n".len());
+    assert!(!turn.answer.is_empty(), "the ended heading is drawn");
+    let heading = format!("{:?}", turn.answer[0]);
+    // A code block's blank lines end nothing.
+    delta(&mut app, " and then:\n\n```rust\nfn a() {}\n\nfn b() {}\n");
+    let in_code = app.proj.ask_turns[0].settled;
+    assert!(
+        app.proj.ask_turns[0].answer_md[..in_code].ends_with("then:\n\n"),
+        "{:?}",
+        &app.proj.ask_turns[0].answer_md[..in_code]
+    );
+    delta(&mut app, "```\n\nDone.");
+    let _ = app.update(Message::Ask(AskMsg::StreamEnded {
+        stamp: app.stamp(),
+        stream: 5,
+        outcome: clew_protocol::StreamOutcome::Done,
+    }));
+    let turn = &app.proj.ask_turns[0];
+    assert!(!turn.streaming);
+    assert_eq!(turn.settled, turn.answer_md.len());
+    assert_eq!(
+        format!("{:?}", turn.answer[0]),
+        heading,
+        "the heading was redrawn"
+    );
+    let code = turn
+        .answer
+        .iter()
+        .filter(|s| matches!(s, crate::app::model::PreparedSeg::Code(_)))
+        .count();
+    assert_eq!(code, 1, "{:?}", turn.answer);
 }

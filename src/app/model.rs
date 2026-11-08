@@ -425,9 +425,15 @@ pub struct AskTurn {
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.
     pub answer_md: String,
-    /// The answer rendered as ordered display segments (filled when the stream
-    /// finishes; empty while streaming, when `answer_md` is shown as plain text).
+    /// The answer rendered as ordered display segments. While it streams,
+    /// what of it is settled — its whole paragraphs, code blocks and
+    /// formulas, `answer_md[..settled]` — is here, drawn as it will stay; only
+    /// the paragraph still being written is drawn as plain text. It was all
+    /// plain text until the end — `##`, backticks and `-` as typed — and then
+    /// redrawn at once, the answer jumping as it changed.
     pub answer: Vec<PreparedSeg>,
+    /// How much of `answer_md` is in `answer`, in bytes (see there).
+    pub settled: usize,
     /// The retrieved nodes (with similarity scores) that grounded this answer,
     /// shown beneath it as clickable source chips.
     pub sources: Vec<(explain::Node, f32)>,

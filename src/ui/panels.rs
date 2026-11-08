@@ -675,8 +675,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             // as an answer is (`App::settle_waiting_answers`).
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         } else if turn.streaming {
-            // Live answer: "Thinking…" until the first token, then the raw text
-            // (with a cursor) as it streams; it's re-rendered richly when done.
+            // Live answer: "Thinking…" until the first token; then what has
+            // settled drawn as it will stay, and the paragraph being written
+            // as its plain words, a cursor after them — in the answer's own
+            // size and leading, so it does not move as it settles.
             if turn.answer_md.trim().is_empty() {
                 let label = if !turn.extras.approvals.is_empty() {
                     tr!("Waiting for your answer…")
@@ -687,9 +689,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 };
                 convo.push(text(label).size(ts::BODY).color(theme::dim()).into());
             } else {
+                convo.extend(super::explain_view::render_answer(app, &turn.answer));
+                let writing = turn.answer_md.get(turn.settled..).unwrap_or("").trim();
                 convo.push(
-                    text(format!("{}▍", turn.answer_md))
-                        .size(ts::BASE)
+                    text(format!("{writing}▍"))
+                        .size(theme::PROSE_SIZE)
+                        .line_height(1.6)
                         .color(theme::fg())
                         .into(),
                 );
@@ -697,18 +702,17 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         } else {
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
-        if !turn.sources.is_empty() {
+        // What grounded the answer, under it once it is whole: they stood
+        // under half an answer, the reader's eye drawn from the words.
+        if !turn.sources.is_empty() && !turn.streaming {
             convo.push(
                 text(tr!("Sources"))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
             );
-            let chips: Vec<Element<'_, Message>> = turn
-                .sources
-                .iter()
-                .map(|(n, s)| source_chip(n, *s))
-                .collect();
+            let chips: Vec<Element<'_, Message>> =
+                turn.sources.iter().map(|(n, _)| source_chip(n)).collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
     }

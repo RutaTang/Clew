@@ -1840,7 +1840,9 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
 
 /// A clickable chip for a retrieved source node — jumps to the code on press,
 /// showing the similarity score when it came from the ranked retrieval.
-pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Element<'a, Message> {
+/// A chip naming what grounded an answer, opening it. Its name only: a
+/// score beside it ("87%") read as a grade of the answer.
+pub(crate) fn source_chip<'a>(node: &crate::explain::Node) -> Element<'a, Message> {
     use crate::explain::Node;
     let label = match node {
         Node::Function { name, .. } => name.clone(),
@@ -1850,18 +1852,9 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Elemen
             .unwrap_or("?")
             .to_string(),
     };
-    let pct = if score > 0.0 {
-        format!("  {}%", (score * 100.0).round() as i32)
-    } else {
-        String::new()
-    };
-    button(
-        text(format!("{label}{pct}"))
-            .size(ts::CAPTION)
-            .color(theme::dim()),
-    )
-    .style(theme::toolbar_button)
-    .padding([1, 6])
-    .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
-    .into()
+    button(text(label).size(ts::CAPTION).color(theme::dim()))
+        .style(theme::toolbar_button)
+        .padding([1, 6])
+        .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
+        .into()
 }

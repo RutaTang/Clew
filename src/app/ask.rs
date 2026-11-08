@@ -158,6 +158,61 @@ pub(crate) fn open_file_context(pin: &AskPin) -> String {
 
 /// The user turn of a retrieval-mode Ask answer: the untrusted-data note once,
 /// first — before any repository text — then the question, then the context.
+/// Where in `md` a streaming answer is settled up to, from `from` (itself
+/// such a place): just after the last blank line that ends a block — not
+/// one inside a code block or a display formula, which go on past it. What
+/// is before it reads the same however the answer goes on, and is drawn as
+/// it will stay; `from` when no block has ended since.
+pub(crate) fn settle_point(md: &str, from: usize) -> usize {
+    let Some(rest) = md.get(from..) else {
+        return from;
+    };
+    // The fence a code block opened with (its mark and length), while in one.
+    let mut fence: Option<(char, usize)> = None;
+    let mut math = false;
+    let mut settled = from;
+    let mut at = from;
+    for line in rest.split_inclusive('\n') {
+        at += line.len();
+        // A line still being written ends nothing.
+        if !line.ends_with('\n') {
+            break;
+        }
+        let body = line.trim_end_matches(['\n', '\r']);
+        let lead = body.len() - body.trim_start_matches(' ').len();
+        let mark = &body[lead.min(3)..];
+        let run = |c: char| mark.chars().take_while(|&m| m == c).count();
+        match fence {
+            Some((c, n)) => {
+                if lead <= 3 && run(c) >= n && mark.trim_start_matches(c).trim().is_empty() {
+                    fence = None;
+                }
+                continue;
+            }
+            None if lead <= 3 && (run('`') >= 3 || run('~') >= 3) => {
+                let c = if run('`') >= 3 { '`' } else { '~' };
+                fence = Some((c, run(c)));
+                continue;
+            }
+            None => {}
+        }
+        // A display formula: `$$` on a line of its own opens or closes it;
+        // one that opens and closes on its line is whole.
+        let trimmed = body.trim();
+        if trimmed.starts_with("$$") {
+            let whole = trimmed.len() > 2 && trimmed.ends_with("$$");
+            if !whole {
+                math = !math;
+            }
+            continue;
+        }
+        if !math && trimmed.is_empty() {
+            settled = at;
+        }
+    }
+    settled
+}
+
 pub(crate) fn ask_user_prompt(question: &str, context: &str) -> String {
     format!(
         "{}\n\nQuestion: {question}\n\nCode context:\n{context}",
@@ -217,7 +272,7 @@ impl App {
     /// finished answer is (code as code, links as links) rather than as the
     /// raw text a streaming answer shows.
     pub(crate) fn settle_waiting_answers(&mut self) -> Task<Message> {
-        let waiting: Vec<(usize, String)> = self
+        let waiting: Vec<(usize, usize)> = self
             .proj
             .ask_turns
             .iter()
@@ -225,14 +280,12 @@ impl App {
             .filter(|(_, t)| {
                 t.streaming && !t.extras.approvals.is_empty() && !t.answer_md.trim().is_empty()
             })
-            .map(|(i, t)| (i, t.answer_md.clone()))
+            .map(|(i, t)| (i, t.answer_md.len()))
             .collect();
-        let mut tasks = Vec::new();
-        for (i, md) in waiting {
-            let (prepared, task) = self.prepare_segments(&md);
-            self.proj.ask_turns[i].answer = prepared;
-            tasks.push(task);
-        }
+        let tasks: Vec<_> = waiting
+            .into_iter()
+            .map(|(i, end)| self.settle_answer_to(i, end))
+            .collect();
         Task::batch(tasks)
     }
 
@@ -771,6 +824,7 @@ impl App {
             spoken,
             answer_md: String::new(),
             answer: Vec::new(),
+            settled: 0,
             sources,
             steps: Vec::new(),
             streaming: true,
@@ -957,6 +1011,7 @@ impl App {
             spoken,
             answer_md: String::new(),
             answer: Vec::new(),
+            settled: 0,
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
@@ -1055,15 +1110,21 @@ impl App {
         // Route by stream id. "The last streaming turn" also matches a turn
         // belonging to another question — or, after a project switch, to a
         // conversation in another project entirely.
-        let Some(turn) = self
+        let Some(idx) = self
             .proj
             .ask_turns
-            .iter_mut()
-            .find(|t| t.stream == stream && t.streaming)
+            .iter()
+            .position(|t| t.stream == stream && t.streaming)
         else {
             return Task::none();
         };
-        turn.answer_md.push_str(&text);
+        self.proj.ask_turns[idx].answer_md.push_str(&text);
+        // A block that has ended is drawn as it will stay.
+        let settle = {
+            let turn = &self.proj.ask_turns[idx];
+            settle_point(&turn.answer_md, turn.settled)
+        };
+        let drawn = self.settle_answer_to(idx, settle);
         // First token(s): the answer is streaming, not "thinking".
         self.proj.asking = false;
         // A question said aloud: its answer is said too, as it comes.
@@ -1076,7 +1137,35 @@ impl App {
                 y: f32::MAX,
             },
         );
-        Task::batch([said, follow])
+        Task::batch([said, follow, drawn])
+    }
+
+    /// Draw turn `idx`'s answer as it will stay up to `to` (a place
+    /// [`settle_point`] found, or its end): what came since it was last
+    /// settled is prepared and added on. Its whole text is never prepared
+    /// again, so nothing drawn moves.
+    pub(crate) fn settle_answer_to(&mut self, idx: usize, to: usize) -> Task<Message> {
+        let Some(turn) = self.proj.ask_turns.get_mut(idx) else {
+            return Task::none();
+        };
+        // The text replaced under it (an empty answer given its reason): drawn
+        // anew.
+        if turn.settled > turn.answer_md.len() || !turn.answer_md.is_char_boundary(turn.settled) {
+            turn.answer.clear();
+            turn.settled = 0;
+        }
+        let to = to.min(turn.answer_md.len());
+        if to <= turn.settled || !turn.answer_md.is_char_boundary(to) {
+            return Task::none();
+        }
+        let chunk = turn.answer_md[turn.settled..to].to_string();
+        turn.settled = to;
+        if chunk.trim().is_empty() {
+            return Task::none();
+        }
+        let (prepared, task) = self.prepare_segments(&chunk);
+        self.proj.ask_turns[idx].answer.extend(prepared);
+        task
     }
 
     pub(crate) fn on_ask_stream_ended(
@@ -1134,7 +1223,11 @@ impl App {
             if let Some(reason) = empty_reason
                 && turn.answer_md.trim().is_empty()
             {
+                // In place of what was there (blank lines, settled as they
+                // came): drawn from its start.
                 turn.answer_md = reason;
+                turn.answer.clear();
+                turn.settled = 0;
             } else if matches!(outcome, StreamOutcome::Stopped) {
                 // Stopped part-way: said so where it stops — it ended mid-
                 // sentence, or mid-heading, with nothing to tell it from an
@@ -1148,8 +1241,8 @@ impl App {
             }
             turn.answer_md.clone()
         };
-        let (prepared, task) = self.prepare_segments(&md);
-        self.proj.ask_turns[idx].answer = prepared;
+        // The rest of it, added to what is drawn already: nothing drawn moves.
+        let task = self.settle_answer_to(idx, md.len());
         // Answered: the session is kept as it now stands.
         self.keep_ask_session();
         let to_bottom = operation::scroll_to(
@@ -1718,5 +1811,35 @@ impl App {
                 ..
             } => self.on_acp_option_set(agent, session, option, value, result),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settle_point;
+
+    /// Where a streaming answer settles: after a block's blank line — not
+    /// one inside a code block or a formula, nor a line still being written.
+    #[test]
+    fn an_answer_settles_where_a_block_ends() {
+        let md = "First.\n\nSecond, being wri";
+        assert_eq!(settle_point(md, 0), "First.\n\n".len());
+        // From where it settled, nothing new has ended.
+        assert_eq!(settle_point(md, 8), 8);
+        let code = "Intro\n\n```rust\nfn a() {}\n\nfn b() {}\n";
+        assert_eq!(settle_point(code, 0), "Intro\n\n".len());
+        let closed = format!("{code}```\n\nAfter");
+        assert_eq!(settle_point(&closed, 0), closed.len() - "After".len());
+        let tilde = "~~~\na\n\nb\n";
+        assert_eq!(settle_point(tilde, 0), 0);
+        let math = "$$\na\n\nb\n$$\n\nAfter";
+        assert_eq!(settle_point(math, 0), math.len() - "After".len());
+        let one_line = "$$x^2$$\n\nAfter";
+        assert_eq!(settle_point(one_line, 0), one_line.len() - "After".len());
+        // A blank line still being written ends nothing yet.
+        assert_eq!(settle_point("Para.\n", 0), 0);
+        assert_eq!(settle_point("Para.\n\n", 0), "Para.\n\n".len());
+        // Out of range: where it was.
+        assert_eq!(settle_point("ab", 9), 9);
     }
 }
