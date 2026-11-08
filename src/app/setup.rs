@@ -561,7 +561,11 @@ impl App {
             .filter(|s| s.fetch != Fetch::Nothing)
             .map(|s| s.language.clone())
             .collect();
-        self.set_up_servers(&root, &servers)
+        let set_up = self.set_up_servers(&root, &servers);
+        // Looked at afresh: a server another window put in place since the
+        // last look is found in hand — nothing fetches it, and no fetch's
+        // end would take it off the status bar, where Set up stayed.
+        Task::batch([set_up, self.look_for_missing_setup()])
     }
 
     /// Carry out a first open's answer once the project it was for is open
@@ -644,20 +648,23 @@ impl App {
     ) -> Task<Message> {
         match result {
             Ok(exe) => {
-                // Set up: the look this lands with confirms it.
+                // Set up — and looked at afresh, so a look begun before it
+                // was in, landing after, does not offer it again.
                 self.proj.setup_missing.retain(|s| s.language != language);
+                let look = self.look_for_missing_setup();
                 let wanted = self
                     .proj
                     .panes
                     .iter()
                     .flatten()
                     .any(|v| highlight::detect(&v.abs) == Some(language.as_str()));
-                if wanted {
+                let start = if wanted {
                     self.start_lsp_with(&language, exe)
                 } else {
                     self.proj.link.lsp.remove(&language);
                     Task::none()
-                }
+                };
+                Task::batch([start, look])
             }
             Err(e) => {
                 self.status = tr!(

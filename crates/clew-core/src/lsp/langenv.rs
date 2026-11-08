@@ -65,6 +65,61 @@ const CARGO_DEPTH: usize = 4;
 const CARGO_WALK_CAP: usize = 50_000;
 /// A `Cargo.toml` larger than this is no project's manifest.
 const MANIFEST_MAX_BYTES: u64 = 1 << 20;
+/// The most projects [`cargo_projects`] links. A tree of more packages than
+/// this, apart from any workspace, is not one rust-analyzer can load each
+/// of in any case; past it, the walk stops reading manifests.
+const CARGO_MAX_PROJECTS: usize = 64;
+
+/// What a `Cargo.toml` declares, by its tables: a workspace, a package, or
+/// neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestKind {
+    Workspace,
+    Package,
+}
+
+/// `manifest`'s kind, read from its table headers (`[workspace]`,
+/// `[workspace.dependencies]`, `[package]`) and top-level dotted keys
+/// (`workspace.members = …`) — not parsed whole: this runs as a language
+/// server starts, over every manifest of a tree, and parsing each as TOML
+/// held a window still for seconds on a tree of a thousand crates.
+fn manifest_kind(manifest: &str) -> Option<ManifestKind> {
+    let mut kind = None;
+    let mut top_level = true;
+    for line in manifest.lines() {
+        let line = line.trim_start();
+        let (key, is_header) = match line.strip_prefix('[') {
+            // `[[bin]]` and the like: an array of tables, its own.
+            Some(rest) if !rest.starts_with('[') => (rest.trim_start(), true),
+            Some(_) => {
+                top_level = false;
+                continue;
+            }
+            None if top_level => (line, false),
+            None => continue,
+        };
+        if is_header {
+            top_level = false;
+        }
+        let named = |name: &str| {
+            key.strip_prefix(name).is_some_and(|after| {
+                let after = after.trim_start();
+                if is_header {
+                    after.starts_with(']') || after.starts_with('.')
+                } else {
+                    after.starts_with('.') || after.starts_with('=')
+                }
+            })
+        };
+        if named("workspace") {
+            return Some(ManifestKind::Workspace);
+        }
+        if named("package") {
+            kind = Some(ManifestKind::Package);
+        }
+    }
+    kind
+}
 
 /// rust-analyzer's `linkedProjects` for `root`, when it holds Cargo
 /// projects past the one at its top, which is all rust-analyzer finds of
@@ -116,17 +171,17 @@ pub fn cargo_projects(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let too_big = std::fs::metadata(&path).map_or(true, |m| m.len() > MANIFEST_MAX_BYTES);
-        let Some(manifest) = (!too_big)
+        let kind = (!too_big)
             .then(|| std::fs::read_to_string(&path).ok())
             .flatten()
-            .and_then(|text| text.parse::<toml::Table>().ok())
-        else {
-            continue;
-        };
-        if manifest.contains_key("workspace") {
-            workspaces.push(path);
-        } else if manifest.contains_key("package") {
-            packages.push(path);
+            .and_then(|text| manifest_kind(&text));
+        match kind {
+            Some(ManifestKind::Workspace) => workspaces.push(path),
+            Some(ManifestKind::Package) => packages.push(path),
+            None => {}
+        }
+        if workspaces.len() + packages.len() >= CARGO_MAX_PROJECTS * 4 {
+            break;
         }
     }
     // A package under a workspace's folder is that workspace's (or one it
@@ -141,6 +196,7 @@ pub fn cargo_projects(root: &Path) -> Vec<PathBuf> {
     let mut projects = workspaces;
     projects.extend(packages);
     projects.sort();
+    projects.truncate(CARGO_MAX_PROJECTS);
     projects
 }
 
@@ -1637,6 +1693,53 @@ mod tests {
             cargo_projects(&root),
             vec![root.join("Cargo.toml"), root.join("fuzz/Cargo.toml")]
         );
+    }
+
+    /// A manifest's kind is read from its tables and top-level dotted keys,
+    /// without parsing it whole — and not from a key of the same name inside
+    /// another table, or a table of a longer name.
+    #[test]
+    fn a_manifest_is_known_by_its_tables() {
+        use ManifestKind::*;
+        let cases: &[(&str, Option<ManifestKind>)] = &[
+            ("[package]\nname = \"a\"\n", Some(Package)),
+            ("[workspace]\nmembers = [\"a\"]\n", Some(Workspace)),
+            ("[package]\nname = \"a\"\n\n[workspace]\n", Some(Workspace)),
+            ("[workspace.dependencies]\nserde = \"1\"\n", Some(Workspace)),
+            ("  [ workspace ]\n", Some(Workspace)),
+            ("workspace.members = [\"a\"]\n", Some(Workspace)),
+            ("package.name = \"a\"\n", Some(Package)),
+            ("[dependencies]\nworkspace = true\n", None),
+            ("[dependencies]\nserde.workspace = true\n", None),
+            ("[[bin]]\nname = \"workspace\"\n", None),
+            ("[packages]\n", None),
+            ("[workspaces]\n", None),
+            ("# [workspace]\n[lib]\n", None),
+            ("", None),
+        ];
+        for (manifest, kind) in cases {
+            assert_eq!(manifest_kind(manifest), *kind, "{manifest:?}");
+        }
+    }
+
+    /// However many packages a tree holds apart, no more than
+    /// CARGO_MAX_PROJECTS are linked: rust-analyzer could not load each in
+    /// any case, and reading every manifest held the window still.
+    #[test]
+    fn a_tree_of_many_packages_links_a_bounded_few() {
+        let root = scratch("cargo-many");
+        for n in 0..CARGO_MAX_PROJECTS + 10 {
+            let dir = root.join(format!("crates/c{n:03}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"c{n}\"\n"),
+            )
+            .unwrap();
+        }
+        let projects = cargo_projects(&root);
+        assert_eq!(projects.len(), CARGO_MAX_PROJECTS);
+        assert_eq!(projects[0], root.join("crates/c000/Cargo.toml"));
     }
 
     /// A project of one workspace at its top is left to rust-analyzer, which

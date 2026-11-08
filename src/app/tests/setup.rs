@@ -545,6 +545,32 @@ fn set_up_in_one_click_fetches_what_the_servers_lack() {
     assert!(app.setting_up(), "and said to be setting up");
 }
 
+/// Set up looks afresh as it is clicked: a server another window put in
+/// place since the last look — which nothing then fetches, and no fetch's
+/// end takes off the status bar — is found in hand, and Set up goes.
+#[test]
+fn set_up_looks_afresh_for_what_is_now_in_hand() {
+    let store = test_dir("setup-data-one-click-fresh");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let mut app = scanned_app("setup-one-click-fresh");
+    let needs = SetupServer {
+        builds: false,
+        ..builds_and_downloads()
+    };
+    app.proj.setup_missing = vec![needs];
+    let before = app.proj.setup_look;
+    let task = app.update(Message::Project(ProjectMsg::SetUpMissing));
+    assert!(app.proj.setup_look > before, "no look begun");
+    let looked = run_task(task).into_iter().any(|m| {
+        matches!(
+            m,
+            Message::Project(ProjectMsg::MissingSetupFound { seq, .. }) if seq == app.proj.setup_look
+        )
+    });
+    assert!(looked, "the look's answer is the one taken");
+}
+
 /// A server in hand that builds the project is offered until the leave to
 /// build is given — by the one click, which gives it — and then no more.
 /// One running, or being asked about, is not offered at all.
