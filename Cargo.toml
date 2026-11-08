@@ -13,7 +13,7 @@ exclude = ["vendor"]
 
 [package]
 name = "clew"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"
