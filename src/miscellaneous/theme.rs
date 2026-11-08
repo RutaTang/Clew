@@ -1209,8 +1209,30 @@ pub const PROSE_SIZE: f32 = ui_size(TextRole::Reading);
 /// Size of a markdown file's text, read as a document in the reader.
 pub const DOCUMENT_SIZE: f32 = 16.0;
 
-/// [`markdown_settings`] at a given base text size.
+/// How much larger than the prose around them its headings are, level by
+/// level, in the answers, explanations and notes Clew writes in its cards
+/// and panels: a notch each, as a chat's are. iced's own scale (a level-1
+/// heading twice the text) is a document's, and an answer's "## How it is
+/// used" stood in a card at nearly twice the size of what it headed.
+pub const PROSE_HEADING_SCALE: [f32; 6] = [1.3, 1.2, 1.1, 1.0, 1.0, 1.0];
+
+/// [`markdown_settings`] at a given base text size: prose in a card or a
+/// panel, its headings a notch over it ([`PROSE_HEADING_SCALE`]).
 pub fn markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
+    let mut settings = document_markdown_settings_at(size);
+    let [h1, h2, h3, h4, h5, h6] = PROSE_HEADING_SCALE.map(|scale| (size * scale).into());
+    settings.h1_size = h1;
+    settings.h2_size = h2;
+    settings.h3_size = h3;
+    settings.h4_size = h4;
+    settings.h5_size = h5;
+    settings.h6_size = h6;
+    settings
+}
+
+/// A markdown file read as a document in the reader: its headings at a
+/// document's scale, a level-1 one twice its text.
+pub fn document_markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
     use iced::widget::markdown;
     markdown::Settings::with_text_size(
         size,

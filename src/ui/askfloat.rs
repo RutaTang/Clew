@@ -785,18 +785,6 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         .as_ref()
         .and_then(|p| p.root.file_name())
         .map(|n| n.to_string_lossy().into_owned());
-    let new = button(
-        row![
-            glyph::icon(Glyph::Plus, theme::accent(), 14.0),
-            text(tr!("New session")).size(ts::BASE).color(theme::fg()),
-        ]
-        .spacing(9)
-        .align_y(iced::Center),
-    )
-    .style(theme::menu_row)
-    .padding([7, 9])
-    .width(Fill)
-    .on_press(Message::Ask(AskMsg::NewSession));
     // The search over the sessions' names, questions and answers.
     let search = container(
         row![
@@ -859,13 +847,9 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
             .spacing(9)
             .align_y(iced::Center),
         )
-        .style(move |t: &iced::Theme, status| {
-            if current {
-                theme::list_row(true)(t, status)
-            } else {
-                theme::menu_row(t, status)
-            }
-        })
+        // The one open is marked by its dot alone: filled as well, it was a
+        // second lit row beside the one under the pointer.
+        .style(theme::menu_row)
         .padding([6, 9])
         .width(Fill)
         .on_press(Message::Ask(AskMsg::SwitchSession(session.id)));
@@ -913,16 +897,17 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     };
     // Searching is worth it once there is more than one to look through —
     // and the field stays while what it holds still filters the menu, so
-    // it can be cleared.
-    let top = if app.proj.ask_sessions.len() > 1 || !app.ask_sessions_query.is_empty() {
-        column![search, new].spacing(4)
-    } else {
-        column![new]
-    };
+    // it can be cleared. A new session is the header's +, beside the menu:
+    // not offered a second time in it.
+    let searching = app.proj.ask_sessions.len() > 1 || !app.ask_sessions_query.is_empty();
+    let mut menu = Column::new().spacing(1);
+    if searching {
+        menu = menu
+            .push(search)
+            .push(container(hairline()).padding([3, 2]));
+    }
     container(opaque(
-        column![
-            top,
-            container(hairline()).padding([3, 2]),
+        menu.push(
             container(
                 text(heading)
                     .size(ts::SMALL)
@@ -930,9 +915,8 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                     .color(theme::dim()),
             )
             .padding([4, 9]),
-            body,
-        ]
-        .spacing(1),
+        )
+        .push(body),
     ))
     .width(SESSIONS_MENU_W)
     .max_height(SESSIONS_MENU_MAX_H)

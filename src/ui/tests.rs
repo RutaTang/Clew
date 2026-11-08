@@ -8761,7 +8761,9 @@ fn the_card_names_its_session_and_lists_the_others() {
     app.ask_sessions_menu = true;
     {
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "New session"));
+        // A new session is the header's +, beside the menu: not a second
+        // time in it.
+        assert!(!shows(&mut sim, "New session"));
         assert!(shows(&mut sim, "How is a host connected?"));
         assert!(shows(&mut sim, "2 min ago · 1 question"));
         assert!(shows(&mut sim, "2 h ago · 2 questions"));
@@ -8770,12 +8772,6 @@ fn the_card_names_its_session_and_lists_the_others() {
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Ask(AskMsg::SwitchSession(2)))),
-        "{sent:?}"
-    );
-    let sent = click(sim_of(&app), "New session");
-    assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Ask(AskMsg::NewSession))),
         "{sent:?}"
     );
     // Searched: only what has it, with where it is when it is past the name.
@@ -9199,6 +9195,11 @@ fn the_voice_settings_offer_each_model_and_its_size() {
             shows(&mut sim, "Download (190 MB)"),
             "its size, before anything"
         );
+        // The one chosen, not here yet, says what being chosen does.
+        assert!(shows(
+            &mut sim,
+            "Voice uses this model once it is downloaded."
+        ));
     }
     app.voice.prefs.model = "base.en".into();
     assert!(
@@ -9210,11 +9211,7 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         [Message::Voice(crate::VoiceMsg::Download("base.en"))]
     ));
     assert!(matches!(
-        click(
-            sim_elem(super::voice_section(&app)),
-            "Medium (Large v3 Turbo)"
-        )
-        .as_slice(),
+        click(sim_elem(super::voice_section(&app)), "Large Turbo").as_slice(),
         [Message::Voice(crate::VoiceMsg::PickModel(
             "large-v3-turbo-q5_0"
         ))]
@@ -9228,6 +9225,15 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         assert!(shows(&mut sim, "Downloaded"));
         assert!(shows(&mut sim, "Language"));
     }
+    // The one chosen here too: nothing to say about it.
+    std::fs::write(store.path(app.voice.prefs.model()), b"x").unwrap();
+    assert!(
+        !shows(
+            &mut sim_elem(super::voice_section(&app)),
+            "once it is downloaded"
+        ),
+        "the one chosen is here"
+    );
     assert!(matches!(
         click(sim_elem(super::voice_section(&app)), "Remove").as_slice(),
         [Message::Voice(crate::VoiceMsg::RemoveModel("base.en"))]
@@ -10794,4 +10800,42 @@ fn a_custom_providers_fields_say_what_goes_in_them() {
             (provider.default_model(), provider.default_base_url())
         );
     }
+}
+
+/// L11: a heading in an answer, an explanation or a note stands a notch
+/// over the prose it heads, as a chat's do. At iced's document scale an
+/// answer's "## How it is used" was set at nearly twice its text in a card;
+/// a markdown file read as a document keeps that scale.
+#[test]
+fn a_heading_in_prose_stands_a_notch_over_its_text() {
+    use iced::advanced::{layout, widget::Tree};
+    crate::fonts::load();
+    let renderer = renderer();
+    // How tall `md`, one line of it, is laid out with `settings`.
+    let height = |md: &str, settings: iced::widget::markdown::Settings| {
+        let items: Vec<iced::widget::markdown::Item> = iced::widget::markdown::parse(md).collect();
+        let mut element: Element<'_, Message> = iced::widget::markdown::view(&items, settings)
+            .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
+        let mut tree = Tree::new(element.as_widget());
+        let limits = layout::Limits::new(Size::ZERO, Size::new(800.0, 10_000.0));
+        element
+            .as_widget_mut()
+            .layout(&mut tree, &renderer, &limits)
+            .size()
+            .height
+    };
+    let ratio = |settings: fn() -> iced::widget::markdown::Settings| {
+        height("## How it is used", settings()) / height("The toolbar draws the field.", settings())
+    };
+    let prose = ratio(crate::theme::markdown_settings);
+    assert!(
+        prose > 1.05 && prose < 1.3,
+        "a prose heading is {prose}× its text"
+    );
+    let document =
+        ratio(|| crate::theme::document_markdown_settings_at(crate::theme::DOCUMENT_SIZE));
+    assert!(
+        document > 1.5,
+        "a document's heading is {document}× its text"
+    );
 }

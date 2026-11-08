@@ -123,7 +123,7 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         id: "large-v3-turbo-q5_0",
-        name: "Medium (Large v3 Turbo)",
+        name: "Large Turbo",
         size_mb: 574,
         bytes: Some(574_041_195),
         checksum: Checksum::Sha256(
@@ -134,7 +134,7 @@ pub const MODELS: &[Model] = &[
     },
     Model {
         id: "large-v3-q5_0",
-        name: "Large (Large v3)",
+        name: "Large",
         size_mb: 1081,
         bytes: Some(1_081_140_203),
         checksum: Checksum::Sha256(

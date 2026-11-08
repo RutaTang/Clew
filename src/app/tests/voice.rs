@@ -1727,3 +1727,36 @@ fn a_model_being_removed_judges_nothing() {
     assert!(app.turn_model().is_some(), "here again once it is let go");
     assert!(judge.asked.lock().unwrap().is_empty());
 }
+
+/// L10: the voice key with the model chosen not on this computer says so,
+/// and opens Settings → Voice: that there is no model at all only when
+/// there is none — another one downloaded, it says which is missing and
+/// that one that is here can be chosen.
+#[test]
+fn the_voice_key_says_which_model_is_missing() {
+    let mut app = blank_app();
+    let store = own_store(&mut app, "voice-key-missing");
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.is_listening());
+    assert!(
+        app.status.starts_with("Voice needs a speech model"),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.settings.page, SettingsPage::Voice);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    // Base downloaded, Small still the one chosen.
+    let base = clew_voice::models::find("base.en").unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(base), b"x").unwrap();
+    app.voice.reset_for_test();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.is_listening());
+    assert_eq!(
+        app.status,
+        "Small is not downloaded yet — download it (190 MB) in Settings → Voice, or choose \
+         one that is"
+    );
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, SettingsPage::Voice);
+}

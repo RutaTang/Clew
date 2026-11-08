@@ -1094,12 +1094,23 @@ impl App {
         // be the yes (or the no).
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
-            self.status = tr!(
-                "Voice needs a speech model on this computer — download {model} ({size} MB) \
-                 in Settings → Voice",
-                model = crate::i18n::lookup(model.name),
-                size = model.size_mb
-            );
+            // Another one here: it is not that there is none.
+            let another = models::MODELS.iter().any(|m| self.voice.installed(m));
+            self.status = if another {
+                tr!(
+                    "{model} is not downloaded yet — download it ({size} MB) in Settings → \
+                     Voice, or choose one that is",
+                    model = crate::i18n::lookup(model.name),
+                    size = model.size_mb
+                )
+            } else {
+                tr!(
+                    "Voice needs a speech model on this computer — download {model} ({size} MB) \
+                     in Settings → Voice",
+                    model = crate::i18n::lookup(model.name),
+                    size = model.size_mb
+                )
+            };
             return self.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
         }
         match (self.voice.open_mic)(MAX_SECONDS) {

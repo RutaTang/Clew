@@ -63,12 +63,22 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
             form::action(&label, msg).into()
         }
     };
-    let detail = column![
+    let mut detail = column![
         text(crate::i18n::lookup(model.about))
             .size(ts::SMALL)
             .color(theme::dim())
             .wrapping(Wrapping::WordOrGlyph),
     ];
+    // The one chosen and not here yet — the first one chosen, Small, is
+    // not: chosen, it says what being chosen does until it is here.
+    if picked && !installed && !app.voice.downloads.contains_key(model.id) {
+        detail = detail.push(
+            text(tr!("Voice uses this model once it is downloaded."))
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(Wrapping::WordOrGlyph),
+        );
+    }
     let mut rows = column![form::choice_with(
         crate::i18n::lookup(model.name),
         Some(detail.into()),
