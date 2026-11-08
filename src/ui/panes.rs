@@ -531,11 +531,19 @@ pub(crate) fn diff_view<'a>(
     // `DiffState::new` — not per repaint). Never narrower than the pane: a
     // diff of short lines tinted its added lines and hunk headers only as
     // far as its longest line, a third of the way across.
-    let content_width = row_width(
-        d.max_cols,
-        mono_advance(app.font_size),
-        DIFF_PAD_LEFT + DIFF_PAD_RIGHT,
-    );
+    let advance = mono_advance(app.font_size);
+    // The numbers' columns: the widest number, before and after, a space
+    // between — then the mark (+, −) of what happened to the line.
+    let gutter_cols = d
+        .runs
+        .iter()
+        .find(|r| r.kind != DiffKind::Hunk)
+        .and_then(|r| r.gutter.lines().next())
+        .map_or(0, |g| g.chars().count());
+    let gutter_w = (gutter_cols as f32 + 1.0) * advance + DIFF_PAD_LEFT;
+    let mark_w = 2.0 * advance;
+    let content_width =
+        row_width(d.max_cols, advance, DIFF_PAD_LEFT + DIFF_PAD_RIGHT) + gutter_w + mark_w;
     let body = iced::widget::responsive(move |size| {
         let run_width = diff_run_width(content_width, size.width);
         // One text block per run of same-kind lines rather than a widget per
@@ -543,7 +551,34 @@ pub(crate) fn diff_view<'a>(
         // layout work on a long diff — prepared once, borrowed here.
         let mut rows: Vec<Element<'a, Message>> = Vec::new();
         for run in &d.runs {
-            let (bg, fg) = match run.kind {
+            let code_text = |t: &'a str, color: iced::Color| {
+                text(t)
+                    .font(crate::fonts::CODE)
+                    .size(app.font_size)
+                    .color(color)
+                    .wrapping(Wrapping::None)
+            };
+            // Where a hunk is: a quiet line naming the place, not git's
+            // `@@ -12,7 +12,9 @@`.
+            if run.kind == DiffKind::Hunk {
+                rows.push(
+                    container(code_text(run.text.as_str(), theme::dim()))
+                        .width(Length::Fixed(run_width))
+                        .padding(Padding {
+                            top: 6.0,
+                            right: DIFF_PAD_RIGHT,
+                            bottom: 2.0,
+                            left: gutter_w + mark_w,
+                        })
+                        .style(|_: &iced::Theme| container::Style {
+                            background: Some(theme::with_alpha(theme::accent(), 0.06).into()),
+                            ..container::Style::default()
+                        })
+                        .into(),
+                );
+                continue;
+            }
+            let (bg, mark_color) = match run.kind {
                 DiffKind::Add => (
                     Some(theme::with_alpha(theme::success(), 0.14)),
                     theme::success(),
@@ -552,27 +587,41 @@ pub(crate) fn diff_view<'a>(
                     Some(theme::with_alpha(theme::danger(), 0.14)),
                     theme::danger(),
                 ),
-                DiffKind::Hunk => (
-                    Some(theme::with_alpha(theme::accent(), 0.12)),
-                    theme::accent(),
-                ),
-                DiffKind::Header => (None, theme::dim()),
-                DiffKind::Context => (None, theme::fg()),
+                _ => (None, theme::dim()),
             };
-            let mut cell = container(
-                text(run.text.as_str())
-                    .font(crate::fonts::CODE)
-                    .size(app.font_size)
-                    .color(fg)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fixed(run_width))
-            .padding(Padding {
-                top: 0.0,
-                right: DIFF_PAD_RIGHT,
-                bottom: 0.0,
-                left: DIFF_PAD_LEFT,
-            });
+            // The code, coloured as the editor colours it.
+            let spans: Vec<iced::widget::text::Span<'a, Message>> = run
+                .spans
+                .iter()
+                .map(|(t, style)| {
+                    iced::widget::span(t.as_str())
+                        .color(
+                            style
+                                .and_then(crate::highlight::style_color)
+                                .unwrap_or(theme::code_fg()),
+                        )
+                        .font(crate::fonts::CODE)
+                        .size(app.font_size)
+                })
+                .collect();
+            let line = row![
+                container(code_text(run.gutter.as_str(), theme::dim()))
+                    .width(Length::Fixed(gutter_w))
+                    .padding(Padding {
+                        left: DIFF_PAD_LEFT,
+                        ..Padding::ZERO
+                    }),
+                container(code_text(run.marks.as_str(), mark_color)).width(Length::Fixed(mark_w)),
+                iced::widget::rich_text(spans).wrapping(Wrapping::None),
+            ];
+            let mut cell = container(line)
+                .width(Length::Fixed(run_width))
+                .padding(Padding {
+                    top: 0.0,
+                    right: DIFF_PAD_RIGHT,
+                    bottom: 0.0,
+                    left: 0.0,
+                });
             if let Some(bg) = bg {
                 cell = cell.style(move |_: &iced::Theme| container::Style {
                     background: Some(bg.into()),
@@ -623,7 +672,7 @@ const DIFF_PAD_LEFT: f32 = 10.0;
 const DIFF_PAD_RIGHT: f32 = 8.0;
 /// Columns a tab advances in the reader (the highlighter expands tabs to this
 /// many spaces, so the diff draws them the same way).
-const TAB_COLS: usize = 4;
+pub(crate) const TAB_COLS: usize = 4;
 
 /// A diff line as the view draws it: tabs expanded like the code view's, and a
 /// blank line kept one space wide so it does not collapse.
@@ -2169,7 +2218,74 @@ mod tests {
                 text: line,
             }],
         );
-        assert_eq!(diff.max_cols, 6);
+        // Its `+` is drawn in a column of its own, not in the line.
+        assert_eq!(diff.max_cols, 5);
+    }
+
+    /// A diff reads as code does: git's headers are not drawn, a hunk is a
+    /// quiet line naming where it is, each line has its numbers before and
+    /// after and its mark apart, and the code is coloured as the editor
+    /// colours it. It was git's raw text — `diff --git`, `index`,
+    /// `@@ -10,2 +10,3 @@` — in one colour per kind.
+    #[test]
+    fn a_diff_reads_as_code_does() {
+        use crate::git::{DiffKind, DiffLine};
+        let line = |kind, text: &str| DiffLine {
+            kind,
+            text: text.into(),
+        };
+        let d = crate::DiffState::new(
+            std::path::PathBuf::from("/p/src/main.rs"),
+            "src/main.rs".into(),
+            vec![
+                line(DiffKind::Header, "diff --git a/src/main.rs b/src/main.rs"),
+                line(DiffKind::Header, "index 1a2b3c..4d5e6f 100644"),
+                line(DiffKind::Header, "--- a/src/main.rs"),
+                line(DiffKind::Header, "+++ b/src/main.rs"),
+                line(DiffKind::Hunk, "@@ -10,2 +10,2 @@ fn main() {"),
+                line(DiffKind::Context, "    let x = 1;"),
+                line(DiffKind::Remove, "-    println!(\"old\");"),
+                line(DiffKind::Add, "+    println!(\"new\");"),
+            ],
+        );
+        let kinds: Vec<DiffKind> = d.runs.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                DiffKind::Hunk,
+                DiffKind::Context,
+                DiffKind::Remove,
+                DiffKind::Add
+            ]
+        );
+        assert!(d.runs.iter().all(|r| !r.text.contains("diff --git")));
+        assert_eq!(d.runs[0].text, "⋯  fn main() {");
+        assert_eq!(d.runs[1].gutter, "10 10");
+        assert_eq!(d.runs[2].gutter, "11   ");
+        assert_eq!(d.runs[3].gutter, "   11");
+        assert_eq!(d.runs[2].marks, "−");
+        assert_eq!(d.runs[3].marks, "+");
+        assert_eq!(d.runs[3].text, "    println!(\"new\");");
+        // Coloured: the string is a string.
+        assert!(
+            d.runs[3]
+                .spans
+                .iter()
+                .any(|(t, s)| t.contains("new") && s.is_some()),
+            "{:?}",
+            d.runs[3].spans
+        );
+        // A hunk git names no place for.
+        let bare = crate::DiffState::new(
+            std::path::PathBuf::from("/p/a.txt"),
+            "a.txt".into(),
+            vec![
+                line(DiffKind::Hunk, "@@ -1 +1 @@"),
+                line(DiffKind::Add, "+x"),
+            ],
+        );
+        assert_eq!(bare.runs[0].text, "⋯");
+        assert_eq!(bare.runs[1].gutter, "  1");
     }
 
     /// The advance is measured by the text engine, not assumed at 0.6 em —

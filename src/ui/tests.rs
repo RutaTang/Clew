@@ -9787,3 +9787,32 @@ fn a_streaming_answer_shows_its_settled_blocks_drawn() {
     assert!(shows(&mut sim, "Sources"));
     assert!(!shows(&mut sim, "87%"), "a score read as a grade");
 }
+
+/// The diff view shows where each change is and its numbers, not git's raw
+/// headers.
+#[test]
+fn the_diff_view_shows_places_and_numbers_not_git_headers() {
+    use crate::git::{DiffKind, DiffLine};
+    let mut app = reader_app();
+    let line = |kind, text: &str| DiffLine {
+        kind,
+        text: text.into(),
+    };
+    app.proj.diff = Some(crate::DiffState::new(
+        PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
+        "src/lib.rs".into(),
+        vec![
+            line(DiffKind::Header, "diff --git a/src/lib.rs b/src/lib.rs"),
+            line(DiffKind::Header, "index 1a2b3c..4d5e6f 100644"),
+            line(DiffKind::Hunk, "@@ -3,1 +3,2 @@ fn line_2() {"),
+            line(DiffKind::Context, " fn line_3() {}"),
+            line(DiffKind::Add, "+fn added() {}"),
+        ],
+    ));
+    let d = app.proj.diff.as_ref().unwrap();
+    let mut sim = sim_elem(super::panes::diff_view(&app, 0, d));
+    assert!(shows(&mut sim, "⋯  fn line_2() {"));
+    assert!(shows(&mut sim, "3 3"));
+    assert!(!shows(&mut sim, "diff --git"));
+    assert!(!shows(&mut sim, "@@"));
+}

@@ -1113,36 +1113,180 @@ pub struct DiffState {
     pub max_cols: usize,
 }
 
-/// One run of same-kind diff lines as the diff view draws it.
+/// One run of same-kind diff lines as the diff view draws it: its code
+/// coloured as the editor colours it, its lines' numbers beside it — before
+/// and after — and the mark of what happened to them. A hunk is a run of
+/// its own: a quiet line naming where it is (`fn main()`), not git's
+/// `@@ -12,7 +12,9 @@`. Git's own headers (`diff --git`, `index`, `---`,
+/// `+++`) are not drawn: the view's header names the file.
 #[derive(Debug, Clone)]
 pub struct DiffRun {
     pub kind: git::DiffKind,
-    /// The run's lines as drawn (`ui::diff_display_text`), joined.
+    /// The run's code as drawn (`ui::diff_display_text`), its lines joined,
+    /// without the `+`/`-`/` ` git marks them with.
     pub text: String,
+    /// The numbers of its lines, before and after, one line each.
+    pub gutter: String,
+    /// What happened to each of its lines (`+`, `−`), one line each.
+    pub marks: String,
+    /// The run's code, coloured: `(words, style)`, a `\n` span between lines.
+    pub spans: Vec<(String, Option<u8>)>,
 }
 
 impl DiffState {
     pub fn new(abs: PathBuf, rel: String, lines: Vec<git::DiffLine>) -> Self {
+        use git::DiffKind;
         let shown = &lines[..lines.len().min(crate::ui::MAX_DIFF_ROWS)];
+        // A line's code: git's mark off.
+        let code = |l: &git::DiffLine| -> String {
+            let t = l.text.as_str();
+            match l.kind {
+                DiffKind::Add | DiffKind::Remove | DiffKind::Context => t
+                    .get(1..)
+                    .filter(|_| t.starts_with(['+', '-', ' ']))
+                    .unwrap_or(t),
+                DiffKind::Hunk | DiffKind::Header => t,
+            }
+            .to_string()
+        };
+        // Coloured as the file's language, each side as it reads: the lines
+        // after (context and added) together, and the lines before (context
+        // and removed) — a string or a comment over several lines coloured as
+        // one. A very long diff is drawn plain.
+        let lang = crate::highlight::detect(&abs);
+        let side = |keep: fn(DiffKind) -> bool| -> Vec<crate::highlight::HlLine> {
+            let src: Vec<String> = shown.iter().filter(|l| keep(l.kind)).map(code).collect();
+            let src = src.join("\n");
+            if shown.len() > DIFF_HIGHLIGHT_MAX {
+                crate::highlight::plain_lines(&src)
+            } else {
+                crate::highlight::highlight_lines(&src, lang)
+            }
+        };
+        let after = side(|k| matches!(k, DiffKind::Context | DiffKind::Add));
+        let before = side(|k| matches!(k, DiffKind::Context | DiffKind::Remove));
+        let (mut a, mut b) = (0usize, 0usize);
+        // Line numbers, from each hunk's header.
+        let (mut old_no, mut new_no) = (0usize, 0usize);
+        struct Row {
+            kind: DiffKind,
+            text: String,
+            gutter: (Option<usize>, Option<usize>),
+            spans: Vec<(String, Option<u8>)>,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for l in shown {
+            let text = crate::ui::diff_display_text(&code(l));
+            let plain = || vec![(text.clone(), None)];
+            let row = match l.kind {
+                DiffKind::Header => continue,
+                DiffKind::Hunk => {
+                    let (old, new, place) = hunk_header(&l.text);
+                    (old_no, new_no) = (old, new);
+                    Row {
+                        kind: DiffKind::Hunk,
+                        text: place.clone(),
+                        gutter: (None, None),
+                        spans: vec![(place, None)],
+                    }
+                }
+                DiffKind::Context => {
+                    let spans = after.get(a).map(|h| h.spans.clone());
+                    a += 1;
+                    b += 1;
+                    let row = Row {
+                        kind: l.kind,
+                        spans: spans.filter(|s| !s.is_empty()).unwrap_or_else(plain),
+                        text,
+                        gutter: (Some(old_no), Some(new_no)),
+                    };
+                    old_no += 1;
+                    new_no += 1;
+                    row
+                }
+                DiffKind::Add => {
+                    let spans = after.get(a).map(|h| h.spans.clone());
+                    a += 1;
+                    let row = Row {
+                        kind: l.kind,
+                        spans: spans.filter(|s| !s.is_empty()).unwrap_or_else(plain),
+                        text,
+                        gutter: (None, Some(new_no)),
+                    };
+                    new_no += 1;
+                    row
+                }
+                DiffKind::Remove => {
+                    let spans = before.get(b).map(|h| h.spans.clone());
+                    b += 1;
+                    let row = Row {
+                        kind: l.kind,
+                        spans: spans.filter(|s| !s.is_empty()).unwrap_or_else(plain),
+                        text,
+                        gutter: (Some(old_no), None),
+                    };
+                    old_no += 1;
+                    row
+                }
+            };
+            rows.push(row);
+        }
         // Of what is drawn (`ui::diff_display_text`): a direction control
         // is drawn as U+FFFD, a column where it took none, and a `\r` not
         // at all.
-        let max_cols = shown
+        let max_cols = rows
             .iter()
-            .map(|l| crate::ui::display_cols(&crate::highlight::line_in_order(&l.text)))
+            .map(|r| crate::ui::display_cols(&crate::highlight::line_in_order(&r.text)))
             .max()
             .unwrap_or(0);
-        let runs = shown
-            .chunk_by(|a, b| a.kind == b.kind)
-            .map(|run| DiffRun {
-                kind: run[0].kind,
-                text: run
-                    .iter()
-                    .map(|l| crate::ui::diff_display_text(&l.text))
-                    .collect::<Vec<_>>()
+        let widest_no = rows
+            .iter()
+            .flat_map(|r| [r.gutter.0, r.gutter.1])
+            .flatten()
+            .max()
+            .unwrap_or(0)
+            .to_string()
+            .len();
+        let number = |n: Option<usize>| match n {
+            Some(n) => format!("{n:>widest_no$}"),
+            None => " ".repeat(widest_no),
+        };
+        let runs =
+            rows.chunk_by(|x, y| x.kind == y.kind)
+                .map(|run| DiffRun {
+                    kind: run[0].kind,
+                    text: run
+                        .iter()
+                        .map(|r| r.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    gutter: run
+                        .iter()
+                        .map(|r| format!("{} {}", number(r.gutter.0), number(r.gutter.1)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    marks: vec![
+                        match run[0].kind {
+                            DiffKind::Add => "+",
+                            DiffKind::Remove => "−",
+                            _ => " ",
+                        };
+                        run.len()
+                    ]
                     .join("\n"),
-            })
-            .collect();
+                    spans: run
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(i, r)| {
+                            let tabs = r.spans.iter().map(|(t, s)| {
+                                (t.replace('\t', &" ".repeat(crate::ui::TAB_COLS)), *s)
+                            });
+                            let gap = (i > 0).then(|| ("\n".to_string(), None));
+                            gap.into_iter().chain(tabs)
+                        })
+                        .collect(),
+                })
+                .collect();
         DiffState {
             abs,
             rel,
@@ -1151,6 +1295,33 @@ impl DiffState {
             max_cols,
         }
     }
+}
+
+/// Past this many lines a diff is drawn without colouring it: preparing it
+/// is done as it arrives, on the window's own thread.
+const DIFF_HIGHLIGHT_MAX: usize = 3000;
+
+/// What a hunk's header says: where its first line is before and after, and
+/// the place it is in (`fn main()`) — `⋯` when git names none.
+fn hunk_header(header: &str) -> (usize, usize, String) {
+    let mut parts = header.splitn(3, "@@");
+    let _ = parts.next();
+    let ranges = parts.next().unwrap_or("");
+    let place = parts.next().unwrap_or("").trim();
+    let start = |sign: char| {
+        ranges
+            .split_whitespace()
+            .find_map(|r| r.strip_prefix(sign))
+            .and_then(|r| r.split(',').next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(1)
+    };
+    let place = if place.is_empty() {
+        "⋯".to_string()
+    } else {
+        format!("⋯  {place}")
+    };
+    (start('-'), start('+'), place)
 }
 
 /// State of the language server for one language.
