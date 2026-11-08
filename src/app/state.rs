@@ -938,6 +938,10 @@ pub struct UpdateState {
     /// A manual "Check for Updates" is running, so its result is announced even
     /// when already up to date.
     pub checking: bool,
+    /// The first-run question about checking for updates waits for the
+    /// window to settle — no setup sheet, no project still opening — so it
+    /// is not put at the same moment as the sheet's.
+    pub consent_waits: bool,
     /// Whether clew checks for updates automatically at startup (persisted).
     pub auto_check: bool,
 }
@@ -952,6 +956,7 @@ impl Default for UpdateState {
             generation: 0,
             download: None,
             checking: false,
+            consent_waits: false,
             auto_check: true,
         }
     }

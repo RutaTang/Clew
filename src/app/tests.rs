@@ -18772,11 +18772,9 @@ fn a_diff_toggle_while_loading_cancels_and_a_git_failure_is_not_no_changes() {
     assert!(app.proj.diff.is_none(), "a superseded load opened the diff");
     let _ = app.update(loaded(newer, Ok(Some(Vec::new()))));
     assert!(app.proj.diff.is_some());
-    assert!(
-        app.status.contains("no changes against HEAD"),
-        "{}",
-        app.status
-    );
+    // No changes: said by the diff's own pane, not again on the status
+    // line under it.
+    assert!(app.status.is_empty(), "{}", app.status);
 }
 
 /// Skim is a toggle like Diff and Time Travel, and its button says so: it
@@ -33273,4 +33271,24 @@ fn try_asking_offers_questions_written_for_here() {
         "{:?}",
         app.suggested_questions()
     );
+}
+
+/// The first-run question about checking for updates waits while the
+/// setup sheet asks its own, or a project is still opening, and is put
+/// once nothing else asks: on the first launch both came up at once, a
+/// native dialog over the sheet.
+#[test]
+fn the_update_question_waits_for_the_setup_sheet() {
+    let mut app = blank_app();
+    app.update.consent_waits = true;
+    app.pending_consent = Some(std::path::PathBuf::from("/nonexistent/project"));
+    assert!(app.ask_update_consent().is_none(), "asked over the sheet");
+    assert!(app.update.consent_waits);
+    app.pending_consent = None;
+    app.scanning = true;
+    assert!(app.ask_update_consent().is_none(), "asked while opening");
+    app.scanning = false;
+    assert!(app.ask_update_consent().is_some(), "asked once settled");
+    assert!(!app.update.consent_waits);
+    assert!(app.ask_update_consent().is_none(), "asked once");
 }

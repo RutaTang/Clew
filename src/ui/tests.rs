@@ -9432,3 +9432,64 @@ fn the_ask_card_holds_still_while_an_answer_comes_in() {
         "the header moved as the answer came in"
     );
 }
+
+/// The strip's tools that read a project do nothing with none open, and are
+/// drawn faded so: they looked as ready as the rest, and a press did
+/// nothing. Settings and ⋯ still answer.
+#[test]
+fn the_strips_project_tools_wait_for_a_project() {
+    let press = |app: &App, tool: super::StripTool| {
+        let at = super::strip_tool_center(app, tool);
+        let mut sim = sim_of(app);
+        sim.point_at(at);
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+    };
+    let mut app = blank_app();
+    app.window_width = WINDOW.width;
+    app.window_height = WINDOW.height;
+    assert!(app.proj.project.is_none());
+    assert!(press(&app, super::StripTool::CallGraph).is_empty());
+    assert!(
+        press(&app, super::StripTool::Settings)
+            .iter()
+            .any(|m| matches!(m, Message::Settings(crate::SettingsMsg::Open)))
+    );
+    let app = reader_app();
+    assert!(
+        press(&app, super::StripTool::CallGraph)
+            .iter()
+            .any(|m| matches!(m, Message::Graph(_))),
+        "with a project it opens"
+    );
+}
+
+/// The graph's Heat toggle is as wide on as off: a dot added after its word
+/// when on widened it, and moved the controls beside it.
+#[test]
+fn the_heat_toggle_keeps_its_width() {
+    let heat_at = |on: bool| {
+        let frame =
+            super::graph_modal_frame("Import Graph", true, false, false, on, None, space().into());
+        let mut sim = sim_elem(frame);
+        text_at(&mut sim, |t| t.starts_with("Heat"), 0).expect("the toggle")
+    };
+    assert_eq!(heat_at(false), heat_at(true));
+}
+
+/// The setup sheet with no AI key offers where one is added, a click away:
+/// it said "Needs an API key in Settings." and left the reader to find it.
+#[test]
+fn the_setup_sheet_links_to_where_a_key_is_added() {
+    let root = std::path::Path::new("/nonexistent/clew-sheet");
+    let sent = click(sim_elem(open_sheet(root, true)), "Add an API Key…");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::SettingsPage::LanguageModel
+            ))
+        )),
+        "{sent:?}"
+    );
+}

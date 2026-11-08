@@ -407,6 +407,22 @@ pub fn icon<'a, M: 'a>(glyph: Glyph, color: Color, size: f32) -> Element<'a, M> 
     svg(handle(glyph, color)).width(size).height(size).into()
 }
 
+/// [`icon`] faded to `opacity`: a control that can do nothing now, drawn
+/// so — `color` alone could not say it (the stroke's colour is set in the
+/// image, and a button's disabled style never reached it).
+pub fn icon_faded<'a, M: 'a>(
+    glyph: Glyph,
+    color: Color,
+    size: f32,
+    opacity: f32,
+) -> Element<'a, M> {
+    svg(handle(glyph, color))
+        .width(size)
+        .height(size)
+        .opacity(opacity)
+        .into()
+}
+
 /// `glyph` in `color`, as an image to draw: what [`icon`] shows.
 pub fn handle(glyph: Glyph, color: Color) -> svg::Handle {
     let stroke = hex(color);

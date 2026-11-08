@@ -140,6 +140,28 @@ pub(crate) fn setup_sheet<'a>(
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
             ));
+            // No key: where one is added, a click away — the line said
+            // "in Settings" and left the reader to find it.
+            if !app.llm_available {
+                body = body.push(
+                    container(
+                        button(
+                            text(tr!("Add an API Key…"))
+                                .size(ts::SMALL)
+                                .color(theme::accent()),
+                        )
+                        .style(theme::icon_button(false))
+                        .padding([2, 6])
+                        .on_press(Message::Settings(
+                            crate::SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel),
+                        )),
+                    )
+                    .padding(Padding {
+                        left: DETAIL_INDENT - 6.0,
+                        ..Padding::ZERO
+                    }),
+                );
+            }
         }
         SetupMode::Explain => {
             body = body.push(text(explain_says).size(ts::BODY).color(theme::fg_muted()));

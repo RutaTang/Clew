@@ -16,7 +16,7 @@ impl App {
     ///   behind, and this is the first moment anyone can show it.
     /// - The automatic check runs only with the user's consent. Unanswered,
     ///   the first-run question is asked instead of contacting GitHub.
-    pub(crate) fn startup_update_check(&self) -> Task<Message> {
+    pub(crate) fn startup_update_check(&mut self) -> Task<Message> {
         if !updater::claim_startup_check() {
             return Task::none();
         }
@@ -27,9 +27,30 @@ impl App {
         let check = match updater::auto_check_preference() {
             Some(true) => updater::check_task(false),
             Some(false) => Task::none(),
-            None => updater::consent_task(),
+            None => {
+                // Asked once the window has settled (`ask_update_consent`).
+                self.update.consent_waits = true;
+                Task::none()
+            }
         };
         Task::batch([failure, check])
+    }
+
+    /// The first-run question about checking for updates, once nothing
+    /// else asks: no setup sheet, no project still opening. Put at once on
+    /// the first launch, it came up together with the sheet that asks how
+    /// to set the project up — two questions at the same moment, one a
+    /// native dialog over the other.
+    pub(crate) fn ask_update_consent(&mut self) -> Option<Task<Message>> {
+        let settled = self.setup.is_none()
+            && self.pending_consent.is_none()
+            && self.pending_open.is_none()
+            && !self.scanning;
+        if !self.update.consent_waits || !settled {
+            return None;
+        }
+        self.update.consent_waits = false;
+        Some(updater::consent_task())
     }
 
     /// A manual "Check for Updates" (menu), which announces the result either

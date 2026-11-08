@@ -47,6 +47,11 @@ impl App {
             Some(jump) => Task::batch([task, jump]),
             None => task,
         };
+        // The first-run question about updates, once nothing else asks.
+        let task = match self.ask_update_consent() {
+            Some(ask) => Task::batch([task, ask]),
+            None => task,
+        };
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {

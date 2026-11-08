@@ -68,21 +68,15 @@ pub(crate) fn graph_modal_frame<'a>(
             )
         });
         // Heat: colour by how often each file changed, instead of by language.
+        // A toggle: lit while on, its word the same either way — a dot
+        // added after it widened the button, and moved those beside it.
         header = header.push(chrome_tip(
-            button(
-                text(if graph_heat {
-                    format!("{} ●", tr!("Heat"))
-                } else {
-                    tr!("Heat").to_string()
-                })
-                .size(ts::SMALL)
-                .color(if graph_heat {
-                    theme::danger()
-                } else {
-                    theme::fg_muted()
-                }),
-            )
-            .style(theme::toolbar_button)
+            button(text(tr!("Heat")).size(ts::SMALL).color(if graph_heat {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            }))
+            .style(theme::toggle(graph_heat))
             .padding([4, 8])
             .on_press(Message::Graph(GraphMsg::ToggleHeat)),
             if graph_heat {
@@ -2332,12 +2326,9 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         .selected_map_index()
         .and_then(|i| choices.get(i).cloned());
     match choices.len() {
-        0 => app.proj.maps_building.then(|| {
-            text(tr!("Reading the project's maps…"))
-                .size(ts::SMALL)
-                .color(theme::dim())
-                .into()
-        }),
+        // While they are read, the body says so — once: the header said it
+        // too, a line above.
+        0 => None,
         _ => Some(
             pick_list(choices, selected, |c: MapChoice| {
                 Message::Graph(GraphMsg::SelectMap(c.id))

@@ -1235,11 +1235,9 @@ impl App {
                 // Show the diff only if the active pane still shows that file —
                 // a slow diff must not display against another file.
                 if self.active_viewer().is_some_and(|v| v.abs == abs) {
-                    if lines.is_empty() {
-                        self.status = tr!("{file} has no changes against HEAD", file = rel);
-                    } else {
-                        self.status.clear();
-                    }
+                    // No changes is said by the diff's own pane; the status
+                    // line said it again under it.
+                    self.status.clear();
                     self.proj.diff = Some(DiffState::new(abs, rel, lines));
                 }
             }

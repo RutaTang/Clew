@@ -325,9 +325,28 @@ pub(crate) fn split_caps(caps: &str) -> Vec<String> {
 }
 
 /// A borderless icon button of the chrome.
+/// How strongly a strip control that can do nothing now is drawn.
+pub(crate) const DISABLED_OPACITY: f32 = 0.35;
+
 fn icon_button<'a>(glyph: Glyph, color: iced::Color, on: bool) -> button::Button<'a, Message> {
+    strip_button(glyph, color, on, true)
+}
+
+/// A strip control: `glyph` in `color`, lit when `on`, faded when it can
+/// do nothing (`able` false).
+fn strip_button<'a>(
+    glyph: Glyph,
+    color: iced::Color,
+    on: bool,
+    able: bool,
+) -> button::Button<'a, Message> {
+    let mark = if able {
+        glyph::icon(glyph, color, ICON)
+    } else {
+        glyph::icon_faded(glyph, color, ICON, DISABLED_OPACITY)
+    };
     button(
-        container(glyph::icon(glyph, color, ICON))
+        container(mark)
             .width(Fill)
             .height(Fill)
             .align_x(iced::Center)
@@ -833,8 +852,12 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         // Its menu open, the ⋯ is lit: drawn in the text's colour.
         let on = tool == StripTool::More && app.show_tools_menu;
         let tint = if on { theme::fg() } else { theme::fg_muted() };
+        // What reads a project does nothing with none open: drawn so, and
+        // pressed, nothing — they looked as ready as the rest.
+        let able =
+            app.proj.project.is_some() || matches!(tool, StripTool::More | StripTool::Settings);
         tip_at(
-            icon_button(glyph, tint, on).on_press(msg),
+            strip_button(glyph, tint, on, able).on_press_maybe(able.then_some(msg)),
             label,
             shortcut,
             tooltip::Position::Left,
@@ -866,7 +889,8 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
             StripSlot::Row(row) => {
                 let (glyph, label, msg) = tools_row(app, row);
                 tip_at(
-                    icon_button(glyph, theme::fg_muted(), false).on_press_maybe(msg),
+                    strip_button(glyph, theme::fg_muted(), false, msg.is_some())
+                        .on_press_maybe(msg),
                     label,
                     None,
                     tooltip::Position::Left,

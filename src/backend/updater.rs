@@ -134,7 +134,7 @@ pub fn consent_task() -> Task<Message> {
     let no: &'static str = tr!("Don't Check");
     let title = tr!("Check for Clew updates automatically?");
     let description = tr!(
-        "Clew can ask GitHub for a newer release each time it starts. Nothing about your projects is sent. You can change this later in Settings, and check manually from the Clew menu at any time."
+        "Clew can ask GitHub for a newer release each time it starts. Nothing about your projects is sent. You can change this, and check for updates yourself, in Settings → Updates at any time."
     );
     Task::perform(
         async move {
