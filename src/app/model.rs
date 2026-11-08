@@ -912,6 +912,9 @@ pub struct ContextMenu {
     /// The language's own action here, when its file's language has one
     /// ([`InsightKind::for_lang`]).
     pub insight: Option<InsightKind>,
+    /// Whether the file's language server is ready: what only it can answer
+    /// (the go-tos, the call hierarchy) waits for it, drawn so.
+    pub served: bool,
 }
 
 /// What a language can say about the code under the cursor that no other

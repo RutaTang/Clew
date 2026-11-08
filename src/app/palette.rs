@@ -412,6 +412,7 @@ impl App {
                     .active_viewer()
                     .and_then(|v| v.lang_key)
                     .and_then(InsightKind::for_lang);
+                let served = self.served(pane);
                 self.proj.context_menu = Some(ContextMenu {
                     pane,
                     line,
@@ -419,6 +420,7 @@ impl App {
                     x: 0.0,
                     y: 0.0,
                     insight,
+                    served,
                 });
                 self.update(message)
             }

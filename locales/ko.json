@@ -1335,6 +1335,7 @@
  "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it — `{remove}` — then connect again and check the new key's fingerprint before trusting it.": "{file}:{line}에 기록된 키는 Clew에서 신뢰하도록 등록한 키입니다. 키가 바뀐 이유를 알고 있다면 `{remove}` 명령으로 이 키를 삭제한 뒤 다시 연결하고, 새 키의 핑거프린트를 확인한 다음 신뢰하세요.",
  "The key on record is in {file}:{line}. If you know why it changed, remove it — `{remove}` — and connect again.": "기록된 키는 {file}:{line}에 있습니다. 키가 바뀐 이유를 알고 있다면 `{remove}` 명령으로 삭제한 뒤 다시 연결하세요.",
  "The language server has no type for this name.": "언어 서버가 이 이름의 타입 정보를 제공하지 않습니다.",
+ "The language server isn't ready": "언어 서버가 준비되지 않았습니다",
  "The language server stopped while refining {file} ({reason})": "{file} 파일을 정밀화하는 중에 언어 서버가 중지되었습니다 ({reason})",
  "The last run never stopped inside this project": "마지막 실행이 이 프로젝트 안에서 한 번도 멈추지 않았습니다",
  "The old key was not forgotten: {error}": "이전 키를 삭제하지 못했습니다: {error}",

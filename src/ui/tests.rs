@@ -1829,6 +1829,7 @@ fn escape_names_the_topmost_overlay() {
         x: 20.0,
         y: 20.0,
         insight: None,
+        served: true,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -1885,6 +1886,7 @@ fn escape_closes_overlays_one_at_a_time() {
         x: 20.0,
         y: 20.0,
         insight: None,
+        served: true,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -6186,6 +6188,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         x: 10.0,
         y: 10.0,
         insight: None,
+        served: true,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -7420,6 +7423,7 @@ fn the_context_menu_offers_the_languages_own_action() {
         x: 10.0,
         y: 10.0,
         insight,
+        served: true,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -9607,5 +9611,62 @@ fn the_tools_menu_rows_name_their_keys() {
         })]);
         let key = text_at(&mut sim, |t| t == last, 0);
         assert!(key.is_some(), "{row:?}'s tip does not say {last}");
+    }
+}
+
+/// What only the language server answers waits for it in the context menu:
+/// drawn faded and inert while there is none ready — it was offered, and
+/// answered with a line in the status bar — while what Clew answers itself
+/// stays.
+#[test]
+fn the_context_menu_waits_for_the_language_server() {
+    let mut app = reader_app();
+    let menu = |served| crate::ContextMenu {
+        pane: 0,
+        line: 0,
+        col: 0,
+        x: 10.0,
+        y: 10.0,
+        insight: None,
+        served,
+    };
+    app.proj.context_menu = Some(menu(false));
+    for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {
+        let sent = click(sim_of(&app), waits);
+        assert!(
+            !sent.iter().any(|m| matches!(
+                m,
+                Message::Hover(HoverMsg::ContextGoto(_)) | Message::Calls(_)
+            )),
+            "{waits}: {sent:?}"
+        );
+    }
+    let sent = click(sim_of(&app), "Trace Value");
+    assert!(
+        sent.iter().any(|m| matches!(m, Message::Flow(_))),
+        "{sent:?}"
+    );
+    app.proj.context_menu = Some(menu(true));
+    let sent = click(sim_of(&app), "Go to Definition");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Hover(HoverMsg::ContextGoto(_)))),
+        "{sent:?}"
+    );
+    // Each row names the keys that do it in the code, on its own line.
+    let trace = app.keymap.chord(crate::keymap::Action::TraceValue).caps();
+    for (row, keys) in [("Go to Definition", "g d"), ("Trace Value", trace.as_str())] {
+        let mut sim = sim_of(&app);
+        let at = |sim: &mut Sim<'_>, t: &str| {
+            let t = t.to_string();
+            text_at(sim, move |s| s == t, 0)
+        };
+        let row_at = at(&mut sim, row).unwrap();
+        let keys_at = at(&mut sim, keys).unwrap_or_else(|| panic!("{row} names no keys"));
+        assert!(
+            (row_at.center_y() - keys_at.center_y()).abs() < 2.0,
+            "{row}"
+        );
+        assert!(keys_at.x > row_at.x + row_at.width, "{row}");
     }
 }

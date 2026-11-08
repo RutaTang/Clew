@@ -388,6 +388,7 @@ impl App {
             .and_then(Option::as_ref)
             .and_then(|v| v.lang_key)
             .and_then(InsightKind::for_lang);
+        let served = self.served(pane);
         self.proj.context_menu = Some(ContextMenu {
             pane,
             line,
@@ -395,8 +396,35 @@ impl App {
             x,
             y,
             insight,
+            served,
         });
+        // The menu acts where it was opened: the caret goes there, as a
+        // click puts it — the code said nothing of what it would act on. A
+        // selection clicked inside stays, for what acts on it (Add to Ask).
+        if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut) {
+            let at = (line, col);
+            let inside = v.selection.is_some_and(|(a, b)| {
+                let (from, to) = if a <= b { (a, b) } else { (b, a) };
+                from != to && from <= at && at <= to
+            });
+            if !inside {
+                v.selection = Some((at, at));
+            }
+            v.caret = Some(at);
+            self.reader_moved_caret(pane);
+            return self.sync_reading_context();
+        }
         Task::none()
+    }
+
+    /// Whether the language server of what `pane` shows is ready.
+    pub(crate) fn served(&self, pane: usize) -> bool {
+        self.proj
+            .panes
+            .get(pane)
+            .and_then(Option::as_ref)
+            .and_then(|v| v.lang_key)
+            .is_some_and(|lang| matches!(self.proj.link.lsp.get(lang), Some(LspSlot::Ready(_))))
     }
 }
 

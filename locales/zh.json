@@ -1335,6 +1335,7 @@
  "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it — `{remove}` — then connect again and check the new key's fingerprint before trusting it.": "已记录的密钥（{file}:{line}）是你曾在 Clew 中信任过的。如果你知道它为何改变，请先删除它（`{remove}`），再重新连接，并在信任新密钥前核对其指纹。",
  "The key on record is in {file}:{line}. If you know why it changed, remove it — `{remove}` — and connect again.": "已记录的密钥位于 {file}:{line}。如果你知道它为何改变，请删除它（`{remove}`）后重新连接。",
  "The language server has no type for this name.": "语言服务器没有提供此名称的类型。",
+ "The language server isn't ready": "语言服务器未就绪",
  "The language server stopped while refining {file} ({reason})": "精确化 {file} 时语言服务器停止了（{reason}）",
  "The last run never stopped inside this project": "上次运行从未在此项目的代码中暂停过",
  "The old key was not forgotten: {error}": "未能删除旧密钥：{error}",

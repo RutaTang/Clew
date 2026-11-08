@@ -474,7 +474,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::ViewMenu => view_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::Finder => finder_modal(app),
-            Self::ContextMenu(menu) => context_menu(menu),
+            Self::ContextMenu(menu) => context_menu(app, menu),
             Self::Hover(hover) => hover_tooltip(hover),
         }
     }

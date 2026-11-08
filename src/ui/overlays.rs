@@ -80,56 +80,152 @@ pub(crate) fn hover_tooltip(h: &crate::HoverState) -> Element<'_, Message> {
 
 // ---------------------------------------------------------------- context menu
 
-pub(crate) fn context_menu(menu: &crate::ContextMenu) -> Element<'_, Message> {
+pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Element<'a, Message> {
     use crate::GotoKind;
 
-    let goto = |kind: GotoKind| (kind.label(), Message::Hover(HoverMsg::ContextGoto(kind)));
-    let mut rows = vec![
-        goto(GotoKind::Definition),
-        goto(GotoKind::References),
-        goto(GotoKind::Implementation),
-        goto(GotoKind::TypeDefinition),
+    // A row: its words, what it does, the keys that do it in the code (the
+    // `g` pairs, a shortcut), and whether it can do it now — what only the
+    // language server answers waits for it.
+    struct Row {
+        label: &'static str,
+        msg: Message,
+        keys: Option<String>,
+        able: bool,
+    }
+    let keys = |k: &str| Some(k.to_string());
+    let goto = |kind: GotoKind, k: &str| Row {
+        label: kind.label(),
+        msg: Message::Hover(HoverMsg::ContextGoto(kind)),
+        keys: keys(k),
+        able: menu.served,
+    };
+    let mut navigate = vec![
+        goto(GotoKind::Definition, "g d"),
+        goto(GotoKind::References, "g r"),
+        goto(GotoKind::Implementation, "g i"),
+        goto(GotoKind::TypeDefinition, "g y"),
+        Row {
+            label: tr!("Call Hierarchy"),
+            msg: Message::Calls(CallsMsg::FromMenu),
+            keys: keys("g c"),
+            able: menu.served,
+        },
     ];
     // The language's own action, for a file whose language has one.
     if let Some(kind) = menu.insight {
-        rows.push((kind.label(), Message::Hover(HoverMsg::Insight)));
+        navigate.push(Row {
+            label: kind.label(),
+            msg: Message::Hover(HoverMsg::Insight),
+            keys: keys("g e"),
+            able: true,
+        });
     }
-    rows.extend([
-        (tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
-        (tr!("Call Hierarchy"), Message::Calls(CallsMsg::FromMenu)),
-        (tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu)),
-        (tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
-        (tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
-        (
-            tr!("Why is this here?"),
-            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
-        ),
-        (
-            tr!("Toggle Breakpoint"),
-            Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
-        ),
-        (
-            tr!("Conditional Breakpoint…"),
-            Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
-        ),
-    ]);
-    // As designed, or as wide as its longest row in the reader's language,
-    // so none wraps.
-    let width = rows
+    let plain = |label: &'static str, msg: Message| Row {
+        label,
+        msg,
+        keys: None,
+        able: true,
+    };
+    // In groups: going somewhere, understanding what is here, debugging.
+    let groups = [
+        navigate,
+        vec![
+            plain(tr!("View Docs"), Message::Docs(DocsMsg::ViewFromMenu)),
+            Row {
+                keys: Some(app.keymap.chord(crate::keymap::Action::TraceValue).caps()),
+                ..plain(tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu))
+            },
+            plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
+            plain(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
+            plain(
+                tr!("Why is this here?"),
+                Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+            ),
+        ],
+        vec![
+            plain(
+                tr!("Toggle Breakpoint"),
+                Message::Debug(DebugMsg::ToggleBreakpointFromMenu),
+            ),
+            plain(
+                tr!("Conditional Breakpoint…"),
+                Message::Debug(DebugMsg::ConditionalBreakpointFromMenu),
+            ),
+        ],
+    ];
+    // As designed, or as wide as its longest row (its keys too) in the
+    // reader's language, so none wraps.
+    let key_w = |k: &Option<String>| {
+        k.as_deref().map_or(0.0, |k| {
+            super::sheet::text_width(k, ts::SMALL, crate::fonts::UI) + 16.0
+        })
+    };
+    let width = groups
         .iter()
-        .map(|(label, _)| {
-            super::sheet::text_width(label, ts::BASE, crate::fonts::UI) + 2.0 * 12.0 + 2.0 * 4.0
+        .flatten()
+        .map(|r| {
+            super::sheet::text_width(r.label, ts::BASE, crate::fonts::UI)
+                + key_w(&r.keys)
+                + 2.0 * 12.0
+                + 2.0 * 4.0
         })
         .fold(MENU_W, f32::max)
         .ceil();
-    let items = rows.into_iter().map(|(label, msg)| {
-        button(text(label).size(ts::BASE).wrapping(Wrapping::None))
-            .style(theme::list_row(false))
-            .width(Fill)
-            .padding([5, 12])
-            .on_press(msg)
-            .into()
-    });
+    let row = |r: Row| -> Element<'a, Message> {
+        let words = text(r.label).size(ts::BASE).wrapping(Wrapping::None);
+        let words = if r.able {
+            words
+        } else {
+            words.color(theme::dim())
+        };
+        let trailing: Element<'a, Message> = match r.keys {
+            Some(k) => text(k)
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None)
+                .into(),
+            None => space().into(),
+        };
+        let b = button(
+            row![words, space().width(Fill), trailing]
+                .spacing(16)
+                .align_y(iced::Center),
+        )
+        .style(theme::list_row(false))
+        .width(Fill)
+        .padding([5, 12])
+        .on_press_maybe(r.able.then_some(r.msg));
+        if r.able {
+            b.into()
+        } else {
+            super::toolbar::tip_at(
+                b,
+                tr!("The language server isn't ready"),
+                None,
+                iced::widget::tooltip::Position::Right,
+            )
+        }
+    };
+    let rule = || -> Element<'a, Message> {
+        container(
+            container(space())
+                .width(Fill)
+                .height(Length::Fixed(1.0))
+                .style(|_: &iced::Theme| container::Style {
+                    background: Some(theme::hairline().into()),
+                    ..container::Style::default()
+                }),
+        )
+        .padding([4, 8])
+        .into()
+    };
+    let mut items: Vec<Element<'a, Message>> = Vec::new();
+    for (i, group) in groups.into_iter().enumerate() {
+        if i > 0 {
+            items.push(rule());
+        }
+        items.extend(group.into_iter().map(row));
+    }
     let panel = container(Column::with_children(items).spacing(1))
         .width(width)
         .padding(4)

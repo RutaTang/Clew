@@ -1335,6 +1335,7 @@
  "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it — `{remove}` — then connect again and check the new key's fingerprint before trusting it.": "記録されている鍵（{file}:{line}）は、Clew で信頼した鍵です。変更された理由がわかっている場合は、`{remove}` で削除してから再接続し、新しい鍵のフィンガープリントを確認したうえで信頼してください。",
  "The key on record is in {file}:{line}. If you know why it changed, remove it — `{remove}` — and connect again.": "記録されている鍵は {file}:{line} にあります。変更された理由がわかっている場合は、`{remove}` で削除してから再接続してください。",
  "The language server has no type for this name.": "この名前の型情報は言語サーバーから得られませんでした。",
+ "The language server isn't ready": "言語サーバーの準備ができていません",
  "The language server stopped while refining {file} ({reason})": "{file} の精密化中に言語サーバーが停止しました（{reason}）",
  "The last run never stopped inside this project": "前回の実行では、このプロジェクト内で一度も停止しませんでした",
  "The old key was not forgotten: {error}": "古い鍵を削除できませんでした: {error}",

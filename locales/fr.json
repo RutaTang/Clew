@@ -1335,6 +1335,7 @@
  "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it — `{remove}` — then connect again and check the new key's fingerprint before trusting it.": "La clé enregistrée ({file}:{line}) est une clé que vous avez approuvée dans Clew. Si vous savez pourquoi elle a changé, oubliez-la — `{remove}` — puis reconnectez-vous et vérifiez l’empreinte de la nouvelle clé avant de l’approuver.",
  "The key on record is in {file}:{line}. If you know why it changed, remove it — `{remove}` — and connect again.": "La clé enregistrée se trouve dans {file}:{line}. Si vous savez pourquoi elle a changé, supprimez-la — `{remove}` — et reconnectez-vous.",
  "The language server has no type for this name.": "Le serveur de langage ne connaît aucun type pour ce nom.",
+ "The language server isn't ready": "Le serveur de langage n’est pas prêt",
  "The language server stopped while refining {file} ({reason})": "Le serveur de langage s’est arrêté pendant l’affinage de {file} ({reason})",
  "The last run never stopped inside this project": "La dernière exécution ne s’est jamais arrêtée dans ce projet",
  "The old key was not forgotten: {error}": "L’ancienne clé n’a pas été oubliée : {error}",

@@ -8533,6 +8533,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         x: 10.0,
         y: 10.0,
         insight: None,
+        served: true,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -12302,6 +12303,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         x: 10.0,
         y: 10.0,
         insight: None,
+        served: true,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -20568,6 +20570,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         x: 0.0,
         y: 0.0,
         insight: None,
+        served: true,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -21871,6 +21874,7 @@ fn fill_project_session(app: &mut App) {
         x: 1.0,
         y: 1.0,
         insight: None,
+        served: true,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -28491,6 +28495,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 x: 10.0,
                 y: 10.0,
                 insight: None,
+                served: true,
             })
         }),
     ];
@@ -33360,4 +33365,33 @@ fn a_page_over_the_code_goes_back_to_it() {
     });
     let _ = app.update(esc_press());
     assert!(app.proj.docs.page.is_none(), "Esc left the doc page up");
+}
+
+/// A right-click puts the caret where the menu will act, as a click does —
+/// the code said nothing of what it would act on — and keeps a selection
+/// it was inside, for what acts on that. No server ready, the menu knows.
+#[test]
+fn a_right_click_puts_the_caret_where_the_menu_acts() {
+    let mut app = scanned_app("right-click-caret");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let open_menu = |app: &mut App, line, col| {
+        let _ = app.update(Message::Hover(HoverMsg::ContextMenuOpened {
+            pane: 0,
+            line,
+            col,
+            x: 10.0,
+            y: 10.0,
+        }));
+    };
+    open_menu(&mut app, 2, 7);
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.caret, Some((2, 7)));
+    assert_eq!(v.selection, Some(((2, 7), (2, 7))));
+    assert!(!app.proj.context_menu.as_ref().unwrap().served);
+    // Inside a selection: it stays.
+    app.active_viewer_mut().unwrap().selection = Some(((0, 0), (3, 1)));
+    open_menu(&mut app, 1, 4);
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.selection, Some(((0, 0), (3, 1))));
+    assert_eq!(v.caret, Some((1, 4)));
 }
