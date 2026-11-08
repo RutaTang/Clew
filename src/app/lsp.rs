@@ -292,7 +292,7 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let path = path.unwrap_or_else(clew_core::linerpc::child_path);
-                    on_path_for(&fetched, Some(&path)).filter(|program| runs_here(program))
+                    on_path_for(&fetched, Some(&path)).filter(|program| worth_offering(program))
                 })
                 .await
                 .ok()
@@ -1800,16 +1800,46 @@ pub(crate) fn path_name(provision: &LspProvision) -> Option<&'static str> {
     std::path::Path::new(binary).file_name()?.to_str()
 }
 
-/// Whether `program` runs here: asked its version with nothing to read, it
-/// exits in success within a few seconds. A program on PATH can be a
-/// version manager's shim for a tool that is not installed — rustup's
-/// `rust-analyzer` without the component, pyenv's for another Python — that
-/// is there only to fail when run.
-pub(crate) fn runs_here(program: &std::path::Path) -> bool {
+/// Whether the server's own `program`, found on PATH, is worth offering in
+/// place of Clew's copy. A program on PATH can be a version manager's shim
+/// for a tool that is not installed — rustup's `rust-analyzer` without the
+/// component, asdf's or pyenv's for another version — there only to fail
+/// when run. One that answers its version is asked it ([`version_args`]);
+/// one with no way to ask (pyright's server, VS Code's) is offered as found,
+/// unless it is such a shim: those are kept in a `shims` folder (asdf,
+/// mise, pyenv, rbenv, nodenv), and only running it would tell.
+pub(crate) fn worth_offering(program: &std::path::Path) -> bool {
+    let name = program.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+    match version_args(name) {
+        Some(args) => runs_here(program, args),
+        None => !program.components().any(|c| c.as_os_str() == "shims"),
+    }
+}
+
+/// How the server program `name` is asked its version, for those that
+/// answer it: `gopls version`, `--version` for the rest. Pyright's server
+/// and VS Code's (JSON, HTML, CSS) take no such flag — they refuse to start
+/// without a connection — nor does intelephense or csharp-ls.
+pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "gopls" => Some(&["version"]),
+        "rust-analyzer"
+        | "clangd"
+        | "zls"
+        | "taplo"
+        | "typescript-language-server"
+        | "haskell-language-server-wrapper" => Some(&["--version"]),
+        _ => None,
+    }
+}
+
+/// Whether `program` runs here: asked with `args`, with nothing to read, it
+/// exits in success within a few seconds.
+pub(crate) fn runs_here(program: &std::path::Path, args: &[&str]) -> bool {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     let Ok(mut child) = clew_core::spawn::command(program)
-        .arg("--version")
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

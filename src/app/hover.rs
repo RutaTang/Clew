@@ -397,6 +397,7 @@ impl App {
             y,
             insight,
             served,
+            by_pointer: true,
         });
         // The menu acts where it was opened: the caret goes there, as a
         // click puts it — the code said nothing of what it would act on. A

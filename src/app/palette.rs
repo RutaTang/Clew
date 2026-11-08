@@ -421,6 +421,7 @@ impl App {
                     y: 0.0,
                     insight,
                     served,
+                    by_pointer: false,
                 });
                 self.update(message)
             }

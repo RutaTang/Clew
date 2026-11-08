@@ -3244,29 +3244,45 @@ fn the_download_question_finds_the_program_on_path_by_its_name() {
     assert_eq!(crate::app::lsp::on_path_for(&build, Some(&path)), None);
 }
 
-/// A program on PATH is offered only once it is seen to run: a version
-/// manager's shim for a tool that is not installed (rustup's rust-analyzer
-/// without the component) is there, and fails when run.
+/// A program on PATH is offered only where it is seen to run, asked its
+/// version the way it answers it — `gopls version`, `--version` for the
+/// rest: a version manager's shim for a tool that is not installed
+/// (rustup's rust-analyzer without the component) is there, and fails when
+/// run. One that cannot be asked (pyright's server refuses `--version`) is
+/// offered as found — but not from a version manager's `shims` folder.
 #[cfg(unix)]
 #[test]
 fn a_program_on_path_is_offered_only_if_it_runs() {
+    use crate::app::lsp::{runs_here, worth_offering};
     use std::os::unix::fs::PermissionsExt;
-    let bin = test_dir("runs-here-bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let write = |name: &str, body: &str| {
-        let program = bin.join(name);
+    let root = test_dir("runs-here");
+    let write = |dir: &str, name: &str, body: &str| {
+        let dir = root.join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let program = dir.join(name);
         std::fs::write(&program, body).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         program
     };
-    let works = write("works", "#!/bin/sh\n[ \"$1\" = --version ] && echo 1.0\n");
-    let shim = write(
-        "shim",
-        "#!/bin/sh\necho \"error: 'shim' is not installed for the toolchain\" >&2\nexit 1\n",
-    );
-    assert!(crate::app::lsp::runs_here(&works));
-    assert!(!crate::app::lsp::runs_here(&shim));
-    assert!(!crate::app::lsp::runs_here(&bin.join("missing")));
+    let answers = |flag: &str| format!("#!/bin/sh\n[ \"$1\" = {flag} ] && echo 1.0\n");
+    let shim = "#!/bin/sh\necho \"error: not installed for the toolchain\" >&2\nexit 1\n";
+    let refuses = "#!/bin/sh\necho 'Connection input stream is not set' >&2\nexit 1\n";
+
+    let works = write("bin", "works", &answers("--version"));
+    assert!(runs_here(&works, &["--version"]));
+    assert!(!runs_here(&works, &["version"]));
+    assert!(!runs_here(&root.join("bin/missing"), &["--version"]));
+
+    let rust_analyzer = write("bin", "rust-analyzer", &answers("--version"));
+    assert!(worth_offering(&rust_analyzer));
+    let rust_analyzer = write("rustup", "rust-analyzer", shim);
+    assert!(!worth_offering(&rust_analyzer), "a shim that fails");
+    let gopls = write("bin", "gopls", &answers("version"));
+    assert!(worth_offering(&gopls), "gopls is asked `gopls version`");
+    let pyright = write("bin", "pyright-langserver", refuses);
+    assert!(worth_offering(&pyright), "no way to ask: offered as found");
+    let pyright = write("shims", "pyright-langserver", refuses);
+    assert!(!worth_offering(&pyright), "a version manager's shim");
 }
 
 /// Asked to download a server whose own program is on PATH, Clew runs that
@@ -3311,6 +3327,23 @@ fn the_download_question_looks_for_the_program_on_path() {
             assert_eq!(consent.on_path.as_ref(), Some(&program));
         }
     }
+    // Pyright's server refuses `--version` (it will not start without a
+    // connection): asked so, it was never offered. It is offered as found.
+    let pyright = bin.join("pyright-langserver");
+    std::fs::write(
+        &pyright,
+        "#!/bin/sh\necho 'Connection input stream is not set' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&pyright, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut app = scanned_app("on-path-look-python");
+    let looked = app.ensure_lsp("python");
+    for message in run_task(looked) {
+        let _ = app.update(message);
+    }
+    let consent = app.proj.pending_lsp_consent.front().expect("asked");
+    assert_eq!(consent.language, "python");
+    assert_eq!(consent.on_path.as_ref(), Some(&pyright));
     crate::app::lsp::SEARCH_PATH.with(|path| *path.borrow_mut() = None);
 }
 
@@ -8789,6 +8822,7 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
         y: 10.0,
         insight: None,
         served: true,
+        by_pointer: true,
     };
     // `pub fn origin() -> Point {`, the third line.
     app.proj.context_menu = Some(menu(2));
@@ -8846,6 +8880,7 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         y: 321.0,
         insight,
         served: true,
+        by_pointer: true,
     };
     app.proj.context_menu = Some(menu(None));
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
@@ -8869,6 +8904,24 @@ fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
         app.proj.insight.as_ref().and_then(|i| i.anchor),
         Some(321.0)
     );
+
+    // From the palette, at the caret, nothing was pointed at: "Why" opens
+    // where the keyboard's popups do, not at the top edge of the window
+    // its stand-in menu's y of 0 put it at.
+    app.proj.blame_why = None;
+    if let Some(v) = app.active_viewer_mut() {
+        v.caret = Some((2, 4));
+    }
+    let _ = app.run_palette(tr!("Why Is This Here?"));
+    let why = app.proj.blame_why.as_ref().expect("asked from the palette");
+    assert_eq!(why.anchor, None);
+    // Nor does the language's answer, from a menu no pointer opened.
+    app.proj.context_menu = Some(ContextMenu {
+        by_pointer: false,
+        ..menu(Some(crate::InsightKind::ExpandMacro))
+    });
+    let _ = app.update(Message::Hover(HoverMsg::Insight));
+    assert_eq!(app.proj.insight.as_ref().and_then(|i| i.anchor), None);
 }
 
 /// Breakpoints are kept between runs: set in one window, they are there in
@@ -12617,6 +12670,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         y: 10.0,
         insight: None,
         served: true,
+        by_pointer: true,
     });
     app.proj.find.open = true;
     app.proj.find.query = "Point".into();
@@ -21132,6 +21186,7 @@ fn opening_a_text_input_form_takes_the_keyboard_from_the_code() {
         y: 0.0,
         insight: None,
         served: true,
+        by_pointer: true,
     });
     let _ = app.update(Message::Debug(DebugMsg::ConditionalBreakpointFromMenu));
     assert_eq!(app.proj.bp_cond_edit.as_ref().map(|e| &e.0), Some(&abs));
@@ -22451,6 +22506,7 @@ fn fill_project_session(app: &mut App) {
         y: 1.0,
         insight: None,
         served: true,
+        by_pointer: true,
     });
     p.diff = Some(DiffState::new(
         file.clone(),
@@ -29080,6 +29136,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 y: 10.0,
                 insight: None,
                 served: true,
+                by_pointer: true,
             })
         }),
     ];

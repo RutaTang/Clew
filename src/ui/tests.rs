@@ -2054,6 +2054,7 @@ fn escape_names_the_topmost_overlay() {
         y: 20.0,
         insight: None,
         served: true,
+        by_pointer: true,
     });
     assert!(matches!(
         super::escape_message(&app),
@@ -2111,6 +2112,7 @@ fn escape_closes_overlays_one_at_a_time() {
         y: 20.0,
         insight: None,
         served: true,
+        by_pointer: true,
     });
     open_tools_menu(&mut app);
     let escape = || {
@@ -6944,6 +6946,7 @@ fn the_flow_tab_lists_occurrences_under_their_roles() {
         y: 10.0,
         insight: None,
         served: true,
+        by_pointer: true,
     });
     assert!(shows(&mut sim_of(&app), "Trace Value"));
     app.proj.context_menu = None;
@@ -8193,6 +8196,7 @@ fn the_context_menu_offers_the_languages_own_action() {
         y: 10.0,
         insight,
         served: true,
+        by_pointer: true,
     };
     app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
     assert!(shows(&mut sim_of(&app), "Expand Macro"));
@@ -10500,6 +10504,7 @@ fn the_context_menu_waits_for_the_language_server() {
         y: 10.0,
         insight: None,
         served,
+        by_pointer: true,
     };
     app.proj.context_menu = Some(menu(false));
     for waits in ["Go to Definition", "Find References", "Call Hierarchy"] {

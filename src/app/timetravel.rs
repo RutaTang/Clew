@@ -1219,7 +1219,8 @@ impl App {
 
     pub(crate) fn on_why_is_this_here(&mut self) -> Task<Message> {
         let menu = self.proj.context_menu.take();
-        let anchor = menu.map(|m| m.y);
+        // Where the pointer asked — none from the palette's stand-in.
+        let anchor = menu.filter(|m| m.by_pointer).map(|m| m.y);
         let pane = menu.map(|m| m.pane).unwrap_or(self.proj.active);
         let menu_line = menu.map(|m| m.line);
         if self.proj.project.is_none() {

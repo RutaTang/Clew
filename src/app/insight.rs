@@ -24,7 +24,7 @@ impl App {
         let task = self.start_insight(kind, menu.pane, menu.line, menu.col);
         // Opened where it was asked from.
         if let Some(insight) = self.proj.insight.as_mut() {
-            insight.anchor = Some(menu.y);
+            insight.anchor = menu.by_pointer.then_some(menu.y);
         }
         task
     }

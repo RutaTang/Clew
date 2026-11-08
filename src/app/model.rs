@@ -926,6 +926,10 @@ pub struct ContextMenu {
     /// Whether the file's language server is ready: what only it can answer
     /// (the go-tos, the call hierarchy) waits for it, drawn so.
     pub served: bool,
+    /// Opened by the pointer, at `x`, `y` — not the palette's stand-in at
+    /// the caret, which has no place on the screen: a popup asked from it
+    /// opens where one asked from the keyboard does.
+    pub by_pointer: bool,
 }
 
 /// What a language can say about the code under the cursor that no other

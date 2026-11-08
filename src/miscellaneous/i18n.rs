@@ -602,8 +602,11 @@ type Fit<'t> = (&'static str, Vec<(&'static str, &'t str)>, usize);
 /// backticks — Markdown's code span, as the model and the Markdown views
 /// read it, `cargo` or `{name}` filled — set in the reader's quotation
 /// marks instead (“cargo”, « cargo », 「cargo」). Shown as typed, the
-/// backticks stood in plain text as marks of their own. A lone backtick,
-/// and one in a run of them, is left as it is.
+/// backticks stood in plain text as marks of their own. So is a name GNU
+/// programs quote as `name' in what they say (an error passed through):
+/// its apostrophe closes it where it ends a word — `foldl'` and
+/// `&'static str` keep theirs. A lone backtick, and a run of them (a
+/// double span, a fence), is left as it is.
 pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains('`') {
         return std::borrow::Cow::Borrowed(text);
@@ -614,31 +617,57 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
         Lang::Ja => ("\u{300c}", "\u{300d}"),
         Lang::Ko => ("\u{2018}", "\u{2019}"),
     };
-    let mut out = String::with_capacity(text.len() + 8);
-    let mut rest = text;
-    while let Some(start) = rest.find('`') {
-        let after = &rest[start + 1..];
-        // A span: one backtick, what it holds (no backtick, no line break),
-        // one backtick.
-        let span = after
-            .find('`')
-            .filter(|&end| end > 0 && !after[..end].contains('\n'))
-            .filter(|_| !rest[..start].ends_with('`') && !after.starts_with('`'));
-        match span {
-            Some(end) if !after[end + 1..].starts_with('`') => {
-                out.push_str(&rest[..start]);
-                out.push_str(open);
-                out.push_str(&after[..end]);
-                out.push_str(close);
-                rest = &after[end + 1..];
-            }
-            _ => {
-                out.push_str(&rest[..=start]);
-                rest = after;
+    // Every index below is a backtick's, an apostrophe's or a line break's:
+    // ASCII, so a boundary of any text around them.
+    let bytes = text.as_bytes();
+    let run = |at: usize| bytes[at..].iter().take_while(|&&b| b == b'`').count();
+    // Where the span a lone backtick opens just before `from` closes: at
+    // the next lone backtick, or at an apostrophe that ends a word — on
+    // the same line, after something.
+    let close_of = |from: usize| {
+        for (at, &b) in bytes.iter().enumerate().skip(from) {
+            match b {
+                b'\n' => return None,
+                b'`' => return (at > from && run(at) == 1).then_some(at),
+                b'\''
+                    if at > from
+                        && !bytes
+                            .get(at + 1)
+                            .is_some_and(|&n| n.is_ascii_alphanumeric() || b"_'`".contains(&n)) =>
+                {
+                    return Some(at);
+                }
+                _ => {}
             }
         }
+        None
+    };
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(found) = text[at..].find('`') {
+        let tick = at + found;
+        let ticks = run(tick);
+        if ticks > 1 {
+            at = tick + ticks;
+            continue;
+        }
+        match close_of(tick + 1) {
+            Some(end) => {
+                out.push_str(&text[copied..tick]);
+                out.push_str(open);
+                out.push_str(&text[tick + 1..end]);
+                out.push_str(close);
+                copied = end + 1;
+                at = end + 1;
+            }
+            None => at = tick + 1,
+        }
     }
-    out.push_str(rest);
+    if copied == 0 {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
     std::borrow::Cow::Owned(out)
 }
 
@@ -1117,9 +1146,27 @@ mod tests {
             "``",
             "a ``double`` span",
             "split `a\nb` lines",
+            "``x`",
+            "`a``",
         ] {
             assert_eq!(quoted(kept), kept, "{kept:?}");
         }
+        // A run of backticks opens nothing, and the backtick after it is a
+        // span's own.
+        assert_eq!(
+            quoted("a ``double`` and `y`"),
+            "a ``double`` and \u{201c}y\u{201d}"
+        );
+        // GNU's `name' quoting, in an error passed through; an apostrophe in
+        // a name stays the name's.
+        assert_eq!(
+            quoted("cannot stat `a': no; see `b'"),
+            "cannot stat \u{201c}a\u{201d}: no; see \u{201c}b\u{201d}"
+        );
+        assert_eq!(
+            quoted("Opened `foldl'` and `&'static str`"),
+            "Opened \u{201c}foldl'\u{201d} and \u{201c}&'static str\u{201d}"
+        );
         with_lang(Lang::Fr, || {
             assert_eq!(quoted("`x`"), "\u{ab}\u{a0}x\u{a0}\u{bb}")
         });
