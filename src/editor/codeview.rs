@@ -2068,35 +2068,33 @@ where
                     theme::with_alpha(theme::accent(), if theme::is_light() { 0.07 } else { 0.08 }),
                 );
             }
-            // Debug: a breakpoint dot at the left of the gutter — red normally,
-            // amber when conditional.
-            if self.breakpoints.contains(&(i + 1)) {
-                let d = (lh * 0.55).min(9.0);
-                let color = if self.cond_breakpoints.contains(&(i + 1)) {
-                    theme::warning()
-                } else {
-                    theme::danger()
-                };
-                // A breakpoint the adapter refused is drawn as a ring: it is
-                // still the user's breakpoint and still where they put it, but
-                // it will not fire, and a filled dot said the opposite.
-                let refused = self.unverified_breakpoints.contains(&(i + 1));
+            // Its marks at the gutter's left: a bookmark's ribbon, then a
+            // breakpoint — each a shape, not a colour alone (`gutter_marks`).
+            for mark in gutter_marks(
+                self.bookmarks.contains(&(i + 1)),
+                self.breakpoints.contains(&(i + 1)).then(|| BreakpointMark {
+                    conditional: self.cond_breakpoints.contains(&(i + 1)),
+                    refused: self.unverified_breakpoints.contains(&(i + 1)),
+                }),
+                bounds.x,
+                y,
+                lh,
+            ) {
                 renderer.fill_quad(
                     renderer::Quad {
-                        bounds: Rectangle {
-                            x: bounds.x + 1.0,
-                            y: y + (lh - d) / 2.0,
-                            width: d,
-                            height: d,
-                        },
+                        bounds: mark.bounds,
                         border: iced::Border {
-                            radius: (d / 2.0).into(),
-                            width: if refused { 1.5 } else { 0.0 },
-                            color,
+                            radius: mark.radius.into(),
+                            width: if mark.filled { 0.0 } else { 1.5 },
+                            color: mark.color,
                         },
                         ..renderer::Quad::default()
                     },
-                    if refused { Color::TRANSPARENT } else { color },
+                    if mark.filled {
+                        mark.color
+                    } else {
+                        Color::TRANSPARENT
+                    },
                 );
             }
 
@@ -2635,6 +2633,75 @@ struct InactiveHeads<'a> {
     note: NoteOf<'a>,
 }
 
+/// A breakpoint, as its mark shows it.
+#[derive(Debug, Clone, Copy)]
+struct BreakpointMark {
+    /// Stops only when its condition holds.
+    conditional: bool,
+    /// The adapter would not set it: it will not fire.
+    refused: bool,
+}
+
+/// A mark in the gutter: where, how round, its colour, and whether filled
+/// or only outlined.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GutterMark {
+    bounds: Rectangle,
+    radius: f32,
+    color: Color,
+    filled: bool,
+}
+
+/// The width of a bookmark's ribbon at the gutter's left edge.
+const BOOKMARK_RIBBON_W: f32 = 2.5;
+
+/// The marks a line's gutter shows at its left, from the gutter's `x`, the
+/// row at `y` `lh` tall: a bookmark's ribbon down its edge — the line number
+/// tinted was its only sign, a colour alone — then a breakpoint: a dot, a
+/// rounded square when conditional (it was only amber), a ring when the
+/// adapter refused it.
+fn gutter_marks(
+    bookmark: bool,
+    breakpoint: Option<BreakpointMark>,
+    x: f32,
+    y: f32,
+    lh: f32,
+) -> Vec<GutterMark> {
+    let mut marks = Vec::new();
+    if bookmark {
+        marks.push(GutterMark {
+            bounds: Rectangle {
+                x,
+                y: y + 2.0,
+                width: BOOKMARK_RIBBON_W,
+                height: (lh - 4.0).max(1.0),
+            },
+            radius: 1.0,
+            color: theme::accent(),
+            filled: true,
+        });
+    }
+    if let Some(bp) = breakpoint {
+        let d = (lh * 0.55).min(9.0);
+        marks.push(GutterMark {
+            bounds: Rectangle {
+                x: x + BOOKMARK_RIBBON_W + 1.0,
+                y: y + (lh - d) / 2.0,
+                width: d,
+                height: d,
+            },
+            radius: if bp.conditional { 2.0 } else { d / 2.0 },
+            color: if bp.conditional {
+                theme::warning()
+            } else {
+                theme::danger()
+            },
+            filled: !bp.refused,
+        });
+    }
+    marks
+}
+
 /// The box a text the code view draws is clipped to: its own, `width`
 /// across and a row `lh` tall from `(x, y)`. Never the whole viewport: the
 /// software renderer masks a text to its layer only when the box it is
@@ -3060,6 +3127,57 @@ mod tests {
         assert_eq!(at(5), 0);
         // Its guides: one, at column 0 — the first level is drawn too.
         assert_eq!((0..at(2)).step_by(4).collect::<Vec<_>>(), [0]);
+    }
+
+    /// A bookmark and a conditional breakpoint each say so by a shape, not
+    /// by a colour alone: the bookmark a ribbon down the gutter's edge (its
+    /// line number tinted was all it had), the conditional breakpoint a
+    /// rounded square beside the plain one's dot, a refused one a ring. And
+    /// both on one line, side by side.
+    #[test]
+    fn gutter_marks_are_shapes_not_only_colours() {
+        use super::{BreakpointMark, gutter_marks};
+        let plain = BreakpointMark {
+            conditional: false,
+            refused: false,
+        };
+        assert!(gutter_marks(false, None, 0.0, 0.0, 20.0).is_empty());
+        let ribbon = gutter_marks(true, None, 0.0, 0.0, 20.0);
+        assert_eq!(ribbon.len(), 1, "a bookmark has a mark of its own");
+        assert!(
+            ribbon[0].bounds.height > ribbon[0].bounds.width * 3.0,
+            "a ribbon"
+        );
+        let dot = gutter_marks(false, Some(plain), 0.0, 0.0, 20.0)[0];
+        let square = gutter_marks(
+            false,
+            Some(BreakpointMark {
+                conditional: true,
+                ..plain
+            }),
+            0.0,
+            0.0,
+            20.0,
+        )[0];
+        assert!(dot.radius >= dot.bounds.width / 2.0 - 0.01, "round");
+        assert!(square.radius < square.bounds.width / 3.0, "squared off");
+        let ring = gutter_marks(
+            false,
+            Some(BreakpointMark {
+                refused: true,
+                ..plain
+            }),
+            0.0,
+            0.0,
+            20.0,
+        )[0];
+        assert!(dot.filled && !ring.filled);
+        let both = gutter_marks(true, Some(plain), 0.0, 0.0, 20.0);
+        assert_eq!(both.len(), 2);
+        assert!(
+            both[1].bounds.x >= both[0].bounds.x + both[0].bounds.width,
+            "side by side: {both:?}"
+        );
     }
 
     #[test]
