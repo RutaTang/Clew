@@ -86,7 +86,8 @@ pub fn find_matches(query: &str, lines: &[HlLine]) -> Vec<Match> {
     find_matches_cased(query, lines, false)
 }
 
-/// [`find_matches`], its case mattering whatever it is when `case`.
+/// All matches of `query` across `lines`, in document order: its case
+/// mattering when `case`, or once it has a capital in it.
 fn find_matches_cased(query: &str, lines: &[HlLine], case: bool) -> Vec<Match> {
     if query.is_empty() {
         return Vec::new();

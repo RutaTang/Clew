@@ -623,7 +623,6 @@ fn search_field(app: &App) -> Element<'_, Message> {
                     ts::INTER,
                     ts::BASE,
                 )
-                .into()
             }))
             .width(Fill)
             .height(Length::Fixed(FIELD_H - 2.0))

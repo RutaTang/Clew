@@ -947,8 +947,8 @@ impl<'a, Message> CodeView<'a, Message> {
         self
     }
 
-    /// In-file find matches (document order, as [`crate::find::find_matches`]
-    /// returns them) and the index of the current one, painted like
+    /// In-file find matches (document order, as
+    /// [`crate::find::FindState::recompute`] finds them) and the index of the current one, painted like
     /// highlights without being copied into the highlight list.
     pub fn find_matches(mut self, matches: &'a [FindMatch], current: usize) -> Self {
         self.find = Some((matches, current));

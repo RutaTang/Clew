@@ -5781,6 +5781,8 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     // Settings' Languages page, where the servers are. (Opening it is an
     // update, which reads the live server again: poisoned once more.)
     app.proj.project_languages = vec!["rust".into()];
+    // The project's code is in them, as a scan finds it.
+    app.proj.code_languages = app.proj.project_languages.clone();
     let _ = app.update(Message::Lsp(crate::LspMsg::TogglePanel));
     assert!(app.server_panel);
     app.proj
@@ -7681,6 +7683,8 @@ fn the_languages_section_offers_each_languages_build_choices() {
     };
     let mut app = reader_app();
     app.proj.project_languages = vec!["c".into(), "go".into(), "lean".into(), "rust".into()];
+    // The project's code is in them, as a scan finds it.
+    app.proj.code_languages = app.proj.project_languages.clone();
     app.proj.file_languages = vec!["lua".into()];
     app.proj.lang_choices = LanguageChoices {
         rust: Some(RustChoices {
@@ -7783,6 +7787,8 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     use clew_protocol::{LanguageChoices, LanguageOptions, ToolchainCandidate};
     let mut app = reader_app();
     app.proj.project_languages = vec!["typescript".into(), "zig".into()];
+    // The project's code is in them, as a scan finds it.
+    app.proj.code_languages = app.proj.project_languages.clone();
     let projects = "/p/node_modules/typescript/lib/tsserver.js".to_string();
     app.proj.lang_options = Some(Ok(LanguageOptions {
         toolchains: [
@@ -7845,6 +7851,8 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     app.proj.project_languages = ["java", "php", "csharp", "ruby", "erlang", "haskell"]
         .map(String::from)
         .to_vec();
+    // The project's code is in them, as a scan finds it.
+    app.proj.code_languages = app.proj.project_languages.clone();
     let one = |command: &str, name: &str| {
         vec![ToolchainCandidate {
             command: command.into(),
@@ -7949,6 +7957,8 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     ];
     for (language, row_label, get, want) in picks {
         app.proj.project_languages = vec![language.to_string()];
+        // The project's code is in them, as a scan finds it.
+        app.proj.code_languages = app.proj.project_languages.clone();
         let mut sim = sim_elem(super::connect::languages_section(&app));
         let _ = sim.click(row_label);
         let chosen: Vec<LanguageChoices> = sim
@@ -7964,6 +7974,8 @@ fn the_languages_section_picks_a_jdk_a_php_a_solution_and_programs() {
     app.proj.project_languages = ["java", "php", "csharp", "ruby", "erlang", "haskell"]
         .map(String::from)
         .to_vec();
+    // The project's code is in them, as a scan finds it.
+    app.proj.code_languages = app.proj.project_languages.clone();
 
     app.proj.lang_choices = LanguageChoices {
         php: Some("8.2".into()),
@@ -7998,6 +8010,8 @@ fn pressing_your_own_program_again_keeps_its_arguments() {
     use clew_protocol::{LanguageChoices, LanguageOptions, ServerChoice, ToolchainCandidate};
     let mut app = reader_app();
     app.proj.project_languages = vec!["lean".into()];
+    // The project's code is in them, as a scan finds it.
+    app.proj.code_languages = app.proj.project_languages.clone();
     app.proj.lang_options = Some(Ok(LanguageOptions {
         toolchains: [(
             "lean".to_string(),

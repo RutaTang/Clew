@@ -47,7 +47,7 @@ impl App {
             self.proj
                 .project_languages
                 .iter()
-                .filter(|l| self.proj.link.lsp.contains_key(*l))
+                .filter(|l| self.proj.link.lsp.contains_key(l.as_str()))
                 .cloned(),
         );
         rows.sort();
