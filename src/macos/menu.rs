@@ -291,7 +291,7 @@ fn command(title: &'static str, tag: isize) -> Entry {
 fn app_menu_entries() -> Vec<Entry> {
     vec![
         Entry::Standard {
-            title: tr_noop!("About clew"),
+            title: tr_noop!("About Clew"),
             action: sel!(orderFrontStandardAboutPanel:),
             key: None,
         },
@@ -301,9 +301,9 @@ fn app_menu_entries() -> Vec<Entry> {
         command(tr_noop!("Settings…"), SETTINGS),
         Entry::Separator,
         Entry::Standard {
-            title: tr_noop!("Hide clew"),
+            title: tr_noop!("Hide Clew"),
             action: sel!(hide:),
-            key: reserved_key(tr_noop!("Hide clew")),
+            key: reserved_key(tr_noop!("Hide Clew")),
         },
         Entry::Separator,
         // Bridged, NOT `terminate:`. AppKit's `terminate:` calls `exit(0)` from
@@ -314,7 +314,7 @@ fn app_menu_entries() -> Vec<Entry> {
         // ⌘Q through the bridge puts the quit back in the shell's hands, where
         // the teardown lives, directly (the terminate requests macOS makes
         // itself reach it too, through `crate::macos::terminate`).
-        command(tr_noop!("Quit clew"), QUIT),
+        command(tr_noop!("Quit Clew"), QUIT),
     ]
 }
 

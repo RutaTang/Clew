@@ -178,6 +178,8 @@ pub struct PendingAsk {
     pub stream: u64,
     pub question: String,
     pub sources: Vec<(explain::Node, f32)>,
+    /// The question was said aloud: its answer is read aloud.
+    pub spoken: bool,
 }
 
 /// The debugger (DAP client): the active session, plus the breakpoints and
@@ -762,6 +764,11 @@ pub struct SettingsDraft {
     pub embed_key: String,
     pub embed_model: String,
     pub embed_base_url: String,
+    /// Embeddings made on this computer, not by the service the three
+    /// fields above name — which are kept as they are, for a change back.
+    pub embed_here: bool,
+    /// `embed_here` as the modal pre-filled it (see `ai_snapshot`).
+    pub embed_here_snapshot: bool,
     /// The key in effect came from the environment, so the field above is
     /// deliberately BLANK rather than pre-filled with it. Set in
     /// `on_open_settings`; the form uses it only to say which variable it is
@@ -849,6 +856,8 @@ impl Default for SettingsDraft {
             embed_key: String::new(),
             embed_model: String::new(),
             embed_base_url: String::new(),
+            embed_here: false,
+            embed_here_snapshot: false,
             key_from_env: false,
             embed_key_from_env: false,
             // Replaced with what was read from storage the moment the modal
@@ -1132,8 +1141,10 @@ pub struct App {
     /// carrying an older generation is from a superseded spawn (restart, project
     /// switch) and is dropped instead of installing a dead client as Ready.
     pub lsp_gen: std::collections::HashMap<String, u64>,
-    /// Whether an embedding endpoint is configured.
+    /// Whether embeddings can be made with what is saved.
     pub embed_available: bool,
+    /// While they cannot, why, as what to do (`App::refresh_embeddings`).
+    pub embed_missing: String,
     /// Whether the collapsible bottom panel — the debugger's — is shown.
     pub show_bottom: bool,
     /// Where the floating Ask window is.
@@ -1144,6 +1155,8 @@ pub struct App {
     pub ask_sessions_query: String,
     /// Voice: listening, the words heard, the speech models.
     pub(crate) voice: crate::app::voice::VoiceState,
+    /// EmbeddingGemma's download, for embeddings made on this computer.
+    pub(crate) local_embedding: crate::app::embedding::LocalEmbedding,
     /// The debugger (DAP): the active session plus breakpoints and watches that
     /// persist across sessions (see [`DebugState`]).
     pub debug: DebugState,
@@ -1872,14 +1885,26 @@ pub struct ProjectSession {
     /// The same for the last references request: the encoding its
     /// locations' characters are counted in.
     pub refs_encoding: crate::viewer::PositionEncoding,
-    /// The name a definition or references request was asked about — the
-    /// word under the caret — which the list of its places marks in each
-    /// line (`SearchState::matcher`).
+    /// The name the list of places shown in Search marks in each line
+    /// (`SearchState::matcher`): its request's [`Self::refs_term`] or
+    /// [`Self::goto_term`], taken when its answer is shown.
     pub nav_term: Option<String>,
-    /// Where the last jump to a definition or a symbol lands on its line:
-    /// the file, its 0-based line, and the place there. The caret goes on
-    /// the name, not the line's first column.
+    /// The word under the caret the last references request asked about.
+    /// Kept apart from [`Self::goto_term`]: a definition asked for while
+    /// references are on their way marked their list with its own word.
+    pub refs_term: Option<String>,
+    /// The same for the last definition or implementation request; `None`
+    /// for a type's definition, whose places spell the type, not the word.
+    pub goto_term: Option<String>,
+    /// Where the jump being made lands on its line: the file, its 0-based
+    /// line, and the place there — the caret goes on the name, not the
+    /// line's first column. Set for each jump from [`Self::landing_next`]:
+    /// a later jump to the same line (a search hit, Back) lands at its
+    /// start, as any jump not to a name does.
     pub landing: Option<(PathBuf, usize, LandingAt)>,
+    /// The landing a jump to a definition or a symbol asks for, taken by
+    /// the open it makes next (`open_file`).
+    pub landing_next: Option<(PathBuf, usize, LandingAt)>,
     /// The call hierarchy shown in the Calls sidebar tab, if any.
     pub call_graph: Option<callgraph::CallTree>,
     /// The token of the `CallsMsg::Prepared` currently awaited, if any.
@@ -2168,7 +2193,10 @@ impl Default for ProjectSession {
             goto_encoding: crate::viewer::PositionEncoding::Utf16,
             refs_encoding: crate::viewer::PositionEncoding::Utf16,
             nav_term: None,
+            refs_term: None,
+            goto_term: None,
             landing: None,
+            landing_next: None,
             call_graph: Default::default(),
             call_pending: Default::default(),
             flow: None,

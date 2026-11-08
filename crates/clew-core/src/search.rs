@@ -264,7 +264,7 @@ impl<R: Read> Read for Capped<R> {
             return match self.inner.read(&mut probe)? {
                 0 => Ok(0),
                 _ => Err(std::io::Error::other(format!(
-                    "grew past {} MB while it was being searched (searched up to there)",
+                    "grew past {} MB while it was being searched, so only part of it was searched",
                     self.cap / (1024 * 1024)
                 ))),
             };
@@ -405,18 +405,7 @@ const LEAD_CHARS: usize = 16;
 /// from its start, a match past the sidebar's edge was not to be seen.
 /// Cut at [`MAX_PREVIEW_CHARS`].
 pub fn preview_around(text: &str, at: Option<usize>) -> String {
-    let line = text.trim_end_matches(['\n', '\r']);
-    let indent = line.len() - line.trim_start().len();
-    let start = match at {
-        Some(at) if at > indent && at <= line.len() && line.is_char_boundary(at) => {
-            let before: Vec<usize> = line[indent..at].char_indices().map(|(i, _)| i).collect();
-            match before.len().checked_sub(LEAD_CHARS) {
-                Some(cut) if cut > 0 => indent + before[cut],
-                _ => indent,
-            }
-        }
-        _ => indent,
-    };
+    let (line, indent, start) = preview_start(text, at);
     // Drawn as the code view draws the line (`highlight::line_in_order`): a
     // preview holding a direction control read in another order than the
     // line does, and one holding a `\r` split where the line does not.
@@ -432,6 +421,78 @@ pub fn preview_around(text: &str, at: Option<usize>) -> String {
     out.extend(shown.chars().take(MAX_PREVIEW_CHARS));
     out.push('…');
     out
+}
+
+/// The line [`preview_around`] previews, the width of its indentation, and
+/// where in it the preview starts.
+fn preview_start(text: &str, at: Option<usize>) -> (&str, usize, usize) {
+    let line = text.trim_end_matches(['\n', '\r']);
+    let indent = line.len() - line.trim_start().len();
+    let start = match at {
+        Some(at) if at > indent && at <= line.len() && line.is_char_boundary(at) => {
+            let before: Vec<usize> = line[indent..at].char_indices().map(|(i, _)| i).collect();
+            match before.len().checked_sub(LEAD_CHARS) {
+                Some(cut) if cut > 0 => indent + before[cut],
+                _ => indent,
+            }
+        }
+        _ => indent,
+    };
+    (line, indent, start)
+}
+
+/// Where `ranges` of `text` (byte ranges, as a matcher found them in the
+/// whole line) stand in [`preview_around`]`(text, at)`: each cut to what the
+/// preview shows of it, those it shows none of left out. Matched in the line
+/// itself, a mark is where the search matched — a pattern anchored at the
+/// line's start or matching its tabs, a match running past the preview's
+/// end, a whole word the preview's `…` would cut out of a longer one —
+/// where matched in the preview it was not. `None` when the preview does
+/// not keep the line's characters in their places (a direction control or
+/// a `\r` in what it shows).
+pub fn preview_marks(
+    text: &str,
+    at: Option<usize>,
+    ranges: &[(usize, usize)],
+) -> Option<Vec<(usize, usize)>> {
+    let (line, indent, start) = preview_start(text, at);
+    let rest = &line[start..];
+    if rest
+        .chars()
+        .any(|c| c == '\r' || crate::highlight::rearranges_text(c))
+    {
+        return None;
+    }
+    // Each shown character's place in the line and in the preview, then
+    // where the preview's text ends in both.
+    let mut places: Vec<(usize, usize)> = Vec::new();
+    let mut shown = if start > indent { '…'.len_utf8() } else { 0 };
+    let mut count = 0;
+    let mut end = line.len();
+    for (i, c) in rest.char_indices() {
+        let width = if c == '\t' { 4 } else { 1 };
+        if count + width > MAX_PREVIEW_CHARS {
+            end = start + i;
+            break;
+        }
+        places.push((start + i, shown));
+        shown += if c == '\t' { 4 } else { c.len_utf8() };
+        count += width;
+    }
+    places.push((end, shown));
+    let place = |at: usize| match places.binary_search_by_key(&at, |&(line, _)| line) {
+        Ok(i) => places[i].1,
+        // Inside a character: where it starts.
+        Err(i) => places[i.saturating_sub(1)].1,
+    };
+    Some(
+        ranges
+            .iter()
+            .filter(|&&(from, to)| to > start && from < end)
+            .map(|&(from, to)| (place(from.max(start)), place(to.min(end))))
+            .filter(|(from, to)| from < to)
+            .collect(),
+    )
 }
 
 /// Escape regex metacharacters so the query is matched literally.
@@ -453,7 +514,12 @@ fn escape_regex(s: &str) -> String {
 /// result's preview: what the results list marks in each preview, matched as
 /// the search matched its line.
 #[derive(Debug, Clone)]
-pub struct PreviewMatcher(RegexMatcher);
+pub struct PreviewMatcher {
+    matcher: RegexMatcher,
+    /// Matching whole words: what a preview's `…` stands beside may be the
+    /// rest of one.
+    whole_word: bool,
+}
 
 impl PreviewMatcher {
     /// The matcher of a search as `opts` asks for it; `None` for an empty
@@ -463,7 +529,10 @@ impl PreviewMatcher {
         if query.is_empty() {
             return None;
         }
-        build_matcher(query, opts).ok().map(Self)
+        build_matcher(query, opts).ok().map(|matcher| Self {
+            matcher,
+            whole_word: opts.whole_word,
+        })
     }
 
     /// The matcher of a symbol's own name: the name as a whole word, in its
@@ -482,13 +551,28 @@ impl PreviewMatcher {
     /// pattern that can match nothing) marks nothing.
     pub fn ranges(&self, text: &str) -> Vec<(usize, usize)> {
         let mut out = Vec::new();
-        let _ = self.0.find_iter(text.as_bytes(), |m| {
+        let _ = self.matcher.find_iter(text.as_bytes(), |m| {
             if m.end() > m.start() {
                 out.push((m.start(), m.end()));
             }
             out.len() < MAX_PREVIEW_MATCHES
         });
         out
+    }
+
+    /// [`Self::ranges`] in a preview whose line cannot be had to match in
+    /// ([`preview_marks`]): a whole word standing beside the `…` the cut
+    /// put in may be the end or the start of a longer one, and is not marked.
+    pub fn ranges_in_preview(&self, preview: &str) -> Vec<(usize, usize)> {
+        let cut = '…'.len_utf8();
+        let led = preview.starts_with('…');
+        let trails = preview.ends_with('…');
+        self.ranges(preview)
+            .into_iter()
+            .filter(|&(from, to)| {
+                !self.whole_word || !((led && from == cut) || (trails && to == preview.len() - cut))
+            })
+            .collect()
     }
 }
 
@@ -534,6 +618,72 @@ mod tests {
         // An empty match marks nothing.
         let m = search("x*", |o| o.regex = true).unwrap();
         assert!(m.ranges("abc").is_empty());
+    }
+
+    /// What a search matched in a line is marked where it stands in the
+    /// line's preview: matched in the preview instead, a pattern anchored at
+    /// the line's start or matching its tabs marked nothing, a match running
+    /// past the preview's end nothing, and a whole word the preview's `…`
+    /// cut out of a longer one was marked as though it stood alone.
+    #[test]
+    fn marks_found_in_the_line_land_in_its_preview() {
+        let marks = |line: &str, matcher: &PreviewMatcher| {
+            let ranges = matcher.ranges(line);
+            let at = ranges.first().map(|r| r.0);
+            let preview = preview_around(line, at);
+            let marked: Vec<String> = preview_marks(line, at, &ranges)
+                .unwrap()
+                .into_iter()
+                .map(|(from, to)| preview[from..to].to_string())
+                .collect();
+            (preview, marked)
+        };
+        let regex = |q: &str| {
+            PreviewMatcher::of_search(&SearchOptions {
+                query: q.into(),
+                regex: true,
+                ..SearchOptions::default()
+            })
+            .unwrap()
+        };
+        // Anchored at the line's start, past its indentation.
+        let (preview, marked) = marks("\t\treturn total", &regex(r"^\s+return"));
+        assert_eq!(preview, "return total");
+        assert_eq!(marked, ["return"]);
+        // A tab, spaced out in the preview.
+        let (_, marked) = marks("a\tfoo", &regex(r"\tfoo"));
+        assert_eq!(marked, ["    foo"]);
+        // Running past the preview's end: what it shows of it.
+        let long = "x".repeat(250);
+        let (_, marked) = marks(&long, &regex("x+"));
+        assert_eq!(marked, ["x".repeat(MAX_PREVIEW_CHARS)]);
+        // A whole word: `xfoo-…` is not one, though cut to `…foo-…` it reads so.
+        let words = PreviewMatcher::of_search(&SearchOptions {
+            query: "foo".into(),
+            whole_word: true,
+            ..SearchOptions::default()
+        })
+        .unwrap();
+        let line = format!("{}xfoo-234567890ab foo", "z".repeat(20));
+        let (preview, marked) = marks(&line, &words);
+        assert_eq!(preview, "…foo-234567890ab foo");
+        assert_eq!(
+            words.ranges(&preview).len(),
+            2,
+            "the preview alone reads two"
+        );
+        assert_eq!(marked, ["foo"]);
+        assert_eq!(
+            preview_marks(&line, Some(line.len() - 3), &words.ranges(&line)),
+            Some(vec![(19, 22)])
+        );
+        // A direction control: the preview is not the line in its places.
+        assert_eq!(preview_marks("a\u{202E}b", None, &[(0, 1)]), None);
+        // With no line to match in, a whole word beside the cut's `…` may be
+        // part of a longer one: not marked.
+        assert_eq!(words.ranges_in_preview(&preview), [(19, 22)]);
+        let any = regex("foo");
+        assert_eq!(any.ranges_in_preview(&preview).len(), 2);
     }
 
     #[test]

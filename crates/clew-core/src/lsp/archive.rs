@@ -461,7 +461,7 @@ fn extract_tar_xz(bytes: &[u8], dest: &Path, budget: Budget) -> Result<(), Strin
         drop(reader);
         let decoded = decoder
             .join()
-            .unwrap_or_else(|_| (Err("the xz decoder panicked".to_string()), false));
+            .unwrap_or_else(|_| (Err("the xz decoder failed unexpectedly".to_string()), false));
         (extracted, decoded)
     });
     if over_budget {

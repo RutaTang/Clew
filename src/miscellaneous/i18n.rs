@@ -1066,6 +1066,10 @@ mod tests {
             written.push(m.name.into());
             written.push(m.about.into());
         }
+        for m in clew_voice::speech::VOICE_MODELS {
+            written.push(m.name.into());
+            written.push(m.about.into());
+        }
         written.extend(clew_core::mcp::config::Approve::ALL.map(|a| a.label().to_string()));
         written.push(clew_core::llm::Provider::Custom.label().into());
         written.extend(
@@ -1268,7 +1272,7 @@ mod tests {
     fn a_messages_advice_and_parts_are_translated() {
         with_lang(Lang::Fr, || {
             let fr = catalog(Lang::Fr);
-            let bypass = "list the host in no_proxy, which clew reads in place of NO_PROXY";
+            let bypass = "list the host in no_proxy, which Clew reads in place of NO_PROXY";
             let tail = " — to reach the host without the proxy, {bypass}";
             let said = message(&format!(
                 "the session is ending — to reach the host without the proxy, {bypass}"
@@ -1459,12 +1463,10 @@ mod tests {
         with_lang(Lang::Fr, || {
             let said = message(
                 "the proxy http://…@proxy.corp:3128 answered HTTP 407 (Proxy Authentication \
-                 Required): it takes only NTLM or Negotiate logins, which clew cannot make — \
-                 name a local relay that makes such logins for clew, such as cntlm or px, as the \
-                 proxy instead, or list the host in no_proxy, which clew reads in place of \
+                 Required): it accepts only NTLM or Negotiate logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or list the host in no_proxy, which Clew reads in place of \
                  NO_PROXY",
             );
-            for english in ["answered", "takes only", "local relay", "list the host"] {
+            for english in ["answered", "accepts only", "local relay", "list the host"] {
                 assert!(!said.contains(english), "{said}");
             }
             assert!(said.contains("http://…@proxy.corp:3128"), "{said}");
@@ -1483,25 +1485,19 @@ mod tests {
     /// would take the advice into its last place.
     #[test]
     fn a_proxys_failure_is_said_to_its_last_part() {
-        let system_bypass = "list the host under \u{201c}Bypass proxy settings for these hosts\
-                             \u{201d} in System Settings \u{203a} Network \u{203a} Details \
-                             \u{203a} Proxies, or in no_proxy, which clew reads in place of \
-                             NO_PROXY";
-        let env_bypass = "list the host in no_proxy, which clew reads in place of NO_PROXY";
+        let system_bypass = "list the host under “Bypass proxy settings for these hosts” in System Settings › Network › Details › Proxies, or in no_proxy, which Clew reads in place of NO_PROXY";
+        let env_bypass = "list the host in no_proxy, which Clew reads in place of NO_PROXY";
         with_lang(Lang::Fr, || {
             let said = message(&format!(
                 "request failed: the proxy http://proxy.corp:3128 answered HTTP 407 (Proxy \
-                 Authentication Required): it asks for a user name and password — clew does \
-                 not read proxy passwords from the keychain: name them in the environment \
-                 (percent-encoding any character in them that is not a letter or a digit), \
-                 which clew then reads instead of all of the system's proxy settings — so set \
+                 Authentication Required): it asks for a user name and password — Clew cannot read proxy passwords from the keychain: put them in environment variables (percent-encoding any character in them that is not a letter or a digit); Clew then uses those instead of all of the system's proxy settings, so set \
                  https_proxy=http://user:password@proxy.corp:3128, or {system_bypass}"
             ));
             for english in [
                 "request failed",
                 "answered",
                 "asks for",
-                "does not read",
+                "cannot read",
                 "percent-encoding",
                 "list the host",
             ] {
@@ -1573,7 +1569,7 @@ mod tests {
                 }
             }
         }
-        for krate in ["clew-core", "clew-server", "clew-voice"] {
+        for krate in ["clew-core", "clew-server", "clew-speak", "clew-voice"] {
             let mut files = Vec::new();
             walk(&root.join(krate).join("src"), &mut files);
             for path in files {
@@ -1581,7 +1577,17 @@ mod tests {
                 let text = text.split("#[cfg(test)]\nmod tests").next().unwrap();
                 // A `Display` says its message with `write!(f, ..)` and
                 // `f.write_str(..)`.
-                for opener in ["format!(", "Err(", "msg =", "write!(", "f.write_str("] {
+                for opener in [
+                    "format!(",
+                    "Err(",
+                    "SayError::Voice(",
+                    "SayError::Sentence(",
+                    "Halt::Engine(",
+                    "Halt::Batch(",
+                    "msg =",
+                    "write!(",
+                    "f.write_str(",
+                ] {
                     for (at, _) in text.match_indices(opener) {
                         let mut after = text[at + opener.len()..].trim_start();
                         // `write!(f, ..)`, the formatter on any line.

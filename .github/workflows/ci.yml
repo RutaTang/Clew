@@ -114,7 +114,7 @@ jobs:
         include:
           - os: Linux
             runner: ubuntu-latest
-            packages: -p clew -p clew-voice
+            packages: -p clew -p clew-voice -p clew-speak
     defaults:
       run:
         shell: bash

@@ -16,6 +16,8 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
@@ -158,8 +160,68 @@ pub struct Store {
     dir: PathBuf,
 }
 
-/// What a download in progress is written to, beside the model's own name.
+/// What a download in progress is written to, beside the model's own
+/// name: `<name>.<process>-<n>.part`, a file of its own for each download.
+/// Two downloads of one model at once — Clew open twice — each finish,
+/// and give up, their own: one put in place never holds the other's
+/// half-written bytes. `<name>.part` is what earlier versions wrote.
 const PART: &str = ".part";
+
+/// A download holds its partial file locked for as long as it writes it,
+/// and the lock goes with its program: a partial file nobody holds is one
+/// whose download ended without cleaning up after itself — its program was
+/// killed — and the next download of the model removes it at once. Where
+/// files cannot be locked (some network shares), a partial file is told
+/// abandoned by not having been written to for this long instead; one
+/// still downloading writes far more often, each read of its transfer
+/// giving up long before this.
+const ABANDONED: Duration = Duration::from_secs(60 * 60);
+
+/// Whether the partial file at `path` is being written by a download:
+/// `Some(true)` while one holds it, `Some(false)` when none does, `None`
+/// when that cannot be told here.
+fn held(path: &Path) -> Option<bool> {
+    let file = File::open(path).ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(false),
+        Err(std::fs::TryLockError::WouldBlock) => Some(true),
+        Err(std::fs::TryLockError::Error(_)) => None,
+    }
+}
+
+/// The partial files of downloads of `name` in `dir`: this version's, with
+/// how long since each was written to, and an earlier version's (`None`).
+fn parts_of(dir: &Path, name: &str) -> Vec<(PathBuf, Option<Duration>)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let legacy = format!("{name}{PART}");
+    let prefix = format!("{name}.");
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let file = entry.file_name();
+            let file = file.to_str()?;
+            if file == legacy {
+                return Some((entry.path(), None));
+            }
+            let tag = file.strip_prefix(&prefix)?.strip_suffix(PART)?;
+            let (process, n) = tag.split_once('-')?;
+            let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+            if !digits(process) || !digits(n) {
+                return None;
+            }
+            // An age that cannot be read — a clock set back, a share whose
+            // clock is ahead — is no age: the file is kept.
+            let quiet = fs::symlink_metadata(entry.path())
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .unwrap_or(Duration::ZERO);
+            Some((entry.path(), Some(quiet)))
+        })
+        .collect()
+}
 
 impl Store {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
@@ -184,35 +246,21 @@ impl Store {
     /// Start installing `model`: a fresh partial file, written through the
     /// returned [`Install`] and checked by its [`Install::finish`].
     pub fn begin(&self, model: &'static Model) -> io::Result<Install> {
-        fs::create_dir_all(&self.dir)?;
-        let part = self.dir.join(format!("{}{PART}", model.file_name()));
-        // Whatever an earlier attempt left — or a link planted in its place
-        // — is removed (a link itself, not what it points at), and the file
-        // is then created new, so the bytes cannot be steered elsewhere.
-        match fs::remove_file(&part) {
-            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
-            _ => {}
-        }
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&part)?;
-        Ok(Install {
-            model,
-            file: Some(file),
-            part,
-            dest: self.path(model),
-            hasher: Hasher::of(&model.checksum),
-            written: 0,
-        })
+        Install::begin(
+            self.path(model),
+            Expected {
+                name: model.file_name(),
+                bytes: model.bytes,
+                max_bytes: model.max_bytes(),
+                checksum: model.checksum,
+            },
+        )
     }
 
     /// Remove `model` (and any download of it left part-way).
     pub fn remove(&self, model: &Model) -> io::Result<()> {
-        for path in [
-            self.path(model),
-            self.dir.join(format!("{}{PART}", model.file_name())),
-        ] {
+        let parts = parts_of(&self.dir, &model.file_name());
+        for path in std::iter::once(self.path(model)).chain(parts.into_iter().map(|(p, _)| p)) {
             match fs::remove_file(&path) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
                 _ => {}
@@ -222,12 +270,23 @@ impl Store {
     }
 }
 
+/// What a download must turn out to be: its name (for what is said of
+/// it), its size where that is published, the most it may be, and what it
+/// hashes to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expected {
+    pub name: String,
+    pub bytes: Option<u64>,
+    pub max_bytes: u64,
+    pub checksum: Checksum,
+}
+
 /// A model being downloaded: bytes written to it are hashed on their way
 /// to a partial file, which [`Install::finish`] renames into place only if
 /// the hash is the one listed. Dropped unfinished — cancelled, failed — it
 /// deletes what it wrote.
 pub struct Install {
-    model: &'static Model,
+    expected: Expected,
     file: Option<File>,
     part: PathBuf,
     dest: PathBuf,
@@ -265,6 +324,58 @@ impl Hasher {
 }
 
 impl Install {
+    /// Start a download that, once it is `expected`, becomes `dest`: a
+    /// fresh partial file beside it.
+    pub fn begin(dest: PathBuf, expected: Expected) -> io::Result<Install> {
+        let dir = dest
+            .parent()
+            .ok_or_else(|| io::Error::other("a download needs a folder"))?;
+        fs::create_dir_all(dir)?;
+        let name = dest
+            .file_name()
+            .ok_or_else(|| io::Error::other("a download needs a name"))?;
+        let name = name.to_string_lossy();
+        // What downloads that were killed left, and an earlier version's.
+        for (path, quiet) in parts_of(dir, &name) {
+            let abandoned = match quiet {
+                None => true,
+                Some(quiet) => match held(&path) {
+                    Some(held) => !held,
+                    None => quiet >= ABANDONED,
+                },
+            };
+            if abandoned {
+                let _ = fs::remove_file(path);
+            }
+        }
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let part = dir.join(format!("{name}.{}-{n}{PART}", std::process::id()));
+        // Whatever is at its name — left by a killed program whose number
+        // this one has now, or a link planted there — is removed (a link
+        // itself, not what it points at), and the file is then created new,
+        // so the bytes cannot be steered elsewhere.
+        match fs::remove_file(&part) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&part)?;
+        // Held while it is written ([`held`]); where it cannot be, its age
+        // tells instead.
+        let _ = file.try_lock();
+        Ok(Install {
+            hasher: Hasher::of(&expected.checksum),
+            expected,
+            file: Some(file),
+            part,
+            dest,
+            written: 0,
+        })
+    }
+
     /// Bytes written so far.
     pub fn written(&self) -> u64 {
         self.written
@@ -273,42 +384,46 @@ impl Install {
     /// Check what was written against the model's checksum and, if it is
     /// the model, put it in place. Returns where it is.
     pub fn finish(mut self) -> Result<PathBuf, String> {
+        // Held until it is in place — let go before, another download
+        // would take it for one whose program was killed, and remove it —
+        // and closed after (it goes before the partial file is removed, on
+        // the way out of a download that fails).
         let mut file = self.file.take().ok_or("the download was already closed")?;
         file.flush()
             .and_then(|()| file.sync_all())
             .map_err(|e| format!("could not save the model: {e}"))?;
-        drop(file);
-        let expected = self.model.checksum;
-        if let Some(bytes) = self.model.bytes.filter(|b| *b != self.written) {
+        let expected = self.expected.checksum;
+        if let Some(bytes) = self.expected.bytes.filter(|b| *b != self.written) {
             return Err(format!(
-                "the download is not {} as published ({} bytes, not {bytes}) — it was \
-                 discarded",
-                self.model.file_name(),
-                self.written
+                "the download does not match the published {} ({} bytes, not {bytes}) — it was discarded",
+                self.expected.name, self.written
             ));
         }
         let hasher = std::mem::replace(&mut self.hasher, Hasher::of(&expected));
         let digest = hasher.finish();
         if digest != expected.hex() {
             return Err(format!(
-                "the download is not {} as published (its {} is {digest}, not {}) — it \
-                 was discarded",
-                self.model.file_name(),
+                "the download does not match the published {} (its {} is {digest}, not {}) — it was discarded",
+                self.expected.name,
                 expected.name(),
                 expected.hex()
             ));
         }
         fs::rename(&self.part, &self.dest).map_err(|e| format!("could not save the model: {e}"))?;
+        // In place: let go at once, before the file is even closed — a
+        // program loading it a moment from now finds no lock in its way.
+        let _ = file.unlock();
+        drop(file);
         Ok(self.dest.clone())
     }
 }
 
 impl Write for Install {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if self.written + buf.len() as u64 > self.model.max_bytes() {
+        if self.written + buf.len() as u64 > self.expected.max_bytes {
             return Err(io::Error::other(format!(
-                "the download is larger than {} can be",
-                self.model.file_name()
+                "the download is larger than {} should be",
+                self.expected.name
             )));
         }
         let file = self
@@ -501,7 +616,10 @@ mod tests {
         let mut install = store.begin(model).unwrap();
         install.write_all(b"something else").unwrap();
         let err = install.finish().unwrap_err();
-        assert!(err.contains("not ggml-test.bin as published"), "{err}");
+        assert!(
+            err.contains("does not match the published ggml-test.bin"),
+            "{err}"
+        );
         assert!(!store.installed(model));
         assert_eq!(fs::read_dir(store.dir()).unwrap().count(), 0);
         let _ = fs::remove_dir_all(store.dir());
@@ -540,6 +658,62 @@ mod tests {
         assert!(wrote <= model.max_bytes(), "{wrote}");
         assert!(err.to_string().contains("larger than"), "{err}");
         drop(install);
+        let _ = fs::remove_dir_all(store.dir());
+    }
+
+    /// Two downloads of one model at once — Clew open twice — each write a
+    /// file of their own: the one that finishes puts its own verified bytes
+    /// in place, not the other's half-written ones, and one given up takes
+    /// nothing from the other.
+    #[test]
+    fn two_downloads_at_once_keep_to_their_own_files() {
+        let store = temp_store("two");
+        let model = model_of(b"whole");
+        let mut first = store.begin(model).unwrap();
+        first.write_all(b"whole").unwrap();
+        let mut second = store.begin(model).unwrap();
+        second.write_all(b"wh").unwrap();
+        first.finish().unwrap();
+        assert_eq!(fs::read(store.path(model)).unwrap(), b"whole");
+        drop(store.begin(model).unwrap());
+        second.write_all(b"ole").unwrap();
+        second.finish().unwrap();
+        assert_eq!(fs::read(store.path(model)).unwrap(), b"whole");
+        assert_eq!(
+            fs::read_dir(store.dir()).unwrap().count(),
+            1,
+            "nothing left"
+        );
+        let _ = fs::remove_dir_all(store.dir());
+    }
+
+    /// What a killed download left — its partial file held by nobody — is
+    /// removed by the next download at once, however recently it was
+    /// written; one still being written, held, is not. Removing the model
+    /// removes them all.
+    #[test]
+    fn what_a_killed_download_left_is_removed() {
+        let store = temp_store("killed");
+        fs::create_dir_all(store.dir()).unwrap();
+        let killed = store.dir().join("ggml-test.bin.4000001-0.part");
+        let running = store.dir().join("ggml-test.bin.4000002-3.part");
+        let unrelated = store.dir().join("ggml-test.bin.notes.part");
+        for path in [&killed, &running, &unrelated] {
+            fs::write(path, b"x").unwrap();
+        }
+        // Being written: held, as a download holds it.
+        let writer = File::open(&running).unwrap();
+        writer.try_lock().unwrap();
+        let model = model_of(b"x");
+        let mut install = store.begin(model).unwrap();
+        assert!(!killed.exists(), "killed a moment ago, and removed");
+        assert!(running.exists() && unrelated.exists());
+        drop(writer);
+        install.write_all(b"x").unwrap();
+        install.finish().unwrap();
+        store.remove(model).unwrap();
+        assert!(!running.exists() && !store.installed(model));
+        assert!(unrelated.exists(), "not a download's");
         let _ = fs::remove_dir_all(store.dir());
     }
 

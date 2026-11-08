@@ -333,7 +333,12 @@ impl App {
                     }))
                 })
                 .await
-                .unwrap_or_else(|e| Err(tr!("staging the command failed: {error}", error = e)))
+                .unwrap_or_else(|e| {
+                    Err(tr!(
+                        "preparing the language server command failed: {error}",
+                        error = e
+                    ))
+                })
             },
             move |result| {
                 Message::Lsp(LspMsg::Staged {
@@ -1473,7 +1478,7 @@ impl App {
                     Err(e) => {
                         self.status = tr!(
                             "{language} server failed: {error}",
-                            language = language,
+                            language = crate::app::languages::language_name(&language),
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
@@ -1535,13 +1540,16 @@ impl App {
                 self.proj.link.lsp_installs.remove(&language);
                 match result {
                     Ok(exe) => {
-                        self.status = tr!("{language} server installed", language = language);
+                        self.status = tr!(
+                            "{language} server installed",
+                            language = crate::app::languages::language_name(&language)
+                        );
                         self.start_lsp_with(&language, exe)
                     }
                     Err(e) => {
                         self.status = tr!(
                             "{language} server download failed: {error}",
-                            language = language,
+                            language = crate::app::languages::language_name(&language),
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));

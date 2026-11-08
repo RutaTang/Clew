@@ -273,8 +273,7 @@ impl std::fmt::Display for McpError {
             McpError::Protocol(why) => write!(f, "the server's answer is not valid MCP: {why}"),
             McpError::OldSse => write!(
                 f,
-                "this server speaks only the old HTTP+SSE transport (MCP 2024-11-05), which clew \
-                 does not — use its Streamable HTTP endpoint, or run it over stdio"
+                "this server speaks only the old HTTP+SSE transport (MCP 2024-11-05), which Clew does not — use its Streamable HTTP endpoint, or run it over stdio"
             ),
             McpError::Cancelled => write!(f, "cancelled"),
         }
@@ -394,7 +393,7 @@ pub(crate) fn read_probe(outcome: Result<Value, Option<RpcError>>) -> Result<Pro
             match pick_legacy(&supported).filter(|_| !supported.is_empty()) {
                 Some(version) => Ok(Probe::Legacy(version)),
                 None => Err(McpError::Protocol(format!(
-                    "the server speaks MCP {}, and clew speaks {} and {}",
+                    "the server speaks MCP {}, and Clew speaks {} and {}",
                     supported.join(", "),
                     MODERN_VERSIONS.join(", "),
                     LEGACY_VERSIONS.join(", ")
@@ -409,7 +408,7 @@ pub(crate) fn read_probe(outcome: Result<Value, Option<RpcError>>) -> Result<Pro
             match pick_legacy(&supported).filter(|_| !supported.is_empty()) {
                 Some(version) => Ok(Probe::Legacy(version)),
                 None => Err(McpError::Protocol(format!(
-                    "the server speaks MCP {}, which clew does not",
+                    "the server speaks MCP {}, which Clew does not",
                     if supported.is_empty() {
                         "versions it did not name".to_string()
                     } else {
@@ -443,7 +442,7 @@ pub(crate) fn read_initialize(result: &Value) -> Result<ServerInfo, McpError> {
         .ok_or_else(|| McpError::Protocol("initialize named no protocolVersion".into()))?;
     if !LEGACY_VERSIONS.contains(&version) {
         return Err(McpError::Protocol(format!(
-            "the server chose MCP {version}, which clew does not speak"
+            "the server chose MCP {version}, which Clew does not speak"
         )));
     }
     let info = result.get("serverInfo");
@@ -918,7 +917,7 @@ impl Client {
                         // Nothing was declared that would let a server ask
                         // (no roots, sampling or elicitation capability).
                         return Err(McpError::Protocol(format!(
-                            "the server asked for input clew does not give ({})",
+                            "the server asked for something Clew does not support ({})",
                             asked.join(", ")
                         )));
                     }

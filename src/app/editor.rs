@@ -44,6 +44,9 @@ impl App {
         if let Some(anchor) = self.proj.walk.pending_anchor.as_mut() {
             anchor.superseded = true;
         }
+        // Where this jump lands on its line: on a name only when the jump
+        // to it asked so (`landing_next`), else at the line's start.
+        self.proj.landing = self.proj.landing_next.take();
         // A package (a Go or Java import names its directory, a C# `using`
         // its namespace: the Imports tab's row, the map's) opens at its first
         // file: neither is a file. Looked up whatever the name: a namespace's
@@ -1429,6 +1432,53 @@ impl App {
         Task::batch([follow, self.sync_reading_context()])
     }
 
+    /// Scroll the active pane by `pages` screens — down when positive — the
+    /// caret going as far, so it stays where it was on the screen; at the
+    /// end it goes to the last line (the first, scrolling up).
+    pub(crate) fn scroll_pages(&mut self, pages: i32) -> Task<Message> {
+        let line_height = self.line_height();
+        let Some(v) = self.active_viewer() else {
+            return Task::none();
+        };
+        let page = ((v.viewport_h / line_height).floor() as i64 - 1).max(1);
+        self.scroll_rows(page * i64::from(pages))
+    }
+
+    /// [`Self::scroll_pages`] by `rows` lines of the screen.
+    pub(crate) fn scroll_rows(&mut self, by: i64) -> Task<Message> {
+        let pane = self.proj.active;
+        let line_height = self.line_height();
+        let Some(v) = self.active_viewer_mut() else {
+            return Task::none();
+        };
+        let rows = v.content_rows() as i64;
+        // As far as the view scrolls: on past the end until the last line
+        // is the first in view (`ui::panes`' room after the code). Capped a
+        // screen short of that, "scroll down" from near the end moved up.
+        let most = ((rows - 1).max(0)) as f32 * line_height;
+        let before = v.scroll_y;
+        v.scroll_y = (before + by as f32 * line_height).clamp(0.0, most);
+        let moved = ((v.scroll_y - before) / line_height).round() as i64;
+        let row = match v.caret {
+            _ if moved == 0 => {
+                if by > 0 {
+                    rows - 1
+                } else {
+                    0
+                }
+            }
+            Some((line, _)) => v.row_of(line) as i64 + moved,
+            None => (v.scroll_y / line_height) as i64,
+        };
+        let line = v.line_at_row(row.clamp(0, (rows - 1).max(0)) as usize);
+        v.caret = Some((line, 0));
+        let y = v.scroll_y;
+        self.reader_moved_caret(pane);
+        let scroll = operation::scroll_to(ui::code_scroll_id(pane), AbsoluteOffset { x: 0.0, y });
+        let follow = self.follow_caret(scroll);
+        Task::batch([follow, self.sync_reading_context()])
+    }
+
     /// Change `pane`'s folds with `fold`. A fold that hides the caret pulls
     /// it onto its header, which is the reader moving it as much as a click
     /// is (`reader_moved_caret`).
@@ -1838,6 +1888,25 @@ impl App {
             EditorMsg::SkimFile => {
                 self.skim_active_file();
                 Task::none()
+            }
+            EditorMsg::ScrollPages(pages) => self.scroll_pages(pages),
+            EditorMsg::ScrollLines(lines) => self.scroll_rows(i64::from(lines)),
+            EditorMsg::MoveCaret(motion) => self.move_cursor(motion),
+            EditorMsg::FoldAll(collapse) => {
+                self.fold_all(collapse);
+                Task::none()
+            }
+            EditorMsg::FoldHere => {
+                self.fold_toggle_at_cursor();
+                Task::none()
+            }
+            EditorMsg::GotoLineNumber(line) => {
+                let Some(v) = self.active_viewer() else {
+                    return Task::none();
+                };
+                let line = line.clamp(1, v.lines.len().max(1));
+                let abs = v.abs.clone();
+                self.open_file(abs, Some(line), true)
             }
             EditorMsg::NbToggleOutputs { pane, cell } => {
                 if let Some(v) = self.proj.panes.get_mut(pane).and_then(Option::as_mut)

@@ -33,7 +33,7 @@ pub fn maps(corpus: &Corpus) -> Vec<ProjectMap> {
         map: MapBuilder::new(
             "routes",
             "Routes",
-            "each route — its method and path — with an arrow to the handler it reaches; a handler written in place is the route itself",
+            "each route — its method and path — with an arrow to the handler it reaches; an inline handler is shown as the route itself",
         ),
         corpus,
     };

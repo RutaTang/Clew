@@ -1,18 +1,19 @@
 # The clew workspace: the `clew` GUI client (this package), `clew-core` (the
 # backend logic both binaries share), `clew-protocol` (the client <-> server wire
 # contract), `clew-server` (the headless backend the client runs as a local
-# child or deploys over SSH) and `clew-voice` (listening and offline speech
+# child or deploys over SSH), `clew-voice` (listening and offline speech
 # recognition, free of anything platform-bound: built and tested on Linux,
-# macOS and Windows alike).
+# macOS and Windows alike) and `clew-speak` (answers read aloud by an
+# on-device voice, in a process of its own beside the client).
 [workspace]
-members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server", "crates/clew-voice"]
+members = ["crates/clew-core", "crates/clew-protocol", "crates/clew-server", "crates/clew-speak", "crates/clew-voice"]
 # Third-party crates carried with a fix of clew's (see vendor/README.md): built
 # as dependencies, not linted, formatted or tested as clew's own.
 exclude = ["vendor"]
 
 [package]
 name = "clew"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 # The MSRV cargo enforces; kept equal to rust-toolchain.toml's channel.
 rust-version = "1.95"

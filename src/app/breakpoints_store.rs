@@ -26,7 +26,11 @@ const FILE: &str = "breakpoints.json";
 const VERSION: u32 = 1;
 
 /// One kept breakpoint: where, by the project-relative path, and when.
+/// A field this build does not know makes the file not its own to write
+/// (`load_checked`): read past, it was dropped from every breakpoint as the
+/// file was written again.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct Saved {
     pub(crate) rel: String,
     /// 1-based, as the gutter numbers it.
@@ -36,6 +40,7 @@ pub(crate) struct Saved {
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BreakpointsFile {
     version: u32,
     breakpoints: Vec<Saved>,
@@ -51,28 +56,76 @@ fn load_checked(dir: &Path) -> std::io::Result<Vec<Saved>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    match serde_json::from_slice::<BreakpointsFile>(&bytes) {
-        Ok(file) if file.version == VERSION => Ok(file
-            .breakpoints
+    // Empty: what a crash can leave of a file written as it struck. It
+    // holds nothing to lose, where refused, every later change was.
+    if bytes.iter().all(u8::is_ascii_whitespace) {
+        return Ok(Vec::new());
+    }
+    // Its version first, whatever else it holds: another version's file is
+    // said to be one.
+    #[derive(Deserialize)]
+    struct Versioned {
+        version: u32,
+    }
+    let unreadable = |e: serde_json::Error| std::io::Error::other(format!("{FILE}: {e}"));
+    let version = serde_json::from_slice::<Versioned>(&bytes)
+        .map_err(unreadable)?
+        .version;
+    if version != VERSION {
+        return Err(std::io::Error::other(format!(
+            "{FILE} is version {version}, not {VERSION}"
+        )));
+    }
+    let file = serde_json::from_slice::<BreakpointsFile>(&bytes).map_err(unreadable)?;
+    Ok(file
+        .breakpoints
+        .into_iter()
+        .filter(|s| s.line > 0 && clew_core::statefile::safe_rel(&s.rel))
+        .collect())
+}
+
+/// [`load_checked`] for setting them again. A file of this version that
+/// holds what this build does not know (a field added without a new
+/// version) still sets what it can read: only writing it over would lose
+/// that, and refused, none of the project's breakpoints came back. An error
+/// says why none could be read.
+pub(crate) fn load(dir: &Path) -> std::io::Result<Vec<Saved>> {
+    load_checked(dir).or_else(|e| read_past_the_unknown(dir).ok_or(e))
+}
+
+/// The breakpoints in a file of this version, past fields this build does
+/// not know; `None` when it is not one.
+fn read_past_the_unknown(dir: &Path) -> Option<Vec<Saved>> {
+    #[derive(Deserialize)]
+    struct Loose {
+        rel: String,
+        line: usize,
+        #[serde(default)]
+        condition: Option<String>,
+    }
+    #[derive(Deserialize)]
+    struct LooseFile {
+        version: u32,
+        breakpoints: Vec<Loose>,
+    }
+    let bytes = std::fs::read(dir.join(FILE)).ok()?;
+    let file = serde_json::from_slice::<LooseFile>(&bytes).ok()?;
+    (file.version == VERSION).then(|| {
+        file.breakpoints
             .into_iter()
             .filter(|s| s.line > 0 && clew_core::statefile::safe_rel(&s.rel))
-            .collect()),
-        Ok(file) => Err(std::io::Error::other(format!(
-            "{FILE} is version {}, not {VERSION}",
-            file.version
-        ))),
-        Err(e) => Err(std::io::Error::other(format!("{FILE}: {e}"))),
-    }
+            .map(|s| Saved {
+                rel: s.rel,
+                line: s.line,
+                condition: s.condition,
+            })
+            .collect()
+    })
 }
 
-/// [`load_checked`] for setting them again: a file that cannot be read
-/// sets none.
-pub(crate) fn load(dir: &Path) -> Vec<Saved> {
-    load_checked(dir).unwrap_or_default()
-}
-
-/// Write `list` whole beside the file, then move it over: a crash leaves
-/// the old file or the new, never half of one.
+/// Write `list` whole beside the file, synced to the disk, then move it
+/// over: a crash leaves the old file or the new, never half of one (moved
+/// over unsynced, a crash could leave it empty).
 fn save(dir: &Path, list: &[Saved]) -> std::io::Result<()> {
     clew_core::derived::ensure_private_dir(dir)?;
     let file = BreakpointsFile {
@@ -80,9 +133,7 @@ fn save(dir: &Path, list: &[Saved]) -> std::io::Result<()> {
         breakpoints: list.to_vec(),
     };
     let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
-    let tmp = dir.join(format!("{FILE}.tmp"));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, dir.join(FILE))
+    clew_core::statefile::write_atomic(&dir.join(FILE), &bytes)
 }
 
 /// Serializes [`edit`]'s read, change and write across this process's
@@ -148,7 +199,14 @@ impl App {
         ) else {
             return;
         };
-        for saved in load(&dir) {
+        let saved = match load(&dir) {
+            Ok(saved) => saved,
+            Err(e) => {
+                self.status = tr!("Could not read the saved breakpoints: {error}", error = e);
+                return;
+            }
+        };
+        for saved in saved {
             self.debug
                 .breakpoints
                 .entry(root.join(&saved.rel))

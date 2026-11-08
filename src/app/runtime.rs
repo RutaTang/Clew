@@ -98,11 +98,16 @@ impl App {
             next_proc_id: 1,
             lsp_gen: std::collections::HashMap::new(),
             embed_available: embed::Config::available(),
+            embed_missing: crate::app::embedding::why_no_embeddings(),
             show_bottom: false,
             ask_view: AskView::Hidden,
             ask_sessions_menu: false,
             ask_sessions_query: String::new(),
             voice: crate::app::voice::VoiceState::new(),
+            local_embedding: crate::app::embedding::LocalEmbedding {
+                program: clew_core::embed::local::program().is_some(),
+                ..Default::default()
+            },
             debug: DebugState::default(),
             debug_hover_eval: false,
             llm_available: llm::Config::available(),
@@ -264,6 +269,14 @@ impl App {
             subs.push(
                 iced::time::every(crate::app::voice::LISTEN_TICK)
                     .map(|_| Message::Voice(crate::VoiceMsg::Tick)),
+            );
+        }
+        // While Clew speaks: the meter, and the moment all is said — when
+        // Keep listening opens the microphone.
+        if self.voice.speech.is_speaking() {
+            subs.push(
+                iced::time::every(crate::app::speech::SPEAK_TICK)
+                    .map(|_| Message::Voice(crate::VoiceMsg::SpeakTick)),
             );
         }
         // No per-frame clock for the graph maps: the canvas requests its own
@@ -525,6 +538,11 @@ impl App {
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.
                     self.invalidate_llm_config();
+                    // Or downloaded or removed the embedding model, or chosen
+                    // another source: what can be made follows, and the
+                    // server is told what is in effect now.
+                    self.refresh_embeddings();
+                    self.send_ai_config();
                     // A compositing manager may have come or gone meanwhile
                     // (a desktop's switch for games, say).
                     return self.ask_composited();
@@ -718,7 +736,7 @@ impl App {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {
                     self.keymap_notice = Some(tr!(
-                        "Its default is used by “{action}” now — rebind that first",
+                        "Its default shortcut is now used by “{action}” — change that one first",
                         action = crate::i18n::lookup(other.label())
                     ));
                     return Task::none();

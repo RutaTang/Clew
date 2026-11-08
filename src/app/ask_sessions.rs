@@ -347,6 +347,9 @@ impl App {
     /// code and the ACP agent's session with it — for another to take its
     /// place.
     fn leave_ask_session(&mut self) -> Task<Message> {
+        // What is said of the conversation left ends with it — what was
+        // written of an answer can still be being said.
+        self.stop_speaking();
         let mut stop = self.stop_ask_streams();
         // An answer clew's agent or the server writes is stopped there, and
         // its turn left open for the server's closing notification, which
@@ -439,6 +442,8 @@ impl App {
     /// card in its place.
     pub(crate) fn delete_ask_session(&mut self, id: u64) -> Task<Message> {
         let stop = if self.proj.ask_session == Some(id) {
+            // What is said of it goes with it.
+            self.stop_speaking();
             let stop = self.stop_ask_streams();
             self.proj.ask_turns.clear();
             self.proj.ask_pins.clear();

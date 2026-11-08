@@ -750,11 +750,9 @@ impl Via {
     /// says which list the one it names takes the place of.
     pub(crate) fn advice(&self, fault: ProxyFault) -> String {
         let bypass = if self.system.is_some() {
-            "list the host under \u{201c}Bypass proxy settings for these hosts\u{201d} in \
-             System Settings \u{203a} Network \u{203a} Details \u{203a} Proxies, or in no_proxy, \
-             which clew reads in place of NO_PROXY"
+            "list the host under “Bypass proxy settings for these hosts” in System Settings › Network › Details › Proxies, or in no_proxy, which Clew reads in place of NO_PROXY"
         } else {
-            "list the host in no_proxy, which clew reads in place of NO_PROXY"
+            "list the host in no_proxy, which Clew reads in place of NO_PROXY"
         };
         match fault {
             ProxyFault::Credentials => {}
@@ -771,8 +769,7 @@ impl Via {
             // logs in to the proxy for the clients it serves.
             ProxyFault::LoginScheme => {
                 return format!(
-                    " — name a local relay that makes such logins for clew, such as cntlm or \
-                     px, as the proxy instead, or {bypass}"
+                    " — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {bypass}"
                 );
             }
             _ => return format!(" — to reach the host without the proxy, {bypass}"),
@@ -782,13 +779,11 @@ impl Via {
             format!("correct them in its setting ({example}, {PERCENT_ENCODING})")
         } else if let Some(system) = &self.system {
             format!(
-                "clew does not read proxy passwords from the keychain: name them in the \
-                 environment ({PERCENT_ENCODING}), which clew then reads instead of all of the \
-                 system's proxy settings — so set {}",
+                "Clew cannot read proxy passwords from the keychain: put them in environment variables ({PERCENT_ENCODING}); Clew then uses those instead of all of the system's proxy settings, so set {}",
                 self.environment(system)
             )
         } else {
-            format!("name them in its setting, as {example}")
+            format!("put them in its setting, as {example}")
         };
         format!(" — {give}, or {bypass}")
     }
@@ -1034,7 +1029,7 @@ pub(crate) fn proxy(spec: &str) -> Result<ProxySetting, String> {
         "socks5h" => Some(SocksVersion::V5h),
         "socks4" => Some(SocksVersion::V4),
         "socks4a" => Some(SocksVersion::V4a),
-        other => return Err(unusable(format!("clew cannot use {other}:// proxies"))),
+        other => return Err(unusable(format!("Clew cannot use {other}:// proxies"))),
     };
     if !matches!(parsed.path(), "" | "/") || parsed.query().is_some() || parsed.fragment().is_some()
     {
@@ -1285,9 +1280,7 @@ impl Socks {
         io::Error::new(
             e.kind(),
             format!(
-                "{e} — a {}:// proxy is handed the address clew looks up here; for a name only \
-                 the proxy's side of the network knows, set it as {instead}://, which hands the \
-                 proxy the name",
+                "{e} — a {}:// proxy is handed the address Clew looks up here; for a name only the proxy's side of the network knows, set it as {instead}://, which hands the proxy the name",
                 self.version.scheme()
             ),
         )
@@ -1414,7 +1407,9 @@ impl Socks {
                 return Err(self.failed("accepts none of the ways to log in offered"));
             }
             (other, _) => {
-                return Err(self.failed(format!("chose a way to log in not offered ({other})")));
+                return Err(
+                    self.failed(format!("chose a login method Clew did not offer ({other})"))
+                );
             }
         }
         // CONNECT, to an address as one, and to a name BY NAME.
@@ -2133,9 +2128,7 @@ pub(crate) fn request_uri(url: &str) -> Result<Uri, String> {
     let target = Target::of(&uri).map_err(|e| describe(&e))?;
     let host = target.host.trim_end_matches('.').to_ascii_lowercase();
     if read != Some((target.https, host, Some(target.port))) {
-        return Err(format!(
-            "{url}: not sent — the HTTP client would read another host in it"
-        ));
+        return Err(format!("{url}: not sent — its host name is ambiguous"));
     }
     Ok(uri)
 }
@@ -2889,7 +2882,7 @@ impl Tcp {
                 let what = if receiving {
                     "sent nothing"
                 } else {
-                    "took nothing in"
+                    "accepted no data"
                 };
                 io::Error::new(
                     io::ErrorKind::TimedOut,
@@ -3420,7 +3413,7 @@ fn tls_over(
     let name = rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|e| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("{host} is no name TLS can verify: {e}"),
+            format!("{host} is not a host name TLS can verify: {e}"),
         )
     })?;
     let mut session =
@@ -3657,9 +3650,7 @@ fn tunnel(
         match (&authorization, hung_up, how) {
             (Some(_), true, how) => proxy_failed(
                 format!(
-                    "the proxy {name} gave no answer to the CONNECT to {authority}, which \
-                     carried the user name and password of its setting ({}): it may have \
-                     refused them",
+                    "the proxy {name} did not answer the CONNECT to {authority} ({}); it may have rejected the user name and password in its setting",
                     how.unwrap_or_else(|| "the connection closed".into())
                 ),
                 ProxyFault::LoginUnanswered,
@@ -3797,7 +3788,7 @@ fn offered_logins<'a>(lines: impl Iterator<Item = &'a str>) -> Vec<String> {
 fn refused_login(schemes: &[String], named: bool) -> (String, ProxyFault) {
     match unusable_login(schemes) {
         Some(schemes) => (
-            format!("it takes only {schemes} logins, which clew cannot make"),
+            format!("it accepts only {schemes} logins, which Clew does not support"),
             ProxyFault::LoginScheme,
         ),
         None if named => (
@@ -4093,8 +4084,7 @@ impl Exchange {
         io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
-                "timed out: the answer came in slower than {} KiB/s over {} s, once the first {} s \
-                 were up",
+                "timed out: the download stayed below {} KiB/s for {} s (after the first {} s)",
                 pace.floor.div_ceil(1024),
                 pace.window.as_secs_f32(),
                 pace.grace.as_secs_f32()
@@ -6976,7 +6966,7 @@ mod tests {
                 "accepts none of the ways",
                 Refused,
             ),
-            ("socks5h://proxy", vec![5, 2], "not offered", Refused),
+            ("socks5h://proxy", vec![5, 2], "did not offer", Refused),
             (
                 "socks5h://u:bad@proxy",
                 vec![5, 2, 1, 1],
@@ -8171,23 +8161,17 @@ mod tests {
 
     /// The bypass advice for a proxy named in the environment, as
     /// [`Via::advice`] words it.
-    const ENV_BYPASS: &str = "list the host in no_proxy, which clew reads in place of NO_PROXY";
+    const ENV_BYPASS: &str = "list the host in no_proxy, which Clew reads in place of NO_PROXY";
 
     /// The bypass advice for a system proxy, as [`Via::advice`] words it.
-    const SYSTEM_BYPASS: &str = "list the host under \u{201c}Bypass proxy settings for these \
-                                 hosts\u{201d} in System Settings \u{203a} Network \u{203a} \
-                                 Details \u{203a} Proxies, or in no_proxy, which clew reads in \
-                                 place of NO_PROXY";
+    const SYSTEM_BYPASS: &str = "list the host under “Bypass proxy settings for these hosts” in System Settings › Network › Details › Proxies, or in no_proxy, which Clew reads in place of NO_PROXY";
 
     /// How [`Via::advice`] says to give a system proxy the password the
     /// keychain holds: in the environment, which then stands in for all of
     /// the system's settings — `set`, as the environment names them.
     fn keychain(set: &str) -> String {
         format!(
-            " — clew does not read proxy passwords from the keychain: name them in the \
-             environment (percent-encoding any character in them that is not a letter or a \
-             digit), which clew then reads instead of all of the system's proxy settings — so \
-             set {set}"
+            " — Clew cannot read proxy passwords from the keychain: put them in environment variables (percent-encoding any character in them that is not a letter or a digit); Clew then uses those instead of all of the system's proxy settings, so set {set}"
         )
     }
 
@@ -8259,7 +8243,7 @@ mod tests {
             err,
             format!(
                 "{url} (through the proxy socks5h://{addr}): the SOCKS proxy {addr} asks for a \
-                 user name and password — name them in its setting, as \
+                 user name and password — put them in its setting, as \
                  socks5h://user:password@{addr}, or {ENV_BYPASS}"
             )
         );
@@ -8334,9 +8318,8 @@ mod tests {
             err,
             format!(
                 "{url} (through the proxy http://…@{addr}): the proxy {addr} answered the \
-                 CONNECT to models.lan.invalid:443 with HTTP/1.1 407 Refused: it takes only \
-                 Negotiate or NTLM logins, which clew cannot make — name a local relay that \
-                 makes such logins for clew, such as cntlm or px, as the proxy instead, or \
+                 CONNECT to models.lan.invalid:443 with HTTP/1.1 407 Refused: it accepts only \
+                 Negotiate or NTLM logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or \
                  {ENV_BYPASS}"
             )
         );
@@ -8376,9 +8359,7 @@ mod tests {
             named.answered_407(&challenges),
             format!(
                 "the proxy http://…@proxy.corp:3128 answered HTTP 407 (Proxy Authentication \
-                 Required): it takes only NTLM or Negotiate logins, which clew cannot make — \
-                 name a local relay that makes such logins for clew, such as cntlm or px, as the \
-                 proxy instead, or {ENV_BYPASS}"
+                 Required): it accepts only NTLM or Negotiate logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
             )
         );
         challenges.append(
@@ -8501,7 +8482,7 @@ mod tests {
                     .unwrap()
                     .advice(ProxyFault::Credentials);
                 // What it says to set: `name=value`, each with a password.
-                let (_, set) = advice.split_once(" — so set ").expect("variables to set");
+                let (_, set) = advice.split_once(", so set ").expect("variables to set");
                 let (set, _) = set.split_once(", or ").expect("the bypass after them");
                 let set: Vec<(&str, String)> = set
                     .split(' ')
@@ -8593,7 +8574,7 @@ mod tests {
                 let what = format!("{spelling} set, {whose} proxy: {advice}");
                 // The list it names, and the one it says that list takes
                 // the place of.
-                let (list, replaced) = match advice.rsplit_once(", which clew reads in place of ") {
+                let (list, replaced) = match advice.rsplit_once(", which Clew reads in place of ") {
                     Some((list, replaced)) => (list, Some(replaced)),
                     None => (advice.as_str(), None),
                 };
@@ -9213,7 +9194,7 @@ mod tests {
         let result = call(&paced, &format!("{base}/asset"));
         let took = began.elapsed();
         let err = result.expect_err("a trickled record outlasted the pace");
-        assert!(err.contains("slower than 4 KiB/s"), "{err}");
+        assert!(err.contains("stayed below 4 KiB/s"), "{err}");
         assert!(took < Duration::from_secs(3), "the pace held for {took:?}");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -9374,7 +9355,7 @@ mod tests {
             let (result, took) = request.join().unwrap();
             let err = result.expect_err("a trickle outlasted the pace");
             assert!(
-                err.contains("slower than 4 KiB/s over 0.5 s, once the first 2 s were up"),
+                err.contains("stayed below 4 KiB/s for 0.5 s (after the first 2 s)"),
                 "{what}: {err}"
             );
             assert!(
@@ -9805,20 +9786,20 @@ mod tests {
                 &["Proxy-Authenticate: NTLM", "proxy-authenticate: Negotiate"],
                 named,
                 LoginScheme,
-                "it takes only NTLM or Negotiate logins, which clew cannot make",
+                "it accepts only NTLM or Negotiate logins, which Clew does not support",
             ),
             (
                 &["Proxy-Authenticate: Digest realm=\"corp, int\", qop = \"auth\", nonce=\"x\""],
                 plain,
                 LoginScheme,
-                "it takes only Digest logins, which clew cannot make",
+                "it accepts only Digest logins, which Clew does not support",
             ),
             // A scheme inside a quoted string is none: Basic is not offered.
             (
                 &["Proxy-Authenticate: NTLM realm=\"a, Basic b\""],
                 named,
                 LoginScheme,
-                "it takes only NTLM logins, which clew cannot make",
+                "it accepts only NTLM logins, which Clew does not support",
             ),
         ] {
             let lines: Vec<&str> = [refused].iter().chain(challenges).copied().collect();
@@ -9838,9 +9819,9 @@ mod tests {
         // sent, perhaps a refusal of it; without one, the connection's
         // failure.
         let io_end = |kind: io::ErrorKind| Some(ureq::Error::from(io::Error::from(kind)));
-        let closed = "the proxy proxy.corp:3128 gave no answer to the CONNECT to \
-                      api.example.com:443, which carried the user name and password of its \
-                      setting (the connection closed): it may have refused them";
+        let closed = "the proxy proxy.corp:3128 did not answer the CONNECT to \
+                      api.example.com:443 (the connection closed); it may have rejected the \
+                      user name and password in its setting";
         let plain_closed = "the proxy proxy.corp:3128 closed the connection instead of \
                             answering the CONNECT";
         assert_eq!(
@@ -9868,7 +9849,10 @@ mod tests {
         for (how, end) in hang_ups() {
             let (got, why) = open(named, vec![], Some(end.into()));
             assert_eq!(got, Some(LoginUnanswered), "{how}: {why}");
-            assert!(why.contains("it may have refused them"), "{how}: {why}");
+            assert!(
+                why.contains("it may have rejected the user name and password"),
+                "{how}: {why}"
+            );
         }
         for (how, end) in hang_ups() {
             let (got, why) = open(plain, vec![], Some(end.into()));
@@ -9954,17 +9938,17 @@ mod tests {
             (
                 "\r\nProxy-Authenticate: NTLM\r\n",
                 LoginScheme,
-                "it takes only NTLM logins, which clew cannot make",
+                "it accepts only NTLM logins, which Clew does not support",
             ),
             (
                 "\r\nProxy-Authenticate: NTLM\r\nproxy-authenticate: Negotiate\r\nVia: 1.1 p",
                 LoginScheme,
-                "it takes only NTLM or Negotiate logins, which clew cannot make",
+                "it accepts only NTLM or Negotiate logins, which Clew does not support",
             ),
             (
                 "\nProxy-Authenticate: NTLM\n\nProxy-Authenticate: Basic\n",
                 LoginScheme,
-                "it takes only NTLM logins, which clew cannot make",
+                "it accepts only NTLM logins, which Clew does not support",
             ),
             (
                 "\r\nProxy-Authenticate: Basic realm=\"corp\"\r\nProxy-Authenticate: NTL",
@@ -10003,9 +9987,7 @@ mod tests {
             failure(&failed(named, vec![answer], None), Some(&via)),
             format!(
                 "the proxy proxy.corp:3128 began to answer the CONNECT to api.example.com:443 \
-                 with a 407 and broke off (the connection closed): it takes only NTLM logins, \
-                 which clew cannot make — name a local relay that makes such logins for clew, \
-                 such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
+                 with a 407 and broke off (the connection closed): it accepts only NTLM logins, which Clew does not support — set a local relay that can log in for Clew, such as cntlm or px, as the proxy instead, or {ENV_BYPASS}"
             )
         );
     }

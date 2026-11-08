@@ -145,7 +145,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
     let mut v = vec![
         // -- Intro ----------------------------------------------------------
         TutStep::new(
-            tr!("Welcome to clew"),
+            tr!("Welcome to Clew"),
             &tr!(
                 "A reader for code, not an editor. A quick tour of {project}.",
                 project = project
@@ -189,7 +189,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // -- The margin beside the code, then the outline --------------------
         TutStep::new(
             tr!("Notes beside the code"),
-            tr!("clew's note on each function sits beside it. Explain All fills them in."),
+            tr!("Clew's note on each function sits beside it. Explain All fills them in."),
             Anchor::RightTop,
         ),
         TutStep::new(
@@ -232,7 +232,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         .demo(tab(SidebarTab::Marks)),
         TutStep::new(
             tr!("Guided walkthroughs"),
-            tr!("Pick a topic, and clew walks you through the files."),
+            tr!("Pick a topic, and Clew walks you through the files."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Walk)),
@@ -258,20 +258,20 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // -- Working in the reader ------------------------------------------
         TutStep::new(
             tr!("Split and compare"),
-            tr!("⌘\\ splits the reader in two."),
+            tr!("⌘\\ splits the view in two."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         TutStep::new(
             tr!("Why is this here?"),
-            tr!("Right-click a line, and clew explains it from git history."),
+            tr!("Right-click a line, and Clew explains it from git history."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
         // -- Talking to clew: Ask, in the corner ----------------------------
         TutStep::new(
-            tr!("Ask clew, or tell it what to do"),
-            tr!("Ask about the project, or tell clew what to do. It asks before running anything."),
+            tr!("Ask Clew, or tell it what to do"),
+            tr!("Ask about the project, or tell Clew what to do. It asks before running anything."),
             Anchor::AskCorner,
         )
         .demo(Message::Ask(AskMsg::Open)),
@@ -332,7 +332,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         ),
         TutStep::new(
             tr!("Settings"),
-            tr!("AI keys and reading preferences."),
+            tr!("API keys and reading preferences."),
             Anchor::Strip(StripTool::Settings),
         ),
         // -- The ⋯ menu, opened: introduce each item top to bottom. These steps
@@ -345,7 +345,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         ),
         TutStep::new(
             tr!("Explain All"),
-            tr!("AI summaries for every function, file and folder. Needs an AI key."),
+            tr!("AI summaries for every function, file and folder. Needs an API key."),
             menu_row(ToolsRow::ExplainAll),
         ),
         TutStep::new(
@@ -394,7 +394,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             menu_row(ToolsRow::Tutorial),
         ),
         TutStep::new(
-            tr!("That's clew"),
+            tr!("That's Clew"),
             tr!("That's the tour. Go read some code. 🧵"),
             Anchor::Center,
         ),

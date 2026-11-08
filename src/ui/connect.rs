@@ -139,7 +139,6 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     );
 
     let page = app.settings.page;
-    let stored = || form::note(tr!("Stored in {path}", path = crate::llm::config_hint())).into();
     let body: Element<'_, Message> = match page {
         SettingsPage::Appearance => form::page(vec![form::group(
             "",
@@ -151,7 +150,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                     // macOS draws its own parts of the window (the Open
                     // panel, alerts) in the language it was started in.
                     cfg!(target_os = "macos").then(|| {
-                        tr!("The Open panel and system alerts follow at the next launch.")
+                        tr!("The Open dialog and system alerts switch language the next time you start Clew.")
                             .to_string()
                     }),
                     language,
@@ -179,33 +178,53 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 ),
             ],
         )]),
-        SettingsPage::LanguageModel => form::page(vec![
-            form::group(
+        SettingsPage::LanguageModel => form::page(vec![form::group(
+            "",
+            None,
+            None,
+            vec![
+                form::field(tr!("Provider"), None, provider),
+                form::field(tr!("API key"), None, key),
+                form::field(tr!("Model"), None, model),
+                form::field(tr!("Base URL"), None, base),
+            ],
+        )]),
+        SettingsPage::Embeddings => {
+            let here = app.settings.embed_here;
+            let source = form::segmented([
+                (
+                    tr!("On this computer").to_string(),
+                    here,
+                    Message::Settings(SettingsMsg::EmbedHere(true)),
+                ),
+                (
+                    tr!("A service").to_string(),
+                    !here,
+                    Message::Settings(SettingsMsg::EmbedHere(false)),
+                ),
+            ]);
+            let made = form::group(
                 "",
                 None,
                 None,
-                vec![
-                    form::field(tr!("Provider"), None, provider),
-                    form::field(tr!("API key"), None, key),
-                    form::field(tr!("Model"), None, model),
-                    form::field(tr!("Base URL"), None, base),
-                ],
-            ),
-            stored(),
-        ]),
-        SettingsPage::Embeddings => form::page(vec![
-            form::group(
-                "",
-                Some(tr!("Any OpenAI-compatible /embeddings endpoint.").into()),
-                None,
-                vec![
-                    form::field(tr!("API key"), None, embed_key),
-                    form::field(tr!("Model"), None, embed_model),
-                    form::field(tr!("Base URL"), None, embed_base),
-                ],
-            ),
-            stored(),
-        ]),
+                vec![form::item(tr!("Where embeddings are made"), None, source)],
+            );
+            let how = if here {
+                form::group("", None, None, embed_model_rows(app))
+            } else {
+                form::group(
+                    "",
+                    Some(tr!("Any OpenAI-compatible /embeddings endpoint.").into()),
+                    None,
+                    vec![
+                        form::field(tr!("API key"), None, embed_key),
+                        form::field(tr!("Model"), None, embed_model),
+                        form::field(tr!("Base URL"), None, embed_base),
+                    ],
+                )
+            };
+            form::page(vec![made, how])
+        }
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
         SettingsPage::Languages if app.proj.project.is_none() => form::page(vec![
@@ -588,7 +607,7 @@ pub(crate) fn languages_section(app: &App) -> Element<'_, Message> {
             PathChoice {
                 title: tr!("TypeScript and JavaScript"),
                 about: tr!("The TypeScript the language server runs."),
-                automatic: tr!("clew's built-in TypeScript 5"),
+                automatic: tr!("Clew's built-in TypeScript 5"),
                 chosen: app.proj.lang_choices.typescript.as_deref(),
                 found: found("typescript"),
                 field: crate::LangField::TypeScriptPath,
@@ -782,10 +801,10 @@ fn python_block<'a>(
             PythonSource::Chosen => tr!("Your choice"),
             PythonSource::LspToml => tr!("Set in the project's .clew/lsp.toml"),
             PythonSource::ProjectVenv => tr!("Found in the project"),
-            PythonSource::Activated => tr!("Active in the shell clew started from"),
+            PythonSource::Activated => tr!("Active in the shell Clew was started from"),
             // Nobody named one: the server looks for its own. "None" read
             // as though Python went without an interpreter.
-            PythonSource::Server => tr!("Left to the language server: it finds one itself"),
+            PythonSource::Server => tr!("Chosen by the language server"),
         };
         let mut in_use = column![text(who).size(ts::BASE).color(theme::fg())].spacing(2);
         if let Some(path) = &effect.interpreter {
@@ -795,9 +814,7 @@ fn python_block<'a>(
         if let Some(bad) = &effect.unusable_choice {
             rows.push(form::plain(
                 text(tr!(
-                    "Your choice {path} can't be used: it no longer exists, or it is a \
-                     program inside the repository. The interpreter above is used until you \
-                     pick another.",
+                    "The interpreter you chose ({path}) can't be used: it no longer exists, or it is a program inside the repository. The interpreter above is used until you pick another.",
                     path = bad
                 ))
                 .size(ts::SMALL)
@@ -1154,7 +1171,7 @@ fn c_block<'a>(app: &'a App, options: Option<&'a clew_protocol::COptions>) -> El
         ));
     }
     let flags_about = match c.flags.is_empty() {
-        true => tr!("For files the database does not cover.").to_string(),
+        true => tr!("For files not in compile_commands.json.").to_string(),
         false => tr!(
             "Current: {flags}",
             flags = crate::app::languages::join_args(&c.flags)
@@ -1292,7 +1309,7 @@ fn toolchain_block<'a>(
     )];
     for candidate in found {
         let label = match candidate.project {
-            true => tr!("{name} — the project's", name = candidate.name),
+            true => tr!("{name} (set by the project)", name = candidate.name),
             false => candidate.name.clone(),
         };
         rows.push(form::choice(
@@ -1407,8 +1424,7 @@ fn servers_block(app: &App) -> Element<'_, Message> {
         tr!("Server programs"),
         Some(
             tr!(
-                "Your own server program for a language: a different build, or a server clew \
-                 doesn't support."
+                "Your own server program for a language: a different build, or a server Clew doesn't support."
             )
             .into(),
         ),
@@ -1673,7 +1689,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         tr!("MCP servers"),
         servers
             .is_empty()
-            .then(|| tr!("No MCP servers yet. Their tools are available in Ask.").to_string()),
+            .then(|| tr!("No MCP servers yet. Add one to use its tools in Ask.").to_string()),
         None,
         servers,
     ));
@@ -1682,7 +1698,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         tr!("ACP agents"),
         agents
             .is_empty()
-            .then(|| tr!("No agents yet. An agent can answer in Ask instead of clew.").to_string()),
+            .then(|| tr!("No agents yet. An agent can answer in Ask instead of Clew.").to_string()),
         None,
         agents,
     ));
@@ -1948,7 +1964,7 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
     let row: Element<'_, Message> = if held {
         row![
             glyph::icon(Glyph::Remote, theme::warning(), 14.0),
-            text(tr!("{host} holds your AI keys.", host = host))
+            text(tr!("{host} holds your API keys.", host = host))
                 .size(ts::SMALL)
                 .color(theme::fg()),
             space().width(Fill),
@@ -1961,7 +1977,7 @@ pub(crate) fn live_ai_keys_row(app: &App) -> Option<Element<'_, Message>> {
         .align_y(iced::Center)
         .into()
     } else {
-        text(tr!("{host} does not hold your AI keys.", host = host))
+        text(tr!("{host} does not hold your API keys.", host = host))
             .size(ts::SMALL)
             .color(theme::dim())
             .into()
@@ -2113,7 +2129,7 @@ pub(crate) fn connect_picker<'a>(
     col = col.push(
         iced::widget::checkbox(ui.send_ai_keys)
             .style(theme::check)
-            .label(tr!("Send my AI keys to this host"))
+            .label(tr!("Send my API keys to this host"))
             .on_toggle(|v| Message::Connect(ConnectMsg::ToggleAiKeys(v)))
             .size(14)
             .text_size(ts::BODY)
@@ -2415,4 +2431,85 @@ fn settings_nav_w() -> f32 {
         })
         .fold(SETTINGS_NAV_W, f32::max)
         .ceil()
+}
+
+/// EmbeddingGemma's rows: what it is, and at its right whether it is here —
+/// Remove — its download, or getting it; under them its terms, and why its
+/// last download failed.
+fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
+    use clew_core::embed::local::MODEL;
+    let state: Element<'_, Message> = if let Some(d) = app.local_embedding.download.as_ref() {
+        let total = d.total.unwrap_or(MODEL.bytes()).max(1);
+        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
+        row![
+            container(super::meter::eased_bar(
+                share,
+                70.0,
+                4.0,
+                theme::progress,
+                super::meter::PROGRESS,
+            ))
+            .width(70),
+            text(tr!(
+                "{percent}%",
+                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
+            ))
+            .size(ts::SMALL)
+            .color(theme::dim()),
+            form::action(
+                tr!("Cancel"),
+                Some(Message::Settings(SettingsMsg::CancelEmbedDownload))
+            ),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    } else if app.embed_model_installed() {
+        form::action(
+            tr!("Remove"),
+            Some(Message::Settings(SettingsMsg::RemoveEmbedModel)),
+        )
+        .into()
+    } else {
+        form::primary(
+            &tr!("Download ({size} MB)", size = MODEL.size_mb()),
+            Some(Message::Settings(SettingsMsg::DownloadEmbedModel)),
+        )
+        .into()
+    };
+    let mut rows = vec![form::item(
+        MODEL.name,
+        Some(
+            tr!("By Google DeepMind, run by Clew: nothing leaves this computer, and no key is needed.")
+                .to_string(),
+        ),
+        state,
+    )];
+    // Here, but nothing to run it with.
+    let unrunnable = app.embed_model_installed() && !app.local_embedding.program;
+    if let Some(e) = app
+        .local_embedding
+        .error
+        .clone()
+        .or_else(|| unrunnable.then(crate::app::embedding::missing_here))
+        .as_ref()
+    {
+        rows.push(form::plain(
+            text(crate::i18n::message(e))
+                .size(ts::SMALL)
+                .color(theme::warn())
+                .wrapping(Wrapping::WordOrGlyph),
+        ));
+    }
+    rows.push(form::item(
+        tr!("Gemma Terms of Use"),
+        Some(tr!("By downloading EmbeddingGemma, you accept these terms.").to_string()),
+        form::action(
+            tr!("Read the terms"),
+            Some(Message::Content(ContentMsg::OpenLink(
+                MODEL.terms.to_string(),
+            ))),
+        ),
+    ));
+    rows
 }

@@ -28,6 +28,7 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
             "scripts",
             "src",
             "server/src",
+            "speak/src",
             "assets/licenses",
             "assets/lproj/fr.lproj",
             "bin",
@@ -48,7 +49,7 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
         )
         .unwrap();
         std::fs::write(root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"server\"]\n[package]\nname = \"clew\"\nversion = \"0.1.15\"\nedition = \"2024\"\n").unwrap();
+            "[workspace]\nmembers = [\"server\", \"speak\"]\n[package]\nname = \"clew\"\nversion = \"0.1.15\"\nedition = \"2024\"\n").unwrap();
         std::fs::write(
             root.join("server/Cargo.toml"),
             "[package]\nname = \"clew-server\"\nversion = \"0.1.15\"\nedition = \"2024\"\n",
@@ -64,8 +65,19 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
             "fn main() { println!(\"fresh server\"); }\n",
         )
         .unwrap();
+        std::fs::write(
+            root.join("speak/Cargo.toml"),
+            "[package]\nname = \"clew-speak\"\nversion = \"0.1.15\"\nedition = \"2024\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("speak/src/main.rs"),
+            "fn main() { println!(\"fresh voice\"); }\n",
+        )
+        .unwrap();
         // Unrelated packaging inputs and macOS signing are isolated stubs;
-        // both Rust binaries are built by real Cargo, then really copied/run.
+        // the three Rust binaries are built by real Cargo, then really
+        // copied and run.
         for name in [
             "clew.icns",
             "NERDFONT-LICENSE.md",
@@ -82,6 +94,7 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
         write_script(&root.join("bin/codesign"), "exit 0");
         write_script(&root.join("target/debug/clew"), "echo stale GUI");
         write_script(&root.join("target/debug/clew-server"), "echo stale server");
+        write_script(&root.join("target/debug/clew-speak"), "echo stale voice");
         let mut lock = Command::new("cargo");
         lock.current_dir(&root)
             .env("CARGO_HOME", root.join("cargo-home"))
@@ -118,7 +131,11 @@ fn app_bundles_follow_cargo_artifacts_in_environment_and_configured_directories(
             build.env("CARGO_TARGET_DIR", root.join("custom \"outputs\""));
         }
         checked(&mut build);
-        for (binary, expected) in [("clew", "fresh GUI\n"), ("clew-server", "fresh server\n")] {
+        for (binary, expected) in [
+            ("clew", "fresh GUI\n"),
+            ("clew-server", "fresh server\n"),
+            ("clew-speak", "fresh voice\n"),
+        ] {
             let output = checked(&mut Command::new(
                 root.join("dist/Clew.app/Contents/MacOS").join(binary),
             ));

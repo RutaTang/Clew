@@ -117,7 +117,7 @@ fn includes(corpus: &Corpus) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "c.includes",
         "Include cost",
-        "each file and an arrow to each file it includes; its detail counts what it pulls in all told — every file that includes it pays for that",
+        "each file and an arrow to each file it includes; its detail counts every file it pulls in, directly or not — which every file that includes it pulls in too",
     );
     for (file, targets) in &graph {
         let at = map.node("file", file, file);

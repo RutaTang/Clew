@@ -1384,7 +1384,7 @@ fn exec_tool_basic(
             if notebook {
                 let Some(nb) = clew_core::notebook::parse(&source) else {
                     return (
-                        format!("cannot read {rel}: not a notebook clew can parse"),
+                        format!("cannot read {rel}: not a notebook Clew can parse"),
                         format!("outline {rel}"),
                         Vec::new(),
                     );
@@ -1854,7 +1854,19 @@ fn exec_tool_basic(
 /// or the deadline, left that thread and the socket held until the endpoint
 /// answered or the request's own limits ran out.
 fn embed_query(cfg: &embed::Config, query: &str, stop: &AtomicBool) -> Result<Vec<f32>, String> {
-    embed_query_within(cfg, query, stop, EMBED_QUERY_TIMEOUT)
+    embed_query_within(cfg, query, stop, query_limit(cfg))
+}
+
+/// How long one query may take: [`EMBED_QUERY_TIMEOUT`], and — made on this
+/// computer — the time the model may take to load first. Given up while it
+/// loads, the half-loaded model was let go, and on a machine slower to load
+/// it than the query's own limit no search ever got past loading it.
+fn query_limit(cfg: &embed::Config) -> std::time::Duration {
+    if cfg.is_local() {
+        embed::local::READY_TIMEOUT + EMBED_QUERY_TIMEOUT
+    } else {
+        EMBED_QUERY_TIMEOUT
+    }
 }
 
 /// [`embed_query`], given up after `limit` — [`EMBED_QUERY_TIMEOUT`], or a
@@ -1867,9 +1879,10 @@ fn embed_query_within(
 ) -> Result<Vec<f32>, String> {
     let deadline = std::time::Instant::now() + limit;
     let stopped = || stop.load(Ordering::Relaxed);
-    let result = embed::embed_batch_cancellable(cfg, &[query.to_string()], &|| {
-        stopped() || std::time::Instant::now() >= deadline
-    });
+    let result =
+        embed::embed_batch_cancellable(cfg, &[query.to_string()], embed::Purpose::Query, &|| {
+            stopped() || std::time::Instant::now() >= deadline
+        });
     match result {
         Ok(mut vecs) if !vecs.is_empty() => Ok(vecs.remove(0)),
         Ok(_) => Err("the endpoint returned no vector".into()),
@@ -2293,6 +2306,18 @@ mod tests {
             dedup,
             "the same arguments panic again — block the exact repeat"
         );
+    }
+
+    /// A query made on this computer may wait for the model to load first;
+    /// one made at a service has the query's own limit.
+    #[test]
+    fn a_query_made_here_waits_for_the_model_to_load() {
+        let here = embed::Config::local();
+        let service =
+            embed::Config::from_parts("k".into(), "m".into(), "http://emb.test/v1".into());
+        assert_eq!(query_limit(&service), EMBED_QUERY_TIMEOUT);
+        assert!(query_limit(&here) > embed::local::READY_TIMEOUT);
+        assert!(query_limit(&here) >= EMBED_QUERY_TIMEOUT + embed::local::READY_TIMEOUT);
     }
 
     /// An embeddings endpoint that accepts the request and then says nothing

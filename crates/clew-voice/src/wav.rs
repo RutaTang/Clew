@@ -46,7 +46,7 @@ pub fn read(bytes: &[u8]) -> Result<(Vec<f32>, u32), String> {
                     .chunks_exact(4)
                     .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                     .collect(),
-                _ => return Err(format!("WAV format {tag} at {bits} bits is not read")),
+                _ => return Err(format!("WAV format {tag} at {bits} bits is not supported")),
             };
             return Ok((crate::audio::mono(&samples, usize::from(channels)), rate));
         }

@@ -159,7 +159,7 @@ fn errors(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
     let mut map = MapBuilder::new(
         "zig.errors",
         "Error sets",
-        "each error set and the errors in it; each function and the set its return type names, the errors it returns, the functions whose errors try passes on, and the errors it catches",
+        "each error set and the errors in it; each function and the set its return type names, the errors it returns, the functions whose errors it passes on with “try”, and the errors it catches",
     );
     // The named sets first, so a function's return type finds its set.
     let mut sets: HashMap<String, (String, usize)> = HashMap::new();
@@ -184,7 +184,7 @@ fn errors(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
             }
             let set = text(name, src).to_string();
             sets.insert(set.clone(), (source.rel.clone(), line(decl)));
-            let at = map.node("set", &set, &set);
+            let at = map.node("error set", &set, &set);
             map.place(at, &source.rel, line(decl));
             for literal in std::iter::once(value).chain(all_of(value, "error_set_declaration")) {
                 if literal.kind() != "error_set_declaration" {
@@ -208,7 +208,7 @@ fn errors(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
                         match x.kind() {
                             "identifier" => {
                                 let other = text(x, src).to_string();
-                                let to = map.node("set", &other, &other);
+                                let to = map.node("error set", &other, &other);
                                 map.edge(at, to, "includes");
                                 n = None;
                             }
@@ -219,7 +219,7 @@ fn errors(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
                                         .filter(|i| i.kind() == "identifier")
                                     {
                                         let other = text(i, src).to_string();
-                                        let to = map.node("set", &other, &other);
+                                        let to = map.node("error set", &other, &other);
                                         map.edge(at, to, "includes");
                                     }
                                 }
@@ -263,7 +263,7 @@ fn errors(sources: &[(&Source, tree_sitter::Tree)]) -> Option<ProjectMap> {
                 match ty.child_by_field_name("error") {
                     Some(set) if set.kind() == "identifier" => {
                         let s = text(set, src).to_string();
-                        let to = map.node("set", &s, &s);
+                        let to = map.node("error set", &s, &s);
                         if let Some((rel, at)) = sets.get(&s) {
                             map.place(to, rel, *at);
                         }

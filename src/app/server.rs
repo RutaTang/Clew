@@ -145,6 +145,21 @@ impl Drop for ServerLink {
     }
 }
 
+/// The embedding config a server is handed: `cfg` — unless its vectors are
+/// made on this computer and the server is on another (`remote`), which has
+/// no model to make them with.
+pub(crate) fn embed_for_server(
+    cfg: Option<embed::Config>,
+    remote: bool,
+) -> Option<clew_protocol::AiEmbedConfig> {
+    cfg.filter(|c| !c.is_local() || !remote)
+        .map(|c| clew_protocol::AiEmbedConfig {
+            api_key: c.api_key,
+            model: c.model,
+            base_url: c.base_url,
+        })
+}
+
 impl App {
     pub(crate) fn on_server_connected(&mut self, tx: server::RequestTx) -> Task<Message> {
         // The in-process clew-server is up; keep its request channel and
@@ -760,11 +775,7 @@ impl App {
                     base_url: c.base_url,
                     reply_language: llm::reply_language(),
                 }),
-                embed::Config::load().map(|c| clew_protocol::AiEmbedConfig {
-                    api_key: c.api_key,
-                    model: c.model,
-                    base_url: c.base_url,
-                }),
+                embed_for_server(embed::Config::load(), self.connection.is_remote()),
             )
         } else {
             (None, None)
@@ -1341,10 +1352,10 @@ impl App {
                         self.status = match languages.first() {
                             Some(lang) => tr!(
                                 "Stopped the {lang} language server: its output was not being read. It restarts on next use.",
-                                lang = lang
+                                lang = crate::app::languages::language_name(lang)
                             ),
                             None => {
-                                tr!("Stopped a proxied process: its output was not being read.")
+                                tr!("Stopped a background process: its output was not being read.")
                                     .into()
                             }
                         };
@@ -1379,12 +1390,12 @@ impl App {
                     self.status = match code {
                         Some(c) => tr!(
                             "{language} language server exited (code {code}). It restarts on the next request.",
-                            language = language,
+                            language = crate::app::languages::language_name(&language),
                             code = c
                         ),
                         None => tr!(
                             "{language} language server exited. It restarts on the next request.",
-                            language = language
+                            language = crate::app::languages::language_name(&language)
                         ),
                     };
                 }
@@ -1426,8 +1437,7 @@ impl App {
             } => {
                 if protocol != clew_protocol::PROTOCOL_VERSION {
                     return self.on_handshake_failed(tr!(
-                        "clew-server speaks protocol v{server}, this clew speaks v{client} — \
-                         update the server (local: rebuild; remote: it redeploys on reconnect)",
+                        "clew-server speaks protocol v{server}, this Clew speaks v{client} — update the server (local: rebuild; remote: it redeploys on reconnect)",
                         server = protocol,
                         client = clew_protocol::PROTOCOL_VERSION
                     ));
@@ -1438,8 +1448,7 @@ impl App {
                 // as one clear error, instead of a session of silent drops.
                 if fingerprint != clew_protocol::SCHEMA_FINGERPRINT {
                     return self.on_handshake_failed(tr!(
-                        "clew-server was built from different protocol sources (server {server}, \
-                         this clew {client}) — rebuild the server (remote: reconnect to redeploy)",
+                        "clew-server was built from different protocol sources (server {server}, this Clew {client}) — rebuild the server (remote: reconnect to redeploy)",
                         server = fingerprint,
                         client = clew_protocol::SCHEMA_FINGERPRINT
                     ));

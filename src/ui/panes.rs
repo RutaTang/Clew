@@ -419,12 +419,14 @@ pub(crate) fn time_travel_story<'a>(
     tt: &'a TimeTravel,
     story: &'a [crate::PreparedSeg],
 ) -> Element<'a, Message> {
-    let name = tt.scope.symbol_name().unwrap_or(tr!("this block"));
+    // A name is quoted; the block that has none is not.
+    let title = match tt.scope.symbol_name() {
+        Some(name) => tr!("Story of “{name}”", name = name),
+        None => tr!("Story of this block").to_string(),
+    };
     let header = row![
         column![
-            text(tr!("Story of {name}", name = name))
-                .size(ts::BODY)
-                .color(theme::accent()),
+            text(title).size(ts::BODY).color(theme::accent()),
             // `git log -L` only follows the block's CURRENT lines, so earlier
             // rewrites may not be attributed — say so, so it's not read as a full
             // biography.
@@ -470,10 +472,11 @@ pub(crate) fn diff_view<'a>(
                 .size(ts::BODY)
                 .color(theme::accent()),
             space().width(Fill),
-            button(text(format!("✕ {}", tr!("Close"))).size(ts::SMALL))
-                .style(theme::toolbar_button)
-                .padding([2, 8])
-                .on_press(Message::Editor(EditorMsg::ToggleDiff)),
+            super::toolbar::icon_action(
+                crate::glyph::Glyph::Close,
+                tr!("Close"),
+                Some(Message::Editor(EditorMsg::ToggleDiff)),
+            ),
         ]
         .align_y(iced::Center),
     )
@@ -1722,7 +1725,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         rows = rows.push(row_of(
             Glyph::TimeTravel,
             tr!("This function through time"),
-            tr!("Scrub its history, commit by commit."),
+            tr!("Step through its history, commit by commit."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
@@ -1730,7 +1733,7 @@ fn margin_history(app: &App) -> Element<'_, Message> {
         .push(row_of(
             Glyph::TimeTravel,
             tr!("This file through time"),
-            tr!("Scrub the whole file back through its commits."),
+            tr!("Step back through the whole file's commits."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
         ))
         .push(row_of(

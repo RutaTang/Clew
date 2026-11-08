@@ -81,14 +81,14 @@ pub fn installed_bundle() -> Option<PathBuf> {
 /// answer: the two calls are a download apart.
 pub fn self_install_blocker() -> Option<String> {
     let Some(bundle) = installed_bundle() else {
-        return Some(tr!("clew is not running from an installed app").into());
+        return Some(tr!("Clew is not running from an installed app").into());
     };
     if let Err(e) = replaceable(&bundle) {
         return Some(e);
     }
     if let Err(e) = signing_identity(&bundle) {
         return Some(tr!(
-            "this copy of clew cannot anchor an update ({error})",
+            "this copy of Clew cannot update itself ({error})",
             error = e
         ));
     }
@@ -102,7 +102,7 @@ fn replaceable(bundle: &Path) -> Result<(), String> {
     // read-only mirror; there is no "installed" copy to replace.
     if bundle.to_string_lossy().contains("/AppTranslocation/") {
         return Err(tr!(
-            "clew is running from a quarantined, translocated copy — move Clew.app into /Applications and open it from there"
+            "Clew is running from a temporary copy macOS made — move Clew.app into /Applications and open it from there"
         )
         .into());
     }
@@ -114,13 +114,13 @@ fn replaceable(bundle: &Path) -> Result<(), String> {
     // the new copy are created; the bundle itself is renamed and, once the new
     // version is in, deleted — which needs write access inside it too.
     for (path, what) in [
-        (parent, tr!("the folder clew is installed in")),
+        (parent, tr!("the folder Clew is installed in")),
         (bundle, "Clew.app"),
     ] {
         if let Err(e) = writable(path) {
             return Err(match e.raw_os_error() {
                 Some(libc::EROFS) => tr!(
-                    "clew is running from a read-only volume (the disk image?) — copy Clew.app to /Applications and open it from there"
+                    "Clew is running from a read-only volume (the disk image?) — copy Clew.app to /Applications and open it from there"
                 )
                 .to_string(),
                 _ => tr!(
@@ -164,7 +164,7 @@ pub fn install_dmg(dmg: &Path, expected: Version, reopen: Option<PathBuf>) -> Re
 
 fn install_dmg_inner(dmg: &Path, expected: Version, reopen: Option<PathBuf>) -> Result<(), String> {
     let target = installed_bundle().ok_or(tr!(
-        "clew is not running from an installed app, so it can't update itself"
+        "Clew is not running from an installed app, so it can't update itself"
     ))?;
     // Re-checked, not taken from the pre-download answer: an install that
     // cannot complete must fail HERE, while clew is still running to say so.
@@ -653,7 +653,7 @@ fn check_candidate_version(
     let candidate = clew_core::update::ensure_upgrade(running, candidate)?;
     if candidate != expected {
         return Err(tr!(
-            "the update image holds clew {candidate}, but {expected} was offered; refusing it",
+            "the update image holds Clew {candidate}, but {expected} was offered; refusing it",
             candidate = candidate,
             expected = expected
         ));
@@ -1975,7 +1975,7 @@ mod tests {
         let translocated = root.join("AppTranslocation/0A1B/d/Clew.app");
         std::fs::create_dir_all(&translocated).unwrap();
         let err = replaceable(&translocated).unwrap_err();
-        assert!(err.contains("translocated"), "{err}");
+        assert!(err.contains("a temporary copy macOS made"), "{err}");
 
         // The parent directory not writable: the helper's first `mv` fails.
         std::fs::set_permissions(&apps, std::fs::Permissions::from_mode(0o555)).unwrap();

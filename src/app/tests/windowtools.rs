@@ -19,7 +19,7 @@ fn turn_app(
 ) {
     let mut app = scanned_app(tag);
     let mut rx = attach_server(&mut app);
-    let _pump = app.start_agent_turn("show me".into(), Vec::new(), ToolMap::new());
+    let _pump = app.start_agent_turn("show me".into(), false, Vec::new(), ToolMap::new());
     let stream = app.proj.link.agent_stream.expect("an agent turn is open");
     // What the turn was offered.
     let tools = std::iter::from_fn(|| rx.try_recv().ok())

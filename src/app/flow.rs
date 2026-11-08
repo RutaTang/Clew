@@ -352,7 +352,7 @@ impl App {
             _ => {
                 self.status = tr!(
                     "No {language} server ready — a value trace needs one",
-                    language = lang
+                    language = crate::app::languages::language_name(lang)
                 );
                 return Task::none();
             }
@@ -448,8 +448,14 @@ impl App {
         for node in nodes {
             tree.push_root(node);
         }
-        // Definitions and references share the cap: the note counts both.
-        let total = defs.len() + refs.len();
+        // Definitions and references share the cap: the note counts both,
+        // the declaration once (references are asked for with it).
+        let total = defs
+            .iter()
+            .chain(&refs)
+            .map(|t| (&t.path, t.line, t.character))
+            .collect::<HashSet<_>>()
+            .len();
         if total > MAX_FLOW_NODES {
             tree.note = Some(tr!(
                 "{total} occurrences; the first {shown} are shown",
@@ -458,10 +464,8 @@ impl App {
             ));
         } else if !local && !to_read.is_empty() {
             tree.note = Some(trn!(
-                "1 occurrence in a file not open here is listed by location only; open the \
-                 file to classify its line",
-                "{n} occurrences in files not open here are listed by location only; open a \
-                 file to classify its lines",
+                "1 occurrence in a file that is not open is shown by location only; open the file to see how it is used",
+                "{n} occurrences in files that are not open are shown by location only; open a file to see how they are used",
                 to_read.len()
             ));
         }
@@ -563,7 +567,10 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = tr!("No {language} server ready", language = lang);
+                self.status = tr!(
+                    "No {language} server ready",
+                    language = crate::app::languages::language_name(lang)
+                );
                 return Task::none();
             }
         };
@@ -929,7 +936,7 @@ impl App {
                 // A past revision on screen: its names are not the live
                 // file's, and the trace ran from the hidden live caret.
                 if ui::time_travel_pane(self).is_some() {
-                    self.status = tr!("Leave time travel to trace values").into();
+                    self.status = tr!("Exit Time Travel to trace values").into();
                     return Task::none();
                 }
                 let pane = self.proj.active;

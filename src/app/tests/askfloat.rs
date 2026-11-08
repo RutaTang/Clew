@@ -98,6 +98,7 @@ fn asking_opens_the_card_and_debug_keeps_the_bottom_panel() {
     let mut rx = attach_server(&mut app);
     let _ = app.start_agent_turn(
         "why?".into(),
+        false,
         Vec::new(),
         crate::app::integrations::ToolMap::new(),
     );
@@ -181,13 +182,32 @@ fn the_card_stands_in_the_corner() {
 }
 
 /// The tour's Ask step shows the card; the steps after it put it away.
+/// The tour speaks of the project by its folder's name.
+#[test]
+fn the_tour_names_the_project() {
+    let app = scanned_app("askfloat-tour-names");
+    let root = &app.proj.project.as_ref().expect("scanned").root;
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    let steps = crate::app::tutorial::steps(&app);
+    for title in [
+        "Welcome to Clew",
+        "The file tree",
+        "The overview",
+        "Project stats",
+        "The call graph",
+    ] {
+        let step = steps.iter().find(|s| s.title == title).expect(title);
+        assert!(step.body.contains(&name), "{title}: {}", step.body);
+    }
+}
+
 #[test]
 fn the_tour_shows_the_ask_card() {
     let mut app = scanned_app("askfloat-tour");
     let _ = app.update(Message::Tutorial(TutorialMsg::Start));
     let ask_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Ask clew, or tell it what to do")
+        .position(|s| s.title == "Ask Clew, or tell it what to do")
         .expect("an Ask step");
     while app.tutorial.is_some_and(|s| s < ask_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
@@ -467,9 +487,12 @@ fn going_back_to_the_oldest_session_keeps_it() {
     // A new session's first answer, streaming from the provider here.
     let stream = app.mint_request_id();
     let _ = app.start_ask_stream(
-        stream,
-        "why?".into(),
-        Vec::new(),
+        crate::app::state::PendingAsk {
+            stream,
+            question: "why?".into(),
+            sources: Vec::new(),
+            spoken: false,
+        },
         unreachable_llm(),
         "system".into(),
         vec![llm::ChatMsg::user("why?")],

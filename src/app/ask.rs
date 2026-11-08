@@ -218,6 +218,8 @@ impl App {
 
     /// Put Ask away — its pill too — the keyboard back with the code.
     pub(crate) fn close_ask(&mut self) {
+        // Put away, the conversation says no more.
+        self.stop_speaking();
         self.ask_sessions_menu = false;
         self.ask_sessions_query.clear();
         self.ask_view = AskView::Closed;
@@ -265,6 +267,8 @@ impl App {
             self.status = tr!("Still answering — wait, or press Stop").into();
             return Task::none();
         }
+        // A new question: what Clew was saying of the last answer stops.
+        self.stop_speaking();
         // "… now ask your question" has been heeded: it stayed in the status
         // line under the answer.
         let heeded: Vec<String> =
@@ -291,14 +295,21 @@ impl App {
         // can't run an agent turn).
         if self.server.is_up() && self.ai_on_server() {
             self.proj.ask_input.clear();
-            return self.start_agent_ask(question);
+            let spoken = std::mem::take(&mut self.proj.ask_spoken);
+            return self.start_agent_ask(question, spoken);
         }
-        self.on_ask_submit_rag(question)
+        let spoken = self.proj.ask_spoken;
+        self.on_ask_submit_rag(question, spoken)
     }
 
     /// The pre-agent Ask path: retrieval (embed → top-K) + one streamed
     /// completion. Kept as the fallback when an agent turn can't run.
-    pub(crate) fn on_ask_submit_rag(&mut self, question: String) -> Task<Message> {
+    ///
+    /// `spoken`: the question was said aloud, so its answer is read aloud
+    /// (`AskTurn::spoken`). It travels with the question to its turn: the
+    /// input's own flag (`ask_spoken`) belongs to whatever is typed or said
+    /// into the input meanwhile.
+    pub(crate) fn on_ask_submit_rag(&mut self, question: String, spoken: bool) -> Task<Message> {
         // Semantic retrieval needs an embedding index. But when the
         // debugger is paused or a selection is pinned, that live context
         // is the grounding — allow asking without an index.
@@ -313,8 +324,12 @@ impl App {
         let grounded = self.debug_context().is_some() || !self.proj.ask_pins.is_empty();
         if !has_index && !grounded {
             // Be specific when a pass is already building the index, so a
-            // question asked mid-"Explain All" doesn't read as a silent no-op.
-            self.status = if self.proj.explain.running || self.proj.building_embeddings {
+            // question asked mid-"Explain All" doesn't read as a silent no-op
+            // — and when no embeddings can be made, say what is missing, not
+            // to build an index that may well be there.
+            self.status = if ecfg.is_none() {
+                crate::app::embedding::why_no_embeddings()
+            } else if self.proj.explain.running || self.proj.building_embeddings {
                 tr!("Building the semantic index — ask again when it's ready").into()
             } else {
                 tr!("Build the semantic index first (Find by meaning → Build index)").into()
@@ -330,6 +345,7 @@ impl App {
         // turn ran, which is theirs to keep.
         if self.proj.ask_input.trim() == question.trim() {
             self.proj.ask_input.clear();
+            self.proj.ask_spoken = false;
         }
         self.reveal_ask();
         self.proj.asking = true;
@@ -350,19 +366,23 @@ impl App {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            embed::embed_batch_cancellable(&ecfg, std::slice::from_ref(&q), &|| {
-                                retired.load(std::sync::atomic::Ordering::Relaxed)
-                            })
+                            embed::embed_batch_cancellable(
+                                &ecfg,
+                                std::slice::from_ref(&q),
+                                embed::Purpose::Query,
+                                &|| retired.load(std::sync::atomic::Ordering::Relaxed),
+                            )
                             .map(|mut v| v.pop().unwrap_or_default())
                         })
                         .await
-                        .unwrap_or_else(|_| Err("task join failed".into()))
+                        .unwrap_or_else(|_| Err("an internal task failed".into()))
                     },
                     move |qvec| {
                         Message::Ask(AskMsg::Retrieved {
                             stamp: stamp.clone(),
                             stream,
                             question: question.clone(),
+                            spoken,
                             space: Some(space.clone()),
                             qvec,
                         })
@@ -374,6 +394,7 @@ impl App {
                 stamp,
                 stream,
                 question,
+                spoken,
                 space: None,
                 qvec: Ok(Vec::new()),
             })),
@@ -383,10 +404,12 @@ impl App {
     /// A question that could not be answered goes back into the Ask input,
     /// from which it was cleared at submit — unless the user has typed
     /// something there since, which stays. Failing used to take the question
-    /// with it.
-    fn return_question(&mut self, question: String) {
+    /// with it. Back in the input, it is still the question said aloud, if
+    /// it was one.
+    pub(crate) fn return_question(&mut self, question: String, spoken: bool) {
         if self.proj.ask_input.trim().is_empty() {
             self.proj.ask_input = question;
+            self.proj.ask_spoken = spoken;
         }
     }
 
@@ -394,6 +417,7 @@ impl App {
         &mut self,
         stream: u64,
         question: String,
+        spoken: bool,
         space: Option<embed::Space>,
         qvec: Result<Vec<f32>, String>,
     ) -> Task<Message> {
@@ -420,7 +444,7 @@ impl App {
                 || *space != self.proj.embed_index.space()
             {
                 self.proj.asking = false;
-                self.return_question(question);
+                self.return_question(question, spoken);
                 self.status = tr!("The index changed — ask again when it's ready").into();
                 return Task::none();
             }
@@ -429,7 +453,7 @@ impl App {
             Ok(v) => v,
             Err(e) => {
                 self.proj.asking = false;
-                self.return_question(question);
+                self.return_question(question, spoken);
                 self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
@@ -438,7 +462,7 @@ impl App {
         // another window's): the same gate, and the same offer, as a submit.
         if let Err(ask_for_key) = self.require_llm() {
             self.proj.asking = false;
-            self.return_question(question);
+            self.return_question(question, spoken);
             return ask_for_key;
         }
 
@@ -459,7 +483,7 @@ impl App {
             Ok(sources) => sources,
             Err(e) => {
                 self.proj.asking = false;
-                self.return_question(question);
+                self.return_question(question, spoken);
                 self.status = tr!("Ask failed: {error}", error = e);
                 return Task::none();
             }
@@ -582,6 +606,7 @@ impl App {
             stream,
             question,
             sources,
+            spoken,
         });
         Task::perform(
             async move {
@@ -629,7 +654,7 @@ impl App {
         };
         if messages.is_empty() {
             self.proj.asking = false;
-            self.return_question(pending.question);
+            self.return_question(pending.question, pending.spoken);
             self.status = tr!("Ask failed: the question's context could not be assembled").into();
             return Task::none();
         }
@@ -637,18 +662,11 @@ impl App {
             Ok(cfg) => cfg,
             Err(ask_for_key) => {
                 self.proj.asking = false;
-                self.return_question(pending.question);
+                self.return_question(pending.question, pending.spoken);
                 return ask_for_key;
             }
         };
-        self.start_ask_stream(
-            pending.stream,
-            pending.question,
-            pending.sources,
-            cfg,
-            ASK_SYSTEM.to_string(),
-            messages,
-        )
+        self.start_ask_stream(pending, cfg, ASK_SYSTEM.to_string(), messages)
     }
 
     /// Start a streaming answer for the Ask panel: push a pending turn, then feed
@@ -657,21 +675,25 @@ impl App {
     /// the Task that pumps tokens into `AskMsg::Delta` / `AskMsg::StreamEnded`.
     pub(crate) fn start_ask_stream(
         &mut self,
-        stream_id: u64,
-        question: String,
-        sources: Vec<(explain::Node, f32)>,
+        ask: PendingAsk,
         cfg: llm::Config,
         system: String,
         messages: Vec<llm::ChatMsg>,
     ) -> Task<Message> {
         use iced::futures::SinkExt;
+        let PendingAsk {
+            stream: stream_id,
+            question,
+            sources,
+            spoken,
+        } = ask;
         // `stream_id` was minted when the question was submitted: it is how a
         // delta finds its own turn, and how Stop found the question before
         // any stream existed.
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question,
-            spoken: std::mem::take(&mut self.proj.ask_spoken),
+            spoken,
             answer_md: String::new(),
             answer: Vec::new(),
             sources,
@@ -815,6 +837,7 @@ impl App {
     pub(crate) fn start_agent_turn(
         &mut self,
         question: String,
+        spoken: bool,
         tools: Vec<clew_protocol::ExternalTool>,
         map: crate::app::integrations::ToolMap,
     ) -> Task<Message> {
@@ -856,7 +879,7 @@ impl App {
         self.proj.ask_turns.push(AskTurn {
             stream: stream_id,
             question: question.clone(),
-            spoken: std::mem::take(&mut self.proj.ask_spoken),
+            spoken,
             answer_md: String::new(),
             answer: Vec::new(),
             sources: Vec::new(),
@@ -964,14 +987,17 @@ impl App {
         turn.answer_md.push_str(&text);
         // First token(s): the answer is streaming, not "thinking".
         self.proj.asking = false;
+        // A question said aloud: its answer is said too, as it comes.
+        let said = self.read_answer(stream, false);
         // Follow the growing answer.
-        operation::scroll_to(
+        let follow = operation::scroll_to(
             ui::ask_scroll_id(),
             AbsoluteOffset {
                 x: 0.0,
                 y: f32::MAX,
             },
-        )
+        );
+        Task::batch([said, follow])
     }
 
     pub(crate) fn on_ask_stream_ended(
@@ -1040,14 +1066,25 @@ impl App {
                 y: f32::MAX,
             },
         );
-        // Answered, with Keep listening on: listen for what comes next. A
-        // Stop or a failure leaves the microphone to the reader.
+        // What is left of an answer said aloud is said — why it failed,
+        // too; a Stop stops it.
+        let said = if matches!(outcome, StreamOutcome::Stopped) {
+            // This answer's speech, not another's: a Stop's close can come
+            // after the next question was asked.
+            self.hush_answer(stream);
+            Task::none()
+        } else {
+            self.read_answer(stream, true)
+        };
+        // Answered, with Keep listening on: listen for what comes next —
+        // once all of it is said. A Stop or a failure leaves the microphone
+        // to the reader.
         let listen = if matches!(outcome, StreamOutcome::Done) {
             self.resume_listening()
         } else {
             Task::none()
         };
-        Task::batch([task, to_bottom, listen])
+        Task::batch([task, to_bottom, said, listen])
     }
 
     /// The agent made a tool call: append its chip to the open turn and keep
@@ -1110,7 +1147,9 @@ impl App {
         {
             let reason = reason.clone();
             let question = self.proj.ask_turns[idx].question.clone();
-            let fallback = self.on_ask_submit_rag(question);
+            // Said aloud, its answer from the index is said aloud too.
+            let spoken = self.proj.ask_turns[idx].spoken;
+            let fallback = self.on_ask_submit_rag(question, spoken);
             // `asking` is how the retrieval path says it took the question
             // over. It only appends turns, so `idx` still names this one.
             if self.proj.asking {
@@ -1137,6 +1176,8 @@ impl App {
 
     /// Stop the in-flight answer where it actually runs — the Stop button.
     pub(crate) fn on_agent_stop(&mut self) -> Task<Message> {
+        // Stop is for the answer, as it is written and as it is said.
+        self.stop_speaking();
         self.stop_ask_streams()
     }
 
@@ -1412,10 +1453,11 @@ impl App {
             AskMsg::Retrieved {
                 stream,
                 question,
+                spoken,
                 space,
                 qvec,
                 ..
-            } => self.on_ask_retrieved(stream, question, space, qvec),
+            } => self.on_ask_retrieved(stream, question, spoken, space, qvec),
             AskMsg::ContextReady {
                 stream, messages, ..
             } => self.on_ask_context_ready(stream, messages),
@@ -1435,6 +1477,7 @@ impl App {
                 // turns alone left `agent_stream` set, so the Stop button
                 // stayed up and the one-at-a-time gate blocked the next
                 // question until the abandoned turn finished.
+                self.stop_speaking();
                 let stop = self.stop_ask_streams();
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();
@@ -1464,9 +1507,10 @@ impl App {
             AskMsg::McpGathered {
                 token,
                 question,
+                spoken,
                 gathered,
                 ..
-            } => self.on_mcp_gathered(token, question, gathered),
+            } => self.on_mcp_gathered(token, question, spoken, gathered),
             AskMsg::AgentToolCalled {
                 stream,
                 call,

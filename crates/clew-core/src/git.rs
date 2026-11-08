@@ -189,7 +189,7 @@ impl std::fmt::Display for GitError {
             GitError::Spawn(e) => write!(f, "git could not be started: {e}"),
             GitError::Unsupported(version) => write!(
                 f,
-                "git {version} is too old for clew (it needs {}.{} or newer)",
+                "git {version} is too old for Clew (it needs {}.{} or newer)",
                 MIN_GIT.0, MIN_GIT.1
             ),
             GitError::NotARepository => f.write_str("not a git repository"),

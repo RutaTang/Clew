@@ -1423,7 +1423,10 @@ impl Server {
                     .unwrap_or_else(|_| {
                         Err((
                             ErrorCode::Failed,
-                            format!("resolving the {language} server failed"),
+                            format!(
+                                "resolving the {language} server failed",
+                                language = lsp_gate::shown(&language)
+                            ),
                         ))
                     });
                     match resolved {
@@ -1484,7 +1487,10 @@ impl Server {
                     .await
                     .unwrap_or_else(|_| {
                         clew_protocol::LspResolution::Unsupported {
-                            message: format!("resolving the {language} server failed"),
+                            message: format!(
+                                "resolving the {language} server failed",
+                                language = lsp_gate::shown(&language)
+                            ),
                         }
                     });
                     Self::reply(
@@ -1528,7 +1534,10 @@ impl Server {
                     let resolution = match outcome {
                         Ok(resolution) => resolution,
                         Err(_) => clew_protocol::LspResolution::Unsupported {
-                            message: format!("installing the {language} server failed"),
+                            message: format!(
+                                "installing the {language} server failed",
+                                language = lsp_gate::shown(&language)
+                            ),
                         },
                     };
                     Self::reply(
@@ -1648,6 +1657,13 @@ impl Server {
                     })
                 });
                 self.stop_ai_work(|w| w.chat && chat_gone || w.embed && embed_gone);
+                // Vectors no longer made here (another source chosen, the
+                // model removed): the model this server holds in memory, a
+                // few hundred megabytes, goes now, not once it has been idle
+                // a while. One making a batch goes when its batch is stopped.
+                if !embed.as_ref().is_some_and(embed::Config::is_local) {
+                    embed::local::let_go();
+                }
                 self.wipe_ai_keys();
                 self.ai_chat = chat;
                 self.ai_embed = embed;
@@ -1820,7 +1836,9 @@ impl Server {
                 tokio::spawn(async move {
                     let stop = flag.clone();
                     let result = tokio::task::spawn_blocking(move || {
-                        embed::embed_all(&cfg, &texts, &|| stop.load(Ordering::Relaxed))
+                        embed::embed_all(&cfg, &texts, embed::Purpose::Document, &|| {
+                            stop.load(Ordering::Relaxed)
+                        })
                     })
                     .await;
                     agents
@@ -2768,6 +2786,85 @@ mod tests {
             ended.expect("the stopped stream went on waiting for the queue"),
             StreamOutcome::Stopped
         );
+    }
+
+    /// Vectors no longer made here — the client chose a service, or none —
+    /// and the model this server holds in memory, a few hundred megabytes,
+    /// goes now, not once it has been idle a while.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vectors_no_longer_made_here_let_the_model_go() {
+        use clew_core::embed::local;
+        use clew_protocol::{AiEmbedConfig, Request};
+        let data = clew_core::testutil::DataDir::new("server-embed-let-go");
+        let bin = data.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        clew_core::testutil::fake_embedder(&bin.join("clew-speak"), "vectors");
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs = std::iter::once(bin.clone()).chain(std::env::split_paths(&path));
+        let _path =
+            clew_core::testutil::EnvVars::new().set("PATH", std::env::join_paths(dirs).unwrap());
+        let model = local::dir().unwrap();
+        for file in local::MODEL.files {
+            let path = model.join(file.path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut server = super::Server::new(out);
+        let hello = Request::Hello {
+            protocol: clew_protocol::PROTOCOL_VERSION,
+            fingerprint: clew_protocol::SCHEMA_FINGERPRINT.into(),
+            locale: None,
+        };
+        assert!(server.handle(0, hello).await.is_some());
+        let here = clew_core::embed::Config::local();
+        let config = |embed: Option<AiEmbedConfig>| Request::SetAiConfig {
+            chat: None,
+            embed,
+            locale: None,
+        };
+        let local_config = AiEmbedConfig {
+            api_key: here.api_key,
+            model: here.model,
+            base_url: here.base_url,
+        };
+        assert!(
+            server
+                .handle(1, config(Some(local_config.clone())))
+                .await
+                .is_none()
+        );
+        // The same again: it is kept. (Tried a few times: another test of
+        // this run changing its server's config lets go of this process's
+        // model too, and may do so at just this moment.)
+        let mut kept = false;
+        for id in 2..5 {
+            let held = local::embed(&["the total".into()], local::Purpose::Query, &|| false);
+            assert_eq!(held.unwrap().len(), 1);
+            assert!(
+                server
+                    .handle(id, config(Some(local_config.clone())))
+                    .await
+                    .is_none()
+            );
+            if local::let_go() {
+                kept = true;
+                break;
+            }
+        }
+        assert!(kept, "the model went while vectors are still made here");
+        let held = local::embed(&["the total".into()], local::Purpose::Query, &|| false);
+        assert_eq!(held.unwrap().len(), 1);
+        let service = AiEmbedConfig {
+            api_key: "k".into(),
+            model: "m".into(),
+            base_url: "http://emb.test/v1".into(),
+        };
+        assert!(server.handle(5, config(Some(service))).await.is_none());
+        let still_held = local::let_go();
+        local::unload();
+        assert!(!still_held, "the model was kept after a service was chosen");
     }
 
     /// An `Embed` the client cancels — the index build of a project its

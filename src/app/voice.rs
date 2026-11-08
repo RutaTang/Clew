@@ -47,6 +47,9 @@ pub(crate) trait Listening: Send {
     /// Seconds of quiet since the speaker last spoke; `None` before any
     /// speech.
     fn silence_after_speech(&self) -> Option<f32>;
+    /// The last `seconds` heard, and the rate they are at: what Smart Turn
+    /// judges a pause by ([`crate::app::turn`]).
+    fn recent(&self, seconds: f32) -> (Vec<f32>, u32);
     /// Whether it has heard all it may keep.
     fn full(&self) -> bool;
     /// A failure since it started (the device went away).
@@ -61,6 +64,9 @@ impl Listening for Recorder {
     }
     fn silence_after_speech(&self) -> Option<f32> {
         Recorder::silence_after_speech(self)
+    }
+    fn recent(&self, seconds: f32) -> (Vec<f32>, u32) {
+        Recorder::recent(self, seconds)
     }
     fn full(&self) -> bool {
         Recorder::full(self)
@@ -218,10 +224,29 @@ pub(crate) enum HeardOutcome {
 pub(crate) struct ModelDownload {
     pub done: u64,
     pub total: Option<u64>,
-    cancel: Arc<AtomicBool>,
+    pub(crate) cancel: Arc<AtomicBool>,
+    /// The model's files, claimed for as long as the download is wanted:
+    /// let go when it is cancelled, not when its transfer has wound down —
+    /// a Download straight after a Cancel was refused as "downloading in
+    /// another window". The transfer still stopping writes a partial file
+    /// of its own, and puts nothing in place once cancelled.
+    pub(crate) _claim: Claim,
     /// Aborts the transfer when dropped — when the window closes with it
     /// running.
-    _task: iced::task::Handle,
+    pub(crate) _task: iced::task::Handle,
+}
+
+/// One of the voice settings: what is written when it changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Pref {
+    Model,
+    Language,
+    RunCommands,
+    SendQuestions,
+    Speak,
+    Speed,
+    /// The voice picked for this speech model.
+    Voice(&'static str),
 }
 
 /// The user's voice settings, kept in config.toml's `[voice]`.
@@ -236,6 +261,13 @@ pub(crate) struct VoicePrefs {
     pub run_commands: bool,
     /// Ask what is not one at once, rather than leave it in the input.
     pub send_questions: bool,
+    /// Read the answers to questions that were said aloud
+    /// ([`crate::app::speech`]).
+    pub speak: bool,
+    /// How fast Clew speaks: 1 is the voice's own pace.
+    pub speed: f32,
+    /// The voice picked for each speech model, by the model's id.
+    pub voices: std::collections::BTreeMap<String, i32>,
 }
 
 impl Default for VoicePrefs {
@@ -245,6 +277,9 @@ impl Default for VoicePrefs {
             language: None,
             run_commands: true,
             send_questions: true,
+            speak: true,
+            speed: 1.0,
+            voices: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -291,18 +326,91 @@ impl VoicePrefs {
         if let Some(on) = section.get("send").and_then(|v| v.as_bool()) {
             prefs.send_questions = on;
         }
+        if let Some(on) = section.get("speak").and_then(|v| v.as_bool()) {
+            prefs.speak = on;
+        }
+        if let Some(speed) = section
+            .get("speed")
+            .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64)))
+            .map(|v| v as f32)
+            .filter(|v| (0.5..=2.0).contains(v))
+        {
+            prefs.speed = speed;
+        }
+        if let Some(voices) = section.get("voices").and_then(|v| v.as_table()) {
+            for (id, voice) in voices {
+                let Some(model) = clew_voice::speech::find(id) else {
+                    continue;
+                };
+                if let Some(voice) = voice
+                    .as_integer()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .filter(|v| model.voices.iter().any(|known| known.id == *v))
+                {
+                    prefs.voices.insert(id.clone(), voice);
+                }
+            }
+        }
         prefs
     }
 
-    fn save(&self) -> Result<(), String> {
-        let mut section = toml::Table::new();
-        section.insert("model".into(), self.model.clone().into());
-        if let Some(language) = &self.language {
-            section.insert("language".into(), language.clone().into());
-        }
-        section.insert("commands".into(), self.run_commands.into());
-        section.insert("send".into(), self.send_questions.into());
-        clew_core::globalconfig::update("voice", section)
+    /// Write `pref` as it is now — that setting alone, into `[voice]` as
+    /// it stands on disk: another window's settings, changed since this one
+    /// read them, are kept.
+    fn save(&self, pref: Pref) -> Result<(), String> {
+        clew_core::globalconfig::edit(|root| {
+            if !root.get("voice").is_some_and(|v| v.is_table()) {
+                root.insert("voice".into(), toml::Table::new().into());
+            }
+            let Some(section) = root.get_mut("voice").and_then(|v| v.as_table_mut()) else {
+                return;
+            };
+            match pref {
+                Pref::Model => {
+                    section.insert("model".into(), self.model.clone().into());
+                }
+                Pref::Language => match &self.language {
+                    Some(language) => {
+                        section.insert("language".into(), language.clone().into());
+                    }
+                    None => {
+                        section.remove("language");
+                    }
+                },
+                Pref::RunCommands => {
+                    section.insert("commands".into(), self.run_commands.into());
+                }
+                Pref::SendQuestions => {
+                    section.insert("send".into(), self.send_questions.into());
+                }
+                Pref::Speak => {
+                    section.insert("speak".into(), self.speak.into());
+                }
+                Pref::Speed => {
+                    section.insert("speed".into(), f64::from(self.speed).into());
+                }
+                Pref::Voice(model) => {
+                    if !section.get("voices").is_some_and(|v| v.is_table()) {
+                        section.insert("voices".into(), toml::Table::new().into());
+                    }
+                    if let (Some(voices), Some(voice)) = (
+                        section.get_mut("voices").and_then(|v| v.as_table_mut()),
+                        self.voices.get(model),
+                    ) {
+                        voices.insert(model.into(), i64::from(*voice).into());
+                    }
+                }
+            }
+        })
+    }
+
+    /// The voice `model` speaks in: the one picked, else its own default.
+    pub(crate) fn voice_for(&self, model: &clew_voice::speech::VoiceModel) -> i32 {
+        self.voices
+            .get(model.id)
+            .copied()
+            .filter(|v| model.voices.iter().any(|known| known.id == *v))
+            .unwrap_or(model.default_voice)
     }
 
     /// The model chosen, from the catalog.
@@ -316,8 +424,10 @@ impl VoicePrefs {
 /// Voice's state in a window.
 pub(crate) struct VoiceState {
     pub phase: VoicePhase,
-    /// The microphone, while listening.
-    listening: Option<Box<dyn Listening>>,
+    /// The microphone, while listening, and the model what it hears is
+    /// for: the one found on this computer when listening began, whatever
+    /// another window picks meanwhile.
+    listening: Option<(Box<dyn Listening>, &'static Model)>,
     /// Stops the transcription in progress.
     cancel: Arc<AtomicBool>,
     /// The last run started, so a late result of an earlier one is dropped.
@@ -344,6 +454,10 @@ pub(crate) struct VoiceState {
     pub(crate) open_mic: OpenMic,
     pub(crate) transcriber: Arc<dyn Transcriber>,
     pub(crate) fetch: Fetch,
+    /// Clew's answers, read aloud.
+    pub speech: crate::app::speech::Speech,
+    /// Smart Turn: when the speaker has finished.
+    pub(crate) turn: crate::app::turn::TurnState,
 }
 
 /// How long the pill in the corner says what was last heard.
@@ -379,26 +493,33 @@ impl VoiceState {
             open_mic: open_system_mic,
             transcriber: ENGINE.clone(),
             fetch: fetch_over_net,
+            speech: crate::app::speech::Speech::new(),
+            turn: crate::app::turn::TurnState::new(),
         }
     }
 
     /// Whether Esc has something of voice's to put away: listening, a
-    /// transcription, a command waiting for a yes.
+    /// transcription, a command waiting for a yes, Clew speaking.
     pub(crate) fn is_busy(&self) -> bool {
-        self.phase != VoicePhase::Idle || self.confirm.is_some()
+        self.phase != VoicePhase::Idle || self.confirm.is_some() || self.speech.is_speaking()
     }
 
     pub(crate) fn is_listening(&self) -> bool {
         matches!(self.phase, VoicePhase::Listening { .. })
     }
 
+    /// The microphone, while it listens.
+    pub(crate) fn listening_now(&self) -> Option<&dyn Listening> {
+        self.listening.as_ref().map(|(l, _)| l.as_ref())
+    }
+
     /// Back to idle, as before anything was said — the key's last press
-    /// forgotten too, so a test's next press is not taken for a repeat.
+    /// forgotten too, so a test's next press is not taken for a repeat. A
+    /// command waiting for a yes still waits, as it does for a real press.
     #[cfg(test)]
     pub(crate) fn reset_for_test(&mut self) {
         self.phase = VoicePhase::Idle;
         self.listening = None;
-        self.confirm = None;
         self.heard = None;
         self.last_toggle = None;
     }
@@ -422,6 +543,25 @@ pub enum VoiceMsg {
     Cancel,
     /// While listening: read the level and look for the pause that ends it.
     Tick,
+    /// What Smart Turn said of pause `pause` of listening `listen`: how
+    /// likely it is that the speaker has finished, or why it could not say.
+    Judged {
+        listen: u64,
+        pause: u64,
+        result: Result<f32, String>,
+    },
+    /// Download Smart Turn (the button that says its size).
+    DownloadTurn,
+    CancelTurnDownload,
+    TurnDownloadProgress {
+        done: u64,
+        total: Option<u64>,
+    },
+    TurnDownloaded(Result<(), String>),
+    /// Delete Smart Turn.
+    RemoveTurn,
+    /// Smart Turn deleted, or why it could not be.
+    TurnRemoved(Result<(), String>),
     /// What a run heard: its words, or why there are none.
     Transcribed {
         token: u64,
@@ -452,6 +592,48 @@ pub enum VoiceMsg {
     SetSendQuestions(bool),
     /// Listen again after each answer, or not.
     SetKeepListening(bool),
+    /// A sentence made into speech, for the stop round it was made in — or
+    /// why it could not be.
+    Spoken {
+        round: u64,
+        result: Result<crate::app::speech::Audio, clew_voice::speaker::SayError>,
+        /// The output, opened meanwhile when none was open.
+        opened: Option<crate::app::speech::Opened>,
+    },
+    /// While Clew speaks: the meter, and whether all is said.
+    SpeakTick,
+    /// Stop speaking.
+    StopSpeaking,
+    /// Read answers to spoken questions aloud, or not.
+    SetSpeak(bool),
+    /// How fast Clew speaks.
+    SetSpeed(f32),
+    /// Speak with this voice of this speech model.
+    PickSpeechVoice {
+        model: &'static str,
+        voice: i32,
+    },
+    /// Say a sample with this speech model.
+    TrySpeech(&'static str),
+    /// Download a speech model (the button that says its size).
+    DownloadSpeech(&'static str),
+    CancelSpeechDownload(&'static str),
+    SpeechDownloadProgress {
+        id: &'static str,
+        done: u64,
+        total: Option<u64>,
+    },
+    SpeechDownloaded {
+        id: &'static str,
+        result: Result<(), String>,
+    },
+    /// Delete a downloaded speech model.
+    RemoveSpeech(&'static str),
+    /// A speech model deleted, or why it could not be.
+    SpeechRemoved {
+        id: &'static str,
+        result: Result<(), String>,
+    },
 }
 
 impl VoiceMsg {
@@ -597,7 +779,11 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
     if said.is_empty() {
         return None;
     }
-    let mut found = None;
+    // The title as it is written is a better fit than the title without its
+    // category: "Raccourcis clavier" is "Raccourcis clavier…", not
+    // "Réglages : Raccourcis clavier". Two equally good: neither.
+    let mut found: Option<(usize, usize)> = None;
+    let mut tied = false;
     for (index, title) in shown.iter().enumerate() {
         // The title, without its category, without its aside, both.
         let main = title
@@ -609,23 +795,45 @@ pub(crate) fn said_as_shown(lang: crate::i18n::Lang, said: &str, shown: &[&str])
                 None => t.to_string(),
             }
         };
-        let fits = [*title, main, &plain(title), &plain(main)]
+        let fit = if [*title, &plain(title)]
             .iter()
-            .any(|form| bare(form) == said);
-        if fits {
-            if found.is_some() {
-                return None;
+            .any(|form| bare(form) == said)
+        {
+            0
+        } else if [main, &plain(main)].iter().any(|form| bare(form) == said) {
+            1
+        } else {
+            continue;
+        };
+        match found {
+            Some((best, _)) if best < fit => {}
+            Some((best, _)) if best == fit => tied = true,
+            _ => {
+                found = Some((fit, index));
+                tied = false;
             }
-            found = Some(index);
         }
     }
-    found
+    if tied { None } else { found.map(|(_, i)| i) }
 }
 
 impl App {
     /// Handle a [`VoiceMsg`].
     pub(crate) fn update_voice(&mut self, message: VoiceMsg) -> Task<Message> {
         match message {
+            message @ (VoiceMsg::Spoken { .. }
+            | VoiceMsg::SpeakTick
+            | VoiceMsg::StopSpeaking
+            | VoiceMsg::SetSpeak(_)
+            | VoiceMsg::SetSpeed(_)
+            | VoiceMsg::PickSpeechVoice { .. }
+            | VoiceMsg::TrySpeech(_)
+            | VoiceMsg::DownloadSpeech(_)
+            | VoiceMsg::CancelSpeechDownload(_)
+            | VoiceMsg::SpeechDownloadProgress { .. }
+            | VoiceMsg::SpeechDownloaded { .. }
+            | VoiceMsg::RemoveSpeech(_)
+            | VoiceMsg::SpeechRemoved { .. }) => self.update_speech(message),
             VoiceMsg::Toggle => self.on_voice_toggle(),
             VoiceMsg::SetKeepListening(on) => {
                 self.voice.keep_listening = on;
@@ -637,6 +845,17 @@ impl App {
                 Task::none()
             }
             VoiceMsg::Tick => self.on_voice_tick(),
+            VoiceMsg::Judged {
+                listen,
+                pause,
+                result,
+            } => self.on_judged(listen, pause, result),
+            message @ (VoiceMsg::DownloadTurn
+            | VoiceMsg::CancelTurnDownload
+            | VoiceMsg::TurnDownloadProgress { .. }
+            | VoiceMsg::TurnDownloaded(_)
+            | VoiceMsg::RemoveTurn
+            | VoiceMsg::TurnRemoved(_)) => self.on_turn_settings(message),
             VoiceMsg::Transcribed { token, result } => self.on_transcribed(token, result),
             VoiceMsg::Confirm => match self.voice.confirm.take() {
                 Some(title) => {
@@ -671,18 +890,31 @@ impl App {
                 match result {
                     Ok(_) => {
                         self.voice.download_errors.remove(id);
-                        self.status = tr!(
-                            "{model} is ready — press the voice key to talk",
-                            model = name
-                        );
                         // The model just downloaded is the one the voice
-                        // key hears with from now on, as that says: kept
-                        // to the one chosen before, the key would send the
-                        // reader back to Settings for a model still not on
-                        // this computer (the first one chosen is Small).
-                        if self.voice.prefs.model != id {
+                        // key hears with when the one chosen is not on this
+                        // computer (the first one chosen, Small, is not):
+                        // kept to it, the key sent the reader back to
+                        // Settings for it. One chosen and here stays chosen
+                        // — one picked while this downloaded included.
+                        let chosen = self.voice.prefs.model();
+                        // Nor one chosen and still on its way, in any window.
+                        let coming = self
+                            .voice
+                            .store
+                            .as_ref()
+                            .is_some_and(|store| downloading(&store.path(chosen)));
+                        let switch = chosen.id != id && !self.voice.installed(chosen) && !coming;
+                        self.status = if switch || chosen.id == id {
+                            tr!(
+                                "{model} is ready — press the voice key to talk",
+                                model = name
+                            )
+                        } else {
+                            tr!("{model} is downloaded", model = name)
+                        };
+                        if switch {
                             self.voice.prefs.model = id.to_string();
-                            self.save_voice_prefs();
+                            self.save_voice_pref(Pref::Model);
                         }
                     }
                     Err(e) => {
@@ -697,42 +929,59 @@ impl App {
                 Task::none()
             }
             VoiceMsg::RemoveModel(id) => {
+                let mut rechosen = false;
                 if let (Some(model), Some(store)) = (models::find(id), self.voice.store.as_ref()) {
                     let name = crate::i18n::lookup(model.name);
                     self.status = match store.remove(model) {
-                        Ok(()) => tr!("Removed {model}", model = name),
+                        Ok(()) => {
+                            // The model the voice key hears with, removed
+                            // while another is still on this computer: that
+                            // one is used now, rather than the key asking to
+                            // download again the one just removed.
+                            if self.voice.prefs.model == model.id
+                                && let Some(other) =
+                                    models::MODELS.iter().find(|m| store.installed(m))
+                            {
+                                self.voice.prefs.model = other.id.to_string();
+                                rechosen = true;
+                            }
+                            tr!("Removed {model}", model = name)
+                        }
                         Err(e) => tr!("Could not remove {model}: {error}", model = name, error = e),
                     };
+                }
+                if rechosen {
+                    self.save_voice_pref(Pref::Model);
                 }
                 Task::none()
             }
             VoiceMsg::PickModel(id) => {
                 if models::find(id).is_some() {
                     self.voice.prefs.model = id.to_string();
-                    self.save_voice_prefs();
+                    self.save_voice_pref(Pref::Model);
                 }
                 Task::none()
             }
             VoiceMsg::SetLanguage(language) => {
                 self.voice.prefs.language = language.map(str::to_string);
-                self.save_voice_prefs();
+                self.save_voice_pref(Pref::Language);
                 Task::none()
             }
             VoiceMsg::SetRunCommands(on) => {
                 self.voice.prefs.run_commands = on;
-                self.save_voice_prefs();
+                self.save_voice_pref(Pref::RunCommands);
                 Task::none()
             }
             VoiceMsg::SetSendQuestions(on) => {
                 self.voice.prefs.send_questions = on;
-                self.save_voice_prefs();
+                self.save_voice_pref(Pref::SendQuestions);
                 Task::none()
             }
         }
     }
 
-    fn save_voice_prefs(&mut self) {
-        if let Err(e) = self.voice.prefs.save() {
+    pub(crate) fn save_voice_pref(&mut self, pref: Pref) {
+        if let Err(e) = self.voice.prefs.save(pref) {
             self.status = tr!("Could not save the voice settings: {error}", error = e);
         }
     }
@@ -757,7 +1006,11 @@ impl App {
                 self.status = tr!("Still working out what was said…").into();
                 Task::none()
             }
-            VoicePhase::Idle => self.start_listening(),
+            VoicePhase::Idle => {
+                // Said over Clew, as over a person: it stops, and listens.
+                self.stop_speaking();
+                self.start_listening()
+            }
         }
     }
 
@@ -766,6 +1019,12 @@ impl App {
     /// heard or waiting for a yes, and there is a model to hear it with
     /// (this never sends the reader to Settings for one).
     pub(crate) fn resume_listening(&mut self) -> Task<Message> {
+        // Not while Clew speaks: the microphone would hear it. Once all is
+        // said, this is asked again.
+        if self.voice.keep_listening && self.voice.speech.is_speaking() {
+            self.voice.speech.listen_after = true;
+            return Task::none();
+        }
         let ready = self.voice.keep_listening
             && self.ask_view.is_open()
             && self.voice.phase == VoicePhase::Idle
@@ -780,7 +1039,8 @@ impl App {
 
     /// Open the microphone — once there is a model to hear it with.
     fn start_listening(&mut self) -> Task<Message> {
-        self.voice.confirm = None;
+        // A command waiting for a yes keeps waiting: what is said next can
+        // be the yes (or the no).
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
             self.status = tr!(
@@ -793,13 +1053,20 @@ impl App {
         }
         match (self.voice.open_mic)(MAX_SECONDS) {
             Ok(listening) => {
-                self.voice.listening = Some(listening);
+                self.voice.listening = Some((listening, model));
                 self.voice.phase = VoicePhase::Listening {
                     since: Instant::now(),
                     level: 0.0,
                 };
+                self.turn_listening_began();
                 self.voice.heard = None;
-                self.status = tr!("Listening… say a command or a question (Esc cancels)").into();
+                self.status = match &self.voice.confirm {
+                    Some(title) => tr!(
+                        "Listening… say yes to run {command}, or no",
+                        command = crate::i18n::lookup(title)
+                    ),
+                    None => tr!("Listening… say a command or a question (Esc cancels)").into(),
+                };
             }
             Err(e) => {
                 self.status = tr!("Can't listen: {error}", error = e);
@@ -817,7 +1084,7 @@ impl App {
         let VoicePhase::Listening { since, .. } = self.voice.phase else {
             return Task::none();
         };
-        let Some(listening) = self.voice.listening.as_ref() else {
+        let Some((listening, _)) = self.voice.listening.as_ref() else {
             return Task::none();
         };
         if let Some(e) = listening.error() {
@@ -827,13 +1094,21 @@ impl App {
         }
         let level = listening.level();
         self.voice.phase = VoicePhase::Listening { since, level };
-        let ended = listening.full()
-            || listening
-                .silence_after_speech()
-                .is_some_and(|quiet| quiet >= END_SILENCE);
-        if ended {
+        let full = listening.full();
+        let quiet = listening.silence_after_speech();
+        // The pause ends listening — at once when Smart Turn hears a turn
+        // finished, later when it hears one that is not, after
+        // [`END_SILENCE`] without it.
+        let (paused, judge) = self.pause_ends(quiet);
+        if full || paused {
             return self.stop_listening();
         }
+        if quiet.is_some() {
+            return judge;
+        }
+        let Some((listening, _)) = self.voice.listening.as_ref() else {
+            return Task::none();
+        };
         if listening.silence_after_speech().is_none()
             && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
         {
@@ -850,7 +1125,7 @@ impl App {
     /// Stop listening and turn what was heard into words, off the UI
     /// thread.
     fn stop_listening(&mut self) -> Task<Message> {
-        let Some(listening) = self.voice.listening.take() else {
+        let Some((listening, model)) = self.voice.listening.take() else {
             return Task::none();
         };
         let recording = listening.stop();
@@ -859,18 +1134,29 @@ impl App {
         self.voice.phase = VoicePhase::Transcribing { token };
         self.voice.cancel = Arc::new(AtomicBool::new(false));
         self.status = tr!("Transcribing…").into();
-        let model = self.voice.prefs.model();
         let Some(path) = self.voice.store.as_ref().map(|s| s.path(model)) else {
             return self.on_transcribed(token, Err(tr!("no data directory for the model").into()));
         };
         // The window's command names, so whisper spells them as they are
-        // spelled here.
-        let hint = self
+        // spelled here — and only those: the longer the hint, the likelier
+        // whisper is to hear it in what was not clearly said. The phrases
+        // said with a value ("go to line 30") use the titles' words.
+        let words: Vec<String> = self
             .palette_commands()
             .iter()
+            // Not the voice key's own "Talk": nobody says it, and whisper
+            // would hear it for "start".
+            .filter(|c| {
+                !matches!(
+                    c.action,
+                    crate::app::palette::PaletteAction::Send(Message::Editor(
+                        EditorMsg::RunAction(crate::keymap::Action::Voice)
+                    ))
+                )
+            })
             .map(|c| c.shown().trim_end_matches('…').to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+            .collect();
+        let hint = words.join(", ");
         let options = Options {
             language: self.voice.prefs.language.clone(),
             hint,
@@ -898,9 +1184,12 @@ impl App {
     }
 
     /// Esc: stop listening or transcribing and keep nothing; or say no to
-    /// the command that waits for a yes.
+    /// the command that waits for a yes; and stop speaking.
     pub(crate) fn cancel_voice(&mut self) {
-        if let Some(listening) = self.voice.listening.take() {
+        if self.stop_speaking() {
+            self.status = tr!("Stopped speaking").into();
+        }
+        if let Some((listening, _)) = self.voice.listening.take() {
             drop(listening.stop());
         }
         if matches!(self.voice.phase, VoicePhase::Transcribing { .. }) {
@@ -942,6 +1231,33 @@ impl App {
             });
             return Task::none();
         }
+        // The answer to a command waiting for a yes; anything else said
+        // instead puts it away and is read as itself.
+        if let Some(title) = self.voice.confirm.take() {
+            match crate::app::spoken::yes_or_no(&text) {
+                Some(true) => {
+                    self.status = tr!(
+                        "“{text}” → {command}",
+                        text = text,
+                        command = crate::i18n::lookup(&title)
+                    );
+                    self.voice.hear(Heard {
+                        text,
+                        outcome: HeardOutcome::Ran(title.clone()),
+                    });
+                    return self.run_palette(&title);
+                }
+                Some(false) => {
+                    self.status = tr!(
+                        "Didn't run {command}",
+                        command = crate::i18n::lookup(&title)
+                    );
+                    self.voice.heard = None;
+                    return Task::none();
+                }
+                None => {}
+            }
+        }
         if self.voice.prefs.run_commands {
             let commands = self.palette_commands();
             let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
@@ -954,7 +1270,7 @@ impl App {
             if let Some(i) = found {
                 let command = &commands[i];
                 let title = command.title.clone();
-                if command.costly() {
+                if command.asks_when_said() {
                     self.status = tr!(
                         "“{text}” → {command}? Confirm or press Esc",
                         text = text,
@@ -977,6 +1293,11 @@ impl App {
                     outcome: HeardOutcome::Ran(title.clone()),
                 });
                 return self.run_palette(&title);
+            }
+            // A line, a file, a symbol, words to look for: said with what
+            // no title names.
+            if let Some((done, task)) = self.spoken(&text) {
+                return self.did_as_said(text, done, task);
             }
         }
         // A question: to Ask, with the window open on it.
@@ -1003,6 +1324,35 @@ impl App {
         ])
     }
 
+    /// `text` came to `done` ([`App::spoken`]): said on the status
+    /// line and the pill, as a command run is — or, when it could not be
+    /// done, as a failure is.
+    fn did_as_said(
+        &mut self,
+        text: String,
+        done: crate::app::spoken::Done,
+        task: Task<Message>,
+    ) -> Task<Message> {
+        use crate::app::spoken::Done;
+        match done {
+            Done::Did(done) => {
+                self.status = tr!("“{text}” → {command}", text = text, command = done);
+                self.voice.hear(Heard {
+                    text,
+                    outcome: HeardOutcome::Ran(done),
+                });
+            }
+            Done::Cannot(why) => {
+                self.status = why.clone();
+                self.voice.hear(Heard {
+                    text,
+                    outcome: HeardOutcome::Failed(why),
+                });
+            }
+        }
+        task
+    }
+
     /// Download model `id` into the store, verified as it lands.
     fn start_model_download(&mut self, id: &'static str) -> Task<Message> {
         let Some(model) = models::find(id) else {
@@ -1014,6 +1364,13 @@ impl App {
         let Some(store) = self.voice.store.clone() else {
             self.status = tr!("There is no data directory to keep the model in").into();
             return Task::none();
+        };
+        let claim = match Claim::take(store.path(model), ClaimedFor::Download) {
+            Ok(claim) => claim,
+            Err(held) => {
+                self.status = held.busy(crate::i18n::lookup(model.name));
+                return Task::none();
+            }
         };
         self.voice.download_errors.remove(id);
         let cancel = Arc::new(AtomicBool::new(false));
@@ -1050,6 +1407,11 @@ impl App {
                             &mut install,
                             &mut progress,
                         ) {
+                            // Cancelled as it ended: not put in place — the
+                            // model may be being removed by now.
+                            Ok(_) if worker_cancel.load(Ordering::Relaxed) => {
+                                Err(clew_core::llm::CANCELLED.to_string())
+                            }
                             Ok(_) => install.finish(),
                             Err(e) => Err(download_failure(&e, install.written(), model)),
                         }
@@ -1071,6 +1433,7 @@ impl App {
                 done: 0,
                 total: None,
                 cancel,
+                _claim: claim,
                 _task: handle.abort_on_drop(),
             },
         );
@@ -1088,6 +1451,11 @@ impl App {
 /// (a CDN's signed one is a paragraph), and how far it got if it got
 /// anywhere.
 pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model) -> String {
+    download_failure_sized(error, written, model.size_mb)
+}
+
+/// [`download_failure`], for a download of `size_mb` MB.
+pub(crate) fn download_failure_sized(error: &str, written: u64, size_mb: u32) -> String {
     let why = if clew_core::net::was_cut_short(error) {
         tr!("the connection closed").to_string()
     } else {
@@ -1099,7 +1467,7 @@ pub(crate) fn download_failure(error: &str, written: u64, model: &models::Model)
     tr!(
         "Stopped at {done} of {total} MB: {why}",
         done = written / 1_000_000,
-        total = model.size_mb,
+        total = size_mb,
         why = why
     )
 }
@@ -1134,8 +1502,75 @@ fn with_host_only(error: &str) -> String {
     format!("{host}{colon}{after}")
 }
 
+/// The models being downloaded in this process, by the file each becomes:
+/// two windows downloading one model wrote one partial file between them,
+/// and the first to finish moved the other's half-written bytes into place.
+static DOWNLOADING: LazyLock<Mutex<HashMap<PathBuf, ClaimedFor>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// What a model's files are claimed for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClaimedFor {
+    Download,
+    Removal,
+}
+
+impl ClaimedFor {
+    /// Why `model` cannot be downloaded or removed now: its files are
+    /// claimed for this.
+    pub(crate) fn busy(self, model: &str) -> String {
+        match self {
+            ClaimedFor::Download => tr!(
+                "{model} is already downloading in another window",
+                model = model
+            ),
+            ClaimedFor::Removal => tr!("{model} is being removed", model = model),
+        }
+    }
+}
+
+/// A model's files, claimed for the transfer that writes them or the
+/// removal that deletes them — held until it ends, finished, failed or
+/// stopped.
+pub(crate) struct Claim(PathBuf);
+
+impl Claim {
+    /// Claim the files that go to `dest`, for `purpose`; while another
+    /// holds them, what for.
+    pub(crate) fn take(dest: PathBuf, purpose: ClaimedFor) -> Result<Claim, ClaimedFor> {
+        {
+            let mut claimed = DOWNLOADING.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(held) = claimed.get(&dest) {
+                return Err(*held);
+            }
+            claimed.insert(dest.clone(), purpose);
+        }
+        // Made only when taken, and after the lock is let go: a claim
+        // dropped under it locked it again, and gave up another's.
+        Ok(Claim(dest))
+    }
+}
+
+impl Drop for Claim {
+    fn drop(&mut self) {
+        DOWNLOADING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// Whether the model that goes to `dest` is being downloaded — or removed
+/// — in any window.
+pub(crate) fn downloading(dest: &Path) -> bool {
+    DOWNLOADING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .contains_key(dest)
+}
+
 /// Sets its flag when dropped.
-struct StopOnDrop(Arc<AtomicBool>);
+pub(crate) struct StopOnDrop(pub(crate) Arc<AtomicBool>);
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {

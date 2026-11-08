@@ -58,7 +58,7 @@ fn scan_summary(report: &fs_scan::ScanReport) -> Option<String> {
     }
     if let Some(error) = &report.tracked_error {
         parts.push(tr!(
-            "git could not list the tracked files, so ignored ones may be missing ({error})",
+            "git could not list the tracked files, so ignored files that git tracks may be missing ({error})",
             error = error
         ));
     }
@@ -334,16 +334,22 @@ impl App {
         })
     }
 
-    /// Consent to creating `.clew` in `root`: the folder the modal within
-    /// reach asks about, once it has been long enough to be read
-    /// ([`App::may_allow`]).
-    pub(crate) fn on_consent_allowed(&mut self, root: PathBuf) -> Task<Message> {
+    /// The first open of `root` answered — the folder the sheet within reach
+    /// asks about, once it has been long enough to be read
+    /// ([`App::may_allow`]): the project opens, its `.clew` made —
+    /// `with_setup`, with what its sheet has ticked (Open); without, with
+    /// nothing of it done (Not now).
+    pub(crate) fn on_consent_allowed(&mut self, root: PathBuf, with_setup: bool) -> Task<Message> {
         if self.pending_consent.as_ref() != Some(&root)
             || !self.may_allow(&crate::app::model::Question::Project(root.clone()))
         {
             return Task::none();
         }
         self.pending_consent = None;
+        if !with_setup && let Some(setup) = self.setup.as_mut().filter(|s| s.root == root) {
+            setup.servers = false;
+            setup.explain = false;
+        }
         // Consent is recorded outside the project (see `request_open`): a
         // repository must never be able to grant itself permission. It is
         // bound to the host it was granted for.
@@ -432,7 +438,7 @@ impl App {
         // Land on the architecture-overview home (filled from the cache when
         // the project's state has loaded).
         self.proj.overview.showing = true;
-        self.embed_available = embed::Config::available();
+        self.refresh_embeddings();
         // A project open re-reads the AI config (another window may have
         // saved Settings).
         self.invalidate_llm_config();
@@ -622,7 +628,7 @@ impl App {
             let mut lost: Vec<&str> = left.remote_state_dirty.iter().map(String::as_str).collect();
             lost.sort_unstable();
             discarded.push(tr!(
-                "Unsaved remote state was discarded: {files}",
+                "Changes not yet saved on the remote host were discarded: {files}",
                 files = lost.join(", ")
             ));
         }
@@ -675,6 +681,8 @@ impl App {
         // provider on THIS machine is aborted — `stop_ask_streams` covers all
         // three, plus a question still being retrieved.
         let stop_ask = self.stop_ask_streams();
+        // And what is said of its answers: the conversation stays behind.
+        self.stop_speaking();
         // The debuggee belongs to the old project: left running, its variables
         // would keep feeding the new project's Ask context. Literally the same
         // teardown the Stop button performs, rather than a copy of it that
@@ -855,7 +863,7 @@ impl App {
 
         if !problems.is_empty() {
             self.status = tr!(
-                "Left untouched, could not read: {problems} — fix or remove the file to use it",
+                "Some saved state was left as is because it could not be read: {problems} — fix or remove the file to use it",
                 problems = problems.join("; ")
             );
         }
@@ -1164,7 +1172,8 @@ impl App {
                 self.status = tr!("Project not opened").to_string();
                 Task::none()
             }
-            ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root),
+            ProjectMsg::ConsentAllowed(root) => self.on_consent_allowed(root, true),
+            ProjectMsg::OpenWithoutSetup(root) => self.on_consent_allowed(root, false),
             ProjectMsg::SetupShow(mode) => {
                 // A first open's sheet is answered first. There is one sheet:
                 // replaced (⌘⇧E reaches under it), the first open's question

@@ -106,8 +106,7 @@ pub fn ensure_upgrade(running: Version, candidate: &str) -> Result<Version, Stri
         .ok_or_else(|| format!("the update declares an unreadable version {candidate:?}"))?;
     if v <= running {
         return Err(format!(
-            "the update contains clew {v}, which is not newer than the running {running} — \
-             refusing to install it"
+            "the update contains Clew {v}, which is not newer than the running {running} — refusing to install it"
         ));
     }
     Ok(v)

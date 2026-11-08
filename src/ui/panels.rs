@@ -422,7 +422,7 @@ const APPROVE_BUTTON_H: f32 = 30.0;
 const APPROVE_GAP: f32 = 12.0;
 /// Size of what an approval says it does, under its question.
 const APPROVE_DETAIL_SIZE: f32 = 12.0;
-/// Size of the "Said" over a question said rather than typed, and of its
+/// Size of the "Spoken" over a question said rather than typed, and of its
 /// microphone: the design's 11.
 const SAID_SIZE: f32 = 11.0;
 /// Widest the question's bubble grows, of the conversation's text column:
@@ -544,7 +544,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 row![
                     glyph::icon(Glyph::Mic, theme::dim(), SAID_SIZE),
                     ts::set_in(
-                        text(tr!("Said")).color(theme::dim()),
+                        text(tr!("Spoken")).color(theme::dim()),
                         ts::INTER.normal(SAID_SIZE),
                         ts::INTER,
                         SAID_SIZE,
@@ -1023,6 +1023,22 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     ]
     .spacing(KEEP_LISTENING_GAP)
     .align_y(iced::Center);
+    // While voice listens, works out the words, waits for a yes or Clew
+    // speaks, what it is doing is where the question is typed.
+    // As the pill says it, and the button lit as on the pill.
+    let input: Element<'_, Message> = match super::askfloat::voice_bar(app, false) {
+        Some(bar) => container(bar)
+            .width(Fill)
+            .height(Length::Fixed(ROUND_BUTTON))
+            .padding(Padding {
+                left: 4.0,
+                ..Padding::ZERO
+            })
+            .align_y(iced::Center)
+            .into(),
+        None => input,
+    };
+    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
     // The composer, under a rule across the card: the question as it is
     // typed, Stop while an answer comes in, Keep listening, the microphone
     // and send.
@@ -1565,11 +1581,7 @@ fn tree_head<'a>(
 
 /// Expand every node of a tree.
 fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
-    button(text(tr!("Expand all")).size(ts::SMALL))
-        .style(theme::toolbar_button)
-        .padding([2, 7])
-        .on_press(msg)
-        .into()
+    super::toolbar::icon_action(crate::glyph::Glyph::ExpandAll, tr!("Expand all"), Some(msg))
 }
 
 /// Which way a tree reads (callers or callees, imports or importers): a
@@ -1996,7 +2008,7 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
                     space().width(6),
-                    text(tr!("ext")).size(ts::CAPTION).color(theme::dim()),
+                    text(tr!("external")).size(ts::CAPTION).color(theme::dim()),
                 ]
                 .align_y(iced::Center),
             )

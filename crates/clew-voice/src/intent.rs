@@ -11,12 +11,19 @@
 //! speaker said must belong to the title — an extra word means a request,
 //! not a command — and when two titles fit equally well, neither is run.
 
+use std::cmp::Reverse;
+
 /// Words that only say "do it", on either side.
 const VERBS: &[&str] = &[
     "go", "to", "run", "toggle", "view", "switch", "bring", "up", "launch", "start", "add", "set",
     "put", "use", "turn", "change", "do", "execute", "jump", "navigate", "take", "me", "i", "want",
     "would", "like", "can", "could", "you", "please", "hey", "ok", "okay", "clew", "clue", "now",
     "just", "lets", "the", "a", "an", "my", "this", "that", "into", "for",
+];
+
+/// Of [`VERBS`], the small words that only link the others.
+const LINKING: &[&str] = &[
+    "to", "the", "a", "an", "my", "this", "that", "into", "for", "me", "i", "up",
 ];
 
 /// Words that ask for something to be shown.
@@ -48,7 +55,16 @@ struct Title {
     /// Words that may be said: its category, its parenthetical.
     optional: Vec<String>,
     polarity: Polarity,
+    /// Whether what must be said is its category: the rest of it only says
+    /// what it does ("Ask: Hide").
+    by_category: bool,
 }
+
+/// How well what was said fits a title, better the greater: its words said
+/// exactly, its optional words said, its optional words left unsaid (fewer
+/// is better), its own "do it" words said, and its length (shorter is
+/// better).
+type Score = (usize, usize, Reverse<usize>, usize, Reverse<usize>);
 
 /// The index in `titles` of the command `utterance` names, if it plainly
 /// names exactly one.
@@ -57,10 +73,13 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
     if said.is_empty() {
         return None;
     }
-    let mut best: Option<((usize, usize), usize)> = None;
+    // Every word said, the ones that only say "do it" too: which of a
+    // title's own such words were said tells "add to ask" from "ask".
+    let all_said = words(utterance);
+    let mut best: Option<(Score, usize)> = None;
     let mut tied = false;
-    for (index, title) in titles.iter().enumerate() {
-        let title = read_title(title);
+    for (index, text) in titles.iter().enumerate() {
+        let title = read_title(text);
         if title.required.is_empty() {
             continue;
         }
@@ -68,14 +87,38 @@ pub fn command(utterance: &str, titles: &[&str]) -> Option<usize> {
             (Polarity::Show, Polarity::Hide) | (Polarity::Hide, Polarity::Show) => false,
             // "Close the call graph" does not open it.
             (Polarity::Neither, Polarity::Hide) => false,
+            // A title that is only its category and what it does ("Find:
+            // Close"): what it does is said, or "find" would close it.
+            (Polarity::Show | Polarity::Hide, said) if title.by_category => said == title.polarity,
             _ => true,
         };
         if !agrees {
             continue;
         }
-        let Some(score) = fit(&said, &title) else {
+        let Some((exact, optional)) = fit(&said, &title) else {
             continue;
         };
+        // Equally well said, the title that says no more than was said wins:
+        // "view docs" is "View Docs", not "Sidebar: Docs"; "ask" is "Ask",
+        // not "Add to Ask".
+        let own = words(text);
+        // Its own verbs, not the small words between them: "go to ask" is
+        // Ask, "add to ask" Add to Ask.
+        let verbs_said = own
+            .iter()
+            .filter(|w| {
+                VERBS.contains(&w.as_str())
+                    && !LINKING.contains(&w.as_str())
+                    && all_said.contains(w)
+            })
+            .count();
+        let score = (
+            exact,
+            optional,
+            Reverse(title.optional.len() - optional),
+            verbs_said,
+            Reverse(own.len()),
+        );
         match best {
             Some((top, _)) if score < top => {}
             Some((top, _)) if score == top => tied = true,
@@ -131,24 +174,46 @@ fn read_title(title: &str) -> Title {
     };
     let mut polarity = Polarity::Neither;
     let mut required = Vec::new();
+    // A title's "of" may go unsaid, or be heard as another small word
+    // ("go to the top on the file"); said where a title has none, it is a
+    // word of a request ("explain all of this").
+    let mut main_optional = Vec::new();
     for w in words(main) {
         if w == "show" {
             polarity = Polarity::Show;
-        } else if w == "hide" {
+        } else if HIDE.contains(&w.as_str()) {
             polarity = Polarity::Hide;
+        } else if w == "of" {
+            main_optional.push(w);
         } else if !VERBS.contains(&w.as_str()) && !SHOW.contains(&w.as_str()) {
             required.push(w);
         }
     }
-    let optional = words(category)
+    let category: Vec<String> = words(category)
         .into_iter()
-        .chain(words(aside))
         .filter(|w| !VERBS.contains(&w.as_str()))
         .collect();
+    let aside = words(aside)
+        .into_iter()
+        .filter(|w| !VERBS.contains(&w.as_str()));
+    // Nothing but a verb after the category ("Ask: Hide", "Find: Close"):
+    // the category is what is named, and must be said.
+    let by_category = required.is_empty();
+    let optional = if by_category {
+        required = category;
+        main_optional.into_iter().chain(aside).collect()
+    } else {
+        category
+            .into_iter()
+            .chain(main_optional)
+            .chain(aside)
+            .collect()
+    };
     Title {
         required,
         optional,
         polarity,
+        by_category,
     }
 }
 
@@ -270,7 +335,7 @@ mod tests {
         "Stats",
         "Settings",
         "Sidebar: Files",
-        "Sidebar: Marks",
+        "Sidebar: Bookmarks",
         "View: Hide Sidebar",
         "View: Show Context Panel",
         "View: Debug Panel",
@@ -283,6 +348,15 @@ mod tests {
         "Theme: Light",
         "Theme: Dark",
         "Theme: Match System",
+        "Ask: Hide",
+        "Find: Close",
+        "Debug: Turn Off Hover Evaluation",
+        "Find…",
+        "Sidebar: Find by Meaning",
+        "Ask",
+        "View Docs",
+        "Sidebar: Docs",
+        "Go to Top of File",
     ];
 
     fn said(utterance: &str) -> Option<&'static str> {
@@ -311,7 +385,7 @@ mod tests {
             ("open settings", "Settings"),
             ("open preferences", "Settings"),
             ("files sidebar", "Sidebar: Files"),
-            ("show the marks", "Sidebar: Marks"),
+            ("show the bookmarks", "Sidebar: Bookmarks"),
             ("hide the sidebar", "View: Hide Sidebar"),
             ("show the context panel", "View: Show Context Panel"),
             ("Hide the mini map.", "View: Hide Minimap"),
@@ -326,6 +400,27 @@ mod tests {
             ("Why is this here?", "Why Is This Here?"),
             ("open folder", "Open Folder…"),
             ("expand the macro", "Expand Macro"),
+            // A title that is only its category and a verb: the category said.
+            ("hide ask", "Ask: Hide"),
+            ("Close Ask.", "Ask: Hide"),
+            ("close find", "Find: Close"),
+            (
+                "turn off hover evaluation",
+                "Debug: Turn Off Hover Evaluation",
+            ),
+            // Equally well said: the title that says no more than was said.
+            ("find", "Find…"),
+            ("find by meaning", "Sidebar: Find by Meaning"),
+            ("ask", "Ask"),
+            ("add to ask", "Add to Ask"),
+            ("view docs", "View Docs"),
+            ("docs sidebar", "Sidebar: Docs"),
+            // "of" heard as another small word, or not said.
+            ("to, go to the top on the file,", "Go to Top of File"),
+            ("go to the top of the file", "Go to Top of File"),
+            ("go to the top file", "Go to Top of File"),
+            ("go to ask", "Ask"),
+            ("switch to ask", "Ask"),
         ] {
             assert_eq!(said(utterance), Some(title), "{utterance:?}");
         }
@@ -358,6 +453,13 @@ mod tests {
 
     #[test]
     fn requests_are_left_for_the_agent() {
+        // "of" where a title has none is a request's word.
+        assert_eq!(command("explain all of this", &["Explain All"]), None);
+        assert_eq!(command("explain all", &["Explain All"]), Some(0));
+        assert_eq!(
+            command("summary of this file", &["View: Hide File Summary"]),
+            None
+        );
         for utterance in [
             "explain the call graph",
             "what does this function do",
@@ -380,6 +482,9 @@ mod tests {
         assert_eq!(said("show the minimap"), None, "only Hide is listed");
         assert_eq!(said("hide the context panel"), None, "only Show is listed");
         assert_eq!(said("turn off inlay hints"), None);
+        // "Close" in a title is a hide, as said.
+        assert_eq!(said("open find"), Some("Find…"), "opened, not closed");
+        assert_eq!(said("turn on hover evaluation"), None);
     }
 
     /// Two titles that fit equally well run neither.

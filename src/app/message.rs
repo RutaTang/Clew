@@ -256,6 +256,9 @@ pub enum ProjectMsg {
     /// Allow creating `.clew` in the folder the consent modal names (see
     /// `crate::app::model::Question`).
     ConsentAllowed(PathBuf),
+    /// The first open's Not now: the project opens, and nothing on the
+    /// setup sheet is done — each server asks as ever when it is needed.
+    OpenWithoutSetup(PathBuf),
     ConsentDenied(PathBuf),
     /// Show the setup sheet over the open project: what to set up, or
     /// Explain All asking first.
@@ -495,6 +498,20 @@ pub enum EditorMsg {
     /// Toggle "skim" for the active file: fold function/method bodies to
     /// signatures + summaries, or expand them again.
     SkimFile,
+    /// Scroll the active pane by whole screens — down when positive — its
+    /// caret going as far ("Scroll Down", said or picked in the palette).
+    ScrollPages(i32),
+    /// Scroll the active pane by lines, as [`EditorMsg::ScrollPages`] does
+    /// by screens ("scroll down 10 lines").
+    ScrollLines(i32),
+    /// Move the active pane's caret (the top or the end of the file).
+    MoveCaret(crate::viewer::Motion),
+    /// Close (`true`) or open every fold of the active pane (`zM`, `zR`).
+    FoldAll(bool),
+    /// Open or close the fold the caret is in (`za`).
+    FoldHere,
+    /// Go to `line` (1-based) of the active pane's file ("go to line 30").
+    GotoLineNumber(usize),
     /// Toggle a notebook cell's outputs between collapsed and expanded.
     NbToggleOutputs {
         pane: usize,
@@ -645,6 +662,9 @@ pub enum NavMsg {
         stamp: Stamp,
         generation: u64,
         styled: Vec<Vec<(String, Option<u8>)>>,
+        /// What each preview marks, as found in its line
+        /// (`SearchState::marks`).
+        marks: Vec<Option<Vec<(usize, usize)>>>,
     },
     /// Jump to the exact line where `caller` calls `callee` (from CALLED BY),
     /// resolved live from the caller file; falls back to the caller's definition.
@@ -1138,6 +1158,8 @@ pub enum AskMsg {
         /// stopped, cleared or superseded while being embedded is dropped.
         stream: u64,
         question: String,
+        /// The question was said aloud (`AskTurn::spoken`).
+        spoken: bool,
         /// The space used to embed this question. `None` answers from pinned
         /// or live debugger context without semantic retrieval.
         space: Option<embed::Space>,
@@ -1202,6 +1224,8 @@ pub enum AskMsg {
         stamp: Stamp,
         token: u64,
         question: String,
+        /// The question was said aloud (`AskTurn::spoken`).
+        spoken: bool,
         gathered: Vec<clew_core::mcp::hub::Gathered>,
     },
     /// The agent turn on `stream` calls MCP tool `tool` (its model name).
@@ -1847,6 +1871,19 @@ pub enum SettingsMsg {
     EmbedKeyChanged(String),
     EmbedModelChanged(String),
     EmbedBaseUrlChanged(String),
+    /// Embeddings made on this computer (`true`), or by a service.
+    EmbedHere(bool),
+    /// EmbeddingGemma: download it, stop downloading it, how far it is, and
+    /// how it ended; remove it, and how that ended.
+    DownloadEmbedModel,
+    CancelEmbedDownload,
+    EmbedDownloadProgress {
+        done: u64,
+        total: Option<u64>,
+    },
+    EmbedDownloaded(Result<(), String>),
+    RemoveEmbedModel,
+    EmbedModelRemoved(Result<(), String>),
     /// Open / close the Settings modal: `Open` on the page it last showed,
     /// `OpenAt` on the one a flow needs (Voice, for a model to download).
     Open,
@@ -2102,6 +2139,7 @@ impl ProjectMsg {
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
+            | ProjectMsg::OpenWithoutSetup(..)
             | ProjectMsg::ConsentDenied(..)
             | ProjectMsg::SetupShow(..)
             | ProjectMsg::SetupCounted { .. }
@@ -2161,6 +2199,12 @@ impl EditorMsg {
             | EditorMsg::FindStep(..)
             | EditorMsg::FindClosed
             | EditorMsg::SkimFile
+            | EditorMsg::ScrollPages(..)
+            | EditorMsg::ScrollLines(..)
+            | EditorMsg::MoveCaret(..)
+            | EditorMsg::FoldAll(..)
+            | EditorMsg::FoldHere
+            | EditorMsg::GotoLineNumber(..)
             | EditorMsg::NbToggleOutputs { .. }
             | EditorMsg::NbExpandAll { .. }
             | EditorMsg::ToggleMarkdownSource(..) => None,
@@ -2672,6 +2716,13 @@ impl SettingsMsg {
             | SettingsMsg::EmbedKeyChanged(..)
             | SettingsMsg::EmbedModelChanged(..)
             | SettingsMsg::EmbedBaseUrlChanged(..)
+            | SettingsMsg::EmbedHere(..)
+            | SettingsMsg::DownloadEmbedModel
+            | SettingsMsg::CancelEmbedDownload
+            | SettingsMsg::EmbedDownloadProgress { .. }
+            | SettingsMsg::EmbedDownloaded(..)
+            | SettingsMsg::RemoveEmbedModel
+            | SettingsMsg::EmbedModelRemoved(..)
             | SettingsMsg::Open
             | SettingsMsg::OpenAt(..)
             | SettingsMsg::Close

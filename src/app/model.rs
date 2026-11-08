@@ -420,7 +420,7 @@ pub struct AskTurn {
     /// unique for the App's whole lifetime.
     pub stream: u64,
     pub question: String,
-    /// The question was said, not typed: marked "Said" over it.
+    /// The question was said, not typed: marked "Spoken" over it.
     pub spoken: bool,
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.
@@ -1054,6 +1054,11 @@ pub struct SearchState {
     /// [`NavMsg::PreviewsStyled`] has brought them; until then (and for a
     /// preview changed since) the preview is drawn plain.
     pub styled: Vec<Vec<(String, Option<u8>)>>,
+    /// Where each hit's preview marks what matched, found in its whole line
+    /// (`search::preview_marks`) and brought with the colours; `None` where
+    /// the line could not be had (a remote file not open here), whose
+    /// preview is marked as matched in itself.
+    pub marks: Vec<Option<Vec<(usize, usize)>>>,
     /// Bumped as the previews are given out to be coloured: only the last
     /// colouring asked for is taken.
     pub styled_gen: u64,
@@ -1282,9 +1287,7 @@ impl LspSlot {
                     Some(e) => format!("⚠ {}", lsp_error_summary(e)),
                     None => s.progress.clone().unwrap_or_else(|| tr!("ready").into()),
                 },
-                Some(Err(_)) => {
-                    tr!("⚠ state unreadable after an internal error — restart it").into()
-                }
+                Some(Err(_)) => tr!("⚠ internal error — restart this language server").into(),
                 None => tr!("ready").into(),
             },
             LspSlot::Failed(e) => tr!("error: {error}", error = e),

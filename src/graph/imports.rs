@@ -311,8 +311,8 @@ impl TsConfigs {
         }
         if bases > 0 {
             parts.push(trn!(
-                "1 more base not read (limit {limit} files)",
-                "{n} more bases not read (limit {limit} files)",
+                "1 more base config not read (limit {limit} files)",
+                "{n} more base configs not read (limit {limit} files)",
                 bases,
                 limit = MAX_TS_SOURCES
             ));
@@ -7037,7 +7037,7 @@ mod resolution_tests {
         assert!(configs.reads(&root.join("web/tsconfig.json")));
         assert!(!configs.reads(&root.join("web/late.json")));
         assert_eq!(web.base_url, None, "a base past the budget applied");
-        let said = format!("more bases not read (limit {MAX_TS_SOURCES} files)");
+        let said = format!("more base configs not read (limit {MAX_TS_SOURCES} files)");
         assert!(
             configs.cap_note().is_some_and(|note| note.contains(&said)),
             "the budget is silent: {:?}",

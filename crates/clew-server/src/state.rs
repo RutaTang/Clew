@@ -157,7 +157,7 @@ pub(crate) fn check_replaceable(
     let writing = incoming.and_then(|t| format.schema_version(t)).unwrap_or(1);
     if current > writing {
         return refuse(format!(
-            "it was written by a newer clew (schema {current}; this client writes {writing})"
+            "it was written by a newer Clew (schema {current}; this client writes {writing})"
         ));
     }
     Ok(())
@@ -689,7 +689,7 @@ mod tests {
         // A newer clew's layout — for a write and for a delete alike.
         std::fs::write(&history, r#"{"schema_version":2,"trail":[]}"#).unwrap();
         let err = check_replaceable(&history, "history.json", new).unwrap_err();
-        assert!(err.contains("newer clew"), "{err}");
+        assert!(err.contains("newer Clew"), "{err}");
         assert!(check_replaceable(&history, "history.json", None).is_err());
         // ...unless the writer is at least as new.
         assert!(

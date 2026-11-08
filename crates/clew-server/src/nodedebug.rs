@@ -1225,8 +1225,8 @@ where
         if n == 0 {
             let said = said.trim();
             return Err(match said {
-                "" => "node ended before its inspector listened".to_string(),
-                said => format!("node ended before its inspector listened: {said}"),
+                "" => "Node.js exited before its debugger started listening".to_string(),
+                said => format!("Node.js exited before its debugger started listening: {said}"),
             });
         }
         if let Some(url) = line

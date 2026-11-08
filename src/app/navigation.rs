@@ -123,6 +123,86 @@ pub(crate) fn location_preview(
         .to_string()
 }
 
+/// A hit's preview as given out to be coloured and marked
+/// ([`App::style_search_previews`]).
+pub(crate) struct PreviewToStyle {
+    lang: Option<&'static str>,
+    preview: String,
+    /// Its whole line, as an open pane has it.
+    line: Option<String>,
+    abs: PathBuf,
+    line0: usize,
+}
+
+/// Each preview's colours and marks, by hit ([`style_previews`]).
+type StyledPreviews = (
+    Vec<Vec<(String, Option<u8>)>>,
+    Vec<Option<Vec<(usize, usize)>>>,
+);
+
+/// How many of a search's results have their whole line read for their
+/// marks ([`style_previews`]).
+const LINES_READ_FOR_MARKS: usize = 500;
+
+/// Each preview in its language's colours, and where it marks what
+/// `matcher` matches — found in its whole line, read from its file in a
+/// local project when no pane had it.
+fn style_previews(
+    hits: Vec<PreviewToStyle>,
+    matcher: Option<&clew_core::search::PreviewMatcher>,
+    local: bool,
+) -> StyledPreviews {
+    let mut lines: Vec<Option<String>> = hits.iter().map(|h| h.line.clone()).collect();
+    if local && matcher.is_some() {
+        // Read only where marks can come of it — a preview there is (a
+        // location list's are read after this pass) — and for the first
+        // results only: a search of thousands waited on every one of their
+        // files before any colour showed. The rest are marked in their
+        // previews, as the sidebar does without a line.
+        let unread: Vec<(usize, PathBuf, usize)> = hits
+            .iter()
+            .enumerate()
+            .take(LINES_READ_FOR_MARKS)
+            .filter(|(_, h)| h.line.is_none() && !h.preview.trim().is_empty())
+            .map(|(i, h)| (i, h.abs.clone(), h.line0))
+            .collect();
+        for (i, line) in read_location_lines(unread) {
+            lines[i] = Some(line);
+        }
+    }
+    let styled = hits
+        .iter()
+        .map(|h| preview_spans(&h.preview, h.lang))
+        .collect();
+    let marks = hits
+        .iter()
+        .zip(&lines)
+        .map(|(h, line)| marks_in_line(matcher?, line.as_deref()?, &h.preview))
+        .collect();
+    (styled, marks)
+}
+
+/// Where `preview`, cut from `line`, marks what `matcher` matches in the
+/// whole line: found in the line, so a pattern anchored at its start or
+/// matching its tabs, a match the cut ends, a whole word the cut's `…`
+/// would make of a longer one, are marked as the search matched them.
+/// `None` when the preview is not this line's (changed since it was cut)
+/// or cannot be placed in it.
+pub(crate) fn marks_in_line(
+    matcher: &clew_core::search::PreviewMatcher,
+    line: &str,
+    preview: &str,
+) -> Option<Vec<(usize, usize)>> {
+    use clew_core::search::{preview_around, preview_marks};
+    let ranges = matcher.ranges(line);
+    // Cut where the search cut it: at its first match, or a reference at
+    // its own name.
+    let at = std::iter::once(None)
+        .chain(ranges.iter().map(|r| Some(r.0)))
+        .find(|&at| preview_around(line, at).trim_end() == preview.trim_end())?;
+    preview_marks(line, at, &ranges)
+}
+
 /// [`read_location_previews`], each line as the file has it: untrimmed, so a
 /// column the language server gives for it lands where it points (a trimmed
 /// line shifts every column by the indentation). A trailing `\r` is dropped.
@@ -298,19 +378,24 @@ impl App {
             _ => {
                 self.status = crate::keymap::local_keys(&tr!(
                     "No {language} server ready (⌘T to search symbols)",
-                    language = lang
+                    language = crate::app::languages::language_name(lang)
                 ));
                 return Task::none();
             }
         };
         // The display column, in the server's own position encoding.
         let character = viewer::Col(col).to_offset(&source_line, client.encoding);
-        self.proj.nav_term = word_at_byte(
+        let word = word_at_byte(
             &source_line,
             viewer::Col(col).to_offset(&source_line, viewer::PositionEncoding::Utf8),
         );
         self.status = format!("{}…", kind.verb());
         let is_references = matches!(kind, GotoKind::References);
+        match kind {
+            GotoKind::References => self.proj.refs_term = word,
+            GotoKind::TypeDefinition => self.proj.goto_term = None,
+            GotoKind::Definition | GotoKind::Implementation => self.proj.goto_term = word,
+        }
         // Mint this request's identity: references paint the Search sidebar
         // (so they share its counter); definitions jump the editor.
         let seq = if is_references {
@@ -373,6 +458,7 @@ impl App {
                     "{count} definitions — pick one in the Search list",
                     count = targets.len()
                 );
+                self.proj.nav_term = self.proj.goto_term.clone();
                 self.show_locations(tr!("(definitions)"), targets, self.proj.goto_encoding)
             }
             Ok(targets) if !targets.is_empty() => {
@@ -382,7 +468,7 @@ impl App {
                 // Clear the "Looking up definition…" progress; the jump itself
                 // is the feedback (otherwise the status stays stuck on it).
                 self.status.clear();
-                self.proj.landing = Some((
+                self.proj.landing_next = Some((
                     abs.clone(),
                     t.line,
                     crate::app::state::LandingAt::Char(t.character, self.proj.goto_encoding),
@@ -411,6 +497,7 @@ impl App {
                     "{n} references — showing them in Search",
                     refs.len()
                 );
+                self.proj.nav_term = self.proj.refs_term.clone();
                 self.show_locations(tr!("(references)"), refs, self.proj.refs_encoding)
             }
             Ok(_) => {
@@ -439,9 +526,11 @@ impl App {
         enc: viewer::PositionEncoding,
     ) -> Task<Message> {
         // Painting the sidebar supersedes whatever it was waiting for — a
-        // server-side text search included (see `goto_request`).
+        // server-side text search included (see `goto_request`), and a
+        // pause in typing still to end, whose search painted over the list.
         self.proj.search_seq += 1;
         self.proj.link.pending_search = None;
+        self.proj.search.typed += 1;
         let seq = self.proj.search_seq;
         let mut to_read: Vec<(usize, PathBuf, usize, usize)> = Vec::new();
         let hits: Vec<SearchHit> = targets
@@ -460,7 +549,10 @@ impl App {
                     .flatten()
                     .find(|v| v.abs == t.path)
                     .filter(|v| t.line < v.lines.len())
-                    .map(|v| location_preview(&v.line_text(t.line + 1), Some(t.character), enc));
+                    // The line as the file has it, where the server's
+                    // character counts: the view's has its tabs spaced out.
+                    .and_then(|v| v.source_line(t.line))
+                    .map(|line| location_preview(line, Some(t.character), enc));
                 if from_pane.is_none() {
                     to_read.push((i, t.path.clone(), t.line, t.character));
                 }
@@ -563,6 +655,7 @@ impl App {
         self.proj.search.listing = None;
         self.proj.search.matcher = None;
         self.proj.search.styled.clear();
+        self.proj.search.marks.clear();
         // Nor is the count the status line still gives for them.
         if let Some(said) = self.proj.search.said.take() {
             self.settle_status(&[&said]);
@@ -685,34 +778,49 @@ impl App {
     pub(crate) fn style_search_previews(&mut self) -> Task<Message> {
         self.proj.search.styled_gen += 1;
         self.proj.search.styled.clear();
+        self.proj.search.marks.clear();
         let generation = self.proj.search.styled_gen;
-        let previews: Vec<(Option<&'static str>, String)> = self
+        // Each hit with its line as an open pane has it; else, in a local
+        // project, read from its file with the colours — where its marks are
+        // found, as the search found them.
+        let hits: Vec<PreviewToStyle> = self
             .proj
             .search
             .hits
             .iter()
-            .map(|h| (highlight::detect(&h.abs), h.preview.clone()))
+            .map(|h| PreviewToStyle {
+                lang: highlight::detect(&h.abs),
+                preview: h.preview.clone(),
+                line: self
+                    .proj
+                    .panes
+                    .iter()
+                    .flatten()
+                    .find(|v| v.abs == h.abs)
+                    .and_then(|v| v.source_line(h.line.saturating_sub(1)))
+                    .map(str::to_string),
+                abs: h.abs.clone(),
+                line0: h.line.saturating_sub(1),
+            })
             .collect();
-        if previews.is_empty() {
+        if hits.is_empty() {
             return Task::none();
         }
+        let matcher = self.proj.search.matcher.clone();
+        let local = self.local_project_state();
         let stamp = self.stamp();
         Task::perform(
             async move {
-                tokio::task::spawn_blocking(move || {
-                    previews
-                        .iter()
-                        .map(|(lang, preview)| preview_spans(preview, *lang))
-                        .collect::<Vec<_>>()
-                })
-                .await
-                .unwrap_or_default()
+                tokio::task::spawn_blocking(move || style_previews(hits, matcher.as_ref(), local))
+                    .await
+                    .unwrap_or_default()
             },
-            move |styled| {
+            move |(styled, marks)| {
                 Message::Nav(NavMsg::PreviewsStyled {
                     stamp: stamp.clone(),
                     generation,
                     styled,
+                    marks,
                 })
             },
         )
@@ -859,7 +967,7 @@ impl App {
 
     /// A jump to the symbol `name` on `line1` of `abs` lands on its name.
     fn land_on_name(&mut self, abs: &Path, line1: usize, name: String) {
-        self.proj.landing = Some((
+        self.proj.landing_next = Some((
             abs.to_path_buf(),
             line1.saturating_sub(1),
             crate::app::state::LandingAt::Name(name),
@@ -1077,11 +1185,17 @@ impl App {
                 Task::none()
             }
             NavMsg::PreviewsStyled {
-                generation, styled, ..
+                generation,
+                styled,
+                marks,
+                ..
             } => {
                 let search = &mut self.proj.search;
                 if generation == search.styled_gen && styled.len() == search.hits.len() {
                     search.styled = styled;
+                    if marks.len() == search.hits.len() {
+                        search.marks = marks;
+                    }
                 }
                 Task::none()
             }

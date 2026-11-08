@@ -11,7 +11,17 @@
 //!
 //! DeepSeek has no embeddings API, so the embedding endpoint is configured
 //! separately (defaulting to OpenAI, key falling back to `OPENAI_API_KEY` only
-//! while the endpoint is still OpenAI's).
+//! while the endpoint is still OpenAI's) — or the vectors are made on this
+//! computer, with no service and no key ([`local`]). That choice is the
+//! section's `source` (`local`, or `service` — the default); the service's
+//! own fields are kept as they are while it is not used. A config whose
+//! vectors are made here says so by its `base_url`: [`local::BASE_URL`].
+//! Their index is kept apart from a service's, as `embeddings-local.json`:
+//! going from one to the other and back finds the first as it was.
+
+pub mod local;
+
+pub use local::Purpose;
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -68,6 +78,33 @@ pub struct Config {
 /// rotating one — or clearing it, which makes `load` return `None` — would read
 /// as a move to another space and throw away a usable index (see [`Space`]).
 fn model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
+    if made_here(emb) {
+        return (local::MODEL.key(), local::BASE_URL.to_string());
+    }
+    service_model_and_base_url(emb)
+}
+
+/// What the stored `[embedding]` section's `source` says: vectors made on
+/// this computer (`local`), or by the service its fields name.
+fn made_here(emb: Option<&toml::Table>) -> bool {
+    emb.and_then(|e| e.get("source"))
+        .and_then(|v| v.as_str())
+        .is_some_and(names_here)
+}
+
+/// Whether a `source`, as written — by hand too ("Local") — names this
+/// computer.
+fn names_here(source: &str) -> bool {
+    source.trim().eq_ignore_ascii_case(SOURCE_LOCAL)
+}
+
+/// The `source` of embeddings made on this computer, and of a service's.
+const SOURCE_LOCAL: &str = "local";
+const SOURCE_SERVICE: &str = "service";
+
+/// The service the stored `[embedding]` section names, whether or not it
+/// is the source: its model and endpoint, defaults filled.
+fn service_model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
     let field = |k: &str| {
         emb.and_then(|e| e.get(k))
             .and_then(|v| v.as_str())
@@ -81,7 +118,18 @@ fn model_and_base_url(emb: Option<&toml::Table>) -> (String, String) {
     let model = field("model")
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| DEFAULT_MODEL.into());
-    (model, base_url)
+    (local_model_or(model, &base_url), base_url)
+}
+
+/// `model`, unless `base_url` says the vectors are made here: then the one
+/// model they are made with ([`local::MODEL`]), whatever was written — the
+/// name stamped on an index has to be the model that made it.
+fn local_model_or(model: String, base_url: &str) -> String {
+    if base_url == local::BASE_URL {
+        local::MODEL.key()
+    } else {
+        model
+    }
 }
 
 /// The identity of a vector space: the model AND the endpoint serving it.
@@ -126,6 +174,20 @@ pub fn stored_space() -> Space {
 }
 
 impl Config {
+    /// Vectors made on this computer ([`local`]).
+    pub fn local() -> Config {
+        Config {
+            api_key: String::new(),
+            model: local::MODEL.key(),
+            base_url: local::BASE_URL.to_string(),
+        }
+    }
+
+    /// Whether this config's vectors are made on this computer.
+    pub fn is_local(&self) -> bool {
+        self.base_url == local::BASE_URL
+    }
+
     /// The space this config's vectors live in.
     pub fn space(&self) -> Space {
         Space {
@@ -135,16 +197,38 @@ impl Config {
     }
 
     /// Load from the `[embedding]` section, falling back to `OPENAI_API_KEY` and
-    /// the OpenAI defaults. `None` when no key is available.
+    /// the OpenAI defaults. `None` when no key is available — or, for vectors
+    /// made here, while the model or the program that runs it is not
+    /// ([`local::ready`]).
     pub fn load() -> Option<Config> {
         let config = Self::current_or_default();
-        (!config.api_key.is_empty()).then_some(config)
+        let usable = if config.is_local() {
+            local::ready()
+        } else {
+            !config.api_key.is_empty()
+        };
+        usable.then_some(config)
     }
 
-    /// The stored embedding settings (defaults filled), even without a key.
-    /// The settings form must snapshot these values so a later save does not
-    /// mistake the stored model and endpoint for edits made by another window.
+    /// The stored embedding settings (defaults filled), even without a key:
+    /// the service's, or vectors made here ([`Config::local`]).
     pub fn current_or_default() -> Config {
+        if made_here(crate::globalconfig::section("embedding").as_ref()) {
+            return Config::local();
+        }
+        Self::service_or_default()
+    }
+
+    /// Whether the stored settings make vectors on this computer.
+    pub fn stored_here() -> bool {
+        made_here(crate::globalconfig::section("embedding").as_ref())
+    }
+
+    /// The service the stored settings name (defaults filled), even without
+    /// a key, and whether or not it is the source. The settings form must
+    /// snapshot these values so a later save does not mistake the stored
+    /// model and endpoint for edits made by another window.
+    pub fn service_or_default() -> Config {
         let emb = crate::globalconfig::section("embedding");
         let field = |k: &str| {
             emb.as_ref()
@@ -155,7 +239,7 @@ impl Config {
 
         // Resolved before the key, because whether the environment may supply
         // the key depends on where the request would go.
-        let (model, base_url) = model_and_base_url(emb.as_ref());
+        let (model, base_url) = service_model_and_base_url(emb.as_ref());
         let api_key = field("api_key")
             .filter(|k| !k.is_empty())
             .or_else(|| {
@@ -205,6 +289,7 @@ impl Config {
         } else {
             base_url.trim().trim_end_matches('/').to_string()
         };
+        let model = local_model_or(model, &base_url);
         Config {
             api_key: api_key.trim().to_string(),
             model,
@@ -213,13 +298,40 @@ impl Config {
     }
 
     /// Persist the `[embedding]` section, preserving other config sections
-    /// (see [`crate::globalconfig::update`]).
+    /// (see [`crate::globalconfig::update`]). Vectors made here are saved
+    /// as the `source` alone: the service's fields stay as they were.
     pub fn save(&self) -> Result<(), String> {
-        let mut emb = toml::Table::new();
-        emb.insert("api_key".into(), self.api_key.clone().into());
-        emb.insert("model".into(), self.model.clone().into());
-        emb.insert("base_url".into(), self.base_url.clone().into());
+        let mut emb = crate::globalconfig::section("embedding").unwrap_or_default();
+        if self.is_local() {
+            emb.insert("source".into(), SOURCE_LOCAL.into());
+        } else {
+            emb.insert("api_key".into(), self.api_key.clone().into());
+            emb.insert("model".into(), self.model.clone().into());
+            emb.insert("base_url".into(), self.base_url.clone().into());
+            emb.insert("source".into(), SOURCE_SERVICE.into());
+        }
         crate::globalconfig::update("embedding", emb)
+    }
+
+    /// Persist where vectors are made — here, or by the service — as an
+    /// edit of `previous`, what the form was opened with (see
+    /// [`Config::save_from`]): one another writer changed since is kept,
+    /// and named.
+    pub fn save_source_from(here: bool, previous: bool) -> Result<Vec<String>, String> {
+        let source = |here: bool| if here { SOURCE_LOCAL } else { SOURCE_SERVICE };
+        // What is written, when it says what the form was opened with in
+        // other words ("Local", a word that names neither, read as the
+        // service): that is what is being changed, not another writer's.
+        let written = crate::globalconfig::section("embedding")
+            .and_then(|e| e.get("source").and_then(|v| v.as_str()).map(str::to_string));
+        let previous = match written {
+            Some(written) if names_here(&written) == previous => written,
+            _ => source(previous).to_string(),
+        };
+        crate::globalconfig::update_fields(
+            "embedding",
+            &[("source", previous, source(here).into())],
+        )
     }
 
     /// Persist this config as an edit OF `previous`, keeping any field another
@@ -319,8 +431,12 @@ fn build_agent(
 /// endpoint's token cap). Blocking — run off the UI thread — and bounded:
 /// every silence by [`REQUEST_TIMEOUT`], the whole by [`BATCH_PACE`]. A
 /// caller that must be able to stop it uses [`embed_batch_cancellable`].
-pub fn embed_batch(cfg: &Config, texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
-    embed_batch_cancellable(cfg, texts, &|| false)
+pub fn embed_batch(
+    cfg: &Config,
+    texts: &[String],
+    purpose: Purpose,
+) -> Result<Vec<Vec<f32>>, String> {
+    embed_batch_cancellable(cfg, texts, purpose, &|| false)
 }
 
 /// How often a caller waiting on a batch re-tests its `cancelled` predicate.
@@ -339,13 +455,20 @@ const CANCEL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
 /// is abandoned once its answer is in, and that abandon, of a request that is
 /// over, cannot reach the batch the connection serves next
 /// (`crate::net::Lease`).
+///
+/// `purpose`, what the texts are embedded for, matters to a model run here
+/// ([`local::prompted`]); an endpoint is given the texts as they are.
 pub fn embed_batch_cancellable(
     cfg: &Config,
     texts: &[String],
+    purpose: Purpose,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Vec<f32>>, String> {
     if texts.is_empty() {
         return Ok(Vec::new());
+    }
+    if cfg.is_local() {
+        return local::embed(texts, purpose, cancelled);
     }
     let url = endpoint(cfg);
     let (agent, via) = agent(&url)?;
@@ -496,7 +619,7 @@ fn request_batch(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("elsewhere");
         return Err(BatchError::Final(format!(
-            "embeddings endpoint redirected to {}; not following — point base_url at the real endpoint",
+            "embeddings endpoint redirected to {}; not following — set the Base URL in Settings to the real endpoint",
             to.lines()
                 .next()
                 .unwrap_or("")
@@ -637,6 +760,7 @@ fn parse_embeddings(text: &str, expected: usize) -> Result<Vec<Vec<f32>>, String
 pub fn embed_all(
     cfg: &Config,
     texts: &[String],
+    purpose: Purpose,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<Vec<f32>>, String> {
     const CHUNK: usize = 96;
@@ -645,7 +769,7 @@ pub fn embed_all(
         if cancelled() {
             return Err(crate::llm::CANCELLED.to_string());
         }
-        let batch = embed_batch_cancellable(cfg, chunk, cancelled)?;
+        let batch = embed_batch_cancellable(cfg, chunk, purpose, cancelled)?;
         // Each batch is uniform; so must the batches be with each other.
         if let (Some(first), Some(next)) = (out.first(), batch.first())
             && first.len() != next.len()
@@ -747,8 +871,21 @@ struct StoredRef<'a> {
     entries: &'a [Entry],
 }
 
-fn index_path(store: &Path) -> PathBuf {
-    store.join("embeddings.json")
+/// The index of a service's vectors in a store.
+const INDEX_FILE: &str = "embeddings.json";
+/// The index of vectors made on this computer.
+const LOCAL_INDEX_FILE: &str = "embeddings-local.json";
+
+/// Where the index of `space` is kept in `store`: vectors made on this
+/// computer apart from a service's, so choosing the other and then this one
+/// again finds this one's as they were — a service's were paid for, and a
+/// build after the round trip would have paid for every one again.
+fn index_path(store: &Path, space: &Space) -> PathBuf {
+    store.join(if space.base_url == local::BASE_URL {
+        LOCAL_INDEX_FILE
+    } else {
+        INDEX_FILE
+    })
 }
 
 /// Load the index for `store`, judged against this machine's current embedding
@@ -801,9 +938,9 @@ pub fn load_for(store: &Path, root: &Path, cfg: Option<&Config>) -> Index {
 /// [`load_for`] against an explicit space (`None`: nothing can match), with
 /// the reason a stored index that exists was refused (see [`load_checked`]).
 fn load_in(store: &Path, root: &Path, space: Option<&Space>) -> (Index, Option<String>) {
-    let path = index_path(store);
+    let path = index_path(store, space.unwrap_or(&Space::default()));
     let Some(text) = crate::statefile::read(&path) else {
-        return (Index::default(), stored_index_problem(store));
+        return (Index::default(), index_problem(&path));
     };
     let stored = match serde_json::from_str::<Stored>(&text) {
         Ok(stored) => stored,
@@ -838,8 +975,12 @@ fn load_in(store: &Path, root: &Path, space: Option<&Space>) -> (Index, Option<S
 /// absent or readable. Cheap (one `lstat`), but blind to a file that reads
 /// and does not parse — [`load_checked`] reports that case too.
 pub fn stored_index_problem(store: &Path) -> Option<String> {
-    let path = index_path(store);
-    let meta = std::fs::symlink_metadata(&path).ok()?;
+    index_problem(&index_path(store, &stored_space()))
+}
+
+/// [`stored_index_problem`] of the index at `path`.
+fn index_problem(path: &Path) -> Option<String> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
     if !meta.is_file() {
         return Some(format!(
             "the semantic index {} is not a plain file; ignored",
@@ -893,7 +1034,7 @@ fn save_capped(store: &Path, index: &Index, cap: u64) -> std::io::Result<usize> 
         };
         let json = serde_json::to_vec(&stored).map_err(|e| std::io::Error::other(e.to_string()))?;
         if json.len() as u64 <= cap || keep == 0 {
-            crate::statefile::write_atomic(&index_path(store), &json)?;
+            crate::statefile::write_atomic(&index_path(store, &index.space()), &json)?;
             let left_out = index.entries.len() - keep;
             if left_out > 0 {
                 eprintln!(
@@ -973,7 +1114,8 @@ fn merge_capped(
     // unlocked is the lost update the lock prevents, and the reasons it fails
     // — the store cannot be created, the lock's name is squatted — forbid the
     // write as well.
-    let locked = crate::statefile::lock(&index_path(store))
+    // One lock for the store's indexes, under the name it always had.
+    let locked = crate::statefile::lock(&store.join(INDEX_FILE))
         .map_err(|e| std::io::Error::new(e.kind(), format!("could not lock embeddings.json: {e}")));
     let (stored, problem) = load_in(store, root, Some(&built.space()));
     if let Some(problem) = problem {
@@ -1222,6 +1364,44 @@ mod tests {
         assert_eq!(saved.api_key, edited.api_key);
     }
 
+    /// Vectors made on this computer are kept apart from a service's:
+    /// building the one leaves the other as it was, and each loads back
+    /// for its own config — the service's were paid for.
+    #[test]
+    fn the_index_made_here_is_kept_apart_from_the_services() {
+        let dir = crate::testutil::TempDir::new("embed-index-apart");
+        let resolved = dir.path().canonicalize().unwrap();
+        let (store, root) = (resolved.join("store"), resolved.join("proj"));
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = |vec: Vec<f32>| Entry {
+            node: Node::File(root.join("a.rs")),
+            hash: 7,
+            vec,
+        };
+        let service = Config::from_parts("sk".into(), "m".into(), "http://emb.test/v1".into());
+        let here = Config::local();
+        let index = |cfg: &Config, vec: Vec<f32>| Index {
+            model: cfg.model.clone(),
+            base_url: cfg.base_url.clone(),
+            entries: vec![entry(vec)],
+        };
+        save(&store, &index(&service, vec![1.0, 0.0])).unwrap();
+        let (_, saved) = merge_built(&store, &root, &index(&here, vec![0.0, 1.0, 0.0]));
+        saved.unwrap();
+        let vecs = |cfg: &Config| {
+            load_for(&store, &root, Some(cfg))
+                .entries
+                .into_iter()
+                .map(|e| e.vec)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(vecs(&service), [vec![1.0, 0.0]], "the service's, as it was");
+        assert_eq!(vecs(&here), [vec![0.0, 1.0, 0.0]]);
+        save(&store, &index(&service, vec![0.6, 0.8])).unwrap();
+        assert_eq!(vecs(&here), [vec![0.0, 1.0, 0.0]], "and the other way");
+    }
+
     /// An index built in another embedding space must read as absent: reusing
     /// it would rank the query by cosine against vectors it shares no geometry
     /// with, silently and with no way to fix it from the UI.
@@ -1283,7 +1463,7 @@ mod tests {
         // Serializing an `Index` no longer produces that shape — it now
         // carries both — so the file is written field by field, omitting them.
         std::fs::write(
-            index_path(&store),
+            index_path(&store, &Space::default()),
             serde_json::to_string(&serde_json::json!({ "entries": index.entries }))
                 .unwrap()
                 .as_bytes(),
@@ -1501,7 +1681,7 @@ mod tests {
         .expect_err("a proxy that refuses every login yields no embeddings");
         let err = err.message().to_string();
         assert!(
-            err.contains("it takes only NTLM logins, which clew cannot make")
+            err.contains("it accepts only NTLM logins, which Clew does not support")
                 && err.contains("cntlm or px"),
             "{err}"
         );
@@ -1699,7 +1879,7 @@ mod tests {
         let (result, took) = batch(&trickled);
         let err = result.expect_err("a trickled answer outlasted its pace");
         assert!(err.contains("timed out"), "{err}");
-        assert!(err.contains("slower than 4 KiB/s"), "{err}");
+        assert!(err.contains("stayed below 4 KiB/s"), "{err}");
         assert!(took < Duration::from_secs(5), "the pace held for {took:?}");
     }
 
@@ -1834,7 +2014,7 @@ mod tests {
             model: "m".into(),
             base_url: format!("http://{addr}"),
         };
-        let err = embed_batch(&cfg, &["hello".to_string()])
+        let err = embed_batch(&cfg, &["hello".to_string()], Purpose::Query)
             .expect_err("a 3xx is not a set of embeddings");
         assert!(err.contains("redirected"), "the refusal is reported: {err}");
         endpoint.join().unwrap();
@@ -1873,7 +2053,8 @@ mod tests {
             model: "m".into(),
             base_url: format!("http://{addr}"),
         };
-        let result = std::panic::catch_unwind(|| embed_batch(&cfg, &["hello".to_string()]));
+        let result =
+            std::panic::catch_unwind(|| embed_batch(&cfg, &["hello".to_string()], Purpose::Query));
         peer.join().unwrap();
         let err = result
             .expect("a reset connection panicked the thread that asked")
@@ -2062,7 +2243,9 @@ mod integrity_tests {
             left_out > 100,
             "only {left_out} left out under a 50-entry cap"
         );
-        let bytes = std::fs::metadata(index_path(&dir)).unwrap().len();
+        let bytes = std::fs::metadata(index_path(&dir, &Space::default()))
+            .unwrap()
+            .len();
         assert!(bytes <= cap, "{bytes} bytes written under a {cap}-byte cap");
         let back = load(&dir, &root);
         assert_eq!(back.entries.len(), 200 - left_out);
@@ -2125,11 +2308,14 @@ mod integrity_tests {
         assert_eq!(to_embed(&adopted, &nodes), 0);
 
         // And merging that next build changes nothing: same index, same file.
-        let first_file = std::fs::read(index_path(&dir)).unwrap();
+        let first_file = std::fs::read(index_path(&dir, &Space::default())).unwrap();
         let (again, saved) = merge_capped(&dir, &root, &adopted, cap);
         assert_eq!(saved.unwrap(), left_out);
         assert_eq!(again.entries.len(), N);
-        assert_eq!(std::fs::read(index_path(&dir)).unwrap(), first_file);
+        assert_eq!(
+            std::fs::read(index_path(&dir, &Space::default())).unwrap(),
+            first_file
+        );
 
         // A new session loads the capped file: only what the file could not
         // hold is embedded again, once.
@@ -2166,7 +2352,7 @@ mod integrity_tests {
                 merge_capped(&dir, &root, &index("m", DEFAULT_BASE_URL, build), cap);
             let left_out = saved.unwrap();
             assert!(left_out > 0 && left_out < 30, "{left_out}");
-            files.push(std::fs::read(index_path(&dir)).unwrap());
+            files.push(std::fs::read(index_path(&dir, &Space::default())).unwrap());
             orders.push(
                 merged
                     .entries
@@ -2202,7 +2388,7 @@ mod integrity_tests {
         let root = PathBuf::from("/p");
         assert_eq!(load_checked(&dir, &root).1, None, "absent");
 
-        std::fs::write(index_path(&dir), b"{ not json").unwrap();
+        std::fs::write(index_path(&dir, &Space::default()), b"{ not json").unwrap();
         let (loaded, problem) = load_checked(&dir, &root);
         assert!(loaded.entries.is_empty());
         let problem = problem.expect("an unparseable file is a problem");
@@ -2318,7 +2504,7 @@ mod integrity_tests {
             &index("m", DEFAULT_BASE_URL, vec![entry("stored", vec![1.0])]),
         )
         .unwrap();
-        let before = std::fs::read(index_path(&data)).unwrap();
+        let before = std::fs::read(index_path(&data, &Space::default())).unwrap();
         // Something that is not a plain file squats on the lock's name.
         std::fs::create_dir(data.join(".embeddings.json.lock")).unwrap();
 
@@ -2336,7 +2522,7 @@ mod integrity_tests {
             "the fresh read merged with the build is handed back"
         );
         assert_eq!(
-            std::fs::read(index_path(&data)).unwrap(),
+            std::fs::read(index_path(&data, &Space::default())).unwrap(),
             before,
             "the file is left as it was"
         );
@@ -2347,7 +2533,7 @@ mod integrity_tests {
     #[test]
     fn an_unreadable_stored_index_is_reported() {
         let dir = with_config("oversize", "m");
-        let f = std::fs::File::create(index_path(&dir)).unwrap();
+        let f = std::fs::File::create(index_path(&dir, &Space::default())).unwrap();
         // Sparse: no bytes are written.
         f.set_len(crate::statefile::MAX_STATE_BYTES + 1).unwrap();
         let problem = stored_index_problem(&dir).expect("an over-cap file is a problem");
@@ -2355,7 +2541,7 @@ mod integrity_tests {
         assert!(load(&dir, Path::new("/p")).entries.is_empty());
         // Closed first: Windows keeps an open file's name until it is.
         drop(f);
-        std::fs::remove_file(index_path(&dir)).unwrap();
+        std::fs::remove_file(index_path(&dir, &Space::default())).unwrap();
         assert_eq!(stored_index_problem(&dir), None, "absent is not a problem");
     }
 
@@ -2483,10 +2669,15 @@ mod integrity_tests {
             model: model.into(),
             base_url: format!("http://{addr}"),
         };
-        embed_batch(&cfg("text-embedding-3-small"), &["a".to_string()]).unwrap();
+        embed_batch(
+            &cfg("text-embedding-3-small"),
+            &["a".to_string()],
+            Purpose::Query,
+        )
+        .unwrap();
         let v3 = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(v3.contains("\"dimensions\":512"), "{v3}");
-        embed_batch(&cfg("nomic-embed-text"), &["a".to_string()]).unwrap();
+        embed_batch(&cfg("nomic-embed-text"), &["a".to_string()], Purpose::Query).unwrap();
         let other = rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap();
         assert!(!other.contains("dimensions"), "{other}");
         assert!(supports_dimensions("openai/text-embedding-3-large"));

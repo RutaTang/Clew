@@ -506,7 +506,7 @@ impl Adapter {
     async fn evaluate(&self, args: &Value) -> Result<Value, String> {
         let expression = args["expression"].as_str().unwrap_or("").trim().to_string();
         if expression.is_empty() || expression.contains('\n') {
-            return Err("one line to evaluate".into());
+            return Err("enter a single line to evaluate".into());
         }
         let session = self.session()?;
         let command = match is_identifier(&expression) {

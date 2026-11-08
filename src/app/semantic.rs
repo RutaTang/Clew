@@ -40,7 +40,10 @@ pub(crate) fn merged_or_built(
         let built = Arc::try_unwrap(built).unwrap_or_else(|a| (*a).clone());
         (
             built,
-            Err(tr!("the merge failed unexpectedly: {error}", error = e)),
+            Err(tr!(
+                "saving the semantic index failed unexpectedly: {error}",
+                error = e
+            )),
         )
     })
 }
@@ -86,12 +89,14 @@ impl App {
             return Task::none();
         }
         let Some(cfg) = embed::Config::load() else {
-            self.status = tr!("Configure an embedding endpoint in Settings").into();
+            self.status = crate::app::embedding::why_no_embeddings();
             return Task::none();
         };
         self.drop_foreign_embed_index(&cfg);
         if self.proj.explain.cache.is_empty() {
-            self.status = tr!("Run Explain All first — the index embeds the summaries").into();
+            self.status =
+                tr!("Run Explain All first — the semantic index is built from the summaries")
+                    .into();
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -119,8 +124,32 @@ impl App {
         // stamped with — and the live-config check decides at its next use
         // (`drop_foreign_embed_index`).
         let space = cfg.space();
+        // None held — another source was chosen, then this one again: what
+        // is stored of this one is reused rather than paid for again.
+        let stored = existing
+            .entries
+            .is_empty()
+            .then(|| {
+                self.proj
+                    .derived_dir
+                    .clone()
+                    .zip(self.proj.project.as_ref())
+            })
+            .flatten()
+            .map(|(store, project)| (store, project.root.clone()));
         let (build, handle) = Task::perform(
             async move {
+                let existing = match stored {
+                    Some((store, root)) => {
+                        let cfg = cfg.clone();
+                        tokio::task::spawn_blocking(move || {
+                            embed::load_for(&store, &root, Some(&cfg))
+                        })
+                        .await
+                        .unwrap_or_default()
+                    }
+                    None => existing,
+                };
                 let index = build_embeddings(&ai, &cfg, nodes, existing).await?;
                 built_in_stored_space(index, &space, &embed::stored_space())
             },
@@ -142,6 +171,11 @@ impl App {
         &mut self,
         result: Result<embed::Index, EmbedBuildFailed>,
     ) -> Task<Message> {
+        // A build stopped (another source chosen) whose answer was already
+        // on its way: nothing of it is wanted.
+        if !self.proj.building_embeddings {
+            return Task::none();
+        }
         // The build's task is over: nothing left to abort.
         self.proj.inflight.embed_build = None;
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
@@ -269,7 +303,7 @@ impl App {
             return Task::none();
         }
         let Some(cfg) = embed::Config::load() else {
-            self.status = tr!("Configure an embedding endpoint in Settings").into();
+            self.status = crate::app::embedding::why_no_embeddings();
             return Task::none();
         };
         self.drop_foreign_embed_index(&cfg);
@@ -293,13 +327,16 @@ impl App {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    embed::embed_batch_cancellable(&cfg, std::slice::from_ref(&query), &|| {
-                        superseded.load(std::sync::atomic::Ordering::Relaxed)
-                    })
+                    embed::embed_batch_cancellable(
+                        &cfg,
+                        std::slice::from_ref(&query),
+                        embed::Purpose::Query,
+                        &|| superseded.load(std::sync::atomic::Ordering::Relaxed),
+                    )
                     .map(|mut v| v.pop().unwrap_or_default())
                 })
                 .await
-                .unwrap_or_else(|_| Err("task join failed".into()))
+                .unwrap_or_else(|_| Err("an internal task failed".into()))
             },
             move |result| {
                 Message::Semantic(SemanticMsg::Results {

@@ -436,7 +436,7 @@ pub(crate) async fn refine_stream(
     let result = std::panic::AssertUnwindSafe(run)
         .catch_unwind()
         .await
-        .unwrap_or_else(|_| Err(tr!("the pass panicked").to_string()));
+        .unwrap_or_else(|_| Err(tr!("it stopped on an internal error").to_string()));
     let _ = output
         .send(Message::Graph(GraphMsg::ProjectCallsRefined {
             stamp,
@@ -468,7 +468,7 @@ async fn refine_pass(
         mut edges,
     } = tokio::task::spawn_blocking(move || pass.plan())
         .await
-        .map_err(|_| tr!("listing the project's functions panicked").to_string())?;
+        .map_err(|_| tr!("listing the project's functions failed unexpectedly").to_string())?;
     let query_defs: Vec<&projectcalls::Def> = query.iter().map(|&i| &defs[i]).collect();
 
     // File lines, read once, for locating each function name's column. A
@@ -782,7 +782,7 @@ async fn refine_pass(
         }
     })
     .await
-    .map_err(|_| tr!("assembling the refined graph panicked").to_string())
+    .map_err(|_| tr!("building the refined call graph failed unexpectedly").to_string())
 }
 
 /// How one function's query went, in the refine pass ([`refine_pass`]).
@@ -2186,10 +2186,10 @@ impl ExplainFailure {
                 detail = detail
             ),
             ExplainFailure::Cancelled => {
-                tr!("its calls were cancelled — run it again to finish").to_string()
+                tr!("its requests were cancelled — run it again to finish").to_string()
             }
             ExplainFailure::Internal(detail) => tr!(
-                "clew failed internally ({detail}) — try again, and report it if it happens again",
+                "Clew failed internally ({detail}) — try again, and report it if it happens again",
                 detail = detail
             ),
             ExplainFailure::ProjectUnreadable(detail) => tr!(
@@ -4003,7 +4003,7 @@ mod pass_tests {
             )),
             rpc(None, "no reply from the server within 600s"),
             rpc(None, "server dropped the request"),
-            CallError::Internal("task join failed".into()),
+            CallError::Internal("an internal task failed".into()),
         ];
         for failure in &once {
             assert_eq!(sent(explicit(), failure), 1, "sent again: {failure:?}");
@@ -4516,7 +4516,7 @@ mod pass_tests {
         }
 
         for call in [
-            CallError::Internal("task join failed".into()),
+            CallError::Internal("an internal task failed".into()),
             CallError::Internal("unexpected reply to Chat: Tree".into()),
             rpc(
                 Some(ErrorCode::Failed),

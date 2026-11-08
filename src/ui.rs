@@ -477,7 +477,9 @@ impl<'a> ActiveOverlay<'a> {
 
     /// The message that dismisses this overlay — the same one its Cancel /
     /// Close control or a backdrop click sends. For the consent prompts that
-    /// is the decline ("Not now" / "Don't run"), as Escape means cancel.
+    /// is the decline, as Escape means cancel: a first open's × (the project
+    /// not opened — its Not now opens it, set up with nothing), a command's
+    /// "Don't run".
     pub(crate) fn dismiss_message(&self) -> Message {
         match self {
             Self::Consent(root) => Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),

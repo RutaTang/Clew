@@ -804,7 +804,7 @@ pub(crate) fn lsp_consent_modal(
     let asked = asked.into();
     let ready = asked.ready;
     use crate::LspProvision;
-    let server_blurb = tr!("clew keeps it separate from your system:");
+    let server_blurb = tr!("Clew installs it in its own folder, not system-wide:");
     let (title, blurb, action) = match consent.provision {
         LspProvision::DebugAdapter { .. } => (
             tr!("Install a debug adapter?"),
@@ -997,7 +997,7 @@ pub(crate) fn lsp_command_modal(
             column(blocks).spacing(8),
             text(tr!(
                 "Language: {language} · Server: {server} {version}",
-                language = pending.language,
+                language = crate::app::languages::language_name(&pending.language),
                 server = pending.server_name,
                 version = pending.version
             ))

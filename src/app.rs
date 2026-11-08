@@ -61,6 +61,7 @@ pub(crate) mod content;
 mod debug;
 mod docs;
 mod editor;
+pub(crate) mod embedding;
 mod explain;
 pub(crate) mod export;
 pub(crate) mod flow;
@@ -87,6 +88,8 @@ pub use runtime::note_window_system;
 mod semantic;
 pub(crate) mod server;
 mod settings;
+pub(crate) mod speech;
+pub(crate) mod spoken;
 mod timetravel;
 pub(crate) mod tutorial;
 mod update;
@@ -109,3 +112,4 @@ pub(crate) use explain::UNCHECKED_MARK;
 
 #[cfg(test)]
 pub(crate) mod tests;
+pub(crate) mod turn;

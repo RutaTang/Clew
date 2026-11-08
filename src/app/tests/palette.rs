@@ -99,13 +99,15 @@ fn the_palette_opens_ranks_runs_and_remembers() {
     typed(&mut app, ">");
     assert_eq!(titles(&app).first().map(String::as_str), Some("Call Graph"));
     // A click runs the row it is on, by its title.
-    let _ = app.update(Message::Nav(NavMsg::PaletteRun("Sidebar: Marks".into())));
+    let _ = app.update(Message::Nav(NavMsg::PaletteRun(
+        "Sidebar: Bookmarks".into(),
+    )));
     assert_eq!(app.sidebar, SidebarTab::Marks);
     assert!(!app.proj.finder.open);
     open_commands(&mut app);
     assert_eq!(
         titles(&app)[..2],
-        ["Sidebar: Marks".to_string(), "Call Graph".to_string()]
+        ["Sidebar: Bookmarks".to_string(), "Call Graph".to_string()]
     );
 
     // Without the `>`, the bar matches the commands and then the files: a
@@ -291,7 +293,7 @@ fn the_command_bar_suggests_what_to_do_here() {
     assert_eq!(
         app.palette_home,
         [
-            Suggestion::Ask("Ask Clew about origin".into()),
+            Suggestion::Ask("Ask Clew about “origin”".into()),
             Suggestion::GoToFile,
             symbol("origin", 3),
         ]

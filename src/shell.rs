@@ -545,13 +545,17 @@ impl Clew {
         // (`theme::init` writes the palette every window paints with), so a
         // later window reverted an appearance being previewed, or a binding
         // whose save failed, under the others, which were never told — and
-        // then fired different chords than they did. It joins them instead.
+        // then fired different chords than they did. It joins them instead —
+        // and their voice settings, which a later window read from the file
+        // too: one whose save failed went back to what the file said, and
+        // the new window's next voice change carried that to every window.
         let live = self.windows.values().next().map(|app| {
             (
                 crate::theme::current_light().id,
                 crate::theme::current_dark().id,
                 crate::theme::current_pref(),
                 app.keymap.clone(),
+                app.voice.prefs.clone(),
             )
         });
         let (mut app, init) = if restore {
@@ -559,12 +563,13 @@ impl Clew {
         } else {
             (App::blank(), Task::none())
         };
-        if let Some((light, dark, pref, keymap)) = live {
+        if let Some((light, dark, pref, keymap, voice)) = live {
             crate::theme::set_light_theme(light);
             crate::theme::set_dark_theme(dark);
             crate::theme::apply_pref(pref);
             app.theme_pref = pref;
             app.keymap = keymap;
+            app.voice.prefs = voice;
         }
         let (id, open) = iced::window::open(crate::window_settings());
         // The App targets window operations (close / minimize / fullscreen) at
@@ -1266,6 +1271,10 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let before = crate::theme::revision();
             // Same for the keymap: a rebind lands in the acting window's copy.
             let keymap_before = clew.windows.get(&id).map(|app| app.keymap.stamp());
+            // And the voice settings: a model chosen in one window was not
+            // the others', which listened for the old one and, saving any
+            // voice setting of their own, wrote it back over the choice.
+            let voice_before = clew.windows.get(&id).map(|app| app.voice.prefs.clone());
             // And the language, which the menu bar is built in.
             #[cfg(target_os = "macos")]
             let lang_before = crate::i18n::current();
@@ -1291,6 +1300,10 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             let keymap_after = clew.windows.get(&id).map(|app| app.keymap.stamp());
             if keymap_before.is_some() && keymap_after != keymap_before {
                 adopt_keymap(clew, id);
+            }
+            let voice_after = clew.windows.get(&id).map(|app| app.voice.prefs.clone());
+            if voice_before.is_some() && voice_after != voice_before {
+                adopt_voice_prefs(clew, id);
             }
             // The menu bar speaks the language it was built in: a language
             // chosen in Settings rebuilds it.
@@ -1431,6 +1444,19 @@ fn adopt_keymap(clew: &mut Clew, from: window::Id) {
     crate::macos::menu::rebuild(&keymap);
 }
 
+/// Hand the voice settings of window `from` to every other window
+/// ([`adopt_keymap`]'s way): one model, language and choice everywhere.
+fn adopt_voice_prefs(clew: &mut Clew, from: window::Id) {
+    let Some(prefs) = clew.windows.get(&from).map(|app| app.voice.prefs.clone()) else {
+        return;
+    };
+    for (other, app) in clew.windows.iter_mut() {
+        if *other != from {
+            app.voice.prefs = prefs.clone();
+        }
+    }
+}
+
 /// Whether a key press reaches the window's key handler.
 ///
 /// `listen_with` also sees events a focused widget already handled
@@ -1471,15 +1497,23 @@ fn forward_key(
 /// which is how shortcuts are spelled. iced gives the key without its
 /// modifiers, so Shift+G arrived as "g" — `G` (to the end) began a `g`
 /// prefix that ate the next key — and `$` as "4", `zR` and `zM` as `zr`
-/// and `zm`: none of them ever ran.
+/// and `zm`: none of them ever ran. A letter Caps Lock alone made capital
+/// is the letter pressed: with it on, `j` and `k` did nothing, and `gg` went
+/// to the end of the file.
 fn typed_key(
     key: keyboard::Key,
     modified_key: keyboard::Key,
     modifiers: keyboard::Modifiers,
 ) -> keyboard::Key {
     let chord = modifiers.command() || modifiers.control() || modifiers.alt() || modifiers.logo();
-    match modified_key {
-        keyboard::Key::Character(_) if !chord => modified_key,
+    match &modified_key {
+        keyboard::Key::Character(typed) if !chord => {
+            let capitalized = !modifiers.shift()
+                && matches!(&key, keyboard::Key::Character(pressed)
+                    if pressed.chars().all(char::is_lowercase)
+                        && typed.as_str() == pressed.to_uppercase());
+            if capitalized { key } else { modified_key }
+        }
         _ => key,
     }
 }
@@ -2223,6 +2257,25 @@ mod tests {
         );
     }
 
+    /// And on their voice settings: read from the file, a choice whose save
+    /// failed was not the new window's, and its next voice change carried
+    /// the file's back to every window.
+    #[tokio::test]
+    async fn a_new_window_joins_the_open_windows_voice_settings() {
+        let mut rt = Runtime::new();
+        let mut app = blank_app();
+        app.voice.prefs.model = "tiny.en".into();
+        app.voice.prefs.run_commands = false;
+        let first = rt.window(app);
+        rt.send(Shell::NewWindow);
+        let second = rt.clew.focused.expect("the new window");
+        assert!(second != first);
+        assert_eq!(
+            rt.clew.windows[&second].voice.prefs,
+            rt.clew.windows[&first].voice.prefs
+        );
+    }
+
     /// The exit waits for the last window's teardown — every clew-server
     /// reaped, or the grace over — and a window opened meanwhile (New Window
     /// works from the menu with none open) keeps clew running.
@@ -2916,7 +2969,7 @@ mod tests {
             question.message,
             format!(
                 "3 changes to bookmarks in {project} are not saved to the host: 1 could not be \
-                 sent and 2 were sent but not confirmed. Close, and they may be lost."
+                 sent and 2 were sent but not confirmed. If you close now, they may be lost."
             )
         );
         // Asked after the grace, of a close the user asked for in clew.
@@ -3032,8 +3085,7 @@ mod tests {
         assert_eq!(
             question.message,
             format!(
-                "1 change to bookmarks in {project} could not be saved by the host. Close, and \
-                 it is lost."
+                "1 change to bookmarks in {project} could not be saved by the host. If you close now, it will be lost."
             )
         );
         assert!(rt.is_open(window));
@@ -3364,11 +3416,7 @@ mod tests {
         rt.answer(0, false);
         assert!(rt.is_open(window));
         let app = &rt.clew.windows[&window];
-        assert!(
-            app.status.starts_with("clew was kept open"),
-            "{}",
-            app.status
-        );
+        assert!(app.status.starts_with("Clew stayed open"), "{}", app.status);
         assert!(
             matches!(app.update.phase, crate::UpdatePhase::Failed(_)),
             "{:?}",
@@ -3811,6 +3859,15 @@ mod tests {
             Key::Character("f".into())
         );
         assert_eq!(press("p", "p", Modifiers::LOGO), Key::Character("p".into()));
+        // Caps Lock on: a letter is still the one pressed; Shift's is not.
+        assert_eq!(
+            press("j", "J", Modifiers::empty()),
+            Key::Character("j".into())
+        );
+        assert_eq!(
+            press("g", "G", Modifiers::SHIFT),
+            Key::Character("G".into())
+        );
     }
 
     #[test]
@@ -4141,6 +4198,45 @@ mod tests {
             !crate::window_settings().exit_on_close_request,
             "iced would close the window itself, unasked"
         );
+    }
+
+    /// A voice model chosen in one window is every window's: the others
+    /// listened for the old one, and saving a voice setting of their own
+    /// wrote it back over the choice.
+    #[test]
+    fn a_voice_setting_in_one_window_reaches_every_window() {
+        // The choice is kept in config.toml: a private directory.
+        let data = test_dir("shell-voice");
+        std::fs::create_dir_all(&data).unwrap();
+        let _env = data_dir_override(&data);
+        let mut clew = test_clew();
+        let (acting, other) = (window::Id::unique(), window::Id::unique());
+        for id in [acting, other] {
+            let mut app = blank_app();
+            app.main_window = Some(id);
+            clew.windows.insert(id, app);
+        }
+        let _ = update(
+            &mut clew,
+            Shell::Window(
+                acting,
+                Message::Voice(crate::app::voice::VoiceMsg::PickModel("tiny.en")),
+            ),
+        );
+        assert_eq!(clew.windows[&acting].voice.prefs.model, "tiny.en");
+        assert_eq!(clew.windows[&other].voice.prefs.model, "tiny.en");
+        // The other window's own change keeps the choice.
+        let _ = update(
+            &mut clew,
+            Shell::Window(
+                other,
+                Message::Voice(crate::app::voice::VoiceMsg::SetRunCommands(false)),
+            ),
+        );
+        let kept = crate::app::voice::VoicePrefs::load();
+        assert_eq!(kept.model, "tiny.en");
+        assert!(!kept.run_commands);
+        assert!(!clew.windows[&acting].voice.prefs.run_commands);
     }
 
     /// A rebind in one window used to change that window alone: the others

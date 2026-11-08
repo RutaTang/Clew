@@ -747,7 +747,7 @@ fn ask_control_socket(name: &str, command: &str) -> Result<String, String> {
     let text = String::from_utf8_lossy(&reply);
     let text = text.trim_end_matches('\0').trim();
     if text.is_empty() {
-        return Err("the program ended before Xdebug read it".into());
+        return Err("the program ended before Xdebug read the command".into());
     }
     let xml = Xml::parse(text).map_err(|e| format!("Xdebug's control socket said: {e}"))?;
     let refused = xml

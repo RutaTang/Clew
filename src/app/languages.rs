@@ -18,6 +18,20 @@ use crate::*;
 
 use clew_protocol::{CChoices, GoChoices, LanguageChoices, RustChoices, ServerChoice};
 
+/// A language's name as a reader knows it ("C++"), for its key ("cpp"):
+/// what a sentence says of it, never the key.
+pub(crate) fn language_name(key: &str) -> &str {
+    clew_core::highlight::lang_name(key).unwrap_or(key)
+}
+
+/// Languages by name, in a list ("C++, Rust").
+pub(crate) fn language_names<S: AsRef<str>>(keys: &[S]) -> String {
+    keys.iter()
+        .map(|k| language_name(k.as_ref()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 impl App {
     /// Read the user's choices for the open project's languages, off the UI
     /// thread; they land as `LanguagesMsg::ChoicesLoaded`. Language servers
@@ -80,7 +94,7 @@ impl App {
                     // The dimming stays as the target alone decides it.
                     Err(e) => {
                         self.status = tr!(
-                            "Could not read what the build leaves out: {error}",
+                            "Could not tell which code the build excludes: {error}",
                             error = e
                         );
                     }
@@ -414,7 +428,7 @@ impl App {
                     clew_core::buildfacts::read(&root, &crates, &choices, config.as_ref())
                 })
                 .await
-                .map_err(|_| tr!("reading the build facts failed").to_string())
+                .map_err(|_| tr!("reading the project's build settings failed").to_string())
             },
             loaded,
         )

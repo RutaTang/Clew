@@ -363,17 +363,25 @@ impl UnsavedEdits {
         let n = self.pending();
         match (quitting, self.unconfirmed > 0) {
             (false, true) => trn!(
-                "Close, and it may be lost.",
-                "Close, and they may be lost.",
+                "If you close now, it may be lost.",
+                "If you close now, they may be lost.",
                 n
             ),
-            (false, false) => trn!("Close, and it is lost.", "Close, and they are lost.", n),
+            (false, false) => trn!(
+                "If you close now, it will be lost.",
+                "If you close now, they will be lost.",
+                n
+            ),
             (true, true) => trn!(
-                "Quit, and it may be lost.",
-                "Quit, and they may be lost.",
+                "If you quit now, it may be lost.",
+                "If you quit now, they may be lost.",
                 n
             ),
-            (true, false) => trn!("Quit, and it is lost.", "Quit, and they are lost.", n),
+            (true, false) => trn!(
+                "If you quit now, it will be lost.",
+                "If you quit now, they will be lost.",
+                n
+            ),
         }
     }
 
@@ -744,7 +752,7 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
             "{}\n\n{}\n\n{}",
             tr!("Not confirmed by their hosts yet:"),
             list(),
-            tr!("Quit, and they may be lost.")
+            tr!("If you quit now, they may be lost.")
         );
         return (title, message);
     }
@@ -753,7 +761,11 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
             "{}\n\n{}\n\n{}",
             tr!("Not sent to their hosts:"),
             list(),
-            trn!("Quit, and it is lost.", "Quit, and they are lost.", total)
+            trn!(
+                "If you quit now, it will be lost.",
+                "If you quit now, they will be lost.",
+                total
+            )
         );
         return (title, message);
     }
@@ -771,10 +783,10 @@ pub(crate) fn quit_question(lost: &[UnsavedEdits]) -> (String, String) {
     let may_be = lost.iter().any(|l| l.unconfirmed > 0);
     let end = match (lost.iter().all(|l| l.pending() == 0), given_up, may_be) {
         (true, _, _) => tr!("Quit anyway?"),
-        (false, true, true) => tr!("Quit, and the others may be lost."),
-        (false, true, false) => tr!("Quit, and the others are lost."),
-        (false, false, true) => tr!("Quit, and they may be lost."),
-        (false, false, false) => tr!("Quit, and they are lost."),
+        (false, true, true) => tr!("If you quit now, the others may be lost."),
+        (false, true, false) => tr!("If you quit now, the others will be lost."),
+        (false, false, true) => tr!("If you quit now, they may be lost."),
+        (false, false, false) => tr!("If you quit now, they will be lost."),
     };
     let message = format!(
         "{}\n\n{}\n\n{end}",
@@ -989,8 +1001,7 @@ impl App {
             .count();
         if waiting >= EDIT_JOURNAL_CAP {
             self.status = tr!(
-                "Not changed: {n} earlier changes to .clew/{rel} are still waiting for the \
-                 server to confirm them — try again once they are saved",
+                "Not changed: {n} earlier changes to .clew/{rel} are still waiting for the host to confirm them — try again once they are saved",
                 n = waiting,
                 rel = rel
             );

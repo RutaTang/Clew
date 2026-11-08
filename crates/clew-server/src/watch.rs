@@ -195,8 +195,7 @@ pub(crate) fn spawn_watcher(
                     let _ = out.send(ServerMessage::Notification {
                         event: Event::Status {
                             message: format!(
-                                "file watching reported a problem ({first}) — changes made \
-                                 outside clew may not appear until the project is reopened"
+                                "file watching reported a problem ({first}) — changes made outside Clew may not appear until the project is reopened"
                             ),
                         },
                     });
@@ -249,8 +248,7 @@ pub(crate) fn watch_or_report(
             let _ = out.send(ServerMessage::Notification {
                 event: Event::Status {
                     message: format!(
-                        "file watching is unavailable for {} ({e}) — changes made outside \
-                         clew will not appear until the project is reopened",
+                        "file watching is unavailable for {} ({e}) — changes made outside Clew will not appear until the project is reopened",
                         root.display()
                     ),
                 },

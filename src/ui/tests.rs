@@ -636,6 +636,12 @@ fn leaving_a_view_that_replaced_the_code_puts_the_reader_back() {
     let read_to = historical.expect("the historical view is on screen");
     assert!(read_to.y > 100.0 && read_to.x > 100.0, "{read_to:?}");
     app.proj.time_travel.as_mut().unwrap().story = Some(Vec::new());
+    // The story of a block with no name of its own says so, not quoted as
+    // if it were one.
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Story of this block"));
+    assert!(!shows(&mut sim, "“this block”"));
+    drop(sim);
     let (next, _, offset) = turn(
         &app,
         next,
@@ -1420,7 +1426,7 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     app.update.phase = crate::UpdatePhase::Downloading;
     app.update.progress = Some((1 << 20, Some(4 << 20)));
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Downloading clew 9.9.9"));
+    assert!(shows(&mut sim, "Downloading Clew 9.9.9"));
     let sent = click(sim, "Cancel");
     assert!(
         matches!(
@@ -1957,12 +1963,16 @@ type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 
 /// The whole window, at the app's test size.
 fn sim_of(app: &App) -> Sim<'_> {
+    // The renderer keeps a shader cache under `$XDG_CACHE_HOME`: in the
+    // suite's own directory, never the developer's home.
+    crate::app::tests::isolated_data_dir();
     crate::fonts::load();
     iced_test::Simulator::with_size(Default::default(), WINDOW, super::view(app))
 }
 
 /// One element on its own (default simulator size).
 fn sim_elem(elem: Element<'_, Message>) -> Sim<'_> {
+    crate::app::tests::isolated_data_dir();
     iced_test::simulator(elem)
 }
 
@@ -2751,7 +2761,7 @@ fn forgetting_a_key_keeps_the_discard_notice() {
     );
     assert!(
         app.status
-            .contains("Unsaved remote state was discarded: notes.json"),
+            .contains("Changes not yet saved on the remote host were discarded: notes.json"),
         "{}",
         app.status
     );
@@ -2760,6 +2770,28 @@ fn forgetting_a_key_keeps_the_discard_notice() {
         "{}",
         app.status
     );
+}
+
+/// Leave to build is given to one project, and its Allow says which, by
+/// the project's folder name.
+#[test]
+fn leave_to_build_names_the_project_it_is_for() {
+    let consent = crate::LspConsent {
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Build {
+            runs: "build scripts".into(),
+            root: PathBuf::from("/work/shop"),
+            host: None,
+        },
+        dest_dir: PathBuf::new(),
+    };
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 3, 0, true));
+    assert!(matches!(
+        click(sim, "Allow in shop").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentAllowed(3))]
+    ));
 }
 
 /// F#8: consent questions are asked one at a time, and the modal says when
@@ -2845,9 +2877,9 @@ fn the_setup_sheet_says_what_each_choice_takes() {
         "Open iced",
         "/nonexistent/iced/.clew",
         "Language servers",
-        "rust-analyzer: download, builds the project, running its code",
+        "rust-analyzer: download, builds the project (runs its code)",
         "Explain the project",
-        "About 3,600 AI calls. Also builds the search index.",
+        "About 3,600 AI calls. Also builds the semantic index.",
         "Not now",
     ] {
         assert!(shows(&mut sim, said), "{said:?}");
@@ -2888,6 +2920,15 @@ fn an_unread_questions_allow_sends_nothing() {
     assert!(matches!(
         click(sim, "Open").as_slice(),
         [Message::Project(ProjectMsg::ConsentAllowed(r))] if *r == root
+    ));
+    // A first open's Not now opens the project too, with nothing set up:
+    // an answer as Open is, pressed only once it can have been read.
+    let sim = sim_elem(open_sheet(&root, false));
+    assert!(click(sim, "Not now").is_empty());
+    let sim = sim_elem(open_sheet(&root, true));
+    assert!(matches!(
+        click(sim, "Not now").as_slice(),
+        [Message::Project(ProjectMsg::OpenWithoutSetup(r))] if *r == root
     ));
     let pending = crate::PendingLspCommand {
         root: root.clone(),
@@ -2949,7 +2990,7 @@ fn an_unread_questions_allow_sends_nothing() {
     ));
 }
 
-/// A question said rather than typed is marked "Said" over its bubble; a
+/// A question said rather than typed is marked "Spoken" over its bubble; a
 /// typed one is not.
 #[test]
 fn a_spoken_question_is_marked_said() {
@@ -2963,11 +3004,11 @@ fn a_spoken_question_is_marked_said() {
     {
         let mut sim = sim_elem(super::ask_panel(&app, 560.0));
         assert!(shows(&mut sim, "where is the origin?"));
-        assert!(shows(&mut sim, "Said"));
+        assert!(shows(&mut sim, "Spoken"));
     }
     app.proj.ask_turns[0].spoken = false;
     let mut sim = sim_elem(super::ask_panel(&app, 560.0));
-    assert!(!shows(&mut sim, "Said"));
+    assert!(!shows(&mut sim, "Spoken"));
 }
 
 /// A press held on Stop as the answer ends is not one on Ask, let go of
@@ -4494,10 +4535,12 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
     use iced_test::selector::{Candidate, Selector};
     // `view`, its Allow counting or not, pressed and let go of on the
     // answers labelled `allow` and `decline`.
+    /// An answer's label, and what it sends.
+    type Answer<'s> = (&'s str, fn(&Message) -> bool);
     fn check<'a>(
         view: impl Fn(bool) -> Element<'a, Message>,
-        (allow, allows): (&str, fn(&Message) -> bool),
-        (decline, declines): (&str, fn(&Message) -> bool),
+        (allow, allows): Answer<'_>,
+        decline: Option<Answer<'_>>,
     ) {
         let mut renderer = renderer();
         let mut cache = Cache::default();
@@ -4547,9 +4590,11 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         let _ = frame(true, allow, &press);
         let sent = frame(true, allow, &release);
         assert!(sent.iter().any(allows), "{allow}: {sent:?}");
-        let _ = frame(false, decline, &press);
-        let sent = frame(true, decline, &release);
-        assert!(sent.iter().any(declines), "{decline}: {sent:?}");
+        if let Some((decline, declines)) = decline {
+            let _ = frame(false, decline, &press);
+            let sent = frame(true, decline, &release);
+            assert!(sent.iter().any(declines), "{decline}: {sent:?}");
+        }
     }
 
     let approval = Approval {
@@ -4576,10 +4621,10 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
             "Allow once",
             |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "once"),
         ),
-        (
+        Some((
             "Deny",
             |m| matches!(m, Message::Ask(AskMsg::Approve { option, .. }) if option == "no"),
-        ),
+        )),
     );
     let consent = crate::LspConsent {
         language: "rust".into(),
@@ -4596,9 +4641,9 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ("Download", |m| {
             matches!(m, Message::Lsp(LspMsg::ConsentAllowed(7)))
         }),
-        ("Not now", |m| {
+        Some(("Not now", |m| {
             matches!(m, Message::Lsp(LspMsg::ConsentDismissed(7)))
-        }),
+        })),
     );
     let root = PathBuf::from("/nonexistent/clew-ui-allow");
     let pending = crate::PendingLspCommand {
@@ -4617,18 +4662,26 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ("Allow", |m| {
             matches!(m, Message::Lsp(LspMsg::CommandAllowed(8)))
         }),
-        ("Don't allow", |m| {
+        Some(("Don't allow", |m| {
             matches!(m, Message::Lsp(LspMsg::CommandDismissed(8)))
-        }),
+        })),
     );
+    // A first open's Open and Not now both open the project — Not now with
+    // nothing set up — so both are held until the sheet can have been
+    // read; not opening it is the ×, or Escape.
     check(
         |ready| open_sheet(&root, ready),
         ("Open", |m| {
             matches!(m, Message::Project(ProjectMsg::ConsentAllowed(_)))
         }),
+        None,
+    );
+    check(
+        |ready| open_sheet(&root, ready),
         ("Not now", |m| {
-            matches!(m, Message::Project(ProjectMsg::ConsentDenied(_)))
+            matches!(m, Message::Project(ProjectMsg::OpenWithoutSetup(_)))
         }),
+        None,
     );
     let target = port_2222_target();
     let key = scanned_key();
@@ -4637,18 +4690,18 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         ("Trust and connect", |m| {
             matches!(m, Message::Connect(ConnectMsg::TrustHost { .. }))
         }),
-        ("Cancel", |m| {
+        Some(("Cancel", |m| {
             matches!(m, Message::Connect(ConnectMsg::TrustCancel))
-        }),
+        })),
     );
     check(
         |ready| super::connect::host_key_changed_prompt(&target, "changed", "host", ready),
         ("Forget the old key", |m| {
             matches!(m, Message::Connect(ConnectMsg::ForgetHostKey { .. }))
         }),
-        ("Cancel", |m| {
+        Some(("Cancel", |m| {
             matches!(m, Message::Connect(ConnectMsg::TrustCancel))
-        }),
+        })),
     );
 }
 
@@ -4696,9 +4749,10 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
         keys_in(&super::lsp_command_modal(&pending, 8, 0, true)),
         [8, 1]
     );
+    // A first open's Not now opens the project too: held as Open is.
     assert_eq!(
         keys_in(&open_sheet(&root, true)),
-        [hash(&|h| root.hash(h)), 1]
+        [hash(&|h| root.hash(h)), 1, 1]
     );
     let target = port_2222_target();
     let key = scanned_key();
@@ -4936,7 +4990,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
     app.remote_ai_opt_in = true;
     app.connect = Some(crate::ConnectUi::default());
     let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "holds your AI keys"));
+    assert!(shows(&mut sim, "holds your API keys"));
     let sent = click(sim, "Revoke");
     assert!(
         matches!(
@@ -4949,7 +5003,7 @@ fn the_connect_modal_can_revoke_the_live_hosts_ai_keys() {
         let _ = app.update(msg);
     }
     assert_eq!(app.live_ai_opt_in(), Some(false));
-    assert!(shows(&mut sim_of(&app), "does not hold your AI keys"));
+    assert!(shows(&mut sim_of(&app), "does not hold your API keys"));
     // Locally there is nothing to grant, so nothing is shown.
     app.connection = crate::connect::ConnTarget::Local;
     let mut local = sim_of(&app);
@@ -5312,7 +5366,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
         .link
         .lsp_snapshots
         .insert("rust".into(), Err(crate::lsp::client::StatePoisoned));
-    assert!(shows(&mut sim_of(&app), "rust-analyzer ⚠ state unreadable"));
+    assert!(shows(&mut sim_of(&app), "rust-analyzer ⚠ internal error"));
     assert!(
         !underlined(&app),
         "nothing is read past a poisoned snapshot"
@@ -5329,7 +5383,7 @@ async fn the_view_reads_lsp_state_from_one_snapshot_and_reports_poisoning() {
     assert!(
         text_at(
             &mut sim_of(&app),
-            |t| t.contains("state unreadable after an internal error"),
+            |t| t.contains("internal error — restart this language server"),
             0
         )
         .is_some(),
@@ -5836,15 +5890,36 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
         &root, &files, &structure,
     ));
     let mut sim = sim_elem(super::project_types_body(&app));
-    assert!(shows(&mut sim, "4 types · 4 relations · 1 inherit"));
-    assert!(shows(&mut sim, "MOST REFERENCED (NAMED BY OTHERS)"));
+    assert!(shows(
+        &mut sim,
+        "4 types · 4 relations · 1 inheritance link"
+    ));
+    assert!(shows(&mut sim, "MOST REFERENCED (USED BY THE MOST TYPES)"));
     assert!(shows(&mut sim, "Customer"));
     assert!(shows(&mut sim, "2 ←"), "Customer is named twice");
     assert!(shows(&mut sim, "BASE TYPES (MOST SUBTYPES)"));
     assert!(shows(&mut sim, "1 subtype"));
-    assert!(shows(&mut sim, "MOST DEPENDENCIES (NAMING OTHERS)"));
+    assert!(shows(&mut sim, "MOST DEPENDENCIES (USES THE MOST TYPES)"));
     assert!(shows(&mut sim, "→ 2"), "Order names two");
     drop(sim);
+    // None inherits: the count says none — in French too, where nought takes
+    // the singular.
+    let structured = std::mem::replace(
+        &mut app.proj.type_graph,
+        std::sync::Arc::new(crate::typegraph::TypeGraph::build(
+            &root,
+            &files,
+            &Default::default(),
+        )),
+    );
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "· 0 inheritance links"));
+    drop(sim);
+    crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
+        let mut sim = sim_elem(super::project_types_body(&app));
+        assert!(shows(&mut sim, "· 0 lien d'héritage"));
+    });
+    app.proj.type_graph = structured;
     // A node of the type map opens its definition at its line.
     let layout = crate::graphlayout::layout(
         vec![crate::graphlayout::NodeInput {
@@ -5960,10 +6035,7 @@ fn the_last_runs_trace_is_offered_as_a_walkthrough_and_listed_on_the_call_graph(
     assert_eq!(super::trace_files(&app).len(), 1);
     app.proj.project_calls.graph = std::sync::Arc::new(g);
     let mut sim = sim_elem(super::project_calls_body(&app));
-    assert!(shows(
-        &mut sim,
-        "EXECUTED (THE LAST DEBUG RUN STOPPED HERE)"
-    ));
+    assert!(shows(&mut sim, "WHERE THE LAST DEBUG RUN STOPPED"));
     assert!(shows(&mut sim, "2 stops"));
 }
 
@@ -6927,7 +6999,7 @@ fn the_languages_section_offers_each_languages_build_choices() {
         "/p/build",
         "The toolchain the language server runs from.",
         "The lake found on the PATH",
-        "elan — the project's",
+        "elan (set by the project)",
         "Server programs",
     ] {
         assert!(sim.find(shown).is_ok(), "{shown:?} is shown");
@@ -6989,7 +7061,7 @@ fn the_languages_section_picks_a_typescript_and_a_zig() {
     let mut sim = sim_elem(super::connect::languages_section(&app));
     for shown in [
         "TypeScript and JavaScript",
-        "clew's built-in TypeScript 5",
+        "Clew's built-in TypeScript 5",
         "The project's TypeScript 5.4.5 — runs the project's own code",
         "Zig",
         "zvm · Zig 0.13.0",
@@ -8101,6 +8173,46 @@ fn the_unexplained_note_follows_a_language_switch() {
     assert!(said(&app).contains("Pas encore expliqué"), "{}", said(&app));
 }
 
+/// Smart Turn in Voice settings: its download says its size; once it is
+/// here, Remove; what went wrong with it is said under it — and that it
+/// cannot run without `clew-speak` beside Clew.
+#[test]
+fn smart_turn_is_offered_in_voice_settings() {
+    use crate::VoiceMsg;
+    let mut app = reader_app();
+    let dir = crate::app::tests::test_dir("ui-smart-turn");
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = clew_voice::models::Store::new(dir);
+    app.voice.store = Some(store.clone());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "Smart Turn"));
+    assert!(shows(&mut sim, "a pause to think is waited through"));
+    assert!(matches!(
+        click(sim, "Download (9 MB)").as_slice(),
+        [Message::Voice(VoiceMsg::DownloadTurn)]
+    ));
+    std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+    std::fs::File::create(clew_voice::turn::path(&store))
+        .unwrap()
+        .set_len(clew_voice::turn::MODEL.bytes)
+        .unwrap();
+    app.voice.turn.error = Some("the model failed: it broke".into());
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(&mut sim, "the model failed: it broke"));
+    assert!(!shows(&mut sim, "Download (9 MB)"));
+    assert!(matches!(
+        click(sim, "Remove").as_slice(),
+        [Message::Voice(VoiceMsg::RemoveTurn)]
+    ));
+    app.voice.turn.judges = None;
+    let mut sim = sim_elem(super::voice_section(&app));
+    assert!(shows(
+        &mut sim,
+        "clew-speak, which runs it, is not installed beside Clew"
+    ));
+    let _ = std::fs::remove_dir_all(store.dir());
+}
+
 /// What voice could not do is said in the reader's language: on the card,
 /// on the pill, and under a model in Settings.
 #[test]
@@ -8117,8 +8229,8 @@ fn voice_failures_are_said_in_the_readers_language() {
     app.voice.store = Some(clew_voice::models::Store::new(dir));
     app.voice.download_errors.insert(
         "base.en",
-        "the download is not ggml-base.en.bin as published (13 bytes, not 147951465) — it was \
-         discarded"
+        "the download does not match the published ggml-base.en.bin (13 bytes, not 147951465) — \
+         it was discarded"
             .into(),
     );
     with_lang(Lang::Fr, || {
@@ -8135,11 +8247,83 @@ fn voice_failures_are_said_in_the_readers_language() {
         assert!(
             shows(
                 &mut sim_elem(super::voice_section(&app)),
-                "le téléchargement ne correspond pas au fichier ggml-base.en.bin publié"
+                "le téléchargement ne correspond pas au ggml-base.en.bin publié"
             ),
             "under the model"
         );
     });
+}
+
+/// Clew speaking shows as listening does: on the pill, even with Ask put
+/// away, and in the card's composer — the speaker, how loud, and the
+/// button lit to stop it.
+#[test]
+fn speaking_shows_with_a_stop() {
+    struct Playing;
+    impl crate::app::speech::Playing for Playing {
+        fn play(&self, _: &[f32], _: u32) {}
+        fn rate(&self) -> u32 {
+            48_000
+        }
+        fn queued_seconds(&self) -> f32 {
+            1.0
+        }
+        fn played(&self) -> u64 {
+            0
+        }
+        fn take_rest(&self) -> (Vec<f32>, u32) {
+            (Vec::new(), 1)
+        }
+        fn idle(&self) -> bool {
+            false
+        }
+        fn level(&self) -> f32 {
+            0.5
+        }
+        fn error(&self) -> Option<String> {
+            None
+        }
+    }
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Closed;
+    app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
+    {
+        let mut sim = sim_of(&app);
+        let speaking =
+            text_at(&mut sim, |t| t == "Speaking", 0).expect("the pill says Clew speaks");
+        let (right, bottom) = ask_corner_edges();
+        assert!(
+            speaking.x > right - 300.0 && speaking.y > bottom - 60.0,
+            "in the corner: {speaking:?}"
+        );
+    }
+    // The pill says Esc stops it, and its button, lit, does.
+    assert!(shows(&mut sim_of(&app), "Esc"));
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Speaking",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
+        "{sent:?}"
+    );
+    // On the card, in the composer: the same, Esc left to the pill.
+    app.ask_view = crate::AskView::Compact;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Speaking"), "on the card too");
+    assert!(!shows(&mut sim, "Esc"));
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Speaking",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
+        "{sent:?}"
+    );
 }
 
 /// What voice is doing shows in Ask's corner, never in the field at the
@@ -8158,7 +8342,7 @@ fn voice_shows_what_it_is_doing() {
     };
     {
         let mut sim = sim_of(&app);
-        let listening = text_at(&mut sim, |t| t == "Listening…", 0)
+        let listening = text_at(&mut sim, |t| t == "Listening", 0)
             .expect("the pill says it listens, even put away");
         let (right, bottom) = ask_corner_edges();
         assert!(
@@ -8186,11 +8370,26 @@ fn voice_shows_what_it_is_doing() {
     app.ask_view = crate::AskView::Compact;
     assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");
     app.voice.phase = VoicePhase::Transcribing { token: 1 };
-    assert!(shows(&mut sim_of(&app), "Working out what you said"));
-    assert!(matches!(
-        click(sim_of(&app), "Cancel").as_slice(),
-        [Message::Voice(crate::VoiceMsg::Cancel)]
-    ));
+    assert!(shows(&mut sim_of(&app), "Transcribing"));
+    // On the card, the microphone's place holds the way to cancel; on the
+    // pill, as while listening, Esc.
+    let sent = click_right_of(
+        || sim_of(&app),
+        "Transcribing",
+        |m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel)),
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel))),
+        "{sent:?}"
+    );
+    app.ask_view = crate::AskView::Hidden;
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Transcribing"));
+        assert!(shows(&mut sim, "Esc"));
+    }
+    app.ask_view = crate::AskView::Compact;
     app.voice.phase = VoicePhase::Idle;
     app.voice.confirm = Some("Explain All".into());
     assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));
@@ -8615,4 +8814,182 @@ fn every_layer_leaves_the_rounded_corners_clear() {
             assert_eq!(alpha(&rgba, x, y), 255, "{what}: the edge at ({x}, {y})");
         }
     }
+}
+
+/// What is missing to make embeddings on this computer — the model, then
+/// the program that runs it — is said where search would be, and on the
+/// Embeddings page once the model is here.
+#[cfg(unix)]
+#[test]
+fn what_is_missing_to_make_embeddings_is_shown() {
+    use clew_core::embed::local;
+    let dir = crate::app::tests::test_dir("ui-embed-missing");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _data = crate::app::tests::data_dir_override(&dir);
+    let old = std::env::var_os("PATH").unwrap_or_default();
+    let kept: Vec<PathBuf> = std::env::split_paths(&old)
+        .filter(|d| !d.join("clew-speak").exists())
+        .collect();
+    let _path =
+        clew_core::testutil::EnvVars::new().set("PATH", std::env::join_paths(kept).unwrap());
+    assert!(local::program().is_none(), "no clew-speak to be found");
+    clew_core::embed::Config::local().save().unwrap();
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.explain_cache_mut().insert(
+        explain_file(&root, "src/lib.rs"),
+        crate::explain::Cached {
+            summary: "Sums the cart.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.refresh_embeddings();
+    assert!(!app.embed_available);
+    let download = format!("Download {} in Settings → Embeddings", local::MODEL.name);
+    let program = "clew-speak, which makes embeddings on this computer, is not installed";
+    {
+        let mut sim = sim_elem(super::semantic_tab(&app));
+        assert!(shows(&mut sim, &download));
+    }
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Embeddings,
+    )));
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, program), "not before the model is here");
+    }
+    let model = local::dir().unwrap();
+    for file in local::MODEL.files {
+        let path = model.join(file.path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+    }
+    // As a download that finished does.
+    app.refresh_embeddings();
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, program), "the page says what is missing");
+    }
+    let _ = app.update(Message::Settings(crate::SettingsMsg::Close));
+    {
+        let mut sim = sim_elem(super::semantic_tab(&app));
+        assert!(shows(&mut sim, program), "so does search");
+    }
+    // A service saved, this computer chosen on the page but not saved yet:
+    // the page says what this computer is missing, not the service's.
+    clew_core::embed::Config::from_parts("sk".into(), "m".into(), "http://emb.test/v1".into())
+        .save()
+        .unwrap();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Embeddings,
+    )));
+    let _ = app.update(Message::Settings(crate::SettingsMsg::EmbedHere(true)));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, program), "for the choice on the page");
+}
+
+/// Actions done again and again — refresh the statistics, rebuild the
+/// semantic index, expand every branch of a tree, close the diff — are
+/// icons named by their tooltips, not words; each does what its word did.
+#[test]
+fn repeated_actions_are_icons_that_do_what_they_did() {
+    use crate::{CallsMsg, OverviewMsg, SemanticMsg};
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let words_gone = |sim: &mut Sim<'_>, words: &[&str]| {
+        for w in words {
+            assert!(!shows(sim, w), "{w:?} is still a word");
+        }
+    };
+
+    app.proj.stats.report = Some(crate::stats::StatsReport {
+        langs: vec![crate::stats::LangStat {
+            name: "Rust".into(),
+            files: 1,
+            code: 42,
+            comments: 0,
+            blanks: 0,
+        }],
+        ..Default::default()
+    });
+    words_gone(&mut sim_elem(super::stats_home(&app)), &["Refresh"]);
+    let sent = click_right_of(
+        || sim_elem(super::stats_home(&app)),
+        "Code Statistics",
+        |m| matches!(m, Message::Overview(OverviewMsg::RefreshStats)),
+    );
+    assert!(
+        !sent.is_empty(),
+        "the statistics are refreshed from their icon"
+    );
+
+    app.proj.embed_index = crate::embed::Index {
+        model: "m".into(),
+        base_url: "http://emb.test/v1".into(),
+        entries: vec![crate::embed::Entry {
+            node: crate::explain::Node::File(root.join("src/lib.rs")),
+            hash: 1,
+            vec: vec![1.0, 0.0],
+        }],
+    };
+    words_gone(&mut sim_elem(super::semantic_tab(&app)), &["Rebuild"]);
+    // At the start of the row the count ends.
+    let count = text_at(
+        &mut sim_elem(super::semantic_tab(&app)),
+        |t| t == "1 indexed",
+        0,
+    )
+    .expect("the count is on screen");
+    let rebuilt = (0..count.x as u32).step_by(3).any(|x| {
+        let mut sim = sim_elem(super::semantic_tab(&app));
+        sim.point_at(Point::new(x as f32, count.center_y()));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
+            .into_iter()
+            .any(|m| matches!(m, Message::Semantic(SemanticMsg::BuildIndex)))
+    });
+    assert!(rebuilt, "the index is rebuilt from its icon");
+    // The first build is asked for in words.
+    app.proj.embed_index = crate::embed::Index::default();
+    assert!(shows(
+        &mut sim_elem(super::semantic_tab(&app)),
+        "Build index"
+    ));
+
+    let item = crate::lsp::client::CallItem {
+        name: "origin".into(),
+        detail: String::new(),
+        kind: 12,
+        path: root.join("src/lib.rs"),
+        line: 1,
+        character: 0,
+        raw: serde_json::json!({}),
+    };
+    app.proj.call_graph = Some(crate::callgraph::CallTree::new(
+        1,
+        crate::callgraph::Direction::Incoming,
+        "rust",
+        vec![item],
+    ));
+    words_gone(&mut sim_elem(super::calls_tab(&app)), &["Expand all"]);
+    let sent = click_right_of(
+        || sim_elem(super::calls_tab(&app)),
+        "origin",
+        |m| matches!(m, Message::Calls(CallsMsg::ExpandAll)),
+    );
+    assert!(!sent.is_empty(), "the tree is expanded from its icon");
+
+    let abs = root.join("src/lib.rs");
+    app.proj.diff = Some(crate::DiffState::new(abs, "src/lib.rs".into(), Vec::new()));
+    let head = "src/lib.rs  ·  vs HEAD";
+    words_gone(&mut sim_of(&app), &["✕ Close"]);
+    let sent = click_right_of(
+        || sim_of(&app),
+        head,
+        |m| matches!(m, Message::Editor(EditorMsg::ToggleDiff)),
+    );
+    assert!(!sent.is_empty(), "the diff is closed from its icon");
 }

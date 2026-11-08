@@ -35,14 +35,17 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = tr!("No {language} server ready", language = lang);
+                self.status = tr!(
+                    "No {language} server ready",
+                    language = crate::app::languages::language_name(lang)
+                );
                 return Task::none();
             }
         };
         if !client.call_hierarchy {
             self.status = tr!(
                 "Call hierarchy isn't supported for {language}",
-                language = lang
+                language = crate::app::languages::language_name(lang)
             );
             return Task::none();
         }

@@ -432,7 +432,7 @@ impl App {
             scope_kept().to_string()
         } else {
             tr!(
-                "Stopped loading the history of {file} — you kept working in this one",
+                "Stopped loading the history of {file}, since you kept working here",
                 file = self.rel_of(&start.abs)
             )
         };

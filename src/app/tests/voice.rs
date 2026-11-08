@@ -31,6 +31,9 @@ impl Listening for FakeMic {
     fn silence_after_speech(&self) -> Option<f32> {
         self.0.lock().unwrap().silence
     }
+    fn recent(&self, _seconds: f32) -> (Vec<f32>, u32) {
+        (spoken(), 16_000)
+    }
     fn full(&self) -> bool {
         self.0.lock().unwrap().full
     }
@@ -77,12 +80,14 @@ struct Hears {
     words: String,
     hints: Mutex<Vec<String>>,
     heard_audio: Mutex<usize>,
+    /// The model file it was last asked to hear with.
+    model: Mutex<Option<PathBuf>>,
 }
 
 impl Transcriber for Hears {
     fn transcribe(
         &self,
-        _model: &Path,
+        model: &Path,
         audio: &[f32],
         options: &Options,
         cancel: &AtomicBool,
@@ -90,6 +95,7 @@ impl Transcriber for Hears {
         if cancel.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("cancelled".into());
         }
+        *self.model.lock().unwrap() = Some(model.to_path_buf());
         self.hints.lock().unwrap().push(options.hint.clone());
         *self.heard_audio.lock().unwrap() = audio.len();
         Ok(self.words.clone())
@@ -111,6 +117,7 @@ fn voice_app(tag: &str, words: &str) -> (App, Arc<Mutex<MicScript>>, Arc<Hears>)
         words: words.into(),
         hints: Mutex::new(Vec::new()),
         heard_audio: Mutex::new(0),
+        model: Mutex::new(None),
     });
     app.voice.transcriber = hears.clone();
     (app, script, hears)
@@ -500,7 +507,7 @@ fn model_downloads_are_verified() {
     assert!(app.voice.downloads.is_empty());
     let error = app.voice.download_errors.get("base.en").cloned().unwrap();
     assert!(
-        error.contains("not ggml-base.en.bin as published"),
+        error.contains("does not match the published ggml-base.en.bin"),
         "{error}"
     );
     assert!(!app.voice.installed(model));
@@ -543,8 +550,9 @@ fn model_downloads_are_verified() {
     assert!(!app.voice.installed(model));
 }
 
-/// A model downloaded is the one the voice key hears with — not the one
-/// chosen before, which may not be on this computer — and that is kept.
+/// A model downloaded is the one the voice key hears with when the one
+/// chosen is not on this computer — and that is kept; one chosen and here
+/// stays chosen.
 #[test]
 fn a_downloaded_model_is_the_one_the_voice_key_uses() {
     // A data directory of its own: config.toml is everyone's.
@@ -569,12 +577,55 @@ fn a_downloaded_model_is_the_one_the_voice_key_uses() {
     assert!(app.status.contains("is ready"), "{}", app.status);
     assert_eq!(app.voice.prefs.model, "tiny.en");
     assert_eq!(VoicePrefs::load().model, "tiny.en", "kept");
+    // One chosen and here stays chosen when another finishes downloading
+    // (picked while it downloaded, say): that one is only said to be here.
+    let _ = app.update(Message::Voice(VoiceMsg::Download("base.en")));
+    let base = clew_voice::models::find("base.en").unwrap();
+    std::fs::write(store.path(base), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::Downloaded {
+        id: "base.en",
+        result: Ok(store.path(base)),
+    }));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    assert!(app.status.contains("is downloaded"), "{}", app.status);
     // And the voice key listens with it, as the status says.
     app.voice.reset_for_test();
     script.lock().unwrap().silence = None;
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(app.voice.is_listening(), "{}", app.status);
     assert!(!app.settings.open);
+}
+
+/// The model the voice key hears with, removed while another is on this
+/// computer: that one is used, not the removed one asked for again. With
+/// none left, the choice stays (Settings offers it to download).
+#[test]
+fn removing_the_chosen_model_uses_one_still_here() {
+    let data = test_dir("voice-removed-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, script, _) = voice_app("voice-removed", "hello");
+    let store = app.voice.store.clone().unwrap();
+    let small = app.voice.prefs.model();
+    assert!(app.voice.installed(small));
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveModel("small-q5_1")));
+    assert!(!app.voice.installed(small));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    assert_eq!(VoicePrefs::load().model, "tiny.en", "kept");
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    // Removing one not chosen leaves the choice alone.
+    std::fs::write(store.path(small), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveModel("small-q5_1")));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
+    // The last one gone: still chosen, to download again.
+    let _ = app.update(Message::Voice(VoiceMsg::RemoveModel("tiny.en")));
+    assert_eq!(app.voice.prefs.model, "tiny.en");
 }
 
 /// The voice settings are kept in config.toml, and read back.
@@ -750,4 +801,824 @@ fn each_languages_examples_run_what_they_say() {
             );
         });
     }
+}
+
+/// The recognizer hears `words` from now on.
+fn hears(app: &mut App, words: &str) {
+    app.voice.transcriber = Arc::new(Hears {
+        words: words.into(),
+        hints: Mutex::new(Vec::new()),
+        heard_audio: Mutex::new(0),
+        model: Mutex::new(None),
+    });
+}
+
+/// Say `words`, and land the file a pane then waits for, as the runtime
+/// would.
+fn say_words(app: &mut App, script: &Arc<Mutex<MicScript>>, words: &str) {
+    hears(app, words);
+    say(app, script);
+    let pane = app.proj.active;
+    if let Some(req) = app.proj.link.pane_pending[pane] {
+        let open = app.proj.link.pane_opening[pane]
+            .clone()
+            .filter(|o| o.req == req)
+            .expect("the pane's open is kept");
+        land_active_load(app, open.abs, open.target);
+    }
+}
+
+/// The caret's line in the active pane, 1-based.
+fn caret_line(app: &App) -> Option<usize> {
+    app.active_viewer()?.caret.map(|(line, _)| line + 1)
+}
+
+/// What was done with what was heard.
+fn ran(app: &App) -> Option<&str> {
+    match &app.voice.heard.as_ref()?.outcome {
+        HeardOutcome::Ran(done) => Some(done),
+        _ => None,
+    }
+}
+
+/// A line said is gone to — in figures or in words — and a line said with no
+/// file open goes to Ask, which can say there is none.
+#[test]
+fn a_line_said_is_gone_to() {
+    let (mut app, script, _) = voice_app("voice-line", "");
+    say_words(&mut app, &script, "Go to line 4.");
+    assert!(
+        app.voice
+            .heard
+            .as_ref()
+            .is_some_and(|h| h.outcome == HeardOutcome::Asked),
+        "no file is open"
+    );
+    open_synchronously(&mut app, "src/lib.rs", None);
+    say_words(&mut app, &script, "Go to line 4.");
+    assert_eq!(caret_line(&app), Some(4), "{}", app.status);
+    assert_eq!(ran(&app), Some("Line 4"));
+    say_words(&mut app, &script, "line two");
+    assert_eq!(caret_line(&app), Some(2));
+    // Past the end: the last line.
+    say_words(&mut app, &script, "go to line 900");
+    assert_eq!(
+        caret_line(&app),
+        Some(app.active_viewer().unwrap().lines.len())
+    );
+    // The palette's own "Go to Line…" asks for one; said without a number,
+    // that is what runs.
+    say_words(&mut app, &script, "Go to line");
+    assert_eq!(ran(&app), Some("Go to Line…"));
+}
+
+/// A long file is moved through by voice as by its keys: by a screen, by
+/// lines, to either end; and folded and unfolded.
+#[test]
+fn a_file_is_scrolled_and_folded_by_voice() {
+    let (mut app, script, _) = voice_app("voice-scroll", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let body: String = (0..120)
+        .map(|i| format!("fn f{i}() {{\n    let x = {i};\n}}\n"))
+        .collect();
+    std::fs::write(root.join("src/long.rs"), body).unwrap();
+    scan_synchronously(&mut app, root);
+    open_synchronously(&mut app, "src/long.rs", None);
+    let line_height = app.line_height();
+    app.active_viewer_mut().unwrap().viewport_h = 20.0 * line_height;
+    let scroll = |app: &App| app.active_viewer().unwrap().scroll_y;
+
+    say_words(&mut app, &script, "Scroll down.");
+    assert_eq!(ran(&app), Some("Scroll Down"), "{}", app.status);
+    assert_eq!(scroll(&app), 19.0 * line_height, "a screen, less a line");
+    assert_eq!(caret_line(&app), Some(20), "the caret goes as far");
+    say_words(&mut app, &script, "scroll down 10 lines");
+    assert_eq!(scroll(&app), 29.0 * line_height);
+    say_words(&mut app, &script, "Scroll up five lines.");
+    assert_eq!(scroll(&app), 24.0 * line_height);
+    say_words(&mut app, &script, "scroll up");
+    assert_eq!(scroll(&app), 5.0 * line_height);
+
+    // Near the end, down is still down: on until the last line is the
+    // first in view, as the wheel goes.
+    let rows = app.active_viewer().unwrap().content_rows() as f32;
+    app.active_viewer_mut().unwrap().scroll_y = (rows - 10.0) * line_height;
+    say_words(&mut app, &script, "scroll down");
+    assert_eq!(scroll(&app), (rows - 1.0) * line_height);
+    say_words(&mut app, &script, "Go to the end of the file.");
+    assert_eq!(ran(&app), Some("Go to End of File"));
+    assert_eq!(
+        caret_line(&app),
+        Some(app.active_viewer().unwrap().lines.len())
+    );
+    say_words(&mut app, &script, "go to top of file");
+    assert_eq!(caret_line(&app), Some(1));
+
+    say_words(&mut app, &script, "Fold all.");
+    assert_eq!(ran(&app), Some("Fold All"));
+    assert!(!app.active_viewer().unwrap().collapsed.is_empty());
+    say_words(&mut app, &script, "unfold all");
+    assert!(app.active_viewer().unwrap().collapsed.is_empty());
+}
+
+/// The debugger by voice: a breakpoint on a line said, the program stepped
+/// with no yes for each step, a watch added and taken away; starting and
+/// stopping it still asks — and the yes, or the no, can be said.
+#[test]
+fn the_debugger_is_driven_by_voice() {
+    let (mut app, script, _) = voice_app("voice-debug", "");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = app.active_viewer().unwrap().abs.clone();
+    say_words(&mut app, &script, "Breakpoint on line 4.");
+    assert_eq!(ran(&app), Some("Breakpoint on line 4"), "{}", app.status);
+    assert!(
+        app.debug
+            .breakpoints
+            .get(&abs)
+            .is_some_and(|b| b.contains_key(&4))
+    );
+    // No line 90: nothing set, and said so.
+    say_words(&mut app, &script, "Breakpoint on line 90.");
+    assert!(
+        !app.debug
+            .breakpoints
+            .get(&abs)
+            .is_some_and(|b| b.contains_key(&90))
+    );
+    assert!(app.status.contains("no line 90"), "{}", app.status);
+    assert!(
+        matches!(
+            app.voice.heard.as_ref().map(|h| &h.outcome),
+            Some(HeardOutcome::Failed(_))
+        ),
+        "not shown as done"
+    );
+    say_words(&mut app, &script, "toggle breakpoint on line four");
+    assert!(
+        !app.debug
+            .breakpoints
+            .get(&abs)
+            .is_some_and(|b| b.contains_key(&4))
+    );
+
+    // Starting asks; "no" says no, "yes" runs it.
+    say_words(&mut app, &script, "Start debugging.");
+    assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+    say_words(&mut app, &script, "No, never mind.");
+    assert_eq!(app.voice.confirm, None);
+    assert!(app.status.contains("Start Debugging"), "{}", app.status);
+    say_words(&mut app, &script, "Start debugging.");
+    say_words(&mut app, &script, "Yes, run it.");
+    assert_eq!(app.voice.confirm, None);
+    assert_eq!(ran(&app), Some("Start Debugging"));
+    // Something else said instead puts the question away and is read as
+    // itself.
+    say_words(&mut app, &script, "Start debugging.");
+    say_words(&mut app, &script, "go to line 2");
+    assert_eq!(app.voice.confirm, None);
+    assert_eq!(caret_line(&app), Some(2));
+
+    // A program stopped: each step runs as said.
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    for (said, title) in [
+        ("Step over.", "Debug: Step Over"),
+        ("step into", "Debug: Step Into"),
+        ("Step out", "Debug: Step Out"),
+        ("continue", "Debug: Continue"),
+    ] {
+        say_words(&mut app, &script, said);
+        assert_eq!(ran(&app), Some(title), "{said}: {}", app.status);
+        assert_eq!(app.voice.confirm, None, "{said}");
+    }
+    say_words(&mut app, &script, "Stop debugging.");
+    assert_eq!(app.voice.confirm.as_deref(), Some("Debug: Stop"));
+    say_words(&mut app, &script, "cancel");
+    assert_eq!(app.voice.confirm, None);
+
+    say_words(&mut app, &script, "Watch cart total.");
+    assert_eq!(app.debug.watches, ["cart total"]);
+    say_words(&mut app, &script, "stop watching cart total");
+    assert!(app.debug.watches.is_empty());
+    say_words(&mut app, &script, "Turn on hover evaluation.");
+    assert_eq!(
+        app.voice.confirm.as_deref(),
+        Some("Debug: Turn On Hover Evaluation"),
+        "evaluating in the program as the mouse moves asks"
+    );
+}
+
+/// Words to look for, a file and a symbol said by name, Settings' pages and
+/// the find bar's matches: each where it is said to be.
+#[test]
+fn what_is_named_is_found_and_opened() {
+    let (mut app, script, _) = voice_app("voice-named", "");
+    // The project's symbols, indexed as the runtime does in a task.
+    let files = app.proj.project.as_ref().unwrap().files.clone();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
+        stamp: Stamp {
+            root: Some(root.clone()),
+            epoch: app.project_epoch,
+            conn: None,
+        },
+        indexed: index::build_indexed(&root, files),
+    }));
+    settle_imports(&mut app, indexed);
+    say_words(&mut app, &script, "Open notes dot txt.");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("notes.txt"),
+        "{}",
+        app.status
+    );
+    // An extension misheard: the file of that name.
+    say_words(&mut app, &script, "Open, lib.ide,");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.as_str()),
+        Some("src/lib.rs"),
+        "{}",
+        app.status
+    );
+    say_words(&mut app, &script, "Go to origin.");
+    assert_eq!(ran(&app), Some("origin"), "{}", app.status);
+    let v = app.active_viewer().unwrap();
+    assert_eq!(v.rel, "src/lib.rs");
+    assert_eq!(caret_line(&app), Some(3));
+
+    say_words(&mut app, &script, "Find point.");
+    assert!(app.proj.find.open);
+    assert_eq!(app.proj.find.query, "point");
+    assert_eq!(app.proj.find.matches.len(), 3);
+    say_words(&mut app, &script, "find next");
+    assert_eq!(app.proj.find.current, 1, "{}", app.status);
+    say_words(&mut app, &script, "find previous");
+    assert_eq!(app.proj.find.current, 0);
+    say_words(&mut app, &script, "close find");
+    assert!(!app.proj.find.open);
+
+    // What is not a file's name, nor words to find, is a question.
+    for question in [
+        "Open it.",
+        "Show me.",
+        "Go to the end.",
+        "Find where the origin is worked out.",
+    ] {
+        say_words(&mut app, &script, question);
+        assert!(
+            app.voice
+                .heard
+                .as_ref()
+                .is_some_and(|h| h.outcome == HeardOutcome::Asked),
+            "{question}: {}",
+            app.status
+        );
+        app.proj.ask_input.clear();
+    }
+
+    say_words(&mut app, &script, "Search for needle.");
+    assert_eq!(app.proj.search.query, "needle");
+    assert_eq!(app.sidebar, SidebarTab::Search);
+
+    say_words(&mut app, &script, "Open the voice settings.");
+    assert!(app.settings.open, "{}", app.status);
+    assert_eq!(app.settings.page, SettingsPage::Voice);
+}
+
+/// The phrases are heard in the reader's language too; whisper is told the
+/// titles, not them.
+#[test]
+fn phrases_are_heard_in_the_readers_language() {
+    use crate::i18n::{Lang, with_lang};
+    with_lang(Lang::Fr, || {
+        let (mut app, script, hears) = voice_app("voice-phrase-fr", "");
+        open_synchronously(&mut app, "src/lib.rs", None);
+        say_words(&mut app, &script, "Aller à la ligne 4.");
+        assert_eq!(caret_line(&app), Some(4), "{}", app.status);
+        drop(hears);
+        // A title beginning as a phrase does is the title: "Rechercher les
+        // références" is Find References, not a search for "les références".
+        app.active_viewer_mut().unwrap().caret = Some((2, 7));
+        say_words(&mut app, &script, "Rechercher les références");
+        assert_eq!(ran(&app), Some("Find References"), "{}", app.status);
+        assert!(app.proj.search.query.is_empty());
+        say_words(&mut app, &script, "Démarrer le débogage");
+        assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+        say_words(&mut app, &script, "Oui, vas-y.");
+        assert_eq!(ran(&app), Some("Start Debugging"), "{}", app.status);
+    });
+    with_lang(Lang::Zh, || {
+        let (mut app, script, _) = voice_app("voice-phrase-zh", "");
+        open_synchronously(&mut app, "src/lib.rs", None);
+        say_words(&mut app, &script, "跳到第3行。");
+        assert_eq!(caret_line(&app), Some(3), "{}", app.status);
+        say_words(&mut app, &script, "在第2行设置断点");
+        let abs = app.active_viewer().unwrap().abs.clone();
+        assert!(
+            app.debug
+                .breakpoints
+                .get(&abs)
+                .is_some_and(|b| b.contains_key(&2)),
+            "{}",
+            app.status
+        );
+    });
+    let (mut app, script, hears) = voice_app("voice-phrase-hint", "go to line 2");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    say(&mut app, &script);
+    let hints = hears.hints.lock().unwrap();
+    // The titles, and nothing that whisper might hear in what was not
+    // clearly said.
+    assert!(hints[0].contains("Scroll Down"), "{}", hints[0]);
+    assert!(!hints[0].contains("breakpoint on line"), "{}", hints[0]);
+    assert!(
+        !hints[0].split(", ").any(|w| w == "Talk"),
+        "the voice key's own command: {}",
+        hints[0]
+    );
+}
+
+/// Every command the window offers runs when its name is said, in each
+/// language — with a file open, its find bar up and a program stopped in
+/// the debugger, so that every command is offered.
+#[test]
+fn every_command_runs_when_its_name_is_said() {
+    use crate::i18n::{Lang, with_lang};
+    let (mut app, _script, _) = voice_app("voice-every-command", "");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.active_viewer_mut().unwrap().caret = Some((2, 7));
+    let _ = app.update(Message::Editor(EditorMsg::FindOpened));
+    app.debug.session = Some(DebugSession {
+        client: None,
+        status: DebugStatus::Stopped,
+        thread_id: Some(1),
+        frames: Vec::new(),
+        scopes: Vec::new(),
+        watches: Vec::new(),
+        output: Vec::new(),
+        current: None,
+        program: PathBuf::from("/bin/true"),
+        args: Vec::new(),
+        cwd: PathBuf::from("/"),
+        addr: None,
+    });
+    for lang in Lang::ALL {
+        with_lang(lang, || {
+            let commands = app.palette_commands();
+            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+            let mut unheard = Vec::new();
+            for (i, command) in commands.iter().enumerate() {
+                let said = command.shown().trim_end_matches('…');
+                let found = clew_voice::intent::command(said, &titles)
+                    .or_else(|| crate::app::voice::said_as_shown(lang, said, &shown));
+                if found.map(|f| titles[f]) != Some(titles[i]) {
+                    unheard.push(format!("{said:?} → {:?}", found.map(|f| titles[f])));
+                }
+            }
+            assert!(unheard.is_empty(), "{}: {unheard:#?}", lang.code());
+        });
+    }
+    // And as the README says them.
+    let commands = app.palette_commands();
+    let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+    for (said, title) in [
+        ("scroll down", "Scroll Down"),
+        ("go to the end of the file", "Go to End of File"),
+        ("fold all", "Fold All"),
+        ("unfold all", "Unfold All"),
+        ("fold here", "Toggle Fold Here"),
+        ("find next", "Find Next"),
+        ("find previous", "Find Previous"),
+        ("close find", "Find: Close"),
+        ("step over", "Debug: Step Over"),
+        ("continue", "Debug: Continue"),
+        ("voice settings", "Settings: Voice"),
+        ("full screen", "Window: Full Screen"),
+        ("maximize", "Window: Toggle Maximize"),
+        ("maximize the window", "Window: Toggle Maximize"),
+        // The sidebar's tab, as before the margin's were listed.
+        ("notes", "Sidebar: Notes"),
+        ("show calls", "Sidebar: Calls"),
+        ("margin notes", "Margin Notes"),
+        ("margin history", "Margin History"),
+    ] {
+        assert_eq!(
+            clew_voice::intent::command(said, &titles).map(|i| titles[i]),
+            Some(title),
+            "{said:?}"
+        );
+    }
+}
+
+/// What is said is heard with the model listening began with: one another
+/// window picks meanwhile — not downloaded, say — is the next listen's.
+#[test]
+fn listening_keeps_the_model_it_began_with() {
+    let (mut app, script, hears) = voice_app("voice-model-kept", "hello");
+    let began = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    // Another window's pick, handed to this one by the shell.
+    app.voice.prefs.model = "tiny.en".into();
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(
+        hears.model.lock().unwrap().as_deref(),
+        Some(store.path(began).as_path())
+    );
+}
+
+/// A model downloading is not downloaded again in another window — both
+/// wrote one partial file, and the first to finish moved the other's
+/// half-written bytes into place — and, chosen, it stays chosen when
+/// another one finishes first.
+#[test]
+fn a_model_on_its_way_is_neither_downloaded_twice_nor_passed_over() {
+    let data = test_dir("voice-coming-data");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let (mut app, _script, _) = voice_app("voice-coming", "hello");
+    let store = app.voice.store.clone().unwrap();
+    let small = app.voice.prefs.model();
+    std::fs::remove_file(store.path(small)).unwrap();
+    app.voice.fetch = junk_fetch;
+    // The chosen model, on its way in this window (its transfer not run).
+    let small_transfer = app.update(Message::Voice(VoiceMsg::Download(small.id)));
+    assert!(app.voice.downloads.contains_key(small.id));
+    let mut other = blank_app();
+    other.voice.store = Some(store.clone());
+    other.voice.fetch = junk_fetch;
+    let _ = other.update(Message::Voice(VoiceMsg::Download(small.id)));
+    assert!(other.voice.downloads.is_empty(), "downloaded twice");
+    assert!(
+        other.status.contains("already downloading"),
+        "{}",
+        other.status
+    );
+    // Tiny, finished first, does not take its place.
+    let _tiny_transfer = app.update(Message::Voice(VoiceMsg::Download("tiny.en")));
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    let _ = app.update(Message::Voice(VoiceMsg::Downloaded {
+        id: "tiny.en",
+        result: Ok(store.path(tiny)),
+    }));
+    assert_eq!(app.voice.prefs.model, small.id);
+    assert!(app.status.contains("is downloaded"), "{}", app.status);
+    // Its transfer over, another window may download it.
+    drop(small_transfer);
+    let _ = app.update(Message::Voice(VoiceMsg::CancelDownload(small.id)));
+    let _ = other.update(Message::Voice(VoiceMsg::Download(small.id)));
+    assert!(
+        other.voice.downloads.contains_key(small.id),
+        "{}",
+        other.status
+    );
+}
+
+// ---- Smart Turn: when the speaker has finished ---------------------------
+
+/// A judge that answers what the test says it will, in order, and keeps
+/// how much audio each judgement was given.
+#[derive(Default)]
+struct FakeJudge {
+    answers: Mutex<Vec<Result<f32, String>>>,
+    asked: Mutex<Vec<usize>>,
+    warmed: Mutex<usize>,
+    stopped: Mutex<usize>,
+}
+
+impl crate::app::turn::Judging for FakeJudge {
+    fn warm(&self, _file: &std::path::Path) -> Result<(), String> {
+        *self.warmed.lock().unwrap() += 1;
+        Ok(())
+    }
+    fn judge(&self, _file: &std::path::Path, samples: &[f32]) -> Result<f32, String> {
+        self.asked.lock().unwrap().push(samples.len());
+        let mut answers = self.answers.lock().unwrap();
+        if answers.is_empty() {
+            Err("not answered".into())
+        } else {
+            answers.remove(0)
+        }
+    }
+    fn stop(&self) {
+        *self.stopped.lock().unwrap() += 1;
+    }
+}
+
+/// [`voice_app`] with Smart Turn: its model "downloaded" (a file of its
+/// size), judged by a judge that answers `answers`; and listening begun.
+fn turn_app(
+    tag: &str,
+    answers: Vec<Result<f32, String>>,
+    model: bool,
+) -> (App, Arc<Mutex<MicScript>>, Arc<FakeJudge>) {
+    let (mut app, script, _) = voice_app(tag, "open settings");
+    if model {
+        let store = app.voice.store.clone().unwrap();
+        std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+        std::fs::File::create(clew_voice::turn::path(&store))
+            .unwrap()
+            .set_len(clew_voice::turn::MODEL.bytes)
+            .unwrap();
+    }
+    let judge = Arc::new(FakeJudge {
+        answers: Mutex::new(answers),
+        ..FakeJudge::default()
+    });
+    app.voice.turn.judges = Some(judge.clone());
+    app.voice.reset_for_test();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    (app, script, judge)
+}
+
+/// The microphone has been quiet `quiet` seconds since speech: a tick.
+fn quiet_for(app: &mut App, script: &Arc<Mutex<MicScript>>, quiet: f32) -> Task<Message> {
+    script.lock().unwrap().silence = Some(quiet);
+    app.update(Message::Voice(VoiceMsg::Tick))
+}
+
+fn transcribing(app: &App) -> bool {
+    matches!(app.voice.phase, VoicePhase::Transcribing { .. })
+}
+
+/// A turn that sounds finished ends listening at its first short pause,
+/// long before the pause listening waits out without the model; the model
+/// hears the last of what was said.
+#[test]
+fn a_finished_turn_ends_listening_at_its_first_pause() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-finished", vec![Ok(0.9)], true);
+    assert!(
+        quiet_for(&mut app, &script, 0.1).units() == 0,
+        "too short to judge"
+    );
+    assert!(judge.asked.lock().unwrap().is_empty());
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    assert!(app.voice.is_listening(), "listening while it is judged");
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(*judge.asked.lock().unwrap(), [spoken().len()]);
+    assert!(transcribing(&app), "a finished turn ends listening");
+    assert!(script.lock().unwrap().stopped);
+    const { assert!(JUDGE_AFTER < END_SILENCE) };
+}
+
+/// A turn that sounds unfinished — a pause to think — is waited through,
+/// past the pause that ends listening without the model, up to its own.
+#[test]
+fn an_unfinished_turn_is_waited_through() {
+    use crate::app::turn::{HOLD_FOR, JUDGE_AFTER};
+    let (mut app, script, _) = turn_app("turn-unfinished", vec![Ok(0.1)], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.1);
+    assert!(app.voice.is_listening(), "an unfinished turn is waited for");
+    let _ = quiet_for(&mut app, &script, HOLD_FOR - 0.1);
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, HOLD_FOR);
+    assert!(transcribing(&app), "and not for ever");
+}
+
+/// Speech coming back is a pause of its own when it stops again: judged
+/// afresh. A judgement of the pause before it, landing late, changes
+/// nothing.
+#[test]
+fn each_pause_is_judged_afresh() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-afresh", vec![Ok(0.95), Ok(0.1), Ok(0.9)], true);
+    // A pause judged finished — but speech comes back before the answer.
+    let late = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    let _ = quiet_for(&mut app, &script, 0.02);
+    for message in run_task(late) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening(), "a judgement of a pause gone by");
+    // The next pause: unfinished, then speech, then a finished one.
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, 0.02);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(judge.asked.lock().unwrap().len(), 3, "once a pause");
+    assert!(transcribing(&app));
+}
+
+/// A pause is judged once, however many ticks it lasts.
+#[test]
+fn a_pause_is_judged_once() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-once", vec![Ok(0.2)], true);
+    let first = quiet_for(&mut app, &script, JUDGE_AFTER + 0.01);
+    let second = quiet_for(&mut app, &script, JUDGE_AFTER + 0.07);
+    assert_eq!(second.units(), 0, "not asked again while it is judged");
+    for message in run_task(first) {
+        let _ = app.update(message);
+    }
+    let third = quiet_for(&mut app, &script, JUDGE_AFTER + 0.2);
+    assert_eq!(third.units(), 0, "nor once it has been");
+    assert_eq!(judge.asked.lock().unwrap().len(), 1);
+}
+
+/// Without the model, or when it cannot answer, a pause ends listening as
+/// it always has; what went wrong is kept for Settings to show.
+#[test]
+fn without_a_judgement_a_pause_ends_as_before() {
+    use crate::app::turn::JUDGE_AFTER;
+    // Not downloaded: nothing is asked.
+    let (mut app, script, judge) = turn_app("turn-none", vec![Ok(0.9)], false);
+    assert_eq!(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05).units(), 0);
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.01);
+    assert!(transcribing(&app));
+    assert!(judge.asked.lock().unwrap().is_empty());
+    assert_eq!(*judge.warmed.lock().unwrap(), 0, "no model to load");
+    // It fails: the pause is waited out as without it.
+    let (mut app, script, _) = turn_app("turn-fails", vec![Err("it broke".into())], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    let _ = quiet_for(&mut app, &script, END_SILENCE - 0.1);
+    assert!(app.voice.is_listening());
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.01);
+    assert!(transcribing(&app));
+    assert_eq!(app.voice.turn.error.as_deref(), Some("it broke"));
+    // No `clew-speak` to run it: as without the model.
+    let (mut app, script, _) = turn_app("turn-no-program", vec![Ok(0.9)], true);
+    app.voice.turn.judges = None;
+    assert_eq!(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05).units(), 0);
+    assert!(app.voice.is_listening());
+}
+
+/// Listening loads the model meanwhile, so the first pause is judged at
+/// once.
+#[test]
+fn listening_loads_the_model() {
+    let (_app, _script, judge) = turn_app("turn-warm", Vec::new(), true);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while *judge.warmed.lock().unwrap() == 0 && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(*judge.warmed.lock().unwrap(), 1);
+}
+
+/// A download of Smart Turn that is not it, held to its own cap.
+fn junk_turn_fetch(
+    _url: &str,
+    max_bytes: u64,
+    _cancel: &AtomicBool,
+    sink: &mut dyn std::io::Write,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<u64, String> {
+    assert_eq!(
+        max_bytes,
+        clew_voice::turn::MODEL.bytes,
+        "the model's own cap"
+    );
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    sink.write_all(b"not the model")
+        .map_err(|e| e.to_string())?;
+    progress(13, Some(13));
+    Ok(13)
+}
+
+/// Smart Turn is downloaded checked against its size and checksum, and
+/// removed with what runs it let go first.
+#[test]
+fn smart_turn_downloads_verified_and_is_removed() {
+    let (mut app, _script, judge) = turn_app("turn-download", Vec::new(), false);
+    let store = app.voice.store.clone().unwrap();
+    app.voice.fetch = junk_turn_fetch;
+    let task = app.update(Message::Voice(VoiceMsg::DownloadTurn));
+    assert!(app.voice.turn.download.is_some());
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.turn.download.is_none());
+    let error = app.voice.turn.error.clone().unwrap();
+    assert!(
+        error.contains("does not match the published smart-turn-v3.2-cpu.onnx"),
+        "{error}"
+    );
+    assert!(!clew_voice::turn::installed(&store));
+    // Cancelled: whatever it says after is nobody's.
+    let task = app.update(Message::Voice(VoiceMsg::DownloadTurn));
+    assert!(app.voice.turn.error.is_none(), "a new try clears it");
+    let _ = app.update(Message::Voice(VoiceMsg::CancelTurnDownload));
+    let before = app.status.clone();
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.status, before, "a cancelled download says nothing");
+    // Removed: the model let go of first.
+    std::fs::create_dir_all(clew_voice::turn::dir(&store)).unwrap();
+    std::fs::File::create(clew_voice::turn::path(&store))
+        .unwrap()
+        .set_len(clew_voice::turn::MODEL.bytes)
+        .unwrap();
+    assert!(clew_voice::turn::installed(&store));
+    let task = app.update(Message::Voice(VoiceMsg::RemoveTurn));
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(!clew_voice::turn::installed(&store));
+    assert_eq!(*judge.stopped.lock().unwrap(), 1);
+    assert!(app.status.contains("removed"), "{}", app.status);
+}
+
+/// Spoken again after a pause was sent to be judged, before any tick has
+/// seen it: the answer that the pause finished a turn is about a pause that
+/// is over, and listening goes on.
+#[test]
+fn speech_back_before_the_answer_keeps_listening() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, _) = turn_app("turn-spoke-again", vec![Ok(0.95)], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    script.lock().unwrap().silence = Some(0.03);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert!(app.voice.is_listening(), "cut off mid-word");
+}
+
+/// A failed judgement is said under the model until one succeeds; one
+/// from a listening already over is not said at all.
+#[test]
+fn a_judgement_failure_is_said_until_one_succeeds() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, _) = turn_app(
+        "turn-fails-once",
+        vec![Err("took too long".into()), Ok(0.2)],
+        true,
+    );
+    for message in run_task(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05)) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.voice.turn.error.as_deref(), Some("took too long"));
+    let _ = quiet_for(&mut app, &script, 0.02);
+    for message in run_task(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05)) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.voice.turn.error, None, "it answers again");
+    // An answer for the listening before this one.
+    let listen = app.voice.turn.pause.listen;
+    let _ = app.update(Message::Voice(VoiceMsg::Judged {
+        listen: listen - 1,
+        pause: 0,
+        result: Err("long ago".into()),
+    }));
+    assert_eq!(app.voice.turn.error, None);
+}
+
+/// A model being removed — in any window — judges nothing: a pause ends
+/// as without it, whether the removal began before listening or during it.
+#[test]
+fn a_model_being_removed_judges_nothing() {
+    use crate::app::turn::JUDGE_AFTER;
+    use crate::app::voice::{Claim, ClaimedFor};
+    let (mut app, script, judge) = turn_app("turn-removing", vec![Ok(0.9)], true);
+    let store = app.voice.store.clone().unwrap();
+    let removal = Claim::take(clew_voice::turn::path(&store), ClaimedFor::Removal).unwrap();
+    assert_eq!(quiet_for(&mut app, &script, JUDGE_AFTER + 0.05).units(), 0);
+    let _ = quiet_for(&mut app, &script, END_SILENCE + 0.01);
+    assert!(transcribing(&app));
+    // Begun before listening: not even loaded.
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.turn_model().is_none());
+    drop(removal);
+    assert!(app.turn_model().is_some(), "here again once it is let go");
+    assert!(judge.asked.lock().unwrap().is_empty());
 }

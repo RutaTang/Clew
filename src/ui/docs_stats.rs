@@ -244,7 +244,11 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         },
         Message::Docs(DocsMsg::ToggleShowAll),
     );
-    let refresh = chip("↻".into(), Message::Docs(DocsMsg::Refresh));
+    let refresh = super::toolbar::icon_action(
+        Glyph::Refresh,
+        tr!("Rebuild"),
+        Some(Message::Docs(DocsMsg::Refresh)),
+    );
     let controls = row![group_btn, vis_btn, space().width(Fill), refresh]
         .spacing(4)
         .align_y(iced::Center);
@@ -416,7 +420,7 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
             .color(theme::dim())
             .wrapping(Wrapping::None),
         space().width(Fill),
-        button(text(tr!("Open source")).size(ts::BODY))
+        button(text(tr!("View source")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
             .on_press(Message::Editor(EditorMsg::OpenRel {
@@ -526,7 +530,14 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                 .size(ts::HEADING)
                 .color(theme::fg()),
             space().width(Fill),
-            regen(tr!("Regenerate")),
+            // An icon, as the chrome's actions are, named by its tooltip —
+            // the height of the header's title line: the page below sits
+            // where it did.
+            super::toolbar::icon_action(
+                Glyph::Refresh,
+                tr!("Regenerate"),
+                Some(Message::Overview(OverviewMsg::Generate)),
+            ),
         ]
         .align_y(iced::Center);
         // The module map, drawn natively (same engine as the Import Graph
@@ -701,10 +712,11 @@ pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
 /// The code-statistics "home": totals, a language-proportion bar, a per-language
 /// breakdown, and the largest files (each row opens the file).
 pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
-    let refresh = button(text(tr!("Refresh")).size(ts::BODY))
-        .style(theme::toolbar_button)
-        .padding([3, 12])
-        .on_press(Message::Overview(OverviewMsg::RefreshStats));
+    let refresh = super::toolbar::icon_action(
+        Glyph::Refresh,
+        tr!("Refresh"),
+        Some(Message::Overview(OverviewMsg::RefreshStats)),
+    );
 
     // Nothing to show yet: computing, or a project with no counted code.
     let Some(report) = app.proj.stats.report.as_ref().filter(|r| !r.is_empty()) else {

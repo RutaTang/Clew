@@ -336,7 +336,7 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
     };
     let toggle =
-        container(row![seg(tr!("Search"), is_search), seg(tr!("Walk"), !is_search)].spacing(1))
+        container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(1))
             .padding(2)
             .style(theme::trough);
 
@@ -753,7 +753,7 @@ const SIDEBAR_GAP: f32 = 12.0;
 
 /// The file-tree mark of a file git tracks although `.gitignore` (or a
 /// build-directory name) would hide it (see `fs_scan::ScanReport`).
-pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked · ignored");
+pub(crate) const TRACKED_IGNORED_MARK: &str = tr_noop!("tracked, though ignored");
 
 pub(crate) fn append_tree_rows<'a>(
     rows: &mut Vec<Element<'a, Message>>,
@@ -1124,13 +1124,25 @@ fn search_preview<'a>(app: &'a App, i: usize, preview: &'a str) -> Element<'a, M
         Some(spans) => spans,
         None => &plain,
     };
-    let marks = app
+    // Found in the whole line where it could be read; else as matched in
+    // the preview itself.
+    let in_line = app
         .proj
         .search
-        .matcher
-        .as_ref()
-        .map(|m| m.ranges(&shown))
-        .unwrap_or_default();
+        .marks
+        .get(i)
+        .and_then(Option::as_ref)
+        .filter(|_| *shown == *preview);
+    let marks = match in_line {
+        Some(marks) => marks.clone(),
+        None => app
+            .proj
+            .search
+            .matcher
+            .as_ref()
+            .map(|m| m.ranges_in_preview(&shown))
+            .unwrap_or_default(),
+    };
     let pieces = mark_spans(spans, &marks);
     let mark = theme::with_alpha(theme::find(), 0.35);
     let spans: Vec<iced::widget::text::Span<'static, Message>> = pieces
@@ -1507,7 +1519,7 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
-            None => text(tr!("detached"))
+            None => text(tr!("symbol not found"))
                 .size(ts::CAPTION)
                 .color(theme::warning())
                 .into(),
@@ -1645,19 +1657,26 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .size(ts::BASE)
         .padding(7);
 
-    let build_label = if app.proj.building_embeddings {
-        tr!("Building…")
-    } else if n == 0 {
-        tr!("Build index")
-    } else {
-        tr!("Rebuild")
-    };
-    let mut build = button(text(build_label).size(ts::SMALL))
+    let press =
+        (!app.proj.building_embeddings).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    // The first build is asked for in words; building again, as the other
+    // rebuilds are, by its icon.
+    let build: Element<'_, Message> = if n == 0 {
+        button(
+            text(if app.proj.building_embeddings {
+                tr!("Building…")
+            } else {
+                tr!("Build index")
+            })
+            .size(ts::SMALL),
+        )
         .style(theme::toolbar_button)
-        .padding([2, 8]);
-    if !app.proj.building_embeddings {
-        build = build.on_press(Message::Semantic(SemanticMsg::BuildIndex));
-    }
+        .padding([2, 8])
+        .on_press_maybe(press)
+        .into()
+    } else {
+        super::toolbar::icon_action(crate::glyph::Glyph::Refresh, tr!("Rebuild"), press)
+    };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
     let info = text(if app.proj.building_embeddings {
@@ -1667,7 +1686,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     } else if app.proj.explain.cache.is_empty() {
         tr!("Run Explain All to enable semantic search.").to_string()
     } else if !app.embed_available {
-        tr!("Set an embedding provider in Settings.").to_string()
+        app.embed_missing.clone()
     } else {
         tr!("Preparing the index…").to_string()
     })

@@ -71,8 +71,14 @@ pub enum Glyph {
     Export,
     // Voice and the Ask window
     Mic,
+    /// A speaker, sounding: Clew speaking.
+    Speaker,
+    /// A filled square: stop.
+    Stop,
     Expand,
     Shrink,
+    /// Two chevrons down: open every branch of a tree.
+    ExpandAll,
     // The window's chrome
     /// The app menu of Windows and Linux (three bars).
     Menu,
@@ -286,11 +292,20 @@ fn body(g: Glyph) -> &'static str {
              <path d='M5.5 11 A6.5 6.5 0 0 0 18.5 11'/><path d='M12 17.5 V21'/>\
              <path d='M8.5 21 H15.5'/>"
         }
+        // A speaker, and the sound it makes.
+        Speaker => {
+            "<path d='M11 5.5 L6.5 9.5 H3.5 V14.5 H6.5 L11 18.5 Z'/>\
+             <path d='M15.2 9 A4 4 0 0 1 15.2 15'/><path d='M18 6.2 A8 8 0 0 1 18 17.8'/>"
+        }
+        // A filled square, its corners rounded: stop.
+        Stop => "<rect x='6' y='6' width='12' height='12' rx='2.5' fill='STROKE' stroke='none'/>",
         // Two corners pulled outward: make larger.
         Expand => {
             "<path d='M14 4 H20 V10'/><path d='M20 4 L13.5 10.5'/>\
              <path d='M10 20 H4 V14'/><path d='M4 20 L10.5 13.5'/>"
         }
+        // Two chevrons, one under the other: open every branch.
+        ExpandAll => "<path d='m7 6 5 5 5-5'/><path d='m7 13 5 5 5-5'/>",
         // Two corners pushed inward: make smaller.
         Shrink => {
             "<path d='M20 10 H14 V4'/><path d='M14 10 L20.5 3.5'/>\

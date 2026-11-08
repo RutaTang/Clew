@@ -59,13 +59,13 @@ pub(crate) const CALLS_REV_STALE: u64 = u64::MAX;
 
 /// What the status line says to do once a refinement was handed back to the
 /// name-based build (`App::drop_refinement`) with its servers still ready.
-pub(crate) const REFINE_AGAIN: &str = tr_noop!("refine it with LSP for exact edges");
+pub(crate) const REFINE_AGAIN: &str = tr_noop!("refine it with LSP for exact calls");
 
 /// Why a refinement is handed back when the project's index lands after it
 /// began: it read only what was indexed by then, and nothing notes what the
 /// index adds.
 pub(crate) const REFINED_BEFORE_INDEXED: &str =
-    tr_noop!("The project finished indexing after the refine began");
+    tr_noop!("The project finished indexing after refinement began");
 
 /// How long the refine holds the changed files of a language whose server is
 /// starting — restarted, or replacing one that died — before it hands the
@@ -118,17 +118,17 @@ impl GaveUp {
         match self {
             GaveUp::NotStarted => tr!(
                 "The {language} server did not start within {time} to refine the files that changed",
-                language = lang,
+                language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_WAIT_LIMIT)
             ),
             GaveUp::NotLoaded => tr!(
                 "The {language} server did not load the project within {time} to refine the files that changed",
-                language = lang,
+                language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_LOAD_LIMIT)
             ),
             GaveUp::Silent => tr!(
                 "The {language} server reported nothing for {time} while loading the project to refine the files that changed",
-                language = lang,
+                language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_WAIT_LIMIT)
             ),
         }
@@ -140,19 +140,19 @@ impl GaveUp {
         match self {
             GaveUp::NotStarted => tr!(
                 "The {language} server did not start within {time} — {status}",
-                language = lang,
+                language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_WAIT_LIMIT),
                 status = status
             ),
             GaveUp::NotLoaded => tr!(
                 "The {language} server did not load the project within {time} — {status}",
-                language = lang,
+                language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_LOAD_LIMIT),
                 status = status
             ),
             GaveUp::Silent => tr!(
                 "The {language} server reported nothing for {time} while loading the project — {status}",
-                language = lang,
+                language = crate::app::languages::language_name(lang),
                 time = in_words(REFINE_WAIT_LIMIT),
                 status = status
             ),
@@ -160,13 +160,13 @@ impl GaveUp {
     }
 }
 
-/// "the {title} map did not hold together", for a project map from another
+/// "the {title} map is malformed", for a project map from another
 /// process whose arrows name nodes it does not have. Made outside the async
 /// block that reports it, which must not hold the arguments' references
 /// across its awaits.
 fn map_not_whole(title: &str) -> String {
     tr!(
-        "the {map} map did not hold together",
+        "the {map} map is malformed",
         map = crate::i18n::lookup(title)
     )
 }
@@ -1009,7 +1009,7 @@ impl App {
                 let mut failed = applied.map(Arc::unwrap_or_clone);
                 self.status = if retried {
                     tr!(
-                        "Could not update the import graph, even on a second try ({error}) — what that update carried was dropped, and applies when its files next change",
+                        "Could not update the import graph, even on a second try ({error}) — those changes are skipped until their files change again",
                         error = e
                     )
                 } else if let Some(batch) =
@@ -1022,7 +1022,7 @@ impl App {
                     )
                 } else {
                     tr!(
-                        "Could not update the import graph ({error}) — the changes queued since take its place",
+                        "Could not update the import graph ({error}) — newer changes are applied instead",
                         error = e
                     )
                 };
@@ -1205,7 +1205,7 @@ impl App {
                     })
                     .await
                     .map_err(|_| {
-                        tr!("collecting the import scope failed unexpectedly").to_string()
+                        tr!("collecting the project's imports failed unexpectedly").to_string()
                     })?;
                     // Every failure is reported — the transport, a refusal,
                     // and a graph whose indices do not hold together — rather
@@ -1572,9 +1572,9 @@ impl App {
             self.drop_refinement(
                 &tr!(
                     "No {language} server is ready to refine the files that changed",
-                    language = lang
+                    language = crate::app::languages::language_name(lang)
                 ),
-                tr!("refine it with LSP once one is"),
+                tr!("refine it with LSP once a server is ready"),
             );
             return self.refresh_call_graph_in_use();
         }
@@ -1773,7 +1773,10 @@ impl App {
             Some((*lang, why))
         });
         if let Some((lang, why)) = gave_up {
-            self.drop_refinement(&why.to_refine(lang), tr!("refine it with LSP once it has"));
+            self.drop_refinement(
+                &why.to_refine(lang),
+                tr!("refine it with LSP once the server is ready"),
+            );
             return self.refresh_call_graph_in_use();
         }
         let (renewed, timer) = self.arm_refine_wait(late.iter().copied(), Some(held.since));
@@ -2014,10 +2017,10 @@ impl App {
             let mut waiting: Vec<&str> = held.heard.keys().map(String::as_str).collect();
             waiting.sort_unstable();
             return Some(match waiting.as_slice() {
-                [] => tr!("Waiting for its servers to load the project…").to_string(),
+                [] => tr!("Waiting for the language servers to load the project…").to_string(),
                 langs => tr!(
-                    "Waiting for {languages} to load the project…",
-                    languages = langs.join(", ")
+                    "Waiting for the language servers ({languages}) to load the project…",
+                    languages = crate::app::languages::language_names(langs)
                 ),
             });
         };
@@ -2040,12 +2043,18 @@ impl App {
         // Each part after a " · " says one thing whole.
         let mut label = match self.refined_languages().as_slice() {
             [] => tr!("● LSP-precise").to_string(),
-            covered => tr!("● LSP-precise: {languages}", languages = covered.join(", ")),
+            covered => tr!(
+                "● LSP-precise: {languages}",
+                languages = crate::app::languages::language_names(covered)
+            ),
         };
         let left = self.languages_left_out();
         if !left.is_empty() {
             label.push_str(" · ");
-            label.push_str(&tr!("{languages} left out", languages = left.join(", ")));
+            label.push_str(&tr!(
+                "{languages} left out",
+                languages = crate::app::languages::language_names(&left)
+            ));
         }
         match calls.unrefined.len() {
             0 => {}
@@ -2056,7 +2065,8 @@ impl App {
         }
         let waiting = self.refine_waiting_for();
         if !waiting.is_empty() {
-            let names = waiting.into_iter().collect::<Vec<_>>().join(", ");
+            let names =
+                crate::app::languages::language_names(&waiting.into_iter().collect::<Vec<_>>());
             label.push_str(" · ");
             label.push_str(&tr!("waiting for {languages}", languages = names));
         }
@@ -2074,7 +2084,7 @@ impl App {
             [] => tr!("LSP-precise — exact caller/callee edges.").to_string(),
             covered => tr!(
                 "LSP-precise for {languages} — exact caller/callee edges.",
-                languages = covered.join(", ")
+                languages = crate::app::languages::language_names(covered)
             ),
         };
         let left = self.languages_left_out();
@@ -2082,7 +2092,7 @@ impl App {
             summary.push(' ');
             summary.push_str(&tr!(
                 "Functions in {languages} are left out: no server was ready to refine them.",
-                languages = left.join(", ")
+                languages = crate::app::languages::language_names(&left)
             ));
         }
         // After a pass over changed files, the calls out of a function it
@@ -2181,7 +2191,7 @@ impl App {
     /// Hold the full pass for the servers of `loading` to load the project
     /// ([`App::refine_project_calls`]), under one wait.
     fn hold_full_refine(&mut self, loading: &BTreeSet<String>) -> Task<Message> {
-        let names = loading.iter().cloned().collect::<Vec<_>>().join(", ");
+        let names = crate::app::languages::language_names(&loading.iter().collect::<Vec<_>>());
         self.status = trn!(
             "Waiting for the {names} server to load the project before refining the call graph",
             "Waiting for the {names} servers to load the project before refining the call graph",
@@ -2290,7 +2300,7 @@ impl App {
                         "Refining 1 function with LSP… ({languages} left out: no server ready)",
                         "Refining {n} functions with LSP… ({languages} left out: no server ready)",
                         defs.len(),
-                        languages = left.join(", ")
+                        languages = crate::app::languages::language_names(&left)
                     ),
                 };
                 defs.len()
@@ -2357,7 +2367,7 @@ impl App {
             // status says why.
             Err(e) => {
                 self.drop_refinement(
-                    &tr!("The LSP refine failed ({error})", error = e),
+                    &tr!("LSP refinement failed ({error})", error = e),
                     REFINE_AGAIN,
                 );
                 return self.refresh_call_graph_in_use();
@@ -2388,7 +2398,7 @@ impl App {
             let why = match highlight::detect(file) {
                 Some(lang) => tr!(
                     "The {language} server stopped while refining {file} ({reason})",
-                    language = lang,
+                    language = crate::app::languages::language_name(lang),
                     file = self.rel_of(file),
                     reason = why
                 ),
@@ -2466,11 +2476,12 @@ impl App {
         let mut refined = tr!("Call graph refined with LSP").to_string();
         if !unanswering.is_empty() {
             let count = unanswering.len();
-            let names = unanswering.into_iter().collect::<Vec<_>>().join(", ");
+            let names =
+                crate::app::languages::language_names(&unanswering.into_iter().collect::<Vec<_>>());
             refined.push_str(" — ");
             refined.push_str(&trn!(
-                "the {names} server left {limit} queries in a row unanswered, and was asked no more",
-                "the {names} servers left {limit} queries in a row unanswered, and were asked no more",
+                "the {names} server stopped answering ({limit} timeouts in a row) and was skipped",
+                "the {names} servers stopped answering ({limit} timeouts in a row) and were skipped",
                 count,
                 names = names,
                 limit = REFINE_BREAKER_TIMEOUTS
@@ -2539,21 +2550,21 @@ impl App {
         match (starting.as_slice(), loading.as_slice()) {
             ([], []) => None,
             (starting, []) => Some(trn!(
-                "for the {languages} server to start to refine the files that changed",
-                "for the {languages} servers to start to refine the files that changed",
+                "for the {languages} server to start before refining the files that changed",
+                "for the {languages} servers to start before refining the files that changed",
                 starting.len(),
-                languages = starting.join(", ")
+                languages = crate::app::languages::language_names(starting)
             )),
             ([], loading) => Some(trn!(
-                "for the {languages} server to load the project to refine the files that changed",
-                "for the {languages} servers to load the project to refine the files that changed",
+                "for the {languages} server to load the project before refining the files that changed",
+                "for the {languages} servers to load the project before refining the files that changed",
                 loading.len(),
-                languages = loading.join(", ")
+                languages = crate::app::languages::language_names(loading)
             )),
             (starting, loading) => Some(tr!(
-                "for servers to start ({starting}) and to load the project ({loading}) to refine the files that changed",
-                starting = starting.join(", "),
-                loading = loading.join(", ")
+                "for servers to start ({starting}) and to finish loading the project ({loading}) before refining the files that changed",
+                starting = crate::app::languages::language_names(starting),
+                loading = crate::app::languages::language_names(loading)
             )),
         }
     }

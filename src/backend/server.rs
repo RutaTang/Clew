@@ -614,7 +614,7 @@ async fn resolve_settings(
     }
     crate::connect::SshSettings::parse(&out.stdout, |p| Path::new(p).exists()).map_err(|e| {
         tr!(
-            "`ssh -G` printed something clew cannot read: {error}",
+            "`ssh -G` printed something Clew cannot read: {error}",
             error = e
         )
     })
@@ -757,8 +757,7 @@ fn ssh_failure(step: &str, ssh: &Ssh, out: &Captured) -> Failure {
             return Failure::new(
                 FailureKind::HostKeyUnknown,
                 tr!(
-                    "{label}'s host key is not known yet, and clew does not accept an unknown \
-                     key blindly.",
+                    "{label}'s host key is not known yet, and Clew does not accept an unknown key blindly.",
                     label = label
                 ),
             );
@@ -767,9 +766,7 @@ fn ssh_failure(step: &str, ssh: &Ssh, out: &Captured) -> Failure {
             return Failure::new(
                 FailureKind::Auth,
                 tr!(
-                    "{label} refused the login ({error}). clew cannot type a password when it \
-                     was not started from a terminal: use key-based login (a key in ssh-agent \
-                     — `ssh-add` — or an identity file).",
+                    "{label} refused the login ({error}). Clew cannot type a password when it was not started from a terminal: use key-based login (a key in ssh-agent — `ssh-add` — or an identity file).",
                     label = label,
                     error = last_line(err)
                 ),
@@ -896,8 +893,7 @@ fn changed_key_failure(ssh: &Ssh, stderr: &str) -> Failure {
         })
         .unwrap_or_else(|| label.to_string());
     let mut reason = tr!(
-        "{label}'s host key has CHANGED since the last connection. Someone may be \
-         intercepting the connection (or the host was reinstalled), so clew will not connect.",
+        "{label}'s host key has CHANGED since the last connection. Someone may be intercepting the connection (or the host was reinstalled), so Clew will not connect.",
         label = label
     );
     if let Some((kind, print)) = &report.presented {
@@ -914,9 +910,7 @@ fn changed_key_failure(ssh: &Ssh, stderr: &str) -> Failure {
         if ssh.clew_known_hosts.as_deref() == Some(Path::new(file)) {
             reason.push(' ');
             reason.push_str(&tr!(
-                "The key on record ({file}:{line}) is one you trusted in clew. If you know why \
-                 it changed, forget it — `{remove}` — then connect again and check the new \
-                 key's fingerprint before trusting it.",
+                "The key on record ({file}:{line}) is one you trusted in Clew. If you know why it changed, forget it — `{remove}` — then connect again and check the new key's fingerprint before trusting it.",
                 file = file,
                 line = line,
                 remove = remove
@@ -1030,7 +1024,7 @@ async fn describe_unknown_host(
     use crate::connect::{known_hosts_pattern, ssh_destination, ssh_host_port, ssh_port};
     let label = ssh.label.as_str();
     let refused = tr!(
-        "{label}'s host key is not known yet, and clew does not accept an unknown key blindly.",
+        "{label}'s host key is not known yet, and Clew does not accept an unknown key blindly.",
         label = label
     );
     // What the host's administrator can run on it to show its key.
@@ -1042,8 +1036,7 @@ async fn describe_unknown_host(
     let why_not = match (&ssh.settings, &ssh.clew_known_hosts, &for_host) {
         (Ok(settings), Some(_), Some(for_host)) => match &settings.proxy {
             Some((option, value)) => tr!(
-                "{label} is reached through {option} {value}, so clew cannot fetch the key it \
-                 presents to show you here.",
+                "{label} is reached through {option} {value}, so Clew cannot fetch the key it presents to show you here.",
                 label = label,
                 option = option,
                 value = value
@@ -1066,7 +1059,7 @@ async fn describe_unknown_host(
                     return (reason, Some(key));
                 }
                 None => tr!(
-                    "clew could not fetch the key {label} presents ({host}:{port}).",
+                    "Clew could not fetch the host key of {label} ({host}:{port}).",
                     label = label,
                     host = settings.hostname,
                     port = settings.port
@@ -1695,7 +1688,7 @@ fn start_local(server: Option<&Path>) -> Result<Transport, Failure> {
     let Some(path) = server else {
         return Err(Failure::new(
             FailureKind::NoServer,
-            tr!("No clew-server binary was found beside clew or on PATH; working without it."),
+            tr!("No clew-server binary was found beside Clew or on PATH; working without it."),
         ));
     };
     let mut cmd = clew_core::spawn::tokio_command(path);
@@ -3152,7 +3145,7 @@ exit 3
         assert!(!err.retryable());
         for part in [
             "It now presents ED25519 SHA256:NewKeyPrintForTests.".to_string(),
-            format!("({}:1) is one you trusted in clew", clew.display()),
+            format!("({}:1) is one you trusted in Clew", clew.display()),
             format!(
                 "`ssh-keygen -f '{}' -R '[example.com]:2222'`",
                 clew.display()

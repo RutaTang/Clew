@@ -65,7 +65,9 @@ impl App {
         let stored = llm::Config::stored_key();
         self.settings.key_from_env = stored.is_empty() && !c.api_key.is_empty();
         self.settings.key = stored;
-        let e = embed::Config::current_or_default();
+        // The service, as it is stored, whether or not it is the source.
+        let e = embed::Config::service_or_default();
+        self.settings.embed_here = embed::Config::stored_here();
         self.settings.embed_model = e.model;
         self.settings.embed_base_url = e.base_url;
         let embed_stored = embed::Config::stored_key();
@@ -88,6 +90,7 @@ impl App {
                 self.settings.embed_base_url.clone(),
             ),
         );
+        self.settings.embed_here_snapshot = self.settings.embed_here;
         self.settings.save_failed = false;
         self.settings.integrations.note = None;
         self.refresh_integrations();
@@ -132,16 +135,27 @@ impl App {
                         kept.extend(embed_kept);
                         kept
                     })
+            })
+            .and_then(|mut kept| {
+                embed::Config::save_source_from(
+                    self.settings.embed_here,
+                    self.settings.embed_here_snapshot,
+                )
+                .map(|source_kept| {
+                    kept.extend(source_kept);
+                    kept
+                })
             });
         match saved {
             Ok(kept) => {
                 // The cached chat config (and the `llm_available` gate) must
                 // follow what was just written.
                 self.invalidate_llm_config();
-                self.embed_available = embed::Config::available();
+                self.refresh_embeddings();
                 self.settings.open = false;
                 // Said where the model is picked; read there, it is done.
                 self.voice.download_errors.clear();
+                self.voice.speech.download_errors.clear();
                 self.code_focused = true;
                 // A changed embedding space makes every vector held in memory
                 // unusable, and keeping them is worse than losing them: FIND
@@ -154,7 +168,26 @@ impl App {
                 // the file, but only when the project opens; nothing was
                 // re-applying it to the copy already in memory.
                 let space_changed = embed::stored_space() != space_before;
-                let dropped = space_changed && !self.proj.embed_index.entries.is_empty();
+                // Vectors no longer made here: the model held in memory goes.
+                if !embed::Config::stored_here() {
+                    embed::local::let_go();
+                }
+                // A build embedding in the space just left stops now: every
+                // batch still to come would be paid for (or made on this
+                // computer) and then thrown away — its vectors are of a
+                // space this window no longer searches in. One whose vectors
+                // are all made, being merged into its own space's file, is
+                // let finish: what it paid for is kept there, and a build
+                // asked for meanwhile waits for it, as any does.
+                let stopped = space_changed
+                    && self.proj.building_embeddings
+                    && self.proj.inflight.embed_build.is_some();
+                if stopped {
+                    self.proj.inflight.embed_build = None;
+                    self.proj.building_embeddings = false;
+                    self.proj.embed_build_pending = false;
+                }
+                let dropped = stopped || space_changed && !self.proj.embed_index.entries.is_empty();
                 if space_changed {
                     self.retire_semantic_search();
                     self.proj.semantic_results.clear();
@@ -174,8 +207,8 @@ impl App {
                 }
                 self.status = if !fields.is_empty() {
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so it was kept",
-                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        "Settings saved — {fields} was changed in another window, so that value was kept",
+                        "Settings saved — {fields} were changed in another window, so those values were kept",
                         fields.len(),
                         fields = fields.join(", ")
                     )
@@ -242,6 +275,7 @@ impl App {
             self.settings.embed_base_url.clone(),
         );
         now.provider != chat.provider
+            || self.settings.embed_here != self.settings.embed_here_snapshot
             || now.api_key != chat.api_key
             || now.model != chat.model
             || now.base_url != chat.base_url
@@ -274,6 +308,7 @@ impl App {
         // A model's failed download is said under it, in here; once
         // Settings is closed it has been read, and it goes.
         self.voice.download_errors.clear();
+        self.voice.speech.download_errors.clear();
         // Back to reading, as the finder's close does: the motions the
         // form took from the code are the code's again.
         self.code_focused = true;
@@ -340,6 +375,7 @@ fn saved_field_name(key: &str) -> &str {
         "api_key" => tr!("API key"),
         "model" => tr!("Model"),
         "base_url" => tr!("Base URL"),
+        "source" => tr!("Where embeddings are made"),
         other => other,
     }
 }
@@ -395,6 +431,13 @@ impl App {
                 self.settings.embed_base_url = s;
                 Task::none()
             }
+            msg @ (SettingsMsg::EmbedHere(..)
+            | SettingsMsg::DownloadEmbedModel
+            | SettingsMsg::CancelEmbedDownload
+            | SettingsMsg::EmbedDownloadProgress { .. }
+            | SettingsMsg::EmbedDownloaded(..)
+            | SettingsMsg::RemoveEmbedModel
+            | SettingsMsg::EmbedModelRemoved(..)) => self.on_local_embedding(msg),
             SettingsMsg::Open => {
                 let opened = self.on_open_settings();
                 Task::batch([opened, self.sync_server_listing()])
@@ -629,8 +672,8 @@ mod tests {
                 assert_eq!(
                     app.status,
                     trn!(
-                        "Settings saved — {fields} was changed in another window, so it was kept",
-                        "Settings saved — {fields} were changed in another window, so they were kept",
+                        "Settings saved — {fields} was changed in another window, so that value was kept",
+                        "Settings saved — {fields} were changed in another window, so those values were kept",
                         1,
                         fields = field
                     ),

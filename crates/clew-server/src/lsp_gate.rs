@@ -9,6 +9,12 @@ use std::sync::{Arc, Mutex};
 use clew_protocol::{ErrorCode, Event, ServerMessage};
 use tokio::sync::mpsc::UnboundedSender;
 
+/// A language as people read it ("Rust", not the key `rust`), for messages
+/// the client shows.
+pub(crate) fn shown(language: &str) -> &str {
+    clew_core::highlight::lang_name(language).unwrap_or(language)
+}
+
 /// Client-granted approvals for repo-specified language-server commands:
 /// `language` → the approved fingerprint (see `trust::lsp_fingerprint`).
 /// Shared with the agent's LSP pool so **every** spawn path checks the same
@@ -90,11 +96,16 @@ pub fn lsp_command_allowed(
         server.init_options.as_ref(),
         |fingerprint| is_approved(approvals, root, language, fingerprint),
     )
-    .map_err(|e| format!("cannot fingerprint the {language} server command: {e}"))?;
+    .map_err(|e| {
+        format!(
+            "cannot fingerprint the {language} server command: {e}",
+            language = shown(language)
+        )
+    })?;
     staged.exec_path.ok_or_else(|| {
         format!(
-            "refused: this project's lsp.toml command for {language} is not approved — \
-             open a {language} file in clew and approve it there"
+            "refused: this project's lsp.toml command for {language} is not approved — open a {language} file in Clew and approve it there",
+            language = shown(language)
         )
     })
 }
@@ -137,9 +148,9 @@ pub(crate) fn build_refusal(
     runs: &str,
 ) -> String {
     format!(
-        "{} has not been allowed to build this project (it runs {runs}) — open a {} file \
-         in clew to allow it",
-        server.server_name, server.language
+        "{} has not been allowed to build this project (it runs {runs}) — open a {} file in Clew to allow it",
+        server.server_name,
+        shown(&server.language)
     )
 }
 
@@ -217,7 +228,8 @@ pub fn approved_init_options(
                 None,
                 Some(format!(
                     "this project's lsp.toml init_options for {language} cannot be \
-                     fingerprinted ({e}) — they were not sent to the server"
+                     fingerprinted ({e}) — they were not sent to the server",
+                    language = shown(language)
                 )),
             );
         }
@@ -290,7 +302,10 @@ pub(crate) fn resolve_spawn_exe(
     let Some(server) = config.resolve_with(language, choices) else {
         return Err((
             ErrorCode::Refused,
-            format!("no {language} language server is configured for this project"),
+            format!(
+                "no {language} language server is configured for this project",
+                language = shown(language)
+            ),
         ));
     };
     use clew_core::lsp::store::Located;
@@ -322,7 +337,8 @@ pub(crate) fn resolve_spawn_exe(
                     ErrorCode::Refused,
                     format!(
                         "the {language} server is not installed on this host — \
-                         it must be installed (with the user's consent) first"
+                         it must be installed (with the user's consent) first",
+                        language = shown(language)
                     ),
                 ));
             }
@@ -330,7 +346,7 @@ pub(crate) fn resolve_spawn_exe(
             Located::RepoCommand(_) => {
                 return Err((
                     ErrorCode::Refused,
-                    "a repo-specified command must go through its approval".into(),
+                    "a command set by the project must be approved first".into(),
                 ));
             }
             Located::Unsupported(message) => return Err((ErrorCode::Failed, message)),
@@ -377,7 +393,10 @@ pub(crate) fn resolve_lsp(
     };
     let Some(server) = config.resolve_with(language, choices) else {
         return LspResolution::Unsupported {
-            message: format!("no language server is configured for {language}"),
+            message: format!(
+                "no language server is configured for {language}",
+                language = shown(language)
+            ),
         };
     };
     // A `command` config carries its options inside the command's
@@ -481,12 +500,18 @@ pub(crate) fn resolve_lsp(
         // Offered just above; kept total rather than unreachable.
         Located::NeedsDownload { .. } | Located::NeedsInstall { .. } => {
             LspResolution::Unsupported {
-                message: format!("the {language} server is not installed"),
+                message: format!(
+                    "the {language} server is not installed",
+                    language = shown(language)
+                ),
             }
         }
         // A `command` config returned `LspResolution::Command` above.
         Located::RepoCommand(_) => LspResolution::Unsupported {
-            message: format!("the {language} server is repo-specified"),
+            message: format!(
+                "the {language} server is set by the project (.clew/lsp.toml)",
+                language = shown(language)
+            ),
         },
         Located::Unsupported(message) => LspResolution::Unsupported { message },
     }
@@ -529,14 +554,20 @@ pub(crate) fn install_lsp(
     };
     let Some(server) = config.resolve_with(language, choices) else {
         return LspResolution::Unsupported {
-            message: format!("no language server is configured for {language}"),
+            message: format!(
+                "no language server is configured for {language}",
+                language = shown(language)
+            ),
         };
     };
     if server.command.is_some() {
         // A repo-specified command is approved, not installed; a client
         // sending LspInstall for it is confused — refuse.
         return LspResolution::Unsupported {
-            message: format!("the {language} server is repo-specified, nothing to install"),
+            message: format!(
+                "the {language} server is set by the project (.clew/lsp.toml), nothing to install",
+                language = shown(language)
+            ),
         };
     }
     let located = clew_core::lsp::store::locate(&server);
@@ -547,7 +578,10 @@ pub(crate) fn install_lsp(
             Some(offer) => {
                 let _ = out.send(ServerMessage::Notification {
                     event: Event::Status {
-                        message: format!("nothing was installed for {language}: {refusal}"),
+                        message: format!(
+                            "nothing was installed for {language}: {refusal}",
+                            language = shown(language)
+                        ),
                     },
                 });
                 offer
@@ -578,13 +612,15 @@ pub(crate) fn install_lsp(
             .map(|_| ())
         }
         // Refused by the consent check above: nothing installs these.
-        Located::RepoCommand(_) => Err("repo-specified, nothing to install".into()),
+        Located::RepoCommand(_) => {
+            Err("set by the project (.clew/lsp.toml), nothing to install".into())
+        }
         Located::Unsupported(message) => Err(message),
     };
     match installed {
         Ok(()) => resolve_lsp(out, approvals, root, language, choices),
         Err(e) => LspResolution::Unsupported {
-            message: format!("install {language} server: {e}"),
+            message: format!("install {language} server: {e}", language = shown(language)),
         },
     }
 }
@@ -601,6 +637,41 @@ mod tests {
     use clew_protocol::{ErrorCode, Event, LspResolution, ServerMessage};
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+
+    /// What the client shows names the language as people read it: "the
+    /// Rust server", not the key `rust` (one it has no name for stays as
+    /// given).
+    #[test]
+    fn a_refusal_names_the_language_as_people_read_it() {
+        assert_eq!(super::shown("rust"), "Rust");
+        assert_eq!(super::shown("no-such-language"), "no-such-language");
+        let root = Scratch::new("lsp-gate-named");
+        std::fs::create_dir_all(root.join(".clew")).unwrap();
+        std::fs::write(
+            root.join(".clew/lsp.toml"),
+            "[rust]\ncommand = \"/opt/ra\"\n",
+        )
+        .unwrap();
+        let (out, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let approvals: SharedApprovals = Arc::new(Mutex::new(HashMap::new()));
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let refused = install_lsp(
+            &out,
+            &approvals,
+            &root,
+            "rust",
+            "",
+            &stop,
+            &Default::default(),
+        );
+        match refused {
+            LspResolution::Unsupported { message } => assert_eq!(
+                message,
+                "the Rust server is set by the project (.clew/lsp.toml), nothing to install"
+            ),
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
 
     /// The pushed-approval lookup tolerates a lock another thread's panic
     /// poisoned (the request loop takes the same lock). That the lock is
@@ -815,6 +886,7 @@ mod tests {
             resolve_spawn_exe(&approvals, &root, "rust", &choose("rust")).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
+        assert!(message.contains("open a Rust file in Clew"), "{message}");
         approvals.lock().unwrap().insert(
             clew_core::trust::build_key("rust-analyzer"),
             clew_core::trust::build_fingerprint("rust-analyzer"),
@@ -870,6 +942,7 @@ mod tests {
             resolve_spawn_exe(&approvals, &root, "rust", &Default::default()).unwrap_err();
         assert_eq!(code, ErrorCode::Refused);
         assert!(message.contains("not been allowed to build"), "{message}");
+        assert!(message.contains("open a Rust file in Clew"), "{message}");
         // The leave as the client pushes it…
         let (key, leave) = (
             clew_core::trust::build_key("rust-analyzer"),
