@@ -388,7 +388,9 @@ impl App {
         let stop = self.leave_ask_session();
         self.proj.ask_session = None;
         self.reveal_ask();
-        Task::batch([stop, self.on_open_ask()])
+        // A new session: questions to try written afresh.
+        let suggest = self.ask_for_suggestions(true);
+        Task::batch([stop, self.on_open_ask(), suggest])
     }
 
     /// Go back to session `id`: its questions and answers on the card, the

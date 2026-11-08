@@ -1159,6 +1159,13 @@ pub enum AskMsg {
     Submit,
     /// Ask a suggested (context-aware) question: fill the input and submit it.
     Suggested(String),
+    /// The model's questions for "Try asking" came, for where the reader
+    /// was (`app::suggest`).
+    SuggestionsCame {
+        stamp: Stamp,
+        key: crate::app::suggest::SuggestKey,
+        result: Result<String, String>,
+    },
     /// The question's embedding vector came back (retrieval step). The stamp
     /// names the project the question was asked in.
     Retrieved {
@@ -2525,7 +2532,8 @@ impl AskMsg {
             | AskMsg::AcpEvent { stamp, .. }
             | AskMsg::AcpTurnEnded { stamp, .. }
             | AskMsg::AcpOptionSet { stamp, .. }
-            | AskMsg::AcpCancelOverdue { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | AskMsg::AcpCancelOverdue { stamp, .. }
+            | AskMsg::SuggestionsCame { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
             | AskMsg::Open
             | AskMsg::Expand

@@ -206,7 +206,10 @@ impl App {
     pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
         self.reveal_ask();
         self.code_focused = false;
-        operation::focus(ui::ask_input_id())
+        // Questions to try, written for where the reader is, when there are
+        // none for here yet.
+        let suggest = self.ask_for_suggestions(false);
+        Task::batch([operation::focus(ui::ask_input_id()), suggest])
     }
 
     /// A turn waiting for the user to answer one of its approvals says
@@ -1472,14 +1475,23 @@ impl App {
     }
 
     /// Context-aware starter questions for the Ask panel, most specific first:
-    /// about any pinned selection, the symbol/file under the cursor, then the
-    /// codebase. Static templates — instant and free.
+    /// about any pinned selection, then the model's, written for where the
+    /// reader is — or, until they come (or with no key), templates for the
+    /// symbol or file under the cursor and the codebase.
     pub fn suggested_questions(&self) -> Vec<String> {
         let mut qs: Vec<String> = Vec::new();
         if !self.proj.ask_pins.is_empty() {
             qs.push(tr!("Explain the attached code.").into());
             qs.push(tr!("Why is the attached code written this way?").into());
         }
+        // The model's, written for where the reader is, when they have come
+        // — a few at random each new session (`app::suggest`).
+        if let Some(written) = self.ai_suggestions() {
+            qs.extend(written);
+            qs.truncate(crate::app::suggest::SHOWN);
+            return qs;
+        }
+        // Else the few that fit any project, and where the reader is.
         match self.cursor_target() {
             Some(explain::Node::Function { name, .. }) => {
                 qs.push(tr!("What calls `{name}`?", name = name));
@@ -1498,7 +1510,7 @@ impl App {
         }
         qs.push(tr!("What is the entry point of this codebase?").into());
         qs.push(tr!("How does data flow through the app?").into());
-        qs.truncate(4);
+        qs.truncate(crate::app::suggest::SHOWN);
         qs
     }
 
@@ -1539,6 +1551,10 @@ impl App {
         match message {
             AskMsg::Toggle => self.on_toggle_ask(),
             AskMsg::Open => self.on_open_ask(),
+            AskMsg::SuggestionsCame { key, result, .. } => {
+                self.on_suggestions(key, result);
+                Task::none()
+            }
             AskMsg::Expand => {
                 self.ask_view = AskView::Expanded;
                 self.code_focused = false;

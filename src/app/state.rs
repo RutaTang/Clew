@@ -1986,6 +1986,13 @@ pub struct ProjectSession {
     /// Why the last question could not be asked, said in the card where it
     /// was (and on the status line): cleared by the next.
     pub ask_notice: Option<String>,
+    /// The model's questions for "Try asking", and for where
+    /// (`app::suggest`).
+    pub suggestions: Option<crate::app::suggest::Suggestions>,
+    /// Where questions were last asked for, while the request is out.
+    pub suggest_asked: Option<crate::app::suggest::SuggestKey>,
+    /// This session's draw of which of them are offered.
+    pub suggest_draw: u64,
     pub ask_turns: Vec<AskTurn>,
     /// The project's Ask sessions, newest first, kept in its derived
     /// directory (`app::ask_sessions`).
@@ -2246,6 +2253,9 @@ impl Default for ProjectSession {
             ask_spoken: false,
             ask_unread: false,
             ask_notice: None,
+            suggestions: None,
+            suggest_asked: None,
+            suggest_draw: 0,
             ask_turns: Default::default(),
             ask_sessions: Default::default(),
             ask_session: None,

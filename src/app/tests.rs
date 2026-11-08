@@ -21561,6 +21561,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             stream: 1,
         }),
+        Message::Ask(AskMsg::SuggestionsCame {
+            stamp: s(),
+            key: Default::default(),
+            result: Ok("What is it for?".into()),
+        }),
         Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
             stamp: s(),
             token: app.blame_why_seq,
@@ -33211,4 +33216,61 @@ fn a_stopped_answer_says_where_it_stopped() {
     turn(&mut app, 3, "All of it.");
     let _ = app.on_ask_stream_ended(3, StreamOutcome::Done);
     assert_eq!(app.proj.ask_turns[2].answer_md, "All of it.");
+}
+
+/// "Try asking" offers the model's questions, written for where the reader
+/// is, once they come — asked for as the empty card opens, and afresh for
+/// each new session, which draws another few of them at once. Without a key
+/// nothing is asked, and the templates are offered; questions written for
+/// another file are not offered on this one.
+#[test]
+fn try_asking_offers_questions_written_for_here() {
+    let mut app = scanned_app("ask-suggest");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    // No key: templates, and nothing asked.
+    app.llm_available = false;
+    let task = app.update(Message::Ask(AskMsg::Open));
+    assert!(app.proj.suggest_asked.is_none());
+    assert!(
+        app.suggested_questions()
+            .iter()
+            .any(|q| q.contains("entry point")),
+        "{:?}",
+        app.suggested_questions()
+    );
+    drop(task);
+    // A key: asked for, as the empty card opens.
+    app.llm_available = true;
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let key = app.proj.suggest_asked.clone().expect("questions asked for");
+    assert_eq!(key.file.as_deref(), Some("src/lib.rs"));
+    let written: String = (1..=8)
+        .map(|i| format!("{i}. Question {i} about lib.rs?\n"))
+        .collect();
+    let _ = app.update(Message::Ask(AskMsg::SuggestionsCame {
+        stamp: app.stamp(),
+        key: key.clone(),
+        result: Ok(written),
+    }));
+    assert!(app.proj.suggest_asked.is_none());
+    let first = app.suggested_questions();
+    assert_eq!(first.len(), 4);
+    assert!(first.iter().all(|q| q.starts_with("Question")), "{first:?}");
+    // A new session: another draw at once, and asked afresh.
+    let _ = app.update(Message::Ask(AskMsg::NewSession));
+    assert!(app.proj.suggest_asked.is_some(), "asked afresh");
+    let second = app.suggested_questions();
+    assert_ne!(first, second, "the same few again");
+    // On another file, they are not this one's.
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(
+        !app.suggested_questions()
+            .iter()
+            .any(|q| q.starts_with("Question")),
+        "{:?}",
+        app.suggested_questions()
+    );
 }
