@@ -1982,6 +1982,10 @@ pub struct ProjectSession {
     // -- Ask ---------------------------------------------------------------------
     /// "Ask clew" Q&A: input, conversation, state.
     pub ask_input: String,
+    /// The question as its field holds it: lines that wrap and grow
+    /// (`ask_input` is its text, and what the rest of the app reads and
+    /// sets — `App::sync_ask_editor` keeps the two one).
+    pub ask_editor: iced::widget::text_editor::Content,
     /// Questions asked while an answer was coming in, each with whether it
     /// was said aloud: asked in turn, once nothing is answering
     /// (`App::send_next_queued`).
@@ -2260,6 +2264,7 @@ impl Default for ProjectSession {
             searching_semantic: Default::default(),
             semantic_seq: Default::default(),
             ask_input: Default::default(),
+            ask_editor: Default::default(),
             ask_queue: Vec::new(),
             ask_queue_held: false,
             ask_spoken: false,

@@ -881,16 +881,38 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
         None => tr!("Ask about this codebase…").to_string(),
     };
-    let input = ts::field_in(
-        text_input(&placeholder, &app.proj.ask_input)
-            .id(ask_input_id())
-            .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
-            .on_submit(Message::Ask(AskMsg::Submit))
-            .style(theme::bare_input),
-        ROUND_BUTTON,
-        ts::INTER,
-        ts::READING,
-    );
+    // The question, in lines that wrap and grow — to a few, then it
+    // scrolls: one line that scrolled sideways hid the start of a long
+    // question as it was typed. Enter asks it; Shift+Enter starts a line.
+    // One line is as tall as the round buttons beside it.
+    let line_h = ts::INTER.normal(ts::READING);
+    let pad_y = ((ROUND_BUTTON - line_h) / 2.0).max(0.0);
+    let input: Element<'_, Message> = iced::widget::text_editor(&app.proj.ask_editor)
+        .id(ask_input_id())
+        .placeholder(placeholder)
+        .on_action(|a| Message::Ask(AskMsg::Edit(a)))
+        .key_binding(|press| {
+            use iced::keyboard::{Key, key::Named};
+            use iced::widget::text_editor::Binding;
+            if matches!(press.key.as_ref(), Key::Named(Named::Enter)) && !press.modifiers.shift() {
+                return Some(Binding::Custom(Message::Ask(AskMsg::Submit)));
+            }
+            Binding::from_key_press(press)
+        })
+        .font(crate::fonts::in_control(crate::fonts::UI))
+        .size(ts::READING)
+        .line_height(iced::widget::text::LineHeight::Absolute(line_h.into()))
+        .wrapping(Wrapping::WordOrGlyph)
+        .padding(Padding {
+            top: pad_y,
+            right: ts::FIELD_INSET,
+            bottom: pad_y,
+            left: ts::FIELD_INSET,
+        })
+        .height(Length::Shrink)
+        .max_height(line_h * COMPOSER_LINES + 2.0 * pad_y)
+        .style(theme::bare_editor)
+        .into();
     // The send button is the composer's primary action, a round button in
     // the accent — and the one way to stop an answer coming in: while one
     // is, with nothing typed, it stops it (any answer — an agent turn, a
@@ -1115,10 +1137,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     })));
     // The composer, under a rule across the card: the question as it is
     // typed, Keep listening, the microphone and send — or stop.
+    // The buttons at the foot of a question of several lines, by its last.
     let compose_row = row![input, keep_listening, talk, ask_btn]
         .spacing(8)
-        .align_y(iced::Center);
-    compose.push(row![agent, compose_row].align_y(iced::Center).into());
+        .align_y(iced::Bottom);
+    compose.push(row![agent, compose_row].align_y(iced::Bottom).into());
 
     let height = if fit { Length::Shrink } else { Fill };
     container(column![
@@ -1139,6 +1162,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
 
 /// Side of the composer's round buttons (the microphone, send).
 pub(crate) const ROUND_BUTTON: f32 = 30.0;
+/// The most lines the question's field grows to before it scrolls.
+const COMPOSER_LINES: f32 = 6.0;
 /// Size of the composer's "Keep listening", as the design sets it.
 const KEEP_LISTENING_SIZE: f32 = 12.0;
 /// The design's gap between the switch and what it says.

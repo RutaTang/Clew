@@ -1519,6 +1519,20 @@ pub fn field(active: bool) -> impl Fn(&Theme) -> container::Style {
 
 /// A text input with no face of its own, set inside a [`field`] (the file
 /// filter, the command palette): the field around it is the well.
+/// [`bare_input`] for a field of several lines (Ask's question).
+pub fn bare_editor(
+    _theme: &Theme,
+    _status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    iced::widget::text_editor::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        placeholder: dim(),
+        value: fg(),
+        selection: selection(),
+    }
+}
+
 pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
     text_input::Style {
         background: Color::TRANSPARENT.into(),

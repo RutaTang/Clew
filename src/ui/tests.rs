@@ -9906,3 +9906,77 @@ fn time_travel_says_each_thing_once_and_counts_as_its_slider_runs() {
         "the oldest, at the slider's left end"
     );
 }
+
+/// The question's field wraps a long question and grows with it, a few
+/// lines at most — it was one line that scrolled sideways, its start out of
+/// sight — and Enter asks it while Shift+Enter starts a line.
+#[test]
+fn the_question_field_wraps_and_enter_asks() {
+    use iced::keyboard::{self, Key, key::Named};
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    let height_of = |app: &App| {
+        let mut sim = sim_of(app);
+        let target = sim
+            .find(super::ask_input_id())
+            .expect("the question's field");
+        iced_test::selector::Bounded::visible_bounds(&target)
+            .expect("on screen")
+            .height
+    };
+    let one = height_of(&app);
+    app.proj.ask_input = "how does the server decide which language server to start for a \
+                          file that it has never seen before, and what happens when two match"
+        .into();
+    app.sync_ask_editor();
+    let wrapped = height_of(&app);
+    assert!(wrapped > one * 1.5, "one line {one}, wrapped {wrapped}");
+    app.proj.ask_input = "line\n".repeat(40);
+    app.sync_ask_editor();
+    let longest = height_of(&app);
+    assert!(longest < one * 8.0, "it grew to {longest}");
+
+    // Enter asks; Shift+Enter starts a line.
+    app.proj.ask_input = "why?".into();
+    app.sync_ask_editor();
+    let mut sim = sim_of(&app);
+    sim.click(super::ask_input_id())
+        .expect("the question's field");
+    let _ = sim.tap_key(Key::Named(Named::Enter));
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Submit))),
+        "{sent:?}"
+    );
+    let mut sim = sim_of(&app);
+    sim.click(super::ask_input_id())
+        .expect("the question's field");
+    let shift = keyboard::Modifiers::SHIFT;
+    let _ = sim.simulate([
+        Event::Keyboard(keyboard::Event::ModifiersChanged(shift)),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: Key::Named(Named::Enter),
+            modified_key: Key::Named(Named::Enter),
+            physical_key: keyboard::key::Physical::Unidentified(
+                keyboard::key::NativeCode::Unidentified,
+            ),
+            location: keyboard::Location::Standard,
+            modifiers: shift,
+            text: Some("\n".into()),
+            repeat: false,
+        }),
+    ]);
+    let sent = sent_by(sim);
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Submit))),
+        "{sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Edit(_)))),
+        "{sent:?}"
+    );
+}

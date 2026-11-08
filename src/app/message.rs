@@ -1134,6 +1134,8 @@ pub enum SemanticMsg {
 /// The Ask panel: questions, answers streaming in, pinned selections.
 #[derive(Debug, Clone)]
 pub enum AskMsg {
+    /// The question's field was typed in, clicked in or moved through.
+    Edit(iced::widget::text_editor::Action),
     /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, or put it away.
     Toggle,
     /// Open the Ask window (as a card, when it is put away) with its input
@@ -2557,6 +2559,7 @@ impl AskMsg {
             | AskMsg::DeleteSession(..)
             | AskMsg::Close
             | AskMsg::InputChanged(..)
+            | AskMsg::Edit(..)
             | AskMsg::Submit
             | AskMsg::Suggested(..)
             | AskMsg::Stop

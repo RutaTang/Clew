@@ -55,6 +55,8 @@ impl App {
         // A notice on the status line is timed from when it was first said,
         // whichever message said it.
         self.note_status();
+        // The question's field holds the question, however it was set.
+        self.sync_ask_editor();
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {

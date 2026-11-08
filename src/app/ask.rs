@@ -289,6 +289,19 @@ impl App {
         Task::batch(tasks)
     }
 
+    /// Keep the question's field holding `ask_input`, whichever way it was
+    /// set (a question said, one put back from the queue, a send that
+    /// cleared it): drawn anew with the caret at its end.
+    pub(crate) fn sync_ask_editor(&mut self) {
+        use iced::widget::text_editor::{Action, Content, Motion};
+        if self.proj.ask_editor.text() != self.proj.ask_input {
+            self.proj.ask_editor = Content::with_text(&self.proj.ask_input);
+            self.proj
+                .ask_editor
+                .perform(Action::Move(Motion::DocumentEnd));
+        }
+    }
+
     /// Bring the conversation on screen without taking the keyboard: a card
     /// when it was put away, as it is when already open.
     pub(crate) fn reveal_ask(&mut self) {
@@ -1695,6 +1708,15 @@ impl App {
             AskMsg::InputChanged(s) => {
                 self.proj.ask_input = s;
                 self.proj.ask_spoken = false;
+                Task::none()
+            }
+            AskMsg::Edit(action) => {
+                let edits = action.is_edit();
+                self.proj.ask_editor.perform(action);
+                if edits {
+                    self.proj.ask_input = self.proj.ask_editor.text();
+                    self.proj.ask_spoken = false;
+                }
                 Task::none()
             }
             AskMsg::Suggested(q) => {

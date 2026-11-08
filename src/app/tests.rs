@@ -33507,3 +33507,27 @@ fn a_streaming_answer_is_drawn_block_by_block() {
         .count();
     assert_eq!(code, 1, "{:?}", turn.answer);
 }
+
+/// What is typed in the question's field is the question, and a question
+/// set from elsewhere — said aloud, put back from the queue, cleared by a
+/// send — is what the field holds, its caret at its end.
+#[test]
+fn the_question_field_and_the_question_are_one() {
+    use iced::widget::text_editor::{Action, Edit};
+    let mut app = scanned_app("ask-editor-sync");
+    for c in "why?".chars() {
+        let _ = app.update(Message::Ask(AskMsg::Edit(Action::Edit(Edit::Insert(c)))));
+    }
+    assert_eq!(app.proj.ask_input, "why?");
+    app.proj.ask_input = "said aloud".into();
+    let _ = app.update(Message::Noop);
+    assert_eq!(app.proj.ask_editor.text(), "said aloud");
+    let _ = app.update(Message::Ask(AskMsg::Edit(Action::Edit(Edit::Insert('!')))));
+    assert_eq!(
+        app.proj.ask_input, "said aloud!",
+        "the caret was not at its end"
+    );
+    app.proj.ask_input.clear();
+    let _ = app.update(Message::Noop);
+    assert!(app.proj.ask_editor.text().is_empty());
+}
