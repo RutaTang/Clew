@@ -581,6 +581,9 @@ impl App {
                 // user may have flipped the OS theme while clew was in the
                 // background. Only re-color if it actually changed.
                 if focused {
+                    // A commit, a checkout made elsewhere: the Files view's
+                    // marks are read anew.
+                    self.proj.git_status_stale = true;
                     self.follow_system_appearance();
                     // Another window may have saved Settings while this one was
                     // in the background: re-read the AI config on next use.

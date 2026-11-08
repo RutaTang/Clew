@@ -1228,6 +1228,12 @@ impl App {
             ProjectMsg::MissingSetupFound { seq, servers, .. } => {
                 self.on_missing_setup_found(seq, servers)
             }
+            ProjectMsg::GitStatusRead { result, .. } => {
+                self.proj.git_status_loading = false;
+                // Not a repository (or git refused): no marks, not old ones.
+                self.proj.git_status = result.unwrap_or_default().into_iter().collect();
+                Task::none()
+            }
             ProjectMsg::SetUpMissing => self.on_set_up_missing(),
             ProjectMsg::SetupClose => {
                 // A first open's sheet is answered with Open or Not now.

@@ -2343,3 +2343,49 @@ fn git_runs_by_its_absolute_path_with_an_absolute_path() {
     );
     assert!(installed_version().is_ok());
 }
+
+/// The working tree's changes, as the Files view marks them: modified,
+/// added, deleted, untracked, a rename as its new name — and from inside a
+/// project that is a folder of its repository, only that folder's, by its
+/// own paths.
+#[test]
+fn the_working_status_names_each_change_once() {
+    let repo = repo_dir("working-status");
+    let root = &repo.root;
+    std::fs::create_dir_all(root.join("app/src")).unwrap();
+    std::fs::write(root.join("app/src/kept.rs"), "a\n").unwrap();
+    std::fs::write(root.join("app/src/edited.rs"), "a\n").unwrap();
+    std::fs::write(root.join("app/src/gone.rs"), "a\n").unwrap();
+    std::fs::write(root.join("app/src/old.rs"), "a\nb\nc\n").unwrap();
+    std::fs::write(root.join("outside.rs"), "a\n").unwrap();
+    commit_all(root, "one");
+    std::fs::write(root.join("app/src/edited.rs"), "b\n").unwrap();
+    std::fs::remove_file(root.join("app/src/gone.rs")).unwrap();
+    std::fs::write(root.join("app/src/staged.rs"), "new\n").unwrap();
+    sh_git(root, &["add", "app/src/staged.rs"]);
+    sh_git(root, &["mv", "app/src/old.rs", "app/src/new.rs"]);
+    std::fs::write(root.join("app/src/fresh.rs"), "new\n").unwrap();
+    std::fs::write(root.join("outside.rs"), "b\n").unwrap();
+
+    let mut all = working_status(root).unwrap();
+    all.sort();
+    assert_eq!(
+        all,
+        [
+            ("app/src/edited.rs".to_string(), 'M'),
+            ("app/src/fresh.rs".to_string(), 'U'),
+            ("app/src/gone.rs".to_string(), 'D'),
+            ("app/src/new.rs".to_string(), 'R'),
+            ("app/src/staged.rs".to_string(), 'A'),
+            ("outside.rs".to_string(), 'M'),
+        ]
+    );
+    // The project a folder of the repository: its own, by its paths.
+    let mut inside = working_status(&root.join("app")).unwrap();
+    inside.sort();
+    assert_eq!(inside.len(), 5, "{inside:?}");
+    assert!(
+        inside.iter().all(|(rel, _)| rel.starts_with("src/")),
+        "{inside:?}"
+    );
+}

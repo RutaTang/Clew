@@ -64,9 +64,14 @@ impl App {
             Some(history) => Task::batch([task, history]),
             None => task,
         };
-        // The Files view shows where the file being read is.
+        // The Files view shows where the file being read is, and what the
+        // working tree changes.
         let task = match self.sync_tree_reveal() {
             Some(reveal) => Task::batch([task, reveal]),
+            None => task,
+        };
+        let task = match self.sync_git_status() {
+            Some(read) => Task::batch([task, read]),
             None => task,
         };
         // An answer that came with Ask put away is read once its card is

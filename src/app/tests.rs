@@ -6155,6 +6155,9 @@ fn remote_project_never_touches_local_state_or_files() {
         label: "user@host".into(),
         args: vec!["user@host".into()],
     };
+    // The Files view hidden: its git marks would ask this stand-in server,
+    // which answers no git, and the tasks below are run to their end.
+    app.show_left_sidebar = false;
     let mut rx = attach_server(&mut app);
     // Open via the server path: the Tree reply builds the project.
     app.scanning = true;
@@ -13967,6 +13970,70 @@ fn the_files_view_reveals_the_file_being_read() {
     assert!(app.sync_tree_reveal().is_none(), "in view: no scroll");
 }
 
+/// The working tree's changes are read for the Files view as the project
+/// opens, anew when a file changes or the window comes back to the front,
+/// one read at a time; a project git does not know has no marks.
+#[test]
+fn the_files_view_learns_what_the_working_tree_changes() {
+    let mut app = scanned_app("git-marks");
+    app.show_left_sidebar = true;
+    app.sidebar = SidebarTab::Files;
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    // Not a repository: read, and nothing marked.
+    let read = |app: &mut App| -> Vec<Message> {
+        app.proj.git_status_loading = false;
+        app.proj.git_status_stale = true;
+        let task = app.sync_git_status().expect("a read");
+        run_task(task)
+    };
+    for m in read(&mut app) {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.git_status.is_empty());
+
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "one"]);
+    std::fs::write(root.join("src/lib.rs"), "pub fn changed() {}\n").unwrap();
+    std::fs::write(root.join("src/new.rs"), "pub fn new() {}\n").unwrap();
+    for m in read(&mut app) {
+        let _ = app.update(m);
+    }
+    assert_eq!(app.proj.git_status.get("src/lib.rs"), Some(&'M'));
+    assert_eq!(app.proj.git_status.get("src/new.rs"), Some(&'U'));
+    assert!(!app.proj.git_status.contains_key("notes.txt"));
+
+    // Read once; asked again only when something may have changed.
+    assert!(app.sync_git_status().is_none(), "nothing changed since");
+    let _ = app.update(Message::Window(WindowMsg::FocusChanged(true)));
+    assert!(
+        app.proj.git_status_stale || app.proj.git_status_loading,
+        "back in front"
+    );
+    app.proj.git_status_stale = false;
+    app.proj.git_status_loading = false;
+    let _ = app.on_files_changed(vec![root.join("src/lib.rs")]);
+    assert!(app.proj.git_status_stale, "a file changed");
+    // One at a time: while a read is on its way, none other.
+    app.proj.git_status_loading = true;
+    assert!(app.sync_git_status().is_none());
+    // And only while the tree shows: the marks are read for nothing else.
+    app.proj.git_status_loading = false;
+    app.sidebar = SidebarTab::Search;
+    assert!(app.sync_git_status().is_none(), "the tree not showing");
+    app.sidebar = SidebarTab::Files;
+    assert!(app.sync_git_status().is_some(), "read as it shows");
+}
+
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.
@@ -21328,6 +21395,10 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: 0,
             servers: Vec::new(),
+        }),
+        Message::Project(ProjectMsg::GitStatusRead {
+            stamp: s(),
+            result: Ok(vec![("stale.rs".into(), 'M')]),
         }),
         Message::Watch(WatchMsg::SymbolIndexDone {
             stamp: s(),

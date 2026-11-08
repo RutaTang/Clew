@@ -698,6 +698,48 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// What the working tree changes in the file at `rel`, as git letters it —
+/// `M`odified, `A`dded, `U`ntracked, `R`enamed, `D`eleted, `!` in conflict —
+/// in a colour of its own, the letter saying it as well as the colour.
+pub(crate) fn file_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
+    match app.proj.git_status.get(rel) {
+        Some(&letter) => text(letter.to_string())
+            .size(ts::SMALL)
+            .font(crate::fonts::CODE)
+            .color(change_color(letter))
+            .into(),
+        None => space().width(0).into(),
+    }
+}
+
+/// A folder holding a change: a dot, as editors mark one.
+fn dir_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
+    let inside = format!("{rel}/");
+    if app
+        .proj
+        .git_status
+        .keys()
+        .any(|changed| changed.starts_with(&inside))
+    {
+        text("●")
+            .size(ts::CAPTION)
+            .color(theme::with_alpha(theme::warning(), 0.8))
+            .into()
+    } else {
+        space().width(0).into()
+    }
+}
+
+/// The colour of a change's letter.
+fn change_color(letter: char) -> iced::Color {
+    match letter {
+        'A' | 'U' => theme::success(),
+        'D' | '!' => theme::danger(),
+        'R' => theme::info(),
+        _ => theme::warning(),
+    }
+}
+
 /// The row `rel` is drawn at in the Files view's tree with `expanded`
 /// folders open — counted as [`append_tree_rows`] lays them out, each
 /// folder's own row, then its rows when open, then its files; `None` while a
@@ -780,6 +822,8 @@ fn filtered_file_rows<'a>(
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
+                    space().width(Fill),
+                    file_change_mark(app, &f.rel),
                 ]
                 .spacing(6)
                 .align_y(iced::Center),
@@ -854,6 +898,8 @@ pub(crate) fn append_tree_rows<'a>(
                 ts::INTER,
                 ts::BASE,
             ),
+            space().width(Fill),
+            dir_change_mark(app, &rel),
         ]
         .spacing(6)
         .height(Fill)
@@ -914,6 +960,8 @@ pub(crate) fn append_tree_rows<'a>(
                 ts::BASE,
             ),
             mark,
+            space().width(Fill),
+            file_change_mark(app, &rel),
         ]
         .spacing(6)
         .height(Fill)

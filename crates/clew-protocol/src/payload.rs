@@ -113,6 +113,10 @@ pub enum GitResult {
     /// The files most changed over the recent history, most first (see
     /// `GitOp::Churn`).
     Churn(Vec<FileChurn>),
+    /// `(rel, letter)` for each file the working tree changes against HEAD
+    /// (`GitOp::WorkingStatus`): `M`odified, `A`dded, `D`eleted, `R`enamed,
+    /// `U`ntracked, `!` in conflict.
+    WorkingStatus(Vec<(Rel, char)>),
 }
 
 impl GitResult {
@@ -133,6 +137,7 @@ impl GitResult {
                 | (GitResult::ChangedFiles(_), GitOp::ChangedFiles { .. })
                 | (GitResult::RangePatch(_), GitOp::RangePatch { .. })
                 | (GitResult::Churn(_), GitOp::Churn { .. })
+                | (GitResult::WorkingStatus(_), GitOp::WorkingStatus)
         )
     }
 
@@ -151,6 +156,7 @@ impl GitResult {
             GitResult::ChangedFiles(_) => "ChangedFiles",
             GitResult::RangePatch(_) => "RangePatch",
             GitResult::Churn(_) => "Churn",
+            GitResult::WorkingStatus(_) => "WorkingStatus",
         }
     }
 }

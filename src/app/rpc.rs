@@ -635,11 +635,12 @@ impl GitAnswer for Vec<String> {
     }
 }
 
-/// `ChangedFiles`: `(rel, status letter)`.
+/// `ChangedFiles` and `WorkingStatus`: `(rel, status letter)`.
 impl GitAnswer for Vec<(String, char)> {
     fn take(result: clew_protocol::GitResult) -> Option<Self> {
         match result {
-            clew_protocol::GitResult::ChangedFiles(v) => Some(v),
+            clew_protocol::GitResult::ChangedFiles(v)
+            | clew_protocol::GitResult::WorkingStatus(v) => Some(v),
             _ => None,
         }
     }

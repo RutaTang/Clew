@@ -1446,6 +1446,55 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     );
 }
 
+/// The Files view marks what the working tree changes: a file by git's
+/// letter for it, a folder holding a change by a dot; an unchanged one by
+/// nothing.
+#[test]
+fn the_files_view_marks_what_changed() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    let tree = crate::fs_scan::DirNode {
+        files: vec!["README.md".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into(), "new.rs".into(), "same.rs".into()],
+            },
+        )],
+    };
+    app.proj.project.as_mut().unwrap().tree = tree;
+    app.proj.expanded.insert("src".into());
+    app.proj.git_status = [
+        ("src/lib.rs".to_string(), 'M'),
+        ("src/new.rs".to_string(), 'U'),
+    ]
+    .into_iter()
+    .collect();
+    let mut sim = sim_of(&app);
+    let row_of = |sim: &mut Sim<'_>, name: &str| text_at(sim, |t| t == name, 0).expect(name);
+    let lib = row_of(&mut sim, "lib.rs");
+    let new = row_of(&mut sim, "new.rs");
+    let m = text_at(&mut sim, |t| t == "M", 0).expect("a mark for the change");
+    let u = text_at(&mut sim, |t| t == "U", 0).expect("a mark for the new file");
+    assert!(
+        (m.center_y() - lib.center_y()).abs() < 2.0,
+        "on lib.rs's row"
+    );
+    assert!(
+        (u.center_y() - new.center_y()).abs() < 2.0,
+        "on new.rs's row"
+    );
+    let src = row_of(&mut sim, "src");
+    let dot = text_at(&mut sim, |t| t == "●", 0).expect("the folder holding them");
+    assert!((dot.center_y() - src.center_y()).abs() < 2.0);
+    assert!(
+        text_at(&mut sim, |t| t == "●", 1).is_none(),
+        "the top holds no change"
+    );
+}
+
 /// A file's row in the Files view's tree is counted as the tree lays its
 /// rows out: each folder's row, its rows when open, then its files.
 #[test]

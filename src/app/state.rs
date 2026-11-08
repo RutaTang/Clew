@@ -1838,6 +1838,15 @@ pub struct ProjectSession {
     /// Where the Files view's tree is scrolled, and how much of it shows;
     /// `None` until it has been scrolled.
     pub tree_scroll: Option<(f32, f32)>,
+    /// What the working tree changes against HEAD, by root-relative path:
+    /// the letter the Files view marks each with (`GitOp::WorkingStatus`).
+    pub git_status: HashMap<String, char>,
+    /// Whether the working tree may have changed since `git_status` was
+    /// read: a new project, a file changed, the window back in front (a
+    /// commit made elsewhere).
+    pub git_status_stale: bool,
+    /// A read of it on its way.
+    pub git_status_loading: bool,
     /// Numbers the time-travel requests — each start (`time_start`), each
     /// revision a session asks for (`TimeTravel::generation`) — so no two
     /// share one. A reply applies only while its own request is still the
@@ -2237,6 +2246,9 @@ impl Default for ProjectSession {
             margin_history: None,
             tree_revealed: None,
             tree_scroll: None,
+            git_status: HashMap::new(),
+            git_status_stale: true,
+            git_status_loading: false,
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),

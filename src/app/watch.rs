@@ -14,6 +14,10 @@ impl App {
     /// dropped. Only refreshes what already exists — the first build of each
     /// artifact stays an explicit user action.
     pub(crate) fn on_files_changed(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        // What the working tree changes is read anew (`sync_git_status`).
+        if !paths.is_empty() {
+            self.proj.git_status_stale = true;
+        }
         // A file the resolver reads for the whole project (go.mod, a
         // tsconfig, a base a tsconfig `extends` under any name) changed:
         // every import resolves again, against a resolver that reads it anew.

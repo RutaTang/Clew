@@ -1139,6 +1139,38 @@ impl App {
     }
 }
 
+impl App {
+    /// The working tree's changes read anew when they may have changed, for
+    /// the Files view's marks: while the tree shows (they are read for
+    /// nothing else), one read at a time, another after it when something
+    /// changed meanwhile. `None` when there is nothing to read.
+    pub(crate) fn sync_git_status(&mut self) -> Option<Task<Message>> {
+        if !self.proj.git_status_stale
+            || self.proj.git_status_loading
+            || !self.show_left_sidebar
+            || self.sidebar != SidebarTab::Files
+        {
+            return None;
+        }
+        let git = self.git_source()?;
+        self.proj.git_status_stale = false;
+        self.proj.git_status_loading = true;
+        let stamp = self.stamp();
+        Some(Task::perform(
+            async move {
+                git.run::<Vec<(String, char)>>(clew_protocol::GitOp::WorkingStatus)
+                    .await
+            },
+            move |result| {
+                Message::Project(ProjectMsg::GitStatusRead {
+                    stamp: stamp.clone(),
+                    result,
+                })
+            },
+        ))
+    }
+}
+
 /// About how much of the window's height is not the Files view's tree: the
 /// top bar, the sidebar's tabs and filter, the status bar.
 const TREE_CHROME_H: f32 = 160.0;

@@ -274,6 +274,12 @@ pub enum ProjectMsg {
     SetupExplain(bool),
     /// The sheet's Apply (or Explain).
     SetupApply,
+    /// The working tree's changes read, for the Files view's marks (see
+    /// `App::sync_git_status`).
+    GitStatusRead {
+        stamp: Stamp,
+        result: Result<Vec<(String, char)>, String>,
+    },
     /// A look at what the open project's language servers still take to
     /// set up is in (see `App::look_for_missing_setup`); `seq` says which.
     MissingSetupFound {
@@ -2188,7 +2194,8 @@ impl ProjectMsg {
             ProjectMsg::ScanDone { stamp, .. }
             | ProjectMsg::StateLoaded { stamp, .. }
             | ProjectMsg::TreeUpdated { stamp, .. }
-            | ProjectMsg::MissingSetupFound { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | ProjectMsg::MissingSetupFound { stamp, .. }
+            | ProjectMsg::GitStatusRead { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
