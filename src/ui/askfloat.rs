@@ -79,7 +79,7 @@ pub(crate) fn ask_is_card(app: &App) -> bool {
 pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
     let (top, bottom) = band(app);
     match app.ask_view {
-        AskView::Closed | AskView::Hidden => None,
+        AskView::Hidden => None,
         AskView::Compact => {
             let (right, _) = corner(app);
             let width = ASK_CARD_W
@@ -192,15 +192,11 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     stack![backdrop, frame].into()
 }
 
-/// The pill Ask hides to: what voice is doing while it hears, works out the
-/// words, waits for a yes, speaks, or has just done what was said — else Ask's own
-/// face, a click from opening. `None` when Ask is put away and voice has
-/// nothing to say.
+/// The pill Ask hides and closes to: what voice is doing while it hears,
+/// works out the words, waits for a yes, speaks, or has just done what was
+/// said — else Ask's own face, a click from opening.
 fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
     let voice = pill_voice(app);
-    if app.ask_view == AskView::Closed && voice.is_none() {
-        return None;
-    }
     let listening = app.voice.is_listening();
     let mic = tip_at(
         button(
@@ -242,8 +238,10 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
     let face: Element<'_, Message> = match voice {
         Some(said) => said,
         None => {
-            let turns = app.proj.ask_turns.len();
-            let mut face = row![
+            // Ask's face, and nothing more: a count of its answers beside it
+            // said nothing the card does not, and moved the pill's edge as
+            // it grew.
+            let face = row![
                 glyph::icon(Glyph::Message, theme::accent(), 15.0),
                 text(tr!("Ask"))
                     .size(ts::BASE)
@@ -252,17 +250,10 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             ]
             .spacing(9)
             .align_y(iced::Center);
-            if turns > 0 {
-                face = face.push(
-                    text(trn!("1 answer", "{n} answers", turns))
-                        .size(ts::SMALL)
-                        .color(theme::dim()),
-                );
-            }
             tip_at(
                 button(face)
-                    .style(theme::toolbar_button)
-                    .padding([4, 6])
+                    .style(theme::pill_face)
+                    .padding([4, 8])
                     .on_press(Message::Ask(AskMsg::Open)),
                 tr!("Ask"),
                 Some(app.keymap.chord(crate::keymap::Action::ToggleAsk).caps()),
@@ -943,58 +934,74 @@ pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
             .into(),
         );
     }
+    // Listening, working out the words, speaking: the mark before the word
+    // (the red dot, nothing, the speaker) and the word itself each in a
+    // place as wide as the widest of them, so the meter after them stays
+    // where it is as one turns to the next — on the pill, its left edge
+    // and the mark jumped at every change, and in the composer the meter
+    // slid along the row.
+    let words = [
+        tr!("listening now\u{4}Listening"),
+        tr!("transcribing now\u{4}Transcribing"),
+        tr!("speaking now\u{4}Speaking"),
+    ];
+    let line =
+        |mark: Element<'static, Message>, word: &'static str, meter: Element<'static, Message>| {
+            let word = super::steady::slot(
+                text(word)
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                word,
+                &words,
+                ts::BASE,
+            );
+            row![
+                container(mark)
+                    .width(Length::Fixed(MARK_W))
+                    .align_x(iced::Center),
+                word,
+                meter,
+            ]
+            .spacing(8)
+            .align_y(iced::Center)
+        };
     match app.voice.phase {
-        VoicePhase::Listening { level, .. } => Some(with_esc(
-            row![
-                container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
-                    container::Style {
-                        background: Some(theme::recording().into()),
-                        border: iced::border::rounded(REC_DOT / 2.0),
-                        ..container::Style::default()
-                    }
-                }),
-                text(tr!("listening now\u{4}Listening"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                super::meter::level_meter(&PILL_BARS, level),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )),
+        VoicePhase::Listening { level, .. } => Some(with_esc(line(
+            container(space().width(REC_DOT).height(REC_DOT))
+                .style(|_: &iced::Theme| container::Style {
+                    background: Some(theme::recording().into()),
+                    border: iced::border::rounded(REC_DOT / 2.0),
+                    ..container::Style::default()
+                })
+                .into(),
+            words[0],
+            super::meter::level_meter(&PILL_BARS, level),
+        ))),
         // What was said, being worked out: the bars ripple on their own.
-        VoicePhase::Transcribing { .. } => Some(with_esc(
-            row![
-                text(tr!("transcribing now\u{4}Transcribing"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                super::meter::ripple(&PILL_BARS),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )),
+        VoicePhase::Transcribing { .. } => Some(with_esc(line(
+            space().into(),
+            words[1],
+            super::meter::ripple(&PILL_BARS),
+        ))),
         // Clew speaking, as it listens: the speaker in the dot's place —
         // the bars rippling while what it says is still being made.
-        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(with_esc(
-            row![
-                glyph::icon(Glyph::Speaker, theme::accent(), 14.0),
-                text(tr!("speaking now\u{4}Speaking"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                if app.voice.speech.preparing() {
-                    super::meter::ripple(&PILL_BARS)
-                } else {
-                    super::meter::level_meter(&PILL_BARS, app.voice.speech.level)
-                },
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )),
+        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(with_esc(line(
+            glyph::icon(Glyph::Speaker, theme::accent(), 14.0),
+            words[2],
+            if app.voice.speech.preparing() {
+                super::meter::ripple(&PILL_BARS)
+            } else {
+                super::meter::level_meter(&PILL_BARS, app.voice.speech.level)
+            },
+        ))),
         VoicePhase::Idle => None,
     }
 }
+
+/// The place of the mark before what voice is doing: the speaker's width,
+/// the widest of them.
+const MARK_W: f32 = 14.0;
 
 /// The voice key's round button, `side` across, lit in the accent while
 /// voice listens — the microphone, which stops it — or Clew speaks — a

@@ -102,22 +102,6 @@ impl From<CallError> for String {
     }
 }
 
-impl CallError {
-    /// The HTTP status the provider answered the call with, where it
-    /// answered with one — here, or to the clew-server that made the call.
-    pub(crate) fn status(&self) -> Option<u16> {
-        use clew_protocol::{ErrorCode, ProviderFailure};
-        match self {
-            CallError::Llm(llm::LlmError::Status { code, .. })
-            | CallError::Rpc(RpcError {
-                code: Some(ErrorCode::Provider(ProviderFailure::Status { code, .. })),
-                ..
-            }) => Some(*code),
-            _ => None,
-        }
-    }
-}
-
 /// Routes AI calls to clew-server (endpoint = Server) or runs them locally
 /// (endpoint = Client). Cheap to clone (handles only), so each background AI
 /// task takes one.

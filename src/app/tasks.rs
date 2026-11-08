@@ -2203,9 +2203,8 @@ impl ExplainFailure {
     /// Whether the call may succeed another time: the provider, the
     /// connection or clew failed this time. A refusal is refused again, an
     /// answer that could not be used is answered again, and a cancellation
-    /// was asked for. Nothing is sent again within the pass for it but a
-    /// gateway's 502 in an explicit pass (see [`explain_pass`]); a later
-    /// pass retries the group.
+    /// was asked for. The pass sends such a call again, once (see
+    /// [`explain_pass`]); failing again, a later pass retries the group.
     fn may_pass_later(&self) -> bool {
         matches!(
             self,
@@ -2336,24 +2335,20 @@ fn was_rejected(model: &str, hash: incremental::Version) -> bool {
         .contains(&(model.to_string(), hash))
 }
 
-/// How one explain call ended: its summary, or why there is none.
-type CallOutcome = Result<String, CallFailed>;
+/// How one explain call ended: its summary, or why there is none — what
+/// the status line says of it, and whether the pass sends it again
+/// ([`ExplainFailure::may_pass_later`]).
+type CallOutcome = Result<String, ExplainFailure>;
 
-/// Why one explain call failed: what the status line says of it, and
-/// whether it was a gateway's 502, which an explicit pass sends again (see
-/// [`explain_pass`]).
-struct CallFailed {
-    why: ExplainFailure,
-    gateway: bool,
-}
-
-/// How long after a gateway's 502 an explicit pass sends the call again
-/// (see [`explain_pass`]): time for a gateway that lost one answer from
-/// upstream to be past it.
-const GATEWAY_RESEND_DELAY: std::time::Duration = if cfg!(test) {
+/// How long after a call failed in a way that may pass the pass sends it
+/// again (see [`explain_pass`]): time for a gateway that lost one answer,
+/// a connection that dropped or a provider that was busy to be past it —
+/// on top of the wait llm's send already made where the provider asked for
+/// one.
+const RESEND_DELAY: std::time::Duration = if cfg!(test) {
     std::time::Duration::from_millis(100)
 } else {
-    std::time::Duration::from_secs(2)
+    std::time::Duration::from_secs(3)
 };
 
 /// LLM calls in flight at once.
@@ -2379,19 +2374,12 @@ impl CallModel {
     }
 }
 
-/// Make one explain call — once. llm's send is the one retry policy
-/// (`send_with_retry`): it resends a request that never reached the
-/// provider and one the provider asked to have sent again, after the wait it
-/// asked for, and gives up on the rest. Resent here, a request the provider
-/// had received — the connection broke while it answered, a gateway's 504,
-/// a clew-server that went quiet for ten minutes — was generated and billed
-/// again, up to three times over; what llm had given up on, it retried on
-/// top of its own retries. A group whose call failed is retried by a later
-/// pass (`explain::Tally::retry`) — and one a gateway failed with a 502, by
-/// an explicit pass, once, at the end of its level ([`CallFailed`]): of a
-/// gateway's failures, the one llm never sends again that is not a 504. A
-/// 503 llm has sent again already, up to three times, after the wait the
-/// provider asked for, as it does a 529.
+/// Make one explain call — once. llm's send resends a request that never
+/// reached the provider and one the provider asked to have sent again,
+/// after the wait it asked for (`send_with_retry`); a call that failed in a
+/// way that may pass is sent again by the pass, once, at the end of its
+/// level ([`explain_pass`]), and a group still failed after that is retried
+/// by a later pass (`explain::Tally::retry`).
 async fn explain_one<C, F>(complete: C, model: &CallModel, job: &explain::Job) -> CallOutcome
 where
     C: Fn(String) -> F,
@@ -2399,12 +2387,9 @@ where
 {
     // Refused for its size earlier this session: it would be refused again.
     if was_rejected(&model.key, job.hash) {
-        return Err(CallFailed {
-            why: ExplainFailure::Rejected {
-                what: Rejection::Length,
-                detail: tr!("refused for its length earlier in this session").into(),
-            },
-            gateway: false,
+        return Err(ExplainFailure::Rejected {
+            what: Rejection::Length,
+            detail: tr!("refused for its length earlier in this session").into(),
         });
     }
     let error = match complete(job.prompt.clone()).await {
@@ -2421,10 +2406,7 @@ where
     ) {
         remember_rejected(&model.key, job.hash);
     }
-    Err(CallFailed {
-        why,
-        gateway: error.status() == Some(502),
-    })
+    Err(why)
 }
 
 /// What an explain pass produced.
@@ -2517,7 +2499,6 @@ where
         }
     }
 
-    let explicit = matches!(reuse, explain::Reuse::SamePrompt);
     let Ok(pass) = tokio::task::spawn_blocking(move || {
         let mut pass = explain::Pass::with_reuse(inputs, prev, reuse);
         pass.waited_before(waited);
@@ -2572,27 +2553,20 @@ where
         // its group keeps what it had — and is said in the status line, never
         // written to the cache.
         //
-        // In an explicit pass, a call a gateway failed with a 502 is sent
-        // again, once: at the end of its level, a moment after it failed,
-        // and so before anything that quotes it renders its prompt. Left
-        // failed, it had its caller, its file and every folder up to the
-        // root paid for without it, then paid for again when a later pass
-        // explained it — for a blip the pass's own retries used to ride out.
-        // Having those wait for it instead, as an automatic pass does
-        // (`explain::Pass`), would leave them unexplained by the pass that
-        // was asked to explain everything, until some later one. Never sent
-        // again: a 504, a connection that broke, a clew-server that went
-        // quiet — the provider may be answering those — nor a 503 or a 529,
-        // which llm's send has sent again already, up to three times, after
-        // the wait the provider asked for (`send_with_retry`). The pass sent
-        // a 503 again on top of that: as many requests again, to a provider
-        // that had said it could not take them, after a flat pause instead
-        // of the wait it asked for.
+        // A call that failed in a way that may pass — the provider busy or
+        // failing, a gateway, the connection, clew — is sent again, once: at
+        // the end of its level, a moment after the last such failure, and
+        // so before anything that quotes it renders its prompt. Left failed,
+        // it had its caller, its file and every folder up to the root paid
+        // for without it, or waiting for it, until a later pass. Once, and
+        // only for those: a call the provider may have answered behind a
+        // broken connection is paid for at most twice, and a refusal, which
+        // would be refused again, is not sent again at all.
         let mut round: Vec<Arc<explain::Job>> = jobs.into_iter().map(Arc::new).collect();
-        let mut resend = explicit;
+        let mut resend = true;
         while !round.is_empty() {
             let mut again: Vec<(Arc<explain::Job>, ExplainFailure)> = Vec::new();
-            let mut gateway_failed = None;
+            let mut last_failed = None;
             // The groups whose call ended, and was folded in.
             let mut ran: HashSet<usize> = HashSet::new();
             let mut calls = iced::futures::stream::iter(round.clone().into_iter().map(|job| {
@@ -2614,13 +2588,13 @@ where
                             ran.insert(job.group);
                             pass.complete(&job, summary);
                         }
-                        Err(call) if resend && call.gateway => {
-                            gateway_failed = Some(std::time::Instant::now());
-                            again.push((job, call.why));
+                        Err(why) if resend && why.may_pass_later() => {
+                            last_failed = Some(std::time::Instant::now());
+                            again.push((job, why));
                         }
-                        Err(call) => {
+                        Err(why) => {
                             ran.insert(job.group);
-                            fail(&mut pass, &mut failures, &job, call.why);
+                            fail(&mut pass, &mut failures, &job, why);
                         }
                     }
                     (pass.settled(), pass.failed())
@@ -2664,8 +2638,8 @@ where
                 }
                 break;
             }
-            if let Some(at) = gateway_failed {
-                tokio::time::sleep(GATEWAY_RESEND_DELAY.saturating_sub(at.elapsed())).await;
+            if let Some(at) = last_failed {
+                tokio::time::sleep(RESEND_DELAY.saturating_sub(at.elapsed())).await;
             }
             round = again.into_iter().map(|(job, _)| job).collect();
             resend = false;
@@ -3939,22 +3913,16 @@ mod pass_tests {
         assert!(calls >= 1, "a different model is asked");
     }
 
-    /// A call that failed is sent once, whatever failed — but a gateway's
-    /// 502 in an explicit pass, sent again once
-    /// (`a_gateway_failure_is_sent_again_before_what_quotes_it`): llm's send
-    /// is the one retry policy — it sends again what never reached the
-    /// provider, and what the provider asked to have sent again, after the
-    /// wait it asked for. The pass sent every failure of the provider, the
-    /// connection or clew again, twice: a request the provider had received —
-    /// the connection broke while it answered, a gateway's 504, a clew-server
-    /// that went quiet — was generated and billed three times, and what llm
-    /// had given up on after its own retries was retried on top of them. An
-    /// explicit pass then still sent a 503 again, once, on top of the
-    /// retries llm had made of it. Failed, it is left to a later pass. An
-    /// automatic pass sends a gateway's 502 once too: what quotes it waits
-    /// for it.
+    /// A call that failed in a way that may pass — the provider busy or
+    /// failing, a gateway, the connection, a clew-server that went quiet,
+    /// clew itself — is sent again, once, in an explicit pass and an
+    /// automatic one alike: what llm's send had given up on is tried once
+    /// more, so a blip does not leave a group unexplained until a later
+    /// pass. Once only: a call the provider may have answered behind a
+    /// broken connection is paid for at most twice. A refusal — of the
+    /// request, of its length — is refused again, and is not sent again.
     #[test]
-    fn a_failed_call_is_sent_once() {
+    fn a_failure_that_may_pass_is_sent_once_more() {
         use llm::LlmError;
         let files = [("src/lib.rs", "pub fn only() {}\n")];
         let rpc = |code, message: &str| {
@@ -3988,7 +3956,9 @@ mod pass_tests {
             assert!(outcome.failures.stopped.is_none(), "{failure:?}");
             attempts.load(Ordering::SeqCst)
         };
-        let once = [
+        let twice = [
+            CallError::Llm(status(502, None, "Bad Gateway")),
+            from_server(&status(502, None, "Bad Gateway")),
             CallError::Llm(LlmError::Connect("connection refused".into())),
             CallError::Llm(LlmError::Transport("connection reset by peer".into())),
             CallError::Llm(status(429, None, "Rate limit reached")),
@@ -4005,24 +3975,32 @@ mod pass_tests {
             rpc(None, "server dropped the request"),
             CallError::Internal("an internal task failed".into()),
         ];
+        for failure in &twice {
+            assert_eq!(sent(explicit(), failure), 2, "{failure:?}");
+            assert_eq!(sent(automatic(), failure), 2, "{failure:?}");
+        }
+        let once = [
+            CallError::Llm(status(422, None, "Unprocessable Entity")),
+            CallError::Llm(status(
+                400,
+                Some("context_length_exceeded"),
+                "maximum context length is 8192 tokens",
+            )),
+            from_server(&status(422, None, "Unprocessable Entity")),
+        ];
         for failure in &once {
             assert_eq!(sent(explicit(), failure), 1, "sent again: {failure:?}");
             assert_eq!(sent(automatic(), failure), 1, "sent again: {failure:?}");
         }
-        let gateway = status(502, None, "Bad Gateway");
-        for failure in [CallError::Llm(gateway.clone()), from_server(&gateway)] {
-            assert_eq!(sent(explicit(), &failure), 2, "{failure:?}");
-            assert_eq!(sent(automatic(), &failure), 1, "{failure:?}");
-        }
     }
 
-    /// In an explicit pass, a call a gateway failed with a 502 is sent
-    /// again, once: at the end of its level, a moment after it failed, and
-    /// before what quotes it renders its prompt — which quotes it. It used
-    /// to stay failed, and its caller, its file and every folder up to the
-    /// root were paid for without it, then paid for again when a later pass
-    /// explained it. Failing again, it is not sent a third time, and what
-    /// quotes it is paid for without it.
+    /// A call that failed in a way that may pass — a gateway's 502, its
+    /// 504 — is sent again, once: at the end of its level, a moment after
+    /// it failed, and before what quotes it renders its prompt — which
+    /// quotes it. It used to stay failed, and its caller, its file and every
+    /// folder up to the root were paid for without it, then paid for again
+    /// when a later pass explained it. Failing again, it is not sent a third
+    /// time, and what quotes it is paid for without it.
     #[test]
     fn a_gateway_failure_is_sent_again_before_what_quotes_it() {
         use std::sync::Mutex;
@@ -4035,8 +4013,8 @@ mod pass_tests {
         }
         let files = [("src/lib.rs", LIB), ("src/helper.rs", HELPER)];
         for fails in [1, usize::MAX] {
-            for remote in [false, true] {
-                let gateway = status(502, None, "Bad Gateway");
+            for (remote, code) in [(false, 502), (true, 502), (false, 504), (true, 504)] {
+                let gateway = status(code, None, "Bad Gateway");
                 let failure = if remote {
                     from_server(&gateway)
                 } else {
@@ -4066,13 +4044,13 @@ mod pass_tests {
                 let log = log.lock().unwrap();
                 let calls = |name| log.iter().filter(|a| a.name == name).collect::<Vec<_>>();
                 let (leaf, other, caller) = (calls("leaf"), calls("other"), calls("caller"));
-                let what = format!("remote: {remote}, failing {fails}");
+                let what = format!("remote: {remote}, {code}, failing {fails}");
                 assert_eq!(leaf.len(), 2, "{what}");
                 assert!(
                     leaf[1].at >= other[0].at,
                     "sent again before its level ended: {what}"
                 );
-                assert!(leaf[1].at - leaf[0].at >= GATEWAY_RESEND_DELAY, "{what}");
+                assert!(leaf[1].at - leaf[0].at >= RESEND_DELAY, "{what}");
                 assert!(caller[0].at >= leaf[1].at, "{what}");
                 if fails == 1 {
                     let quoted = echo(&leaf[1].prompt).unwrap();

@@ -47,6 +47,12 @@ impl App {
             Some(jump) => Task::batch([task, jump]),
             None => task,
         };
+        // A question queued while an answer came in is asked once nothing is
+        // answering, whichever message ended the answer.
+        let task = match self.send_next_queued() {
+            Some(ask) => Task::batch([task, ask]),
+            None => task,
+        };
         // A call-graph refinement holding files — or a full pass held — for
         // a language server starting or loading the project (see
         // `settle_refine_wait`), whichever message readied it.

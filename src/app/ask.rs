@@ -216,14 +216,11 @@ impl App {
         }
     }
 
-    /// Put Ask away — its pill too — the keyboard back with the code.
+    /// Close Ask to its pill, the keyboard back with the code: as hiding
+    /// it does, and the conversation says no more.
     pub(crate) fn close_ask(&mut self) {
-        // Put away, the conversation says no more.
         self.stop_speaking();
-        self.ask_sessions_menu = false;
-        self.ask_sessions_query.clear();
-        self.ask_view = AskView::Closed;
-        self.code_focused = true;
+        self.hide_ask();
     }
 
     /// Hide the card to its pill in the corner, the keyboard back with the
@@ -248,7 +245,7 @@ impl App {
         match self.ask_view {
             AskView::Expanded => self.ask_view = AskView::Compact,
             AskView::Compact => self.hide_ask(),
-            AskView::Hidden | AskView::Closed => return false,
+            AskView::Hidden => return false,
         }
         true
     }
@@ -258,13 +255,17 @@ impl App {
         if question.is_empty() {
             return Task::none();
         }
-        // One answer at a time, whatever produces it. The input submits on
-        // Enter whether or not the Ask button is enabled, and a second
-        // question while one is being answered used to start a SECOND answer
-        // (the retrieval path, beside a running agent turn) or report a
-        // missing index that is not missing. The question stays in the input.
+        // A question asked while one is being answered waits its turn: it
+        // is queued, and asked once nothing is answering
+        // (`send_next_queued`). One answer at a time, whatever produces it —
+        // a second question used to start a SECOND answer (the retrieval
+        // path, beside a running agent turn) or report a missing index that
+        // is not missing; then it was turned away, to be asked again by hand.
+        self.proj.ask_queue_held = false;
         if self.ask_stream_active() {
-            self.status = tr!("Still answering — wait, or press Stop").into();
+            let spoken = std::mem::take(&mut self.proj.ask_spoken);
+            self.proj.ask_queue.push((question, spoken));
+            self.proj.ask_input.clear();
             return Task::none();
         }
         // A new question: what Clew was saying of the last answer stops.
@@ -1176,9 +1177,58 @@ impl App {
 
     /// Stop the in-flight answer where it actually runs — the Stop button.
     pub(crate) fn on_agent_stop(&mut self) -> Task<Message> {
-        // Stop is for the answer, as it is written and as it is said.
+        // Stop is for the answer, as it is written and as it is said — and
+        // holds what is queued after it, which a Stop may well be about.
         self.stop_speaking();
+        self.proj.ask_queue_held = true;
         self.stop_ask_streams()
+    }
+
+    /// The queued question at `at` asked now: moved to the front of the
+    /// queue, the queue let go, and the answer coming in stopped — it is
+    /// asked as soon as nothing is answering (`send_next_queued`).
+    pub(crate) fn send_queued_now(&mut self, at: usize) -> Task<Message> {
+        if at >= self.proj.ask_queue.len() {
+            return Task::none();
+        }
+        let question = self.proj.ask_queue.remove(at);
+        self.proj.ask_queue.insert(0, question);
+        let stop = if self.ask_stream_active() {
+            self.stop_speaking();
+            self.stop_ask_streams()
+        } else {
+            Task::none()
+        };
+        self.proj.ask_queue_held = false;
+        stop
+    }
+
+    /// Ask the first queued question, once nothing is answering and the
+    /// queue is not held: as if it were typed and sent, whatever the input
+    /// holds meanwhile kept there. Run after every message
+    /// ([`App::update`]), so whichever way an answer ends — done, stopped,
+    /// failed — the next is asked.
+    pub(crate) fn send_next_queued(&mut self) -> Option<Task<Message>> {
+        if self.proj.ask_queue.is_empty()
+            || self.proj.ask_queue_held
+            || self.ask_stream_active()
+            || self.proj.project.is_none()
+        {
+            return None;
+        }
+        let (question, spoken) = self.proj.ask_queue.remove(0);
+        let draft = std::mem::replace(&mut self.proj.ask_input, question.clone());
+        let draft_spoken = std::mem::replace(&mut self.proj.ask_spoken, spoken);
+        let task = self.on_ask_submit();
+        // Asked, the question has left the input; not asked (no key, say),
+        // it goes back to the head of the queue, held, for the user to see.
+        if self.proj.ask_input.trim() == question.trim() {
+            self.proj.ask_queue.insert(0, (question, spoken));
+            self.proj.ask_queue_held = true;
+        }
+        self.proj.ask_input = draft;
+        self.proj.ask_spoken = draft_spoken;
+        Some(task)
     }
 
     /// Stop every Ask answer in progress, wherever it runs:
@@ -1467,6 +1517,13 @@ impl App {
                 stream, outcome, ..
             } => self.on_agent_turn_ended(stream, outcome),
             AskMsg::Stop => self.on_agent_stop(),
+            AskMsg::SendQueuedNow(at) => self.send_queued_now(at),
+            AskMsg::DropQueued(at) => {
+                if at < self.proj.ask_queue.len() {
+                    self.proj.ask_queue.remove(at);
+                }
+                Task::none()
+            }
             AskMsg::StreamEnded {
                 stream, outcome, ..
             } => self.on_ask_stream_ended(stream, outcome),
@@ -1479,6 +1536,8 @@ impl App {
                 // question until the abandoned turn finished.
                 self.stop_speaking();
                 let stop = self.stop_ask_streams();
+                self.proj.ask_queue.clear();
+                self.proj.ask_queue_held = false;
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();
                 // Cleared, the session goes from the menu too.

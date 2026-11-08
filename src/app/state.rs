@@ -1621,6 +1621,14 @@ pub struct ProjectSession {
     pub derived_dir: Option<PathBuf>,
     /// Languages actually present in the project that clew can serve.
     pub project_languages: Vec<String>,
+    /// What the last look found its language servers still take to set up
+    /// (`App::look_for_missing_setup`), and which look that was: a look
+    /// begun before the latest one saw less.
+    pub setup_missing: Vec<crate::app::setup::SetupServer>,
+    pub setup_look: u64,
+    /// The languages a one-click Set up is fetching servers for: while any
+    /// is on its way, the status bar says it is setting up.
+    pub setting_up: Vec<String>,
     /// Every language present in the project, served or not — the ones a
     /// server program of the user's can be chosen for.
     pub file_languages: Vec<String>,
@@ -1962,6 +1970,13 @@ pub struct ProjectSession {
     // -- Ask ---------------------------------------------------------------------
     /// "Ask clew" Q&A: input, conversation, state.
     pub ask_input: String,
+    /// Questions asked while an answer was coming in, each with whether it
+    /// was said aloud: asked in turn, once nothing is answering
+    /// (`App::send_next_queued`).
+    pub ask_queue: Vec<(String, bool)>,
+    /// A Stop holds the queue: what is queued waits for its Send now, or
+    /// for the next question asked.
+    pub ask_queue_held: bool,
     /// What is in the input was said (voice put it there), not typed: the
     /// turn it becomes is marked so. Typing in the input makes it typed.
     pub ask_spoken: bool,
@@ -2112,6 +2127,9 @@ impl Default for ProjectSession {
             project: None,
             derived_dir: Default::default(),
             project_languages: Default::default(),
+            setup_missing: Vec::new(),
+            setup_look: 0,
+            setting_up: Vec::new(),
             file_languages: Default::default(),
             registry: Default::default(),
             symbol_index: Default::default(),
@@ -2217,6 +2235,8 @@ impl Default for ProjectSession {
             searching_semantic: Default::default(),
             semantic_seq: Default::default(),
             ask_input: Default::default(),
+            ask_queue: Vec::new(),
+            ask_queue_held: false,
             ask_spoken: false,
             ask_turns: Default::default(),
             ask_sessions: Default::default(),

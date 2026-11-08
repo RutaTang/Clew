@@ -498,10 +498,12 @@ impl App {
         // items to point at, and the View menu's step that menu; every other
         // step keeps them closed.
         self.close_menus();
-        self.show_tools_menu = matches!(
-            anchor,
-            Anchor::Strip(StripTool::More) | Anchor::ToolbarMenu { .. }
-        );
+        // (Not where its rows are on the strip: there they are pointed at.)
+        self.show_tools_menu = !crate::ui::tools_on_strip(self)
+            && matches!(
+                anchor,
+                Anchor::Strip(StripTool::More) | Anchor::ToolbarMenu { .. }
+            );
         self.show_view_menu = matches!(anchor, Anchor::ViewMenu);
 
         let mut tasks = Vec::new();

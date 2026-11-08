@@ -73,6 +73,10 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
             let r = super::askfloat::ask_corner_rect(app);
             rect(r.x, r.y, r.width, r.height)
         }
+        // The ⋯, while its rows are on the strip in its place: them.
+        Anchor::Strip(StripTool::More) if super::toolbar::tools_on_strip(app) => Some(
+            tools_menu_rows_rect(app, 0, super::toolbar::TOOLS_MENU_ROWS.len()),
+        ),
         Anchor::Strip(tool) => {
             let c = strip_tool_center(app, tool);
             rect(
@@ -306,12 +310,18 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
         Anchor::ToolbarMenu { first, count } => {
             let rows = tools_menu_rows_rect(app, first, count);
             let center = rows.y + rows.height / 2.0;
+            // Beside the strip, when the rows are on it; else the menu.
+            let beside = if super::toolbar::tools_on_strip(app) {
+                STRIP_W
+            } else {
+                menu_left
+            };
             (
                 Horizontal::Right,
                 Vertical::Top,
                 Padding {
                     top: (center - 88.0).clamp(lo, hi),
-                    right: menu_left + gap,
+                    right: beside + gap,
                     ..Padding::ZERO
                 },
             )

@@ -235,10 +235,10 @@ pub enum WalkMode {
 /// bottom-right corner, or large and centred over the dimmed window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AskView {
-    /// Put away: nothing in the corner, but for voice's pill while it
-    /// hears. The shortcut, the voice key or the palette bring Ask back.
-    Closed,
     /// Hidden to the pill in the bottom-right corner, the conversation kept.
+    /// Closed too: the pill is how Ask is found again. Put away with nothing
+    /// in the corner, a click on the card's × left no way back to it but a
+    /// shortcut, and Ask seemed to have gone.
     #[default]
     Hidden,
     /// A card in the bottom-right corner, over the margin's corner: the code

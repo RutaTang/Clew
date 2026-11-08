@@ -135,10 +135,22 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
         crate::Overlay::ProjectCalls => Some(if let Some(progress) = app.refine_progress_label() {
-            text(progress)
-                .size(ts::SMALL)
-                .color(theme::warning())
-                .into()
+            // As wide as it reads at its end: counting, its left edge — and
+            // what it said — shook at every file.
+            let widest = match app.proj.project_calls.refine_progress {
+                Some((_, total)) if total > 0 => {
+                    tr!("Refining {done}/{total}…", done = total, total = total)
+                }
+                _ => progress.clone(),
+            };
+            super::steady::slot(
+                text(progress.clone())
+                    .size(ts::SMALL)
+                    .color(theme::warning()),
+                &progress,
+                &[&widest],
+                ts::SMALL,
+            )
         } else if let Some(precise) = app.precise_label() {
             text(precise).size(ts::SMALL).color(theme::accent()).into()
         } else {
@@ -621,11 +633,14 @@ const FADE_FULL_NODES: f32 = 24.0;
 /// The lead-in a camera's start or stop eases its target in by, so the
 /// motion's acceleration builds from nought rather than jumping.
 const LEAD_TAU: f32 = 0.09;
-/// Turns of the spin the 3D framing is measured at, and the room it
-/// leaves for a node's farthest falling between two of them (cos of half
-/// a step, inverted, with a margin).
+/// Turns of the spin, and tilts of the camera, the 3D framing is measured
+/// at, and the room it leaves for a node's farthest falling between two of
+/// them (cos of half the larger step, inverted, with a margin).
 const SPIN_SAMPLES: usize = 24;
-const SPIN_SAMPLE_SLACK: f32 = 1.012;
+const TILT_SAMPLES: usize = 11;
+const SPIN_SAMPLE_SLACK: f32 = 1.016;
+/// How far the camera tilts up or down, in radians.
+const PITCH_LIMIT: f32 = 1.45;
 /// Fastest a fling turns the camera, radians per second.
 const MAX_TURN: f32 = 8.0;
 /// The camera's angles a switch to 3D swings to from flat.
@@ -1033,7 +1048,7 @@ impl GraphCanvas<'_> {
             }
             st.yaw += st.yaw_vel * dt;
             let pitch = st.pitch + st.pitch_vel * dt;
-            st.pitch = pitch.clamp(-1.45, 1.45);
+            st.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
             if st.pitch != pitch {
                 st.pitch_vel = 0.0;
             }
@@ -1142,13 +1157,12 @@ impl GraphCanvas<'_> {
             if n == 0 { 0.0 } else { (lo + hi) / 2.0 }
         });
         // In 3D: how far out each node is drawn — across and up — at the
-        // farthest it gets in a whole turn of the spin at this tilt, its
-        // perspective included. The spin only turns the camera round the
-        // upright axis, so the framing it gives holds at every angle of it
-        // (a spin never makes it breathe), yet is no bigger than the graph
-        // needs: a sphere round a flat or tall graph left half the frame
-        // empty. A tilt (an orbit up or down) eases it to the new bound.
-        let pitch = st.pitch * e;
+        // farthest it gets at any angle the camera can take: a whole turn of
+        // the spin, at every tilt an orbit reaches, its perspective
+        // included. Turning the camera — the spin, a drag, a fling — then
+        // never zooms: the framing holds at every angle of it. It was the
+        // farthest of a turn at the tilt of the moment, and a drag up or
+        // down zoomed the graph in and out under the hand.
         let (mut across, mut up): (Vec<f32>, Vec<f32>) = st
             .pos
             .iter()
@@ -1158,11 +1172,17 @@ impl GraphCanvas<'_> {
                     p[1] - box_center[1],
                     p[2] - box_center[2],
                 ];
-                (0..SPIN_SAMPLES).fold((0.0f32, 0.0f32), |(x, y), k| {
-                    let yaw = k as f32 * std::f32::consts::TAU / SPIN_SAMPLES as f32;
-                    let (rx, ry, _, _) = Self::project_view(rotate(d, yaw, pitch));
-                    (x.max(rx.abs()), y.max(ry.abs()))
-                })
+                let mut far = (0.0f32, 0.0f32);
+                for t in 0..TILT_SAMPLES {
+                    let pitch =
+                        -PITCH_LIMIT + 2.0 * PITCH_LIMIT * t as f32 / (TILT_SAMPLES - 1) as f32;
+                    for k in 0..SPIN_SAMPLES {
+                        let yaw = k as f32 * std::f32::consts::TAU / SPIN_SAMPLES as f32;
+                        let (rx, ry, _, _) = Self::project_view(rotate(d, yaw, pitch));
+                        far = (far.0.max(rx.abs()), far.1.max(ry.abs()));
+                    }
+                }
+                far
             })
             .unzip();
         across.sort_by(f32::total_cmp);
@@ -1695,7 +1715,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 match state.drag {
                     Drag::Orbit => {
                         state.yaw += dx * 0.008;
-                        state.pitch = (state.pitch + dy * 0.008).clamp(-1.45, 1.45);
+                        state.pitch = (state.pitch + dy * 0.008).clamp(-PITCH_LIMIT, PITCH_LIMIT);
                     }
                     Drag::Pan => {
                         state.pan = iced::Vector::new(state.pan.x + dx, state.pan.y + dy);
@@ -3177,22 +3197,26 @@ mod tests {
             "{:?}",
             st.shift
         );
-        // A whole turn of the spin: always inside the padding, and out to
-        // its edge on one axis somewhere in the turn — the frame used, not
-        // half of it.
+        // Every angle the camera can take — a whole turn of the spin, at
+        // every tilt: always inside the padding, and out to its edge on one
+        // axis at some angle — the frame used, not half of it.
         let (half_w, half_h) = (
             BOUNDS.width / 2.0 - GRAPH_PAD,
             BOUNDS.height / 2.0 - GRAPH_PAD,
         );
         let (mut far_x, mut far_y) = (0.0f32, 0.0f32);
-        let yaw = st.yaw;
-        for k in 0..360 {
-            st.yaw = yaw + k as f32 * std::f32::consts::TAU / 360.0;
-            for (x, y) in on_screen(&c, &st) {
-                far_x = far_x.max((x - BOUNDS.width / 2.0).abs());
-                far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
+        let (yaw, pitch) = (st.yaw, st.pitch);
+        for t in 0..=40 {
+            st.pitch = -PITCH_LIMIT + 2.0 * PITCH_LIMIT * t as f32 / 40.0;
+            for k in 0..360 {
+                st.yaw = yaw + k as f32 * std::f32::consts::TAU / 360.0;
+                for (x, y) in on_screen(&c, &st) {
+                    far_x = far_x.max((x - BOUNDS.width / 2.0).abs());
+                    far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
+                }
             }
         }
+        st.pitch = pitch;
         assert!(
             far_x <= half_w + 0.5 && far_y <= half_h + 0.5,
             "{far_x} {far_y}"
@@ -3212,6 +3236,37 @@ mod tests {
                     st.pitch
                 );
             }
+        }
+    }
+
+    /// Dragging the 3D map turns it and nothing more: tilted up and down,
+    /// as an orbit tilts it, it is drawn at one scale throughout. The fit
+    /// was the farthest a node got in a turn at the tilt of the moment, and
+    /// a drag up or down zoomed the graph in and out under the hand.
+    #[test]
+    fn tilting_the_3d_map_never_zooms_it() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        let c = canvas(&l, true, false);
+        let scale = st.fit_scale;
+        assert!(scale > 0.0);
+        st.drag = Drag::Orbit;
+        for (k, frame) in (f..f + 120).enumerate() {
+            st.pitch = (k as f32 * 0.05).sin() * 1.4;
+            st.yaw += 0.02;
+            let now = t0 + std::time::Duration::from_micros(16_667 * frame as u64);
+            let _ = c.tick(
+                &mut st,
+                BOUNDS,
+                now,
+                iced::advanced::mouse::Cursor::Unavailable,
+            );
+            assert!(
+                (st.fit_scale - scale).abs() / scale < 1e-3,
+                "zoomed at pitch {}: {} from {scale}",
+                st.pitch,
+                st.fit_scale
+            );
         }
     }
 

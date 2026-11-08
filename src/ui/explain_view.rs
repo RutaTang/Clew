@@ -909,13 +909,19 @@ pub(crate) fn lsp_consent_modal(
 }
 
 /// "N more questions are waiting…", under a question `waiting` more follow;
-/// nothing under the last.
-fn more_questions<'a>(waiting: usize) -> Option<Element<'a, Message>> {
+/// under the last, its line held empty. The dialog is centred: a line
+/// coming as more questions queued moved its buttons under the hand on its
+/// way to them.
+fn more_questions<'a>(waiting: usize) -> Element<'a, Message> {
     let said = match waiting {
-        0 => return None,
+        0 => String::new(),
         n => trn!("1 more after this", "{n} more after this", n),
     };
-    Some(text(said).size(ts::SMALL).color(theme::dim()).into())
+    text(said)
+        .size(ts::SMALL)
+        .line_height(ts::normal_line(ts::SMALL))
+        .color(theme::dim())
+        .into()
 }
 
 /// Confirm what the project's own `lsp.toml` asks clew to do for a language:

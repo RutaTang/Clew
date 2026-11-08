@@ -53,8 +53,87 @@ use serde_json::{Value, json};
 pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
     match language {
         "python" => Some(python_settings(&find_python_env(root)?)),
+        "rust" => rust_projects(root),
         _ => None,
     }
+}
+
+/// How deep under the project [`cargo_projects`] looks for a workspace:
+/// `examples/Cargo.toml`, `tools/xtask/Cargo.toml` and the like.
+const CARGO_DEPTH: usize = 4;
+/// The most entries [`cargo_projects`] walks: a bound on a vast tree.
+const CARGO_WALK_CAP: usize = 50_000;
+/// A `Cargo.toml` larger than this is no project's manifest.
+const MANIFEST_MAX_BYTES: u64 = 1 << 20;
+
+/// rust-analyzer's `linkedProjects` for `root`, when it holds Cargo
+/// projects past the one at its top, which is all rust-analyzer finds of
+/// itself: a repository whose `examples/` is a workspace of its own (as
+/// many are, to keep the examples' dependencies out of the library's) had
+/// every file in it read as part of no crate — no definition, no
+/// implementation, no type, with the server saying it was ready.
+fn rust_projects(root: &Path) -> Option<Value> {
+    let projects = cargo_projects(root);
+    let top_only = projects.len() == 1 && projects[0] == root.join("Cargo.toml");
+    if projects.is_empty() || top_only {
+        return None;
+    }
+    let linked: Vec<String> = projects
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    Some(json!({ "linkedProjects": linked }))
+}
+
+/// The Cargo projects under `root` a reader of it wants loaded: each
+/// workspace (a `Cargo.toml` with `[workspace]`), and each package no
+/// workspace above it holds. Within [`CARGO_DEPTH`], past what `.gitignore`
+/// and the build directories leave out. Read, never run: a manifest is
+/// parsed as TOML here, and only rust-analyzer — which the user lets build
+/// the project — runs `cargo` on it.
+pub fn cargo_projects(root: &Path) -> Vec<PathBuf> {
+    let walker = ignore::WalkBuilder::new(root)
+        .max_depth(Some(CARGO_DEPTH))
+        .follow_links(false)
+        .filter_entry(|entry| {
+            !(entry.file_type().is_some_and(|t| t.is_dir())
+                && crate::fs_scan::is_noise_dir(entry.file_name()))
+        })
+        .build();
+    let mut workspaces: Vec<PathBuf> = Vec::new();
+    let mut packages: Vec<PathBuf> = Vec::new();
+    for entry in walker.flatten().take(CARGO_WALK_CAP) {
+        if entry.file_name() != "Cargo.toml" || !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.into_path();
+        let too_big = std::fs::metadata(&path).map_or(true, |m| m.len() > MANIFEST_MAX_BYTES);
+        let Some(manifest) = (!too_big)
+            .then(|| std::fs::read_to_string(&path).ok())
+            .flatten()
+            .and_then(|text| text.parse::<toml::Table>().ok())
+        else {
+            continue;
+        };
+        if manifest.contains_key("workspace") {
+            workspaces.push(path);
+        } else if manifest.contains_key("package") {
+            packages.push(path);
+        }
+    }
+    // A package under a workspace's folder is that workspace's (or one it
+    // leaves out, which is rare enough to read as its).
+    let dirs: Vec<&Path> = workspaces.iter().filter_map(|w| w.parent()).collect();
+    packages.retain(|p| {
+        let Some(dir) = p.parent() else {
+            return false;
+        };
+        !dirs.iter().any(|w| dir.starts_with(w))
+    });
+    let mut projects = workspaces;
+    projects.extend(packages);
+    projects.sort();
+    projects
 }
 
 /// The settings the user's `choices` give `language`'s server in `root`, or
@@ -384,9 +463,12 @@ pub fn merge(
     choices: &LanguageChoices,
 ) -> Result<Option<Value>, String> {
     let chosen = chosen(language, root, choices);
+    // What the user chose replaces what was found — an interpreter for an
+    // interpreter — but for Rust they are of different things: the features
+    // and target chosen, and the workspaces found to load.
     let detected = match chosen {
-        Some(_) => None,
-        None => detect(language, &server.server_name, root),
+        Some(_) if language != "rust" => None,
+        _ => detect(language, &server.server_name, root),
     };
     let chosen = match language {
         "go" => keep_build_flags(chosen, explicit.as_ref()),
@@ -1446,6 +1528,84 @@ mod tests {
         let root = crate::testutil::scoped_dir(&format!("langenv-{tag}"));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// A repository whose `examples/` is a Cargo workspace of its own — as
+    /// salvo's is — has rust-analyzer told to load it too, beside the
+    /// repository's own: each workspace, and a package no workspace above it
+    /// holds; not the members of either, nor what a build left in `target/`.
+    /// Its files were read as part of no crate: no definition anywhere.
+    #[test]
+    fn nested_cargo_workspaces_are_linked() {
+        let root = scratch("cargo-nested");
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        write("crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
+        write("examples/Cargo.toml", "[workspace]\nmembers = [\"*\"]\n");
+        write(
+            "examples/otel/Cargo.toml",
+            "[package]\nname = \"otel\"\nversion.workspace = true\n",
+        );
+        write("target/debug/build/x/Cargo.toml", "[workspace]\n");
+        write("broken/Cargo.toml", "this is [not toml");
+        assert_eq!(
+            cargo_projects(&root),
+            vec![root.join("Cargo.toml"), root.join("examples/Cargo.toml")]
+        );
+        let linked = detect("rust", "rust-analyzer", &root).expect("linked projects");
+        assert_eq!(linked["linkedProjects"].as_array().unwrap().len(), 2);
+        // Features chosen in Settings do not take the workspaces away: the
+        // two are of different things, and both reach the server.
+        let choices = LanguageChoices {
+            rust: Some(RustChoices {
+                all_features: true,
+                ..RustChoices::default()
+            }),
+            ..LanguageChoices::default()
+        };
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("rust")
+            .unwrap();
+        let exe = root.join("rust-analyzer");
+        let merged = merge("rust", &server, &exe, &root, None, &choices)
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged["linkedProjects"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["cargo"]["features"], "all", "{merged}");
+
+        // A repository with no manifest at its top, and packages apart in it
+        // (a service and its tools): each is linked.
+        let apart = scratch("cargo-apart");
+        for dir in ["service", "tools/lint"] {
+            std::fs::create_dir_all(apart.join(dir)).unwrap();
+            std::fs::write(
+                apart.join(dir).join("Cargo.toml"),
+                "[package]\nname = \"x\"\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            cargo_projects(&apart),
+            vec![
+                apart.join("service/Cargo.toml"),
+                apart.join("tools/lint/Cargo.toml")
+            ]
+        );
+    }
+
+    /// A project of one workspace at its top is left to rust-analyzer, which
+    /// finds that itself.
+    #[test]
+    fn one_workspace_at_the_top_needs_no_linking() {
+        let root = scratch("cargo-single");
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"one\"\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert_eq!(cargo_projects(&root), vec![root.join("Cargo.toml")]);
+        assert_eq!(detect("rust", "rust-analyzer", &root), None);
     }
 
     /// A "system Python" outside any project root, returning its `bin`

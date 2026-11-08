@@ -383,6 +383,19 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     } else {
         space().into()
     };
+    // Writing the story, Story, Hide story: in a place as wide as the widest
+    // of them (and a button's padding), at the bar's end — turning from one
+    // to the next moved the scope, the count and the arrows before it.
+    let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
+        let widest = super::steady::widest(
+            &[tr!("Writing the story…"), tr!("Hide story"), tr!("Story")],
+            ts::SMALL,
+            crate::fonts::UI,
+        );
+        container(story).width(widest + 16.0).into()
+    } else {
+        story
+    };
 
     container(
         row![
@@ -397,9 +410,17 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
                 tr!("Newer commit"),
                 Some(crate::keymap::local_keys("⌘→"))
             ),
-            text(format!("{} / {}", tt.idx + 1, n))
-                .size(ts::SMALL)
-                .color(theme::dim()),
+            // As wide as it reads at the last commit: scrubbing past the
+            // tenth moved the arrow before it and the slider's end.
+            {
+                let said = format!("{} / {}", tt.idx + 1, n);
+                super::steady::slot(
+                    text(said.clone()).size(ts::SMALL).color(theme::dim()),
+                    &said,
+                    &[&format!("{n} / {n}")],
+                    ts::SMALL,
+                )
+            },
             space().width(16),
             scope_btn,
             story,
@@ -1042,13 +1063,20 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // pinned above the code. Dismissable (toggle back via the More menu). Its
     // slot is always there, so the summary arriving mid-read (Explain All
     // fills the cache as you scroll) does not rebuild the scroller below it.
-    let banner = if app.show_file_banner {
+    //
+    // Not while the margin shows the file's own note — the caret between
+    // functions, the Notes open beside the code: it said the same twice.
+    let file_node = crate::explain::Node::File(v.abs.clone());
+    let margin_says_it = right_panel_shown(app)
+        && app.margin_tab == crate::app::model::MarginTab::Notes
+        && app.proj.explain.view.as_ref() == Some(&file_node);
+    let banner = if app.show_file_banner && !margin_says_it {
         app.proj
             .explain
             .cache
-            .get(&crate::explain::Node::File(v.abs.clone()))
+            .get(&file_node)
             .filter(|c| !crate::explain::is_error_summary(&c.summary))
-            .map(|c| file_banner(first_sentence(&crate::app::shown_summary(c))))
+            .map(|c| file_banner(first_sentence(&crate::app::shown_summary(c)), file_node))
     } else {
         None
     };
@@ -1064,15 +1092,27 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
 /// Room above the code's first line.
 const CODE_TOP_PAD: f32 = 6.0;
 
-/// A one-line file summary pinned at the top of the code view.
-pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
+/// A one-line file summary pinned at the top of the code view: a click on
+/// it shows the file's whole note in the margin. (A "›" before it read as
+/// something to open, and opened nothing.)
+pub(crate) fn file_banner<'a>(summary: String, file: crate::explain::Node) -> Element<'a, Message> {
     container(
         row![
-            text("›").size(ts::BODY).color(theme::accent()),
-            text(summary)
-                .size(ts::BODY)
-                .color(theme::fg_muted())
-                .width(Fill),
+            super::toolbar::tip_at(
+                button(
+                    text(summary)
+                        .size(ts::BODY)
+                        .color(theme::fg_muted())
+                        .wrapping(Wrapping::None),
+                )
+                .style(theme::toolbar_button)
+                .padding([2, 6])
+                .width(Fill)
+                .on_press(Message::Explain(ExplainMsg::Show(file))),
+                tr!("Show the file's note"),
+                None,
+                tooltip::Position::Bottom,
+            ),
             button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                 .style(theme::toolbar_button)
                 .padding([4, 6])
@@ -1904,7 +1944,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
+            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
             // The reader's own note, in accent so it's distinct from the
@@ -1940,7 +1980,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
+            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
         }
 
         // Leading "understood" toggle and trailing note pencil sit inside

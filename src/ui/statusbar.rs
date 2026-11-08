@@ -41,6 +41,11 @@ pub(crate) const STATUSBAR_H: f32 = 32.0;
 const STATUS_GAP: f32 = 18.0;
 /// Height of the target picker at the bar's end.
 const PICKER_H: f32 = 22.0;
+/// The room a language server's own words of what it is doing have, while
+/// it is at work.
+const LSP_BUSY_W: f32 = 240.0;
+/// The most room what the language server's state says may take.
+const LSP_MAX_W: f32 = 340.0;
 
 /// One quiet item of the status bar.
 fn status_text<'a>(s: impl iced::widget::text::IntoFragment<'a>) -> iced::widget::Text<'a> {
@@ -132,27 +137,36 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             border: iced::border::rounded(3),
             ..container::Style::default()
         });
-    let conn_indicator = tooltip(
-        button(
-            row![
-                dot,
-                text(match sync_state(app) {
-                    Some(state) => format!("{place} · {state}"),
-                    None => place,
-                })
-                .size(ts::SMALL)
-                .color(if remote {
-                    theme::accent()
-                } else {
-                    theme::fg_muted()
-                }),
-            ]
-            .spacing(7)
-            .align_y(iced::Center),
-        )
-        .style(theme::icon_button(false))
-        .padding([2, 8])
-        .on_press(Message::Connect(ConnectMsg::Open)),
+    // Scanning, indexing, up to date: in a slot as wide as the widest of
+    // them, so what Clew says beside it stays where it is.
+    let said_place = match sync_state(app) {
+        Some(state) => format!("{place} · {state}"),
+        None => place.clone(),
+    };
+    let every_state: Vec<String> = [tr!("Scanning…"), tr!("Indexing…"), tr!("Up to date")]
+        .into_iter()
+        .map(|state| format!("{place} · {state}"))
+        .collect();
+    let every_state: Vec<&str> = every_state.iter().map(String::as_str).collect();
+    let place_text = super::steady::slot(
+        text(said_place.clone()).size(ts::SMALL).color(if remote {
+            theme::accent()
+        } else {
+            theme::fg_muted()
+        }),
+        &said_place,
+        if app.proj.project.is_some() {
+            &every_state
+        } else {
+            &[]
+        },
+        ts::SMALL,
+    );
+    let conn_indicator = super::tip::tip(
+        button(row![dot, place_text,].spacing(7).align_y(iced::Center))
+            .style(theme::icon_button(false))
+            .padding([2, 8])
+            .on_press(Message::Connect(ConnectMsg::Open)),
         // The design's tooltip bubble.
         container(
             text(tr!("Connect to a remote host"))
@@ -162,7 +176,8 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         .padding([3, 7])
         .style(theme::tip),
         tooltip::Position::Top,
-    );
+    )
+    .gap(5.0);
 
     // What is open, in counts — unless Clew has something to say.
     let said: Element<'_, Message> = if !app.status.is_empty() {
@@ -197,62 +212,19 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // of the button that says it — a row of its own, since the bar's own
     // spacing (the design's gap between everything else) is one for all.
     //
-    // What Clew says takes the room the bar's other items leave, cut off at
+    // What stays while it lasts — setting up, a pass's progress — comes
+    // first, and what Clew says last, taking the room they leave, cut off at
     // its end: a long message (a path, an error) laid out first took the
-    // whole bar, and the caret's place was wrapped down the window's edge a
-    // word a line.
-    let mut said_row = row![said].spacing(STATUS_GAP).align_y(iced::Center);
-    // A prominent, always-visible progress chip while "Explain All" runs — the
-    // pass is slow, so show how far along it is (the status text alone is easy
-    // to miss / read as stuck). It is the one place the pass's progress shows:
-    // the refresh chip stays out of the way meanwhile (see `refresh_chip`).
-    if app.proj.explain.running {
-        let label = match app.proj.explain.progress {
-            Some((done, total)) if total > 0 => {
-                tr!("Explaining {done}/{total}", done = done, total = total)
-            }
-            _ => tr!("Explaining…").to_string(),
-        };
-        let mut chip = row![
-            glyph::icon(Glyph::Sparkle, theme::accent(), 11.0),
-            text(label).size(ts::SMALL).color(theme::accent()),
-        ]
-        .spacing(5)
-        .align_y(iced::Center);
-        // A short determinate bar once the total is known, so progress reads at a
-        // glance instead of by parsing the counter.
-        if let Some((done, total)) = app.proj.explain.progress
-            && total > 0
-        {
-            chip = chip.push(super::meter::eased_bar(
-                done as f32 / total as f32,
-                90.0,
-                4.0,
-                theme::progress,
-                super::meter::PROGRESS,
-            ));
-        }
-        // Failures never hide behind the counter: a running tally in warn red.
-        if app.proj.explain.failed > 0 {
-            chip = chip.push(
-                text(format!(
-                    "· {}",
-                    trn!("1 failed", "{n} failed", app.proj.explain.failed)
-                ))
-                .size(ts::SMALL)
-                .color(theme::warn()),
-            );
-        }
-        // A cancel control right on the always-visible chip, so a long pass can
-        // be stopped without hunting through menus.
-        chip = chip.push(
-            button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
-                .style(theme::icon_button(false))
-                .padding([1, 4])
-                .on_press(Message::Explain(ExplainMsg::Cancel)),
-        );
+    // whole bar, the caret's place was wrapped down the window's edge a word
+    // a line, and a chip after it moved with every word said.
+    let mut said_row = row![].spacing(STATUS_GAP).align_y(iced::Center);
+    if let Some(chip) = setup_chip(app) {
         said_row = said_row.push(chip);
     }
+    if let Some(chip) = explain_chip(app) {
+        said_row = said_row.push(chip);
+    }
+    said_row = said_row.push(said);
     let mut bar = row![
         row![conn_indicator, container(said_row).width(Fill).clip(true)]
             .spacing(STATUS_GAP - 8.0)
@@ -283,14 +255,30 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
             .as_ref()
             .map(|v| format!("  ·  {}", trn!("1 line", "{n} lines", v.lines.len())))
             .unwrap_or_default();
-        bar = bar.push(status_text(format!(
+        let said = format!(
             "{}  ·  {short}  ·  {}/{}{}{}",
             tr!("Time Travel"),
             tt.idx + 1,
             tt.commits.len(),
             scope,
             lines
-        )));
+        );
+        // At its widest: the last revision's number, and a line count a
+        // digit longer than this revision's.
+        let widest = super::steady::widest_figure(&format!(
+            "{}  ·  {short}  ·  {}/{}{}{}",
+            tr!("Time Travel"),
+            tt.commits.len(),
+            tt.commits.len(),
+            scope,
+            format!("{lines}0"),
+        ));
+        bar = bar.push(super::steady::slot(
+            status_text(said.clone()),
+            &said,
+            &[&widest],
+            ts::SMALL,
+        ));
     } else if let Some(v) = app.active_viewer() {
         let lang = v
             .lang_key
@@ -301,23 +289,64 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         // shows as a problem, not as "ready").
         // A server at work is named ("rust-analyzer ready"); one that is
         // not says why in words of its own.
-        let lsp = v
-            .lang_key
-            .and_then(|k| {
-                let status = app.lsp_status(k)?;
-                let at_work = matches!(
-                    app.proj.link.lsp.get(k),
-                    Some(crate::LspSlot::Ready(_) | crate::LspSlot::Starting)
-                );
-                Some(
-                    match crate::lsp::registry::default_for_language(k).filter(|_| at_work) {
-                        Some(server) => format!(" · {} {status}", server.name),
-                        None => format!(" · {status}"),
-                    },
-                )
-            })
-            .unwrap_or_default();
-        bar = bar.push(status_text(format!("{lang}{lsp}")));
+        let server = v.lang_key.and_then(|k| {
+            let status = app.lsp_status(k)?;
+            let at_work = matches!(
+                app.proj.link.lsp.get(k),
+                Some(crate::LspSlot::Ready(_) | crate::LspSlot::Starting)
+            );
+            Some((
+                crate::lsp::registry::default_for_language(k)
+                    .filter(|_| at_work)
+                    .map(|server| server.name),
+                status,
+            ))
+        });
+        let named = |status: &str| match server {
+            Some((Some(name), _)) => format!("{lang} · {name} {status}"),
+            Some((None, _)) => format!("{lang} · {status}"),
+            None => lang.to_string(),
+        };
+        let said = match &server {
+            Some((_, status)) => named(status),
+            None => lang.to_string(),
+        };
+        // A server at work says what it is doing — "Indexing 12/340",
+        // "Building proc-macros: serde" — many times a second, in words of
+        // its own length. Meanwhile it has a slot of its own, cut to it,
+        // that what stands beside it does not move by; at rest, a slot as
+        // wide as the widest of starting and ready.
+        let at_rest = [named(tr!("starting…")), named(tr!("ready"))];
+        let busy = v.lang_key.is_some_and(|k| app.lsp_busy(k));
+        let lsp_text: Element<'_, Message> = if busy {
+            let width =
+                super::steady::widest(&[&at_rest[0], &at_rest[1]], ts::SMALL, crate::fonts::UI)
+                    .max(LSP_BUSY_W);
+            let said = super::steady::cut(&said, width, ts::SMALL, crate::fonts::UI);
+            container(status_text(said).wrapping(iced::widget::text::Wrapping::None))
+                .width(width)
+                .clip(true)
+                .into()
+        } else {
+            // A server that could not be had says why at length ("'cargo' is
+            // required to install this server but was not found on PATH;
+            // …"): cut short to its room, said whole where the pointer
+            // rests. At full length it took the bar's middle, and what Clew
+            // said beside it was squeezed to nothing.
+            let shown = super::steady::cut(&said, LSP_MAX_W, ts::SMALL, crate::fonts::UI);
+            let slot = super::steady::slot(
+                status_text(shown.clone()),
+                &shown,
+                &[&at_rest[0], &at_rest[1]],
+                ts::SMALL,
+            );
+            if shown == said {
+                slot
+            } else {
+                super::toolbar::tip_at(slot, said, None, tooltip::Position::Top)
+            }
+        };
+        bar = bar.push(lsp_text);
         // Diagnostic counts for this file, from the same snapshot.
         let diags = v
             .lang_key
@@ -330,36 +359,60 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
                 let warns = ds.iter().filter(|d| d.severity == 2).count();
                 (errs, warns)
             });
-        if let Some((errs, warns)) = diags
-            && errs + warns > 0
-        {
+        // Said whenever the server can say them, none included, each in a
+        // slot two figures wide at least: a count that came and went with
+        // the problems of the file moved everything beside it.
+        if let Some((errs, warns)) = diags {
+            let count = |mark: &str, n: usize, color: iced::Color| {
+                let said = format!("{mark} {n}");
+                let widest = super::steady::widest_figure(&format!("{mark} {n:02}"));
+                super::steady::slot(
+                    text(said.clone()).size(ts::SMALL).color(color),
+                    &said,
+                    &[&widest],
+                    ts::SMALL,
+                )
+            };
             bar = bar.push(
                 row![
-                    text(format!("✘ {errs}"))
-                        .size(ts::SMALL)
-                        .color(if errs > 0 {
+                    count(
+                        "✘",
+                        errs,
+                        if errs > 0 {
                             theme::danger()
                         } else {
                             theme::fg_muted()
-                        }),
-                    text(format!("⚠ {warns}"))
-                        .size(ts::SMALL)
-                        .color(if warns > 0 {
+                        }
+                    ),
+                    count(
+                        "⚠",
+                        warns,
+                        if warns > 0 {
                             theme::warning()
                         } else {
                             theme::fg_muted()
-                        }),
+                        }
+                    ),
                 ]
                 .spacing(8),
             );
         }
         // 1-based line/column of the last click, when there is one.
         if let Some((l, c)) = v.caret {
-            bar = bar.push(status_text(tr!(
+            let said = tr!("Line {line}, Column {column}", line = l + 1, column = c + 1);
+            // As wide as the file's last line, at a column three figures
+            // wide, reads: moving the caret moves nothing beside it.
+            let widest = super::steady::widest_figure(&tr!(
                 "Line {line}, Column {column}",
-                line = l + 1,
-                column = c + 1
-            )));
+                line = v.lines.len().max(l + 1),
+                column = (c + 1).max(100)
+            ));
+            bar = bar.push(super::steady::slot(
+                status_text(said.clone()),
+                &said,
+                &[&widest],
+                ts::SMALL,
+            ));
         }
     }
     // For a file whose dimming depends on the platform (Rust's `#[cfg]`, Go's
@@ -412,6 +465,103 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     .into()
 }
 
+/// The status bar's offer to set the project's language servers up, in one
+/// click, while any it needs still takes something (`App::missing_setup`):
+/// a download, an install, or leave to build the project. What the click
+/// does is said where the pointer rests. While what it set up is on its
+/// way, it says so instead.
+fn setup_chip(app: &App) -> Option<Element<'_, Message>> {
+    let quiet = |label: String| {
+        row![
+            glyph::icon(Glyph::Plug, theme::accent(), 11.0),
+            text(label).size(ts::SMALL).color(theme::accent()),
+        ]
+        .spacing(5)
+        .align_y(iced::Center)
+    };
+    if app.setting_up() {
+        return Some(quiet(tr!("Setting up language servers…").into()).into());
+    }
+    let missing = app.missing_setup();
+    if missing.is_empty() {
+        return None;
+    }
+    let servers: Vec<crate::app::setup::SetupServer> = missing.into_iter().cloned().collect();
+    let label = trn!(
+        "Set up {count} language server",
+        "Set up {count} language servers",
+        servers.len(),
+        count = servers.len()
+    );
+    let chip = button(quiet(label))
+        .style(theme::icon_button(false))
+        .padding([2, 8])
+        .on_press(Message::Project(ProjectMsg::SetUpMissing));
+    Some(super::toolbar::tip_at(
+        chip,
+        crate::app::setup::servers_line(&servers),
+        None,
+        tooltip::Position::Top,
+    ))
+}
+
+/// A prominent, always-visible progress chip while "Explain All" runs — the
+/// pass is slow, so show how far along it is (the status text alone is easy
+/// to miss / read as stuck). It is the one place the pass's progress shows:
+/// the refresh chip stays out of the way meanwhile (see `refresh_chip`).
+///
+/// Its counter sits in a slot as wide as it reads at the end of the pass,
+/// so the bar and the × beside it stay put as it counts. Calls that failed
+/// are not counted here: the pass sends them again, and says what it could
+/// not explain once it is done.
+fn explain_chip(app: &App) -> Option<Element<'_, Message>> {
+    if !app.proj.explain.running {
+        return None;
+    }
+    let (label, widest) = match app.proj.explain.progress {
+        Some((done, total)) if total > 0 => {
+            let at = |done| tr!("Explaining {done}/{total}", done = done, total = total);
+            (at(done), vec![at(total), tr!("Explaining…").to_string()])
+        }
+        _ => (
+            tr!("Explaining…").to_string(),
+            vec![tr!("Explaining…").to_string()],
+        ),
+    };
+    let widest: Vec<&str> = widest.iter().map(String::as_str).collect();
+    let counter = super::steady::slot(
+        text(label.clone()).size(ts::SMALL).color(theme::accent()),
+        &label,
+        &widest,
+        ts::SMALL,
+    );
+    let mut chip = row![glyph::icon(Glyph::Sparkle, theme::accent(), 11.0), counter]
+        .spacing(5)
+        .align_y(iced::Center);
+    // A short determinate bar once the total is known, so progress reads at
+    // a glance instead of by parsing the counter.
+    if let Some((done, total)) = app.proj.explain.progress
+        && total > 0
+    {
+        chip = chip.push(super::meter::eased_bar(
+            done as f32 / total as f32,
+            90.0,
+            4.0,
+            theme::progress,
+            super::meter::PROGRESS,
+        ));
+    }
+    // A cancel control right on the always-visible chip, so a long pass can
+    // be stopped without hunting through menus.
+    chip = chip.push(
+        button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+            .style(theme::icon_button(false))
+            .padding([1, 4])
+            .on_press(Message::Explain(ExplainMsg::Cancel)),
+    );
+    Some(chip.into())
+}
+
 /// A freshness indicator for the auto-refreshed understanding: shows whether a
 /// refresh is running / queued, and force-refreshes on click (bypassing the 30s
 /// auto cooldown). Hidden until there's something to keep fresh (an explanation
@@ -455,7 +605,28 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
     } else {
         (format!("↻ {}", tr!("Up to date")), theme::dim(), true)
     };
-    let mut b = button(text(label).size(ts::SMALL).color(color))
+    // Its words in a slot as wide as the widest of them: counting down, and
+    // turning from one to the next, it moved everything to its right.
+    let every = [
+        format!("↻ {}", tr!("Refreshing overview…")),
+        format!("↻ {}", tr!("Refreshing index…")),
+        format!(
+            "↻ {}",
+            tr!(
+                "Refresh in {seconds}s",
+                seconds = crate::AUTO_REFRESH_MIN_INTERVAL.as_secs()
+            )
+        ),
+        format!("↻ {}", tr!("Up to date")),
+    ];
+    let every: Vec<&str> = every.iter().map(String::as_str).collect();
+    let words = super::steady::slot(
+        text(label.clone()).size(ts::SMALL).color(color),
+        &label,
+        &every,
+        ts::SMALL,
+    );
+    let mut b = button(words)
         .style(theme::icon_button(false))
         .padding([2, 8]);
     if enabled {

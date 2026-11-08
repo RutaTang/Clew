@@ -36,30 +36,11 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
             .total
             .unwrap_or(u64::from(model.size_mb) * 1_000_000)
             .max(1);
-        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
-        row![
-            container(super::meter::eased_bar(
-                share,
-                70.0,
-                4.0,
-                theme::progress,
-                super::meter::PROGRESS,
-            ))
-            .width(70),
-            text(tr!(
-                "{percent}%",
-                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim()),
-            form::action(
-                tr!("Cancel"),
-                Some(Message::Voice(VoiceMsg::CancelDownload(model.id)))
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        getting(
+            d.done,
+            total,
+            Message::Voice(VoiceMsg::CancelDownload(model.id)),
+        )
     } else if installed {
         row![
             text(tr!("Downloaded"))
@@ -235,9 +216,12 @@ fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, M
     rows
 }
 
-/// A download under way: how far it is, and its Cancel.
-fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
+/// A download under way: how far it is, and its Cancel. The share is said
+/// in a slot as wide as "100%" reads, so its bar does not move as it grows.
+pub(crate) fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
     let share = (done as f32 / total.max(1) as f32).clamp(0.0, 1.0);
+    let percent = |share: f64| tr!("{percent}%", percent = crate::i18n::decimal(share, 0));
+    let said = percent(f64::from(share) * 100.0);
     row![
         container(super::meter::eased_bar(
             share,
@@ -247,12 +231,12 @@ fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
             super::meter::PROGRESS,
         ))
         .width(70),
-        text(tr!(
-            "{percent}%",
-            percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
-        ))
-        .size(ts::SMALL)
-        .color(theme::dim()),
+        super::steady::slot(
+            text(said.clone()).size(ts::SMALL).color(theme::dim()),
+            &said,
+            &[&percent(100.0)],
+            ts::SMALL,
+        ),
         form::action(tr!("Cancel"), Some(cancel)),
     ]
     .spacing(8)

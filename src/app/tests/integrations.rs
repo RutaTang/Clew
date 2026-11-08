@@ -1498,7 +1498,7 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
         );
     }
     // The Ask window put away: out of reach, however long.
-    app.ask_view = AskView::Closed;
+    app.ask_view = AskView::Hidden;
     let _ = app.update(Message::Noop);
     read(&mut app);
     answer(&mut app, 1, "ok");

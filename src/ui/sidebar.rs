@@ -327,17 +327,25 @@ pub(crate) fn scope_label(scope: &str) -> String {
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let is_search = app.walk_ui.mode == crate::WalkMode::Search;
     // Two segments, the mode in use raised; only the other is pressable (it
-    // flips mode). On a line of its own: beside the field it left the field
-    // too narrow to say what it is for.
+    // flips mode). On a line of its own — beside the field it left the field
+    // too narrow to say what it is for — and across it, in halves, as tall
+    // as a field: two small chips at its start sat cramped against its edge
+    // with the line's room empty beside them.
     let seg = |label: &str, active: bool| {
-        button(text(label.to_string()).size(ts::SMALL))
-            .style(theme::segment(active))
-            .padding([2, 10])
-            .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
+        button(
+            container(text(label.to_string()).size(ts::BODY))
+                .width(Fill)
+                .align_x(iced::Center),
+        )
+        .style(theme::segment(active))
+        .padding([5, 0])
+        .width(Fill)
+        .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
     };
     let toggle =
-        container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(1))
+        container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(2))
             .padding(2)
+            .width(Fill)
             .style(theme::trough);
 
     let placeholder = if is_search {
@@ -562,9 +570,17 @@ pub(crate) fn walk_narration<'a>(
             .style(theme::toolbar_button)
             .padding([1, 8])
             .on_press(Message::Walk(WalkMsg::Step(-1))),
-        text(format!("{}/{}", cur + 1, n))
-            .size(ts::SMALL)
-            .color(theme::dim()),
+        // As wide as it reads at the last step: the ‹ before it moved as
+        // the count gained a digit, under the pointer stepping through.
+        {
+            let said = format!("{}/{}", cur + 1, n);
+            super::steady::slot(
+                text(said.clone()).size(ts::SMALL).color(theme::dim()),
+                &said,
+                &[&format!("{n}/{n}")],
+                ts::SMALL,
+            )
+        },
         button(text("›").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
@@ -981,6 +997,9 @@ pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
     }
 }
 
+/// The side of a match-option toggle beside the search field.
+const OPTION_SIDE: f32 = 30.0;
+
 pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
@@ -993,18 +1012,42 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .padding(7);
 
     // Match-option toggles: case-sensitive, whole-word, regex — as round as
-    // the fields, outlined while off, filled in the accent while on.
-    let chip = |label: &'static str, active: bool, opt: SearchOpt| -> Element<'_, Message> {
-        button(text(label).size(ts::BODY).font(crate::fonts::CODE))
-            .style(theme::toggle(active))
-            .padding([3, 8])
-            .on_press(Message::Nav(NavMsg::SearchToggle(opt)))
-            .into()
+    // the fields, outlined while off, filled in the accent while on. Beside
+    // the field they qualify, each a square of one size, its mark centred:
+    // on a row of their own under it, each as wide as its mark, they read
+    // as three odd chips apart from the search.
+    let chip = |label: &'static str, tip: &'static str, active: bool, opt: SearchOpt| {
+        super::toolbar::tip_at(
+            button(container(text(label).size(ts::BODY).font(crate::fonts::CODE)).center(Fill))
+                .style(theme::toggle(active))
+                .padding(0)
+                .width(Length::Fixed(OPTION_SIDE))
+                .height(Length::Fixed(OPTION_SIDE))
+                .on_press(Message::Nav(NavMsg::SearchToggle(opt))),
+            tip,
+            None,
+            tooltip::Position::Bottom,
+        )
     };
     let options = row![
-        chip("Aa", app.proj.search.case_sensitive, SearchOpt::Case),
-        chip("W", app.proj.search.whole_word, SearchOpt::WholeWord),
-        chip(".*", app.proj.search.regex, SearchOpt::Regex),
+        chip(
+            "Aa",
+            tr!("Match case"),
+            app.proj.search.case_sensitive,
+            SearchOpt::Case
+        ),
+        chip(
+            "W",
+            tr!("Whole word"),
+            app.proj.search.whole_word,
+            SearchOpt::WholeWord
+        ),
+        chip(
+            ".*",
+            tr!("Regular expression"),
+            app.proj.search.regex,
+            SearchOpt::Regex
+        ),
     ]
     .spacing(4);
 
@@ -1087,9 +1130,13 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    let mut col = column![input, options, include, exclude]
-        .spacing(6)
-        .padding(8);
+    let mut col = column![
+        row![input, options].spacing(6).align_y(iced::Center),
+        include,
+        exclude
+    ]
+    .spacing(6)
+    .padding(8);
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(ts::SMALL).color(color));
     }

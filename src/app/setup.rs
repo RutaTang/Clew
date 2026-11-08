@@ -150,52 +150,63 @@ pub(crate) fn estimate_calls(files: &[fs_scan::FileEntry]) -> usize {
     ((functions + with_content) as f64 * scale).round() as usize + folders
 }
 
-/// The language servers `languages` need that take something to set up:
-/// clew's own choice of server for each, as a project without settings of
-/// its own would run it.
-pub(crate) fn servers_for(languages: &[String]) -> Vec<SetupServer> {
-    let config = lsp::config::ProjectLspConfig::default();
-    languages
-        .iter()
-        .filter_map(|language| {
-            let server = config.resolve(language)?;
-            let fetch = match lsp::store::locate(&server) {
-                lsp::store::Located::NeedsDownload { .. } => Fetch::Download,
-                lsp::store::Located::NeedsInstall { install, .. } => {
-                    Fetch::Install(install.tool.to_string())
-                }
-                lsp::store::Located::Unsupported(_) => return None,
-                lsp::store::Located::Ready(_) | lsp::store::Located::RepoCommand(_) => {
-                    Fetch::Nothing
-                }
-            };
-            let builds = server.runs_project_code().is_some();
-            Some(SetupServer {
-                language: language.clone(),
-                name: server.server_name,
-                fetch,
-                builds,
+/// What decides the servers a project runs and what each still takes to
+/// set up: the project's `lsp.toml` and the user's choices for it (clew's
+/// own defaults on a first open, before either is read), and the leave to
+/// build each server has on record for it. A copy, so a look runs off the
+/// UI thread.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ServerLook {
+    pub config: lsp::config::ProjectLspConfig,
+    pub choices: clew_protocol::LanguageChoices,
+    pub trust: clew_core::trust::Trust,
+}
+
+impl ServerLook {
+    /// The language servers `languages` need in the project at `root` that
+    /// take something to set up: a download, an install, or the leave to
+    /// build that is not on record yet. Blocking: looks for each on disk.
+    pub(crate) fn servers_for(&self, root: &Path, languages: &[String]) -> Vec<SetupServer> {
+        languages
+            .iter()
+            .filter_map(|language| {
+                let server = self.config.resolve_with(language, &self.choices)?;
+                let fetch = match lsp::store::locate(&server) {
+                    lsp::store::Located::NeedsDownload { .. } => Fetch::Download,
+                    lsp::store::Located::NeedsInstall { install, .. } => {
+                        Fetch::Install(install.tool.to_string())
+                    }
+                    lsp::store::Located::Unsupported(_) => return None,
+                    lsp::store::Located::Ready(_) | lsp::store::Located::RepoCommand(_) => {
+                        Fetch::Nothing
+                    }
+                };
+                // Let build already: nothing to ask.
+                let builds = server.runs_project_code().is_some()
+                    && !self.trust.is_build_trusted(None, root, &server.server_name);
+                Some(SetupServer {
+                    language: language.clone(),
+                    name: server.server_name,
+                    fetch,
+                    builds,
+                })
             })
-        })
-        .filter(SetupServer::asks)
-        .collect()
+            .filter(SetupServer::asks)
+            .collect()
+    }
 }
 
 /// A look at the project at `root` — its files listed, or `files` when they
 /// already are: the servers it needs and about what explaining it costs.
 /// Blocking: reads files.
-pub(crate) fn census(root: &Path, files: Option<Arc<Vec<fs_scan::FileEntry>>>) -> Census {
+pub(crate) fn census(
+    root: &Path,
+    files: Option<Arc<Vec<fs_scan::FileEntry>>>,
+    look: &ServerLook,
+) -> Census {
     let files = files.unwrap_or_else(|| Arc::new(fs_scan::scan(root.to_path_buf()).files));
-    let mut languages: Vec<String> = files
-        .iter()
-        .filter_map(|f| highlight::detect(&f.abs))
-        .filter(|l| lsp::registry::default_for_language(l).is_some())
-        .map(str::to_string)
-        .collect();
-    languages.sort();
-    languages.dedup();
     Census {
-        servers: servers_for(&languages),
+        servers: look.servers_for(root, &crate::app::project::served_languages(&files)),
         calls: Some(estimate_calls(&files)),
     }
 }
@@ -301,10 +312,11 @@ impl App {
             .as_ref()
             .filter(|p| p.root == root)
             .map(|p| p.files.clone());
+        let look = self.server_look(&root);
         Task::perform(
             async move {
                 let looked = root.clone();
-                let census = tokio::task::spawn_blocking(move || census(&looked, files))
+                let census = tokio::task::spawn_blocking(move || census(&looked, files, &look))
                     .await
                     .unwrap_or_default();
                 (root, census)
@@ -397,9 +409,20 @@ impl App {
             return Task::none();
         }
         let servers = Self::ticked_servers(&setup);
-        self.allow_builds(&setup.root, &servers);
+        let mut tasks = vec![self.set_up_servers(&setup.root, &servers)];
+        if setup.explain {
+            tasks.push(self.on_explain_project(false));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Set `servers` up for the project at `root`: the leave to build
+    /// recorded, and each fetched — or, in hand and declined before,
+    /// started afresh.
+    fn set_up_servers(&mut self, root: &Path, servers: &[SetupServer]) -> Task<Message> {
+        self.allow_builds(root, servers);
         let mut tasks: Vec<Task<Message>> = Vec::new();
-        for server in &servers {
+        for server in servers {
             if server.fetch != Fetch::Nothing {
                 tasks.push(self.fetch_lsp(&server.language));
             } else if matches!(
@@ -414,10 +437,131 @@ impl App {
                 tasks.push(self.ensure_lsp(&server.language));
             }
         }
-        if setup.explain {
-            tasks.push(self.on_explain_project(false));
-        }
         Task::batch(tasks)
+    }
+
+    /// What decides the servers of the project at `root` (see
+    /// [`ServerLook`]): the open project's `lsp.toml` and choices when it is
+    /// the one open, clew's defaults before it is; the leave to build on
+    /// record either way.
+    fn server_look(&self, root: &Path) -> ServerLook {
+        let open = self.proj.project.as_ref().is_some_and(|p| p.root == root);
+        ServerLook {
+            config: if open {
+                self.proj.lsp_config.clone()
+            } else {
+                Default::default()
+            },
+            choices: if open {
+                self.proj.lang_choices.clone()
+            } else {
+                Default::default()
+            },
+            trust: self.trust.clone(),
+        }
+    }
+
+    /// Look again at what the open project's language servers still take
+    /// to set up: what the status bar's Set up does in one click (see
+    /// [`App::missing_setup`]). Only once the project's `lsp.toml` and the
+    /// user's choices for it are in — their landing looks again — and only
+    /// for a project on this machine: a remote one's servers are set up on
+    /// its host, which asks there as it needs them.
+    pub(crate) fn look_for_missing_setup(&mut self) -> Task<Message> {
+        // A look begun before this one saw less: its answer is not taken.
+        self.proj.setup_look += 1;
+        if self.connection.is_remote() {
+            self.proj.setup_missing.clear();
+            return Task::none();
+        }
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        if self.proj.inflight.state_loading || self.proj.inflight.choices_loading {
+            return Task::none();
+        }
+        let languages = self.proj.project_languages.clone();
+        let look = self.server_look(&root);
+        let (stamp, seq) = (self.stamp(), self.proj.setup_look);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || look.servers_for(&root, &languages))
+                    .await
+                    .unwrap_or_default()
+            },
+            move |servers| {
+                Message::Project(ProjectMsg::MissingSetupFound {
+                    stamp: stamp.clone(),
+                    seq,
+                    servers,
+                })
+            },
+        )
+    }
+
+    /// A look at what the servers still take is in.
+    pub(crate) fn on_missing_setup_found(
+        &mut self,
+        seq: u64,
+        servers: Vec<SetupServer>,
+    ) -> Task<Message> {
+        if seq == self.proj.setup_look {
+            self.proj.setup_missing = servers;
+        }
+        Task::none()
+    }
+
+    /// What the status bar offers to set up in one click: what the last
+    /// look found, less what has been set up, is on its way or is being
+    /// asked about since. A server the user declined, or whose download
+    /// failed, is offered again.
+    pub(crate) fn missing_setup(&self) -> Vec<&SetupServer> {
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.as_path()) else {
+            return Vec::new();
+        };
+        if self.connection.is_remote() {
+            return Vec::new();
+        }
+        self.proj
+            .setup_missing
+            .iter()
+            .filter(|s| {
+                let open = match self.proj.link.lsp.get(&s.language) {
+                    Some(LspSlot::Failed(_) | LspSlot::Declined(_)) | None => true,
+                    Some(
+                        LspSlot::Ready(_)
+                        | LspSlot::Starting
+                        | LspSlot::AwaitingConsent
+                        | LspSlot::Unsupported(_),
+                    ) => false,
+                };
+                open && (s.fetch != Fetch::Nothing
+                    || !self.trust.is_build_trusted(None, root, &s.name))
+            })
+            .collect()
+    }
+
+    /// Whether a one-click Set up is still fetching what it set up.
+    pub(crate) fn setting_up(&self) -> bool {
+        self.proj
+            .setting_up
+            .iter()
+            .any(|language| self.proj.link.lsp_installs.contains_key(language))
+    }
+
+    /// The status bar's Set up: every server [`App::missing_setup`] offers,
+    /// set up as the sheet's Apply sets them up.
+    pub(crate) fn on_set_up_missing(&mut self) -> Task<Message> {
+        let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
+            return Task::none();
+        };
+        let servers: Vec<SetupServer> = self.missing_setup().into_iter().cloned().collect();
+        self.proj.setting_up = servers
+            .iter()
+            .filter(|s| s.fetch != Fetch::Nothing)
+            .map(|s| s.language.clone())
+            .collect();
+        self.set_up_servers(&root, &servers)
     }
 
     /// Carry out a first open's answer once the project it was for is open
@@ -500,6 +644,8 @@ impl App {
     ) -> Task<Message> {
         match result {
             Ok(exe) => {
+                // Set up: the look this lands with confirms it.
+                self.proj.setup_missing.retain(|s| s.language != language);
                 let wanted = self
                     .proj
                     .panes

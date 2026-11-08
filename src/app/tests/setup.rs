@@ -496,3 +496,80 @@ fn set_up_project_starts_a_server_once_declined_leave_to_build() {
     );
     assert!(app.proj.pending_lsp_consent.is_empty(), "not asked again");
 }
+
+/// A project whose language server is declined is offered, in one click,
+/// what its servers still take: the status bar's Set up fetches it, says
+/// it is setting up meanwhile, and is gone while it does. What a later
+/// look finds replaces what an earlier one did — a look begun before
+/// another is not taken.
+#[test]
+fn set_up_in_one_click_fetches_what_the_servers_lack() {
+    let store = test_dir("setup-data-one-click");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let mut app = scanned_app("setup-one-click");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentDismissed(consent_asked(&app))));
+    assert!(matches!(
+        app.proj.link.lsp.get("rust"),
+        Some(LspSlot::Declined(_))
+    ));
+    let stamp = app.stamp();
+    let needs = SetupServer {
+        builds: false,
+        ..builds_and_downloads()
+    };
+    // Two looks: the older one's answer, landing last, is not taken.
+    let _ = app.look_for_missing_setup();
+    let older = app.proj.setup_look;
+    let _ = app.look_for_missing_setup();
+    let _ = app.update(Message::Project(ProjectMsg::MissingSetupFound {
+        stamp: stamp.clone(),
+        seq: app.proj.setup_look,
+        servers: vec![needs.clone()],
+    }));
+    let _ = app.update(Message::Project(ProjectMsg::MissingSetupFound {
+        stamp,
+        seq: older,
+        servers: Vec::new(),
+    }));
+    assert_eq!(app.missing_setup(), vec![&needs], "declined: offered");
+    assert!(!app.setting_up());
+
+    let _ = app.update(Message::Project(ProjectMsg::SetUpMissing));
+    assert!(
+        matches!(app.proj.link.lsp.get("rust"), Some(LspSlot::Starting)),
+        "the declined server was not fetched"
+    );
+    assert!(app.missing_setup().is_empty(), "on its way: not offered");
+    assert!(app.setting_up(), "and said to be setting up");
+}
+
+/// A server in hand that builds the project is offered until the leave to
+/// build is given — by the one click, which gives it — and then no more.
+/// One running, or being asked about, is not offered at all.
+#[test]
+fn a_build_once_allowed_is_not_offered_again() {
+    let root = fixture_project("setup-one-click-build");
+    let data = test_dir("setup-data-one-click-build");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root.clone());
+    let builds = SetupServer {
+        fetch: Fetch::Nothing,
+        ..builds_and_downloads()
+    };
+    app.proj.setup_missing = vec![builds.clone()];
+    assert_eq!(app.missing_setup(), vec![&builds]);
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::AwaitingConsent);
+    assert!(app.missing_setup().is_empty(), "being asked about");
+    app.proj.link.lsp.remove("rust");
+    let _ = app.update(Message::Project(ProjectMsg::SetUpMissing));
+    assert!(clew_core::trust::Trust::load().is_build_trusted(None, &root, "rust-analyzer"));
+    assert!(app.missing_setup().is_empty(), "allowed: nothing to offer");
+}

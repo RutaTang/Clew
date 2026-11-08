@@ -258,7 +258,7 @@ fn panels_coming_and_going_never_reset_the_code_scroll() {
                 a.show_file_banner = false;
                 a.show_left_sidebar = false;
                 a.show_bottom = false;
-                a.ask_view = crate::AskView::Closed;
+                a.ask_view = crate::AskView::Hidden;
                 a.update.available = None;
                 a.show_right_panel = false;
                 a.show_tools_menu = false;
@@ -7905,10 +7905,13 @@ fn the_floating_ask_is_driven_from_the_screen() {
             "Ask is the whole project's: it is no tab of a file's margin"
         );
     }
-    assert!(
-        !shows(&mut sim_of(&app), "1 answer"),
-        "no pill while the card is open"
-    );
+    // Is Ask's pill in its corner?
+    let pill_shown = |app: &App| {
+        let (right, bottom) = ask_corner_edges();
+        text_at(&mut sim_of(app), |t| t == "Ask", 0)
+            .is_some_and(|at| at.x > right - 200.0 && at.x < right && at.y > bottom - 60.0)
+    };
+    assert!(!pill_shown(&app), "no pill while the card is open");
     // The code beside the card takes its own clicks.
     let mut sim = sim_of(&app);
     let beside = super::ask_place(&app).unwrap().left - 60.0;
@@ -7919,15 +7922,20 @@ fn the_floating_ask_is_driven_from_the_screen() {
         !sent.iter().any(|m| matches!(m, Message::Ask(_))),
         "{sent:?}"
     );
-    // Esc hides it to the pill, which says how many answers it keeps.
+    // Esc hides it to the pill — which says Ask, and no count of its
+    // answers beside it.
     assert!(app.step_ask_down());
     assert_eq!(app.ask_view, crate::AskView::Hidden);
     assert!(super::ask_place(&app).is_none());
-    assert!(shows(&mut sim_of(&app), "1 answer"));
-    // Put away, the pill goes too; the shortcut brings Ask back.
-    let _ = app.update(Message::Ask(AskMsg::Close));
-    assert_eq!(app.ask_view, crate::AskView::Closed);
+    assert!(pill_shown(&app));
     assert!(!shows(&mut sim_of(&app), "1 answer"));
+    // Closed with its ×, it is back on its pill — still there to click.
+    // Put away with nothing in the corner, Ask had gone, with no way back
+    // to it on screen.
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    let _ = app.update(Message::Ask(AskMsg::Close));
+    assert_eq!(app.ask_view, crate::AskView::Hidden);
+    assert!(pill_shown(&app));
     let _ = app.update(Message::Ask(AskMsg::Toggle));
     assert_eq!(app.ask_view, crate::AskView::Compact);
     let _ = app.update(Message::Ask(AskMsg::Toggle));
@@ -8285,7 +8293,7 @@ fn speaking_shows_with_a_stop() {
         }
     }
     let mut app = reader_app();
-    app.ask_view = crate::AskView::Closed;
+    app.ask_view = crate::AskView::Hidden;
     app.voice.speech.speak_for_test(Box::new(Playing), 0.5);
     {
         let mut sim = sim_of(&app);
@@ -8335,7 +8343,7 @@ fn speaking_shows_with_a_stop() {
 fn voice_shows_what_it_is_doing() {
     use crate::app::voice::{Heard, HeardOutcome, VoicePhase};
     let mut app = reader_app();
-    app.ask_view = crate::AskView::Closed;
+    app.ask_view = crate::AskView::Hidden;
     app.voice.phase = VoicePhase::Listening {
         since: std::time::Instant::now(),
         level: 0.5,

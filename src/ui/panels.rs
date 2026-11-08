@@ -319,7 +319,7 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
         return space().into();
     }
-    tooltip(
+    super::tip::tip(
         iced::widget::checkbox(app.debug_hover_eval)
             .style(theme::check)
             .label(tr!("Evaluate on hover"))
@@ -337,6 +337,7 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
         .style(theme::modal_panel),
         tooltip::Position::Bottom,
     )
+    .gap(5.0)
     .into()
 }
 
@@ -861,17 +862,25 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         ts::READING,
     );
     // The send button is the composer's primary action, a round button in
-    // the accent (a quiet one while an answer is coming in, when it does
-    // nothing). Any answer still coming in — an agent turn, a server chat
-    // stream, a local retrieval stream — can be stopped from here, not only
-    // agent turns.
+    // the accent — and the one way to stop an answer coming in: while one
+    // is, with nothing typed, it stops it (any answer — an agent turn, a
+    // server chat stream, a local retrieval stream); with something typed,
+    // it queues that, to be asked when the answer is done. A Stop of its
+    // own beside the field said the same thing in another place.
     let streaming = app.ask_stream_active();
-    let idle = !streaming;
-    let send_tint = if idle {
-        crate::theme::active().on_accent
+    let typed = !app.proj.ask_input.trim().is_empty();
+    let (send_glyph, send_tip, send_msg) = if streaming && !typed {
+        (Glyph::Stop, tr!("Stop"), Message::Ask(AskMsg::Stop))
+    } else if streaming {
+        (
+            Glyph::Send,
+            tr!("Queue: asked when this answer is done"),
+            Message::Ask(AskMsg::Submit),
+        )
     } else {
-        theme::dim()
+        (Glyph::Send, tr!("Ask"), Message::Ask(AskMsg::Submit))
     };
+    let send_tint = crate::theme::active().on_accent;
     let round = |glyph: Glyph, tint: iced::Color| {
         button(
             container(glyph::icon(glyph, tint, 15.0))
@@ -884,11 +893,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .width(Length::Fixed(ROUND_BUTTON))
         .height(Length::Fixed(ROUND_BUTTON))
     };
-    let mut ask_btn = round(Glyph::Send, send_tint).style(theme::round_button(idle));
-    if idle {
-        ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
-    }
-    let ask_btn = super::toolbar::tip_at(ask_btn, tr!("Ask"), None, tooltip::Position::Top);
+    let ask_btn = round(send_glyph, send_tint)
+        .style(theme::round_button(true))
+        .on_press(send_msg);
+    let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed.
     let listening = app.voice.is_listening();
     let talk = super::toolbar::tip_at(
@@ -991,19 +999,6 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .padding(iced::Padding::default().right(6))
         .into();
     }
-    // An answer can run long — always give the user a way out. In a place
-    // of its own, there or not: Stop coming before Ask handed Ask its state
-    // as it went, and a press held on Stop as the answer ended asked the
-    // question typed meanwhile, let go of over Ask.
-    let stop: Element<'_, Message> = if streaming {
-        button(text(tr!("Stop")).size(ts::BASE))
-            .style(theme::toolbar_button)
-            .padding([5, 12])
-            .on_press(Message::Ask(AskMsg::Stop))
-            .into()
-    } else {
-        slot()
-    };
     // A conversation by voice: once Clew has answered, listen again. The
     // design's switch — a track, its knob in from the end it is at — and
     // beside it what it does, which turns it as well.
@@ -1039,10 +1034,56 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         None => input,
     };
     let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
+    // What is queued, over the field, in a place of its own (`compose_slot`):
+    // each question to be asked once the answer coming in is done, with a
+    // way to ask it now — the answer stopped for it — and to take it back.
+    compose.push(compose_slot((!app.proj.ask_queue.is_empty()).then(|| {
+        let state = if app.proj.ask_queue_held {
+            tr!("Held")
+        } else {
+            tr!("Queued")
+        };
+        Column::with_children(
+            app.proj
+                .ask_queue
+                .iter()
+                .enumerate()
+                .map(|(at, (question, _))| {
+                    row![
+                        text(state).size(ts::SMALL).color(theme::dim()),
+                        container(
+                            text(question.lines().next().unwrap_or_default().to_string())
+                                .size(ts::SMALL)
+                                .color(theme::fg_muted())
+                                .wrapping(Wrapping::None),
+                        )
+                        .width(Fill)
+                        .clip(true),
+                        button(text(tr!("Send now")).size(ts::SMALL))
+                            .style(theme::toolbar_button)
+                            .padding([2, 8])
+                            .on_press(Message::Ask(AskMsg::SendQueuedNow(at))),
+                        super::toolbar::tip_at(
+                            button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+                                .style(theme::icon_button(false))
+                                .padding([3, 4])
+                                .on_press(Message::Ask(AskMsg::DropQueued(at))),
+                            tr!("Remove from the queue"),
+                            None,
+                            tooltip::Position::Top,
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .into()
+                }),
+        )
+        .spacing(2)
+        .into()
+    })));
     // The composer, under a rule across the card: the question as it is
-    // typed, Stop while an answer comes in, Keep listening, the microphone
-    // and send.
-    let compose_row = row![input, stop, keep_listening, talk, ask_btn]
+    // typed, Keep listening, the microphone and send — or stop.
+    let compose_row = row![input, keep_listening, talk, ask_btn]
         .spacing(8)
         .align_y(iced::Center);
     compose.push(row![agent, compose_row].align_y(iced::Center).into());

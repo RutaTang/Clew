@@ -77,7 +77,11 @@ impl App {
                 // for meanwhile: on their way, they are waited for, where
                 // asked first they each popped the very download question
                 // the sheet's tick had answered, and the tick was skipped.
-                let mut tasks = vec![self.refresh_build_facts(), self.apply_pending_setup()];
+                let mut tasks = vec![
+                    self.refresh_build_facts(),
+                    self.apply_pending_setup(),
+                    self.look_for_missing_setup(),
+                ];
                 // The servers asked for meanwhile — each waits on, if the
                 // project's other state is still loading, that instead.
                 for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
@@ -352,21 +356,27 @@ impl App {
         self.proj.lang_choices = next.clone();
         let host = self.connection.approval_host().map(str::to_string);
         let stamp = self.stamp();
-        let mut tasks = vec![Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    lsp::choices::save(host.as_deref(), &root, &next)
-                })
-                .await
-                .unwrap_or_else(|_| Err(tr!("the save failed").to_string()))
-            },
-            move |result| {
-                Message::Languages(LanguagesMsg::Saved {
-                    stamp: stamp.clone(),
-                    result,
-                })
-            },
-        )];
+        // A server program of the user's takes nothing to set up; clew's
+        // own again may.
+        let look = self.look_for_missing_setup();
+        let mut tasks = vec![
+            look,
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        lsp::choices::save(host.as_deref(), &root, &next)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err(tr!("the save failed").to_string()))
+                },
+                move |result| {
+                    Message::Languages(LanguagesMsg::Saved {
+                        stamp: stamp.clone(),
+                        result,
+                    })
+                },
+            ),
+        ];
         for language in changed {
             if self.proj.link.lsp.contains_key(&language) {
                 tasks.push(self.update_lsp(LspMsg::Restart(language)));

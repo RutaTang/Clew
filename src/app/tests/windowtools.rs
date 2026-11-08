@@ -210,7 +210,7 @@ fn the_agent_lists_and_runs_the_windows_commands() {
 fn a_costly_command_waits_for_the_users_yes() {
     let (mut app, stream, mut rx) = turn_app("wt-costly");
     app.asking.delay = std::time::Duration::ZERO;
-    app.ask_view = AskView::Closed;
+    app.ask_view = AskView::Hidden;
     let _ = call(
         &mut app,
         stream,

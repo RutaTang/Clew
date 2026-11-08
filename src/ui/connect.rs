@@ -2440,30 +2440,11 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
     use clew_core::embed::local::MODEL;
     let state: Element<'_, Message> = if let Some(d) = app.local_embedding.download.as_ref() {
         let total = d.total.unwrap_or(MODEL.bytes()).max(1);
-        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
-        row![
-            container(super::meter::eased_bar(
-                share,
-                70.0,
-                4.0,
-                theme::progress,
-                super::meter::PROGRESS,
-            ))
-            .width(70),
-            text(tr!(
-                "{percent}%",
-                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim()),
-            form::action(
-                tr!("Cancel"),
-                Some(Message::Settings(SettingsMsg::CancelEmbedDownload))
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        super::voice::getting(
+            d.done,
+            total,
+            Message::Settings(SettingsMsg::CancelEmbedDownload),
+        )
     } else if app.embed_model_installed() {
         form::action(
             tr!("Remove"),

@@ -38,8 +38,10 @@ fn ask_opens_as_a_card_grows_large_and_steps_back_with_esc() {
     let _ = app.update(Message::Ask(AskMsg::Expand));
     let _ = app.update(Message::Ask(AskMsg::Open));
     assert_eq!(app.ask_view, AskView::Expanded);
+    // Closed, to its pill: as hidden, and quiet.
     let _ = app.update(Message::Ask(AskMsg::Close));
-    assert_eq!(app.ask_view, AskView::Closed);
+    assert_eq!(app.ask_view, AskView::Hidden);
+    assert!(app.code_focused);
 }
 
 /// Esc puts away the nearest thing first: the find bar, then the

@@ -37,6 +37,10 @@ pub(crate) use dialogs::*;
 mod tutorial;
 pub(crate) use tutorial::*;
 mod statusbar;
+// Text that changes while it is watched, in a slot that does not.
+pub(crate) mod steady;
+// Tooltips that wait for the pointer to rest.
+pub(crate) mod tip;
 pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;

@@ -13437,9 +13437,11 @@ fn a_question_stopped_while_embedded_lets_its_endpoint_go() {
 
 /// D1-6: Enter submits whether or not the Ask button is enabled, and a question
 /// typed while an agent turn runs used to start a SECOND answer through the
-/// retrieval path. It is refused, and the question stays in the input.
+/// retrieval path; then it was turned away, to be asked again by hand. It is
+/// queued: no second answer, the field free for the next — and once the
+/// turn has ended, it is asked, whatever is typed meanwhile kept.
 #[test]
-fn enter_while_an_agent_turn_runs_starts_no_second_answer() {
+fn a_question_asked_while_answering_is_queued_and_asked_next() {
     let mut app = scanned_app("ask-one-at-a-time");
     let root = app.proj.project.as_ref().unwrap().root.clone();
     app.llm_config_cache = Some(Some(unreachable_llm()));
@@ -13453,13 +13455,53 @@ fn enter_while_an_agent_turn_runs_starts_no_second_answer() {
         app.proj.inflight.ask_retrieval.is_none() && !app.proj.asking,
         "a retrieval answer started beside the running agent turn"
     );
-    assert_eq!(app.proj.ask_input, "and this?", "the question was lost");
+    assert_eq!(app.proj.ask_queue, vec![("and this?".to_string(), false)]);
+    assert_eq!(app.proj.ask_input, "", "the field is free for the next");
+    assert!(run_task(task).is_empty());
+
+    // The turn ends; the user is typing something else meanwhile.
+    app.proj.link.agent_stream = None;
+    let _ = app.update(Message::Ask(AskMsg::InputChanged("and then".into())));
+    assert!(app.proj.ask_queue.is_empty(), "it was not asked");
     assert!(
-        app.status.contains("Still answering"),
-        "the refusal was not explained: {}",
+        app.proj.inflight.ask_retrieval.is_some() || app.proj.asking,
+        "it was not asked: {}",
         app.status
     );
-    assert!(run_task(task).is_empty());
+    assert_eq!(app.proj.ask_input, "and then", "what was typed is kept");
+}
+
+/// A Stop holds what is queued — it may be what the Stop was about: it
+/// waits, shown, for its Send now, which asks it at once; or it is taken
+/// off the queue.
+#[test]
+fn a_stop_holds_the_queue_and_send_now_asks() {
+    let mut app = scanned_app("ask-queue-held");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    app.proj.ask_pins.push(ask_pin(&root));
+    app.proj.link.agent_stream = Some(app.mint_request_id());
+    for question in ["first?", "second?"] {
+        app.proj.ask_input = question.into();
+        let _ = app.update(Message::Ask(AskMsg::Submit));
+    }
+    assert_eq!(app.proj.ask_queue.len(), 2);
+    let _ = app.update(Message::Ask(AskMsg::Stop));
+    app.proj.link.agent_stream = None;
+    let _ = app.update(Message::Ask(AskMsg::InputChanged(String::new())));
+    assert_eq!(app.proj.ask_queue.len(), 2, "asked after a Stop");
+    assert!(app.proj.ask_queue_held);
+    // Taken back: gone from the queue.
+    let _ = app.update(Message::Ask(AskMsg::DropQueued(0)));
+    assert_eq!(app.proj.ask_queue, vec![("second?".to_string(), false)]);
+    // Send now: asked at once.
+    let _ = app.update(Message::Ask(AskMsg::SendQueuedNow(0)));
+    assert!(app.proj.ask_queue.is_empty());
+    assert!(
+        app.proj.inflight.ask_retrieval.is_some() || app.proj.asking,
+        "{}",
+        app.status
+    );
 }
 
 /// D1-3: a "what & why" summary and the story belong to the time-travel SESSION
@@ -22632,7 +22674,7 @@ struct CountingProvider {
     stop: Arc<std::sync::atomic::AtomicBool>,
     /// While set, a request that names it fails — by default with a
     /// gateway's 502: one the HTTP layer never sends again, and a pass sends
-    /// again only when it is explicit, once.
+    /// again, once.
     failing: Arc<std::sync::Mutex<Option<String>>>,
     /// How such a request fails: the status line and body it is answered
     /// with, or — `None` — its connection closed with no answer.
@@ -24197,7 +24239,7 @@ fn a_file_that_cannot_be_explained_and_held_nothing_is_not_named() {
 }
 
 /// E1: a new function whose call failed is handed back and retried. `fresh`
-/// is added to a.rs; its call fails (a gateway error, sent once) and the
+/// is added to a.rs; its call fails (a gateway error, sent twice) and the
 /// pass completes. a.rs keeps its summary — its prompt quotes only what has
 /// one — so nothing in the code tells the next pass that `fresh` is new: the
 /// hand-back does. The next refresh, reported for nothing in a.rs, explains
@@ -24312,14 +24354,15 @@ fn a_request_the_provider_refused_is_said_to_be_refused() {
 }
 
 /// A provider that could not serve a request — a gateway's 5xx — is said to
-/// be unavailable, and a refresh does not send the call again: a gateway
-/// that timed out may have handed the request on, and the provider be
-/// generating it. The pass sent it twice more, billed each time.
+/// be unavailable, after a refresh sent the call once more, a moment later:
+/// once only, since a gateway that timed out may have handed the request on,
+/// and the provider be generating it. The pass sent it twice more, billed
+/// each time.
 #[test]
 fn an_unavailable_provider_is_said_to_be_unavailable() {
     let (mut app, root, provider) = explained_project("explain-fail-unavailable");
     let (status, calls) = refresh_with_fresh_failing(&mut app, &root, &provider);
-    assert_eq!(calls, 1, "{status}");
+    assert_eq!(calls, 2, "{status}");
     assert!(
         status.contains("1 failed: the provider was unavailable (")
             && status.contains("502")
@@ -24328,23 +24371,22 @@ fn an_unavailable_provider_is_said_to_be_unavailable() {
     );
 }
 
-/// In an explicit pass, only a gateway's 502 is sent again on top of what
-/// llm's send made of it: here, the requests one call that keeps failing
-/// costs. A 422 is refused, and a 504 may be generating behind the gateway:
-/// each is sent once. A 502, which llm never sends again, the pass sends
-/// again once. A 503 or a 529 llm sends three times more, after the wait
-/// the provider asks for, and the pass no more. It sent a 503 again: four
-/// requests more, to a provider that had said it could not take them, after
-/// a flat pause instead of the wait it asked for.
+/// What one call that keeps failing costs: llm's send, and the pass's
+/// one resend on top of it. A 422 is refused, and refused again: it is
+/// sent once. A 502 and a 504, which llm never sends again, the pass sends
+/// again once, a moment later. A 503 or a 529 llm sends three times more,
+/// after the wait the provider asks for, and the pass sends it once more
+/// at the end of its level, when the rest of the level has been answered:
+/// as llm does, again.
 #[test]
-fn only_a_gateways_502_is_sent_again_on_top_of_llms_retries() {
+fn a_failure_that_may_pass_is_sent_again_on_top_of_llms_retries() {
     let with_fresh = "pub fn a_one() -> u32 {\n    1\n}\n\npub fn fresh() -> u32 {\n    5\n}\n";
     for (status, requests) in [
         ("422 Unprocessable Entity", 1),
         ("502 Bad Gateway", 2),
-        ("503 Service Unavailable\r\nretry-after: 0", 4),
-        ("504 Gateway Timeout", 1),
-        ("529 Overloaded\r\nretry-after: 0", 4),
+        ("503 Service Unavailable\r\nretry-after: 0", 8),
+        ("504 Gateway Timeout", 2),
+        ("529 Overloaded\r\nretry-after: 0", 8),
     ] {
         let code = &status[..3];
         let (mut app, root, provider) = explained_project(&format!("explain-sent-again-{code}"));
@@ -24359,9 +24401,9 @@ fn only_a_gateways_502_is_sent_again_on_top_of_llms_retries() {
 }
 
 /// A connection that failed — here closed with no answer, after the provider
-/// had read the request — is said to have failed, and the call is not sent
-/// again: the provider may be generating it, and a resend is billed twice.
-/// The pass sent it twice more. A connection that could not be made at all
+/// had read the request — is said to have failed, after the call was sent
+/// once more, a moment later: once only, since the provider may be
+/// generating it, and each resend is billed. The pass sent it twice more. A connection that could not be made at all
 /// is sent again — by the HTTP layer, which alone knows the request never
 /// reached the provider — and is explained once it can be.
 #[test]
@@ -24370,8 +24412,8 @@ fn a_connection_that_failed_is_said_to_have_failed() {
     provider.fail_with(None);
     let (status, calls) = refresh_with_fresh_failing(&mut app, &root, &provider);
     assert_eq!(
-        calls, 1,
-        "a request the provider had read was sent again: {status}"
+        calls, 2,
+        "a request the provider had read was not sent again, once: {status}"
     );
     assert!(
         status.contains("1 failed: the connection failed (request failed")

@@ -274,6 +274,16 @@ pub enum ProjectMsg {
     SetupExplain(bool),
     /// The sheet's Apply (or Explain).
     SetupApply,
+    /// A look at what the open project's language servers still take to
+    /// set up is in (see `App::look_for_missing_setup`); `seq` says which.
+    MissingSetupFound {
+        stamp: Stamp,
+        seq: u64,
+        servers: Vec<crate::app::setup::SetupServer>,
+    },
+    /// The status bar's Set up: every language server that still takes
+    /// something, set up in one click.
+    SetUpMissing,
     /// Put the sheet away (not a first open's: that is answered).
     SetupClose,
     /// The client-side (fallback) scan finished. Its stamp is transport-bound
@@ -1208,6 +1218,11 @@ pub enum AskMsg {
     /// the provider locally (the client AI endpoint). See
     /// [`crate::App::ask_stream_active`] for when a Stop button applies.
     Stop,
+    /// Send the queued question at this place now: the answer coming in is
+    /// stopped, and it is asked next.
+    SendQueuedNow(usize),
+    /// Take the queued question at this place off the queue.
+    DropQueued(usize),
     /// Clear the whole Ask conversation.
     Clear,
     /// Remove the pinned code-selection context with this identity
@@ -2135,7 +2150,8 @@ impl ProjectMsg {
         match self {
             ProjectMsg::ScanDone { stamp, .. }
             | ProjectMsg::StateLoaded { stamp, .. }
-            | ProjectMsg::TreeUpdated { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | ProjectMsg::TreeUpdated { stamp, .. }
+            | ProjectMsg::MissingSetupFound { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
@@ -2146,6 +2162,7 @@ impl ProjectMsg {
             | ProjectMsg::SetupServers(..)
             | ProjectMsg::SetupExplain(..)
             | ProjectMsg::SetupApply
+            | ProjectMsg::SetUpMissing
             | ProjectMsg::SetupClose
             | ProjectMsg::ToggleDir(..) => None,
         }
@@ -2525,6 +2542,8 @@ impl AskMsg {
             | AskMsg::Submit
             | AskMsg::Suggested(..)
             | AskMsg::Stop
+            | AskMsg::SendQueuedNow(..)
+            | AskMsg::DropQueued(..)
             | AskMsg::Clear
             | AskMsg::Unpin(..)
             | AskMsg::PinGoto(..)

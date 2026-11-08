@@ -275,7 +275,7 @@ fn keep_listening_opens_the_microphone_after_an_answer() {
     let _ = app.on_ask_stream_ended(3, StreamOutcome::Stopped);
     assert_eq!(app.voice.phase, VoicePhase::Idle);
     // Put away, the conversation hears nothing.
-    app.ask_view = AskView::Closed;
+    app.ask_view = AskView::Hidden;
     turn(&mut app, 4);
     let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
     assert_eq!(app.voice.phase, VoicePhase::Idle);

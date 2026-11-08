@@ -1247,6 +1247,19 @@ impl App {
         })
     }
 
+    /// Whether `language`'s server is at work — starting, or saying what it
+    /// is doing (indexing, building) — in words that change as it goes.
+    pub fn lsp_busy(&self, language: &str) -> bool {
+        match self.proj.link.lsp.get(language) {
+            Some(LspSlot::Starting) => true,
+            Some(LspSlot::Ready(_)) => matches!(
+                self.proj.link.lsp_snapshots.get(language),
+                Some(Ok(s)) if s.error.is_none() && s.progress.is_some()
+            ),
+            _ => false,
+        }
+    }
+
     /// Status text and the action button for a language row in the server
     /// panel. Distinguishes running / installed-but-idle / not-downloaded so an
     /// installed server never shows a misleading "Download".
@@ -1538,13 +1551,14 @@ impl App {
                 }
                 // Finished: nothing left for its guard to stop.
                 self.proj.link.lsp_installs.remove(&language);
+                let look = self.look_for_missing_setup();
                 match result {
                     Ok(exe) => {
                         self.status = tr!(
                             "{language} server installed",
                             language = crate::app::languages::language_name(&language)
                         );
-                        self.start_lsp_with(&language, exe)
+                        Task::batch([self.start_lsp_with(&language, exe), look])
                     }
                     Err(e) => {
                         self.status = tr!(
@@ -1553,7 +1567,7 @@ impl App {
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
-                        Task::none()
+                        look
                     }
                 }
             }
@@ -1569,7 +1583,8 @@ impl App {
                     return Task::none();
                 }
                 self.proj.link.lsp_installs.remove(&language);
-                self.on_lsp_fetched(language, result)
+                let fetched = self.on_lsp_fetched(language, result);
+                Task::batch([fetched, self.look_for_missing_setup()])
             }
             LspMsg::Staged {
                 stamp,
@@ -1606,7 +1621,8 @@ impl App {
                     Ok(()) => tr!("Removed {name} {version}", name = name, version = version),
                     Err(e) => tr!("Remove failed: {error}", error = e),
                 };
-                self.refresh_server_panel()
+                // A server the project needs, gone: offered to set up again.
+                Task::batch([self.refresh_server_panel(), self.look_for_missing_setup()])
             }
             LspMsg::ToggleInlayHints => self.on_toggle_inlay_hints(),
             LspMsg::TogglePanel => {

@@ -73,9 +73,25 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
                 ),
                 _ => slot(),
             };
+            // As wide as it reads when it is done: the count gaining a digit
+            // or turning from KB to MB moved its own words about.
+            let widest = match total {
+                Some(t) if t > 0 => super::steady::widest_figure(&tr!(
+                    "Downloading Clew {version}…  {done} / {total}",
+                    version = version,
+                    done = human_size(t),
+                    total = human_size(t)
+                )),
+                _ => label.clone(),
+            };
             row![
                 dot(),
-                text(label).size(ts::BODY).color(theme::fg_muted()),
+                super::steady::slot(
+                    text(label.clone()).size(ts::BODY).color(theme::fg_muted()),
+                    &label,
+                    &[&widest],
+                    ts::BODY,
+                ),
                 space().width(Fill),
                 meter,
                 action_button(

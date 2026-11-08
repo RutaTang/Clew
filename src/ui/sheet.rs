@@ -461,12 +461,18 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
         ),
+        // A toggle, as Diff is: pressed again while it is on, it leaves —
+        // where only the Exit at the scrubber's end did.
         file_tool(
             Glyph::TimeTravel,
             tr!("Time Travel"),
             time_travel,
             caps(Action::TimeTravel),
-            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
+            if time_travel {
+                Message::TimeTravel(TimeTravelMsg::Exit)
+            } else {
+                Message::TimeTravel(TimeTravelMsg::Start { symbol: false })
+            },
         ),
         rule,
         view_menu,

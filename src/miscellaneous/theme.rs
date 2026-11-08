@@ -1632,6 +1632,19 @@ pub fn check(_theme: &Theme, status: checkbox::Status) -> checkbox::Style {
     }
 }
 
+/// The wash a borderless control lays under the pointer, and a little
+/// deeper while pressed: faint enough that a row of them does not read as a
+/// row of boxes, and the same everywhere, so every control answers the
+/// pointer alike.
+pub fn hover_wash(status: button::Status) -> Option<iced::Background> {
+    let light = is_light();
+    match status {
+        button::Status::Hovered => Some(wash(if light { 0.055 } else { 0.075 }).into()),
+        button::Status::Pressed => Some(wash(if light { 0.09 } else { 0.11 }).into()),
+        _ => None,
+    }
+}
+
 /// An on/off option beside a field (match case, whole word, regex): as
 /// round as the field, outlined while off, filled in the accent while on.
 pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -1641,9 +1654,8 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
             background: Some(if on {
                 accent().into()
             } else {
-                Color::TRANSPARENT.into()
+                hover_wash(status).unwrap_or(Color::TRANSPARENT.into())
             }),
-            // No wash under the pointer: the label brightens instead.
             text_color: if on {
                 on_accent()
             } else if hovered {
@@ -1661,16 +1673,41 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
-/// The face of a field that is really a button (the chat field opens the
-/// conversation): no fill of its own, the field around it is the well.
-/// It draws nothing under the pointer: a wash inside the field's padding
-/// read as a second box in the field.
-pub fn field_face(_theme: &Theme, _status: button::Status) -> button::Style {
+/// A field that is really a button (the search field opens the finder):
+/// the field's own well and edge ([`field`]), the whole of it a shade deeper
+/// under the pointer, its edge a little firmer. A wash inside the field's
+/// padding read as a second box in the field.
+pub fn field_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let light = is_light();
+    let (shade, edge) = match status {
+        button::Status::Hovered => (if light { 0.055 } else { 0.07 }, wash(0.16)),
+        button::Status::Pressed => (if light { 0.075 } else { 0.09 }, wash(0.18)),
+        _ => (if light { 0.035 } else { 0.045 }, hairline()),
+    };
     button::Style {
-        background: None,
+        background: Some(wash(shade).into()),
         text_color: fg_muted(),
         border: Border {
-            radius: 8.0.into(),
+            color: edge,
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// The face on Ask's pill: a capsule as round as the pill, washed under the
+/// pointer inside it.
+pub fn pill_face(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: hover_wash(status),
+        text_color: match status {
+            button::Status::Disabled => dim(),
+            button::Status::Hovered | button::Status::Pressed => fg_bright(),
+            _ => fg(),
+        },
+        border: Border {
+            radius: 999.0.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -1723,10 +1760,14 @@ pub fn form_choice(_theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// One segment of a segmented control: the chosen one raised as a chip,
-/// the rest quiet, their labels brightening under the pointer.
+/// the rest quiet, washed and their labels brightening under the pointer.
 pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        let background = chosen.then(|| if is_light() { Color::WHITE } else { wash(0.10) }.into());
+        let background = if chosen {
+            Some(if is_light() { Color::WHITE } else { wash(0.10) }.into())
+        } else {
+            hover_wash(status)
+        };
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         button::Style {
             background,
@@ -1755,12 +1796,22 @@ pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style
 }
 
 /// A borderless icon button of the chrome (the top bar, the tool strip):
-/// no fill, under the pointer too; `on` keeps it lit (a menu it opened is
-/// showing, a panel it toggles is shown).
+/// washed under the pointer ([`hover_wash`]); `on` keeps it lit (a menu it
+/// opened is showing, a panel it toggles is shown), a shade more under the
+/// pointer.
 pub fn icon_button(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        // No fill under the pointer; `on` is a state, not a hover.
-        let background = on.then(|| wash(0.08).into());
+        let background = if on {
+            Some(
+                wash(match status {
+                    button::Status::Hovered | button::Status::Pressed => 0.11,
+                    _ => 0.08,
+                })
+                .into(),
+            )
+        } else {
+            hover_wash(status)
+        };
         button::Style {
             background,
             text_color: match status {
@@ -2113,14 +2164,12 @@ pub fn round_button(primary: bool) -> impl Fn(&Theme, button::Status) -> button:
     }
 }
 
-/// Small toolbar button: borderless and unfilled, under the pointer too, so
-/// the toolbar reads as clean text rather than a wall of boxes; its label
-/// brightens under the pointer.
+/// Small toolbar button: borderless and unfilled at rest, so the toolbar
+/// reads as clean text rather than a wall of boxes; under the pointer,
+/// washed ([`hover_wash`]) and its label brightened.
 pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
-        // No fill under the pointer (a box round the Ask pill's face, the
-        // nav arrows); the label brightens instead.
-        background: None,
+        background: hover_wash(status),
         text_color: match status {
             button::Status::Disabled => dim(),
             button::Status::Hovered | button::Status::Pressed => fg_bright(),
