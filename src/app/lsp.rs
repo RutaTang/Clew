@@ -269,7 +269,12 @@ impl App {
         // place of fetching Clew's copy — once it is seen to run, off the UI
         // thread: the question is asked meanwhile, and asked again with the
         // offer (`LspMsg::FoundOnPath`).
-        let name = path_name(&provision);
+        // Not for a server clew's own install keeps from running the
+        // project's code (typescript-language-server, whose TypeScript it
+        // pins): the user's program in its place would run the
+        // repository's `tsserver.js`, one click from a question that says
+        // nothing of it.
+        let name = path_name(&provision).filter(|_| !lsp::langenv::pins(&server.server_name));
         // Looked for in the task (a Finder-opened app's PATH is the login
         // shell's, asked once and maybe not yet answered), on the PATH a
         // test set for this thread when it set one.
@@ -1827,11 +1832,9 @@ pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "gopls" => Some(&["version"]),
         "taplo" => Some(&["lsp", "--help"]),
-        "rust-analyzer"
-        | "clangd"
-        | "zls"
-        | "typescript-language-server"
-        | "haskell-language-server-wrapper" => Some(&["--version"]),
+        "rust-analyzer" | "clangd" | "zls" | "haskell-language-server-wrapper" => {
+            Some(&["--version"])
+        }
         _ => None,
     }
 }

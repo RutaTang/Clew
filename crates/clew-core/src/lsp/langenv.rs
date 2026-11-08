@@ -553,6 +553,14 @@ fn layer(base: Option<Value>, over: Option<Value>) -> Option<Value> {
     }
 }
 
+/// Whether clew's own install of the server `server_name` is kept from
+/// running the project's code by settings of clew's ([`pinned`]) — which a
+/// program of the user's in its place runs without: one is not offered in
+/// place of clew's install for it.
+pub fn pins(server_name: &str) -> bool {
+    server_name == "typescript-language-server"
+}
+
 /// The settings clew sends its own store binary `exe` for `server` in every
 /// project, beneath everything else: the ones that keep the server from
 /// running the project's code by default.
@@ -574,7 +582,7 @@ pub fn pinned(
     server: &crate::lsp::config::EffectiveServer,
     exe: &Path,
 ) -> Result<Option<Value>, String> {
-    if server.command.is_some() || server.chosen.is_some() {
+    if server.command.is_some() || server.chosen.is_some() || !pins(&server.server_name) {
         return Ok(None);
     }
     match server.server_name.as_str() {

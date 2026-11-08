@@ -627,13 +627,16 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
     // the same line, after something. An apostrophe that starts a word (at
     // the span's start, or after a space) opens a single-quoted stretch of
     // the span's own — a shell command's `'/a path'` — and the next one
-    // closes it: neither ends the span.
+    // closes it, unless it is the shell's own escape of an apostrophe
+    // inside one (`'O'\''Brien'`): neither ends the span.
     let close_of = |from: usize| {
         let mut quoting = false;
-        for (at, &b) in bytes.iter().enumerate().skip(from) {
+        let mut at = from;
+        while let Some(&b) = bytes.get(at) {
             match b {
                 b'\n' => return None,
                 b'`' => return (at > from && run(at) == 1).then_some(at),
+                b'\'' if quoting && bytes[at..].starts_with(b"'\\''") => at += 3,
                 b'\'' if quoting => quoting = false,
                 b'\'' if at == from || bytes[at - 1].is_ascii_whitespace() => quoting = true,
                 b'\''
@@ -645,8 +648,20 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
                 }
                 _ => {}
             }
+            at += 1;
         }
         None
+    };
+    // Whether a lone backtick at `at` can open a span: where a name starts —
+    // the text's start, after a space, an opening bracket or quote, or
+    // after text in another script (Chinese and Japanese set no space
+    // before it). One inside a word or a list of characters (`^_`|~`, the
+    // characters a header name may hold) is a mark of its own.
+    let opens = |at: usize| {
+        at == 0 || {
+            let before = bytes[at - 1];
+            !before.is_ascii() || before.is_ascii_whitespace() || b"([{<\"'".contains(&before)
+        }
     };
     let mut out = String::new();
     let mut copied = 0;
@@ -656,6 +671,10 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
         let ticks = run(tick);
         if ticks > 1 {
             at = tick + ticks;
+            continue;
+        }
+        if !opens(tick) {
+            at = tick + 1;
             continue;
         }
         match close_of(tick + 1) {
@@ -1168,6 +1187,23 @@ mod tests {
         assert_eq!(
             quoted("cannot stat `a': no; see `b'"),
             "cannot stat \u{201c}a\u{201d}: no; see \u{201c}b\u{201d}"
+        );
+        // The characters a header name may hold, a backtick among them, and
+        // the form a header takes after them.
+        assert_eq!(
+            quoted(
+                "a header name holds letters, digits and !#$%&'*+-.^_`|~) \u{2014} write each as `Name: value`"
+            ),
+            "a header name holds letters, digits and !#$%&'*+-.^_`|~) \u{2014} write each as \u{201c}Name: value\u{201d}"
+        );
+        // A name with no space before it in a script that sets none.
+        assert_eq!(quoted("已打开`a.rs`"), "已打开\u{201c}a.rs\u{201d}");
+        // The shell's escape of an apostrophe inside a quoted path.
+        assert_eq!(
+            quoted(
+                "forget it \u{2014} `ssh-keygen -f '/home/o'\\''brien/.ssh/known_hosts' -R host` \u{2014} then"
+            ),
+            "forget it \u{2014} \u{201c}ssh-keygen -f '/home/o'\\''brien/.ssh/known_hosts' -R host\u{201d} \u{2014} then"
         );
         // A command's own single quotes, as Clew writes them round a path
         // with a space or a host with its port, are the command's.

@@ -3398,6 +3398,22 @@ fn the_download_question_looks_for_the_program_on_path() {
     let consent = app.proj.pending_lsp_consent.front().expect("asked");
     assert_eq!(consent.language, "python");
     assert_eq!(consent.on_path.as_ref(), Some(&pyright));
+    // Not TypeScript's: clew's own install pins the TypeScript it runs, and
+    // the user's server in its place would run the repository's
+    // `node_modules/typescript` — one click from a question that says
+    // nothing of it.
+    let tsls = bin.join("typescript-language-server");
+    std::fs::write(&tsls, "#!/bin/sh\necho 4.3.3\n").unwrap();
+    std::fs::set_permissions(&tsls, std::fs::Permissions::from_mode(0o755)).unwrap();
+    clew_core::testutil::settle_new_executable(&tsls);
+    let mut app = scanned_app("on-path-look-typescript");
+    let looked = app.ensure_lsp("typescript");
+    for message in run_task(looked) {
+        let _ = app.update(message);
+    }
+    let consent = app.proj.pending_lsp_consent.front().expect("asked");
+    assert_eq!(consent.server_name, "typescript-language-server");
+    assert_eq!(consent.on_path, None);
     crate::app::lsp::SEARCH_PATH.with(|path| *path.borrow_mut() = None);
 }
 
