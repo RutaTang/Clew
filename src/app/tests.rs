@@ -3262,27 +3262,79 @@ fn a_program_on_path_is_offered_only_if_it_runs() {
         let program = dir.join(name);
         std::fs::write(&program, body).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Run once before the probe's timed run: a fork elsewhere in the
+        // suite can hold it busy a moment (ETXTBSY), and macOS checks every
+        // new executable before its first run.
+        clew_core::testutil::settle_new_executable(&program);
         program
     };
     let answers = |flag: &str| format!("#!/bin/sh\n[ \"$1\" = {flag} ] && echo 1.0\n");
     let shim = "#!/bin/sh\necho \"error: not installed for the toolchain\" >&2\nexit 1\n";
     let refuses = "#!/bin/sh\necho 'Connection input stream is not set' >&2\nexit 1\n";
 
+    // The PATH the program was found on, as the server is started with.
+    let path = std::ffi::OsString::from(format!("{}:/usr/bin:/bin", root.join("bin").display()));
+    let path = path.as_os_str();
+
     let works = write("bin", "works", &answers("--version"));
-    assert!(runs_here(&works, &["--version"]));
-    assert!(!runs_here(&works, &["version"]));
-    assert!(!runs_here(&root.join("bin/missing"), &["--version"]));
+    assert!(runs_here(&works, &["--version"], path));
+    assert!(!runs_here(&works, &["version"], path));
+    assert!(!runs_here(&root.join("bin/missing"), &["--version"], path));
+    // Run as the server is: on that PATH — a `#!/usr/bin/env node` server
+    // finds its `node` there, where Clew's own PATH (an app opened from the
+    // Finder) has none — and away from any project.
+    write("bin", "fake-node", "#!/bin/sh\nexit 0\n");
+    let needs_node = write("bin", "needs-node", "#!/bin/sh\nexec fake-node \"$@\"\n");
+    assert!(runs_here(&needs_node, &["--version"], path));
+    assert!(!runs_here(
+        &needs_node,
+        &["--version"],
+        std::ffi::OsStr::new("/usr/bin:/bin")
+    ));
+    let neutral = clew_core::linerpc::neutral_dir();
+    let elsewhere = write(
+        "bin",
+        "elsewhere",
+        &format!(
+            "#!/bin/sh\n[ \"$(pwd -P)\" = \"$(cd '{}' && pwd -P)\" ]\n",
+            neutral.display()
+        ),
+    );
+    assert!(
+        runs_here(&elsewhere, &[], path),
+        "run from {}",
+        neutral.display()
+    );
 
     let rust_analyzer = write("bin", "rust-analyzer", &answers("--version"));
-    assert!(worth_offering(&rust_analyzer));
+    assert!(worth_offering(&rust_analyzer, path));
     let rust_analyzer = write("rustup", "rust-analyzer", shim);
-    assert!(!worth_offering(&rust_analyzer), "a shim that fails");
+    assert!(!worth_offering(&rust_analyzer, path), "a shim that fails");
     let gopls = write("bin", "gopls", &answers("version"));
-    assert!(worth_offering(&gopls), "gopls is asked `gopls version`");
+    assert!(
+        worth_offering(&gopls, path),
+        "gopls is asked `gopls version`"
+    );
     let pyright = write("bin", "pyright-langserver", refuses);
-    assert!(worth_offering(&pyright), "no way to ask: offered as found");
+    assert!(
+        worth_offering(&pyright, path),
+        "no way to ask: offered as found"
+    );
     let pyright = write("shims", "pyright-langserver", refuses);
-    assert!(!worth_offering(&pyright), "a version manager's shim");
+    assert!(!worth_offering(&pyright, path), "a version manager's shim");
+    // npm's taplo answers `--version` and has no language server; the one
+    // built with it answers `taplo lsp --help`.
+    let taplo = write("npm", "taplo", &answers("--version"));
+    assert!(
+        !worth_offering(&taplo, path),
+        "a taplo with no language server"
+    );
+    let taplo = write(
+        "cargo",
+        "taplo",
+        "#!/bin/sh\n[ \"$1 $2\" = 'lsp --help' ]\n",
+    );
+    assert!(worth_offering(&taplo, path));
 }
 
 /// Asked to download a server whose own program is on PATH, Clew runs that
@@ -3308,6 +3360,7 @@ fn the_download_question_looks_for_the_program_on_path() {
     ] {
         std::fs::write(&program, body).unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        clew_core::testutil::settle_new_executable(&program);
         let mut app = scanned_app("on-path-look");
         let looked = app.ensure_lsp("rust");
         assert!(
@@ -3336,6 +3389,7 @@ fn the_download_question_looks_for_the_program_on_path() {
     )
     .unwrap();
     std::fs::set_permissions(&pyright, std::fs::Permissions::from_mode(0o755)).unwrap();
+    clew_core::testutil::settle_new_executable(&pyright);
     let mut app = scanned_app("on-path-look-python");
     let looked = app.ensure_lsp("python");
     for message in run_task(looked) {

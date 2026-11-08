@@ -292,7 +292,8 @@ impl App {
             async move {
                 tokio::task::spawn_blocking(move || {
                     let path = path.unwrap_or_else(clew_core::linerpc::child_path);
-                    on_path_for(&fetched, Some(&path)).filter(|program| worth_offering(program))
+                    on_path_for(&fetched, Some(&path))
+                        .filter(|program| worth_offering(program, &path))
                 })
                 .await
                 .ok()
@@ -1808,25 +1809,27 @@ pub(crate) fn path_name(provision: &LspProvision) -> Option<&'static str> {
 /// one with no way to ask (pyright's server, VS Code's) is offered as found,
 /// unless it is such a shim: those are kept in a `shims` folder (asdf,
 /// mise, pyenv, rbenv, nodenv), and only running it would tell.
-pub(crate) fn worth_offering(program: &std::path::Path) -> bool {
+pub(crate) fn worth_offering(program: &std::path::Path, path: &std::ffi::OsStr) -> bool {
     let name = program.file_stem().and_then(|n| n.to_str()).unwrap_or("");
     match version_args(name) {
-        Some(args) => runs_here(program, args),
+        Some(args) => runs_here(program, args, path),
         None => !program.components().any(|c| c.as_os_str() == "shims"),
     }
 }
 
 /// How the server program `name` is asked its version, for those that
-/// answer it: `gopls version`, `--version` for the rest. Pyright's server
-/// and VS Code's (JSON, HTML, CSS) take no such flag — they refuse to start
+/// answer it: `gopls version`, `--version` for the rest — and taplo whether
+/// it has its language server at all (`taplo lsp --help`): npm's
+/// `@taplo/cli` answers `--version` and has none. Pyright's server and VS
+/// Code's (JSON, HTML, CSS) take no such flag — they refuse to start
 /// without a connection — nor does intelephense or csharp-ls.
 pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
     match name {
         "gopls" => Some(&["version"]),
+        "taplo" => Some(&["lsp", "--help"]),
         "rust-analyzer"
         | "clangd"
         | "zls"
-        | "taplo"
         | "typescript-language-server"
         | "haskell-language-server-wrapper" => Some(&["--version"]),
         _ => None,
@@ -1834,12 +1837,17 @@ pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
 }
 
 /// Whether `program` runs here: asked with `args`, with nothing to read, it
-/// exits in success within a few seconds.
-pub(crate) fn runs_here(program: &std::path::Path, args: &[&str]) -> bool {
+/// exits in success within a few seconds — run as the server would be, on
+/// the PATH it was found on (a `#!/usr/bin/env node` server finds its
+/// `node` there: an app opened from the Finder has none on its own), and
+/// away from any project.
+pub(crate) fn runs_here(program: &std::path::Path, args: &[&str], path: &std::ffi::OsStr) -> bool {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
     let Ok(mut child) = clew_core::spawn::command(program)
         .args(args)
+        .env("PATH", path)
+        .current_dir(clew_core::linerpc::neutral_dir())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

@@ -605,8 +605,9 @@ type Fit<'t> = (&'static str, Vec<(&'static str, &'t str)>, usize);
 /// backticks stood in plain text as marks of their own. So is a name GNU
 /// programs quote as `name' in what they say (an error passed through):
 /// its apostrophe closes it where it ends a word — `foldl'` and
-/// `&'static str` keep theirs. A lone backtick, and a run of them (a
-/// double span, a fence), is left as it is.
+/// `&'static str` keep theirs, and a span's own single-quoted words
+/// (`ssh-keygen -f '/a b/known_hosts'`) theirs. A lone backtick, and a run
+/// of them (a double span, a fence), is left as it is.
 pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
     if !text.contains('`') {
         return std::borrow::Cow::Borrowed(text);
@@ -623,17 +624,22 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
     let run = |at: usize| bytes[at..].iter().take_while(|&&b| b == b'`').count();
     // Where the span a lone backtick opens just before `from` closes: at
     // the next lone backtick, or at an apostrophe that ends a word — on
-    // the same line, after something.
+    // the same line, after something. An apostrophe that starts a word (at
+    // the span's start, or after a space) opens a single-quoted stretch of
+    // the span's own — a shell command's `'/a path'` — and the next one
+    // closes it: neither ends the span.
     let close_of = |from: usize| {
+        let mut quoting = false;
         for (at, &b) in bytes.iter().enumerate().skip(from) {
             match b {
                 b'\n' => return None,
                 b'`' => return (at > from && run(at) == 1).then_some(at),
+                b'\'' if quoting => quoting = false,
+                b'\'' if at == from || bytes[at - 1].is_ascii_whitespace() => quoting = true,
                 b'\''
-                    if at > from
-                        && !bytes
-                            .get(at + 1)
-                            .is_some_and(|&n| n.is_ascii_alphanumeric() || b"_'`".contains(&n)) =>
+                    if !bytes
+                        .get(at + 1)
+                        .is_some_and(|&n| n.is_ascii_alphanumeric() || b"_'`".contains(&n)) =>
                 {
                     return Some(at);
                 }
@@ -1162,6 +1168,18 @@ mod tests {
         assert_eq!(
             quoted("cannot stat `a': no; see `b'"),
             "cannot stat \u{201c}a\u{201d}: no; see \u{201c}b\u{201d}"
+        );
+        // A command's own single quotes, as Clew writes them round a path
+        // with a space or a host with its port, are the command's.
+        assert_eq!(
+            quoted(
+                "forget it \u{2014} `ssh-keygen -f '/Users/me/Library/Application Support/clew/known_hosts' -R '[example.com]:2222'` \u{2014} then"
+            ),
+            "forget it \u{2014} \u{201c}ssh-keygen -f '/Users/me/Library/Application Support/clew/known_hosts' -R '[example.com]:2222'\u{201d} \u{2014} then"
+        );
+        assert_eq!(
+            quoted("run `git commit -m 'fix it'` first"),
+            "run \u{201c}git commit -m 'fix it'\u{201d} first"
         );
         assert_eq!(
             quoted("Opened `foldl'` and `&'static str`"),
