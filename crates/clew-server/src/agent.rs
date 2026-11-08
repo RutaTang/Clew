@@ -400,8 +400,8 @@ impl Turn<'_> {
                     if out.calls.is_empty() {
                         // Prose instead of `answer`: the text IS the answer.
                         if !out.text.is_empty() {
-                            self.deliver_whole(out.text, out.truncated);
-                            return Ok(());
+                            self.deliver(&out.text);
+                            return self.finish_answer(out, STEP_TOKENS_CEIL, false);
                         }
                         self.retry_empty(&mut empty_retried, &out)?;
                         continue;
@@ -447,13 +447,11 @@ impl Turn<'_> {
                     };
                     if !out.text.is_empty() {
                         if unpinned {
-                            self.deliver_whole(out.text, out.truncated);
-                        } else if out.truncated {
-                            // The tokens already went out as they arrived;
-                            // only the note is left to say.
-                            self.delta(llm::TRUNCATED_NOTE.to_string());
+                            self.deliver(&out.text);
+                            return self.finish_answer(out, STEP_TOKENS_CEIL, false);
                         }
-                        return Ok(());
+                        // The tokens already went out as they arrived.
+                        return self.finish_answer(out, ANSWER_TOKENS, true);
                     }
                     if out.calls.is_empty() {
                         self.retry_empty(&mut empty_retried, &out)?;
@@ -539,12 +537,86 @@ impl Turn<'_> {
         });
     }
 
-    /// Deliver an answer that arrived whole (a prose step, not the stream):
-    /// fed to the panel in chunks, with the truncation note when it was cut.
-    fn deliver_whole(&self, mut text: String, truncated: bool) {
-        if truncated {
-            text.push_str(llm::TRUNCATED_NOTE);
+    /// An answer, `out`, that has been delivered: carried on where it
+    /// stopped if the output limit cut it off ([`llm::carry_on`]), within
+    /// `tokens` a request, as it was asked for — `streamed` (the closing
+    /// answer, pinned to prose) or in ordinary steps — and marked cut only if
+    /// it is cut still.
+    fn finish_answer(&self, out: llm::StepOutput, tokens: u32, streamed: bool) -> Result<(), Halt> {
+        let done = llm::Completion {
+            text: out.text,
+            truncated: out.truncated,
+            stop_reason: out.stop_reason,
+        };
+        let done = llm::carry_on(
+            done,
+            tokens,
+            &mut |rest| self.deliver(rest),
+            &|| self.stopped(),
+            &mut |asking, tokens, on_delta| self.carry_request(asking, tokens, streamed, on_delta),
+        )?;
+        if done.truncated {
+            self.delta(llm::TRUNCATED_NOTE.to_string());
         }
+        Ok(())
+    }
+
+    /// One request carrying an answer on: the conversation, then the answer
+    /// as cut and the ask to go on ([`llm::CARRY_ON_PROMPT`]).
+    fn carry_request(
+        &self,
+        asking: llm::Asking<'_>,
+        tokens: u32,
+        streamed: bool,
+        on_delta: &mut dyn FnMut(&str),
+    ) -> Result<llm::Completion, llm::LlmError> {
+        let mut msgs = self.msgs.clone();
+        if let llm::Asking::CarryOn(so_far) = asking {
+            msgs.push(llm::AgentMsg::Assistant {
+                text: so_far.to_string(),
+                calls: Vec::new(),
+            });
+            msgs.push(llm::AgentMsg::User(llm::CARRY_ON_PROMPT.into()));
+        }
+        let stopped = || self.stopped();
+        let out = if streamed {
+            llm::complete_tools_stream(
+                self.chat,
+                &self.system,
+                &msgs,
+                &self.tools,
+                tokens,
+                |delta| on_delta(delta),
+                &stopped,
+            )?
+        } else {
+            llm::complete_tools_step_with(
+                self.chat,
+                &self.system,
+                &msgs,
+                &self.tools,
+                tokens,
+                on_delta,
+                &stopped,
+            )?
+        };
+        if !out.calls.is_empty() {
+            // Tools asked for where the rest of an answer was: the answer
+            // stands as it was cut.
+            return Err(llm::LlmError::Protocol(
+                "tool calls where the rest of an answer was asked for".into(),
+            ));
+        }
+        Ok(llm::Completion {
+            text: out.text,
+            truncated: out.truncated,
+            stop_reason: out.stop_reason,
+        })
+    }
+
+    /// Deliver answer text that arrived whole (a prose step, not the
+    /// stream): fed to the panel in chunks.
+    fn deliver(&self, text: &str) {
         let mut buf = String::new();
         for ch in text.chars() {
             buf.push(ch);
@@ -2925,14 +2997,16 @@ mod tests {
     }
 
     /// A prose answer cut at the output budget is re-asked with a doubled
-    /// budget up to the ceiling; truncated even there, it is delivered —
-    /// marked as truncated, never passed off as complete.
+    /// budget up to the ceiling; cut even there, it is carried on where it
+    /// stopped, and cut still after every carry-on, it is delivered — marked
+    /// as truncated, never passed off as complete.
     #[test]
     fn a_truncated_prose_step_is_delivered_with_a_note() {
         let dir = project("truncated-ceiling");
         let cut = || sse(&[text_event("It returns", Some("length"))]);
-        // STEP_TOKENS doubles up to STEP_TOKENS_CEIL: 4000 → 8000 → 16000.
-        let provider = Provider::new(vec![cut(), cut(), cut()]);
+        // STEP_TOKENS doubles up to STEP_TOKENS_CEIL: 4000 → 8000 → 16000;
+        // then each carry-on.
+        let provider = Provider::new((0..3 + llm::CARRY_ONS).map(|_| cut()).collect());
         let outcome = turn(&dir, &provider, Vec::new());
         assert_eq!(outcome.done, Some(StreamOutcome::Done), "{outcome:?}");
         assert!(outcome.answer.starts_with("It returns"));
@@ -2942,10 +3016,57 @@ mod tests {
             outcome.answer
         );
         let requests = provider.requests();
-        assert_eq!(requests.len(), 3);
+        assert_eq!(requests.len(), 3 + llm::CARRY_ONS);
         assert!(
             requests[2].contains("16000"),
             "the last try used the ceiling"
+        );
+    }
+
+    /// An answer the output limit cut off — in a prose step, or in the
+    /// closing answer's stream — is carried on where it stopped: the model
+    /// is shown what it wrote and asked for the rest, and the reader gets
+    /// one answer, with no note.
+    #[test]
+    fn a_cut_answer_is_carried_on_to_its_end() {
+        let dir = project("carried-on");
+        let cut = || sse(&[text_event("It returns `Resu", Some("length"))]);
+        let provider = Provider::new(vec![cut(), cut(), cut(), prose("lt<u8>` on success.")]);
+        let outcome = turn(&dir, &provider, Vec::new());
+        assert_eq!(outcome.done, Some(StreamOutcome::Done), "{outcome:?}");
+        assert_eq!(outcome.answer, "It returns `Result<u8>` on success.");
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 4);
+        let carried: serde_json::Value = serde_json::from_str(&requests[3]).unwrap();
+        let messages = carried["messages"].as_array().unwrap();
+        let [.., said, asked] = messages.as_slice() else {
+            panic!("{messages:?}")
+        };
+        assert_eq!(said["role"], "assistant");
+        assert_eq!(said["content"], "It returns `Resu");
+        assert_eq!(asked["content"], llm::CARRY_ON_PROMPT);
+
+        // The closing answer, streamed: carried on in the stream, pinned to
+        // prose as it was.
+        let provider = Provider::new(vec![
+            calls(&[("answer", serde_json::json!({}))]),
+            sse(&[text_event("It returns `Resu", Some("length"))]),
+            prose("lt<u8>` on success."),
+        ]);
+        let outcome = turn(&dir, &provider, Vec::new());
+        assert_eq!(outcome.done, Some(StreamOutcome::Done), "{outcome:?}");
+        assert_eq!(outcome.answer, "It returns `Result<u8>` on success.");
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 3);
+        assert!(
+            requests[2].contains(llm::CARRY_ON_PROMPT),
+            "{}",
+            requests[2]
+        );
+        assert!(
+            requests[2].contains(r#""tool_choice":"none""#),
+            "{}",
+            requests[2]
         );
     }
 

@@ -443,7 +443,8 @@ pub struct Completion {
     pub stop_reason: Option<String>,
 }
 
-/// Appended to an answer the provider cut off at its output limit, so a reader
+/// Appended to an answer the provider cut off at its output limit — still cut
+/// once [`carry_on`] has asked for the rest [`CARRY_ONS`] times — so a reader
 /// can tell a truncated answer from a complete one. Plain text on purpose: it
 /// is shown both as markdown (Ask) and verbatim (explanations).
 pub const TRUNCATED_NOTE: &str = "\n\n(truncated: the model reached its output limit)";
@@ -459,6 +460,9 @@ impl Completion {
         }
     }
 }
+
+mod carry;
+pub use carry::{Asking, CARRY_ON_PROMPT, CARRY_ONS, CarryRequest, Seam, carry_on};
 
 /// Whether a provider's stop reason means the output budget cut the answer.
 /// The values do not collide across dialects, so one predicate serves both.
@@ -601,6 +605,18 @@ pub fn complete_tools(
     max_tokens: u32,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<StepOutput, LlmError> {
+    complete_tools_raw(cfg, system, messages, tools, max_tokens, cancelled).map(tidied)
+}
+
+/// [`complete_tools`], its text as the model wrote it.
+fn complete_tools_raw(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+    cancelled: &dyn Fn() -> bool,
+) -> Result<StepOutput, LlmError> {
     let body = tools_body(cfg, system, messages, tools, max_tokens, Wire::Blocking);
     let prepared = prepare(cfg, body, BLOCKING_LIMITS)?;
     let text = run_blocking(prepared, cancelled)?;
@@ -628,12 +644,38 @@ pub fn complete_tools_step(
     max_tokens: u32,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<StepOutput, LlmError> {
+    complete_tools_step_with(
+        cfg,
+        system,
+        messages,
+        tools,
+        max_tokens,
+        &mut |_| {},
+        cancelled,
+    )
+}
+
+/// [`complete_tools_step`], its prose passed to `on_text` as the model
+/// writes it — whole, as it was written, if the endpoint would not stream.
+pub fn complete_tools_step_with(
+    cfg: &Config,
+    system: &str,
+    messages: &[AgentMsg],
+    tools: &[ToolDef],
+    max_tokens: u32,
+    on_text: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<StepOutput, LlmError> {
     let body = tools_body(cfg, system, messages, tools, max_tokens, Wire::Stream);
     let prepared = prepare(cfg, body, STREAM_LIMITS)?;
-    match stream_request(prepared, cfg.provider.dialect(), &mut |_| {}, cancelled) {
+    match stream_request(prepared, cfg.provider.dialect(), on_text, cancelled) {
         // A stopped turn must not spend a second request on the fallback.
         Err(e) if e.stream_refused() && !cancelled() => {
-            complete_tools(cfg, system, messages, tools, max_tokens, cancelled)
+            let out = complete_tools_raw(cfg, system, messages, tools, max_tokens, cancelled)?;
+            if !out.text.is_empty() {
+                on_text(&out.text);
+            }
+            Ok(tidied(out))
         }
         other => other,
     }
@@ -689,6 +731,9 @@ pub fn complete_chat(
 /// cancellation seam: the POST
 /// runs on a worker thread and `cancelled` is polled while it is out (see
 /// [`complete_tools`] for what that can and cannot stop).
+///
+/// An answer cut off at `max_tokens` is carried on where it stopped (see
+/// [`carry_on`]); `truncated` says it is cut still.
 pub fn complete_chat_full(
     cfg: &Config,
     system: &str,
@@ -696,10 +741,58 @@ pub fn complete_chat_full(
     max_tokens: u32,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Completion, LlmError> {
+    let first = chat_once(cfg, system, messages, max_tokens, &mut |_| {}, cancelled)?;
+    carry_on(
+        first,
+        max_tokens,
+        &mut |_| {},
+        cancelled,
+        &mut |asking, tokens, on_text| {
+            chat_once(
+                cfg,
+                system,
+                &asked(messages, asking),
+                tokens,
+                on_text,
+                cancelled,
+            )
+        },
+    )
+}
+
+/// `messages`, as `asking` puts them: when an answer is carried on, followed
+/// by it, cut as it is, and the ask to go on.
+fn asked<'a>(messages: &'a [ChatMsg], asking: Asking<'a>) -> std::borrow::Cow<'a, [ChatMsg]> {
+    match asking {
+        Asking::Afresh => std::borrow::Cow::Borrowed(messages),
+        Asking::CarryOn(so_far) => {
+            let mut carried = messages.to_vec();
+            carried.push(ChatMsg::assistant(so_far));
+            carried.push(ChatMsg::user(CARRY_ON_PROMPT));
+            std::borrow::Cow::Owned(carried)
+        }
+    }
+}
+
+/// One request of [`complete_chat_full`]. Its text, whole, is passed to
+/// `on_text` as the model wrote it, before it is [`tidy`]: the blank space
+/// a carried-on answer opens with is part of it.
+fn chat_once(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+    on_text: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Completion, LlmError> {
     let body = chat_body(cfg, system, messages, max_tokens, false);
     let prepared = prepare(cfg, body, BLOCKING_LIMITS)?;
     let text = run_blocking(prepared, cancelled)?;
     let out = parse_response(cfg.provider.dialect(), &text)?;
+    if !out.text.is_empty() {
+        on_text(&out.text);
+    }
+    let out = tidied(out);
     if out.text.is_empty() && !out.truncated {
         return Err(LlmError::Protocol(match out.stop_reason {
             Some(reason) => format!("no text in response (stop reason: {reason})"),
@@ -746,7 +839,39 @@ pub fn complete_chat_stream(
 
 /// [`complete_chat_stream`] with a typed result; it reports truncation as a
 /// flag and leaves any note to the caller.
+///
+/// An answer cut off at `max_tokens` is carried on where it stopped (see
+/// [`carry_on`]), the rest streamed on through `on_delta` as one answer;
+/// `truncated` says it is cut still.
 pub fn complete_chat_stream_full(
+    cfg: &Config,
+    system: &str,
+    messages: &[ChatMsg],
+    max_tokens: u32,
+    on_delta: &mut dyn FnMut(&str),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Completion, LlmError> {
+    let first = chat_stream_once(cfg, system, messages, max_tokens, on_delta, cancelled)?;
+    carry_on(
+        first,
+        max_tokens,
+        on_delta,
+        cancelled,
+        &mut |asking, tokens, on_delta| {
+            chat_stream_once(
+                cfg,
+                system,
+                &asked(messages, asking),
+                tokens,
+                on_delta,
+                cancelled,
+            )
+        },
+    )
+}
+
+/// One request of [`complete_chat_stream_full`].
+fn chat_stream_once(
     cfg: &Config,
     system: &str,
     messages: &[ChatMsg],
@@ -1192,8 +1317,22 @@ fn parse_response(dialect: Dialect, text: &str) -> Result<StepOutput, LlmError> 
         }
     }
     out.truncated = out.stop_reason.as_deref().is_some_and(is_truncation);
-    out.text = out.text.trim().to_string();
     Ok(out)
+}
+
+/// An answer's `text`, without the blank space a model may open with, or
+/// close with — unless it was `truncated`: the end of an answer cut off is
+/// where it stopped, a space or a line break included, and what carries it
+/// on starts right there.
+fn tidy(text: &str, truncated: bool) -> String {
+    let text = text.trim_start();
+    if truncated { text } else { text.trim_end() }.to_string()
+}
+
+/// `out` as [`parse_response`] gave it, [`tidy`].
+fn tidied(mut out: StepOutput) -> StepOutput {
+    out.text = tidy(&out.text, out.truncated);
+    out
 }
 
 // -- streamed responses ------------------------------------------------------
@@ -1402,8 +1541,9 @@ impl StreamState {
     }
 
     fn finish(self) -> StepOutput {
+        let truncated = self.stop_reason.as_deref().is_some_and(is_truncation);
         StepOutput {
-            text: self.text.trim().to_string(),
+            text: tidy(&self.text, truncated),
             calls: self
                 .calls
                 .into_values()
@@ -4072,46 +4212,67 @@ mod tests {
 
     // -- truncation (C8) -----------------------------------------------------
 
-    /// A cut-off answer must read as cut off. The blocking Anthropic path used
-    /// to return the FIRST text block and ignore `stop_reason`, so a truncated
-    /// answer (or the second half of a split one) passed as complete.
+    /// `reply` as a whole Anthropic answer, cut off at the output limit or not.
+    fn anthropic_reply(text: &str, cut: bool) -> Script {
+        let reason = if cut { "max_tokens" } else { "end_turn" };
+        let body = json!({ "content": [{ "type": "text", "text": text }], "stop_reason": reason });
+        Script::Respond(http("200 OK", "application/json", &body.to_string()))
+    }
+
+    /// `text` as an OpenAI-compatible stream, cut off at the output limit or not.
+    fn openai_stream(text: &str, cut: bool) -> Script {
+        let reason = if cut { "length" } else { "stop" };
+        let delta = json!({ "choices": [{ "delta": { "content": text } }] });
+        let end = json!({ "choices": [{ "delta": {}, "finish_reason": reason }] });
+        Script::Respond(http(
+            "200 OK",
+            "text/event-stream",
+            &format!("data: {delta}\n\ndata: {end}\n\ndata: [DONE]\n\n"),
+        ))
+    }
+
+    /// A cut-off answer must read as cut off — once carrying it on has not
+    /// made it whole. The blocking Anthropic path used to return the FIRST
+    /// text block and ignore `stop_reason`, so a truncated answer (or the
+    /// second half of a split one) passed as complete.
     #[test]
     fn a_truncated_answer_says_so_in_every_path() {
+        // Every text block, in order, and every request cut.
         let body = r#"{"content":[{"type":"text","text":"first half, "},{"type":"text","text":"second half"}],"stop_reason":"max_tokens"}"#;
-        let (addr, handle) = mock(vec![Script::Respond(http(
-            "200 OK",
-            "application/json",
-            body,
-        ))]);
+        let mut scripts = vec![Script::Respond(http("200 OK", "application/json", body))];
+        scripts.extend((0..CARRY_ONS).map(|n| anthropic_reply(&format!(" more {n}"), true)));
+        let (addr, handle) = mock(scripts);
         let done = complete_chat_full(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8, &|| {
             false
         })
         .expect("a completion");
-        handle.join().unwrap();
+        assert_eq!(handle.join().unwrap().served, 1 + CARRY_ONS);
         assert_eq!(
-            done.text, "first half, second half",
-            "every text block, in order"
+            done.text, "first half, second half more 0 more 1 more 2 more 3",
+            "every text block, in order, and every one carried on"
         );
         assert!(done.truncated);
         assert_eq!(done.stop_reason.as_deref(), Some("max_tokens"));
 
         // The string API carries the note in the text itself.
-        let (addr, handle) = mock(vec![Script::Respond(http(
-            "200 OK",
-            "application/json",
-            body,
-        ))]);
+        let (addr, handle) = mock(
+            (0..=CARRY_ONS)
+                .map(|_| anthropic_reply("cut", true))
+                .collect(),
+        );
         let text = complete_chat(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8).unwrap();
         handle.join().unwrap();
         assert!(text.ends_with(TRUNCATED_NOTE), "{text}");
 
         // OpenAI dialect, blocking.
-        let body = r#"{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}"#;
-        let (addr, handle) = mock(vec![Script::Respond(http(
-            "200 OK",
-            "application/json",
-            body,
-        ))]);
+        let partial = || {
+            Script::Respond(http(
+                "200 OK",
+                "application/json",
+                r#"{"choices":[{"message":{"content":"partial"},"finish_reason":"length"}]}"#,
+            ))
+        };
+        let (addr, handle) = mock((0..=CARRY_ONS).map(|_| partial()).collect());
         let done =
             complete_chat_full(&custom(addr), "s", &[ChatMsg::user("q")], 8, &|| false).unwrap();
         handle.join().unwrap();
@@ -4119,14 +4280,11 @@ mod tests {
 
         // Streamed: the note is also delivered as a delta, so a reader that
         // only sees deltas (the Ask panel) sees it.
-        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n\
-                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"length\"}]}\n\n\
-                   data: [DONE]\n\n";
-        let (addr, handle) = mock(vec![Script::Respond(http(
-            "200 OK",
-            "text/event-stream",
-            sse,
-        ))]);
+        let (addr, handle) = mock(
+            (0..=CARRY_ONS)
+                .map(|n| openai_stream(&format!("part {n}. "), true))
+                .collect(),
+        );
         let mut seen = String::new();
         let text = complete_chat_stream(
             &custom(addr),
@@ -4138,10 +4296,13 @@ mod tests {
         )
         .unwrap();
         handle.join().unwrap();
-        assert_eq!(seen, format!("partial{TRUNCATED_NOTE}"));
+        assert_eq!(
+            seen,
+            format!("part 0. part 1. part 2. part 3. part 4. {TRUNCATED_NOTE}")
+        );
         assert_eq!(text, seen);
 
-        // A complete answer carries no note.
+        // A complete answer carries no note, and is asked for once.
         let body = r#"{"choices":[{"message":{"content":"whole"},"finish_reason":"stop"}]}"#;
         let (addr, handle) = mock(vec![Script::Respond(http(
             "200 OK",
@@ -4152,7 +4313,57 @@ mod tests {
             complete_chat(&custom(addr), "s", &[ChatMsg::user("q")], 8).unwrap(),
             "whole"
         );
-        handle.join().unwrap();
+        assert_eq!(handle.join().unwrap().served, 1);
+    }
+
+    /// An answer the output limit cut off is carried on where it stopped:
+    /// the model is shown what it wrote, as its own turn, and asked for the
+    /// rest — and the reader gets one answer, not a cut one with a note.
+    #[test]
+    fn a_cut_answer_is_carried_on_to_its_end() {
+        // Anthropic, whole replies.
+        let (addr, handle) = mock(vec![
+            anthropic_reply("- lib.rs — `CacheIss", true),
+            anthropic_reply("ue` holds the cache.", false),
+        ]);
+        let done = complete_chat_full(&anthropic_at(addr), "s", &[ChatMsg::user("q")], 8, &|| {
+            false
+        })
+        .unwrap();
+        assert_eq!(done.text, "- lib.rs — `CacheIssue` holds the cache.");
+        assert!(!done.truncated);
+        let log = handle.join().unwrap();
+        assert_eq!(log.served, 2);
+        let carried: Value = serde_json::from_str(&log.bodies[1]).unwrap();
+        let messages = carried["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert_eq!(messages[0]["content"], "q");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "- lib.rs — `CacheIss");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], CARRY_ON_PROMPT);
+
+        // Streamed, OpenAI-compatible: the rest streams on as it comes, and
+        // a model that starts by writing the cut word again has the repeat
+        // dropped.
+        let (addr, handle) = mock(vec![
+            openai_stream("It returns `Resu", true),
+            openai_stream("`Result<T>` on success.", false),
+        ]);
+        let mut seen = String::new();
+        let done = complete_chat_stream_full(
+            &custom(addr),
+            "s",
+            &[ChatMsg::user("q")],
+            8,
+            &mut |d| seen.push_str(d),
+            &|| false,
+        )
+        .unwrap();
+        assert_eq!(handle.join().unwrap().served, 2);
+        assert_eq!(seen, "It returns `Result<T>` on success.");
+        assert_eq!(done.text, seen);
+        assert!(!done.truncated);
     }
 
     // -- transport configuration (C12) ---------------------------------------

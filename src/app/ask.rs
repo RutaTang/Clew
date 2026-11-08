@@ -8,6 +8,12 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The output budget of one request for an Ask answer — the agent's own.
+/// An answer longer than that is carried on where it stopped
+/// (`llm::carry_on`), not cut: the budget sets how long each request runs,
+/// not how long an answer may be.
+pub(crate) const ANSWER_TOKENS: u32 = 4_000;
+
 /// One retrieved node's part of an Ask answer's context, as far as memory can
 /// say (see `App::ask_context_items`); a function's body is added by
 /// [`assemble_ask_context`].
@@ -727,7 +733,7 @@ impl App {
                     stream: stream_id,
                     system,
                     messages: msgs,
-                    max_tokens: 1024,
+                    max_tokens: ANSWER_TOKENS,
                 },
             });
             // Not handed over: no `ChatStreamDone` will ever come for it.
@@ -774,7 +780,7 @@ impl App {
                             &cfg,
                             &system,
                             &messages,
-                            1024,
+                            ANSWER_TOKENS,
                             &mut forward,
                             &move || listening.is_closed(),
                         ) {
