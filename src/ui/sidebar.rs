@@ -1704,31 +1704,41 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .size(ts::BASE)
         .padding(7);
 
-    let press =
-        (!app.proj.building_embeddings).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    let building = app.proj.building_embeddings;
+    let press = (!building).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    // While it builds, the button's own icon turns, in its place: words
+    // that came in for the build ("Building…", "Building the index…") moved
+    // what stood beside them, and the count went for as long as it ran.
+    let icon = |size: f32| -> Element<'_, Message> {
+        if building {
+            super::meter::spinning(crate::glyph::Glyph::Refresh, theme::accent(), size)
+        } else {
+            crate::glyph::icon(crate::glyph::Glyph::Refresh, theme::fg_muted(), size)
+        }
+    };
     // The first build is asked for in words; building again, as the other
     // rebuilds are, by its icon.
     let build: Element<'_, Message> = if n == 0 {
         button(
-            text(if app.proj.building_embeddings {
-                tr!("Building…")
-            } else {
-                tr!("Build index")
-            })
-            .size(ts::SMALL),
+            row![icon(13.0), text(tr!("Build index")).size(ts::SMALL)]
+                .spacing(6)
+                .align_y(iced::Center),
         )
         .style(theme::toolbar_button)
         .padding([2, 8])
         .on_press_maybe(press)
         .into()
     } else {
-        super::toolbar::icon_action(crate::glyph::Glyph::Refresh, tr!("Rebuild"), press)
+        super::toolbar::busy_action(
+            crate::glyph::Glyph::Refresh,
+            tr!("Rebuild"),
+            Some(Message::Semantic(SemanticMsg::BuildIndex)),
+            building,
+        )
     };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
-    let info = text(if app.proj.building_embeddings {
-        tr!("Building the index…").to_string()
-    } else if n > 0 {
+    let info = text(if n > 0 {
         trn!("1 indexed", "{n} indexed", n)
     } else if app.proj.explain.cache.is_empty() {
         tr!("Run Explain All to enable semantic search.").to_string()

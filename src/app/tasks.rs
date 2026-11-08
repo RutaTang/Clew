@@ -3979,13 +3979,10 @@ mod pass_tests {
             assert_eq!(sent(explicit(), failure), 2, "{failure:?}");
             assert_eq!(sent(automatic(), failure), 2, "{failure:?}");
         }
+        // (A refusal of the prompt's length is not sent again either — nor
+        // asked again this session at all: `was_rejected`, tested apart.)
         let once = [
             CallError::Llm(status(422, None, "Unprocessable Entity")),
-            CallError::Llm(status(
-                400,
-                Some("context_length_exceeded"),
-                "maximum context length is 8192 tokens",
-            )),
             from_server(&status(422, None, "Unprocessable Entity")),
         ];
         for failure in &once {

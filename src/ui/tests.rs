@@ -1510,7 +1510,7 @@ fn the_overview_map_has_no_caption() {
 /// computed by.
 #[test]
 fn the_chrome_geometry_matches_what_is_drawn() {
-    use super::{StripTool, strip_tool_center};
+    use super::StripTool;
     /// Whether a message is the one a tool sends.
     type Sends = fn(&Message) -> bool;
     let app = reader_app();
@@ -1562,11 +1562,35 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         sent_by(sim).into_iter().collect::<Vec<_>>()
     };
     for (tool, is_expected) in expected {
-        let sent = click_at(strip_tool_center(&app, tool));
+        // The ⋯ is not on a strip tall enough for the menu's own tools.
+        let Some(at) = super::strip_slot_center(&app, super::StripSlot::Tool(tool)) else {
+            assert_eq!(tool, StripTool::More, "{tool:?} is not on the strip");
+            continue;
+        };
+        let sent = click_at(at);
         assert!(
             sent.iter().any(is_expected),
             "{tool:?}'s computed centre clicked {sent:?}"
         );
+    }
+    // The menu's tools laid on the strip: each where it is computed to be.
+    if super::tools_on_strip(&app) {
+        for row in super::TOOLS_MENU_ROWS {
+            let at = super::strip_slot_center(&app, super::StripSlot::Row(row)).unwrap();
+            let sent = click_at(at);
+            let expected = match row {
+                super::ToolsRow::Shortcuts => {
+                    matches!(sent.as_slice(), [Message::Window(WindowMsg::OpenShortcuts)])
+                }
+                super::ToolsRow::OpenFolder => matches!(
+                    sent.as_slice(),
+                    [Message::Project(crate::ProjectMsg::OpenFolderPressed)]
+                ),
+                // The rest: something, and only one thing, is pressed.
+                _ => sent.len() <= 1,
+            };
+            assert!(expected, "{row:?}'s computed centre clicked {sent:?}");
+        }
     }
     let field = super::search_field_rect(&app);
     let sent = click_at(field.center());
@@ -3011,81 +3035,52 @@ fn a_spoken_question_is_marked_said() {
     assert!(!shows(&mut sim, "Spoken"));
 }
 
-/// A press held on Stop as the answer ends is not one on Ask, let go of
-/// there: Ask keeps a place of its own, Stop there or not.
+/// The composer has one button, at its end: while an answer comes in, with
+/// nothing typed it stops the answer, and with something typed it queues
+/// that; at rest it asks. A Stop of its own beside the field said the same
+/// thing in another place, and moved the field as it came and went.
 #[test]
-fn a_press_on_stop_is_not_one_on_ask() {
-    use iced_test::selector::{Candidate, Selector};
-    let mut app = reader_app();
-    app.proj.ask_input = "and then?".into();
-    app.proj.asking = true;
-    let mut renderer = renderer();
-    let size = Size::new(800.0, app.bottom_height);
-    let find = |ui: &mut UserInterface<'_, Message, iced::Theme, iced::Renderer>,
-                renderer: &iced::Renderer,
-                label: &'static str| {
-        let mut find = (move |c: Candidate<'_>| match c {
-            Candidate::Text {
-                content,
-                visible_bounds,
-                ..
-            } if content == label => visible_bounds,
-            _ => None,
-        })
-        .find();
-        ui.operate(renderer, &mut black_box(&mut find));
-        match Operation::finish(&find) {
-            Outcome::Some(Some(at)) => at.center(),
-            other => panic!("{label} is not on screen: {other:?}"),
-        }
+fn the_composers_one_button_stops_queues_or_asks() {
+    let size = Size::new(800.0, 560.0);
+    let press = |app: &App| -> Vec<Message> {
+        crate::app::tests::isolated_data_dir();
+        crate::fonts::load();
+        let mut sim = iced_test::Simulator::with_size(
+            Default::default(),
+            size,
+            super::panels::ask_panel(app, size.height),
+        );
+        let row = text_at(&mut sim, |t| t == "Keep listening", 0).expect("the composer");
+        sim.point_at(Point::new(
+            size.width - super::COMPOSER_PAD.right - super::ROUND_BUTTON / 2.0,
+            row.center_y(),
+        ));
+        let _ = sim.simulate(iced_test::simulator::click());
+        sent_by(sim)
     };
-    let mut ui = UserInterface::build(
-        super::panels::ask_panel(&app, size.height),
-        size,
-        Cache::default(),
-        &mut renderer,
-    );
-    let stop = find(&mut ui, &renderer, "Stop");
-    let mut sent = Vec::new();
-    let _ = ui.update(
-        &[Event::Mouse(mouse::Event::ButtonPressed(
-            mouse::Button::Left,
-        ))],
-        mouse::Cursor::Available(stop),
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut sent,
-    );
-    let cache = ui.into_cache();
-    // The answer ends while it is held; let go of over Ask.
-    app.proj.asking = false;
-    let mut ui = UserInterface::build(
-        super::panels::ask_panel(&app, size.height),
-        size,
-        cache,
-        &mut renderer,
-    );
-    // Ask is the round send button at the composer's end, level with Stop.
-    let ask = iced::Point::new(
-        size.width - super::COMPOSER_PAD.right - super::ROUND_BUTTON / 2.0,
-        stop.y,
-    );
-    let mut sent = Vec::new();
-    let _ = ui.update(
-        &[Event::Mouse(mouse::Event::ButtonReleased(
-            mouse::Button::Left,
-        ))],
-        mouse::Cursor::Available(ask),
-        &mut renderer,
-        &mut clipboard::Null,
-        &mut sent,
-    );
+    let mut app = reader_app();
+    app.proj.asking = true;
     assert!(
-        !sent
-            .iter()
-            .any(|m| matches!(m, Message::Ask(AskMsg::Submit))),
-        "{sent:?}"
+        !shows(
+            &mut sim_elem(super::panels::ask_panel(&app, size.height)),
+            "Stop"
+        ),
+        "no Stop of its own"
     );
+    assert!(matches!(
+        press(&app).as_slice(),
+        [Message::Ask(AskMsg::Stop)]
+    ));
+    app.proj.ask_input = "and then?".into();
+    assert!(matches!(
+        press(&app).as_slice(),
+        [Message::Ask(AskMsg::Submit)]
+    ));
+    app.proj.asking = false;
+    assert!(matches!(
+        press(&app).as_slice(),
+        [Message::Ask(AskMsg::Submit)]
+    ));
 }
 
 /// A field of the Connect form keeps the keyboard while what comes before
@@ -9000,4 +8995,24 @@ fn repeated_actions_are_icons_that_do_what_they_did() {
         |m| matches!(m, Message::Editor(EditorMsg::ToggleDiff)),
     );
     assert!(!sent.is_empty(), "the diff is closed from its icon");
+}
+
+/// Rebuilding the index says so by its button's icon, turning in its place:
+/// the count it has stays said beside it, and no words come for the build
+/// ("Building…", "Building the index…") to move what is there.
+#[test]
+fn rebuilding_the_index_turns_its_icon_and_says_nothing_new() {
+    let mut app = reader_app();
+    app.proj.embed_index.entries.push(crate::embed::Entry {
+        node: crate::explain::Node::File(std::path::PathBuf::from("/p/a.rs")),
+        hash: 0,
+        vec: vec![1.0, 0.0],
+    });
+    for building in [false, true] {
+        app.proj.building_embeddings = building;
+        let mut sim = sim_elem(super::sidebar::semantic_tab(&app));
+        assert!(shows(&mut sim, "1 indexed"), "building: {building}");
+        assert!(!shows(&mut sim, "Building…"));
+        assert!(!shows(&mut sim, "Building the index…"));
+    }
 }

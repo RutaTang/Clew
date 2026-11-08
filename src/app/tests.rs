@@ -21142,6 +21142,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             result: scan(),
             report: Default::default(),
         }),
+        Message::Project(ProjectMsg::MissingSetupFound {
+            stamp: s(),
+            seq: 0,
+            servers: Vec::new(),
+        }),
         Message::Watch(WatchMsg::SymbolIndexDone {
             stamp: s(),
             indexed: Default::default(),

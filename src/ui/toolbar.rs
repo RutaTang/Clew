@@ -118,8 +118,26 @@ pub(crate) fn icon_action<'a>(
     name: &'a str,
     message: Option<Message>,
 ) -> Element<'a, Message> {
+    busy_action(glyph, name, message, false)
+}
+
+/// [`icon_action`] for work that runs a while: while it is `busy`, its icon
+/// turns in its place — words that came in for it moved what stood beside
+/// them — and it cannot be pressed again.
+pub(crate) fn busy_action<'a>(
+    glyph: crate::glyph::Glyph,
+    name: &'a str,
+    message: Option<Message>,
+    busy: bool,
+) -> Element<'a, Message> {
+    let icon = if busy {
+        super::meter::spinning(glyph, theme::accent(), 15.0)
+    } else {
+        crate::glyph::icon(glyph, theme::fg_muted(), 15.0)
+    };
+    let message = message.filter(|_| !busy);
     chrome_tip(
-        button(container(crate::glyph::icon(glyph, theme::fg_muted(), 15.0)).center(Fill))
+        button(container(icon).center(Fill))
             .style(theme::icon_button(false))
             .padding(0)
             .width(24)

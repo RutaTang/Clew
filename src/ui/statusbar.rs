@@ -265,13 +265,14 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         );
         // At its widest: the last revision's number, and a line count a
         // digit longer than this revision's.
+        let lines_longer = format!("{lines}0");
         let widest = super::steady::widest_figure(&format!(
             "{}  ·  {short}  ·  {}/{}{}{}",
             tr!("Time Travel"),
             tt.commits.len(),
             tt.commits.len(),
             scope,
-            format!("{lines}0"),
+            lines_longer,
         ));
         bar = bar.push(super::steady::slot(
             status_text(said.clone()),

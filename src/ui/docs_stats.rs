@@ -533,10 +533,11 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             // An icon, as the chrome's actions are, named by its tooltip —
             // the height of the header's title line: the page below sits
             // where it did.
-            super::toolbar::icon_action(
+            super::toolbar::busy_action(
                 Glyph::Refresh,
                 tr!("Regenerate"),
                 Some(Message::Overview(OverviewMsg::Generate)),
+                app.proj.overview.generating,
             ),
         ]
         .align_y(iced::Center);
@@ -712,10 +713,11 @@ pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
 /// The code-statistics "home": totals, a language-proportion bar, a per-language
 /// breakdown, and the largest files (each row opens the file).
 pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
-    let refresh = super::toolbar::icon_action(
+    let refresh = super::toolbar::busy_action(
         Glyph::Refresh,
         tr!("Refresh"),
         Some(Message::Overview(OverviewMsg::RefreshStats)),
+        app.proj.stats.building,
     );
 
     // Nothing to show yet: computing, or a project with no counted code.

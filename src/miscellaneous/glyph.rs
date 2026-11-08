@@ -404,14 +404,16 @@ fn hex(c: Color) -> String {
 
 /// A square icon widget: `glyph` stroked in `color` at `size` logical px.
 pub fn icon<'a, M: 'a>(glyph: Glyph, color: Color, size: f32) -> Element<'a, M> {
+    svg(handle(glyph, color)).width(size).height(size).into()
+}
+
+/// `glyph` in `color`, as an image to draw: what [`icon`] shows.
+pub fn handle(glyph: Glyph, color: Color) -> svg::Handle {
     let stroke = hex(color);
     let doc = format!(
         "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='{stroke}' \
          stroke-width='1.9' stroke-linecap='round' stroke-linejoin='round'>{}</svg>",
         body(glyph).replace("STROKE", &stroke),
     );
-    svg(svg::Handle::from_memory(doc.into_bytes()))
-        .width(size)
-        .height(size)
-        .into()
+    svg::Handle::from_memory(doc.into_bytes())
 }
