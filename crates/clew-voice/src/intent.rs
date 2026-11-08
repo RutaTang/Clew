@@ -37,6 +37,9 @@ const SYNONYMS: &[(&str, &str)] = &[
     ("preferences", "settings"),
     ("prefs", "settings"),
     ("options", "settings"),
+    // What the app calls the reader's ("Your Notes"), the reader calls
+    // their own.
+    ("my", "your"),
 ];
 
 /// Which way a title or an utterance turns something.

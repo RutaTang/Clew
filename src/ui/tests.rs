@@ -5801,6 +5801,72 @@ fn an_unchecked_summary_is_marked_in_the_outline_and_the_call_flow() {
     assert!(shows(&mut sim, &marked), "CALLS");
 }
 
+/// A feature is called the same wherever it is named: a sidebar view and
+/// the palette's command for it, a shortcut's name and its menu title, a ⋯
+/// row and the view or page it opens. And the reader's own notes and the
+/// call hierarchy are not called what the margin's tabs are.
+#[test]
+fn a_feature_is_called_the_same_wherever_it_is_named() {
+    use super::toolbar::{ToolsRow, tools_row_label};
+    use crate::SidebarTab as T;
+    use crate::keymap::Action;
+    let same = |a: &str, b: &str| {
+        let bare = |s: &str| s.trim_end_matches('…').to_lowercase();
+        bare(a) == bare(b)
+    };
+    let app = reader_app();
+    let commands = app.palette_commands();
+    for tab in [
+        T::Files,
+        T::Search,
+        T::Semantic,
+        T::Marks,
+        T::Trail,
+        T::Calls,
+        T::Flow,
+        T::Imports,
+        T::Walk,
+        T::Notes,
+        T::Docs,
+    ] {
+        let title = format!("Sidebar: {}", super::sidebar::tab_name(tab));
+        assert!(
+            commands.iter().any(|c| same(&c.title, &title)),
+            "no palette command is called {title:?}"
+        );
+    }
+    for action in [
+        Action::ProjectSearch,
+        Action::ZoomIn,
+        Action::ZoomOut,
+        Action::ZoomReset,
+        Action::Walkthrough,
+    ] {
+        assert!(
+            same(action.label(), action.menu().title),
+            "{action:?}: {:?} vs {:?}",
+            action.label(),
+            action.menu().title
+        );
+    }
+    let tab = super::sidebar::tab_name;
+    assert!(same(Action::ProjectSearch.label(), tab(T::Search)));
+    assert!(same(Action::Walkthrough.label(), tab(T::Walk)));
+    assert!(same(tools_row_label(ToolsRow::Walkthrough), tab(T::Walk)));
+    assert!(same(
+        tools_row_label(ToolsRow::LspServers),
+        crate::SettingsPage::Languages.title()
+    ));
+    for margin in ["Notes", "Calls"] {
+        for t in [T::Notes, T::Calls] {
+            assert!(
+                !same(tab(t), margin),
+                "{t:?} is called the margin's {margin}"
+            );
+        }
+    }
+}
+
 /// The margin's History lists the file's commits (subject, then who and
 /// when), each one opening Time Travel at it; and it says so while they
 /// come, and when there are none — not links that do what the sheet's
@@ -8942,7 +9008,7 @@ fn a_view_off_the_strip_is_named_over_it() {
         (crate::SidebarTab::Imports, "Imports"),
         (crate::SidebarTab::Walk, "Walkthroughs"),
         (crate::SidebarTab::Docs, "API docs"),
-        (crate::SidebarTab::Notes, "Reading notes"),
+        (crate::SidebarTab::Notes, "Your notes"),
     ] {
         app.sidebar = tab;
         assert!(shows(&mut sim_of(&app), name), "{name} is named");

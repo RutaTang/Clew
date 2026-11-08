@@ -1308,10 +1308,16 @@ fn every_command_runs_when_its_name_is_said() {
         ("full screen", "Window: Full Screen"),
         ("maximize", "Window: Toggle Maximize"),
         ("maximize the window", "Window: Toggle Maximize"),
-        // The sidebar's tab, as before the margin's were listed.
-        ("notes", "Sidebar: Notes"),
-        ("show calls", "Sidebar: Calls"),
+        // The sidebar's tabs, by their names: the reader's own notes, said
+        // as theirs, apart from the margin's.
+        ("my notes", "Sidebar: Your Notes"),
+        ("show my notes", "Sidebar: Your Notes"),
+        // The caret's own command, of the same name, unless the sidebar is
+        // said.
+        ("call hierarchy", "Call Hierarchy"),
+        ("sidebar call hierarchy", "Sidebar: Call Hierarchy"),
         ("margin notes", "Margin Notes"),
+        ("margin calls", "Margin Calls"),
         ("margin history", "Margin History"),
     ] {
         assert_eq!(

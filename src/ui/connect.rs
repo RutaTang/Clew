@@ -146,7 +146,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             None,
             vec![
                 form::item(
-                    tr!("Language"),
+                    tr!("Display language"),
                     // macOS draws its own parts of the window (the Open
                     // panel, alerts) in the language it was started in.
                     cfg!(target_os = "macos").then(|| {

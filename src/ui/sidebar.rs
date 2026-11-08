@@ -52,11 +52,11 @@ pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
         SidebarTab::Semantic => tr!("Find by meaning"),
         SidebarTab::Marks => tr!("Bookmarks"),
         SidebarTab::Trail => tr!("Reading trail"),
-        SidebarTab::Calls => tr!("Calls"),
+        SidebarTab::Calls => tr!("Call hierarchy"),
         SidebarTab::Flow => tr!("Value flow"),
         SidebarTab::Imports => tr!("Imports"),
         SidebarTab::Walk => tr!("Walkthroughs"),
-        SidebarTab::Notes => tr!("Reading notes"),
+        SidebarTab::Notes => tr!("Your notes"),
         SidebarTab::Docs => tr!("API docs"),
     }
 }
@@ -1003,7 +1003,7 @@ const OPTION_SIDE: f32 = 30.0;
 pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
-    let input = text_input(tr!("Search in project…"), &app.proj.search.query)
+    let input = text_input(tr!("Search text…"), &app.proj.search.query)
         .style(theme::input)
         .id(search_input_id())
         .on_input(|v| Message::Nav(NavMsg::SearchQueryChanged(v)))
@@ -1547,7 +1547,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 /// Every reading note in the project, file by file.
 fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
-        return empty_state(Glyph::Note, tr!("No reading notes yet"), "", None);
+        return empty_state(Glyph::Note, tr!("No notes of your own yet"), "", None);
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();

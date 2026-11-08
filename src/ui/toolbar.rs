@@ -1013,10 +1013,10 @@ pub(crate) fn tools_row_action(row: ToolsRow) -> Option<Action> {
 }
 
 /// What a ⋯ menu row says.
-fn tools_row_label(row: ToolsRow) -> &'static str {
+pub(crate) fn tools_row_label(row: ToolsRow) -> &'static str {
     match row {
         ToolsRow::ExplainAll => tr!("Explain All"),
-        ToolsRow::Walkthrough => tr!("Walkthrough"),
+        ToolsRow::Walkthrough => tr!("Walkthroughs"),
         ToolsRow::Glossary => tr!("Glossary"),
         ToolsRow::OpenFolder => tr!("Open Folder…"),
         ToolsRow::OpenRemote => tr!("Open Remote…"),
@@ -1300,7 +1300,7 @@ fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
         ),
         ToolsRow::Walkthrough => (
             Glyph::ListOrdered,
-            tr!("Walkthrough").into(),
+            tr!("Walkthroughs").into(),
             Some(Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Walk,
             ))),

@@ -839,7 +839,7 @@ impl SettingsPage {
             SettingsPage::Embeddings => tr_noop!("Embeddings"),
             SettingsPage::Voice => tr_noop!("Voice"),
             SettingsPage::Integrations => tr_noop!("Integrations"),
-            SettingsPage::Languages => tr_noop!("Languages"),
+            SettingsPage::Languages => tr_noop!("Language servers"),
             SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
         }
     }

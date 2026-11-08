@@ -880,15 +880,15 @@ impl App {
 fn sidebar_title(tab: SidebarTab) -> &'static str {
     match tab {
         SidebarTab::Files => tr_noop!("Sidebar: Files"),
-        SidebarTab::Search => tr_noop!("Sidebar: Search"),
+        SidebarTab::Search => tr_noop!("Sidebar: Search Text"),
         SidebarTab::Semantic => tr_noop!("Sidebar: Find by Meaning"),
         SidebarTab::Marks => tr_noop!("Sidebar: Bookmarks"),
-        SidebarTab::Trail => tr_noop!("Sidebar: Trail"),
-        SidebarTab::Calls => tr_noop!("Sidebar: Calls"),
+        SidebarTab::Trail => tr_noop!("Sidebar: Reading Trail"),
+        SidebarTab::Calls => tr_noop!("Sidebar: Call Hierarchy"),
         SidebarTab::Flow => tr_noop!("Sidebar: Value Flow"),
         SidebarTab::Imports => tr_noop!("Sidebar: Imports"),
         SidebarTab::Walk => tr_noop!("Sidebar: Walkthroughs"),
-        SidebarTab::Notes => tr_noop!("Sidebar: Notes"),
-        SidebarTab::Docs => tr_noop!("Sidebar: Docs"),
+        SidebarTab::Notes => tr_noop!("Sidebar: Your Notes"),
+        SidebarTab::Docs => tr_noop!("Sidebar: API Docs"),
     }
 }
