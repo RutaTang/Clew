@@ -606,6 +606,7 @@
  "Finding references": "참조 찾는 중",
  "Find…": "찾기…",
  "First connection to {host}. Trust it only if this fingerprint matches the host's key.": "{host}에 처음 연결합니다. 이 핑거프린트가 호스트의 키와 일치할 때만 신뢰하세요.",
+ "Fit the map": "맵을 화면에 맞추기",
  "Flags": "플래그",
  "Flatten to 2D": "2D로 펼치기",
  "Fold All": "모두 접기",

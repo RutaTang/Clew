@@ -1248,6 +1248,8 @@ pub struct App {
     /// recent history ([`ProjectSession::churn`]) instead of by language.
     /// Toggled from the map header; applies to every graph map.
     pub graph_heat: bool,
+    /// Bumped to put the map's camera back where it starts (`GraphMsg::FitView`).
+    pub graph_fit_rev: u64,
     /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
     pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
@@ -1842,6 +1844,8 @@ pub struct ProjectSession {
     pub time_start: Option<TimeStart>,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
+    /// The node of the map the reader picked (see [`GraphPick`]).
+    pub graph_pick: Option<crate::app::model::GraphPick>,
     /// Precomputed force-directed layout for the current overlay's map.
     pub graph_layout: Option<graphlayout::Layout>,
     /// The overlay `graph_layout` was laid out for: shown again when that
@@ -2217,6 +2221,7 @@ impl Default for ProjectSession {
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),
+            graph_pick: None,
             graph_layout: Default::default(),
             graph_layout_for: Default::default(),
             graph_layout_rev: Default::default(),

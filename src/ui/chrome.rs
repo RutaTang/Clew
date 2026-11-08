@@ -36,6 +36,10 @@ pub(crate) const DIALOG_W: f32 = 560.0;
 /// The command bar: the design's 580 inside its 1 px border.
 pub(crate) const FINDER_W: f32 = 582.0;
 pub(crate) const GRAPH_MODAL_W: f32 = 760.0;
+/// The widest the graph window grows in a wide window, and the room it
+/// leaves round it.
+pub(crate) const GRAPH_MODAL_MAX_W: f32 = 1600.0;
+pub(crate) const GRAPH_MODAL_EDGE: f32 = 48.0;
 /// Width of the reading-target dropdown.
 pub(crate) const TARGET_MENU_W: f32 = 172.0;
 /// Width of the tutorial's callout card.

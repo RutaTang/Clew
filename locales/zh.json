@@ -606,6 +606,7 @@
  "Finding references": "正在查找引用",
  "Find…": "查找…",
  "First connection to {host}. Trust it only if this fingerprint matches the host's key.": "首次连接到 {host}。请仅在此指纹与主机密钥一致时信任它。",
+ "Fit the map": "让地图适应窗口",
  "Flags": "编译参数",
  "Flatten to 2D": "平铺为 2D",
  "Fold All": "全部折叠",

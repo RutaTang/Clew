@@ -9500,8 +9500,17 @@ fn the_strips_project_tools_wait_for_a_project() {
 #[test]
 fn the_heat_toggle_keeps_its_width() {
     let heat_at = |on: bool| {
-        let frame =
-            super::graph_modal_frame("Import Graph", true, false, false, on, None, space().into());
+        let frame = super::graph_modal_frame(
+            "Import Graph",
+            true,
+            false,
+            false,
+            on,
+            None,
+            None,
+            WINDOW,
+            space().into(),
+        );
         let mut sim = sim_elem(frame);
         text_at(&mut sim, |t| t.starts_with("Heat"), 0).expect("the toggle")
     };
@@ -9977,6 +9986,40 @@ fn the_question_field_wraps_and_enter_asks() {
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Ask(AskMsg::Edit(_)))),
+        "{sent:?}"
+    );
+}
+
+/// The node picked on a map is said over it — its name, its place — with an
+/// Open beside it; and the map is as large as the window allows, not 760
+/// wide in any window.
+#[test]
+fn a_picked_node_is_said_over_the_map_which_fills_the_window() {
+    let mut app = reader_app();
+    let size = Size::new(1600.0, 1000.0);
+    app.window_width = size.width;
+    app.window_height = size.height;
+    app.graph_mode = true;
+    app.proj.overlay = Some(crate::Overlay::ProjectImports);
+    let file = PathBuf::from("/nonexistent/clew-ui-test/src/app/mod.rs");
+    app.proj.graph_pick = Some(crate::app::model::GraphPick {
+        label: "app/mod.rs".into(),
+        file: file.clone(),
+        open: Box::new(Message::Graph(GraphMsg::OverlayOpenImports(file.clone()))),
+    });
+    let view = || sim_sized(&app, size);
+    assert!(shows(&mut view(), "app/mod.rs"));
+    assert!(shows(&mut view(), "src/app/mod.rs"), "its place");
+    let open = text_at(&mut view(), |t| t == "Open", 0).expect("Open");
+    assert!(
+        open.x + open.width > size.width / 2.0 + 760.0 / 2.0,
+        "the map is no wider than before: Open ends at {}",
+        open.x + open.width
+    );
+    let sent = click(view(), "Open");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Graph(GraphMsg::OverlayOpenImports(f)) if *f == file)),
         "{sent:?}"
     );
 }

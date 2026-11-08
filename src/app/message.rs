@@ -809,6 +809,11 @@ pub enum CallsMsg {
 /// The project graphs and their overlays: imports and the call graph.
 #[derive(Debug, Clone)]
 pub enum GraphMsg {
+    /// A node of the map was clicked: what it is, and how to open it — or
+    /// a click off them put the one picked down.
+    Picked(Option<crate::app::model::GraphPick>),
+    /// Put the map's camera back where it starts: zoom, pan and turn.
+    FitView,
     /// A remote project's tsconfig/jsconfig path mappings were fetched from
     /// the host (see `App::fetch_remote_ts_configs`); applied only to the
     /// project instance they were fetched for, and only while no later fetch
@@ -2371,6 +2376,8 @@ impl GraphMsg {
             | GraphMsg::Toggle3D
             | GraphMsg::ToggleSpin
             | GraphMsg::ToggleHeat
+            | GraphMsg::Picked(..)
+            | GraphMsg::FitView
             | GraphMsg::SelectMap(..)
             | GraphMsg::RefineProjectCalls => None,
         }

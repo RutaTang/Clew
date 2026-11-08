@@ -148,6 +148,7 @@ impl App {
             graph_3d: true,
             graph_spin: true,
             graph_heat: false,
+            graph_fit_rev: 0,
             show_left_sidebar: true,
             show_right_panel: true,
             lsp_doc_rev: 1,

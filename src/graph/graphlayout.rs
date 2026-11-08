@@ -60,6 +60,65 @@ pub struct Layout {
     pub total: usize,
 }
 
+/// Labels that name different places are told apart: a file's by as many
+/// of the folders over it as it takes (`app/mod.rs`, `ui/mod.rs`), anything
+/// else's by its file after it (`new · lib.rs`, then `new · app/lib.rs`).
+/// A map of a crate had a dozen nodes called `mod.rs`.
+pub fn distinguish_labels(nodes: &mut [NodeInput]) {
+    let tail = |file: &std::path::Path, parts: usize| -> String {
+        let names: Vec<String> = file
+            .components()
+            .rev()
+            .take(parts)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        names.into_iter().rev().collect::<Vec<_>>().join("/")
+    };
+    let mut by_label: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    for (i, n) in nodes.iter().enumerate() {
+        by_label.entry(n.label.clone()).or_default().push(i);
+    }
+    for (label, same) in by_label {
+        let files: HashSet<&PathBuf> = same.iter().map(|&i| &nodes[i].file).collect();
+        if same.len() < 2 || files.len() < 2 {
+            continue;
+        }
+        let files_named = same.iter().all(|&i| {
+            nodes[i].file.file_name().map(|f| f.to_string_lossy()) == Some(label.as_str().into())
+        });
+        let deepest = same
+            .iter()
+            .map(|&i| nodes[i].file.components().count())
+            .max()
+            .unwrap_or(1);
+        // Each as few folders as tell it from the others — or all of them.
+        let named = |i: usize, parts: usize| -> String {
+            if files_named {
+                tail(&nodes[i].file, parts + 1)
+            } else {
+                format!("{label} · {}", tail(&nodes[i].file, parts))
+            }
+        };
+        let mut names: Vec<Option<String>> = vec![None; same.len()];
+        for parts in 1..=deepest {
+            let at: Vec<String> = same.iter().map(|&i| named(i, parts)).collect();
+            for (k, name) in at.iter().enumerate() {
+                if names[k].is_none() && at.iter().filter(|n| *n == name).count() == 1 {
+                    names[k] = Some(name.clone());
+                }
+            }
+        }
+        let names: Vec<String> = same
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| names[k].take().unwrap_or_else(|| named(i, deepest)))
+            .collect();
+        for (&i, name) in same.iter().zip(names) {
+            nodes[i].label = name;
+        }
+    }
+}
+
 const SPACE: f32 = 1000.0;
 const ITERATIONS: usize = 300;
 
@@ -74,11 +133,12 @@ pub fn layout(nodes: Vec<NodeInput>, mut edges: Vec<(usize, usize)>) -> Layout {
     edges.dedup();
     // Cap huge graphs to their highest-degree nodes so the O(n²) layout on the
     // UI thread stays cheap (and the map stays legible).
-    let (nodes, mut edges) = if nodes.len() > MAX_LAYOUT_NODES {
+    let (mut nodes, mut edges) = if nodes.len() > MAX_LAYOUT_NODES {
         cap_by_weight(nodes, edges, MAX_LAYOUT_NODES)
     } else {
         (nodes, edges)
     };
+    distinguish_labels(&mut nodes);
     let n = nodes.len();
     if n == 0 {
         return Layout::default();
@@ -585,6 +645,40 @@ fn connected_components(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nodes of one name in different places are told apart, by as little
+    /// as it takes.
+    #[test]
+    fn labels_of_different_places_are_told_apart() {
+        let node = |label: &str, file: &str| NodeInput {
+            label: label.into(),
+            file: PathBuf::from(file),
+            line: 1,
+            weight: 1.0,
+            cyclic: false,
+        };
+        let mut nodes = vec![
+            node("mod.rs", "/p/src/app/mod.rs"),
+            node("mod.rs", "/p/src/ui/mod.rs"),
+            node("mod.rs", "/p/crates/x/src/ui/mod.rs"),
+            node("main.rs", "/p/src/main.rs"),
+            node("new", "/p/src/a.rs"),
+            node("new", "/p/src/b.rs"),
+        ];
+        distinguish_labels(&mut nodes);
+        let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "app/mod.rs",
+                "p/src/ui/mod.rs",
+                "x/src/ui/mod.rs",
+                "main.rs",
+                "new · a.rs",
+                "new · b.rs"
+            ]
+        );
+    }
 
     fn ni(label: &str) -> NodeInput {
         NodeInput {

@@ -606,6 +606,7 @@
  "Finding references": "参照を検索中",
  "Find…": "検索…",
  "First connection to {host}. Trust it only if this fingerprint matches the host's key.": "{host} への初めての接続です。このフィンガープリントがホストの鍵と一致する場合にのみ信頼してください。",
+ "Fit the map": "マップを画面に合わせる",
  "Flags": "フラグ",
  "Flatten to 2D": "2D 表示に切り替え",
  "Fold All": "すべて折りたたむ",

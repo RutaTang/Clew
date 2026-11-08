@@ -7,6 +7,7 @@ use iced::widget::{column, row};
 
 /// Modal frame shared by the project-graph overlays: a titled panel with a
 /// List/Map toggle, over a dismissable backdrop.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_modal_frame<'a>(
     title: &'a str,
     graph_mode: bool,
@@ -14,6 +15,8 @@ pub(crate) fn graph_modal_frame<'a>(
     graph_spin: bool,
     graph_heat: bool,
     extra: Option<Element<'a, Message>>,
+    picked: Option<Element<'a, Message>>,
+    window: iced::Size,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
     // Header controls are icon buttons; each names itself on hover (`chrome_tip`).
@@ -52,6 +55,14 @@ pub(crate) fn graph_modal_frame<'a>(
                 Message::Graph(GraphMsg::ToggleSpin),
             )
         });
+    }
+    // Back to where the map starts: its zoom, its pan, its turn.
+    if graph_mode {
+        header = header.push(icon_btn(
+            Glyph::Compass,
+            tr!("Fit the map"),
+            Message::Graph(GraphMsg::FitView),
+        ));
     }
     if graph_mode {
         header = header.push(if graph_3d {
@@ -106,9 +117,21 @@ pub(crate) fn graph_modal_frame<'a>(
             tr!("Close"),
             Message::Graph(GraphMsg::CloseOverlay),
         ));
-    let panel = container(column![header, body].spacing(12))
-        .width(GRAPH_MODAL_W)
-        .max_height(GRAPH_MODAL_MAX_H)
+    // As large as the window allows, an edge of it left round — it was
+    // 760 × 640 in any window, a big map squeezed into the middle of a big
+    // screen — and never smaller than that where the window has room.
+    let width = (window.width - 2.0 * GRAPH_MODAL_EDGE)
+        .min(GRAPH_MODAL_MAX_W)
+        .max(GRAPH_MODAL_W.min(window.width - 2.0 * MODAL_MARGIN));
+    let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
+        .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
+    let mut parts = column![header].spacing(12);
+    if let Some(picked) = picked {
+        parts = parts.push(picked);
+    }
+    let panel = container(parts.push(body))
+        .width(width)
+        .max_height(height)
         .padding(MODAL_PAD)
         .style(theme::modal_panel);
 
@@ -179,6 +202,39 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             crate::Overlay::ProjectMaps => project_maps_body(app),
         }
     };
+    // The node picked: what it is and where, and the way into it.
+    let picked = app.proj.graph_pick.as_ref().filter(|_| app.graph_mode).map(
+        |pick| -> Element<'_, Message> {
+            let place = app
+                .proj
+                .project
+                .as_ref()
+                .and_then(|p| pick.file.strip_prefix(&p.root).ok())
+                .map(|rel| rel.display().to_string())
+                .unwrap_or_default();
+            row![
+                text(pick.label.as_str())
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(iced::widget::text::Wrapping::None),
+                container(
+                    text(place)
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(iced::widget::text::Wrapping::None)
+                )
+                .width(Fill)
+                .clip(true),
+                button(text(tr!("Open")).size(ts::SMALL))
+                    .style(theme::primary_button)
+                    .padding([3, 12])
+                    .on_press((*pick.open).clone()),
+            ]
+            .spacing(10)
+            .align_y(iced::Center)
+            .into()
+        },
+    );
     graph_modal_frame(
         title,
         app.graph_mode,
@@ -186,6 +242,8 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         app.graph_spin,
         app.graph_heat,
         extra,
+        picked,
+        iced::Size::new(app.window_width, app.window_height),
         body,
     )
 }
@@ -239,7 +297,8 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
                 .flatten(),
             app.proj.churn_rev,
         )
-        .with_visited(Some(trace_files(app)), app.debug.trace_rev),
+        .with_visited(Some(trace_files(app)), app.debug.trace_rev)
+        .with_fit(app.graph_fit_rev),
     )
     .width(Fill)
     .height(Fill);
@@ -326,6 +385,8 @@ pub(crate) struct GraphCanvas<'a> {
     pub(crate) visited: Option<std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>>,
     /// The generation of `visited`: part of the scene cache's key.
     pub(crate) visited_rev: u64,
+    /// Bumped to put the camera back where it starts (`GraphMsg::FitView`).
+    pub(crate) fit_rev: u64,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -348,7 +409,14 @@ impl<'a> GraphCanvas<'a> {
             paint_rev: 0,
             visited: None,
             visited_rev: 0,
+            fit_rev: 0,
         }
+    }
+
+    /// Put the camera back where it starts each time `rev` moves on.
+    pub(crate) fn with_fit(mut self, rev: u64) -> Self {
+        self.fit_rev = rev;
+        self
     }
 
     /// Ring the nodes of the files in `visited` (the last debug run's
@@ -527,6 +595,11 @@ pub(crate) struct GraphState {
     /// The bounds and hovered node the last tick computed for.
     last_bounds: iced::Size,
     last_hover: Option<usize>,
+    /// The node clicked once (its index, under the layout signature it was
+    /// clicked in): a click on it again opens it.
+    picked: Option<(usize, u64)>,
+    /// The `GraphCanvas::fit_rev` the camera was last put back at.
+    fit_rev: u64,
     /// The scene minus the hovered node, re-tessellated only when it changes.
     scene: iced::widget::canvas::Cache,
     /// What `scene` was drawn for: the hovered node, the theme revision and
@@ -580,6 +653,8 @@ impl Default for GraphState {
             dirty: true,
             last_bounds: iced::Size::ZERO,
             last_hover: None,
+            picked: None,
+            fit_rev: 0,
             scene: iced::widget::canvas::Cache::new(),
             scene_key: std::cell::Cell::new(None),
         }
@@ -880,6 +955,20 @@ impl GraphCanvas<'_> {
             y1 + c[1],
             x1 * sy + z1 * cy + c[2],
         ]
+    }
+
+    /// The message that picks node `i` (see `GraphPick`), if it opens to
+    /// anything.
+    pub(crate) fn pick_message(&self, i: usize) -> Option<Message> {
+        let node = self.layout.nodes.get(i)?;
+        let open = self.open_message(i)?;
+        Some(Message::Graph(GraphMsg::Picked(Some(
+            crate::app::model::GraphPick {
+                label: node.label.clone(),
+                file: node.file.clone(),
+                open: Box::new(open),
+            },
+        ))))
     }
 
     /// The message that opens node `i`, if it is still part of this layout.
@@ -1652,6 +1741,25 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
     ) -> Option<iced::widget::canvas::Action<Message>> {
         use iced::mouse;
         use iced::widget::canvas::Action;
+        // The camera put back where it starts, asked from the header.
+        if state.fit_rev != self.fit_rev {
+            state.fit_rev = self.fit_rev;
+            state.zoom_target = 1.0;
+            state.zoom_at = None;
+            state.zoom_vel = 0.0;
+            state.pan = iced::Vector::new(0.0, 0.0);
+            state.yaw = 0.6;
+            state.pitch = 0.35;
+            state.yaw_vel = 0.0;
+            state.pitch_vel = 0.0;
+            state.touch();
+            if !matches!(
+                event,
+                iced::Event::Window(iced::window::Event::RedrawRequested(_))
+            ) {
+                return Some(Action::request_redraw());
+            }
+        }
         match event {
             // Drive the live simulation: one step per frame while anything
             // moves, requesting the next frame only then — a settled map stops
@@ -1744,15 +1852,30 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 let was = state.drag;
                 state.drag = Drag::None;
                 state.touch();
-                // A grab that barely moved is a click → open the node — if it
-                // still belongs to the layout on screen.
+                // A grab that barely moved is a click — on a node still part of
+                // the layout on screen: the first picks it (what it is, over
+                // the map), a second opens it.
                 if let Drag::Node(i, sig) = was
                     && state.moved < 5.0
                     && sig == state.sig
                     && sig == layout_sig(self.layout)
-                    && let Some(msg) = self.open_message(i)
                 {
-                    return Some(Action::publish(msg).and_capture());
+                    let msg = if state.picked == Some((i, sig)) {
+                        self.open_message(i)
+                    } else {
+                        state.picked = Some((i, sig));
+                        self.pick_message(i)
+                    };
+                    if let Some(msg) = msg {
+                        return Some(Action::publish(msg).and_capture());
+                    }
+                }
+                // A click off the nodes puts the picked one down.
+                if !matches!(was, Drag::Node(..)) && state.moved < 5.0 && state.picked.is_some() {
+                    state.picked = None;
+                    return Some(
+                        Action::publish(Message::Graph(GraphMsg::Picked(None))).and_capture(),
+                    );
                 }
                 // A moved node re-settles its neighbourhood.
                 state.alpha = state.alpha.max(0.2);
@@ -2961,9 +3084,12 @@ mod tests {
         assert!(c.open_message(2).is_some());
     }
 
-    /// A click (press + release without moving) on a live node opens it.
+    /// A click (press + release without moving) on a live node picks it —
+    /// what it is, over the map — and a second click opens it: a first
+    /// click closed the map on a node the reader may only have wanted to
+    /// look at. A click off the nodes puts the picked one down.
     #[test]
-    fn a_click_on_a_node_opens_it() {
+    fn a_click_on_a_node_picks_it_and_a_second_opens_it() {
         let l = layout(3);
         let c = canvas(&l, false, false);
         let mut st = GraphState::default();
@@ -2980,22 +3106,78 @@ mod tests {
         let release = iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
             iced::mouse::Button::Left,
         ));
-        let program = |e: &iced::Event, st: &mut GraphState| {
-            <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
-                &c, st, e, BOUNDS, at,
-            )
+        let click = |st: &mut GraphState, at| {
+            let program = |e: &iced::Event, st: &mut GraphState| {
+                <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                    &c, st, e, BOUNDS, at,
+                )
+            };
+            let _ = program(&press, st);
+            program(&release, st)
+                .expect("the release is handled")
+                .into_inner()
+                .0
         };
-        let _ = program(&press, &mut st);
-        assert!(matches!(st.drag, Drag::Node(1, _)));
-        let (published, _, _) = program(&release, &mut st)
-            .expect("the release is handled")
-            .into_inner();
-        match published {
+        match click(&mut st, at) {
+            Some(Message::Graph(GraphMsg::Picked(Some(pick)))) => {
+                assert_eq!(pick.file, std::path::PathBuf::from("/p/file_1.rs"));
+                assert!(matches!(
+                    *pick.open,
+                    Message::Graph(GraphMsg::OverlayOpenImports(_))
+                ));
+            }
+            other => panic!("expected the node to be picked, got {other:?}"),
+        }
+        match click(&mut st, at) {
             Some(Message::Graph(GraphMsg::OverlayOpenImports(file))) => {
                 assert_eq!(file, std::path::PathBuf::from("/p/file_1.rs"))
             }
             other => panic!("expected the node to open, got {other:?}"),
         }
+        // A click on nothing puts it down; the next on it picks it again.
+        let off = iced::advanced::mouse::Cursor::Available(Point::new(2.0, 2.0));
+        assert!(matches!(
+            click(&mut st, off),
+            Some(Message::Graph(GraphMsg::Picked(None)))
+        ));
+        assert!(matches!(
+            click(&mut st, at),
+            Some(Message::Graph(GraphMsg::Picked(Some(_))))
+        ));
+    }
+
+    /// Fit puts the camera back where it starts: zoom, pan and turn.
+    #[test]
+    fn fit_puts_the_camera_back() {
+        let l = layout(3);
+        let mut st = GraphState::default();
+        st.zoom_target = 3.0;
+        st.pan = iced::Vector::new(120.0, -40.0);
+        st.yaw = 2.0;
+        let c = canvas(&l, true, false).with_fit(1);
+        let redraw = iced::Event::Window(iced::window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        ));
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            &c,
+            &mut st,
+            &redraw,
+            BOUNDS,
+            iced::advanced::mouse::Cursor::Unavailable,
+        );
+        assert_eq!(st.zoom_target, 1.0);
+        assert_eq!(st.pan, iced::Vector::new(0.0, 0.0));
+        assert!((st.yaw - 0.6).abs() < 0.2, "{}", st.yaw);
+        // Once: it is not put back again until asked.
+        st.zoom_target = 2.0;
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            &c,
+            &mut st,
+            &redraw,
+            BOUNDS,
+            iced::advanced::mouse::Cursor::Unavailable,
+        );
+        assert_eq!(st.zoom_target, 2.0);
     }
 
     /// Where each node is drawn.

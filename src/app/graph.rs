@@ -529,6 +529,7 @@ impl App {
 
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
         self.proj.overlay = Some(which);
+        self.proj.graph_pick = None;
         // A map laid out for another overlay is not shown under this one:
         // until its own lands, the map says what it waits for. One laid out
         // for this overlay is shown until a fresh one replaces it.
@@ -2624,15 +2625,26 @@ impl App {
             }
             GraphMsg::CloseOverlay => {
                 self.proj.overlay = None;
+                self.proj.graph_pick = None;
+                Task::none()
+            }
+            GraphMsg::Picked(pick) => {
+                self.proj.graph_pick = pick;
+                Task::none()
+            }
+            GraphMsg::FitView => {
+                self.graph_fit_rev += 1;
                 Task::none()
             }
             GraphMsg::OverlayOpenImports(path) => {
                 self.proj.overlay = None;
+                self.proj.graph_pick = None;
                 self.sidebar = SidebarTab::Imports;
                 self.open_file(path, None, true)
             }
             GraphMsg::OverlayOpenAt { abs, line } => {
                 self.proj.overlay = None;
+                self.proj.graph_pick = None;
                 self.open_file(abs, Some(line), true)
             }
             GraphMsg::ProjectCallsBuilt { graph, .. } => self.on_project_calls_built(graph),

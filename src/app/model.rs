@@ -1113,6 +1113,18 @@ pub struct DiffState {
     pub max_cols: usize,
 }
 
+/// The node of a map the reader clicked: what it is called, the file it is
+/// in, and the message that opens it. A click picks a node — its place said
+/// over the map, an Open beside it — and a click on the one picked opens
+/// it: a first click closed the map on a node the reader may only have
+/// wanted to look at.
+#[derive(Debug, Clone)]
+pub struct GraphPick {
+    pub label: String,
+    pub file: PathBuf,
+    pub open: Box<crate::Message>,
+}
+
 /// One run of same-kind diff lines as the diff view draws it: its code
 /// coloured as the editor colours it, its lines' numbers beside it — before
 /// and after — and the mark of what happened to them. A hunk is a run of
