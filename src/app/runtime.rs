@@ -643,7 +643,9 @@ impl App {
                 Task::none()
             }
             WindowMsg::ToggleToolsMenu => {
-                let open = !self.show_tools_menu;
+                // Its tools on the strip, there is no ⋯ to open a menu
+                // from: one opened then hung under a button not there.
+                let open = !self.show_tools_menu && !crate::ui::tools_on_strip(self);
                 self.close_menus();
                 self.show_tools_menu = open;
                 Task::none()

@@ -1600,9 +1600,19 @@ fn the_chrome_geometry_matches_what_is_drawn() {
         "the search field's computed centre clicked {sent:?}"
     );
 
-    // The ⋯ menu's rows: each computed row rect holds that row's label.
+    // Its tools on the strip, no ⋯ menu is drawn, whatever asked for it:
+    // there is no ⋯ to hang it from.
     let mut app = reader_app();
+    assert!(super::tools_on_strip(&app));
     app.show_tools_menu = true;
+    assert!(
+        !shows(&mut sim_of(&app), "Open Remote…"),
+        "a menu of what the strip shows"
+    );
+    // The ⋯ menu's rows, in a window too short for them on the strip: each
+    // computed row rect holds that row's label.
+    app.window_height = 600.0;
+    assert!(!super::tools_on_strip(&app));
     for (row, label) in [
         (super::ToolsRow::ExplainAll, "Explain All"),
         (super::ToolsRow::OpenRemote, "Open Remote…"),

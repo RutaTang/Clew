@@ -368,7 +368,7 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Why(bw)
     } else if let Some(insight) = &app.proj.insight {
         O::Insight(insight)
-    } else if app.show_tools_menu {
+    } else if app.show_tools_menu && !tools_on_strip(app) {
         O::ToolsMenu
     } else if app.show_target_menu {
         O::TargetMenu
