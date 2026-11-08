@@ -1980,6 +1980,9 @@ pub struct ProjectSession {
     /// What is in the input was said (voice put it there), not typed: the
     /// turn it becomes is marked so. Typing in the input makes it typed.
     pub ask_spoken: bool,
+    /// An answer came while Ask was put away to its pill (a question said
+    /// aloud is answered so): the pill marks it until the card is opened.
+    pub ask_unread: bool,
     pub ask_turns: Vec<AskTurn>,
     /// The project's Ask sessions, newest first, kept in its derived
     /// directory (`app::ask_sessions`).
@@ -2238,6 +2241,7 @@ impl Default for ProjectSession {
             ask_queue: Vec::new(),
             ask_queue_held: false,
             ask_spoken: false,
+            ask_unread: false,
             ask_turns: Default::default(),
             ask_sessions: Default::default(),
             ask_session: None,

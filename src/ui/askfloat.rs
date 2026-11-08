@@ -241,8 +241,38 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             // Ask's face, and nothing more: a count of its answers beside it
             // said nothing the card does not, and moved the pill's edge as
             // it grew.
+            // An answer that came while the card was put away: a dot on
+            // the mark, until the card is opened — nothing beside it, so
+            // the pill keeps its size.
+            let mark: Element<'_, Message> = if app.proj.ask_unread {
+                stack![
+                    glyph::icon(Glyph::Message, theme::accent(), 15.0),
+                    container(
+                        container(space().width(UNREAD_DOT).height(UNREAD_DOT)).style(
+                            |_: &iced::Theme| container::Style {
+                                background: Some(theme::accent().into()),
+                                // Ringed in the pill's surface, apart
+                                // from the mark it sits on.
+                                border: iced::Border {
+                                    color: crate::theme::active().elevated,
+                                    width: 1.5,
+                                    radius: (UNREAD_DOT / 2.0).into(),
+                                },
+                                ..container::Style::default()
+                            }
+                        )
+                    )
+                    .width(Length::Fixed(15.0))
+                    .height(Length::Fixed(15.0))
+                    .align_x(iced::Right)
+                    .align_y(iced::Top),
+                ]
+                .into()
+            } else {
+                glyph::icon(Glyph::Message, theme::accent(), 15.0)
+            };
             let face = row![
-                glyph::icon(Glyph::Message, theme::accent(), 15.0),
+                mark,
                 text(tr!("Ask"))
                     .size(ts::BASE)
                     .font(crate::fonts::UI_MEDIUM)
@@ -276,20 +306,41 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
     )
 }
 
-/// What voice says on the pill: listening (how loud, and Esc), working out
+/// What voice says on the pill: listening (how loud), working out
 /// the words, a command waiting for a yes — or, for a moment, what was
 /// just heard and what came of it. `None` when it has nothing to say, or the
 /// card says it.
 fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     // Listening, working out the words, Clew speaking, a command waiting
     // for a yes.
-    if let Some(bar) = voice_bar(app, true) {
+    if let Some(bar) = voice_bar(app) {
         return Some(
             container(bar)
                 .padding(Padding {
                     left: 8.0,
                     ..Padding::ZERO
                 })
+                .into(),
+        );
+    }
+    // A question answered with the card put away (one said aloud is):
+    // the pill says so, a click opening the card on it.
+    if !app.ask_view.is_open() && app.ask_stream_active() {
+        let line = phase_line(
+            glyph::icon(Glyph::Message, theme::accent(), 14.0),
+            phase_words()[3],
+            super::meter::ripple(&PILL_BARS),
+        );
+        return Some(
+            button(line)
+                .style(theme::pill_face)
+                .padding(Padding {
+                    top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 8.0,
+                })
+                .on_press(Message::Ask(AskMsg::Open))
                 .into(),
         );
     }
@@ -310,7 +361,8 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
             tr!("{command}?", command = crate::i18n::lookup(title)),
             theme::dim(),
         ),
-        // A question opened the card, which says it.
+        // A question sent is being answered, which the pill says above;
+        // one kept for the reader to send waits in the card, open on it.
         HeardOutcome::Asked => return None,
         HeardOutcome::Nothing => (
             Glyph::Mic,
@@ -888,19 +940,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
 /// What voice is doing, as the pill says it — and the card's composer, in
 /// place of what is typed: listening (the red dot, how loud), transcribing
 /// (the bars rippling on their own), Clew speaking (the speaker, how loud),
-/// a command waiting for a yes (Run, Cancel). The pill (`pill`) says Esc
-/// stops it; the composer has room for no more than what is happening, its
-/// round button the way to stop it ([`voice_lit`]). `None` while voice is
-/// idle.
-pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
-    // A row of what is happening, and on the pill the key that stops it.
-    let with_esc = |line: iced::widget::Row<'static, Message>| -> Element<'static, Message> {
-        if pill {
-            line.push(keycap("Esc".to_string())).into()
-        } else {
-            line.into()
-        }
-    };
+/// a command waiting for a yes (Run, Cancel). On the pill and in the
+/// composer alike, no more than what is happening: the round button beside
+/// it is the way to stop it ([`voice_lit`]) — a key named beside it too
+/// said the same thing twice. `None` while voice is idle.
+pub(crate) fn voice_bar(app: &App) -> Option<Element<'_, Message>> {
     let small = |label: &'static str, msg: Message, primary: bool| {
         button(text(label).size(ts::SMALL))
             .style(if primary {
@@ -940,34 +984,10 @@ pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
     // where it is as one turns to the next — on the pill, its left edge
     // and the mark jumped at every change, and in the composer the meter
     // slid along the row.
-    let words = [
-        tr!("listening now\u{4}Listening"),
-        tr!("transcribing now\u{4}Transcribing"),
-        tr!("speaking now\u{4}Speaking"),
-    ];
-    let line =
-        |mark: Element<'static, Message>, word: &'static str, meter: Element<'static, Message>| {
-            let word = super::steady::slot(
-                text(word)
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                word,
-                &words,
-                ts::BASE,
-            );
-            row![
-                container(mark)
-                    .width(Length::Fixed(MARK_W))
-                    .align_x(iced::Center),
-                word,
-                meter,
-            ]
-            .spacing(8)
-            .align_y(iced::Center)
-        };
+    let words = phase_words();
+    let line = phase_line;
     match app.voice.phase {
-        VoicePhase::Listening { level, .. } => Some(with_esc(line(
+        VoicePhase::Listening { level, .. } => Some(Element::from(line(
             container(space().width(REC_DOT).height(REC_DOT))
                 .style(|_: &iced::Theme| container::Style {
                     background: Some(theme::recording().into()),
@@ -979,14 +999,14 @@ pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
             super::meter::level_meter(&PILL_BARS, level),
         ))),
         // What was said, being worked out: the bars ripple on their own.
-        VoicePhase::Transcribing { .. } => Some(with_esc(line(
+        VoicePhase::Transcribing { .. } => Some(Element::from(line(
             space().into(),
             words[1],
             super::meter::ripple(&PILL_BARS),
         ))),
         // Clew speaking, as it listens: the speaker in the dot's place —
         // the bars rippling while what it says is still being made.
-        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(with_esc(line(
+        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(Element::from(line(
             glyph::icon(Glyph::Speaker, theme::accent(), 14.0),
             words[2],
             if app.voice.speech.preparing() {
@@ -999,9 +1019,51 @@ pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
     }
 }
 
+/// The dot on the pill's mark for an answer not read yet.
+const UNREAD_DOT: f32 = 7.0;
+
 /// The place of the mark before what voice is doing: the speaker's width,
 /// the widest of them.
 const MARK_W: f32 = 14.0;
+
+/// What the pill and the composer say is happening: listening, working out
+/// the words, speaking — and, on the pill, answering.
+fn phase_words() -> [&'static str; 4] {
+    [
+        tr!("listening now\u{4}Listening"),
+        tr!("transcribing now\u{4}Transcribing"),
+        tr!("speaking now\u{4}Speaking"),
+        tr!("answering now\u{4}Answering"),
+    ]
+}
+
+/// One of [`phase_words`] as a line: its mark, the word — in a place as
+/// wide as the widest of them, so what follows stays where it is as one
+/// turns to the next — and its meter.
+fn phase_line(
+    mark: Element<'static, Message>,
+    word: &'static str,
+    meter: Element<'static, Message>,
+) -> iced::widget::Row<'static, Message> {
+    let word = super::steady::slot(
+        text(word)
+            .size(ts::BASE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
+        word,
+        &phase_words(),
+        ts::BASE,
+    );
+    row![
+        container(mark)
+            .width(Length::Fixed(MARK_W))
+            .align_x(iced::Center),
+        word,
+        meter,
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+}
 
 /// The voice key's round button, `side` across, lit in the accent while
 /// voice listens — the microphone, which stops it — or Clew speaks — a

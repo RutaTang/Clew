@@ -1611,7 +1611,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     );
     // The ⋯ menu's rows, in a window too short for them on the strip: each
     // computed row rect holds that row's label.
-    app.window_height = 600.0;
+    app.window_height = TOOLS_IN_MENU_H;
     assert!(!super::tools_on_strip(&app));
     for (row, label) in [
         (super::ToolsRow::ExplainAll, "Explain All"),
@@ -1739,7 +1739,7 @@ fn the_spotlight_frames_the_regions_the_view_draws() {
 fn the_tools_menu_holds_the_explain_all_count() {
     use crate::i18n::{Lang, with_lang};
     let mut app = reader_app();
-    app.show_tools_menu = true;
+    open_tools_menu(&mut app);
     app.proj.explain.running = true;
     app.proj.explain.progress = Some((1200, 12040));
     for lang in Lang::ALL {
@@ -1841,7 +1841,7 @@ fn escape_names_the_topmost_overlay() {
         Some(Message::Nav(NavMsg::FinderClosed))
     ));
 
-    app.show_tools_menu = true;
+    open_tools_menu(&mut app);
     assert!(matches!(
         super::escape_message(&app),
         Some(Message::Window(WindowMsg::ToggleToolsMenu))
@@ -1886,7 +1886,7 @@ fn escape_closes_overlays_one_at_a_time() {
         y: 20.0,
         insight: None,
     });
-    app.show_tools_menu = true;
+    open_tools_menu(&mut app);
     let escape = || {
         Message::Editor(EditorMsg::KeyPressed(
             keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -1996,6 +1996,17 @@ fn finder_rows_are_revealed_with_minimal_scrolling() {
 type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 
 /// The whole window, at the app's test size.
+/// A window short enough that the ⋯ menu's tools are in its menu, not laid
+/// on the strip ([`super::tools_on_strip`]): there is a ⋯ to open it from.
+const TOOLS_IN_MENU_H: f32 = 600.0;
+
+/// `app`'s ⋯ menu open — in a window short enough to have one.
+fn open_tools_menu(app: &mut App) {
+    app.window_height = TOOLS_IN_MENU_H;
+    assert!(!super::tools_on_strip(app));
+    app.show_tools_menu = true;
+}
+
 fn sim_of(app: &App) -> Sim<'_> {
     // The renderer keeps a shader cache under `$XDG_CACHE_HOME`: in the
     // suite's own directory, never the developer's home.
@@ -2334,6 +2345,8 @@ fn an_overlay_come_up_over_a_field_takes_the_keyboard_from_it() {
     // The search box holding the keys, then `message`: what has them after.
     let mut focused_after = |message: Message| -> Option<iced::widget::Id> {
         let mut app = reader_app();
+        // Short enough for the ⋯ menu's tools to be in it, not on the strip.
+        app.window_height = TOOLS_IN_MENU_H;
         app.show_left_sidebar = true;
         app.sidebar = crate::SidebarTab::Search;
         let mut ui =
@@ -5481,6 +5494,49 @@ fn an_unchecked_summary_is_marked_where_it_is_shown() {
     assert!(shows(&mut sim, &marked), "the search results");
 }
 
+/// A click on the file banner shows the file's note in the margin, from
+/// whichever of its pages the margin was on. Open on Calls (or History),
+/// the margin stayed there: the note was chosen to be shown on Notes, the
+/// banner stayed above the code, and the click seemed to do nothing.
+#[test]
+fn the_file_banner_shows_the_note_from_any_page_of_the_margin() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.explain_cache_mut().insert(
+        explain_file(&root, "src/lib.rs"),
+        crate::explain::Cached {
+            summary: "Reads every line. More.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    app.show_file_banner = true;
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::Calls;
+    // The banner says the note's first sentence.
+    let sent = click(sim_of(&app), "Reads every line");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Explain(crate::ExplainMsg::Show(..)))),
+        "{sent:?}"
+    );
+    for message in sent {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.margin_tab, crate::MarginTab::Notes);
+    assert_eq!(
+        app.proj.explain.view,
+        Some(explain_file(&root, "src/lib.rs"))
+    );
+    // The margin says it now, and the banner no longer says it twice.
+    let mut sim = sim_of(&app);
+    assert!(
+        text_at(&mut sim, |t| t == "Reads every line", 0).is_none(),
+        "the banner stayed"
+    );
+}
+
 /// The same mark in the outline's one-line summaries and in the call flow's
 /// lists: shown there without it, an unchecked summary read as current, and
 /// no test said so.
@@ -5922,7 +5978,7 @@ fn the_type_map_lists_the_most_referenced_and_base_types() {
     drop(sim);
     crate::i18n::with_lang(crate::i18n::Lang::Fr, || {
         let mut sim = sim_elem(super::project_types_body(&app));
-        assert!(shows(&mut sim, "· 0 lien d'héritage"));
+        assert!(shows(&mut sim, "· 0 lien d’héritage"));
     });
     app.proj.type_graph = structured;
     // A node of the type map opens its definition at its line.
@@ -7299,7 +7355,7 @@ fn pressing_your_own_program_again_keeps_its_arguments() {
 fn explain_all_without_a_key_opens_settings_where_the_key_goes() {
     let mut app = reader_app();
     app.llm_available = false;
-    app.show_tools_menu = true;
+    open_tools_menu(&mut app);
     let sent = click(sim_of(&app), "Explain All");
     assert!(
         sent.iter().any(|m| matches!(
@@ -8310,8 +8366,9 @@ fn speaking_shows_with_a_stop() {
             "in the corner: {speaking:?}"
         );
     }
-    // The pill says Esc stops it, and its button, lit, does.
-    assert!(shows(&mut sim_of(&app), "Esc"));
+    // Its button, lit, stops it — and no key is named beside it, which
+    // said the same thing twice.
+    assert!(!shows(&mut sim_of(&app), "Esc"));
     let sent = click_right_of(
         || sim_of(&app),
         "Speaking",
@@ -8400,7 +8457,7 @@ fn voice_shows_what_it_is_doing() {
     {
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Transcribing"));
-        assert!(shows(&mut sim, "Esc"));
+        assert!(!shows(&mut sim, "Esc"));
     }
     app.ask_view = crate::AskView::Compact;
     app.voice.phase = VoicePhase::Idle;
@@ -8450,7 +8507,10 @@ fn the_voice_settings_offer_each_model_and_its_size() {
         for model in clew_voice::models::MODELS {
             assert!(shows(&mut sim, model.name), "{}", model.name);
         }
-        assert!(shows(&mut sim, "Speech stays on this computer"));
+        // No captions around the groups: not the voice key, nor where the
+        // models are kept.
+        assert!(!shows(&mut sim, "Speech stays on this computer"));
+        assert!(!shows(&mut sim, "Models are stored in"));
         assert!(
             shows(&mut sim, "Language"),
             "Echo's Small hears any language"
@@ -9025,4 +9085,31 @@ fn rebuilding_the_index_turns_its_icon_and_says_nothing_new() {
         assert!(!shows(&mut sim, "Building…"));
         assert!(!shows(&mut sim, "Building the index…"));
     }
+}
+
+/// A question answered with Ask put away to its pill (one said aloud is):
+/// the pill says it is being answered — a click on it opens the card — and
+/// once answered, says Ask again.
+#[test]
+fn the_pill_says_an_answer_is_coming() {
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Hidden;
+    assert!(!shows(&mut sim_of(&app), "Answering"));
+    app.proj.asking = true;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Answering"), "said on the pill");
+    let at = text_at(&mut sim, |t| t == "Answering", 0).unwrap();
+    sim.point_at(at.center());
+    let _ = sim.simulate(iced_test::simulator::click());
+    let sent = sent_by(sim);
+    assert!(
+        sent.iter().any(|m| matches!(m, Message::Ask(AskMsg::Open))),
+        "{sent:?}"
+    );
+    // The card open, it says it there, not on a pill.
+    app.ask_view = crate::AskView::Compact;
+    assert!(!shows(&mut sim_of(&app), "Answering"));
+    app.ask_view = crate::AskView::Hidden;
+    app.proj.asking = false;
+    assert!(!shows(&mut sim_of(&app), "Answering"));
 }

@@ -354,7 +354,11 @@ impl App {
             self.proj.ask_input.clear();
             self.proj.ask_spoken = false;
         }
-        self.reveal_ask();
+        // Said aloud, it is answered without the card opening over the code
+        // (see `on_transcribed`).
+        if !spoken {
+            self.reveal_ask();
+        }
         self.proj.asking = true;
         let stamp = self.stamp();
         // The stream id is minted now, at submit: it is the identity the
@@ -895,7 +899,11 @@ impl App {
             extras: Default::default(),
         });
         self.proj.asking = false;
-        self.reveal_ask();
+        // Said aloud, it is answered without the card opening over the code
+        // (see `on_transcribed`).
+        if !spoken {
+            self.reveal_ask();
+        }
 
         self.proj.link.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
@@ -1029,6 +1037,10 @@ impl App {
             return Task::none();
         };
         self.proj.asking = false;
+        // Answered with the card put away: the pill marks it, to be read.
+        if !self.ask_view.is_open() && !matches!(outcome, StreamOutcome::Stopped) {
+            self.proj.ask_unread = true;
+        }
         // Its tool calls waiting for an answer wait for nothing now (a
         // disconnect ends a server's turn here): their cards go with it, or
         // the first of them stood between the user and every later card.
@@ -1191,16 +1203,19 @@ impl App {
     }
 
     /// The queued question at `at` asked now: moved to the front of the
-    /// queue, the queue let go, and the answer coming in stopped — it is
-    /// asked as soon as nothing is answering (`send_next_queued`).
+    /// queue, the queue let go, and the answer coming in stopped, and what
+    /// is said of the last — it is asked as soon as nothing is answering
+    /// (`send_next_queued`).
     pub(crate) fn send_queued_now(&mut self, at: usize) -> Task<Message> {
         if at >= self.proj.ask_queue.len() {
             return Task::none();
         }
         let question = self.proj.ask_queue.remove(at);
         self.proj.ask_queue.insert(0, question);
+        // Said still, an answer that has come holds the queue (see
+        // `send_next_queued`): asked now, it is not waited for.
+        self.stop_speaking();
         let stop = if self.ask_stream_active() {
-            self.stop_speaking();
             self.stop_ask_streams()
         } else {
             Task::none()
@@ -1214,10 +1229,15 @@ impl App {
     /// holds meanwhile kept there. Run after every message
     /// ([`App::update`]), so whichever way an answer ends — done, stopped,
     /// failed — the next is asked.
+    ///
+    /// An answer read aloud is still being given while Clew says it, after
+    /// its last words have come: asked then, the next question stopped
+    /// Clew mid-answer, as a question asked anew does (`on_ask_submit`).
     pub(crate) fn send_next_queued(&mut self) -> Option<Task<Message>> {
         if self.proj.ask_queue.is_empty()
             || self.proj.ask_queue_held
             || self.ask_stream_active()
+            || self.voice.speech.is_speaking()
             || self.proj.project.is_none()
         {
             return None;

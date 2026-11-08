@@ -874,7 +874,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     } else if streaming {
         (
             Glyph::Send,
-            tr!("Queue: asked when this answer is done"),
+            tr!("Queue it to be asked when this answer is done"),
             Message::Ask(AskMsg::Submit),
         )
     } else {
@@ -1021,7 +1021,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // While voice listens, works out the words, waits for a yes or Clew
     // speaks, what it is doing is where the question is typed.
     // As the pill says it, and the button lit as on the pill.
-    let input: Element<'_, Message> = match super::askfloat::voice_bar(app, false) {
+    let input: Element<'_, Message> = match super::askfloat::voice_bar(app) {
         Some(bar) => container(bar)
             .width(Fill)
             .height(Length::Fixed(ROUND_BUTTON))

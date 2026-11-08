@@ -47,6 +47,11 @@ impl App {
             Some(jump) => Task::batch([task, jump]),
             None => task,
         };
+        // An answer that came with Ask put away is read once its card is
+        // open, whichever way it was opened.
+        if self.ask_view.is_open() {
+            self.proj.ask_unread = false;
+        }
         // A question queued while an answer came in is asked once nothing is
         // answering, whichever message ended the answer.
         let task = match self.send_next_queued() {

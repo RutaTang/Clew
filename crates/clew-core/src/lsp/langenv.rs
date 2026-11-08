@@ -107,6 +107,14 @@ pub fn cargo_projects(root: &Path) -> Vec<PathBuf> {
             continue;
         }
         let path = entry.into_path();
+        // A crate `cargo vendor` copied into the project — it leaves the
+        // crate's checksums beside its manifest — is one of its
+        // dependencies, not a project: beside a package at the top, every
+        // vendored crate was linked, and rust-analyzer loaded and built each
+        // as a workspace of its own.
+        if path.with_file_name(".cargo-checksum.json").is_file() {
+            continue;
+        }
         let too_big = std::fs::metadata(&path).map_or(true, |m| m.len() > MANIFEST_MAX_BYTES);
         let Some(manifest) = (!too_big)
             .then(|| std::fs::read_to_string(&path).ok())
@@ -1594,6 +1602,40 @@ mod tests {
                 apart.join("service/Cargo.toml"),
                 apart.join("tools/lint/Cargo.toml")
             ]
+        );
+    }
+
+    /// The crates `cargo vendor` copied into a project — each with its
+    /// checksums beside it — are its dependencies, not projects of their
+    /// own, and are not linked; a package apart (`fuzz/`) still is. Beside a
+    /// package at the top, every vendored crate was linked, and
+    /// rust-analyzer loaded and built each as a workspace of its own.
+    #[test]
+    fn vendored_crates_are_not_linked() {
+        let root = scratch("cargo-vendored");
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[package]\nname = \"app\"\n");
+        for name in ["serde", "itoa"] {
+            write(
+                &format!("vendor/{name}/Cargo.toml"),
+                &format!("[package]\nname = \"{name}\"\n"),
+            );
+            write(
+                &format!("vendor/{name}/.cargo-checksum.json"),
+                "{\"files\":{},\"package\":\"0\"}",
+            );
+        }
+        write(
+            "fuzz/Cargo.toml",
+            "[package]\nname = \"app-fuzz\"\n\n[workspace]\nmembers = [\".\"]\n",
+        );
+        assert_eq!(
+            cargo_projects(&root),
+            vec![root.join("Cargo.toml"), root.join("fuzz/Cargo.toml")]
         );
     }
 

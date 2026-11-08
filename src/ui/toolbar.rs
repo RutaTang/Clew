@@ -226,13 +226,9 @@ const KEYCAP_MIN_W: f32 = 18.0;
 /// Size of a tooltip's words.
 const TIP_SIZE: f32 = 12.0;
 
-/// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
-pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
-    caps_in(caps, crate::fonts::UI_MEDIUM, CapSize::FIELD)
-}
-
-/// [`keycap`] on a control (the chat field), whose words keep the face's
-/// own spacing (`fonts::in_control`).
+/// A shortcut on a control (the chat field), drawn as its keys — one cap
+/// for each (⌘ ⇧ A, or Ctrl Shift A) — whose words keep the face's own
+/// spacing (`fonts::in_control`).
 fn control_keycap<'a>(caps: String) -> Element<'a, Message> {
     caps_in(
         caps,
@@ -241,8 +237,8 @@ fn control_keycap<'a>(caps: String) -> Element<'a, Message> {
     )
 }
 
-/// [`keycap`] at the size the design gives the keys of a row of the
-/// command bar.
+/// A shortcut drawn as its keys, at the size the design gives the keys of a
+/// row of the command bar.
 pub(crate) fn row_keycap<'a>(caps: String) -> Element<'a, Message> {
     caps_in(caps, crate::fonts::UI_MEDIUM, CapSize::ROW)
 }

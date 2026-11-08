@@ -319,7 +319,6 @@ fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
 /// The settings' Voice section: which model listens, and how what it hears
 /// is used. Its changes take effect, and are saved, at once.
 pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
-    let chord = app.keymap.chord(crate::keymap::Action::Voice).caps();
     let models = MODELS.iter().map(|model| model_row(app, model)).collect();
     let mut listening = Vec::new();
     if !app.voice.prefs.model().english_only {
@@ -352,24 +351,11 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
     ));
     listening.extend(turn_rows(app));
-    let mut parts = vec![
-        form::note(tr!(
-            "Press {chord} and speak. Speech stays on this computer.",
-            chord = chord
-        ))
-        .into(),
+    // Groups, and no captions around them: the voice key is on the button
+    // it starts, and where models are kept is no setting.
+    form::page(vec![
         form::group(tr!("Model"), None, None, models),
         form::group(tr!("Listening"), None, None, listening),
         form::group(tr!("Speaking"), None, None, speaking_rows(app)),
-    ];
-    if let Some(store) = &app.voice.store {
-        parts.push(
-            form::note(tr!(
-                "Models are stored in {path}",
-                path = store.dir().display()
-            ))
-            .into(),
-        );
-    }
-    form::page(parts)
+    ])
 }

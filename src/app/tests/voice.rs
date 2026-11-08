@@ -225,10 +225,11 @@ fn a_question_heard_goes_to_ask() {
     let _ = app.update(Message::Ask(AskMsg::InputChanged(typed)));
     assert!(!app.proj.ask_spoken, "typed over, it is typed");
     // Asked at once when the setting says so — here with no model to ask,
-    // so the question waits in the input, said why.
+    // so the question waits in the input, said why. Asked so, it does not
+    // open the card over the code.
     let (mut app, script, _) = voice_app("voice-question-send", "where is the origin defined");
     say(&mut app, &script);
-    assert_eq!(app.ask_view, AskView::Compact);
+    assert!(!app.ask_view.is_open(), "{:?}", app.ask_view);
     assert_eq!(app.proj.ask_input, "where is the origin defined");
     assert!(!app.status.starts_with("Asking"), "{}", app.status);
     // A command the user turned off running: also a question.
@@ -240,9 +241,103 @@ fn a_question_heard_goes_to_ask() {
     assert_eq!(app.proj.ask_input, "open the call graph");
 }
 
+/// A question said aloud is asked without the card opening over the code
+/// (someone finding their way by voice does not want it over what they
+/// went to): it is answered where Ask is, and an answer that comes with the
+/// card put away is marked on the pill until the card is opened.
+#[test]
+fn a_question_said_is_answered_without_opening_the_card() {
+    let (mut app, script, _) = voice_app("voice-question-hidden", "where is the origin defined");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    // Grounded on a pinned line, it is asked with no index.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.ask_pins.push(crate::app::model::AskPin {
+        rel: "src/lib.rs".into(),
+        file: root.join("src/lib.rs"),
+        line: 1,
+        code: "pub struct Point;".into(),
+    });
+    say(&mut app, &script);
+    assert!(app.proj.asking, "asked: {}", app.status);
+    assert!(!app.ask_view.is_open(), "{:?}", app.ask_view);
+    assert!(!app.proj.ask_unread);
+    // Its answer comes with the card put away: marked, until it is opened.
+    app.proj.asking = false;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "where is the origin defined".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    let _ = app.on_ask_stream_ended(7, clew_protocol::StreamOutcome::Done);
+    assert!(app.proj.ask_unread);
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert!(app.ask_view.is_open());
+    assert!(!app.proj.ask_unread, "read once the card is open");
+    // Answered with the card open, nothing is marked.
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 8,
+        question: "and the end?".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let _ = app.on_ask_stream_ended(8, clew_protocol::StreamOutcome::Done);
+    assert!(!app.proj.ask_unread);
+}
+
+/// Keep listening, switched on, listens at once — there is nothing else to
+/// press — and switched off before anything is said, stops.
+#[test]
+fn keep_listening_listens_as_it_is_switched_on() {
+    let (mut app, _script, _) = voice_app("voice-keep-on", "");
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(false)));
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    // Someone speaking as it is switched off is heard to the end.
+    let (mut app, script, _) = voice_app("voice-keep-off-speaking", "");
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
+    script.lock().unwrap().silence = Some(0.2);
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(false)));
+    assert!(app.voice.is_listening());
+}
+
+/// Keep listening: once what was said is done with — a command run, a
+/// place gone to, a yes waited for — the microphone opens again, card open
+/// or not; a quiet that goes on is let go and listened past, not reported
+/// as a microphone that hears nothing.
+#[test]
+fn keep_listening_listens_again_after_a_command() {
+    let (mut app, script, _) = voice_app("voice-keep-command", "open the call graph");
+    app.voice.keep_listening = true;
+    assert!(!app.ask_view.is_open());
+    say(&mut app, &script);
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+    // A command that waits for a yes is listened for.
+    let (mut app, script, _) = voice_app("voice-keep-confirm", "explain all");
+    app.voice.keep_listening = true;
+    say(&mut app, &script);
+    assert_eq!(app.voice.confirm.as_deref(), Some("Explain All"));
+    assert!(app.voice.is_listening());
+    assert!(app.status.contains("say yes"), "{}", app.status);
+    // Nothing said for long: listened past, quietly.
+    script.lock().unwrap().silence = None;
+    if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
+        *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
+    }
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+    assert!(!app.status.contains("Nothing was heard"), "{}", app.status);
+    // Esc puts it away, and it stays away until asked for again.
+    let _ = app.update(Message::Voice(VoiceMsg::Cancel));
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+}
+
 /// Keep listening: once Clew has answered, the microphone opens again for
-/// what is said next — not after a Stop, not with the switch off, and not
-/// with the conversation put away.
+/// what is said next — not after a Stop, not with the switch off — with the
+/// conversation open or put away to its pill, which says it listens.
 #[test]
 fn keep_listening_opens_the_microphone_after_an_answer() {
     use clew_protocol::StreamOutcome;
@@ -274,11 +369,15 @@ fn keep_listening_opens_the_microphone_after_an_answer() {
     turn(&mut app, 3);
     let _ = app.on_ask_stream_ended(3, StreamOutcome::Stopped);
     assert_eq!(app.voice.phase, VoicePhase::Idle);
-    // Put away, the conversation hears nothing.
+    // Put away to its pill, it listens all the same.
     app.ask_view = AskView::Hidden;
     turn(&mut app, 4);
     let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { .. }),
+        "{:?}",
+        app.voice.phase
+    );
 }
 
 /// Nothing heard, nothing done; a recognizer that fails says why.

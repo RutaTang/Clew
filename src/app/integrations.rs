@@ -985,10 +985,11 @@ impl App {
         };
         let stream = self.mint_request_id();
         self.proj.ask_input.clear();
+        let spoken = std::mem::take(&mut self.proj.ask_spoken);
         self.proj.ask_turns.push(AskTurn {
             stream,
             question,
-            spoken: std::mem::take(&mut self.proj.ask_spoken),
+            spoken,
             streaming: true,
             extras: TurnExtras {
                 agent: Some(label.clone()),
@@ -996,7 +997,11 @@ impl App {
             },
             ..AskTurn::default()
         });
-        self.reveal_ask();
+        // Said aloud, it is answered without the card opening over the code
+        // (see `on_transcribed`).
+        if !spoken {
+            self.reveal_ask();
+        }
         let link = self
             .proj
             .acp

@@ -20242,6 +20242,8 @@ fn every_tools_menu_row_dismisses_the_menu() {
         }
     }
     let mut app = blank_app();
+    // Short enough for the ⋯ menu's tools to be in it, not on the strip.
+    app.window_height = 600.0;
     app.show_tools_menu = true;
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
@@ -28284,6 +28286,8 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
     let mut app = scanned_app("tt-overlay-keys");
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
+    // Short enough for the ⋯ menu's tools to be in it, not on the strip.
+    app.window_height = 600.0;
     let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     let _first_scrub = app.update(lib_history(&app, app.proj.time_gen));
     assert!(crate::ui::time_travel_on_screen(&app).is_some());
@@ -28408,6 +28412,8 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     let mut app = scanned_app("tt-overlays-hold-chords");
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
+    // Short enough for the ⋯ menu's tools to be in it, not on the strip.
+    app.window_height = 600.0;
     let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     let _first_scrub = app.update(lib_history(&app, app.proj.time_gen));
     assert!(crate::ui::time_travel_on_screen(&app).is_some());

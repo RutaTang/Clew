@@ -835,10 +835,7 @@ impl App {
             | VoiceMsg::RemoveSpeech(_)
             | VoiceMsg::SpeechRemoved { .. }) => self.update_speech(message),
             VoiceMsg::Toggle => self.on_voice_toggle(),
-            VoiceMsg::SetKeepListening(on) => {
-                self.voice.keep_listening = on;
-                Task::none()
-            }
+            VoiceMsg::SetKeepListening(on) => self.set_keep_listening(on),
             VoiceMsg::Stop => self.stop_listening(),
             VoiceMsg::Cancel => {
                 self.cancel_voice();
@@ -856,7 +853,21 @@ impl App {
             | VoiceMsg::TurnDownloaded(_)
             | VoiceMsg::RemoveTurn
             | VoiceMsg::TurnRemoved(_)) => self.on_turn_settings(message),
-            VoiceMsg::Transcribed { token, result } => self.on_transcribed(token, result),
+            VoiceMsg::Transcribed { token, result } => {
+                let ours = self.voice.phase == (VoicePhase::Transcribing { token });
+                let cancelled = result.as_ref().is_err_and(|e| e == "cancelled");
+                let task = self.on_transcribed(token, result);
+                // Keep listening: what was said is done with — a command
+                // run, a place gone to, a yes waited for, nothing caught —
+                // and the microphone opens for what comes next. Not after a
+                // question sent: its answer is waited for
+                // (`on_ask_stream_ended`), or Clew would hear itself say it.
+                if ours && !cancelled && !self.ask_stream_active() {
+                    Task::batch([task, self.resume_listening()])
+                } else {
+                    task
+                }
+            }
             VoiceMsg::Confirm => match self.voice.confirm.take() {
                 Some(title) => {
                     self.voice.heard = self.voice.heard.take().map(|h| Heard {
@@ -1014,10 +1025,50 @@ impl App {
         }
     }
 
-    /// After an answer, with Keep listening on: the microphone opens again
-    /// for what is said next — while the conversation is open, nothing is
-    /// heard or waiting for a yes, and there is a model to hear it with
-    /// (this never sends the reader to Settings for one).
+    /// Keep listening on: switched on, the microphone opens at once —
+    /// there is nothing else to press — and after it is heard each time,
+    /// again ([`App::resume_listening`]). Switched off, a listen that has
+    /// heard nothing yet is put away; one that is hearing someone ends as
+    /// it would have.
+    fn set_keep_listening(&mut self, on: bool) -> Task<Message> {
+        self.voice.keep_listening = on;
+        if !on {
+            self.voice.speech.listen_after = false;
+            let unheard = self
+                .voice
+                .listening_now()
+                .is_some_and(|l| l.silence_after_speech().is_none());
+            if unheard {
+                if let Some((listening, _)) = self.voice.listening.take() {
+                    drop(listening.stop());
+                }
+                self.voice.phase = VoicePhase::Idle;
+                self.status = tr!("Stopped listening").into();
+            }
+            return Task::none();
+        }
+        // While a question is answered, its end opens the microphone.
+        if self.ask_stream_active() {
+            return Task::none();
+        }
+        if self.voice.speech.is_speaking() {
+            self.voice.speech.listen_after = true;
+            return Task::none();
+        }
+        if self.voice.phase == VoicePhase::Idle {
+            // No model yet: start_listening says so, and opens Settings on
+            // the download.
+            return self.start_listening();
+        }
+        Task::none()
+    }
+
+    /// With Keep listening on, once what was said is done with — a
+    /// command run, an answer given and said: the microphone opens again
+    /// for what is said next, while nothing is being heard and there is a
+    /// model to hear it with (this never sends the reader to Settings for
+    /// one). The conversation need not be open: the pill says Clew is
+    /// listening. A command waiting for a yes is listened for too.
     pub(crate) fn resume_listening(&mut self) -> Task<Message> {
         // Not while Clew speaks: the microphone would hear it. Once all is
         // said, this is asked again.
@@ -1025,10 +1076,10 @@ impl App {
             self.voice.speech.listen_after = true;
             return Task::none();
         }
+        // A question queued is asked next, and its answer waited for.
         let ready = self.voice.keep_listening
-            && self.ask_view.is_open()
             && self.voice.phase == VoicePhase::Idle
-            && self.voice.confirm.is_none()
+            && self.proj.ask_queue.is_empty()
             && self.voice.installed(self.voice.prefs.model());
         if ready {
             self.start_listening()
@@ -1112,6 +1163,15 @@ impl App {
         if listening.silence_after_speech().is_none()
             && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
         {
+            if self.voice.keep_listening {
+                // Listening on, as asked: the quiet is let go, and the
+                // microphone listens afresh for what is said next.
+                if let Some((listening, _)) = self.voice.listening.take() {
+                    drop(listening.stop());
+                }
+                self.voice.phase = VoicePhase::Idle;
+                return self.start_listening();
+            }
             self.cancel_voice();
             self.voice.hear(Heard {
                 text: String::new(),
@@ -1300,12 +1360,14 @@ impl App {
                 return self.did_as_said(text, done, task);
             }
         }
-        // A question: to Ask, with the window open on it.
+        // A question: to Ask. Sent, it is answered where Ask is — the card
+        // is not opened over the code for it: the pill says it is being
+        // answered, and the answer is read aloud. Kept for the reader to
+        // send, it waits in the card's input, open on it.
         self.voice.hear(Heard {
             text: text.clone(),
             outcome: HeardOutcome::Asked,
         });
-        self.reveal_ask();
         let mut input = self.proj.ask_input.trim_end().to_string();
         if !input.is_empty() {
             input.push(' ');
@@ -1313,10 +1375,12 @@ impl App {
         input.push_str(&text);
         self.proj.ask_input = input;
         self.proj.ask_spoken = true;
-        if self.voice.prefs.send_questions && !self.ask_stream_active() {
+        if self.voice.prefs.send_questions {
+            // While one is answered, it is queued, and asked next.
             self.status = tr!("Asking “{text}”", text = text);
             return self.update(Message::Ask(AskMsg::Submit));
         }
+        self.reveal_ask();
         self.code_focused = false;
         Task::batch([
             operation::focus(ui::ask_input_id()),

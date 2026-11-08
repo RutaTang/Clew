@@ -1269,7 +1269,11 @@ impl App {
             } => self.on_explain_done(generation, cache, failures, *tally, written),
             ExplainMsg::RefreshAll => self.on_refresh_all(),
             ExplainMsg::Show(node) => {
+                // A note is shown on the margin's Notes: left on Calls or
+                // History, the margin opened on them and the note asked for
+                // (the file banner's click, the file's Explain) did not show.
                 self.show_right_panel = true;
+                self.margin_tab = MarginTab::Notes;
                 self.show_explanation(node)
             }
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),
