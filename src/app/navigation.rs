@@ -335,6 +335,8 @@ pub(crate) fn names_trail_stops(kind: &str) -> bool {
     )
 }
 
+/// How many of the files read lately lead the file finder with nothing typed.
+const RECENT_FILES: usize = 20;
 impl App {
     /// Run a navigation request from the active pane's cursor.
     pub(crate) fn goto_at_cursor(&mut self, kind: GotoKind) -> Task<Message> {
@@ -852,7 +854,8 @@ impl App {
                 if let Some(p) = &self.proj.project {
                     let files = p.files.clone();
                     let symbols = self.fresh_symbol_index();
-                    self.proj.finder.refresh_files(&files, &symbols);
+                    let recent = self.proj.history.recent_files(RECENT_FILES);
+                    self.proj.finder.refresh_files(&files, &symbols, &recent);
                 }
             }
             FinderMode::Symbols => {

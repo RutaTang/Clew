@@ -67,6 +67,8 @@ pub enum Glyph {
     Pause,
     Play,
     Book,
+    /// A prompt: a command to run (a lone chevron read as a submenu).
+    Prompt,
     /// A book with an A on its cover: the glossary.
     Dictionary,
     /// A crosshair: put the view back where it starts.
@@ -275,6 +277,7 @@ fn body(g: Glyph) -> &'static str {
         }
         Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
         Book => "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>",
+        Prompt => "<path d='m5 7 5 5-5 5'/><path d='M12.5 17H19'/>",
         Dictionary => {
             "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>\
              <path d='m10.5 13 2.7-7 2.7 7'/><path d='M11.5 10.6h3.4'/>"

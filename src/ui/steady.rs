@@ -18,6 +18,45 @@ thread_local! {
     static MEASURED: RefCell<HashMap<(String, u32, Font), f32>> = RefCell::new(HashMap::new());
 }
 
+thread_local! {
+    /// Texts cut to fit, by text, size, font and room: a list redrawn each
+    /// frame cuts the same few paths.
+    static ELIDED: RefCell<HashMap<(String, u32, Font, u32), String>> = RefCell::new(HashMap::new());
+}
+
+/// `content` cut from its start to fit `room` wide at `size` in `font`: an
+/// ellipsis, then as much of its end as fits — from a `/` where one does, so
+/// a path keeps its last folders whole. Whole when it fits; a bare ellipsis
+/// when nothing of it does.
+pub(crate) fn elide_start(content: &str, size: f32, font: Font, room: f32) -> String {
+    if width_of(content, size, font) <= room {
+        return content.to_string();
+    }
+    let key = (content.to_string(), size.to_bits(), font, room.to_bits());
+    if let Some(cut) = ELIDED.with(|m| m.borrow().get(&key).cloned()) {
+        return cut;
+    }
+    let fits = |at: usize| {
+        let cut = format!("…{}", &content[at..]);
+        (width_of(&cut, size, font) <= room).then_some(cut)
+    };
+    let at_separator = content
+        .char_indices()
+        .filter(|&(_, c)| c == '/')
+        .find_map(|(i, _)| fits(i));
+    let cut = at_separator
+        .or_else(|| content.char_indices().skip(1).find_map(|(i, _)| fits(i)))
+        .unwrap_or_else(|| "…".to_string());
+    ELIDED.with(|m| {
+        let mut m = m.borrow_mut();
+        if m.len() >= MEASURED_CAP {
+            m.clear();
+        }
+        m.insert(key, cut.clone());
+    });
+    cut
+}
+
 /// How many widths [`width_of`] keeps before it forgets them all.
 const MEASURED_CAP: usize = 512;
 

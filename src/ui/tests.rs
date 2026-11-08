@@ -1446,6 +1446,69 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     );
 }
 
+/// A path too long for its row is cut at its start — "…" and its last
+/// folders — not run past the row's end, under the finder's scrollbar, and
+/// clipped mid-letter at the panel's edge.
+#[test]
+fn a_long_path_in_the_finder_keeps_its_end_in_view() {
+    let mut app = reader_app();
+    let deep =
+        "crates/clew-core/src/analysis/languages/typescript/resolution/module_graph/fixtures";
+    let mut rels: Vec<String> = vec![format!("{deep}/tsconfig_paths.rs")];
+    // Enough rows that the list scrolls.
+    rels.extend((0..40).map(|i| format!("src/m{i}.rs")));
+    let files: Vec<crate::fs_scan::FileEntry> = rels
+        .iter()
+        .map(|rel| crate::fs_scan::FileEntry {
+            abs: PathBuf::from("/nonexistent/clew-ui-test").join(rel),
+            rel: rel.clone(),
+        })
+        .collect();
+    app.proj.project.as_mut().unwrap().files = Arc::new(files);
+    app.proj.finder.open = true;
+    app.proj.finder.mode = crate::finder::FinderMode::Files;
+    app.proj.finder.results = (0..rels.len()).collect();
+    let mut sim = sim_of(&app);
+    let dir = text_at(&mut sim, |t| t.ends_with("module_graph/fixtures"), 0)
+        .expect("the folder's end is shown");
+    assert!(shows(&mut sim, "…/"), "cut at its start, at a folder");
+    assert!(!shows(&mut sim, "crates/clew-core/src"), "and not whole");
+    let name = text_at(&mut sim, |t| t == "tsconfig_paths.rs", 0).expect("its name");
+    assert!(
+        dir.x > name.x + name.width,
+        "beside its name: {name:?} {dir:?}"
+    );
+    // Inside its row, clear of the scrollbar, which floats in the list's
+    // padding at the panel's right.
+    let panel_right = (WINDOW.width + super::chrome::FINDER_W) / 2.0;
+    let scrollbar_left = panel_right - 1.0 - 6.0 - super::chrome::SCROLLBAR_W;
+    assert!(
+        dir.x + dir.width <= scrollbar_left,
+        "{dir:?} runs under the scrollbar (from {scrollbar_left})"
+    );
+}
+
+/// `elide_start` keeps what fits whole, cuts at a folder where it can, and
+/// at a character where no folder's cut fits.
+#[test]
+fn eliding_keeps_the_end() {
+    use super::steady::{elide_start, width_of};
+    let f = crate::fonts::UI;
+    let path = "alpha/beta/gamma/delta";
+    let whole = width_of(path, 12.0, f);
+    assert_eq!(elide_start(path, 12.0, f, whole + 1.0), path);
+    let cut = elide_start(path, 12.0, f, width_of("…/gamma/delta", 12.0, f) + 1.0);
+    assert_eq!(cut, "…/gamma/delta");
+    let tight = elide_start(
+        "averyveryverylongname",
+        12.0,
+        f,
+        width_of("…name", 12.0, f) + 0.5,
+    );
+    assert_eq!(tight, "…name");
+    assert_eq!(elide_start(path, 12.0, f, 1.0), "…");
+}
+
 /// A19: finder row `i` is the `i`th result, a stale one included (drawn,
 /// inert) — the scroll-into-view places row `i` at `i * FINDER_ROW_H`, and a
 /// skipped row put it, and the highlight, one row off for every row after.

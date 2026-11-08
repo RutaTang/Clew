@@ -237,6 +237,20 @@ impl History {
         out
     }
 
+    /// The files visited, most recently first, each once: at most `n`.
+    pub fn recent_files(&self, n: usize) -> Vec<&Path> {
+        let mut out: Vec<&Path> = Vec::new();
+        for node in self.nodes.iter().rev() {
+            if out.len() >= n {
+                break;
+            }
+            if !out.contains(&node.loc.path.as_path()) {
+                out.push(&node.loc.path);
+            }
+        }
+        out
+    }
+
     pub fn can_back(&self) -> bool {
         self.current.and_then(|c| self.nodes[c].parent).is_some()
     }
