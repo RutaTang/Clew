@@ -2015,6 +2015,13 @@ fn sim_of(app: &App) -> Sim<'_> {
     iced_test::Simulator::with_size(Default::default(), WINDOW, super::view(app))
 }
 
+/// The whole window, at `size` (the app told it is that size too).
+fn sim_sized(app: &App, size: Size) -> Sim<'_> {
+    crate::app::tests::isolated_data_dir();
+    crate::fonts::load();
+    iced_test::Simulator::with_size(Default::default(), size, super::view(app))
+}
+
 /// One element on its own (default simulator size).
 fn sim_elem(elem: Element<'_, Message>) -> Sim<'_> {
     crate::app::tests::isolated_data_dir();
@@ -9112,4 +9119,134 @@ fn the_pill_says_an_answer_is_coming() {
     app.ask_view = crate::AskView::Hidden;
     app.proj.asking = false;
     assert!(!shows(&mut sim_of(&app), "Answering"));
+}
+
+/// The status bar is one line at any width and in any language: what Clew
+/// says is cut short with an ellipsis (said whole where the pointer rests),
+/// and where the chips and it do not fit, the chips are said short and it
+/// gives way. A narrow window wrapped the counts onto two lines above the
+/// bar, a French chip onto two, and cut what was said mid-word.
+#[test]
+fn the_status_bar_is_one_line_at_any_width() {
+    use crate::i18n::{Lang, with_lang};
+    let narrow = Size::new(860.0, 640.0);
+    let mut app = reader_app();
+    app.window_width = narrow.width;
+    app.window_height = narrow.height;
+    app.status = "Reading for Linux, Windows and macOS: the branches of every #[cfg] in \
+                  src/ui/chrome.rs are read for the target picked below"
+        .into();
+    // A line of the bar: its top within the bar, and one line high.
+    let one_line = |at: Rectangle| {
+        assert!(
+            at.y >= narrow.height - super::STATUSBAR_H - 1.0,
+            "above the bar: {at:?}"
+        );
+        assert!(at.height < 20.0, "more than one line: {at:?}");
+    };
+    {
+        let mut sim = sim_sized(&app, narrow);
+        let at = text_at(&mut sim, |t| t.starts_with("Reading for Linux"), 0)
+            .expect("what Clew says is shown");
+        one_line(at);
+        assert!(
+            text_at(
+                &mut sim,
+                |t| t.starts_with("Reading for Linux") && t.ends_with('…'),
+                0
+            )
+            .is_some(),
+            "cut short with an ellipsis"
+        );
+    }
+    // In French, a chip to set up servers and a long status: the chip on one
+    // line, short if it must be.
+    app.proj.setup_missing = vec![crate::app::setup::SetupServer {
+        language: "rust".into(),
+        name: "rust-analyzer".into(),
+        fetch: crate::app::setup::Fetch::Download,
+        builds: false,
+    }];
+    app.status = "x".repeat(200);
+    with_lang(Lang::Fr, || {
+        let mut sim = sim_sized(&app, narrow);
+        let chip = text_at(&mut sim, |t| t.starts_with("Configurer") || t == "1", 0)
+            .expect("the chip is shown");
+        one_line(chip);
+    });
+}
+
+/// The ⋯ menu fits the window: in one short enough for the strip to fall
+/// back to ⋯, it is raised to end above the window's foot (its last row
+/// shown, and clicked), and in one shorter than the menu, its rows scroll.
+/// Hung from its button, its last rows ran past the foot, out of reach.
+#[test]
+fn the_tools_menu_fits_a_short_window() {
+    for height in [520.0, 600.0] {
+        let size = Size::new(1280.0, height);
+        let mut app = reader_app();
+        app.window_width = size.width;
+        app.window_height = size.height;
+        assert!(!super::tools_on_strip(&app));
+        app.show_tools_menu = true;
+        let top = super::tools_menu_top(&app);
+        assert!(top >= super::TOOLBAR_H, "over the top bar: {top}");
+        let mut sim = sim_sized(&app, size);
+        let last =
+            text_at(&mut sim, |t| t == "Keyboard Shortcuts", 0).expect("the last row is drawn");
+        assert!(
+            last.y + last.height <= height,
+            "the last row runs past the foot at {height}: {last:?}"
+        );
+        assert!(
+            text_at(&mut sim, |t| t == "Explain All", 0).is_some(),
+            "and the first is there too"
+        );
+        sim.point_at(last.center());
+        let _ = sim.simulate(iced_test::simulator::click());
+        assert!(
+            sent_by(sim)
+                .iter()
+                .any(|m| matches!(m, Message::Window(WindowMsg::OpenShortcuts))),
+            "its last row clicked at {height}"
+        );
+    }
+    // Shorter than the menu: its rows scroll in what there is.
+    let mut app = reader_app();
+    app.window_height = 360.0;
+    assert!(super::tools_menu_h() > super::tools_menu_room(&app));
+}
+
+/// The open file's name keeps its room in the sheet's header: where the
+/// labelled tools would leave it less, they are said short (their glyphs,
+/// their names in their tooltips) — in French in a narrow window, the
+/// tools took the whole row and the name was cut to nothing.
+#[test]
+fn the_files_name_keeps_its_room_in_the_header() {
+    use crate::i18n::{Lang, with_lang};
+    let narrow = Size::new(860.0, 640.0);
+    let mut app = reader_app();
+    app.window_width = narrow.width;
+    app.window_height = narrow.height;
+    app.show_left_sidebar = true;
+    with_lang(Lang::Fr, || {
+        let mut sim = sim_sized(&app, narrow);
+        let name = text_at(&mut sim, |t| t == "lib.rs", 0).expect("the name is drawn");
+        assert!(name.width > 20.0, "the name cut to nothing: {name:?}");
+        assert!(
+            !shows(&mut sim, "Voyage dans le temps"),
+            "the tools are said short"
+        );
+        // Short, they are where their rect says, and still do what they do.
+        let tools = super::file_tools_rect(&app).unwrap();
+        assert!(tools.x > name.x + name.width, "{tools:?} over {name:?}");
+    });
+    // With room, they are said whole.
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.window_width = WINDOW.width;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Time Travel"));
+    let name = text_at(&mut sim, |t| t == "lib.rs", 0).unwrap();
+    assert!(name.width > 20.0);
 }

@@ -179,54 +179,15 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     )
     .gap(5.0);
 
-    // What is open, in counts — unless Clew has something to say.
-    let said: Element<'_, Message> = if !app.status.is_empty() {
-        // A status the back end wrote as it is (an error passed straight
-        // through) in the reader's language too.
-        status_text(crate::i18n::message(&app.status))
-            .wrapping(iced::widget::text::Wrapping::None)
-            .into()
-    } else if let Some(project) = app.proj.project.as_ref() {
-        let files = project.files.len();
-        let symbols = app.proj.symbol_index.len();
-        let mut counts = trn!(
-            "{count} file",
-            "{count} files",
-            files,
-            count = thousands(files)
-        );
-        if symbols > 0 {
-            counts.push_str(" · ");
-            counts.push_str(&trn!(
-                "{count} symbol",
-                "{count} symbols",
-                symbols,
-                count = thousands(symbols)
-            ));
-        }
-        status_text(counts).into()
-    } else {
-        slot()
-    };
-    // The design's gap after where the code is read from, less the padding
-    // of the button that says it — a row of its own, since the bar's own
-    // spacing (the design's gap between everything else) is one for all.
-    //
-    // What stays while it lasts — setting up, a pass's progress — comes
-    // first, and what Clew says last, taking the room they leave, cut off at
-    // its end: a long message (a path, an error) laid out first took the
-    // whole bar, the caret's place was wrapped down the window's edge a word
-    // a line, and a chip after it moved with every word said.
-    let mut said_row = row![].spacing(STATUS_GAP).align_y(iced::Center);
-    if let Some(chip) = setup_chip(app) {
-        said_row = said_row.push(chip);
-    }
-    if let Some(chip) = explain_chip(app) {
-        said_row = said_row.push(chip);
-    }
-    said_row = said_row.push(said);
+    // What stays while it lasts — setting up, a pass's progress — and what
+    // Clew says, laid out for the room there is (`status_left`).
+    let said_row = container(iced::widget::responsive(move |room| {
+        status_left(app, room.width)
+    }))
+    .width(Fill)
+    .height(Length::Fixed(STATUS_LINE_H));
     let mut bar = row![
-        row![conn_indicator, container(said_row).width(Fill).clip(true)]
+        row![conn_indicator, said_row]
             .spacing(STATUS_GAP - 8.0)
             .align_y(iced::Center)
             .width(Fill)
@@ -471,38 +432,158 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
 /// a download, an install, or leave to build the project. What the click
 /// does is said where the pointer rests. While what it set up is on its
 /// way, it says so instead.
-fn setup_chip(app: &App) -> Option<Element<'_, Message>> {
-    let quiet = |label: String| {
-        row![
-            glyph::icon(Glyph::Plug, theme::accent(), 11.0),
-            text(label).size(ts::SMALL).color(theme::accent()),
-        ]
-        .spacing(5)
-        .align_y(iced::Center)
+/// The height of what the status bar says: one line of its words.
+const STATUS_LINE_H: f32 = 20.0;
+/// The least room what Clew says is given beside the chips: below it, the
+/// chips are said short, and with less still, it is not said.
+const SAID_MIN_W: f32 = 120.0;
+/// What a chip takes beside its words: its mark, the room after it, and its
+/// padding.
+const CHIP_EXTRA_W: f32 = 11.0 + 5.0 + 16.0;
+/// What the explaining chip takes beside its counter: its mark, its bar,
+/// its ×, the room between them.
+const EXPLAIN_EXTRA_W: f32 = 11.0 + 90.0 + 19.0 + 3.0 * 5.0;
+
+/// The status bar's left, laid out for the `room` it has: what stays while
+/// it lasts — setting up, a pass's progress — and then what Clew says,
+/// one line, cut short with an ellipsis. Where the chips and what is said
+/// do not fit, the chips are said short (a mark and a count, the whole in
+/// their tooltips), and what is said gives way first: a narrow window, or a
+/// language of longer words, wrapped the counts onto two lines above the
+/// bar, wrapped a chip, and cut what was said mid-word.
+fn status_left(app: &App, room: f32) -> Element<'_, Message> {
+    let font = crate::fonts::UI;
+    let width = |s: &str| super::steady::width_of(s, ts::SMALL, font);
+    let setup = setup_label(app);
+    let explain = explain_label(app);
+    let full_chips: f32 = setup.as_ref().map_or(0.0, |(l, _)| width(l) + CHIP_EXTRA_W)
+        + explain
+            .as_ref()
+            .map_or(0.0, |(_, widest)| width(widest) + EXPLAIN_EXTRA_W);
+    let chips_n = usize::from(setup.is_some()) + usize::from(explain.is_some());
+    let short = full_chips + STATUS_GAP * chips_n as f32 + SAID_MIN_W > room;
+    let mut row = row![].spacing(STATUS_GAP).align_y(iced::Center);
+    let mut used = 0.0;
+    if let Some(chip) = setup_chip(app, short) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    if let Some(chip) = explain_chip(app, short) {
+        used += chip.1 + STATUS_GAP;
+        row = row.push(chip.0);
+    }
+    // What is open, in counts — unless Clew has something to say.
+    let said = if !app.status.is_empty() {
+        // A status the back end wrote as it is (an error passed straight
+        // through) in the reader's language too.
+        Some(crate::i18n::message(&app.status))
+    } else {
+        app.proj.project.as_ref().map(|project| {
+            let files = project.files.len();
+            let symbols = app.proj.symbol_index.len();
+            let mut counts = trn!(
+                "{count} file",
+                "{count} files",
+                files,
+                count = thousands(files)
+            );
+            if symbols > 0 {
+                counts.push_str(" · ");
+                counts.push_str(&trn!(
+                    "{count} symbol",
+                    "{count} symbols",
+                    symbols,
+                    count = thousands(symbols)
+                ));
+            }
+            counts
+        })
     };
+    let left = room - used;
+    if let Some(said) = said
+        && left >= SAID_MIN_W / 2.0
+    {
+        let shown = super::steady::cut(&said, left, ts::SMALL, font);
+        let line = status_text(shown.clone()).wrapping(iced::widget::text::Wrapping::None);
+        row = row.push(if shown == said {
+            line.into()
+        } else {
+            // Cut short: said whole where the pointer rests.
+            super::toolbar::tip_at(line, said, None, tooltip::Position::Top)
+        });
+    }
+    container(row)
+        .width(Fill)
+        .height(Fill)
+        .align_y(iced::Center)
+        .clip(true)
+        .into()
+}
+
+/// What the setting-up chip says, and whether it is a button: setting up,
+/// or the servers still to set up — `None` when there are none.
+fn setup_label(app: &App) -> Option<(String, bool)> {
     if app.setting_up() {
-        return Some(quiet(tr!("Setting up language servers…").into()).into());
+        return Some((tr!("Setting up language servers…").into(), false));
     }
     let missing = app.missing_setup();
     if missing.is_empty() {
         return None;
     }
-    let servers: Vec<crate::app::setup::SetupServer> = missing.into_iter().cloned().collect();
-    let label = trn!(
-        "Set up {count} language server",
-        "Set up {count} language servers",
-        servers.len(),
-        count = servers.len()
-    );
-    let chip = button(quiet(label))
+    Some((
+        trn!(
+            "Set up {count} language server",
+            "Set up {count} language servers",
+            missing.len(),
+            count = missing.len()
+        ),
+        true,
+    ))
+}
+
+/// The setting-up chip, `short` (its mark and count, the whole said in its
+/// tooltip) or whole, and its width.
+fn setup_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
+    let (whole, asks) = setup_label(app)?;
+    let label = if !short {
+        whole.clone()
+    } else if asks {
+        app.missing_setup().len().to_string()
+    } else {
+        "…".to_string()
+    };
+    let width = super::steady::width_of(&label, ts::SMALL, crate::fonts::UI) + CHIP_EXTRA_W;
+    let quiet = row![
+        glyph::icon(Glyph::Plug, theme::accent(), 11.0),
+        text(label)
+            .size(ts::SMALL)
+            .color(theme::accent())
+            .wrapping(iced::widget::text::Wrapping::None),
+    ]
+    .spacing(5)
+    .align_y(iced::Center);
+    if !asks {
+        let chip: Element<'_, Message> = if short {
+            super::toolbar::tip_at(quiet, whole, None, tooltip::Position::Top)
+        } else {
+            quiet.into()
+        };
+        return Some((chip, width));
+    }
+    let servers: Vec<crate::app::setup::SetupServer> =
+        app.missing_setup().into_iter().cloned().collect();
+    let tip = if short {
+        format!("{whole}\n{}", crate::app::setup::servers_line(&servers))
+    } else {
+        crate::app::setup::servers_line(&servers)
+    };
+    let chip = button(quiet)
         .style(theme::icon_button(false))
         .padding([2, 8])
         .on_press(Message::Project(ProjectMsg::SetUpMissing));
-    Some(super::toolbar::tip_at(
-        chip,
-        crate::app::setup::servers_line(&servers),
-        None,
-        tooltip::Position::Top,
+    Some((
+        super::toolbar::tip_at(chip, tip, None, tooltip::Position::Top),
+        width,
     ))
 }
 
@@ -515,27 +596,57 @@ fn setup_chip(app: &App) -> Option<Element<'_, Message>> {
 /// so the bar and the × beside it stay put as it counts. Calls that failed
 /// are not counted here: the pass sends them again, and says what it could
 /// not explain once it is done.
-fn explain_chip(app: &App) -> Option<Element<'_, Message>> {
+/// What the explaining chip's counter says, and the widest it will: `None`
+/// while nothing is being explained.
+fn explain_label(app: &App) -> Option<(String, String)> {
     if !app.proj.explain.running {
         return None;
     }
-    let (label, widest) = match app.proj.explain.progress {
+    Some(match app.proj.explain.progress {
         Some((done, total)) if total > 0 => {
             let at = |done| tr!("Explaining {done}/{total}", done = done, total = total);
-            (at(done), vec![at(total), tr!("Explaining…").to_string()])
+            let widest = [at(total), tr!("Explaining…").to_string()]
+                .into_iter()
+                .max_by(|a, b| {
+                    let w = |s: &str| super::steady::width_of(s, ts::SMALL, crate::fonts::UI);
+                    w(a).total_cmp(&w(b))
+                })
+                .unwrap_or_default();
+            (at(done), widest)
         }
         _ => (
             tr!("Explaining…").to_string(),
-            vec![tr!("Explaining…").to_string()],
+            tr!("Explaining…").to_string(),
         ),
+    })
+}
+
+/// The explaining chip, `short` (its counter alone, no word, no bar) or
+/// whole, and its width.
+fn explain_chip(app: &App, short: bool) -> Option<(Element<'_, Message>, f32)> {
+    let (whole, widest_whole) = explain_label(app)?;
+    let (label, widest) = match app.proj.explain.progress {
+        Some((done, total)) if short && total > 0 => {
+            (format!("{done}/{total}"), format!("{total}/{total}"))
+        }
+        _ if short => ("…".to_string(), "…".to_string()),
+        _ => (whole.clone(), widest_whole),
     };
-    let widest: Vec<&str> = widest.iter().map(String::as_str).collect();
+    let font = crate::fonts::UI;
     let counter = super::steady::slot(
         text(label.clone()).size(ts::SMALL).color(theme::accent()),
         &label,
-        &widest,
+        &[&widest],
         ts::SMALL,
     );
+    let mut width = super::steady::width_of(&widest, ts::SMALL, font).max(super::steady::width_of(
+        &label,
+        ts::SMALL,
+        font,
+    )) + 11.0
+        + 5.0
+        + 19.0
+        + 5.0;
     let mut chip = row![glyph::icon(Glyph::Sparkle, theme::accent(), 11.0), counter]
         .spacing(5)
         .align_y(iced::Center);
@@ -543,7 +654,9 @@ fn explain_chip(app: &App) -> Option<Element<'_, Message>> {
     // a glance instead of by parsing the counter.
     if let Some((done, total)) = app.proj.explain.progress
         && total > 0
+        && !short
     {
+        width += 90.0 + 5.0;
         chip = chip.push(super::meter::eased_bar(
             done as f32 / total as f32,
             90.0,
@@ -560,7 +673,12 @@ fn explain_chip(app: &App) -> Option<Element<'_, Message>> {
             .padding([1, 4])
             .on_press(Message::Explain(ExplainMsg::Cancel)),
     );
-    Some(chip.into())
+    let chip: Element<'_, Message> = if short {
+        super::toolbar::tip_at(chip, whole, None, tooltip::Position::Top)
+    } else {
+        chip.into()
+    };
+    Some((chip, width))
 }
 
 /// A freshness indicator for the auto-refreshed understanding: shows whether a

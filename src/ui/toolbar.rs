@@ -1037,10 +1037,32 @@ const MENU_SEP_H: f32 = 11.0;
 /// Gap between the strip and a menu it opened.
 const STRIP_MENU_GAP: f32 = 3.0;
 
+/// Room the ⋯ menu keeps from the window's foot, and from the top bar.
+const MENU_EDGE: f32 = 8.0;
+
+/// The ⋯ menu panel's height, every row of it shown.
+pub(crate) fn tools_menu_h() -> f32 {
+    2.0 * MENU_PAD
+        + TOOLS_MENU_ROWS.len() as f32 * (MENU_ROW_H + MENU_ROW_SPACING)
+        + TOOLS_MENU_SEPARATORS.len() as f32 * (MENU_SEP_H + MENU_ROW_SPACING)
+        + TOOLS_MENU_HEADINGS.len() as f32 * (MENU_HEADING_H + MENU_ROW_SPACING)
+}
+
 /// Distance of the ⋯ menu panel from the window's top edge: level with the
-/// ⋯ button it opens from.
+/// ⋯ button it opens from — or raised so it ends above the window's foot,
+/// but not over the top bar. The strip falls back to ⋯ in a short window,
+/// where the menu hung from the button ran past the foot: its last rows
+/// could not be reached.
 pub(crate) fn tools_menu_top(app: &App) -> f32 {
-    strip_tool_center(app, StripTool::More).y - ICON_BTN / 2.0
+    let at_button = strip_tool_center(app, StripTool::More).y - ICON_BTN / 2.0;
+    let ends_at_foot = app.window_height - MENU_EDGE - tools_menu_h();
+    at_button.min(ends_at_foot).max(TOOLBAR_H + MENU_EDGE)
+}
+
+/// The most the ⋯ menu panel may take: what is left under its top; past
+/// it, its rows scroll.
+pub(crate) fn tools_menu_room(app: &App) -> f32 {
+    (app.window_height - MENU_EDGE - tools_menu_top(app)).max(MENU_ROW_H)
 }
 
 /// Distance of the ⋯ menu panel from the window's right edge: just left of
@@ -1175,7 +1197,17 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         let item = menu_item(Some(glyph), label, slot(), msg);
         items.push(item);
     }
-    let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
+    let rows = Column::with_children(items).spacing(MENU_ROW_SPACING);
+    let room = tools_menu_room(app);
+    // A window shorter than the menu: its rows scroll in what there is.
+    let rows: Element<'_, Message> = if tools_menu_h() > room {
+        scrollable(rows)
+            .height(Length::Fixed(room - 2.0 * MENU_PAD))
+            .into()
+    } else {
+        rows.into()
+    };
+    let panel = container(rows)
         .width(tools_menu_w(app))
         .padding(MENU_PAD)
         // The design's ⋯ menu is rounded 11.

@@ -139,12 +139,44 @@ fn title_parts(v: &Viewer) -> (String, String) {
     }
 }
 
-/// Width of a labelled tool of the header ([`file_tool`]).
-fn file_tool_w(label: &str) -> f32 {
+/// Width of a tool of the header ([`file_tool`]): labelled, or `short`, its
+/// glyph alone.
+fn file_tool_w(label: &str, short: bool) -> f32 {
+    if short {
+        return FILE_TOOL_PAD_X * 2.0 + FILE_TOOL_GLYPH;
+    }
     FILE_TOOL_PAD_X * 2.0
         + FILE_TOOL_GLYPH
         + FILE_TOOL_SPACING
         + text_width(label, ts::BODY, FILE_TOOL_FONT)
+}
+
+/// The least room the file's name keeps beside the header's tools: its
+/// width, up to this.
+const TITLE_MIN_W: f32 = 160.0;
+
+/// Width of the header's tools, Explain through View, labelled or `short`.
+fn file_tools_w(short: bool) -> f32 {
+    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
+        .iter()
+        .map(|l| file_tool_w(l, short))
+        .sum::<f32>();
+    tools + TOOLS_RULE_W + view_button_w(short) + 5.0 * TOOLS_SPACING
+}
+
+/// Whether the header's tools are said short — their glyphs alone, their
+/// names in their tooltips: where, labelled, they would leave the file's
+/// name less than its room. In a narrow window, or a language of longer
+/// words, the labelled tools took the whole row and the name was cut to
+/// nothing.
+fn file_tools_short(app: &App) -> bool {
+    let Some(v) = app.active_viewer() else {
+        return false;
+    };
+    let (name, _) = title_parts(v);
+    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
+    let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
+    room - TITLE_GAP / 2.0 - file_tools_w(false) < title
 }
 
 /// The face of the file's name over the sheet: a title's.
@@ -167,14 +199,15 @@ const TOOLS_RULE_W: f32 = 9.0;
 const HEADER_PAD_X: f32 = 20.0;
 const HEADER_PAD_RIGHT: f32 = 16.0;
 
-/// Width of the View menu's button.
-fn view_button_w() -> f32 {
-    VIEW_PAD.x()
-        + 14.0
-        + 6.0
-        + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
-        + 6.0
-        + VIEW_CHEVRON
+/// Width of the View menu's button: its eye, its name unless `short`, and
+/// its chevron.
+fn view_button_w(short: bool) -> f32 {
+    let named = if short {
+        0.0
+    } else {
+        6.0 + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
+    };
+    VIEW_PAD.x() + 14.0 + named + 6.0 + VIEW_CHEVRON
 }
 
 /// The View menu's button: the design's 9 before what it holds, 8 after,
@@ -197,11 +230,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
         return None;
     }
     let row_left = sheet_content_left(app) + HEADER_PAD_X;
-    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
-        .iter()
-        .map(|l| file_tool_w(l))
-        .sum::<f32>();
-    let width = tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING;
+    let width = file_tools_w(file_tools_short(app));
     let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
@@ -215,7 +244,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
 /// of the file tools.
 pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let w = view_button_w();
+    let w = view_button_w(file_tools_short(app));
     Some(iced::Rectangle {
         x: tools.x + tools.width - w,
         width: w,
@@ -301,29 +330,35 @@ fn file_tool<'a>(
     on: bool,
     shortcut: Option<String>,
     msg: Message,
+    short: bool,
 ) -> Element<'a, Message> {
     let tint = if on { theme::fg() } else { theme::fg_muted() };
-    let face = button(
-        row![
-            glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
-            ts::set_in(
-                text(label)
-                    .font(FILE_TOOL_FONT)
-                    .color(tint)
-                    .wrapping(Wrapping::None),
-                HEADER_CONTROL_H,
-                ts::INTER,
-                ts::BODY,
-            ),
-        ]
+    let mut face = row![glyph::icon(glyph, tint, FILE_TOOL_GLYPH)]
         .spacing(FILE_TOOL_SPACING)
-        .align_y(iced::Center),
+        .align_y(iced::Center);
+    if !short {
+        face = face.push(ts::set_in(
+            text(label)
+                .font(FILE_TOOL_FONT)
+                .color(tint)
+                .wrapping(Wrapping::None),
+            HEADER_CONTROL_H,
+            ts::INTER,
+            ts::BODY,
+        ));
+    }
+    let face = button(
+        container(face)
+            .height(Length::Fixed(HEADER_CONTROL_H))
+            .align_y(iced::Center),
     )
     .style(theme::icon_button(on))
-    .padding([0.0, FILE_TOOL_PAD_X]);
-    let face = face.on_press(msg);
+    .padding([0.0, FILE_TOOL_PAD_X])
+    .on_press(msg);
+    // Said short, its name is in its tooltip, with its shortcut.
     match shortcut {
         Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
+        None if short => tip_at(face, label, None, tooltip::Position::Bottom),
         None => face.into(),
     }
 }
@@ -405,6 +440,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             false,
             None,
             Message::Editor(EditorMsg::ToggleMarkdownSource(app.proj.active)),
+            false,
         ));
     }
     let time_travel = time_travel_on_screen(app).is_some();
@@ -419,26 +455,36 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    let view_menu = button(
-        row![
-            glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
-            ts::set_in(
-                text(tr!("View"))
-                    .font(FILE_TOOL_FONT)
-                    .color(theme::fg_muted())
-                    .wrapping(Wrapping::None),
-                HEADER_CONTROL_H,
-                ts::INTER,
-                ts::BODY,
-            ),
-            glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON),
-        ]
+    // Said short where the file's name would otherwise lose its room.
+    let short = file_tools_short(app);
+    let mut view_face = row![glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0)]
         .spacing(6)
-        .align_y(iced::Center),
+        .align_y(iced::Center);
+    if !short {
+        view_face = view_face.push(ts::set_in(
+            text(tr!("View"))
+                .font(FILE_TOOL_FONT)
+                .color(theme::fg_muted())
+                .wrapping(Wrapping::None),
+            HEADER_CONTROL_H,
+            ts::INTER,
+            ts::BODY,
+        ));
+    }
+    let view_face = view_face.push(glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON));
+    let view_menu = button(
+        container(view_face)
+            .height(Length::Fixed(HEADER_CONTROL_H))
+            .align_y(iced::Center),
     )
     .style(theme::icon_button(app.show_view_menu))
     .padding(VIEW_PAD)
     .on_press(Message::Window(WindowMsg::ToggleViewMenu));
+    let view_menu: Element<'_, Message> = if short {
+        tip_at(view_menu, tr!("View"), None, tooltip::Position::Bottom)
+    } else {
+        view_menu.into()
+    };
     let tools = row![
         file_tool(
             Glyph::TextLines,
@@ -446,6 +492,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             false,
             None,
             Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
+            short,
         ),
         file_tool(
             Glyph::Skim,
@@ -453,6 +500,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
+            short,
         ),
         file_tool(
             Glyph::Diff,
@@ -460,6 +508,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
+            short,
         ),
         // A toggle, as Diff is: pressed again while it is on, it leaves —
         // where only the Exit at the scrubber's end did.
@@ -473,6 +522,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             } else {
                 Message::TimeTravel(TimeTravelMsg::Start { symbol: false })
             },
+            short,
         ),
         rule,
         view_menu,
