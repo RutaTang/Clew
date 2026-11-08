@@ -97,6 +97,7 @@
  "1 with output": "1 个有输出",
  "1 year ago": "1 年前",
  "192.168.1.10 or example.com": "192.168.1.10 或 example.com",
+ "<{percent}%": "<{percent}%",
  "A change is not confirmed by the host": "有 1 处更改未得到主机确认",
  "A change is not saved to the host": "有 1 处更改未保存到主机",
  "A debug session is already running": "已有调试会话在运行",

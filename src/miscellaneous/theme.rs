@@ -1001,9 +1001,25 @@ pub fn series_color(i: usize) -> Color {
     rgb(series_ink(tokens(), i))
 }
 
+/// How many colours [`series_color`] has before it comes round again.
+pub const SERIES_COLORS: usize = 8;
+
+/// The series' colours each once, in its order: a palette may give two
+/// kinds of token the same ink, and two series entries read as one.
+pub fn series_distinct() -> Vec<Color> {
+    let mut out: Vec<Color> = Vec::new();
+    for i in 0..SERIES_COLORS {
+        let c = series_color(i);
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// [`series_color`] for a given syntax palette.
 fn series_ink(t: &TokenColors, i: usize) -> u32 {
-    let series = [
+    let series: [u32; SERIES_COLORS] = [
         t.function,
         t.string,
         t.type_,

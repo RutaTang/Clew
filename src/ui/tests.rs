@@ -9644,6 +9644,92 @@ fn what_is_missing_to_make_embeddings_is_shown() {
     assert!(shows(&mut sim, program), "for the choice on the page");
 }
 
+/// The Stats page reads cleanly: the project's files counted beside its
+/// code files (the status bar counts the first); a language past the
+/// colours' series greyed as the rest, not a colour another one has; a
+/// sliver of a share as under a tenth, not 0.00%; a long language name cut,
+/// not wrapped; and room under the last row clear of the Ask pill.
+#[test]
+fn the_stats_page_reads_cleanly() {
+    let mut app = reader_app();
+    let files: Vec<crate::fs_scan::FileEntry> = (0..120)
+        .map(|i| crate::fs_scan::FileEntry {
+            abs: PathBuf::from(format!("/nonexistent/clew-ui-test/f{i}.rs")),
+            rel: format!("f{i}.rs"),
+        })
+        .collect();
+    app.proj.project.as_mut().unwrap().files = Arc::new(files);
+    let lang = |name: &str, code: usize| crate::stats::LangStat {
+        name: name.into(),
+        files: 1,
+        code,
+        comments: 0,
+        blanks: 0,
+    };
+    let mut langs: Vec<crate::stats::LangStat> = (0..9)
+        .map(|i| lang(&format!("Lang{i}"), 10_000 - i * 100))
+        .collect();
+    langs.push(lang("Visual Basic for Applications Macro Language", 2));
+    let top_files = (0..30)
+        .map(|i| clew_protocol::FileStat {
+            rel: format!("src/file{i:02}.rs"),
+            lang: "Rust".into(),
+            code: 800 - i,
+            lines: 900 - i,
+        })
+        .collect();
+    let totals = clew_protocol::Totals {
+        files: 87,
+        code: langs.iter().map(|l| l.code).sum(),
+        ..Default::default()
+    };
+    app.proj.stats.report = Some(crate::stats::StatsReport {
+        totals,
+        langs,
+        top_files,
+        ..Default::default()
+    });
+    // The colours: each its own through the series, grey after.
+    let n = crate::theme::series_distinct().len();
+    assert!(n >= 5, "a palette of a few colours at least: {n}");
+    for i in 0..n {
+        for j in i + 1..n {
+            assert_ne!(super::lang_color(i), super::lang_color(j), "{i} and {j}");
+        }
+    }
+    assert_eq!(super::lang_color(n), crate::theme::dim());
+    assert_eq!(super::lang_color(n + 1), super::lang_color(n));
+
+    let size = Size::new(WINDOW.width, 600.0);
+    let view =
+        || iced_test::Simulator::with_size(Default::default(), size, super::stats_home(&app));
+    let mut sim = view();
+    assert!(shows(&mut sim, "120"), "the project's files");
+    assert!(shows(&mut sim, "87"), "its code files");
+    assert!(!shows(&mut sim, "0.00%"));
+    assert!(shows(&mut sim, "<0.1%"), "a sliver said as one");
+    let long = text_at(&mut sim, |t| t.starts_with("Visual Basic"), 0).expect("the long name");
+    let short = text_at(&mut sim, |t| t == "Lang0", 0).expect("a short one");
+    assert!(long.height <= short.height + 0.5, "on one line: {long:?}");
+    assert!(shows(&mut sim, "…"), "cut, and said so");
+    drop(sim);
+    // Scrolled to its end: the last row stands clear of the pill's place.
+    let mut sim = view();
+    sim.point_at(Point::new(size.width / 2.0, size.height / 2.0));
+    let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+        delta: mouse::ScrollDelta::Pixels {
+            x: 0.0,
+            y: -20_000.0,
+        },
+    })]);
+    let last = text_at(&mut sim, |t| t == "src/file29.rs", 0).expect("the last row");
+    let pill_top = size.height - super::askfloat::ASK_MARGIN - super::askfloat::PILL_H;
+    assert!(
+        last.y + last.height <= pill_top,
+        "{last:?} under the pill from {pill_top}"
+    );
+}
+
 /// Actions done again and again — refresh the statistics, rebuild the
 /// semantic index, expand every branch of a tree, close the diff — are
 /// icons named by their tooltips, not words; each does what its word did.

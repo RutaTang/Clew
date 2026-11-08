@@ -57,6 +57,20 @@ pub(crate) fn elide_start(content: &str, size: f32, font: Font, room: f32) -> St
     cut
 }
 
+/// `content` cut at its end to fit `room` wide at `size` in `font`: as much
+/// of its start as fits, then an ellipsis. Whole when it fits.
+pub(crate) fn elide_end(content: &str, size: f32, font: Font, room: f32) -> String {
+    if width_of(content, size, font) <= room {
+        return content.to_string();
+    }
+    let mut cut: Vec<usize> = content.char_indices().map(|(i, _)| i).collect();
+    cut.reverse();
+    cut.into_iter()
+        .map(|at| format!("{}…", content[..at].trim_end()))
+        .find(|s| width_of(s, size, font) <= room)
+        .unwrap_or_else(|| "…".to_string())
+}
+
 /// How many widths [`width_of`] keeps before it forgets them all.
 const MEASURED_CAP: usize = 512;
 

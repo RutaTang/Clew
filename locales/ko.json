@@ -97,6 +97,7 @@
  "1 with output": "출력 있음 1개",
  "1 year ago": "1년 전",
  "192.168.1.10 or example.com": "192.168.1.10 또는 example.com",
+ "<{percent}%": "<{percent}%",
  "A change is not confirmed by the host": "변경 사항 1개가 호스트에서 확인되지 않았습니다",
  "A change is not saved to the host": "변경 사항 1개가 호스트에 저장되지 않았습니다",
  "A debug session is already running": "디버그 세션이 이미 실행 중입니다",

@@ -670,10 +670,28 @@ pub(crate) fn fmt_thousands(n: usize) -> String {
     crate::i18n::number(n as u64)
 }
 
-/// A stable, readable color for the language at rank `i` in the bar/table.
+/// A stable, readable color for the language at rank `i` in the bar/table:
+/// one of its own while the series lasts, the grey of "the rest" after —
+/// the series came round again, and two languages read as one.
 pub(crate) fn lang_color(i: usize) -> iced::Color {
-    theme::series_color(i)
+    theme::series_distinct()
+        .get(i)
+        .copied()
+        .unwrap_or_else(theme::dim)
 }
+
+/// A language's share of the code, as the table says it: to a tenth of a
+/// percent, a sliver as under that rather than as a column of 0.00%.
+pub(crate) fn share_label(share: f64) -> String {
+    if share > 0.0 && share < 0.05 {
+        tr!("<{percent}%", percent = crate::i18n::decimal(0.1, 1))
+    } else {
+        tr!("{percent}%", percent = crate::i18n::decimal(share, 1))
+    }
+}
+
+/// The width of the table's language column.
+const LANG_COL_W: f32 = 150.0;
 
 /// A small filled square used as a color key next to a language row.
 pub(crate) fn color_swatch(color: iced::Color) -> Element<'static, Message> {
@@ -716,9 +734,20 @@ pub(crate) fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Me
     if portions.is_empty() {
         return space().height(12).into();
     }
+    // The languages past the colours' series, one grey stretch together.
+    let colored = theme::series_distinct().len();
+    let rest: u16 = portions.iter().skip(colored).sum();
+    let mut stretches: Vec<(u16, iced::Color)> = portions
+        .into_iter()
+        .take(colored)
+        .enumerate()
+        .map(|(i, portion)| (portion, lang_color(i)))
+        .collect();
+    if rest > 0 {
+        stretches.push((rest, lang_color(colored)));
+    }
     let mut bar = Row::new();
-    for (i, portion) in portions.into_iter().enumerate() {
-        let color = lang_color(i);
+    for (portion, color) in stretches {
         bar = bar.push(
             container(space())
                 .width(Length::FillPortion(portion))
@@ -813,7 +842,11 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     let t = &report.totals;
     // "Code files" (tokei-counted source files), not the tree's total file count —
     // labelled explicitly so the two numbers don't read as a contradiction.
+    // The project's files beside its code files: the status bar counts the
+    // first, and the one number alone read as a contradiction of it.
+    let all_files = app.proj.project.as_ref().map_or(0, |p| p.files.len());
     let summary = row![
+        stat_cell(tr!("Files"), all_files),
         stat_cell(tr!("Code files"), t.files),
         stat_cell(tr!("Lines"), t.lines()),
         stat_cell(tr!("Code"), t.code),
@@ -836,7 +869,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     let table_header = row![
         // Match the color swatch's width so headers line up with the cells below.
         space().width(10),
-        head(tr!("programming language\u{4}Language"), 150.0),
+        head(tr!("programming language\u{4}Language"), LANG_COL_W),
         head(tr!("Files"), 70.0),
         head(tr!("Code"), 90.0),
         head(tr!("Comments"), 90.0),
@@ -851,16 +884,19 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         table = table.push(
             row![
                 color_swatch(lang_color(i)),
-                cell(l.name.clone(), 150.0, theme::fg()),
+                // A name longer than its column cut, not wrapped onto a
+                // second line that broke the table's rows.
+                cell(
+                    super::steady::elide_end(&l.name, ts::BODY, crate::fonts::UI, LANG_COL_W),
+                    LANG_COL_W,
+                    theme::fg(),
+                )
+                .wrapping(Wrapping::None),
                 cell(fmt_thousands(l.files), 70.0, theme::fg_muted()),
                 cell(fmt_thousands(l.code), 90.0, theme::fg()),
                 cell(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
                 cell(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
-                cell(
-                    tr!("{percent}%", percent = crate::i18n::decimal(share, 2)),
-                    70.0,
-                    theme::dim(),
-                ),
+                cell(share_label(share), 70.0, theme::dim()),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -918,6 +954,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         space().height(14),
         section(tr!("Largest files")),
         files,
+        // Room under the last row clear of the Ask pill floating at the
+        // window's foot, which covered it.
+        space().height(super::askfloat::PILL_H + super::askfloat::ASK_MARGIN),
     ]
     .spacing(8)
     .width(Fill)

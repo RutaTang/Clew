@@ -97,6 +97,7 @@
  "1 with output": "出力あり {n} 個",
  "1 year ago": "{n} 年前",
  "192.168.1.10 or example.com": "192.168.1.10 または example.com",
+ "<{percent}%": "<{percent}%",
  "A change is not confirmed by the host": "ホストで確認されていない変更があります",
  "A change is not saved to the host": "ホストに保存されていない変更があります",
  "A debug session is already running": "デバッグセッションはすでに実行中です",

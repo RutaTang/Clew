@@ -97,6 +97,7 @@
  "1 with output": "{n} avec sortie",
  "1 year ago": "il y a {n} an",
  "192.168.1.10 or example.com": "192.168.1.10 ou example.com",
+ "<{percent}%": "<{percent} %",
  "A change is not confirmed by the host": "{n} modification n’est pas confirmée par l’hôte",
  "A change is not saved to the host": "{n} modification n’est pas enregistrée sur l’hôte",
  "A debug session is already running": "Une session de débogage est déjà en cours",
