@@ -604,6 +604,9 @@ pub enum HoverMsg {
 #[derive(Debug, Clone)]
 pub enum NavMsg {
     SearchQueryChanged(String),
+    /// Put away a language server's list (references, definitions) and go
+    /// back to the search.
+    ListingClosed,
     /// Typing in the search sidebar paused: search, if `typed` is still the
     /// latest edit ([`SearchState::typed`](crate::app::model::SearchState)).
     SearchSettled {
@@ -2275,6 +2278,7 @@ impl NavMsg {
             | NavMsg::LocationPreviews { stamp, .. }
             | NavMsg::PreviewsStyled { stamp, .. } => Some(Origin::Stamped(stamp)),
             NavMsg::SearchQueryChanged(..)
+            | NavMsg::ListingClosed
             | NavMsg::SearchSubmitted
             | NavMsg::SearchToggle(..)
             | NavMsg::SearchIncludeChanged(..)

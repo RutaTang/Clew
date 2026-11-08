@@ -459,7 +459,11 @@ impl App {
                     count = targets.len()
                 );
                 self.proj.nav_term = self.proj.goto_term.clone();
-                self.show_locations(tr!("(definitions)"), targets, self.proj.goto_encoding)
+                let title = match self.proj.nav_term.as_deref() {
+                    Some(name) => tr!("Definitions of “{name}”", name = name),
+                    None => tr!("Definitions").to_string(),
+                };
+                self.show_locations(&title, targets, self.proj.goto_encoding)
             }
             Ok(targets) if !targets.is_empty() => {
                 let t = &targets[0];
@@ -498,7 +502,11 @@ impl App {
                     refs.len()
                 );
                 self.proj.nav_term = self.proj.refs_term.clone();
-                self.show_locations(tr!("(references)"), refs, self.proj.refs_encoding)
+                let title = match self.proj.nav_term.as_deref() {
+                    Some(name) => tr!("References to “{name}”", name = name),
+                    None => tr!("References").to_string(),
+                };
+                self.show_locations(&title, refs, self.proj.refs_encoding)
             }
             Ok(_) => {
                 self.status = tr!("No references").into();
@@ -1124,6 +1132,15 @@ impl App {
                 self.search_when_typing_pauses()
             }
             NavMsg::SearchSubmitted => self.run_search(),
+            // Back to the search, as it was asked.
+            NavMsg::ListingClosed => {
+                self.clear_search_results();
+                if self.proj.search.query.trim().is_empty() {
+                    Task::none()
+                } else {
+                    self.run_search()
+                }
+            }
             NavMsg::SearchDone { seq, result, .. } => {
                 // Only the latest submission may paint the Search sidebar.
                 if seq == self.proj.search_seq {

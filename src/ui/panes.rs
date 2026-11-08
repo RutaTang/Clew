@@ -411,9 +411,11 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
                 Some(crate::keymap::local_keys("⌘→"))
             ),
             // As wide as it reads at the last commit: scrubbing past the
-            // tenth moved the arrow before it and the slider's end.
+            // tenth moved the arrow before it and the slider's end. Counted
+            // as the slider runs, from the oldest: it counted from the
+            // newest, down as the slider went up.
             {
-                let said = format!("{} / {}", tt.idx + 1, n);
+                let said = format!("{} / {}", n - tt.idx, n);
                 super::steady::slot(
                     text(said.clone()).size(ts::SMALL).color(theme::dim()),
                     &said,

@@ -1080,12 +1080,6 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         } else {
             crate::app::count_matches(n)
         };
-        // A language server's list in place of the search's results says
-        // which list it is.
-        let msg = match &app.proj.search.listing {
-            Some(list) => format!("{list} · {msg}"),
-            None => msg,
-        };
         Some((msg, theme::dim()))
     } else if app.proj.search.query.trim().chars().count() == 1 {
         // One character, which matches most of a project, is searched for
@@ -1130,11 +1124,29 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         );
     }
 
-    let mut col = column![
-        row![input, options].spacing(6).align_y(iced::Center),
-        include,
-        exclude
-    ]
+    // A language server's list (the references to a name, its several
+    // definitions) is a list of its own, headed by what it lists, with a way
+    // back to the search: it took the search's place under the search's
+    // own empty fields, "(references)" the only word of what it was.
+    let mut col = match &app.proj.search.listing {
+        Some(list) => column![
+            row![
+                text(list.clone())
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Fill),
+                super::chrome::close_button(Message::Nav(NavMsg::ListingClosed)),
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+        ],
+        None => column![
+            row![input, options].spacing(6).align_y(iced::Center),
+            include,
+            exclude
+        ],
+    }
     .spacing(6)
     .padding(8);
     if let Some((status, color)) = status_line {

@@ -202,42 +202,18 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     // revision). Only while the session is on screen: off it, the document
     // that is.
     if let Some(tt) = time_travel_on_screen(app) {
-        let short: String = tt
-            .commits
-            .get(tt.idx)
-            .map(|c| c.sha.chars().take(8).collect())
-            .unwrap_or_default();
-        let scope = match &tt.scope {
-            TimeScope::Symbol { name, kind, .. } => format!("  ·  {} {name}", short_kind(kind)),
-            TimeScope::File => String::new(),
-        };
+        // Only what neither the banner (the commit) nor the scrubber (its
+        // place, the scope) says: the revision's length. All of it was said
+        // here a second time.
         let lines = tt
             .viewer
             .as_ref()
-            .map(|v| format!("  ·  {}", trn!("1 line", "{n} lines", v.lines.len())))
+            .map(|v| trn!("1 line", "{n} lines", v.lines.len()))
             .unwrap_or_default();
-        let said = format!(
-            "{}  ·  {short}  ·  {}/{}{}{}",
-            tr!("Time Travel"),
-            tt.idx + 1,
-            tt.commits.len(),
-            scope,
-            lines
-        );
-        // At its widest: the last revision's number, and a line count a
-        // digit longer than this revision's.
-        let lines_longer = format!("{lines}0");
-        let widest = super::steady::widest_figure(&format!(
-            "{}  ·  {short}  ·  {}/{}{}{}",
-            tr!("Time Travel"),
-            tt.commits.len(),
-            tt.commits.len(),
-            scope,
-            lines_longer,
-        ));
+        let widest = super::steady::widest_figure(&format!("{lines}0"));
         bar = bar.push(super::steady::slot(
-            status_text(said.clone()),
-            &said,
+            status_text(lines.clone()),
+            &lines,
             &[&widest],
             ts::SMALL,
         ));

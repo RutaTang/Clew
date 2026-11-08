@@ -5118,22 +5118,40 @@ fn the_empty_call_hierarchy_says_how_to_fill_it() {
     assert!(shows(&mut sim, "choose Call Hierarchy"));
 }
 
-/// A language server's list in the Search sidebar says which list it is.
+/// A language server's list in the Search sidebar is a list of its own:
+/// headed by what it lists, with a way back to the search, and not under
+/// the search's own empty fields — "(references)" was the only word of it.
 #[test]
 fn a_reference_list_is_named_in_the_search_sidebar() {
     let mut app = reader_app();
     app.proj.search.ran = true;
-    app.proj.search.listing = Some("(references)".into());
+    app.proj.search.listing = Some("References to “origin”".into());
     app.proj.search.hits = vec![crate::search::SearchHit {
         abs: PathBuf::from("/nonexistent/clew-ui-test/src/lib.rs"),
         rel: "src/lib.rs".into(),
         line: 3,
         preview: "pub fn origin()".into(),
     }];
-    assert!(shows(
-        &mut sim_elem(super::sidebar::search_tab(&app)),
-        "(references) · 1 match"
-    ));
+    let view = || sim_elem(super::sidebar::search_tab(&app));
+    assert!(shows(&mut view(), "References to “origin”"));
+    assert!(shows(&mut view(), "1 match"));
+    assert!(
+        text_at(&mut view(), |t| t.contains("Search in project"), 0).is_none(),
+        "the search's empty field under the list"
+    );
+    let sent = click_right_of(view, "References to “origin”", |m| {
+        matches!(m, Message::Nav(NavMsg::ListingClosed))
+    });
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Nav(NavMsg::ListingClosed))),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(app.proj.search.listing.is_none());
+    assert!(app.proj.search.hits.is_empty());
 }
 
 /// One letter in the search field is searched only on Enter, and the
@@ -9815,4 +9833,76 @@ fn the_diff_view_shows_places_and_numbers_not_git_headers() {
     assert!(shows(&mut sim, "3 3"));
     assert!(!shows(&mut sim, "diff --git"));
     assert!(!shows(&mut sim, "@@"));
+}
+
+/// In Time Travel the status bar says only what the banner and the scrubber
+/// do not — the revision's length — and the scrubber counts as its slider
+/// runs, from the oldest: the hash and "1/3" were said twice, and the count
+/// ran down as the slider went up.
+#[test]
+fn time_travel_says_each_thing_once_and_counts_as_its_slider_runs() {
+    let mut app = reader_app();
+    let v = app.proj.panes[0].as_ref().unwrap();
+    let (abs, rel) = (v.abs.clone(), v.rel.clone());
+    let source = "fn a() {}\nfn b() {}\n".to_string();
+    let historical = Viewer::new(
+        abs.clone(),
+        rel.clone(),
+        Some("rust"),
+        Arc::new(source.clone()),
+        crate::highlight::plain_lines(&source),
+    );
+    let commit = |sha: &str| clew_protocol::HistCommit {
+        sha: sha.into(),
+        author: "a".into(),
+        time: 0,
+        subject: "s".into(),
+        path: rel.clone(),
+    };
+    app.proj.time_travel = Some(crate::TimeTravel {
+        abs,
+        rel: rel.clone(),
+        lang: Some("rust"),
+        scope: crate::TimeScope::File,
+        commits: vec![
+            commit("cccccccc1"),
+            commit("bbbbbbbb1"),
+            commit("aaaaaaaa1"),
+        ],
+        idx: 0,
+        viewer: Some(historical),
+        scroll_y: 0.0,
+        scroll_x: 0.0,
+        caret: None,
+        focus_line: None,
+        loading: false,
+        generation: app.proj.time_gen,
+        session: 0,
+        scoped: 0,
+        why: std::collections::HashMap::new(),
+        why_loading: false,
+        why_pending: std::collections::HashSet::new(),
+        story: None,
+        story_loading: false,
+    });
+    {
+        let mut sim = sim_of(&app);
+        // The newest, at the slider's right end: the last of three.
+        assert!(shows(&mut sim, "3 / 3"));
+        let hashes = {
+            let mut n = 0;
+            while text_at(&mut sim, |t| t.contains("cccccccc"), n).is_some() {
+                n += 1;
+            }
+            n
+        };
+        assert_eq!(hashes, 1, "the commit is named once, in the banner");
+        assert!(shows(&mut sim, "2 lines"), "the revision's length");
+    }
+    app.proj.time_travel.as_mut().unwrap().idx = 2;
+    let mut sim = sim_of(&app);
+    assert!(
+        shows(&mut sim, "1 / 3"),
+        "the oldest, at the slider's left end"
+    );
 }
