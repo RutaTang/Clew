@@ -566,8 +566,10 @@ const ASK_HEADER_PAD: Padding = Padding {
 /// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
     // With its menu of sessions open, the card is as tall as it may be, so
-    // the menu is inside it.
-    ask_is_card(app) && !app.ask_sessions_menu
+    // the menu is inside it. While an answer comes in, too: fitted, the
+    // card grew up the window a line at a time, its header moving with
+    // every line said.
+    ask_is_card(app) && !app.ask_sessions_menu && !app.ask_stream_active()
 }
 
 /// The card: its header (what it is, what is being read, size, close),
@@ -639,17 +641,15 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         );
     }
     header = header.push(space().width(Fill));
-    // A new session; hidden to the pill, made large or small again, put away.
+    // A new session; made large or small again; put away to the pill. No
+    // Hide beside Close: both put it away to the pill (Close stops Clew
+    // speaking too), and Hide's chevron was the session menu's again. Esc
+    // is named on the one it does: Shrink when large, Close when a card.
     header = header
         .push(header_button(
             Glyph::Plus,
             tr!("New session"),
             Message::Ask(AskMsg::NewSession),
-        ))
-        .push(header_button(
-            Glyph::ChevronDown,
-            tr!("Hide (Esc)"),
-            Message::Ask(AskMsg::Hide),
         ))
         .push(if large {
             header_button(
@@ -662,7 +662,11 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         })
         .push(header_button(
             Glyph::Close,
-            tr!("Close Ask"),
+            if large {
+                tr!("Close Ask")
+            } else {
+                tr!("Close Ask (Esc)")
+            },
             Message::Ask(AskMsg::Close),
         ));
     let card: Element<'_, Message> = column![

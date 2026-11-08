@@ -181,10 +181,16 @@ impl App {
                 if self.proj.find.open {
                     return self.update(Message::Editor(EditorMsg::FindClosed));
                 }
+                // Ask holding the keys (its input, not the code, has them),
+                // or its menu of sessions open over it, is put away first:
+                // what the reader is looking at — a press went instead to a
+                // selection, or a jumped-to line's mark, in the code behind.
+                let ask_first =
+                    self.ask_view.is_open() && (!self.code_focused || self.ask_sessions_menu);
                 let marked = self
                     .active_viewer()
                     .is_some_and(|v| v.selection.is_some() || v.target_line.is_some());
-                if !marked && self.step_ask_down() {
+                if (ask_first || !marked) && self.step_ask_down() {
                     return Task::none();
                 }
                 if let Some(v) = self.active_viewer_mut() {

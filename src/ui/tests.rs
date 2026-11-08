@@ -8133,7 +8133,7 @@ fn the_card_names_its_session_and_lists_the_others() {
 
 /// A session named in Chinese — about an em a character — is cut to the
 /// room the card's header leaves it, as a name in Latin letters is: New,
-/// Hide, Expand and Close after it all still answer a click. In the menu,
+/// Expand and Close after it all still answer a click. In the menu,
 /// the name stops short of the × that forgets it.
 #[test]
 fn a_long_chinese_session_name_leaves_the_cards_buttons_in_reach() {
@@ -8156,11 +8156,10 @@ fn a_long_chinese_session_name_leaves_the_cards_buttons_in_reach() {
     let title = text_at(&mut sim_of(&app), |t| t.starts_with("服务器"), 0)
         .expect("the session's name on the card");
     type Sent = fn(&Message) -> bool;
-    let wanted: [(&str, Sent); 4] = [
+    let wanted: [(&str, Sent); 3] = [
         ("New session", |m| {
             matches!(m, Message::Ask(AskMsg::NewSession))
         }),
-        ("Hide", |m| matches!(m, Message::Ask(AskMsg::Hide))),
         ("Expand", |m| matches!(m, Message::Ask(AskMsg::Expand))),
         ("Close", |m| matches!(m, Message::Ask(AskMsg::Close))),
     ];
@@ -9363,4 +9362,73 @@ fn an_empty_type_map_says_why() {
     app.proj.docs.generation = 1;
     let mut sim = sim_elem(super::project_types_body(&app));
     assert!(shows(&mut sim, "No types found in this project."));
+}
+
+/// The Ask card's header has one way to put it away — Close, to the pill —
+/// not a Hide beside it that did the same, its chevron the session menu's
+/// again; and Esc is named on the one control it does.
+#[test]
+fn the_ask_header_has_one_way_away_and_names_esc_once() {
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "Hide (Esc)"));
+    }
+    // Every control along the header, right of the session's name.
+    let name = app.ask_session_title();
+    let title =
+        text_at(&mut sim_of(&app), move |t| t == name, 0).expect("the session's name on the card");
+    let place = super::ask_place(&app).unwrap();
+    let sent = (1..)
+        .map(|i| title.x + title.width + i as f32 * 4.0)
+        .take_while(|&x| x < place.left + place.width)
+        .flat_map(|x| {
+            let mut sim = sim_of(&app);
+            sim.point_at(Point::new(x, title.center_y()));
+            let _ = sim.simulate(iced_test::simulator::click());
+            sent_by(sim)
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        !sent.iter().any(|m| matches!(m, Message::Ask(AskMsg::Hide))),
+        "{sent:?}"
+    );
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Close)))
+    );
+}
+
+/// The Ask card keeps its height while an answer comes in: fitted to it,
+/// the card grew up the window a line at a time, its header moving with
+/// every line said.
+#[test]
+fn the_ask_card_holds_still_while_an_answer_comes_in() {
+    let mut app = reader_app();
+    app.ask_view = crate::AskView::Compact;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 4,
+        question: "What does it do?".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    app.proj.link.agent_stream = Some(4);
+    let _ = app.on_ask_delta(4, "It reads the file.\n\n".into());
+    // Where the card's header is drawn: its session's name.
+    let header_y = |app: &App| {
+        let name = app.ask_session_title();
+        text_at(&mut sim_of(app), move |t| t == name, 0)
+            .expect("the card's header")
+            .y
+    };
+    let before = header_y(&app);
+    for n in 0..12 {
+        let _ = app.on_ask_delta(4, format!("- line {n} of what it does\n"));
+    }
+    assert_eq!(
+        header_y(&app),
+        before,
+        "the header moved as the answer came in"
+    );
 }

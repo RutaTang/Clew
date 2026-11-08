@@ -1132,6 +1132,16 @@ impl App {
                 && turn.answer_md.trim().is_empty()
             {
                 turn.answer_md = reason;
+            } else if matches!(outcome, StreamOutcome::Stopped) {
+                // Stopped part-way: said so where it stops — it ended mid-
+                // sentence, or mid-heading, with nothing to tell it from an
+                // answer that was whole. A code block it stopped in is
+                // closed first, or the mark would be read as code.
+                if turn.answer_md.matches("```").count() % 2 == 1 {
+                    turn.answer_md.push_str("\n```");
+                }
+                turn.answer_md
+                    .push_str(&format!("\n\n*{}*", tr!("Stopped here.")));
             }
             turn.answer_md.clone()
         };

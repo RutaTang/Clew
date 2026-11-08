@@ -1064,8 +1064,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // each question to be asked once the answer coming in is done, with a
     // way to ask it now — the answer stopped for it — and to take it back.
     compose.push(compose_slot((!app.proj.ask_queue.is_empty()).then(|| {
+        // After a Stop the queue waits to be sent by hand: "Paused", which
+        // says so — "Held" did not.
         let state = if app.proj.ask_queue_held {
-            tr!("Held")
+            tr!("Paused")
         } else {
             tr!("Queued")
         };

@@ -33151,3 +33151,64 @@ fn a_remote_projects_php_classes_resolve_by_the_hosts_composer_map() {
     publish(&mut app, 3, clew_protocol::Patch::Set(None));
     assert_eq!(app.proj.remote_manifests, Default::default());
 }
+
+/// Esc puts away what the reader is looking at first: the Ask card while
+/// its input has the keys, or its menu of sessions — not a jumped-to line's
+/// mark in the code behind, which took the first press while the card
+/// stayed up. With the code holding the keys, its mark goes first.
+#[test]
+fn esc_puts_the_ask_card_away_before_a_mark_behind_it() {
+    let mut app = scanned_app("esc-ask-first");
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    dismiss_overlays(&mut app);
+    assert!(crate::ui::escape_message(&app).is_none());
+    assert!(app.active_viewer().unwrap().target_line.is_some());
+    app.ask_view = crate::AskView::Compact;
+    app.code_focused = false;
+    let _ = app.update(esc_press());
+    assert_eq!(app.ask_view, crate::AskView::Hidden, "the card went first");
+    assert!(app.active_viewer().unwrap().target_line.is_some());
+    // Its menu of sessions, open over the code that has the keys: the menu.
+    app.ask_view = crate::AskView::Compact;
+    app.ask_sessions_menu = true;
+    app.code_focused = true;
+    let _ = app.update(esc_press());
+    assert!(!app.ask_sessions_menu);
+    assert!(app.active_viewer().unwrap().target_line.is_some());
+    // The code with the keys, its mark set, the card up: the mark first.
+    let _ = app.update(esc_press());
+    assert!(app.active_viewer().unwrap().target_line.is_none());
+    assert_eq!(app.ask_view, crate::AskView::Compact);
+    let _ = app.update(esc_press());
+    assert_eq!(app.ask_view, crate::AskView::Hidden);
+}
+
+/// An answer stopped part-way says so where it stops — it ended mid-
+/// sentence, or mid-heading, like a whole one — and one stopped inside a
+/// code block has the block closed first. A whole answer is not marked.
+#[test]
+fn a_stopped_answer_says_where_it_stopped() {
+    use clew_protocol::StreamOutcome;
+    let mut app = scanned_app("ask-stopped-mark");
+    let turn = |app: &mut App, stream: u64, said: &str| {
+        app.proj.ask_turns.push(crate::app::model::AskTurn {
+            stream,
+            question: "q".into(),
+            answer_md: said.into(),
+            streaming: true,
+            ..Default::default()
+        });
+    };
+    turn(&mut app, 1, "## The total\nIt adds every");
+    let _ = app.on_ask_stream_ended(1, StreamOutcome::Stopped);
+    let md = &app.proj.ask_turns[0].answer_md;
+    assert!(md.ends_with("*Stopped here.*"), "{md}");
+    turn(&mut app, 2, "It reads:\n```rust\nfn total(");
+    let _ = app.on_ask_stream_ended(2, StreamOutcome::Stopped);
+    let md = &app.proj.ask_turns[1].answer_md;
+    assert_eq!(md.matches("```").count() % 2, 0, "the block closed: {md}");
+    assert!(md.ends_with("*Stopped here.*"), "{md}");
+    turn(&mut app, 3, "All of it.");
+    let _ = app.on_ask_stream_ended(3, StreamOutcome::Done);
+    assert_eq!(app.proj.ask_turns[2].answer_md, "All of it.");
+}
