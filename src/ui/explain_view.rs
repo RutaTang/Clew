@@ -417,6 +417,8 @@ pub(crate) fn call_flow_rows<'a>(
             // live one.
             let is_live = to_call && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::success();
+            // Wrapped, the place under the name where the margin is narrow:
+            // cut at its edge, the two read as one clipped word.
             let mut r = row![
                 text(arrow)
                     .size(ts::SMALL)
@@ -428,7 +430,7 @@ pub(crate) fn call_flow_rows<'a>(
             if is_live {
                 r = r.push(text(tr!("● live")).size(ts::CAPTION).color(live));
             }
-            let mut col = column![r].spacing(1);
+            let mut col = column![r.wrap()].spacing(1);
             if !summary.is_empty() {
                 col = col.push(one_line_desc(&summary, 64));
             }
@@ -526,12 +528,26 @@ fn reached_from_rows<'a>(
             )
         },
     );
+    // A test that calls this itself is under Tests: not again here, as the
+    // one step of a chain.
+    let chains: Vec<&Vec<usize>> = paths
+        .iter()
+        .filter(|chain| {
+            !(chain.len() == 2 && {
+                let first = g.node(chain[0]);
+                app.is_test_symbol(&first.file, &first.name)
+            })
+        })
+        .collect();
+    if chains.is_empty() && !paths.is_empty() {
+        return out;
+    }
     out.push(section_header(tr!("Reached from")));
-    if paths.is_empty() {
+    if chains.is_empty() {
         out.push(caption(tr!("No entry point reaches this").into()));
         return out;
     }
-    for chain in paths.iter() {
+    for chain in chains {
         let mut steps: Vec<Element<'a, Message>> = Vec::new();
         let last = chain.len().saturating_sub(1);
         for (i, &step) in chain.iter().enumerate() {

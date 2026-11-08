@@ -1805,66 +1805,102 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The margin's History: the ways into how this code came to be.
+/// The margin's History: the commits that made the file being read, newest
+/// first — each a way into Time Travel at it — and, under them, the ways
+/// into how the function and the line came to be. It was four links, two
+/// of them the header's own Diff and Time Travel again.
 fn margin_history(app: &App) -> Element<'_, Message> {
     let in_function = matches!(
         app.proj.explain.view,
         Some(crate::explain::Node::Function { .. })
     );
-    let row_of = |glyph: Glyph, title: &'static str, detail: &'static str, msg: Message| {
-        button(
-            row![
-                container(glyph::icon(glyph, theme::fg_muted(), 15.0)).padding([2, 0]),
-                column![
-                    text(title).size(ts::BASE).color(theme::fg()),
-                    text(detail).size(ts::SMALL).color(theme::dim()),
-                ]
-                .spacing(2),
-            ]
-            .spacing(10)
-            .align_y(iced::alignment::Vertical::Top),
-        )
-        .style(theme::menu_row)
-        .width(Fill)
-        .padding([8, 10])
-        .on_press(msg)
+    let note = |s: String| -> Element<'_, Message> {
+        container(text(s).size(ts::SMALL).color(theme::dim()))
+            .padding([6, 10])
+            .into()
     };
     let mut rows = Column::new().spacing(2);
+    let file = app.active_viewer().map(|v| &v.abs);
+    match app
+        .proj
+        .margin_history
+        .as_ref()
+        .filter(|(abs, _)| Some(abs) == file)
+        .map(|(_, got)| got)
+    {
+        None | Some(None) => rows = rows.push(note(tr!("Reading the file's history…").into())),
+        Some(Some(Err(e))) => rows = rows.push(note(crate::i18n::message(e))),
+        Some(Some(Ok(commits))) if commits.is_empty() => {
+            rows = rows.push(note(tr!("No commit has touched this file yet.").into()))
+        }
+        Some(Some(Ok(commits))) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for c in commits {
+                let short: String = c.sha.chars().take(7).collect();
+                rows = rows.push(
+                    button(
+                        column![
+                            text(c.subject.clone())
+                                .size(ts::BODY)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::WordOrGlyph),
+                            text(format!(
+                                "{short}  ·  {}  ·  {}",
+                                c.author,
+                                crate::i18n::ago(c.time, now)
+                            ))
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(Wrapping::WordOrGlyph),
+                        ]
+                        .spacing(2),
+                    )
+                    .style(theme::menu_row)
+                    .width(Fill)
+                    .padding([6, 10])
+                    .on_press(Message::TimeTravel(TimeTravelMsg::StartAt {
+                        sha: c.sha.clone(),
+                    })),
+                );
+            }
+        }
+    }
+    // What only this tab offers: the function's own history, and why the
+    // line under the caret is there.
+    let link = |title: &'static str, msg: Message| {
+        button(text(title).size(ts::SMALL).color(theme::accent()))
+            .style(theme::icon_button(false))
+            .padding([3, 6])
+            .on_press(msg)
+    };
+    let mut links = row![].spacing(6);
     if in_function {
-        rows = rows.push(row_of(
-            Glyph::TimeTravel,
+        links = links.push(link(
             tr!("This function through time"),
-            tr!("Step through its history, commit by commit."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
-    rows = rows
-        .push(row_of(
-            Glyph::TimeTravel,
-            tr!("This file through time"),
-            tr!("Step back through the whole file's commits."),
-            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
-        ))
-        .push(row_of(
-            Glyph::Info,
-            tr!("Why is this line here?"),
-            tr!("The commits that shaped the current line, explained."),
-            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
-        ))
-        .push(row_of(
-            Glyph::Diff,
-            tr!("Changes since the last commit"),
-            tr!("See what's new in this file."),
-            Message::Editor(EditorMsg::ToggleDiff),
-        ));
-    container(rows)
-        .padding(Padding {
-            top: 2.0,
-            right: 8.0,
-            bottom: 8.0,
-            left: 8.0,
-        })
-        .into()
+    links = links.push(link(
+        tr!("Why is this line here?"),
+        Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+    ));
+    scrollable(
+        column![rows, container(links.wrap()).padding([4, 4])]
+            .spacing(6)
+            .padding(Padding {
+                top: 2.0,
+                right: 8.0,
+                bottom: 8.0,
+                left: 8.0,
+            }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
+    .into()
 }
 
 /// A 1px horizontal divider spanning the panel width.

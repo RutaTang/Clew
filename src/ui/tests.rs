@@ -5641,6 +5641,118 @@ fn an_unchecked_summary_is_marked_in_the_outline_and_the_call_flow() {
     assert!(shows(&mut sim, &marked), "CALLS");
 }
 
+/// The margin's History lists the file's commits (subject, then who and
+/// when), each one opening Time Travel at it; and it says so while they
+/// come, and when there are none — not links that do what the sheet's
+/// header buttons already do.
+#[test]
+fn the_margin_history_lists_the_files_commits() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::History;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Reading the file's history"));
+    assert!(shows(&mut sim, "Why is this line here?"));
+    assert!(!shows(&mut sim, "Changes since the last commit"));
+    assert!(!shows(&mut sim, "This file through time"));
+    drop(sim);
+
+    app.proj.margin_history = Some((abs.clone(), Some(Ok(vec![]))));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "No commit has touched this file yet."));
+    drop(sim);
+
+    let commit = |sha: &str, subject: &str| crate::git::HistCommit {
+        sha: sha.into(),
+        author: "Ada".into(),
+        time: 0,
+        subject: subject.into(),
+        path: "src/lib.rs".into(),
+    };
+    app.proj.margin_history = Some((
+        abs.clone(),
+        Some(Ok(vec![
+            commit("bbbbbbb2222", "Read lines lazily"),
+            commit("aaaaaaa1111", "First reader"),
+        ])),
+    ));
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Read lines lazily"));
+    assert!(
+        shows(&mut sim, "aaaaaaa  ·  Ada"),
+        "its short sha and author"
+    );
+    drop(sim);
+    let sent = click(sim_of(&app), "First reader");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::TimeTravel(crate::TimeTravelMsg::StartAt { sha }) if sha == "aaaaaaa1111"
+        )),
+        "{sent:?}"
+    );
+
+    // Another file's commits are not this one's.
+    app.proj.margin_history = Some((
+        abs.with_file_name("other.rs"),
+        Some(Ok(vec![commit("ccccccc3333", "Elsewhere")])),
+    ));
+    let mut sim = sim_of(&app);
+    assert!(!shows(&mut sim, "Elsewhere"));
+    assert!(shows(&mut sim, "Reading the file's history"));
+}
+
+/// A call row in a narrow margin puts its place under the name instead of
+/// running it off the edge, where name and place read as one clipped word.
+#[test]
+fn a_call_row_wraps_its_place_in_a_narrow_margin() {
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    let call =
+        |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
+            name: name.into(),
+            kind: "function".into(),
+            file: "src/lib.rs".into(),
+            line: 12,
+            callers,
+            callees,
+        };
+    app.proj.project_calls.graph = std::sync::Arc::new(
+        crate::projectcalls::ProjectCallGraph::from_wire(
+            clew_protocol::CallGraph {
+                nodes: vec![
+                    call("work", vec![1], vec![]),
+                    call("read_lines_lazily", vec![], vec![0]),
+                ],
+            },
+            |rel| root.join(rel),
+        )
+        .expect("a call graph"),
+    );
+    let node = crate::explain::Node::Function {
+        file: lib,
+        name: "work".into(),
+        ordinal: 0,
+    };
+    const NARROW: f32 = 160.0;
+    let mut sim = sim_elem(
+        container(iced::widget::Column::with_children(super::call_flow_rows(
+            &app, &node,
+        )))
+        .width(NARROW)
+        .into(),
+    );
+    let name = text_at(&mut sim, |t| t == "read_lines_lazily", 0).expect("the caller");
+    let place = text_at(&mut sim, |t| t == "src/lib.rs", 0).expect("its place");
+    assert!(
+        place.x + place.width <= NARROW + 0.5,
+        "inside the margin: {place:?}"
+    );
+    assert!(place.y > name.y, "under the name: {name:?} {place:?}");
+}
+
 /// The REACHED FROM section: the chain from an entry point down to the
 /// explained function, entry first, each step a button; an entry point says
 /// so instead; a function no entry reaches says that; and a project without
@@ -5655,7 +5767,8 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
         name: name.into(),
         ordinal: 0,
     };
-    // main → run → work; test_work → work; alone is called by nobody.
+    // main → run → work; test_work → work, tested; alone is called by
+    // nobody.
     let call =
         |name: &str, callers: Vec<usize>, callees: Vec<usize>| clew_protocol::CallGraphNode {
             name: name.into(),
@@ -5672,8 +5785,9 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
                     call("main", vec![], vec![1]),
                     call("run", vec![0], vec![2]),
                     call("work", vec![1, 3], vec![]),
-                    call("test_work", vec![], vec![2]),
+                    call("test_work", vec![], vec![2, 5]),
                     call("alone", vec![], vec![]),
+                    call("tested", vec![3], vec![]),
                 ],
             },
             |rel| root.join(rel),
@@ -5710,6 +5824,7 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
             symbol("work", 3, None, false),
             symbol("test_work", 4, None, true),
             symbol("alone", 5, None, false),
+            symbol("tested", 6, None, false),
         ]),
     );
     app.proj.symbol_index_rev += 1;
@@ -5719,10 +5834,21 @@ fn the_call_flow_shows_how_an_entry_point_reaches_the_function() {
     assert!(shows(&mut sim, "REACHED FROM"));
     assert!(shows(&mut sim, "main"), "the entry heads the chain");
     assert!(shows(&mut sim, "run"), "the step between");
+    assert!(shows(&mut sim, "test_work"), "the test that calls it");
     assert!(
-        shows(&mut sim, "test_work"),
-        "a test is a chain of its own, after the main"
+        text_at(&mut sim, |t| t.contains("test_work"), 1).is_none(),
+        "a test that calls it itself is said once, under TESTS: not again \
+         as a one-step chain"
     );
+    drop(sim);
+    // Reached by a test alone: TESTS says so, and there is no chain to
+    // show — nor a claim that nothing reaches it.
+    let mut sim = sim_elem(
+        iced::widget::Column::with_children(super::call_flow_rows(&app, &node("tested"))).into(),
+    );
+    assert!(shows(&mut sim, "test_work"));
+    assert!(!shows(&mut sim, "REACHED FROM"));
+    assert!(!shows(&mut sim, "No entry point reaches this"));
     drop(sim);
     let mut sim = sim_elem(
         iced::widget::Column::with_children(super::call_flow_rows(&app, &node("main"))).into(),

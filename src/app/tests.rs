@@ -13790,6 +13790,135 @@ fn why_asks_a_commit_s_diff_under_the_file_s_path_in_it() {
     );
 }
 
+/// The margin's History lists the file's commits, asked for when it shows
+/// (and anew when it is shown again), and a commit picked there opens Time
+/// Travel on that commit, not on the newest; a plain start after it still
+/// lands on the newest.
+#[test]
+fn the_margin_history_lists_commits_and_opens_time_travel_on_the_one_picked() {
+    let mut app = scanned_app("margin-history");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let git = |args: &[&str]| {
+        let done = std::process::Command::new("git")
+            .args(["-c", "user.name=clew", "-c", "user.email=clew@test"])
+            .args(args)
+            .current_dir(&root)
+            .output()
+            .expect("git runs");
+        assert!(done.status.success(), "git {args:?}: {done:?}");
+    };
+    git(&["init", "-q"]);
+    for (i, subject) in ["one", "two", "three"].iter().enumerate() {
+        std::fs::write(
+            root.join("src/lib.rs"),
+            format!("pub fn f() -> u8 {{ {i} }}\n"),
+        )
+        .unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", subject]);
+    }
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let abs = root.join("src/lib.rs");
+    // Not shown: nothing is asked.
+    let quiet = app.update(Message::Window(WindowMsg::MarginTabPicked(
+        crate::MarginTab::Notes,
+    )));
+    assert!(
+        run_task(quiet)
+            .iter()
+            .all(|m| !matches!(m, Message::TimeTravel(TimeTravelMsg::MarginHistory { .. })))
+    );
+    assert!(app.proj.margin_history.is_none());
+
+    let show = |app: &mut App| {
+        let asked = app.update(Message::Window(WindowMsg::MarginTabPicked(
+            crate::MarginTab::History,
+        )));
+        let landed: Vec<_> = run_task(asked)
+            .into_iter()
+            .filter(|m| matches!(m, Message::TimeTravel(TimeTravelMsg::MarginHistory { .. })))
+            .collect();
+        assert_eq!(landed.len(), 1, "one request for the file on show");
+        for m in landed {
+            let _ = app.update(m);
+        }
+    };
+    show(&mut app);
+    let subjects = |app: &App| -> Vec<String> {
+        match &app.proj.margin_history {
+            Some((asked, Some(Ok(commits)))) if *asked == abs => {
+                commits.iter().map(|c| c.subject.clone()).collect()
+            }
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(subjects(&app), ["three", "two", "one"]);
+    // Shown and unchanged: not asked again on every update.
+    let again = app.update(Message::Window(WindowMsg::MarginTabPicked(
+        crate::MarginTab::History,
+    )));
+    assert!(
+        run_task(again)
+            .iter()
+            .all(|m| !matches!(m, Message::TimeTravel(TimeTravelMsg::MarginHistory { .. })))
+    );
+    // A commit made while another page showed is there once History shows
+    // again.
+    let _ = app.update(Message::Window(WindowMsg::MarginTabPicked(
+        crate::MarginTab::Calls,
+    )));
+    std::fs::write(root.join("src/lib.rs"), "pub fn f() -> u8 { 9 }\n").unwrap();
+    git(&["commit", "-q", "-a", "-m", "four"]);
+    show(&mut app);
+    assert_eq!(subjects(&app), ["four", "three", "two", "one"]);
+
+    // "two" picked: Time Travel opens on it.
+    let two = match &app.proj.margin_history {
+        Some((_, Some(Ok(commits)))) => commits[2].sha.clone(),
+        _ => unreachable!(),
+    };
+    let goto = |app: &mut App, start: Message| -> usize {
+        let started = app.update(start);
+        let ready = run_task(started)
+            .into_iter()
+            .find(|m| matches!(m, Message::TimeTravel(TimeTravelMsg::Ready { .. })))
+            .expect("the history comes");
+        run_task(app.update(ready))
+            .into_iter()
+            .find_map(|m| match m {
+                Message::TimeTravel(TimeTravelMsg::Goto(i)) => Some(i),
+                _ => None,
+            })
+            .expect("the session goes to a commit")
+    };
+    let at = goto(
+        &mut app,
+        Message::TimeTravel(TimeTravelMsg::StartAt { sha: two.clone() }),
+    );
+    let tt = app.proj.time_travel.as_ref().expect("a session");
+    assert_eq!(tt.commits[at].sha, two);
+    assert_eq!(tt.commits[at].subject, "two");
+    // The pick is spent: a plain start goes to the newest.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Exit));
+    assert_eq!(
+        goto(
+            &mut app,
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: false })
+        ),
+        0
+    );
+    // And one that never came to be asked does not outlive a plain start.
+    app.proj.time_travel_at = Some(two);
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Exit));
+    assert_eq!(
+        goto(
+            &mut app,
+            Message::TimeTravel(TimeTravelMsg::Start { symbol: false })
+        ),
+        0
+    );
+}
+
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.
@@ -21601,6 +21730,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             session: 0,
             result: Err("stale".into()),
+        }),
+        Message::TimeTravel(TimeTravelMsg::MarginHistory {
+            stamp: s(),
+            abs: PathBuf::from("/stale/history.rs"),
+            result: Ok(vec![]),
         }),
         Message::Debug(DebugMsg::DapStarted {
             stamp: s(),

@@ -1508,6 +1508,15 @@ impl LanguagesMsg {
 /// Git history in the reader: time travel and "Why is this here?".
 #[derive(Debug, Clone)]
 pub enum TimeTravelMsg {
+    /// Step back through the file's history from the commit `sha` (the
+    /// margin's History, a commit picked).
+    StartAt { sha: String },
+    /// The commits that touched `abs`, for the margin's History.
+    MarginHistory {
+        stamp: Stamp,
+        abs: PathBuf,
+        result: Result<Vec<crate::git::HistCommit>, String>,
+    },
     /// Explain why the right-clicked line (or selection) exists, from git blame.
     WhyIsThisHere,
     /// The "why is this here?" answer finished generating.
@@ -2593,8 +2602,10 @@ impl TimeTravelMsg {
             | TimeTravelMsg::Ready { stamp, .. }
             | TimeTravelMsg::Step { stamp, .. }
             | TimeTravelMsg::WhyDone { stamp, .. }
-            | TimeTravelMsg::StoryDone { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | TimeTravelMsg::StoryDone { stamp, .. }
+            | TimeTravelMsg::MarginHistory { stamp, .. } => Some(Origin::Stamped(stamp)),
             TimeTravelMsg::WhyIsThisHere
+            | TimeTravelMsg::StartAt { .. }
             | TimeTravelMsg::BlameWhyClose
             | TimeTravelMsg::Start { .. }
             | TimeTravelMsg::Goto(..)

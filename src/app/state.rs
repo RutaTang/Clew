@@ -1602,6 +1602,9 @@ impl<V> std::ops::Deref for PerFile<V> {
     }
 }
 
+/// A file's commits as git read them (newest first), or why it could not.
+pub type FileHistory = Result<Vec<crate::git::HistCommit>, String>;
+
 /// Everything the window holds for the OPEN project: the project itself, what
 /// was derived from it, what the reader built up in it, the surfaces that
 /// show it, and the work in flight for it.
@@ -1823,6 +1826,12 @@ pub struct ProjectSession {
     pub insight: Option<Insight>,
     /// The active git time-travel session, if any.
     pub time_travel: Option<TimeTravel>,
+    /// The commit the next Time Travel session lands on (the margin's
+    /// History, a commit picked), and not the newest.
+    pub time_travel_at: Option<String>,
+    /// The commits that touched the file being read, for the margin's
+    /// History: its file, and them once they come.
+    pub margin_history: Option<(PathBuf, Option<FileHistory>)>,
     /// Numbers the time-travel requests — each start (`time_start`), each
     /// revision a session asks for (`TimeTravel::generation`) — so no two
     /// share one. A reply applies only while its own request is still the
@@ -2218,6 +2227,8 @@ impl Default for ProjectSession {
             blame_why: Default::default(),
             insight: Default::default(),
             time_travel: Default::default(),
+            time_travel_at: None,
+            margin_history: None,
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),

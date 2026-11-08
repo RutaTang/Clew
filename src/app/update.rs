@@ -57,6 +57,8 @@ impl App {
         self.note_status();
         // The question's field holds the question, however it was set.
         self.sync_ask_editor();
+        // The margin's History lists the commits of the file being read.
+        let task = Task::batch([task, self.sync_margin_history()]);
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {
