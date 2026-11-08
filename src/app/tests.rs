@@ -88,8 +88,17 @@ fn dart_fn_detail_extracts_full_body_not_duplicated_header() {
 /// the mermaid renderer's font cache (`XDG_CACHE_HOME`) into the directory.
 pub(crate) fn isolated_data_dir() -> &'static Path {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    if let Some(dir) = DIR.get() {
+        return dir;
+    }
+    // The environment is taken before the directory is made, never while it
+    // is: a test holding the environment ([`EnvVars`]) that comes here would
+    // otherwise wait for another thread's making, which waits for the
+    // environment — and both, and every test behind them, hang. Taken first,
+    // whoever is making it holds the environment, and the holder that comes
+    // here makes it itself.
+    let _env = clew_core::env_lock();
     DIR.get_or_init(|| {
-        let _env = clew_core::env_lock();
         let dir = clew_core::testutil::TempDir::new("app-test-data").until_exit();
         // SAFETY: env mutation serialized by env_lock.
         unsafe { std::env::set_var("CLEW_DATA_DIR", &dir) };
@@ -11793,7 +11802,13 @@ impl EnvVars {
     pub(crate) fn new() -> EnvVars {
         let write = env_write();
         EnvVars {
-            vars: clew_core::testutil::EnvVars::new(),
+            vars: {
+                // Primed first, as `env_lock` does: a variable set here is
+                // not then replaced by the suite's own when the test makes
+                // its first `App`.
+                isolated_data_dir();
+                clew_core::testutil::EnvVars::new()
+            },
             _write: write,
         }
     }
