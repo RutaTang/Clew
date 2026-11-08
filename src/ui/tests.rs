@@ -11074,7 +11074,20 @@ fn the_search_fields_words_end_in_an_ellipsis_when_cut() {
         shown.expect("the search field says what it searches")
     };
     assert_eq!(shown(WINDOW.width), label, "whole, where it fits");
-    let narrow = shown(640.0);
+    // A window whose field is too narrow for the words — found from the
+    // field's own geometry, which is the platform's: the macOS bar has its
+    // window buttons at the left and nothing at the right, and at 640 its
+    // field still held the whole sentence.
+    let narrow_window = (300..=WINDOW.width as u32)
+        .step_by(10)
+        .map(|w| w as f32)
+        .find(|&w| {
+            let mut app = reader_app();
+            app.window_width = w;
+            super::toolbar::search_field_rect(&app).width >= 200.0
+        })
+        .expect("a window with a 200 px field");
+    let narrow = shown(narrow_window);
     assert!(narrow.ends_with('…'), "{narrow:?}");
     assert!(
         label.starts_with(narrow.trim_end_matches('…')),
