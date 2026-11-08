@@ -20278,11 +20278,9 @@ type LateFlow = (&'static str, Box<dyn Fn(&mut App) -> Message>);
 #[test]
 fn every_llm_flow_reports_a_missing_key_the_same_way() {
     let mut app = scanned_app("llm-gate");
-    // The wording names the config file under `CLEW_DATA_DIR`, which another
-    // test may point elsewhere for a moment (`data_dir_override`, under this
-    // lock): hold it so the expected text and the reported one agree.
-    let _env = env_lock();
-    let expected = format!("Add an API key in Settings ({})", llm::config_hint());
+    // Settings, which it opens, and not the file's whole path: that filled
+    // the status line.
+    let expected = "Add an API key in Settings";
     for (what, msg) in [
         ("Explain All", Message::Explain(ExplainMsg::Project)),
         ("the overview", Message::Overview(OverviewMsg::Generate)),

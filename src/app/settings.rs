@@ -32,10 +32,9 @@ impl App {
         match self.llm_config() {
             Some(cfg) => Ok(cfg),
             None => {
-                self.status = tr!(
-                    "Add an API key in Settings ({path})",
-                    path = llm::config_hint()
-                );
+                // Not where the key is kept: Settings, opened here, is where
+                // it is added (the file's whole path filled the status line).
+                self.status = tr!("Add an API key in Settings").into();
                 Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
                     SettingsPage::LanguageModel,
                 ))))

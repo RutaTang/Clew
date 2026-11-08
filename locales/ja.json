@@ -132,7 +132,7 @@
  "Add agent": "エージェントを追加",
  "Add an ACP agent": "ACP エージェントを追加",
  "Add an API Key…": "API キーを追加…",
- "Add an API key in Settings ({path})": "設定で API キーを追加してください（{path}）",
+ "Add an API key in Settings": "設定で API キーを追加してください",
  "Add an MCP server": "MCP サーバーを追加",
  "Add server": "サーバーを追加",
  "Add to Ask": "質問に追加",
