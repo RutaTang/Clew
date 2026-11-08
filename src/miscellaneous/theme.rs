@@ -172,10 +172,10 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x4b48c9),
     scrollbar: rgb(0xa1a1aa),
-    success: rgb(0x16a34a),
+    success: rgb(0x117f3a),
     warning: rgb(0xb45309),
-    danger: rgb(0xdc2626),
-    info: rgb(0x0284c7),
+    danger: rgb(0xd52222),
+    info: rgb(0x0273ae),
     find: rgb(0xf59e0b),
     selection: rgb(0xdcdbfb),
 };
@@ -220,7 +220,7 @@ const ONE_DARK_PAL: Palette = Palette {
     scrollbar: rgb(0x8a94a6),
     success: rgb(0x98c379),
     warning: rgb(0xe5c07b),
-    danger: rgb(0xe06c75),
+    danger: rgb(0xe2747d),
     info: rgb(0x56b6c2),
     find: rgb(0xe5c07b),
     selection: rgb(0x2d3a55),
@@ -254,7 +254,7 @@ const ONE_LIGHT_PAL: Palette = Palette {
     fg_bright: rgb(0x1b1d23),
     fg_muted: rgb(0x6b7280),
     dim: rgb(0x9ca3af),
-    accent: rgb(0x4078f2),
+    accent: rgb(0x1f60f0),
     warn: rgb(0xd6372c),
     border: rgb(0xcfd3d9),
     hairline: rgb(0xe6e8ec),
@@ -262,10 +262,10 @@ const ONE_LIGHT_PAL: Palette = Palette {
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x3467d6),
     scrollbar: rgb(0x9096a1),
-    success: rgb(0x50a14f),
-    warning: rgb(0xb26f00),
-    danger: rgb(0xe45649),
-    info: rgb(0x0184bc),
+    success: rgb(0x3c783b),
+    warning: rgb(0x985f00),
+    danger: rgb(0xcc2d1e),
+    info: rgb(0x0172a3),
     find: rgb(0xf5b400),
     selection: rgb(0xbcd8fb),
 };
@@ -310,7 +310,7 @@ const GRUVBOX_DARK_PAL: Palette = Palette {
     scrollbar: rgb(0x7c6f64),
     success: rgb(0xb8bb26),
     warning: rgb(0xfabd2f),
-    danger: rgb(0xfb4934),
+    danger: rgb(0xfc6b5a),
     info: rgb(0x8ec07c),
     find: rgb(0xfabd2f),
     selection: rgb(0x504945),
@@ -352,10 +352,10 @@ const GRUVBOX_LIGHT_PAL: Palette = Palette {
     on_accent: rgb(0xfbf1c7),
     accent_hover: rgb(0x05505f),
     scrollbar: rgb(0xa89984),
-    success: rgb(0x79740e),
-    warning: rgb(0xb57614),
+    success: rgb(0x64600c),
+    warning: rgb(0x82550e),
     danger: rgb(0x9d0006),
-    info: rgb(0x427b58),
+    info: rgb(0x38694b),
     find: rgb(0xd79921),
     selection: rgb(0xd5c4a1),
 };
@@ -392,7 +392,7 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     fg_bright: rgb(0x2e2a20),
     fg_muted: rgb(0x857a60),
     dim: rgb(0xa99f86),
-    accent: rgb(0x3b6ea5),
+    accent: rgb(0x37669a),
     warn: rgb(0xa03e3e),
     border: rgb(0xd8ccae),
     hairline: rgb(0xe4dabf),
@@ -401,9 +401,9 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     accent_hover: rgb(0x305d8c),
     scrollbar: rgb(0xb3a988),
     success: rgb(0x4c6b3c),
-    warning: rgb(0xa5762f),
+    warning: rgb(0x815c25),
     danger: rgb(0xa03e3e),
-    info: rgb(0x4a7a70),
+    info: rgb(0x416c63),
     find: rgb(0xd9a441),
     selection: rgb(0xe4d7ad),
 };
@@ -2239,6 +2239,49 @@ pub fn secondary_button(_theme: &Theme, status: button::Status) -> button::Style
 
 #[cfg(test)]
 mod tests {
+    /// WCAG's contrast ratio of two colours.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let lum = |c: Color| {
+            let f = |x: f32| {
+                if x <= 0.03928 {
+                    x / 12.92
+                } else {
+                    ((x + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The colours words are written in where they say something — a test's
+    /// name, a warning, an error, a link — read at 4.5:1 or more on either
+    /// of a theme's surfaces, in every theme: the light theme's green test
+    /// names were about 3:1.
+    #[test]
+    fn every_themes_meaningful_colours_read_on_its_surfaces() {
+        for theme in THEMES {
+            let p = &theme.palette;
+            for (what, ink) in [
+                ("success", p.success),
+                ("warning", p.warning),
+                ("danger", p.danger),
+                ("info", p.info),
+                ("accent", p.accent),
+            ] {
+                for (surface, bg) in [("bg", p.bg), ("bg_panel", p.bg_panel)] {
+                    let ratio = contrast(ink, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "{}: {what} on {surface} is {ratio:.2}:1",
+                        theme.id
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// What Clew writes — explanations, answers, notes — is set in the
