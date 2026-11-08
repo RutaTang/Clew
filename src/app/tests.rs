@@ -33531,3 +33531,48 @@ fn the_question_field_and_the_question_are_one() {
     let _ = app.update(Message::Noop);
     assert!(app.proj.ask_editor.text().is_empty());
 }
+
+/// The tour gives the reader's place back when it ends: the file and line
+/// being read, the trail to them — none of the tour's files in it — and
+/// the page that was over them. It left the statistics up, and its files
+/// open and in the trail.
+#[test]
+fn the_tour_gives_the_readers_place_back() {
+    let mut app = scanned_app("tour-gives-place-back");
+    open_synchronously(&mut app, "notes.txt", None);
+    open_synchronously(&mut app, "src/lib.rs", Some(3));
+    dismiss_overlays(&mut app);
+    let trail = |app: &App| app.proj.history.flatten().len();
+    let before = trail(&app);
+    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    // As the tour goes: a page, another file and its visit.
+    let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
+    open_synchronously(&mut app, "notes.txt", None);
+    assert!(trail(&app) > before);
+    let _ = app.update(Message::Tutorial(TutorialMsg::Exit));
+    assert!(!app.proj.stats.showing, "the tour's page stayed");
+    assert_eq!(trail(&app), before, "the tour's files stayed in the trail");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    land_active_load(&mut app, root.join("src/lib.rs"), Some(3));
+    assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
+}
+
+/// The tour points at the ⋯ menu's rows a group at a time, as the menu
+/// groups them — every row in one — not a step a row.
+#[test]
+fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
+    use crate::app::tutorial::{Anchor, steps};
+    let app = scanned_app("tour-menu-groups");
+    let all = steps(&app);
+    let menu: Vec<(usize, usize)> = all
+        .iter()
+        .filter_map(|s| match s.anchor {
+            Anchor::ToolbarMenu { first, count } => Some((first, count)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(menu.len(), 3, "{menu:?}");
+    let covered: usize = menu.iter().map(|(_, n)| n).sum();
+    assert_eq!(covered, crate::ui::TOOLS_MENU_ROWS.len());
+    assert!(all.len() <= 34, "{} steps", all.len());
+}

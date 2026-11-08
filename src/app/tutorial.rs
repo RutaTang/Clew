@@ -32,10 +32,11 @@ pub(crate) fn closes_tools_menu(message: &Message) -> bool {
 }
 
 /// The spotlight anchor for one row of the ⋯ menu.
-fn menu_row(row: ToolsRow) -> Anchor {
+/// The ⋯ menu's rows from `first` to `last`, as one place to point at.
+fn menu_rows(first: ToolsRow, last: ToolsRow) -> Anchor {
     Anchor::ToolbarMenu {
-        first: row.index(),
-        count: 1,
+        first: first.index(),
+        count: last.index() + 1 - first.index(),
     }
 }
 
@@ -343,55 +344,22 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
             tr!("Everything else lives here."),
             Anchor::Strip(StripTool::More),
         ),
+        // The menu's rows a group at a time, as the menu groups them: one
+        // step a row made the tour forty-one steps long.
         TutStep::new(
-            tr!("Explain All"),
-            tr!("AI summaries for every function, file and folder. Needs an API key."),
-            menu_row(ToolsRow::ExplainAll),
+            tr!("Understand the project"),
+            tr!("Explain All writes a note for every function, file and folder (it needs an API key); walkthroughs guide you through the code; the glossary defines the project's own terms."),
+            menu_rows(ToolsRow::ExplainAll, ToolsRow::Glossary),
         ),
         TutStep::new(
-            tr!("Walkthrough"),
-            tr!("Guided tours through the code."),
-            menu_row(ToolsRow::Walkthrough),
+            tr!("Open another project"),
+            tr!("A folder on this machine, or code on another over SSH. ⌘N opens one in a new window."),
+            menu_rows(ToolsRow::OpenFolder, ToolsRow::OpenRemote),
         ),
         TutStep::new(
-            tr!("Glossary"),
-            tr!("The project's own terms, defined."),
-            menu_row(ToolsRow::Glossary),
-        ),
-        TutStep::new(
-            tr!("Open a folder"),
-            tr!("Open another project. ⌘N opens it in a new window."),
-            menu_row(ToolsRow::OpenFolder),
-        ),
-        TutStep::new(
-            tr!("Read remote code"),
-            tr!("Read code on another machine over SSH."),
-            menu_row(ToolsRow::OpenRemote),
-        ),
-        TutStep::new(
-            tr!("Export notes"),
-            tr!("Your notes, bookmarks and trail as one Markdown file."),
-            menu_row(ToolsRow::ExportNotes),
-        ),
-        TutStep::new(
-            tr!("Set up the project"),
-            tr!("Set up language servers and explanations again at any time."),
-            menu_row(ToolsRow::SetUp),
-        ),
-        TutStep::new(
-            tr!("Language servers"),
-            tr!("The servers behind definitions and references. Restart one here."),
-            menu_row(ToolsRow::LspServers),
-        ),
-        TutStep::new(
-            tr!("Keyboard shortcuts"),
-            tr!("Every command, and its keys."),
-            menu_row(ToolsRow::Shortcuts),
-        ),
-        TutStep::new(
-            tr!("This tour"),
-            tr!("Replay this tour any time."),
-            menu_row(ToolsRow::Tutorial),
+            tr!("And the rest"),
+            tr!("Export your notes as one Markdown file, set the project up again, restart a language server, look up a shortcut, or take this tour again."),
+            menu_rows(ToolsRow::ExportNotes, ToolsRow::Tutorial),
         ),
         TutStep::new(
             tr!("That's Clew"),
@@ -404,13 +372,21 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
 }
 
 /// The layout a tour began from ([`App::on_tutorial_exit`] gives it back).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct TourLayout {
     left: bool,
     right: bool,
     bottom: bool,
     ask: AskView,
     sidebar: SidebarTab,
+    /// The pages over the code (the overview, the statistics, the glossary,
+    /// a doc page): the tour left the last it showed — the statistics.
+    pages: (bool, bool, bool),
+    docs: Option<crate::DocPage>,
+    /// The file being read and the line, and the trail to it: the tour's
+    /// files were left open, and in the trail.
+    reading: Option<(PathBuf, Option<usize>)>,
+    trail: crate::history::History,
 }
 
 impl App {
@@ -420,12 +396,28 @@ impl App {
         // The reader's own layout, to give back at the end (a tour started
         // again while one runs keeps the first one's).
         if self.tutorial.is_none() {
+            let line_h = self.line_height();
+            let reading = self.active_viewer().map(|v| {
+                let line = match v.caret {
+                    Some((line, _)) => line + 1,
+                    None => (v.scroll_y / line_h.max(1.0)) as usize + 1,
+                };
+                (v.abs.clone(), Some(line))
+            });
             self.tutorial_layout = Some(TourLayout {
                 left: self.show_left_sidebar,
                 right: self.show_right_panel,
                 bottom: self.show_bottom,
                 ask: self.ask_view,
                 sidebar: self.sidebar,
+                pages: (
+                    self.proj.overview.showing,
+                    self.proj.stats.showing,
+                    self.proj.glossary.showing,
+                ),
+                docs: self.proj.docs.page.clone(),
+                reading,
+                trail: self.proj.history.clone(),
             });
         }
         self.tutorial = Some(0);
@@ -457,14 +449,31 @@ impl App {
         self.close_menus();
         self.show_tools_menu = false;
         self.show_view_menu = false;
-        if let Some(layout) = self.tutorial_layout.take() {
-            self.show_left_sidebar = layout.left;
-            self.show_right_panel = layout.right;
-            self.show_bottom = layout.bottom;
-            self.ask_view = layout.ask;
-            self.sidebar = layout.sidebar;
-        }
-        Task::none()
+        let Some(layout) = self.tutorial_layout.take() else {
+            return Task::none();
+        };
+        self.show_left_sidebar = layout.left;
+        self.show_right_panel = layout.right;
+        self.show_bottom = layout.bottom;
+        self.ask_view = layout.ask;
+        self.sidebar = layout.sidebar;
+        // The reader's place, as it was: the file and line, and the trail
+        // to them — none of the tour's files in it — then the page over
+        // them, if one was.
+        self.proj.history.restore(layout.trail);
+        let back = match layout.reading {
+            Some((abs, line)) if self.active_viewer().is_none_or(|v| v.abs != abs) => {
+                self.open_file(abs, line, false)
+            }
+            _ => Task::none(),
+        };
+        (
+            self.proj.overview.showing,
+            self.proj.stats.showing,
+            self.proj.glossary.showing,
+        ) = layout.pages;
+        self.proj.docs.page = layout.docs;
+        back
     }
 
     /// Set the whole layout this step needs, then run its `demo` (if any) so the

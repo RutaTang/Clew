@@ -1875,7 +1875,7 @@ pub enum ReadKind {
 
 /// One rendered entry on a doc page: a symbol with its signature and its doc
 /// comment parsed to markdown items (which the markdown widget borrows).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DocEntryView {
     pub name: String,
     pub kind: String,
@@ -1888,7 +1888,7 @@ pub struct DocEntryView {
 
 /// The doc page shown in the main pane: the selected item followed by its
 /// public members (like a rustdoc type page), all in one file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DocPage {
     pub rel: String,
     pub entries: Vec<DocEntryView>,

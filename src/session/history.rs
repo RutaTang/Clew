@@ -84,7 +84,7 @@ struct Node {
     preferred: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct History {
     nodes: Vec<Node>,
     current: Option<usize>,
@@ -193,6 +193,14 @@ impl History {
             }
         }
         changed
+    }
+
+    /// Put back the trail `kept` was a copy of — the visits made since
+    /// dropped — telling views that kept its ids they went stale.
+    pub fn restore(&mut self, kept: History) {
+        let renumbered = self.renumbered.max(kept.renumbered) + 1;
+        *self = kept;
+        self.renumbered = renumbered;
     }
 
     pub fn back(&mut self) -> Option<Loc> {
