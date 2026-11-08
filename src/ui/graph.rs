@@ -2214,16 +2214,39 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.type_graph;
     if g.is_empty() {
-        let msg = if app.docs_loading() {
-            tr!("Building the API docs…")
+        // Said for what it is: the map is drawn from the API index, and an
+        // index never built is no project without types — it said "No types
+        // found" of a project of a thousand.
+        let never_built = app.proj.docs.generation == 0;
+        let (msg, build) = if app.docs_loading() {
+            (tr!("Building the API docs…"), false)
         } else if app.scanning || app.proj.indexing {
-            tr!("Indexing the project…")
+            (tr!("Indexing the project…"), false)
+        } else if never_built && !app.server.is_up() {
+            (
+                tr!(
+                    "The type map is drawn from the project's API index, which Clew's server builds — and it is not running."
+                ),
+                false,
+            )
+        } else if never_built {
+            (
+                tr!("The type map is drawn from the project's API index, not built yet."),
+                true,
+            )
         } else {
-            tr!("No types found in this project.")
+            (tr!("No types found in this project."), false)
         };
-        return container(text(msg).size(ts::BODY).color(theme::dim()))
-            .padding(8)
-            .into();
+        let mut said = column![text(msg).size(ts::BODY).color(theme::dim())].spacing(10);
+        if build {
+            said = said.push(
+                button(text(tr!("Build the API Index")).size(ts::BODY))
+                    .style(theme::primary_button)
+                    .padding([4, 12])
+                    .on_press(Message::Docs(DocsMsg::Refresh)),
+            );
+        }
+        return container(said).padding(8).into();
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(

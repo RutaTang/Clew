@@ -508,13 +508,6 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
 /// The architecture-overview "home": the generated overview, a prompt to
 /// generate it, or a generation-in-progress note.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
-    let regen = |label: &'static str| {
-        button(text(label).size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Overview(OverviewMsg::Generate))
-    };
-
     if app.proj.overview.generating {
         return center(
             text(tr!("Generating architecture overview…"))
@@ -589,25 +582,49 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    // Not generated yet.
-    let action: Element<'_, Message> = if !app.llm_available {
-        text(tr!("Add an API key in Settings to generate the overview."))
-            .size(ts::BODY)
-            .color(theme::dim())
-            .into()
+    // Not generated yet: what it is written from, and the one step that
+    // gets there — a button, each of them. They were words alone ("Run
+    // Explain All first."), and the page a dead end.
+    let step = |label: &'static str, msg: Message| {
+        button(text(label).size(ts::BODY))
+            .style(theme::primary_button)
+            .padding([5, 14])
+            .on_press(msg)
+    };
+    let (why, action) = if !app.llm_available {
+        (
+            tr!("The overview is written by the AI model you choose in Settings."),
+            step(
+                tr!("Add an API Key…"),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+            ),
+        )
     } else if app.proj.explain.cache.is_empty() {
-        text(tr!("Run Explain All first."))
-            .size(ts::BODY)
-            .color(theme::dim())
-            .into()
+        (
+            tr!("The overview is written from the project's notes, which Explain All writes."),
+            step(
+                tr!("Explain All…"),
+                super::toolbar::explain_all_message(app),
+            ),
+        )
     } else {
-        regen(tr!("Generate overview")).into()
+        (
+            tr!("A map of the project's parts, written from its notes."),
+            step(
+                tr!("Generate overview"),
+                Message::Overview(OverviewMsg::Generate),
+            ),
+        )
     };
     center(
         column![
             text(tr!("Architecture Overview"))
                 .size(ts::HEADING)
                 .color(theme::fg()),
+            text(why)
+                .size(ts::BODY)
+                .color(theme::fg_muted())
+                .align_x(iced::Center),
             action,
         ]
         .spacing(12)

@@ -1222,6 +1222,16 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     )
 }
 
+/// What Explain All does, wherever it is offered: asks first what it costs
+/// (the setup sheet), or for a key, on the page of Settings that takes it.
+pub(crate) fn explain_all_message(app: &App) -> Message {
+    if app.llm_available {
+        Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
+    } else {
+        Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
+    }
+}
+
 /// What a row of the ⋯ menu shows and does — in the menu, or on the strip
 /// where there is room for it ([`strip_slots`]): its icon, its name, and
 /// its message (`None` while it can do nothing, as without a project).
@@ -1239,13 +1249,7 @@ fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
         ToolsRow::ExplainAll => (
             Glyph::TextLines,
             tr!("Explain All").into(),
-            // Asking first what it costs (the setup sheet), or for a key,
-            // on the page of Settings that takes it.
-            Some(if app.llm_available {
-                Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
-            } else {
-                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
-            }),
+            Some(explain_all_message(app)),
         ),
         ToolsRow::Walkthrough => (
             Glyph::ListOrdered,

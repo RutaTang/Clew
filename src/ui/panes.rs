@@ -1625,20 +1625,41 @@ fn active_note<'a>(
         Some(None) => tr!("Uncommitted").to_string(),
         None => tr!("History").to_string(),
     };
-    let actions = row![
-        action(
+    // Not explained yet: what explains it, first, where the note says so.
+    let node = match (of, v) {
+        (NoteOf::Function { sym, ordinal }, Some(v)) => Some(crate::explain::Node::Function {
+            file: v.abs.clone(),
+            name: sym.name.clone(),
+            ordinal,
+        }),
+        (NoteOf::File, Some(v)) => Some(crate::explain::Node::File(v.abs.clone())),
+        _ => None,
+    };
+    let unexplained =
+        !app.proj.explain.running && node.is_some_and(|n| !app.proj.explain.cache.contains_key(&n));
+    let mut actions = row![].spacing(2).align_y(iced::Center);
+    if unexplained {
+        actions = actions.push(action(
+            Glyph::TextLines,
+            tr!("Explain All").into(),
+            true,
+            super::toolbar::explain_all_message(app),
+        ));
+    }
+    let actions = actions
+        .push(action(
             Glyph::Network,
             calls_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
-        ),
-        action(
+        ))
+        .push(action(
             Glyph::Clock,
             history_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
-        ),
-        action(
+        ))
+        .push(action(
             Glyph::Message,
             tr!("Ask").into(),
             true,
@@ -1647,10 +1668,7 @@ fn active_note<'a>(
                 name = name,
                 file = app.active_viewer().map_or("", |v| v.rel.as_str())
             ))),
-        ),
-    ]
-    .spacing(2)
-    .align_y(iced::Center);
+        ));
     let said = scrollable(
         Column::with_children(super::explain_view::render_note(
             app,

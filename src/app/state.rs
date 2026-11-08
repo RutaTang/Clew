@@ -1983,6 +1983,9 @@ pub struct ProjectSession {
     /// An answer came while Ask was put away to its pill (a question said
     /// aloud is answered so): the pill marks it until the card is opened.
     pub ask_unread: bool,
+    /// Why the last question could not be asked, said in the card where it
+    /// was (and on the status line): cleared by the next.
+    pub ask_notice: Option<String>,
     pub ask_turns: Vec<AskTurn>,
     /// The project's Ask sessions, newest first, kept in its derived
     /// directory (`app::ask_sessions`).
@@ -2242,6 +2245,7 @@ impl Default for ProjectSession {
             ask_queue_held: false,
             ask_spoken: false,
             ask_unread: false,
+            ask_notice: None,
             ask_turns: Default::default(),
             ask_sessions: Default::default(),
             ask_session: None,

@@ -1203,7 +1203,10 @@ pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
             c.summary
         ),
         Some(c) => c.summary.clone(),
-        None => tr!("Not explained yet — run Explain All from the ⋯ menu.").to_string(),
+        // What explains it is offered beside this, where it is shown — not
+        // named by where it is: "the ⋯ menu" was no menu on screen once its
+        // tools were laid on the strip.
+        None => tr!("Not explained yet.").to_string(),
     }
 }
 

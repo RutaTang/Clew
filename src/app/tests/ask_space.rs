@@ -341,3 +341,53 @@ fn ask_captures_the_space_of_the_real_embedding_request_before_settings_change()
         "a stale-space result sent a paid AI request"
     );
 }
+
+/// A question with nothing to ground it — no index, nothing pinned, no
+/// debugger paused — is answered from the file the reader has open, not
+/// refused: it was refused, said why only on the status line, while the
+/// card seemed to ignore it. With no file open either, why is said in the
+/// card, where it was asked.
+#[test]
+fn a_question_with_nothing_else_is_answered_from_the_open_file() {
+    let (mut app, _, _hold) = indexed_ask("ask-open-file");
+    app.proj.embed_index = embed::Index::default();
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert!(app.proj.ask_pins.is_empty());
+    let submitted = app.on_ask_submit_rag("what is Point?".into(), false);
+    assert!(app.proj.asking, "refused: {}", app.status);
+    assert!(app.proj.ask_notice.is_none());
+    let mut context = Task::none();
+    for msg in run_task(submitted) {
+        context = app.update(msg);
+    }
+    let mut rx = attach_server(&mut app);
+    for msg in run_task(context) {
+        let _ = app.update(msg);
+    }
+    let request = rx.try_recv().unwrap();
+    let clew_protocol::Request::ChatStream { messages, .. } = request.request else {
+        panic!("the question was not asked");
+    };
+    let context: String = messages.into_iter().map(|msg| msg.content).collect();
+    assert!(
+        context.contains("The file the reader has open") && context.contains("src/lib.rs"),
+        "{context}"
+    );
+    let _ = app.update(Message::Ask(AskMsg::Stop));
+
+    // Nothing open: said in the card, the question kept to ask again.
+    let (mut app, _, _hold) = indexed_ask("ask-nothing-open");
+    app.proj.embed_index = embed::Index::default();
+    app.proj.panes = Default::default();
+    app.proj.ask_input = "what is Point?".into();
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert!(!app.proj.asking);
+    assert!(app.proj.ask_notice.is_some(), "{}", app.status);
+    assert_eq!(app.proj.ask_input, "what is Point?");
+    // The next question clears what was said of the last.
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert!(app.proj.ask_notice.is_some(), "still nothing to stand on");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Ask(AskMsg::Submit));
+    assert!(app.proj.ask_notice.is_none());
+}

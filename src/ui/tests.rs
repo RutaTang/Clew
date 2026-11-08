@@ -5916,6 +5916,8 @@ fn the_maps_overlay_lists_a_maps_nodes_by_kind() {
 fn the_type_map_lists_the_most_referenced_and_base_types() {
     let mut app = reader_app();
     let root = app.proj.project.as_ref().unwrap().root.clone();
+    // An index built, and no types in it.
+    app.proj.docs.generation = 1;
     let mut sim = sim_elem(super::project_types_body(&app));
     assert!(shows(&mut sim, "No types found in this project."));
     drop(sim);
@@ -7871,11 +7873,19 @@ fn an_empty_ask_shows_questions_not_instructions() {
         let mut sim = sim_elem(super::ask_panel(&app, 560.0));
         assert!(!shows(&mut sim, "Ask a question about this codebase"));
         assert!(!shows(&mut sim, "Run “Explain All”"));
-        assert!(shows(&mut sim, "For grounded answers, run"));
+        assert!(shows(&mut sim, "Answers draw on the open file"));
     }
+    // A question that could not be asked says why there.
+    app.proj.ask_notice = Some("Open a file to ask about it".into());
+    {
+        let mut sim = sim_elem(super::ask_panel(&app, 560.0));
+        assert!(shows(&mut sim, "Open a file to ask about it"));
+        assert!(!shows(&mut sim, "Answers draw on the open file"));
+    }
+    app.proj.ask_notice = None;
     app.proj.project = None;
     let mut sim = sim_elem(super::ask_panel(&app, 560.0));
-    assert!(!shows(&mut sim, "For grounded answers, run"));
+    assert!(!shows(&mut sim, "Answers draw on the open file"));
 }
 
 /// The palette's rows show each command and its keys, a cap per key; a
@@ -9249,4 +9259,108 @@ fn the_files_name_keeps_its_room_in_the_header() {
     assert!(shows(&mut sim, "Time Travel"));
     let name = text_at(&mut sim, |t| t == "lib.rs", 0).unwrap();
     assert!(name.width > 20.0);
+}
+
+/// A note not explained yet offers what explains it, there in the note: it
+/// named "the ⋯ menu", which was no menu on screen once its tools were laid
+/// on the strip.
+#[test]
+fn an_unexplained_note_offers_explain_all() {
+    let mut app = reader_app();
+    app.show_right_panel = true;
+    app.margin_tab = crate::MarginTab::Notes;
+    let abs = app.active_viewer().unwrap().abs.clone();
+    let _ = app.show_explanation(crate::explain::Node::File(abs));
+    // The note says so (its words are markdown, rendered as rich text), and
+    // names no menu.
+    let said = format!("{:?}", app.proj.explain.prepared);
+    assert!(said.contains("Not explained yet."), "{said}");
+    assert!(!said.contains('⋯'), "{said}");
+    let sent = click(sim_of(&app), "Explain All");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::SettingsPage::LanguageModel
+            )) | Message::Project(crate::ProjectMsg::SetupShow(_))
+        )),
+        "{sent:?}"
+    );
+    // Explained, it is not offered.
+    let node = crate::explain::Node::File(app.active_viewer().unwrap().abs.clone());
+    app.proj.explain.cache.insert(
+        node.clone(),
+        crate::explain::Cached {
+            summary: "The file's note.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let _ = app.show_explanation(node);
+    assert!(!shows(&mut sim_of(&app), "Explain All"));
+}
+
+/// The Overview not generated yet says what it is written from and offers
+/// the one step that gets there, as a button: it said "Run Explain All
+/// first." in words alone, and the page was a dead end.
+#[test]
+fn the_overview_offers_its_next_step() {
+    let mut app = reader_app();
+    app.llm_available = false;
+    let sent = click(sim_elem(super::overview_home(&app)), "Add an API Key…");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Settings(crate::SettingsMsg::OpenAt(
+                crate::SettingsPage::LanguageModel
+            ))]
+        ),
+        "{sent:?}"
+    );
+    app.llm_available = true;
+    let sent = click(sim_elem(super::overview_home(&app)), "Explain All…");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Project(crate::ProjectMsg::SetupShow(_))]
+        ),
+        "{sent:?}"
+    );
+    let node = crate::explain::Node::File(app.active_viewer().unwrap().abs.clone());
+    app.proj.explain.cache.insert(
+        node,
+        crate::explain::Cached {
+            summary: "A note.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let sent = click(sim_elem(super::overview_home(&app)), "Generate overview");
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Overview(crate::OverviewMsg::Generate)]
+        ),
+        "{sent:?}"
+    );
+}
+
+/// An empty type map says why: an API index never built — and, without
+/// Clew's server, that it cannot be — is no project without types. It
+/// said "No types found" of a project of a thousand.
+#[test]
+fn an_empty_type_map_says_why() {
+    let mut app = reader_app();
+    assert_eq!(app.proj.docs.generation, 0);
+    {
+        let mut sim = sim_elem(super::project_types_body(&app));
+        assert!(shows(&mut sim, "not running"));
+        assert!(!shows(&mut sim, "No types found"));
+    }
+    // Built, and empty: then there are none.
+    app.proj.docs.generation = 1;
+    let mut sim = sim_elem(super::project_types_body(&app));
+    assert!(shows(&mut sim, "No types found in this project."));
 }

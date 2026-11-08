@@ -137,6 +137,25 @@ pub(crate) fn pin_context(pin: &AskPin) -> String {
     )
 }
 
+/// Most lines of the open file a question is answered from when nothing
+/// else grounds it ([`App::open_file_pin`]).
+const OPEN_FILE_LINES: usize = 240;
+
+/// The open file's lines, as the context of a question nothing else
+/// grounds: said to be the file the reader has open, not a selection.
+pub(crate) fn open_file_context(pin: &AskPin) -> String {
+    let last = pin.line + pin.code.lines().count().saturating_sub(1);
+    format!(
+        "### The file the reader has open — {} (L{}–L{last})\n{}\n",
+        explain::prompt_label(&pin.rel),
+        pin.line,
+        explain::fenced(
+            highlight::detect(Path::new(&pin.rel)).unwrap_or(""),
+            &pin.code
+        )
+    )
+}
+
 /// The user turn of a retrieval-mode Ask answer: the untrusted-data note once,
 /// first — before any repository text — then the question, then the context.
 pub(crate) fn ask_user_prompt(question: &str, context: &str) -> String {
@@ -261,6 +280,9 @@ impl App {
         if question.is_empty() {
             return Task::none();
         }
+        // What the card said of the last question that could not be asked
+        // is said again only if this one cannot be either.
+        self.proj.ask_notice = None;
         // A question asked while one is being answered waits its turn: it
         // is queued, and asked once nothing is answering
         // (`send_next_queued`). One answer at a time, whatever produces it —
@@ -309,6 +331,33 @@ impl App {
         self.on_ask_submit_rag(question, spoken)
     }
 
+    /// The open file around where the reader is — the caret, else the top
+    /// of the view — as what a question is answered from when nothing else
+    /// grounds it (no index, nothing pinned, no debugger paused): up to
+    /// [`OPEN_FILE_LINES`] of it. Without it such a question was refused,
+    /// said why only on the status line, while the card waited.
+    pub(crate) fn open_file_pin(&self) -> Option<AskPin> {
+        let v = self.active_viewer()?;
+        let lines: Vec<&str> = v.source.lines().collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let at = v
+            .caret
+            .map(|(line, _)| line)
+            .unwrap_or_else(|| (v.scroll_y / self.line_height().max(1.0)).max(0.0) as usize);
+        let start = at
+            .saturating_sub(OPEN_FILE_LINES / 2)
+            .min(lines.len().saturating_sub(OPEN_FILE_LINES));
+        let end = (start + OPEN_FILE_LINES).min(lines.len());
+        Some(AskPin {
+            rel: v.rel.clone(),
+            file: v.abs.clone(),
+            line: start + 1,
+            code: lines[start..end].join("\n"),
+        })
+    }
+
     /// The pre-agent Ask path: retrieval (embed → top-K) + one streamed
     /// completion. Kept as the fallback when an agent turn can't run.
     ///
@@ -328,7 +377,9 @@ impl App {
             self.drop_foreign_embed_index(ecfg);
         }
         let has_index = !self.proj.embed_index.entries.is_empty() && ecfg.is_some();
-        let grounded = self.debug_context().is_some() || !self.proj.ask_pins.is_empty();
+        let grounded = self.debug_context().is_some()
+            || !self.proj.ask_pins.is_empty()
+            || self.open_file_pin().is_some();
         if !has_index && !grounded {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op
@@ -339,8 +390,10 @@ impl App {
             } else if self.proj.explain.running || self.proj.building_embeddings {
                 tr!("Building the semantic index — ask again when it's ready").into()
             } else {
-                tr!("Build the semantic index first (Find by meaning → Build index)").into()
+                tr!("Open a file to ask about it, or build the semantic index to ask about the whole project").into()
             };
+            // Said in the card too, where the question was asked.
+            self.proj.ask_notice = Some(self.status.clone());
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -584,6 +637,14 @@ impl App {
         }
         for pin in &self.proj.ask_pins {
             prologue.push_str(&pin_context(pin));
+        }
+        // Nothing else to stand on: the file the reader has open.
+        if space.is_none()
+            && self.proj.ask_pins.is_empty()
+            && self.debug_context().is_none()
+            && let Some(pin) = self.open_file_pin()
+        {
+            prologue.push_str(&open_file_context(&pin));
         }
         let items = self.ask_context_items(&nodes);
         // A remote project's bodies cannot be read here: a same-pathed local

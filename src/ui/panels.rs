@@ -467,11 +467,19 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             && !app.server.is_up()
             && app.proj.embed_index.entries.is_empty()
             && app.proj.ask_pins.is_empty()
+            && app.proj.ask_notice.is_none()
         {
+            // What answers stand on: the open file, without more.
             convo.push(
-                text(tr!(
-                    "For grounded answers, run “Explain All” or add code with “Add to Ask”."
-                ))
+                text(if app.active_viewer().is_some() {
+                    tr!(
+                        "Answers draw on the open file. To ask about the whole project, run “Explain All”."
+                    )
+                } else {
+                    tr!(
+                        "Open a file to ask about it, or run “Explain All” to ask about the whole project."
+                    )
+                })
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
@@ -534,6 +542,21 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // The question's bubble grows to the design's 82% of the column it is
     // in: the card's, or the margin's.
     let bubble_max = BUBBLE_SHARE * conversation_width(app);
+    // Why the last question could not be asked, where it was — the status
+    // line said it alone, and the card seemed to ignore the question.
+    let notice: Option<Element<'_, Message>> = app.proj.ask_notice.as_ref().map(|why| {
+        row![
+            glyph::icon(Glyph::Info, theme::warning(), 14.0),
+            text(crate::i18n::message(why))
+                .size(ts::SMALL)
+                .color(theme::fg_muted())
+                .width(Fill)
+                .wrapping(Wrapping::WordOrGlyph),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    });
     for turn in &app.proj.ask_turns {
         // A question said rather than typed is marked so, over it (with
         // the design's 4 between them; a typed one has neither).
@@ -688,6 +711,9 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 .collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
+    }
+    if let Some(notice) = notice {
+        convo.push(notice);
     }
     // Retrieval phase (before the answer turn exists) shows a spinner line.
     if app.proj.asking {
