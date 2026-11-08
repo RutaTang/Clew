@@ -33327,3 +33327,39 @@ fn a_notice_on_the_status_line_goes_once_read() {
     let _ = app.update(Message::Tick);
     assert_eq!(app.status, "Copied 3 lines");
 }
+
+/// A page over the code — the overview, the statistics, a doc page — is put
+/// away by Esc, and Back from it is to the file under it: Back went to the
+/// file read before, skipping the one the page covered, and Esc did nothing.
+#[test]
+fn a_page_over_the_code_goes_back_to_it() {
+    let mut app = scanned_app("page-back-to-code");
+    open_synchronously(&mut app, "notes.txt", None);
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    let reading = |app: &App| app.active_viewer().map(|v| v.rel.clone());
+    assert_eq!(reading(&app).as_deref(), Some("src/lib.rs"));
+
+    let _ = app.update(Message::Overview(OverviewMsg::Show));
+    assert!(crate::ui::pane_cover(&app).is_some_and(|c| c.is_page()));
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    assert!(!app.proj.overview.showing, "Back left the overview up");
+    assert_eq!(reading(&app).as_deref(), Some("src/lib.rs"));
+    assert!(!app.proj.history.can_forward(), "Back skipped the file");
+    // With nothing over it, Back goes back.
+    let _ = app.update(Message::Reading(ReadingMsg::GoBack));
+    assert!(app.proj.history.can_forward());
+
+    let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
+    assert!(app.proj.stats.showing);
+    let _ = app.update(esc_press());
+    assert!(!app.proj.stats.showing, "Esc left the statistics up");
+    assert!(crate::ui::pane_cover(&app).is_none());
+
+    app.proj.docs.page = Some(crate::DocPage {
+        rel: "src/lib.rs".into(),
+        entries: Vec::new(),
+    });
+    let _ = app.update(esc_press());
+    assert!(app.proj.docs.page.is_none(), "Esc left the doc page up");
+}

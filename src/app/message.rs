@@ -1019,6 +1019,9 @@ pub enum OverviewMsg {
     ShowStats,
     /// Recompute the code statistics regardless of freshness (the Refresh button).
     RefreshStats,
+    /// Put the overview or the statistics away: the code they covered is
+    /// shown again.
+    Close,
     /// A stats computation finished for the project its stamp names — or
     /// failed, which is not an empty report (see `on_stats_done`).
     StatsDone {
@@ -1867,6 +1870,8 @@ pub enum DocsMsg {
     /// Open the doc page for the symbol under the cursor (from the code view's
     /// right-click menu).
     ViewFromMenu,
+    /// Put the doc page away: the code it covered is shown again.
+    ClosePage,
 }
 
 /// The settings modal and the appearance.
@@ -2410,7 +2415,8 @@ impl OverviewMsg {
             OverviewMsg::Show
             | OverviewMsg::Generate
             | OverviewMsg::ShowStats
-            | OverviewMsg::RefreshStats => None,
+            | OverviewMsg::RefreshStats
+            | OverviewMsg::Close => None,
         }
     }
 }
@@ -2725,7 +2731,8 @@ impl DocsMsg {
             | DocsMsg::ToggleShowAll
             | DocsMsg::ToggleGrouping
             | DocsMsg::Select { .. }
-            | DocsMsg::ViewFromMenu => None,
+            | DocsMsg::ViewFromMenu
+            | DocsMsg::ClosePage => None,
         }
     }
 }

@@ -9493,3 +9493,76 @@ fn the_setup_sheet_links_to_where_a_key_is_added() {
         "{sent:?}"
     );
 }
+
+/// Click about the top right of `view` — where a page's × is — and return
+/// what the first click that sent a `wanted` message sent.
+fn click_top_right<'a>(
+    view: impl Fn() -> Element<'a, Message>,
+    wanted: fn(&Message) -> bool,
+) -> Vec<Message> {
+    crate::app::tests::isolated_data_dir();
+    // The page's padding in from its corner, then half the button.
+    let side = super::chrome::CLOSE_SIDE;
+    let at = Point::new(WINDOW.width - 28.0 - side / 2.0, 20.0 + side / 2.0);
+    let near = [0.0f32, -6.0, 6.0, -12.0, 12.0];
+    for dy in near {
+        for dx in near {
+            let mut sim = iced_test::Simulator::with_size(Default::default(), WINDOW, view());
+            sim.point_at(Point::new(at.x + dx, at.y + dy));
+            let _ = sim.simulate(iced_test::simulator::click());
+            let sent = sent_by(sim);
+            if sent.iter().any(wanted) {
+                return sent;
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Every page over the code has the × the Glossary has, written or still
+/// to be, counted or counting: the overview and the statistics had none,
+/// and a doc page none either.
+#[test]
+fn every_page_over_the_code_has_its_close() {
+    let mut app = reader_app();
+    let closes_overview = |m: &Message| matches!(m, Message::Overview(crate::OverviewMsg::Close));
+    // Still to be written: its step, and a ×.
+    app.llm_available = false;
+    let sent = click_top_right(|| super::overview_home(&app), closes_overview);
+    assert!(sent.iter().any(closes_overview), "{sent:?}");
+    app.proj.overview.generating = true;
+    let sent = click_top_right(|| super::overview_home(&app), closes_overview);
+    assert!(sent.iter().any(closes_overview), "{sent:?}");
+    app.proj.overview.generating = false;
+    // Written: on its title's line.
+    app.proj.overview.markdown = Some("The parts.".into());
+    let sent = click_right_of(
+        || sim_elem(super::overview_home(&app)),
+        "Architecture Overview",
+        closes_overview,
+    );
+    assert!(sent.iter().any(closes_overview), "{sent:?}");
+    // The statistics, counting.
+    app.proj.stats.building = true;
+    let sent = click_top_right(|| super::stats_home(&app), closes_overview);
+    assert!(sent.iter().any(closes_overview), "{sent:?}");
+    // A doc page.
+    let page = crate::DocPage {
+        rel: "src/lib.rs".into(),
+        entries: Vec::new(),
+    };
+    let closes_page = |m: &Message| matches!(m, Message::Docs(crate::DocsMsg::ClosePage));
+    let sent = click_right_of(
+        || sim_elem(super::docs_page(&page)),
+        "View source",
+        closes_page,
+    );
+    assert!(sent.iter().any(closes_page), "{sent:?}");
+    // And each closes.
+    app.proj.overview.showing = true;
+    let _ = app.update(Message::Overview(crate::OverviewMsg::Close));
+    assert!(!app.proj.overview.showing);
+    app.proj.docs.page = Some(page);
+    let _ = app.update(Message::Docs(crate::DocsMsg::ClosePage));
+    assert!(app.proj.docs.page.is_none());
+}

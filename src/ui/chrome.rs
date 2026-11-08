@@ -239,7 +239,7 @@ pub(crate) fn slot<'a>() -> Element<'a, Message> {
 }
 
 /// Side of a panel's close button.
-const CLOSE_SIDE: f32 = 28.0;
+pub(crate) const CLOSE_SIDE: f32 = 28.0;
 
 /// The × at the end of a panel's title (Settings, Connect, Glossary, the
 /// language servers): quiet until the pointer is over it, named in its tip.

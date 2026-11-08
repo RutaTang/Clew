@@ -546,6 +546,11 @@ impl App {
                 let line = self.note_symbol_line(&rel, &symbol);
                 self.open_file(root.join(&rel), line, true)
             }
+            // Back from a page over the file being read is to that file —
+            // it went to the one read before it, skipping this one.
+            ReadingMsg::GoBack if self.active_viewer().is_some() && self.put_away_page() => {
+                Task::none()
+            }
             ReadingMsg::GoBack => match self.proj.history.back() {
                 Some(loc) => {
                     let saved = self.save_history();

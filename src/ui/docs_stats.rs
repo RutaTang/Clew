@@ -73,6 +73,31 @@ pub(crate) enum PaneCover<'a> {
     Glossary,
 }
 
+impl PaneCover<'_> {
+    /// A page the reader opened over the code — one × (or Esc) puts away —
+    /// rather than the window having nothing else to show.
+    pub(crate) fn is_page(&self) -> bool {
+        !matches!(self, PaneCover::Scanning | PaneCover::Welcome)
+    }
+}
+
+/// A page with nothing to head it yet (a step to take, work under way),
+/// its words in the middle and the × that puts it away where a headed page
+/// has it.
+fn closable_center<'a>(
+    content: impl Into<Element<'a, Message>>,
+    close: Message,
+) -> Element<'a, Message> {
+    container(column![
+        row![space().width(Fill), super::chrome::close_button(close)],
+        center(content),
+    ])
+    .width(Fill)
+    .height(Fill)
+    .padding([20, 28])
+    .into()
+}
+
 /// What covers the code panes right now, if anything (see [`PaneCover`]).
 pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
     Some(if app.scanning {
@@ -427,7 +452,9 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
                 rel: page.rel.clone(),
                 line: top_line,
             })),
+        super::chrome::close_button(Message::Docs(DocsMsg::ClosePage)),
     ]
+    .spacing(8)
     .align_y(iced::Center);
 
     let mut blocks: Vec<Element<'a, Message>> = Vec::new();
@@ -508,13 +535,14 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
 /// The architecture-overview "home": the generated overview, a prompt to
 /// generate it, or a generation-in-progress note.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
+    let close = || Message::Overview(OverviewMsg::Close);
     if app.proj.overview.generating {
-        return center(
+        return closable_center(
             text(tr!("Generating architecture overview…"))
                 .size(ts::EMPHASIS)
                 .color(theme::dim()),
-        )
-        .into();
+            close(),
+        );
     }
 
     if app.proj.overview.markdown.is_some() {
@@ -532,7 +560,9 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
                 Some(Message::Overview(OverviewMsg::Generate)),
                 app.proj.overview.generating,
             ),
+            super::chrome::close_button(close()),
         ]
+        .spacing(8)
         .align_y(iced::Center);
         // The module map, drawn natively (same engine as the Import Graph
         // overlay), sits at the top; the LLM prose follows.
@@ -616,7 +646,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             ),
         )
     };
-    center(
+    closable_center(
         column![
             text(tr!("Architecture Overview"))
                 .size(ts::HEADING)
@@ -630,8 +660,8 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         .spacing(12)
         .align_x(iced::Center)
         .max_width(560),
+        close(),
     )
-    .into()
 }
 
 /// Group a large integer with thousands separators, e.g. `12345` → `12,345`
@@ -744,7 +774,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         } else {
             tr!("No code files to count in this project.")
         };
-        return center(
+        return closable_center(
             column![
                 text(tr!("Code Statistics"))
                     .size(ts::HEADING)
@@ -754,8 +784,8 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             .spacing(12)
             .align_x(iced::Center)
             .max_width(560),
-        )
-        .into();
+            Message::Overview(OverviewMsg::Close),
+        );
     };
 
     // A recompute running over already-shown (stale) numbers.
@@ -775,6 +805,8 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         updating,
         space().width(10),
         refresh,
+        space().width(8),
+        super::chrome::close_button(Message::Overview(OverviewMsg::Close)),
     ]
     .align_y(iced::Center);
 
