@@ -1975,7 +1975,7 @@ mod tests {
         let translocated = root.join("AppTranslocation/0A1B/d/Clew.app");
         std::fs::create_dir_all(&translocated).unwrap();
         let err = replaceable(&translocated).unwrap_err();
-        assert!(err.contains("translocated"), "{err}");
+        assert!(err.contains("a temporary copy macOS made"), "{err}");
 
         // The parent directory not writable: the helper's first `mv` fails.
         std::fs::set_permissions(&apps, std::fs::Permissions::from_mode(0o555)).unwrap();
