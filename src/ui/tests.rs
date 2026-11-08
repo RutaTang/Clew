@@ -1446,6 +1446,39 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     );
 }
 
+/// The reading trail's row stands from the first file on, the file alone
+/// until there is a way back: it came with the first jump, and moved the
+/// code down a row.
+#[test]
+fn the_trail_row_does_not_move_the_code_when_the_trail_begins() {
+    let mut app = reader_app();
+    let abs = app.active_viewer().unwrap().abs.clone();
+    assert!(app.proj.history.recent_path(2).is_empty());
+    let before = super::sheet_header_height(&app);
+    let mut sim = sim_of(&app);
+    // Over the code as the title, and in the trail's row.
+    assert!(
+        text_at(&mut sim, |t| t == "lib.rs", 1).is_some(),
+        "the file the trail starts at"
+    );
+    drop(sim);
+    let loc = |line| crate::history::Loc {
+        path: abs.clone(),
+        line: Some(line),
+    };
+    app.proj.history.push(loc(1), Some("line_0".into()));
+    app.proj.history.push(loc(40), Some("line_39".into()));
+    assert_eq!(app.proj.history.recent_path(2).len(), 2, "a way back");
+    assert_eq!(
+        super::sheet_header_height(&app),
+        before,
+        "the trail's start moved the code"
+    );
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "line_0"));
+    assert!(shows(&mut sim, "line_39"));
+}
+
 /// A path too long for its row is cut at its start — "…" and its last
 /// folders — not run past the row's end, under the finder's scrollbar, and
 /// clipped mid-letter at the panel's edge.

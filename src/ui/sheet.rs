@@ -25,8 +25,7 @@ const HEADER_ROW_PAD: Padding = Padding {
     bottom: 6.0,
     left: 0.0,
 };
-/// Height of the header's trail row, when there is a trail to show: the
-/// trail 22 high, with 12 under it.
+/// Height of the header's trail row: the trail 22 high, with 12 under it.
 pub(crate) const TRAIL_ROW_H: f32 = 34.0;
 /// Height of a stop of the trail, a button.
 const TRAIL_STOP_H: f32 = 22.0;
@@ -35,24 +34,18 @@ const TRAIL_STOP_H: f32 = 22.0;
 const HEADER_CONTROL_H: f32 = 28.0;
 /// Height of a margin tab.
 const MARGIN_TAB_H: f32 = 26.0;
-/// Room under the first row when there is no trail under it.
-const NO_TRAIL_PAD: f32 = 6.0;
 /// How many stops of the reading trail the header shows, the current last.
 const TRAIL_STOPS: usize = 4;
 
 /// Height of the sheet's header as drawn now: its first row, the trail row
-/// when there is a trail, and the rule under them — or nothing, with no file
-/// on the sheet.
+/// and the rule under them — or nothing, with no file on the sheet. The
+/// trail row stands from the first file on, one stop long until there is a
+/// way back: it came with the first jump, and moved the code down a row.
 pub(crate) fn sheet_header_height(app: &App) -> f32 {
     if !header_shows(app) {
         return 0.0;
     }
-    let trail = if trail_shows(app) {
-        TRAIL_ROW_H
-    } else {
-        NO_TRAIL_PAD
-    };
-    SHEET_HEADER_ROW_H + trail + 1.0
+    SHEET_HEADER_ROW_H + TRAIL_ROW_H + 1.0
 }
 
 /// Width of `content` set at `size` in `font`, as a text widget lays it
@@ -258,10 +251,6 @@ fn header_shows(app: &App) -> bool {
 }
 
 /// Whether the header's trail row shows: the trail has led somewhere.
-fn trail_shows(app: &App) -> bool {
-    app.proj.history.recent_path(2).len() > 1
-}
-
 /// The sheet, framed in the chrome: its header, the panes with the reading
 /// panel beside them, and the bottom (debugger) panel under them.
 ///
@@ -545,11 +534,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         right: HEADER_PAD_RIGHT,
         ..HEADER_ROW_PAD
     });
-    let trail: Element<'_, Message> = if trail_shows(app) {
-        trail_row(app)
-    } else {
-        space().height(Length::Fixed(NO_TRAIL_PAD)).into()
-    };
+    let trail = trail_row(app);
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
@@ -570,13 +555,37 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 }
 
 /// The reading trail's last stops, oldest first, the current last: where
-/// the reader came from, each a click back to it.
+/// the reader came from, each a click back to it; the file on the sheet
+/// alone before there is a way back.
 fn trail_row(app: &App) -> Element<'_, Message> {
     let stops = app.proj.history.recent_path(TRAIL_STOPS);
     let last = stops.len().saturating_sub(1);
     let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
         .spacing(6)
         .align_y(iced::Center);
+    // No visit recorded yet (a file restored, not gone to): the file on the
+    // sheet is where the trail starts.
+    if stops.is_empty()
+        && let Some(v) = app.active_viewer()
+    {
+        let name = v
+            .abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        line = line.push(
+            container(ts::set_in(
+                text(name)
+                    .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                TRAIL_STOP_H,
+                ts::INTER,
+                ts::BODY,
+            ))
+            .padding([0, 5]),
+        );
+    }
     // Where the reader is now: the function the caret is in, when it is in
     // one of the current stop's file's.
     let here = match (app.cursor_target(), stops.last()) {
