@@ -509,6 +509,8 @@ pub enum EditorMsg {
     ModifiersChanged(keyboard::Modifiers),
     FindOpened,
     FindQueryChanged(String),
+    /// The find bar's Match case, Whole word or Regular expression.
+    FindToggle(crate::SearchOpt),
     FindStep(i32),
     FindClosed,
     /// Toggle "skim" for the active file: fold function/method bodies to
@@ -2265,6 +2267,7 @@ impl EditorMsg {
             | EditorMsg::ModifiersChanged(..)
             | EditorMsg::FindOpened
             | EditorMsg::FindQueryChanged(..)
+            | EditorMsg::FindToggle(..)
             | EditorMsg::FindStep(..)
             | EditorMsg::FindClosed
             | EditorMsg::SkimFile

@@ -33960,3 +33960,70 @@ fn the_language_servers_page_lists_the_languages_the_code_is_in() {
         vec!["python".to_string(), "rust".to_string()]
     );
 }
+
+/// L12: what the Connect form says is wrong marks the field it is about —
+/// both, for a host and a user both missing; the port, the user — and a
+/// field's mark goes when it is edited.
+#[test]
+fn the_connect_form_marks_the_field_an_error_is_about() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Connect(ConnectMsg::Open));
+    let field = |app: &mut App, f: ConnectField, v: &str| {
+        let _ = app.update(Message::Connect(ConnectMsg::Field(f, v.into())));
+    };
+    let submit = |app: &mut App| {
+        let _ = app.update(Message::Connect(ConnectMsg::Submit));
+        let ui = app.connect.as_ref().unwrap();
+        let ConnectStage::Error(why) = &ui.stage else {
+            panic!("no error said");
+        };
+        (why.clone(), ui.marked.clone())
+    };
+    let (why, marked) = submit(&mut app);
+    assert_eq!(why, "Host and user are required.");
+    assert_eq!(marked, [ConnectField::Host, ConnectField::User]);
+    field(&mut app, ConnectField::Host, "example.com");
+    assert_eq!(
+        app.connect.as_ref().unwrap().marked,
+        [ConnectField::User],
+        "the host edited is not marked any more"
+    );
+    field(&mut app, ConnectField::User, "-oProxyCommand=x");
+    let (_, marked) = submit(&mut app);
+    assert_eq!(marked, [ConnectField::User]);
+    field(&mut app, ConnectField::User, "root");
+    field(&mut app, ConnectField::Port, "0");
+    let (why, marked) = submit(&mut app);
+    assert!(why.contains("not a port number"), "{why}");
+    assert_eq!(marked, [ConnectField::Port]);
+    field(&mut app, ConnectField::Identity, "-i");
+    field(&mut app, ConnectField::Port, "22");
+    let (_, marked) = submit(&mut app);
+    assert_eq!(marked, [ConnectField::Identity]);
+}
+
+/// L14: an option of the find bar toggled finds again, with it, at once.
+#[test]
+fn a_find_option_toggled_finds_again() {
+    let mut app = scanned_app("find-options");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(Message::Editor(EditorMsg::FindOpened));
+    let _ = app.update(Message::Editor(EditorMsg::FindQueryChanged("point".into())));
+    // "Point" three times, a capital each time: found without Match case.
+    assert_eq!(app.proj.find.matches.len(), 3);
+    let _ = app.update(Message::Editor(EditorMsg::FindToggle(SearchOpt::Case)));
+    assert!(app.proj.find.case_sensitive);
+    assert!(app.proj.find.matches.is_empty(), "no lowercase point");
+    let _ = app.update(Message::Editor(EditorMsg::FindToggle(SearchOpt::Case)));
+    let _ = app.update(Message::Editor(EditorMsg::FindToggle(SearchOpt::Regex)));
+    let _ = app.update(Message::Editor(EditorMsg::FindQueryChanged(
+        "x: f6[".into(),
+    )));
+    assert!(app.proj.find.invalid);
+    assert!(app.proj.find.matches.is_empty());
+    let _ = app.update(Message::Editor(EditorMsg::FindQueryChanged(
+        r"x: f\d+".into(),
+    )));
+    assert!(!app.proj.find.invalid);
+    assert_eq!(app.proj.find.matches.len(), 1);
+}

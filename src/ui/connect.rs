@@ -2028,21 +2028,12 @@ pub(crate) fn connect_picker<'a>(
     use crate::ConnectField;
     let label = |s: &str| text(s.to_string()).size(ts::SMALL).color(theme::dim());
 
-    // What comes before the form — the error, the saved hosts — in a place
-    // of its own, there or not: pushed in front of the form's fields, it
-    // handed their state on as it came and went (a field focused when Enter
-    // showed an error lost its focus; a host saved from another window moved
-    // the User field's cursor to Name).
+    // What comes before the form — the saved hosts — in a place of its own,
+    // there or not: pushed in front of the form's fields, it handed their
+    // state on as it came and went (a host saved from another window moved
+    // the User field's cursor to Name). What is wrong is said beside
+    // Connect, after them: above them, it pushed the form down as it came.
     let mut head = Column::new().spacing(12);
-
-    if let Some(msg) = error {
-        head = head.push(
-            container(text(msg.to_string()).size(ts::BODY).color(theme::danger()))
-                .padding([6, 10])
-                .width(Fill)
-                .style(theme::modal_panel),
-        );
-    }
 
     // Saved hosts: click a row to connect, × to forget.
     if !app.saved_connections.is_empty() {
@@ -2089,16 +2080,21 @@ pub(crate) fn connect_picker<'a>(
         }
         head = head.push(list);
     }
-    let has_head = error.is_some() || !app.saved_connections.is_empty();
+    let has_head = !app.saved_connections.is_empty();
     let head =
         container(head).padding(Padding::default().bottom(if has_head { 12.0 } else { 0.0 }));
     let mut col = Column::new().spacing(12);
 
     // New-connection form. Enter in any field connects, like the button.
     let field = |title: &str, input: Element<'a, Message>| column![label(title), input].spacing(3);
+    // A field what is wrong is about is marked, until it is edited.
     let input = |placeholder: &str, value: &str, f: ConnectField| {
         text_input(placeholder, value)
-            .style(theme::input)
+            .style(if ui.marked.contains(&f) {
+                theme::input_marked
+            } else {
+                theme::input
+            })
             .on_input(move |s| Message::Connect(ConnectMsg::Field(f, s)))
             .on_submit(Message::Connect(ConnectMsg::Submit))
             .size(ts::BASE)
@@ -2163,14 +2159,24 @@ pub(crate) fn connect_picker<'a>(
             .text_size(ts::BODY)
             .spacing(8),
     );
+    let said: Element<'a, Message> = match error {
+        Some(why) => text(why.to_string())
+            .size(ts::BODY)
+            .color(theme::danger())
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Fill)
+            .into(),
+        None => space().width(Fill).into(),
+    };
     col = col.push(
         row![
-            space().width(Fill),
+            said,
             button(text(tr!("Connect")).size(ts::BASE))
                 .style(theme::primary_button)
                 .padding([6, 18])
                 .on_press(Message::Connect(ConnectMsg::Submit)),
         ]
+        .spacing(12)
         .align_y(iced::Center),
     );
 

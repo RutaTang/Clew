@@ -1585,6 +1585,14 @@ pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::St
 /// A text field on its own: the same rounded well as [`field`] — the
 /// search field, Ask's input — its edge lit in the accent while it has the
 /// keyboard. Every field of the app looks like this one.
+/// [`input`] for a field what the form says is wrong is about: its edge in
+/// the danger colour, hovered or focused alike.
+pub fn input_marked(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = input(theme, status);
+    style.border.color = danger();
+    style
+}
+
 pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     let focused = matches!(status, text_input::Status::Focused { .. });
     let hovered = matches!(status, text_input::Status::Hovered);

@@ -1874,6 +1874,17 @@ impl App {
                 self.recompute_find();
                 self.jump_to_find_match()
             }
+            EditorMsg::FindToggle(opt) => {
+                let find = &mut self.proj.find;
+                let on = match opt {
+                    crate::SearchOpt::Case => &mut find.case_sensitive,
+                    crate::SearchOpt::WholeWord => &mut find.whole_word,
+                    crate::SearchOpt::Regex => &mut find.regex,
+                };
+                *on = !*on;
+                self.recompute_find();
+                self.jump_to_find_match()
+            }
             EditorMsg::FindStep(delta) => {
                 self.proj.find.step(delta);
                 self.jump_to_find_match()

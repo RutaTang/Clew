@@ -15,8 +15,8 @@ pub(crate) fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> 
 
 /// One code pane.
 ///
-/// Its skeleton is fixed — `column![header slot, stack![content, find slot]]`
-/// — whatever is showing, so opening the find bar or splitting the view never
+/// Its skeleton is fixed — `column![header slot, find slot, content]` —
+/// whatever is showing, so opening the find bar or splitting the view never
 /// moves the content to another position in the widget tree. (Both used to:
 /// the find bar wrapped the content in a new `Stack` and the split header
 /// pushed it down a slot, and either rebuilt the code view's scrollable at the
@@ -60,7 +60,9 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         .into(),
     };
 
-    // The find bar floats over the top-right of the active pane.
+    // The find bar stands over the active pane's code, in a row of its own:
+    // floated over the code, it hid the lines under it — the file's first
+    // ones, and a match scrolled to the top of the view.
     let find: Element<'_, Message> =
         if app.proj.find.open && pane == app.proj.active && time_travel.is_none() {
             find_bar(app)
@@ -72,7 +74,7 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
     } else {
         slot()
     };
-    column![header, stack![editor_shell(content), find]]
+    column![header, find, editor_shell(content)]
         .width(Fill)
         .height(Fill)
         .into()
@@ -756,8 +758,14 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         )
     };
 
+    let find = &app.proj.find;
+    // A pattern that is not one is marked, as a field in error is.
     let input = text_input(tr!("Find in file…"), &app.proj.find.query)
-        .style(theme::input)
+        .style(if find.invalid {
+            theme::input_marked
+        } else {
+            theme::input
+        })
         .id(find_input_id())
         .on_input(|v| Message::Editor(EditorMsg::FindQueryChanged(v)))
         .on_submit(Message::Editor(EditorMsg::FindStep(1)))
@@ -772,9 +780,43 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
             .on_press(msg)
     };
 
+    // Match case, whole word, regular expression: as project search has
+    // them, and as it means them — off, the case matters only once the
+    // query has a capital in it.
+    let option = |label: &'static str, tip: &'static str, on: bool, opt: crate::SearchOpt| {
+        super::toolbar::tip_at(
+            button(container(text(label).size(ts::BODY).font(crate::fonts::CODE)).center(Fill))
+                .style(theme::toggle(on))
+                .padding(0)
+                .width(Length::Fixed(FIND_OPTION_SIDE))
+                .height(Length::Fixed(FIND_OPTION_SIDE))
+                .on_press(Message::Editor(EditorMsg::FindToggle(opt))),
+            tip,
+            None,
+            tooltip::Position::Bottom,
+        )
+    };
     let bar = container(
         row![
             input,
+            option(
+                "Aa",
+                tr!("Match case"),
+                find.case_sensitive,
+                crate::SearchOpt::Case
+            ),
+            option(
+                "W",
+                tr!("Whole word"),
+                find.whole_word,
+                crate::SearchOpt::WholeWord
+            ),
+            option(
+                ".*",
+                tr!("Regular expression"),
+                find.regex,
+                crate::SearchOpt::Regex
+            ),
             text(count).size(ts::SMALL).color(theme::dim()).width(46),
             btn(Glyph::ChevronLeft, Message::Editor(EditorMsg::FindStep(-1))),
             btn(Glyph::ChevronRight, Message::Editor(EditorMsg::FindStep(1))),
@@ -786,23 +828,24 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
     .padding(6)
     .style(theme::modal_panel);
 
-    // Pin to the top-right of the pane. Its panel takes every press and
-    // hover over it: the count and the gaps between its controls took none,
-    // and a press on one reached the code drawn under it (the caret moved
-    // there, a ⌘-press went to a definition, a rest asked for a peek of the
-    // token hidden there). The row it is pinned in does not, or the code to
-    // its left could not be clicked.
+    // At the right of its row over the code, on the sheet. Its panel takes
+    // every press and hover over it, the count and the gaps between its
+    // controls included.
     container(iced::widget::opaque(bar))
         .width(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .padding(Padding {
             top: 6.0,
             right: 16.0,
-            bottom: 0.0,
+            bottom: 6.0,
             left: 0.0,
         })
+        .style(theme::on_sheet)
         .into()
 }
+
+/// The side of each of the find bar's option toggles.
+const FIND_OPTION_SIDE: f32 = 26.0;
 
 pub(crate) fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
     let active = app.proj.active == pane;

@@ -1909,6 +1909,9 @@ pub struct ConnectUi {
     /// run AI calls. Off by default; see `App::remote_ai_opt_in`.
     pub send_ai_keys: bool,
     pub stage: ConnectStage,
+    /// The fields what the form says is wrong is about, marked until each
+    /// is edited.
+    pub marked: Vec<ConnectField>,
 }
 
 impl Default for ConnectUi {
@@ -1921,12 +1924,13 @@ impl Default for ConnectUi {
             identity: String::new(),
             send_ai_keys: false,
             stage: ConnectStage::Picking,
+            marked: Vec::new(),
         }
     }
 }
 
 /// Which field of the new-connection form an edit targets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectField {
     Name,
     Host,

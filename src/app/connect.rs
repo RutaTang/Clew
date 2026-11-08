@@ -34,6 +34,8 @@ impl App {
             ConnectField::Host | ConnectField::User | ConnectField::Port | ConnectField::Identity
         );
         if let Some(ui) = &mut self.connect {
+            // Edited: what was said about it is for the user to check again.
+            ui.marked.retain(|marked| *marked != field);
             match field {
                 ConnectField::Name => ui.name = value,
                 ConnectField::Host => ui.host = value,
@@ -86,6 +88,13 @@ impl App {
         let user = ui.user.trim().to_string();
         if host.is_empty() || user.is_empty() {
             if let Some(ui) = &mut self.connect {
+                ui.marked = [
+                    (host.is_empty(), ConnectField::Host),
+                    (user.is_empty(), ConnectField::User),
+                ]
+                .into_iter()
+                .filter_map(|(missing, field)| missing.then_some(field))
+                .collect();
                 ui.stage = ConnectStage::Error(tr!("Host and user are required.").into());
             }
             return Task::none();
@@ -100,11 +109,18 @@ impl App {
             identity: ui.identity.trim().to_string(),
             send_ai_keys: ui.send_ai_keys,
         };
-        if let Err(e) = port.and_then(|_| conn.validate()) {
+        let checked = port
+            .map_err(|why| (ConnectField::Port, why))
+            .and_then(|_| conn.check());
+        if let Err((field, why)) = checked {
             if let Some(ui) = &mut self.connect {
-                ui.stage = ConnectStage::Error(e);
+                ui.marked = vec![field];
+                ui.stage = ConnectStage::Error(why);
             }
             return Task::none();
+        }
+        if let Some(ui) = &mut self.connect {
+            ui.marked.clear();
         }
         self.remember_connection(conn.clone());
         let opt_in = conn.send_ai_keys;

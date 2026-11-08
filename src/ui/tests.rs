@@ -3507,7 +3507,7 @@ fn a_connect_field_keeps_the_keyboard_as_the_form_s_head_changes() {
         &mut sent,
     );
     let cache = ui.into_cache();
-    // Enter showed an error above the form; typed on.
+    // Enter showed an error by Connect; typed on.
     let mut ui = UserInterface::build(
         super::connect::connect_picker(&app, &form, Some("Host and user are required.")),
         size,
@@ -10837,5 +10837,100 @@ fn a_heading_in_prose_stands_a_notch_over_its_text() {
     assert!(
         document > 1.5,
         "a document's heading is {document}× its text"
+    );
+}
+
+/// L12: what the Connect form says is wrong stands beside Connect, after
+/// the fields: above them, it pushed the whole form down as it came.
+#[test]
+fn the_connect_forms_error_stands_beside_connect() {
+    let app = reader_app();
+    let form = crate::ConnectUi::default();
+    let place = |error: Option<&str>, label: &'static str| {
+        let mut sim = sim_elem(super::connect::connect_picker(&app, &form, error));
+        text_at(&mut sim, move |t| t == label, 0)
+            .unwrap_or_else(|| panic!("{label:?} is not on screen"))
+    };
+    let why = "Host and user are required.";
+    assert_eq!(
+        place(None, "Name (optional)").y,
+        place(Some(why), "Name (optional)").y,
+        "the form moved down for the error"
+    );
+    let said = place(Some(why), "Host and user are required.");
+    let connect = place(Some(why), "Connect");
+    assert!(
+        (said.center_y() - connect.center_y()).abs() < 2.0,
+        "{said:?} is not beside {connect:?}"
+    );
+    assert!(
+        said.x + said.width <= connect.x,
+        "{said:?} runs into {connect:?}"
+    );
+}
+
+/// Reads the bounds of the scrollable `target`.
+struct ScrollBoundsProbe {
+    target: Id,
+    found: Option<Rectangle>,
+}
+
+impl Operation for ScrollBoundsProbe {
+    fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+        operate(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        _content_bounds: Rectangle,
+        _translation: Vector,
+        _state: &mut dyn Scrollable,
+    ) {
+        if id == Some(&self.target) {
+            self.found = Some(bounds);
+        }
+    }
+}
+
+/// L14: the find bar stands over the code in a row of its own, and the
+/// code starts under it: floated over the code, it hid the lines under it
+/// — the file's first ones, and a match scrolled to the top of the view.
+/// Its options are there, each saying what it is.
+#[test]
+fn the_find_bar_hides_no_code() {
+    let mut app = reader_app();
+    let mut renderer = renderer();
+    let mut code_top = |app: &App| {
+        let mut ui =
+            UserInterface::build(super::view(app), WINDOW, Cache::default(), &mut renderer);
+        let mut probe = ScrollBoundsProbe {
+            target: super::code_scroll_id(0),
+            found: None,
+        };
+        ui.operate(&renderer, &mut black_box(&mut probe));
+        probe.found.expect("the code view is on screen").y
+    };
+    let closed = code_top(&app);
+    app.proj.find.open = true;
+    let opened = code_top(&app);
+    let mut sim = sim_of(&app);
+    let bar = text_at(&mut sim, |t| t == "Aa", 0).expect("Match case is on the bar");
+    assert!(
+        bar.y + bar.height <= opened,
+        "the bar {bar:?} is over the code, which starts at {opened}"
+    );
+    assert!(opened > closed, "the code did not make room for the bar");
+    assert!(shows(&mut sim, "W"));
+    assert!(shows(&mut sim, ".*"));
+    // Each option a click away.
+    let sent = click(sim_of(&app), ".*");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::FindToggle(crate::SearchOpt::Regex))
+        )),
+        "{sent:?}"
     );
 }
