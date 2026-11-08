@@ -788,67 +788,77 @@ pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
         .unwrap_or_else(|| iced::Point::new(app.window_width - STRIP_W / 2.0, body_top(app)))
 }
 
+/// What a tool of the strip shows and does: its icon, its name, its
+/// shortcut, and its message.
+pub(crate) fn strip_tool(
+    app: &App,
+    tool: StripTool,
+) -> (Glyph, &'static str, Option<String>, Message) {
+    let caps = |action: Action| Some(app.keymap.chord(action).caps());
+    match tool {
+        StripTool::Overview => (
+            Glyph::Layout,
+            tr!("Overview"),
+            None,
+            Message::Overview(OverviewMsg::Show),
+        ),
+        StripTool::Stats => (
+            Glyph::Stats,
+            tr!("Stats"),
+            None,
+            Message::Overview(OverviewMsg::ShowStats),
+        ),
+        StripTool::Debug => (
+            Glyph::Debug,
+            tr!("Debug"),
+            caps(Action::StartDebug),
+            Message::Debug(DebugMsg::Start),
+        ),
+        StripTool::CallGraph => (
+            Glyph::Network,
+            tr!("Call Graph"),
+            caps(Action::CallGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
+        ),
+        StripTool::ImportGraph => (
+            Glyph::ImportGraph,
+            tr!("Import Graph"),
+            caps(Action::ImportGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
+        ),
+        StripTool::TypeMap => (
+            Glyph::TypeMap,
+            tr!("Type Map"),
+            caps(Action::TypeGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
+        ),
+        StripTool::ProjectMaps => (
+            Glyph::ProjectMaps,
+            tr!("Project Maps"),
+            caps(Action::ProjectMaps),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
+        ),
+        StripTool::More => (
+            Glyph::More,
+            tr!("More"),
+            None,
+            Message::Window(WindowMsg::ToggleToolsMenu),
+        ),
+        StripTool::Settings => (
+            Glyph::Settings,
+            tr!("Settings"),
+            Some(crate::keymap::local_keys("⌘,")),
+            Message::Settings(SettingsMsg::Open),
+        ),
+    }
+}
+
 /// The tool strip: the project's tools down the window's right edge, each
 /// naming itself (and its shortcut) to the left on hover.
 pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let tool = |tool: StripTool| -> Element<'_, Message> {
-        let (glyph, label, shortcut, msg) = match tool {
-            StripTool::Overview => (
-                Glyph::Overview,
-                tr!("Overview"),
-                None,
-                Message::Overview(OverviewMsg::Show),
-            ),
-            StripTool::Stats => (
-                Glyph::Stats,
-                tr!("Stats"),
-                None,
-                Message::Overview(OverviewMsg::ShowStats),
-            ),
-            StripTool::Debug => (
-                Glyph::Debug,
-                tr!("Debug"),
-                caps(Action::StartDebug),
-                Message::Debug(DebugMsg::Start),
-            ),
-            StripTool::CallGraph => (
-                Glyph::Network,
-                tr!("Call Graph"),
-                caps(Action::CallGraph),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
-            ),
-            StripTool::ImportGraph => (
-                Glyph::ImportGraph,
-                tr!("Import Graph"),
-                caps(Action::ImportGraph),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
-            ),
-            StripTool::TypeMap => (
-                Glyph::TypeMap,
-                tr!("Type Map"),
-                caps(Action::TypeGraph),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
-            ),
-            StripTool::ProjectMaps => (
-                Glyph::ProjectMaps,
-                tr!("Project Maps"),
-                caps(Action::ProjectMaps),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
-            ),
-            StripTool::More => (
-                Glyph::More,
-                tr!("More"),
-                None,
-                Message::Window(WindowMsg::ToggleToolsMenu),
-            ),
-            StripTool::Settings => (
-                Glyph::Settings,
-                tr!("Settings"),
-                Some(crate::keymap::local_keys("⌘,")),
-                Message::Settings(SettingsMsg::Open),
-            ),
-        };
+        let (glyph, label, shortcut, msg) = strip_tool(app, tool);
         // Its menu open, the ⋯ is lit: drawn in the text's colour.
         let on = tool == StripTool::More && app.show_tools_menu;
         let tint = if on { theme::fg() } else { theme::fg_muted() };
@@ -1282,7 +1292,7 @@ pub(crate) fn explain_all_message(app: &App) -> Message {
 /// What a row of the ⋯ menu shows and does — in the menu, or on the strip
 /// where there is room for it ([`strip_slots`]): its icon, its name, and
 /// its message (`None` while it can do nothing, as without a project).
-fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
+pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
     let has_project = app.proj.project.is_some();
     match row {
         // While a pass runs the row cancels it — the bottom-up pass is
@@ -1299,14 +1309,14 @@ fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
             Some(explain_all_message(app)),
         ),
         ToolsRow::Walkthrough => (
-            Glyph::ListOrdered,
+            Glyph::Compass,
             tr!("Walkthroughs").into(),
             Some(Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Walk,
             ))),
         ),
         ToolsRow::Glossary => (
-            Glyph::Book,
+            Glyph::Dictionary,
             tr!("Glossary").into(),
             has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
         ),
@@ -1316,7 +1326,7 @@ fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
             Some(Message::Project(ProjectMsg::OpenFolderPressed)),
         ),
         ToolsRow::OpenRemote => (
-            Glyph::Servers,
+            Glyph::Remote,
             tr!("Open Remote…").into(),
             Some(Message::Connect(ConnectMsg::Open)),
         ),
@@ -1539,11 +1549,11 @@ fn app_menu_w(app: &App) -> f32 {
 }
 
 /// The rows of the app menu that are not keymap actions, top first.
-fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
+pub(crate) fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
     let _ = app;
     vec![
         (
-            Glyph::Folder,
+            Glyph::FolderOpen,
             tr!("Open Folder…"),
             None,
             Message::Project(ProjectMsg::OpenFolderPressed),

@@ -14,7 +14,10 @@ use iced::{Color, Element};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Glyph {
     // Toolbar
-    Overview,
+    /// An open book: a page read as rendered.
+    OpenBook,
+    /// A page laid out in panels: the project's overview.
+    Layout,
     Stats,
     Ask,
     Debug,
@@ -25,7 +28,6 @@ pub enum Glyph {
     /// The project's maps: a table linked to two others.
     ProjectMaps,
     TextLines,
-    ListOrdered,
     Plug,
     Help,
     Settings,
@@ -42,7 +44,6 @@ pub enum Glyph {
     FolderOpen,
     Diff,
     TimeTravel,
-    Servers,
     Remote,
     Shortcuts,
     // Chrome: nav + panel toggles
@@ -62,12 +63,14 @@ pub enum Glyph {
     Bookmark,
     // Graph-map header
     List,
-    Graph,
     Cube,
-    Plane,
     Pause,
     Play,
     Book,
+    /// A book with an A on its cover: the glossary.
+    Dictionary,
+    /// A crosshair: put the view back where it starts.
+    Recenter,
     Export,
     // Voice and the Ask window
     Mic,
@@ -136,9 +139,12 @@ pub enum WindowGlyph {
 fn body(g: Glyph) -> &'static str {
     use Glyph::*;
     match g {
-        Overview => {
+        OpenBook => {
             "<path d='M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z'/>\
              <path d='M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z'/>"
+        }
+        Layout => {
+            "<rect x='3' y='3' width='18' height='18' rx='2'/><path d='M3 9h18'/><path d='M9 21V9'/>"
         }
         Stats => {
             "<path d='M3 3v18h18'/><path d='M18 17V9'/>\
@@ -159,10 +165,12 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M12 8.65 L7.3 15.25'/><path d='M12 8.65 L16.7 15.25'/>\
              <circle cx='12' cy='7.25' r='2.2'/><circle cx='6.5' cy='16.75' r='2.2'/><circle cx='17.5' cy='16.75' r='2.2'/>"
         }
-        // What a file brings in: an arrow down into a tray.
+        // One file bringing in another: two modules, the one joined to the
+        // other (an arrow into a tray read as a download).
         ImportGraph => {
-            "<path d='M12 3v12'/><path d='m8 11 4 4 4-4'/>\
-             <path d='M8 5H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-4'/>"
+            "<rect x='3' y='3' width='8' height='7' rx='1.5'/>\
+             <rect x='13' y='14' width='8' height='7' rx='1.5'/>\
+             <path d='M7 10v5.5a2 2 0 0 0 2 2h4'/>"
         }
         TypeMap => {
             "<path d='M8.3 10a.7.7 0 0 1-.626-1.079L11.4 3a.7.7 0 0 1 1.198-.043L16.3 8.9a.7.7 0 0 1-.572 1.1Z'/>\
@@ -173,12 +181,11 @@ fn body(g: Glyph) -> &'static str {
             "<polygon points='3 6 9 3 15 6 21 3 21 18 15 21 9 18 3 21'/>\
              <line x1='9' x2='9' y1='3' y2='18'/><line x1='15' x2='15' y1='6' y2='21'/>"
         }
-        // Lines of text, the last short: what clew writes of the code.
-        TextLines => "<path d='M17 6.1H3'/><path d='M21 12.1H3'/><path d='M15.1 18H3'/>",
-        // A numbered list: the stops of a walkthrough.
-        ListOrdered => {
-            "<path d='M10 12h11'/><path d='M10 18h11'/><path d='M10 6h11'/><path d='M4 10h2'/>\
-             <path d='M4 6h1v4'/><path d='M6 18H4c0-1 2-2 2-3s-1-1.5-2-1'/>"
+        // Lines of text and a spark: what clew writes of the code (lines
+        // alone read as "align left").
+        TextLines => {
+            "<path d='M3 6h8'/><path d='M3 12h18'/><path d='M3 18h14'/>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
         }
         // A plug: what a language server is to clew.
         Plug => {
@@ -232,10 +239,6 @@ fn body(g: Glyph) -> &'static str {
             "<path d='M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8'/>\
              <path d='M3 3v5h5'/><path d='M12 7v5l4 2'/>"
         }
-        Servers => {
-            "<rect width='20' height='8' x='2' y='2' rx='2'/><rect width='20' height='8' x='2' y='14' rx='2'/>\
-             <path d='M6 6h.01'/><path d='M6 18h.01'/>"
-        }
         Remote => {
             "<circle cx='12' cy='12' r='8'/><path d='M4 12 H20'/>\
              <path d='M12 4 C8.6 6 8.6 18 12 20 C15.4 18 15.4 6 12 4'/>"
@@ -262,26 +265,24 @@ fn body(g: Glyph) -> &'static str {
              <circle cx='5.5' cy='12' r='1' fill='STROKE' stroke='none'/><path d='M9 12 H19'/>\
              <circle cx='5.5' cy='17' r='1' fill='STROKE' stroke='none'/><path d='M9 17 H19'/>"
         }
-        // Interconnected nodes forming a cycle — a network, not a hierarchy tree.
-        Graph => {
-            "<path d='M7 8 H17'/><path d='M7 8 L12 17'/><path d='M17 8 L12 17'/>\
-             <circle cx='7' cy='8' r='1.9' fill='STROKE' stroke='none'/>\
-             <circle cx='17' cy='8' r='1.9' fill='STROKE' stroke='none'/>\
-             <circle cx='12' cy='17' r='1.9' fill='STROKE' stroke='none'/>"
-        }
         Cube => {
             "<path d='M12 3.8 L19.5 8 V16 L12 20.2 L4.5 16 V8 Z'/>\
              <path d='M4.5 8 L12 12.2 L19.5 8'/><path d='M12 12.2 V20.2'/>"
         }
-        // A flat plane in the Cube's isometric perspective — its top face alone,
-        // reading as "2D" against the full box.
-        Plane => "<path d='M12 6.5 L19.5 12 L12 17.5 L4.5 12 Z'/>",
         Pause => {
             "<rect x='7.5' y='6' width='3' height='12' rx='1'/>\
              <rect x='13.5' y='6' width='3' height='12' rx='1'/>"
         }
         Play => "<path d='M8.5 5.5 L18 12 L8.5 18.5 Z'/>",
         Book => "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>",
+        Dictionary => {
+            "<path d='M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20'/>\
+             <path d='m10.5 13 2.7-7 2.7 7'/><path d='M11.5 10.6h3.4'/>"
+        }
+        Recenter => {
+            "<circle cx='12' cy='12' r='7'/><path d='M12 2v4'/><path d='M12 18v4'/>\
+             <path d='M2 12h4'/><path d='M18 12h4'/>"
+        }
         Export => {
             "<path d='M4 12v8a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-8'/>\
              <polyline points='16 6 12 2 8 6'/><line x1='12' x2='12' y1='2' y2='15'/>"

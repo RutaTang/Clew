@@ -57,27 +57,34 @@ pub(crate) fn graph_modal_frame<'a>(
         });
     }
     // Back to where the map starts: its zoom, its pan, its turn.
+    // Two choices side by side, the one in effect lit: what each is, in
+    // words — shapes for 2D and the map read as ◇ and ▽.
+    let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
+        let seg = |(label, on): (String, bool)| {
+            button(text(label).size(ts::SMALL).color(if on {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            }))
+            .style(theme::toggle(on))
+            .padding([4, 8])
+            .on_press_maybe((!on).then(|| msg.clone()))
+        };
+        row![seg(a), seg(b)].spacing(2).into()
+    };
     if graph_mode {
         header = header.push(icon_btn(
-            Glyph::Compass,
+            Glyph::Recenter,
             tr!("Fit the map"),
             Message::Graph(GraphMsg::FitView),
         ));
     }
     if graph_mode {
-        header = header.push(if graph_3d {
-            icon_btn(
-                Glyph::Plane,
-                tr!("Flatten to 2D"),
-                Message::Graph(GraphMsg::Toggle3D),
-            )
-        } else {
-            icon_btn(
-                Glyph::Cube,
-                tr!("Show in 3D"),
-                Message::Graph(GraphMsg::Toggle3D),
-            )
-        });
+        header = header.push(pair(
+            ("2D".to_string(), !graph_3d),
+            ("3D".to_string(), graph_3d),
+            Message::Graph(GraphMsg::Toggle3D),
+        ));
         // Heat: colour by how often each file changed, instead of by language.
         // A toggle: lit while on, its word the same either way — a dot
         // added after it widened the button, and moved those beside it.
@@ -99,19 +106,11 @@ pub(crate) fn graph_modal_frame<'a>(
         ));
     }
     header = header
-        .push(if graph_mode {
-            icon_btn(
-                Glyph::List,
-                tr!("List view"),
-                Message::Graph(GraphMsg::OverlayViewToggle),
-            )
-        } else {
-            icon_btn(
-                Glyph::Graph,
-                tr!("Map view"),
-                Message::Graph(GraphMsg::OverlayViewToggle),
-            )
-        })
+        .push(pair(
+            (tr!("Map").to_string(), graph_mode),
+            (tr!("List").to_string(), !graph_mode),
+            Message::Graph(GraphMsg::OverlayViewToggle),
+        ))
         .push(icon_btn(
             Glyph::Close,
             tr!("Close"),

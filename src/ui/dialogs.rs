@@ -494,6 +494,7 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 match title.as_str() {
                     _ if *recent => Glyph::TimeTravel,
                     "Open Remote…" => Glyph::Remote,
+                    "Open Folder…" => Glyph::FolderOpen,
                     _ => Glyph::Folder,
                 },
                 theme::dim(),

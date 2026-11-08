@@ -157,7 +157,7 @@ impl PaletteCommand {
                 tr!("This uses the AI model, which costs money."),
             ),
             Message::Project(ProjectMsg::OpenFolderPressed) => (
-                Glyph::Folder,
+                Glyph::FolderOpen,
                 tr!("This opens another folder in this window."),
             ),
             Message::Connect(ConnectMsg::Open) => {

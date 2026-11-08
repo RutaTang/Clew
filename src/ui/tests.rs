@@ -5867,6 +5867,108 @@ fn a_feature_is_called_the_same_wherever_it_is_named() {
     }
 }
 
+/// An icon stands for one thing: what has one name has one icon wherever
+/// it is (the strip, the ⋯ menu, the ☰ menu, the sidebar), and what is
+/// another thing has another icon — the Overview, the glossary and the API
+/// docs were all books, Open Folder and Open Remote each had two. A file's
+/// view of the imports or the calls and the project's graph of them are one
+/// thing, seen at two sizes.
+#[test]
+fn an_icon_stands_for_one_thing() {
+    use super::toolbar::{
+        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+    };
+    use crate::SidebarTab as T;
+    let app = reader_app();
+    let mut named: Vec<(String, crate::glyph::Glyph)> = Vec::new();
+    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+        let (glyph, name, ..) = strip_tool(&app, tool);
+        named.push((name.to_string(), glyph));
+    }
+    for row in TOOLS_MENU_ROWS {
+        let (glyph, name, _) = tools_row(&app, row);
+        named.push((name, glyph));
+    }
+    for (glyph, name, ..) in app_menu_head(&app) {
+        named.push((name.to_string(), glyph));
+    }
+    for tab in [
+        T::Files,
+        T::Search,
+        T::Semantic,
+        T::Marks,
+        T::Trail,
+        T::Calls,
+        T::Flow,
+        T::Imports,
+        T::Walk,
+        T::Notes,
+        T::Docs,
+    ] {
+        named.push((
+            super::sidebar::tab_name(tab).to_string(),
+            super::sidebar::tab_glyph(tab),
+        ));
+    }
+    let bare = |s: &str| s.trim_end_matches('…').to_lowercase();
+    let one_thing = [
+        ("imports", "import graph"),
+        ("call hierarchy", "call graph"),
+    ];
+    for (i, (a, glyph_a)) in named.iter().enumerate() {
+        for (b, glyph_b) in &named[i + 1..] {
+            let (a, b) = (bare(a), bare(b));
+            if a == b
+                || one_thing
+                    .iter()
+                    .any(|&(x, y)| (a == x && b == y) || (a == y && b == x))
+            {
+                assert_eq!(glyph_a, glyph_b, "{a:?} has two icons");
+            } else {
+                assert_ne!(glyph_a, glyph_b, "{a:?} and {b:?} share an icon");
+            }
+        }
+    }
+}
+
+/// The map's header says its views in words, the one in effect lit and
+/// pressing nothing: shapes for 2D and the map read as ◇ and ▽.
+#[test]
+fn the_maps_header_says_its_views_in_words() {
+    let mut app = reader_app();
+    app.window_width = WINDOW.width;
+    app.window_height = WINDOW.height;
+    let header = |app: &App| {
+        super::graph::graph_modal_frame(
+            "Call Graph",
+            true,
+            app.graph_3d,
+            false,
+            false,
+            None,
+            None,
+            WINDOW,
+            iced::widget::space().into(),
+        )
+    };
+    let mut sim = sim_elem(header(&app));
+    for said in ["2D", "3D", "Map", "List"] {
+        assert!(shows(&mut sim, said), "{said}");
+    }
+    drop(sim);
+    app.graph_3d = false;
+    assert!(click(sim_elem(header(&app)), "2D").is_empty(), "in effect");
+    assert!(matches!(
+        click(sim_elem(header(&app)), "3D").as_slice(),
+        [Message::Graph(crate::GraphMsg::Toggle3D)]
+    ));
+    assert!(click(sim_elem(header(&app)), "Map").is_empty(), "in effect");
+    assert!(matches!(
+        click(sim_elem(header(&app)), "List").as_slice(),
+        [Message::Graph(crate::GraphMsg::OverlayViewToggle)]
+    ));
+}
+
 /// The margin's History lists the file's commits (subject, then who and
 /// when), each one opening Time Travel at it; and it says so while they
 /// come, and when there are none — not links that do what the sheet's

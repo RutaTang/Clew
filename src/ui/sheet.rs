@@ -430,7 +430,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // A markdown file reads rendered or as its source.
     if v.md.is_some() {
         let (glyph, label) = if v.show_source {
-            (Glyph::Overview, tr!("Rendered"))
+            (Glyph::OpenBook, tr!("Rendered"))
         } else {
             (Glyph::Note, tr!("Source"))
         };
