@@ -622,6 +622,18 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
     // ASCII, so a boundary of any text around them.
     let bytes = text.as_bytes();
     let run = |at: usize| bytes[at..].iter().take_while(|&&b| b == b'`').count();
+    // Whether what follows an apostrophe goes on with the word it is in —
+    // `foldl'`'s backtick, `&'static`, a file name's `l'été` — rather than
+    // ending a GNU `name'`: a letter of a Latin script (an apostrophe in
+    // French, Italian or English names), a digit, `_`, `'` or a backtick.
+    // Text in another script after it (`x'は`) is the message going on.
+    let continues_word = |rest: &str| {
+        rest.chars().next().is_some_and(|c| {
+            c.is_ascii_alphanumeric()
+                || "_'`".contains(c)
+                || (c.is_alphabetic() && ('\u{c0}'..='\u{24f}').contains(&c))
+        })
+    };
     // Where the span a lone backtick opens just before `from` closes: at
     // the next lone backtick, or at an apostrophe that ends a word — on
     // the same line, after something. An apostrophe that starts a word (at
@@ -639,13 +651,7 @@ pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
                 b'\'' if quoting && bytes[at..].starts_with(b"'\\''") => at += 3,
                 b'\'' if quoting => quoting = false,
                 b'\'' if at == from || bytes[at - 1].is_ascii_whitespace() => quoting = true,
-                b'\''
-                    if !bytes
-                        .get(at + 1)
-                        .is_some_and(|&n| n.is_ascii_alphanumeric() || b"_'`".contains(&n)) =>
-                {
-                    return Some(at);
-                }
+                b'\'' if !continues_word(&text[at + 1..]) => return Some(at),
                 _ => {}
             }
             at += 1;
@@ -1195,6 +1201,16 @@ mod tests {
                 "a header name holds letters, digits and !#$%&'*+-.^_`|~) \u{2014} write each as `Name: value`"
             ),
             "a header name holds letters, digits and !#$%&'*+-.^_`|~) \u{2014} write each as \u{201c}Name: value\u{201d}"
+        );
+        // A file name with an apostrophe before an accented letter is one
+        // name; text in another script after `name' goes on after it.
+        assert_eq!(
+            quoted("Opened `l'été.md`"),
+            "Opened \u{201c}l'été.md\u{201d}"
+        );
+        assert_eq!(
+            quoted("`x'は見つかりません"),
+            "\u{201c}x\u{201d}は見つかりません"
         );
         // A name with no space before it in a script that sets none.
         assert_eq!(quoted("已打开`a.rs`"), "已打开\u{201c}a.rs\u{201d}");
