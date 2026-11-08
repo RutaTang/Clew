@@ -1705,7 +1705,11 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .padding(7);
 
     let building = app.proj.building_embeddings;
-    let press = (!building).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    // It is built from the notes Explain All writes, by an embedding model:
+    // with neither, there is nothing it can do, and it is drawn so — it
+    // looked ready, and answered in the status bar.
+    let can_build = !app.proj.explain.cache.is_empty() && app.embed_available;
+    let press = (!building && can_build).then_some(Message::Semantic(SemanticMsg::BuildIndex));
     // While it builds, the button's own icon turns, in its place: words
     // that came in for the build ("Building…", "Building the index…") moved
     // what stood beside them, and the count went for as long as it ran.
@@ -1738,17 +1742,29 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
     };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
-    let info = text(if n > 0 {
-        trn!("1 indexed", "{n} indexed", n)
-    } else if app.proj.explain.cache.is_empty() {
-        tr!("Run Explain All to enable semantic search.").to_string()
-    } else if !app.embed_available {
-        app.embed_missing.clone()
+    let info: Element<'_, Message> = if n == 0 && app.proj.explain.cache.is_empty() {
+        // The step that gets there, as a link.
+        button(
+            text(tr!("Explain All…"))
+                .size(ts::CAPTION)
+                .color(theme::accent()),
+        )
+        .style(theme::icon_button(false))
+        .padding([2, 6])
+        .on_press(super::toolbar::explain_all_message(app))
+        .into()
     } else {
-        tr!("Preparing the index…").to_string()
-    })
-    .size(ts::CAPTION)
-    .color(theme::dim());
+        text(if n > 0 {
+            trn!("1 indexed", "{n} indexed", n)
+        } else if !app.embed_available {
+            app.embed_missing.clone()
+        } else {
+            tr!("Preparing the index…").to_string()
+        })
+        .size(ts::CAPTION)
+        .color(theme::dim())
+        .into()
+    };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(

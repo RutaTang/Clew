@@ -9670,3 +9670,39 @@ fn the_context_menu_waits_for_the_language_server() {
         assert!(keys_at.x > row_at.x + row_at.width, "{row}");
     }
 }
+
+/// Build index does nothing without notes to build from, and is drawn so,
+/// with the step that gets there beside it: it looked ready, and answered
+/// in the status bar. With notes and a model it builds.
+#[test]
+fn build_index_waits_for_notes_and_offers_explain_all() {
+    let mut app = reader_app();
+    app.llm_available = true;
+    app.embed_available = true;
+    assert!(app.proj.explain.cache.is_empty());
+    let builds = |m: &Message| matches!(m, Message::Semantic(crate::SemanticMsg::BuildIndex));
+    let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
+    assert!(!sent.iter().any(builds), "{sent:?}");
+    let sent = click(sim_elem(super::semantic_tab(&app)), "Explain All…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Project(crate::ProjectMsg::SetupShow(_)))),
+        "{sent:?}"
+    );
+    let node = crate::explain::Node::File(app.active_viewer().unwrap().abs.clone());
+    app.proj.explain.cache.insert(
+        node,
+        crate::explain::Cached {
+            summary: "A note.".into(),
+            prompt_hash: 1,
+            detail: None,
+            basis: None,
+        },
+    );
+    let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
+    assert!(sent.iter().any(builds), "{sent:?}");
+    // No model to embed with: it waits again.
+    app.embed_available = false;
+    let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
+    assert!(!sent.iter().any(builds), "{sent:?}");
+}

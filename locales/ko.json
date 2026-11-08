@@ -1129,7 +1129,6 @@
  "Run": "실행",
  "Run Explain All first": "먼저 ‘모두 설명’을 실행하세요",
  "Run Explain All first — the semantic index is built from the summaries": "먼저 ‘모두 설명’을 실행하세요 — 의미 검색 인덱스는 요약을 바탕으로 만듭니다",
- "Run Explain All to enable semantic search.": "의미 검색을 사용하려면 ‘모두 설명’을 실행하세요.",
  "Run a command or open a file": "명령 실행 또는 파일 열기",
  "Run it": "실행",
  "Run spoken commands": "음성 명령 실행",

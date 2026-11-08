@@ -1129,7 +1129,6 @@
  "Run": "実行",
  "Run Explain All first": "先に「すべて解説」を実行してください",
  "Run Explain All first — the semantic index is built from the summaries": "先に「すべて解説」を実行してください。セマンティックインデックスは要約から作成されます",
- "Run Explain All to enable semantic search.": "セマンティック検索を使うには、「すべて解説」を実行してください。",
  "Run a command or open a file": "コマンドを実行、またはファイルを開く",
  "Run it": "実行する",
  "Run spoken commands": "音声コマンドを実行",

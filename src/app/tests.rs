@@ -33395,3 +33395,22 @@ fn a_right_click_puts_the_caret_where_the_menu_acts() {
     assert_eq!(v.selection, Some(((0, 0), (3, 1))));
     assert_eq!(v.caret, Some((1, 4)));
 }
+
+/// Debug with no `launch.json` suggests one for the project in front of the
+/// reader: it suggested a Python script on a Rust project.
+#[test]
+fn debug_suggests_a_launch_config_in_the_projects_language() {
+    let mut app = scanned_app("debug-launch-example");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(
+        app.status.contains(&format!("target/debug/{name}")),
+        "{}",
+        app.status
+    );
+    assert!(!app.status.contains("python"), "{}", app.status);
+    // A script project, by the file open.
+    assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
+}

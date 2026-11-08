@@ -1732,6 +1732,42 @@ pub(crate) fn resolve_rel(root: &Path, p: &str) -> PathBuf {
     if pb.is_absolute() { pb } else { root.join(pb) }
 }
 
+/// A `launch.json` for a program in `lang` (a language key, as a pane has),
+/// for the project at `root`: what Debug suggests writing when there is
+/// none. It suggested a Python script whatever the project was written in.
+pub(crate) fn launch_example(root: &Path, lang: Option<&str>) -> String {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "app".into());
+    // Without a file open in a language, the project's own manifest says.
+    let lang = lang.or_else(|| {
+        [
+            ("Cargo.toml", "rust"),
+            ("go.mod", "go"),
+            ("build.zig", "zig"),
+            ("package.json", "javascript"),
+            ("CMakeLists.txt", "cpp"),
+            ("Gemfile", "ruby"),
+            ("composer.json", "php"),
+        ]
+        .into_iter()
+        .find(|(manifest, _)| root.join(manifest).is_file())
+        .map(|(_, lang)| lang)
+    });
+    let program = match lang {
+        Some("rust") => format!("target/debug/{name}"),
+        Some("c" | "cpp") => format!("build/{name}"),
+        Some("zig") => format!("zig-out/bin/{name}"),
+        Some("go") => "main.go".into(),
+        Some("javascript" | "typescript") => "index.js".into(),
+        Some("ruby") => "main.rb".into(),
+        Some("php") => "index.php".into(),
+        _ => "main.py".into(),
+    };
+    format!(r#"{{"program": "{program}"}}"#)
+}
+
 /// Read `.clew/launch.json`, resolving relative paths against the project root.
 /// A missing/invalid file yields a helpful message.
 pub(crate) fn read_launch_config(root: &Path) -> Result<LaunchConfig, String> {
