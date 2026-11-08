@@ -173,7 +173,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                 ),
                 form::item(
                     tr!("Version"),
-                    Some(format!("clew {}", crate::updater::current_version())),
+                    Some(format!("Clew {}", crate::updater::current_version())),
                     form::action(tr!("Check now"), Some(Message::Updater(UpdaterMsg::Check))),
                 ),
             ],

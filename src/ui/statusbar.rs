@@ -722,7 +722,9 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
             true,
         )
     } else {
-        (format!("↻ {}", tr!("Up to date")), theme::dim(), true)
+        // The notes, not the project: "Up to date" beside the scan's own
+        // "Up to date" said one word for two things.
+        (format!("↻ {}", tr!("Notes up to date")), theme::dim(), true)
     };
     // Its words in a slot as wide as the widest of them: counting down, and
     // turning from one to the next, it moved everything to its right.
@@ -736,7 +738,7 @@ pub(crate) fn refresh_chip(app: &App) -> Option<Element<'_, Message>> {
                 seconds = crate::AUTO_REFRESH_MIN_INTERVAL.as_secs()
             )
         ),
-        format!("↻ {}", tr!("Up to date")),
+        format!("↻ {}", tr!("Notes up to date")),
     ];
     let every: Vec<&str> = every.iter().map(String::as_str).collect();
     let words = super::steady::slot(

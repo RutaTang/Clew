@@ -212,8 +212,10 @@ impl App {
                         fields = fields.join(", ")
                     )
                 } else if self.llm_available {
+                    // Not in parentheses: a provider's name may have its own
+                    // ("Custom (OpenAI-compatible)").
                     tr!(
-                        "Settings saved ({provider})",
+                        "Settings saved — using {provider}",
                         provider = crate::i18n::lookup(cfg.provider.label())
                     )
                 } else {

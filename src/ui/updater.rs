@@ -173,7 +173,7 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
 
     let panel = container(
         column![
-            text(format!("clew {version}"))
+            text(format!("Clew {version}"))
                 .size(ts::TITLE)
                 .color(theme::fg_bright()),
             text(tr!("What's new"))

@@ -1326,8 +1326,17 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
         },
     );
     {
+        // Idle, it says what is current: the notes — not "Up to date" a
+        // second time beside the scan's own.
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Up to date"), "the refresh chip, idle");
+        assert!(
+            shows(&mut sim, "Notes up to date"),
+            "the refresh chip, idle"
+        );
+        assert!(
+            text_at(&mut sim, |t| t.contains("Up to date"), 1).is_none(),
+            "\"Up to date\" twice"
+        );
     }
     app.proj.explain.running = true;
     app.proj.explain.progress = Some((3, 9));
@@ -9705,4 +9714,41 @@ fn build_index_waits_for_notes_and_offers_explain_all() {
     app.embed_available = false;
     let sent = click(sim_elem(super::semantic_tab(&app)), "Build index");
     assert!(!sent.iter().any(builds), "{sent:?}");
+}
+
+/// A map opened with no project says why it is empty, not "Nothing to
+/// show." (a project with nothing in it), and has nothing to refine.
+#[test]
+fn a_map_with_no_project_says_why() {
+    let mut app = blank_app();
+    app.window_width = WINDOW.width;
+    app.window_height = WINDOW.height;
+    app.graph_mode = true;
+    let calls = crate::Overlay::ProjectCalls;
+    assert!(shows(
+        &mut sim_elem(super::project_graph_modal(&app, calls)),
+        "Open a project to see its map"
+    ));
+    let sent = click(
+        sim_elem(super::project_graph_modal(&app, calls)),
+        "Refine with LSP",
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|m| matches!(m, Message::Graph(GraphMsg::RefineProjectCalls))),
+        "{sent:?}"
+    );
+}
+
+/// The version is the app's name as written everywhere else: "Clew 0.2.1",
+/// not "clew 0.2.1".
+#[test]
+fn the_version_line_names_clew() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Updates,
+    )));
+    let version = format!("Clew {}", crate::updater::current_version());
+    assert!(shows(&mut sim_of(&app), &version), "{version}");
 }

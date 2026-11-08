@@ -148,10 +148,16 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         } else if let Some(precise) = app.precise_label() {
             text(precise).size(ts::SMALL).color(theme::accent()).into()
         } else {
+            // With no project there is nothing to refine.
             button(text(tr!("Refine with LSP")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
-                .on_press(Message::Graph(GraphMsg::RefineProjectCalls))
+                .on_press_maybe(
+                    app.proj
+                        .project
+                        .is_some()
+                        .then_some(Message::Graph(GraphMsg::RefineProjectCalls)),
+                )
                 .into()
         }),
         crate::Overlay::ProjectImports => None,
@@ -196,7 +202,10 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     };
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
-    let empty_msg = if app.proj.project_calls.building {
+    let empty_msg = if app.proj.project.is_none() {
+        // Not "Nothing to show.", which reads as a project with nothing in it.
+        tr!("Open a project to see its map")
+    } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
         tr!("Indexing the project…")

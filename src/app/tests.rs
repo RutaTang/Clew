@@ -33414,3 +33414,30 @@ fn debug_suggests_a_launch_config_in_the_projects_language() {
     // A script project, by the file open.
     assert!(crate::app::tasks::launch_example(&root, Some("ruby")).contains("main.rb"));
 }
+
+/// A save says which provider is in use without nesting parentheses — the
+/// custom provider's name has its own: "Settings saved (Custom (OpenAI-
+/// compatible))".
+#[test]
+fn a_save_names_the_provider_without_nested_parentheses() {
+    let data = test_dir("settings-saved-provider");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let _keys = EnvVars::new()
+        .remove("ANTHROPIC_API_KEY")
+        .remove("OPENAI_API_KEY")
+        .remove("DEEPSEEK_API_KEY");
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    app.settings.provider = llm::Provider::Custom;
+    app.settings.key = "fake-key".into();
+    app.settings.model = "a-model".into();
+    app.settings.base_url = "https://models.invalid/v1".into();
+    let _ = app.update(Message::Settings(SettingsMsg::Saved));
+    assert!(
+        app.status.contains("Custom (OpenAI-compatible)"),
+        "{}",
+        app.status
+    );
+    assert!(!app.status.contains("(Custom"), "{}", app.status);
+}
