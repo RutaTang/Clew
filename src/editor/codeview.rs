@@ -77,6 +77,12 @@ const INACTIVE_ALPHA: f32 = 0.38;
 const OVERSCAN: usize = 8;
 /// Minimap band width, and the smallest file (in rows) worth showing one for.
 const MINIMAP_WIDTH: f32 = 56.0;
+/// Room kept right of the minimap for the code's vertical scrollbar (6
+/// wide) and a gap: it floats at the viewport's edge, and was drawn over
+/// the band.
+const MINIMAP_LANE: f32 = 8.0;
+/// The gap between the code and the minimap band.
+const MINIMAP_GAP: f32 = 6.0;
 const MINIMAP_MIN_ROWS: usize = 40;
 /// Display columns a full-width minimap bar represents.
 const MINIMAP_FULL_COLS: f32 = 100.0;
@@ -1192,7 +1198,7 @@ impl<'a, Message> CodeView<'a, Message> {
         }
         let w = MINIMAP_WIDTH.min(viewport.width * 0.4);
         Some(Rectangle {
-            x: viewport.x + viewport.width - w,
+            x: viewport.x + viewport.width - MINIMAP_LANE - w,
             y: viewport.y,
             width: w,
             height: viewport.height,
@@ -1247,18 +1253,23 @@ impl<'a, Message> CodeView<'a, Message> {
             .min(MAX_SHAPED_COLS + 2)
             .max(summary.hinted_cols)
             .max(summary.collapsed_cols);
-        // The blame annotation stops before the minimap band, so give it room
-        // to clear the band when a minimap is shown.
-        let band = if self.on_minimap.is_some() && self.row_count() >= MINIMAP_MIN_ROWS {
-            ((MINIMAP_WIDTH + 6.0) / char_width.max(1.0)).ceil() as usize
-        } else {
-            0
-        };
         if let Some((line, annotation)) = &self.blame {
             let anno = self.blame_lead_cols(*line) + annotation.chars().count();
-            cols = cols.max(visual_line_cols(self.lines, self.inlay_hints, *line) + anno + band);
+            cols = cols.max(visual_line_cols(self.lines, self.inlay_hints, *line) + anno);
         }
-        cols
+        // Every line's end can be scrolled out from under the minimap band:
+        // the blame's could, the code's own stayed under it.
+        cols + (self.band_room() / char_width.max(1.0)).ceil() as usize
+    }
+
+    /// Room past the widest line for the minimap band, when one is drawn:
+    /// the band, the gap before it and the scrollbar's lane after it.
+    fn band_room(&self) -> f32 {
+        if self.on_minimap.is_some() && self.row_count() >= MINIMAP_MIN_ROWS {
+            MINIMAP_GAP + MINIMAP_WIDTH + MINIMAP_LANE
+        } else {
+            0.0
+        }
     }
 
     /// Colored spans for one line — the text a paragraph is shaped from — and
@@ -2421,16 +2432,10 @@ where
                 let band = self.minimap_band(viewport);
                 let anno_clip = match band {
                     Some(band) => Rectangle {
-                        width: (band.x - 6.0 - viewport.x).max(0.0),
+                        width: (band.x - MINIMAP_GAP - viewport.x).max(0.0),
                         ..*viewport
                     },
                     None => *viewport,
-                };
-                // An annotation must be scrollable out from under the band.
-                let band_room = if band.is_some() {
-                    MINIMAP_WIDTH + 6.0
-                } else {
-                    0.0
                 };
                 // Inline git blame for the caret line, past the line's end.
                 if let Some((bl, annotation)) = &self.blame
@@ -2438,8 +2443,7 @@ where
                 {
                     let lead = self.blame_lead_cols(i);
                     let end_x = text_x0 + text_w + lead as f32 * cw;
-                    right = right
-                        .max(text_w + (lead + estimated_cols(annotation)) as f32 * cw + band_room);
+                    right = right.max(text_w + (lead + estimated_cols(annotation)) as f32 * cw);
                     renderer.fill_text(
                         text::Text {
                             content: annotation.clone(),
@@ -2467,7 +2471,9 @@ where
                         },
                     );
                 }
-                state.record_extent(extent_key, right);
+                // Past it, the band's room: a line's end is scrolled out
+                // from under the minimap (`band_room`).
+                state.record_extent(extent_key, right + self.band_room());
             }
         }
 
@@ -3268,6 +3274,80 @@ mod scroll_tests {
     enum Msg {
         Hit,
         Scrolled(scrollable::Viewport),
+    }
+
+    /// The minimap band keeps clear of the code's vertical scrollbar, which
+    /// floats at the viewport's right edge and was drawn over it; and every
+    /// line's end can be scrolled out from under the band, not only the
+    /// caret line's blame.
+    #[test]
+    fn the_minimap_has_a_lane_of_its_own() {
+        let src = (0..60)
+            .map(|i| format!("let v{i} = {}", "x".repeat(300)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let lines = plain_lines(&src);
+        let max_cols = 320;
+        let code = |minimap: bool| {
+            let code = CodeView::new(
+                &lines,
+                max_cols,
+                13.0,
+                20.0,
+                iced::Color::WHITE,
+                |_| Msg::Hit,
+                |_| Msg::Hit,
+                |_, _| Msg::Hit,
+            );
+            if minimap {
+                code.on_minimap(|_| Msg::Hit)
+            } else {
+                code
+            }
+        };
+        let viewport = iced::Rectangle {
+            x: 100.0,
+            y: 50.0,
+            width: 800.0,
+            height: 600.0,
+        };
+        let band = code(true).minimap_band(&viewport).expect("a band");
+        let scrollbar_left = viewport.x + viewport.width - 6.0;
+        assert!(
+            band.x + band.width <= scrollbar_left,
+            "{band:?} under the scrollbar from {scrollbar_left}"
+        );
+        let width = |minimap: bool| {
+            let elem: iced::Element<'_, Msg> = scrollable::Scrollable::new(code(minimap))
+                .on_scroll(Msg::Scrolled)
+                .direction(Direction::Both {
+                    vertical: Scrollbar::new().width(6.0).scroller_width(6.0),
+                    horizontal: Scrollbar::new().width(6.0).scroller_width(6.0),
+                })
+                .width(Fill)
+                .height(Fill)
+                .into();
+            let mut sim = iced_test::simulator(elem);
+            sim.point_at(Point::new(400.0, 300.0));
+            let _ = sim.simulate([Event::Mouse(mouse::Event::WheelScrolled {
+                delta: mouse::ScrollDelta::Pixels {
+                    x: -10_000.0,
+                    y: 0.0,
+                },
+            })]);
+            sim.into_messages()
+                .filter_map(|m| match m {
+                    Msg::Scrolled(v) => Some(v.content_bounds().width),
+                    _ => None,
+                })
+                .last()
+                .unwrap_or(0.0)
+        };
+        let (plain, mapped) = (width(false), width(true));
+        assert!(
+            mapped >= plain + super::MINIMAP_WIDTH + super::MINIMAP_LANE,
+            "a line's end stays under the band: {plain} vs {mapped}"
+        );
     }
 
     /// Regression test for horizontal scrolling in the code view: a wheel
