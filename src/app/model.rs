@@ -794,6 +794,11 @@ pub struct BlameWhy {
     pub loading: bool,
     /// The rendered answer (empty while loading).
     pub prepared: Vec<PreparedSeg>,
+    /// Where in the window it was asked from — the right-click on the line
+    /// — for the popup to open there, under the line or over it; `None`,
+    /// asked from no point, near the top. Pinned near the top, it opened
+    /// far from the line it was about.
+    pub anchor: Option<f32>,
 }
 
 /// A time-travel session: scrub the active file (or one function's line range)
@@ -996,6 +1001,9 @@ pub struct Insight {
     pub prepared: Vec<PreparedSeg>,
     /// Where the answer points, for its Open button.
     pub defined: Option<(String, usize)>,
+    /// Where in the window it was asked from (the right-click), for the
+    /// popup to open there; `None` near the top (see `BlameWhy::anchor`).
+    pub anchor: Option<f32>,
 }
 
 impl GotoKind {
@@ -1756,6 +1764,11 @@ pub struct LspConsent {
     pub version: String,
     pub provision: LspProvision,
     pub dest_dir: PathBuf,
+    /// The server's own program on this computer's `PATH` (an absolute
+    /// directory of it), for a download or install asked here: what the
+    /// reader may run instead of fetching Clew's copy. Asked to download
+    /// rust-analyzer with one in hand, there was no saying so.
+    pub on_path: Option<PathBuf>,
 }
 
 impl LspConsent {

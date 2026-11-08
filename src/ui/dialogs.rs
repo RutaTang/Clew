@@ -84,6 +84,27 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
     })
 }
 
+/// Where the "why is this here?" popup opens: under the point it was
+/// asked from — the right-click on the line, a line's height clear of it —
+/// or, with too little room under it for the popup, over it; asked from no
+/// point, near the top of the window.
+pub(crate) fn why_placement(app: &App, anchor: Option<f32>) -> Placement {
+    let Some(y) = anchor else {
+        return Placement::Top(WHY_TOP);
+    };
+    let clear = app.line_height();
+    let floor = app.window_height - STATUSBAR_H;
+    if y + clear + WHY_ROOM <= floor {
+        Placement::Top(y + clear)
+    } else {
+        Placement::Bottom((app.window_height - y + clear).max(STATUSBAR_H))
+    }
+}
+
+/// The least room the popup is opened into under the line: its title, its
+/// commits and a few lines of answer.
+const WHY_ROOM: f32 = 220.0;
+
 /// The "Why is this here?" popup: the git-grounded explanation of why a line or
 /// selection exists, with the commit(s) it cites. Async — "Thinking…" until the
 /// answer lands.
@@ -141,7 +162,7 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
         .style(theme::modal_panel);
     modal(
         panel,
-        Placement::Top(WHY_TOP),
+        why_placement(app, bw.anchor),
         Backdrop::Dim(Some(Message::TimeTravel(TimeTravelMsg::BlameWhyClose))),
     )
 }
@@ -198,7 +219,7 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
         .style(theme::modal_panel);
     modal(
         panel,
-        Placement::Top(WHY_TOP),
+        why_placement(app, insight.anchor),
         Backdrop::Dim(Some(Message::Hover(HoverMsg::InsightClose))),
     )
 }

@@ -157,6 +157,21 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
     );
 
     let page = app.settings.page;
+    // The AI fields are kept as Settings closes — by ×, Esc or a click
+    // outside — not as they are typed: said on their pages while any differs
+    // from what Settings opened on, with the way back.
+    let unsaved = || {
+        app.settings_drafts_changed().then(|| {
+            form::item(
+                tr!("Not saved yet"),
+                Some(tr!("Saved when Settings closes, by ×, Esc or a click outside.").into()),
+                form::action(
+                    tr!("Discard changes"),
+                    Some(Message::Settings(SettingsMsg::Discard)),
+                ),
+            )
+        })
+    };
     let body: Element<'_, Message> = match page {
         SettingsPage::Appearance => form::page(vec![form::group(
             "",
@@ -200,13 +215,16 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
             "",
             None,
             None,
-            vec![
+            [
                 form::field(tr!("Provider"), None, provider),
                 form::field(tr!("API key"), None, key),
                 form::field(tr!("Model"), None, model),
                 form::field(tr!("Base URL"), None, base),
                 test,
-            ],
+            ]
+            .into_iter()
+            .chain(unsaved())
+            .collect(),
         )]),
         SettingsPage::Embeddings => {
             let here = app.settings.embed_here;
@@ -242,7 +260,9 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
                     ],
                 )
             };
-            form::page(vec![made, how])
+            // Last, so its coming moves none of the fields being typed in.
+            let unsaved = unsaved().map(|row| form::group("", None, None, vec![row]));
+            form::page([made, how].into_iter().chain(unsaved).collect())
         }
         SettingsPage::Voice => voice_section(app),
         SettingsPage::Integrations => integrations_section(app),
@@ -1699,7 +1719,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     let mut parts = Vec::new();
     if let Some(note) = &draft.note {
         parts.push(
-            text(note.clone())
+            text(crate::i18n::quoted(note).into_owned())
                 .size(ts::BODY)
                 .color(theme::fg_muted())
                 .into(),
@@ -1707,7 +1727,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
     }
     for error in &draft.errors {
         parts.push(
-            text(crate::i18n::message(error))
+            text(crate::i18n::quoted(&crate::i18n::message(error)).into_owned())
                 .size(ts::BODY)
                 .color(theme::danger())
                 .into(),
@@ -1854,8 +1874,10 @@ pub(crate) fn trust_host_prompt<'a>(
     let asked = asked.into();
     let ready = asked.ready;
     let host = target.label();
+    // Its names — a command to run, a file — in the reader's quotation
+    // marks, not backticks.
     let para = |s: String| {
-        text(s)
+        text(crate::i18n::quoted(&s).into_owned())
             .size(ts::BODY)
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
@@ -1934,8 +1956,10 @@ pub(crate) fn host_key_changed_prompt<'a>(
 ) -> Element<'a, Message> {
     let asked = asked.into();
     let ready = asked.ready;
+    // Its names — a command to run, a file — in the reader's quotation
+    // marks, not backticks.
     let para = |s: String| {
-        text(s)
+        text(crate::i18n::quoted(&s).into_owned())
             .size(ts::BODY)
             .color(theme::fg_muted())
             .wrapping(Wrapping::Word)
@@ -2160,7 +2184,7 @@ pub(crate) fn connect_picker<'a>(
             .spacing(8),
     );
     let said: Element<'a, Message> = match error {
-        Some(why) => text(why.to_string())
+        Some(why) => text(crate::i18n::quoted(why).into_owned())
             .size(ts::BODY)
             .color(theme::danger())
             .wrapping(Wrapping::WordOrGlyph)

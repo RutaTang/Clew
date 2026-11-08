@@ -598,6 +598,50 @@ fn fill<'t>(parts: &[Part], text: &'t str, filled: &mut Vec<(&'static str, &'t s
 /// many bytes of it are words.
 type Fit<'t> = (&'static str, Vec<(&'static str, &'t str)>, usize);
 
+/// `text` as it is shown in the interface: each name a message sets in
+/// backticks — Markdown's code span, as the model and the Markdown views
+/// read it, `cargo` or `{name}` filled — set in the reader's quotation
+/// marks instead (“cargo”, « cargo », 「cargo」). Shown as typed, the
+/// backticks stood in plain text as marks of their own. A lone backtick,
+/// and one in a run of them, is left as it is.
+pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('`') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let (open, close) = match current() {
+        Lang::En | Lang::Zh => ("\u{201c}", "\u{201d}"),
+        Lang::Fr => ("\u{ab}\u{a0}", "\u{a0}\u{bb}"),
+        Lang::Ja => ("\u{300c}", "\u{300d}"),
+        Lang::Ko => ("\u{2018}", "\u{2019}"),
+    };
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        // A span: one backtick, what it holds (no backtick, no line break),
+        // one backtick.
+        let span = after
+            .find('`')
+            .filter(|&end| end > 0 && !after[..end].contains('\n'))
+            .filter(|_| !rest[..start].ends_with('`') && !after.starts_with('`'));
+        match span {
+            Some(end) if !after[end + 1..].starts_with('`') => {
+                out.push_str(&rest[..start]);
+                out.push_str(open);
+                out.push_str(&after[..end]);
+                out.push_str(close);
+                rest = &after[end + 1..];
+            }
+            _ => {
+                out.push_str(&rest[..=start]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// A message template: its text, its parts, and how many bytes of it are
 /// words (what a match is ranked by).
 type Template = (&'static str, Vec<Part>, usize);
@@ -1052,6 +1096,36 @@ mod tests {
                 &missing[..missing.len().min(15)]
             );
         }
+    }
+
+    /// A name a message sets in backticks is shown in the reader's
+    /// quotation marks, the backticks gone; text with no code span, and a
+    /// stray backtick, stay as they are.
+    #[test]
+    fn a_code_span_is_shown_in_the_readers_quotation_marks() {
+        assert_eq!(
+            quoted("Connecting to `prod`…"),
+            "Connecting to \u{201c}prod\u{201d}…"
+        );
+        assert_eq!(
+            quoted("`a` and `b`"),
+            "\u{201c}a\u{201d} and \u{201c}b\u{201d}"
+        );
+        assert!(matches!(quoted("no names"), std::borrow::Cow::Borrowed(_)));
+        for kept in [
+            "a lone ` mark",
+            "``",
+            "a ``double`` span",
+            "split `a\nb` lines",
+        ] {
+            assert_eq!(quoted(kept), kept, "{kept:?}");
+        }
+        with_lang(Lang::Fr, || {
+            assert_eq!(quoted("`x`"), "\u{ab}\u{a0}x\u{a0}\u{bb}")
+        });
+        with_lang(Lang::Ja, || assert_eq!(quoted("`x`"), "\u{300c}x\u{300d}"));
+        with_lang(Lang::Ko, || assert_eq!(quoted("`x`"), "\u{2018}x\u{2019}"));
+        with_lang(Lang::Zh, || assert_eq!(quoted("`x`"), "\u{201c}x\u{201d}"));
     }
 
     /// A text that sends the reader to a page of Settings ("… in Settings →

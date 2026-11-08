@@ -2672,6 +2672,63 @@ fn settings_keep_what_was_typed_as_they_close() {
     );
 }
 
+/// L9: what was typed on the AI pages is kept as Settings closes — so Esc
+/// does not lose it — and Discard changes is the way to leave without it:
+/// the fields go back to what Settings opened on, as typed, and closing
+/// then writes nothing.
+#[test]
+fn settings_discard_puts_back_what_settings_opened_on() {
+    let dir = test_dir("settings-discard");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let _env = data_dir_override(&dir);
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let opened = crate::app::state::AiFields::of(&app.settings);
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged("typed".into())));
+    let _ = app.update(Message::Settings(SettingsMsg::ModelChanged(
+        " a model ".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedKeyChanged(
+        "typed".into(),
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(
+        !opened.embed_here,
+    )));
+    let _ = app.update(Message::Settings(SettingsMsg::TestConnection));
+    assert!(app.settings_drafts_changed());
+
+    let _ = app.update(Message::Settings(SettingsMsg::Discard));
+    assert_eq!(crate::app::state::AiFields::of(&app.settings), opened);
+    assert!(!app.settings_drafts_changed());
+    assert!(
+        matches!(
+            app.settings.connection_test,
+            crate::app::state::ConnectionTest::Untried
+        ),
+        "a test of the fields discarded is forgotten with them"
+    );
+    assert!(app.settings.open, "Discard leaves Settings open");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert!(!app.settings.open);
+    assert!(
+        !dir.join("config.toml").exists(),
+        "nothing kept, nothing written"
+    );
+
+    // A stored key typed over comes back as it was stored.
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged("stored".into())));
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert_eq!(llm::Config::stored_key(), "stored");
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    let _ = app.update(Message::Settings(SettingsMsg::KeyChanged("stor".into())));
+    let _ = app.update(Message::Settings(SettingsMsg::Discard));
+    assert_eq!(app.settings.key, "stored");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert_eq!(llm::Config::stored_key(), "stored");
+}
+
 /// A trail waiting to be written behind the one running when the window
 /// closes is written all the same, with the window's teardown: only the
 /// running write finished, and the newest trail was lost with the window.
@@ -3150,6 +3207,197 @@ fn opening_rust_prompts_for_server_download() {
         app.proj.link.lsp.get("rust"),
         Some(LspSlot::Declined(_))
     ));
+}
+
+/// The download question offers the server's own program already on PATH,
+/// found by the name it goes by there — not where it lands in Clew's
+/// download — and only for a question that would fetch one.
+#[cfg(unix)]
+#[test]
+fn the_download_question_finds_the_program_on_path_by_its_name() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = test_dir("on-path-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let path = std::ffi::OsString::from(format!("/no/such/dir:{}", bin.display()));
+    let clangd = crate::LspProvision::Download(clew_core::lsp::registry::Download {
+        url: "https://example.invalid/clangd.zip",
+        sha256: clew_core::lsp::registry::Sha256::of(b""),
+        archive: clew_core::lsp::registry::Archive::Zip,
+        binary: "clangd_22.1.6/bin/clangd",
+    });
+    assert_eq!(crate::app::lsp::path_name(&clangd), Some("clangd"));
+    assert_eq!(crate::app::lsp::on_path_for(&clangd, Some(&path)), None);
+    let program = bin.join("clangd");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        crate::app::lsp::on_path_for(&clangd, Some(&path)),
+        Some(program.clone())
+    );
+    assert_eq!(crate::app::lsp::on_path_for(&clangd, None), None);
+    let build = crate::LspProvision::Build {
+        runs: "build scripts".into(),
+        root: PathBuf::from("/work/shop"),
+        host: None,
+    };
+    assert_eq!(crate::app::lsp::path_name(&build), None);
+    assert_eq!(crate::app::lsp::on_path_for(&build, Some(&path)), None);
+}
+
+/// A program on PATH is offered only once it is seen to run: a version
+/// manager's shim for a tool that is not installed (rustup's rust-analyzer
+/// without the component) is there, and fails when run.
+#[cfg(unix)]
+#[test]
+fn a_program_on_path_is_offered_only_if_it_runs() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = test_dir("runs-here-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let write = |name: &str, body: &str| {
+        let program = bin.join(name);
+        std::fs::write(&program, body).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    };
+    let works = write("works", "#!/bin/sh\n[ \"$1\" = --version ] && echo 1.0\n");
+    let shim = write(
+        "shim",
+        "#!/bin/sh\necho \"error: 'shim' is not installed for the toolchain\" >&2\nexit 1\n",
+    );
+    assert!(crate::app::lsp::runs_here(&works));
+    assert!(!crate::app::lsp::runs_here(&shim));
+    assert!(!crate::app::lsp::runs_here(&bin.join("missing")));
+}
+
+/// Asked to download a server whose own program is on PATH, Clew runs that
+/// program to see that it works, off the UI thread, and the question offers
+/// it once it does — and not a shim that fails.
+#[cfg(unix)]
+#[test]
+fn the_download_question_looks_for_the_program_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = test_dir("on-path-look-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let bin = test_dir("on-path-look-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("rust-analyzer");
+    crate::app::lsp::SEARCH_PATH.with(|path| *path.borrow_mut() = Some(bin.clone().into()));
+    for (body, offered) in [
+        (
+            "#!/bin/sh\necho 'error: not installed for the toolchain' >&2\nexit 1\n",
+            false,
+        ),
+        ("#!/bin/sh\necho 'rust-analyzer 1.95.0'\n", true),
+    ] {
+        std::fs::write(&program, body).unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut app = scanned_app("on-path-look");
+        let looked = app.ensure_lsp("rust");
+        assert!(
+            app.proj
+                .pending_lsp_consent
+                .front()
+                .unwrap()
+                .on_path
+                .is_none()
+        );
+        for message in run_task(looked) {
+            let _ = app.update(message);
+        }
+        let consent = app.proj.pending_lsp_consent.front().expect("still asked");
+        assert_eq!(consent.on_path.is_some(), offered, "{body}");
+        if offered {
+            assert_eq!(consent.on_path.as_ref(), Some(&program));
+        }
+    }
+    crate::app::lsp::SEARCH_PATH.with(|path| *path.borrow_mut() = None);
+}
+
+/// Seen to run, the program on PATH is offered by the question still
+/// waiting — asked again, under a new number, so the new button is read
+/// before it counts — and "Use that one" chooses it as the language's
+/// server, as Settings → Language servers would, with nothing fetched.
+#[cfg(unix)]
+#[test]
+fn the_download_question_offers_and_uses_the_program_on_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let store = test_dir("on-path-store");
+    let _ = std::fs::remove_dir_all(&store);
+    let _env = data_dir_override(&store);
+    let bin = test_dir("on-path-offer-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let program = bin.join("rust-analyzer");
+    std::fs::write(&program, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let mut app = scanned_app("on-path-offer");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let before = consent_asked(&app);
+    let found = |app: &App, language: &str, name: &'static str| {
+        Message::Lsp(LspMsg::FoundOnPath {
+            stamp: app.transport_stamp(),
+            language: language.into(),
+            name,
+            program: program.clone(),
+        })
+    };
+    // Found for another language's question, or under another name: no
+    // question of this one's changes.
+    let _ = app.update(found(&app, "go", "rust-analyzer"));
+    let _ = app.update(found(&app, "rust", "gopls"));
+    assert_eq!(consent_asked(&app), before);
+    assert!(
+        app.proj
+            .pending_lsp_consent
+            .front()
+            .unwrap()
+            .on_path
+            .is_none()
+    );
+
+    let _ = app.update(found(&app, "rust", "rust-analyzer"));
+    let consent = app.proj.pending_lsp_consent.front().unwrap();
+    assert_eq!(consent.on_path.as_ref(), Some(&program));
+    assert_eq!(app.proj.pending_lsp_consent.len(), 1);
+    let asked = consent_asked(&app);
+    assert_ne!(asked, before, "asked again, to be read again");
+    // An answer to the question as first asked answers nothing.
+    let _ = app.update(Message::Lsp(LspMsg::ConsentUsePath(before)));
+    assert!(app.proj.lang_choices.servers.is_none());
+
+    let _ = app.update(Message::Lsp(LspMsg::ConsentUsePath(asked)));
+    let chosen = app
+        .proj
+        .lang_choices
+        .servers
+        .as_ref()
+        .and_then(|servers| servers.get("rust"))
+        .expect("chosen");
+    assert_eq!(chosen.command, program.to_string_lossy());
+    assert_eq!(chosen.args, None);
+    // Nothing is fetched, and the server is started afresh with the program
+    // chosen: what it asks now is rust-analyzer's leave to build the
+    // project — asked of any program run in its place.
+    let builds = |app: &App| {
+        !app.proj.pending_lsp_consent.is_empty()
+            && app
+                .proj
+                .pending_lsp_consent
+                .iter()
+                .all(|c| matches!(c.provision, crate::LspProvision::Build { .. }))
+    };
+    assert!(builds(&app), "{:?}", app.proj.pending_lsp_consent);
+
+    // The program already chosen meanwhile — in another window, as the
+    // question waited — changes no choice, and so restarts nothing of
+    // itself: the server is started all the same, not left waiting on a
+    // question no longer asked.
+    let mut app = scanned_app("on-path-offer-chosen");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    let _ = app.update(found(&app, "rust", "rust-analyzer"));
+    app.proj.lang_choices = server_program("rust", &program, None);
+    let _ = app.update(Message::Lsp(LspMsg::ConsentUsePath(consent_asked(&app))));
+    assert!(builds(&app), "{:?}", app.proj.link.lsp.get("rust"));
 }
 
 /// What a language-server slot says is said in the language spoken when it
@@ -3959,6 +4207,7 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     // Read: within reach for the whole delay.
     let read = |app: &mut App| read_for(app, delay);
     let remote = || crate::LspConsent {
+        on_path: None,
         language: "python".into(),
         server_name: "pyright".into(),
         version: "1".into(),
@@ -8125,6 +8374,7 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
     app.blame_why_seq += 1;
     let token = app.blame_why_seq;
     app.proj.blame_why = Some(crate::app::model::BlameWhy {
+        anchor: None,
         token,
         title: "Why line 3 exists".into(),
         commits: vec![("abc1234".into(), "Add it".into())],
@@ -8561,6 +8811,63 @@ fn add_to_ask_without_a_selection_adds_the_line_clicked() {
     assert_eq!(
         app.status,
         tr!("Select some code first, then choose Add to Ask")
+    );
+}
+
+/// L20: a popup asked from the context menu keeps the height it was asked
+/// at — "Why is this here?" and the language's own answer as they open, and
+/// "Why" as its answer comes in — so it opens, and stays, by the line it is
+/// about.
+#[test]
+fn a_popup_asked_from_the_menu_keeps_where_it_was_asked() {
+    let mut app = scanned_app("popup-anchor");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    for v in app.proj.panes.iter_mut().flatten() {
+        v.git = Some(Arc::new(clew_protocol::GitInfo {
+            blame: (0..8)
+                .map(|_| clew_protocol::BlameLine {
+                    commit: "abc1234".into(),
+                    author: "a".into(),
+                    time: 1_793_793_600,
+                    summary: "Add it".into(),
+                    uncommitted: false,
+                })
+                .collect(),
+            status: Vec::new(),
+            deleted_at: Default::default(),
+        }));
+    }
+    let menu = |insight| ContextMenu {
+        pane: 0,
+        line: 2,
+        col: 8,
+        x: 40.0,
+        y: 321.0,
+        insight,
+        served: true,
+    };
+    app.proj.context_menu = Some(menu(None));
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::WhyIsThisHere));
+    let why = app.proj.blame_why.as_ref().expect("asked");
+    assert_eq!(why.anchor, Some(321.0));
+    let (token, title, commits) = (why.token, why.title.clone(), why.commits.clone());
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::BlameWhyDone {
+        stamp: app.stamp(),
+        token,
+        title,
+        commits,
+        result: Ok("Because.".into()),
+    }));
+    let why = app.proj.blame_why.as_ref().unwrap();
+    assert!(!why.loading, "the answer came in");
+    assert_eq!(why.anchor, Some(321.0), "the answer stays where asked");
+
+    app.proj.context_menu = Some(menu(Some(crate::InsightKind::ExpandMacro)));
+    let _ = app.update(Message::Hover(HoverMsg::Insight));
+    assert_eq!(
+        app.proj.insight.as_ref().and_then(|i| i.anchor),
+        Some(321.0)
     );
 }
 
@@ -12295,6 +12602,7 @@ fn a_project_switch_drops_every_anchor_into_the_old_project() {
         Vec::new(),
     ));
     app.proj.blame_why = Some(BlameWhy {
+        anchor: None,
         token: app.blame_why_seq,
         title: "Why line 3 exists".into(),
         commits: Vec::new(),
@@ -21558,6 +21866,12 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             generation: 0,
             result: Err("stale".into()),
         }),
+        Message::Lsp(LspMsg::FoundOnPath {
+            stamp: s(),
+            language: "rust".into(),
+            name: "rust-analyzer",
+            program: PathBuf::from("/stale/rust-analyzer"),
+        }),
         Message::Hover(HoverMsg::Dwell {
             stamp: s(),
             hover_gen: app.proj.hover_gen,
@@ -22146,6 +22460,7 @@ fn fill_project_session(app: &mut App) {
     p.diff_pending = Some((77, file.clone()));
     p.git_latest.insert(file.clone(), 78);
     p.blame_why = Some(BlameWhy {
+        anchor: None,
         token: 1,
         title: "why".into(),
         commits: Vec::new(),
@@ -22277,6 +22592,7 @@ fn fill_project_session(app: &mut App) {
     p.link.seen_diag_version.insert("rust".into(), 32);
     p.link.seen_inlay_epoch.insert("rust".into(), 33);
     p.pending_lsp_consent.offer(LspConsent {
+        on_path: None,
         language: "rust".into(),
         server_name: "rust-analyzer".into(),
         version: "1".into(),
@@ -25884,6 +26200,7 @@ fn installs_are_cancelled_when_what_they_were_for_goes() {
 fn consent_requests_queue_instead_of_replacing_each_other() {
     let mut app = scanned_app("consent-queue");
     let consent = |language: &str, server: &str, digest: &str| LspConsent {
+        on_path: None,
         language: language.into(),
         server_name: server.into(),
         version: "1".into(),
@@ -28708,6 +29025,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         }),
         Box::new(|a| {
             a.proj.pending_lsp_consent.offer(crate::LspConsent {
+                on_path: None,
                 language: "rust".into(),
                 server_name: "rust-analyzer".into(),
                 version: "1".into(),
@@ -28728,6 +29046,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         }),
         Box::new(|a| {
             a.proj.blame_why = Some(BlameWhy {
+                anchor: None,
                 token: 1,
                 title: "Why line 1 exists".into(),
                 commits: Vec::new(),
@@ -28737,6 +29056,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         }),
         Box::new(|a| {
             a.proj.insight = Some(Insight {
+                anchor: None,
                 token: 1,
                 kind: InsightKind::ExpandMacro,
                 title: "Expansion of MAX".into(),
@@ -32237,6 +32557,36 @@ fn export_notes_writes_the_markdown_where_picked() {
 
     let mut app = scanned_app("export-notes");
     let root = app.proj.project.as_ref().unwrap().root.clone();
+    // Nothing gathered yet: said, and no save dialog asked for (L13).
+    assert!(!app.has_reading_record(), "precondition");
+    let asked = app.update(Message::Export(ExportMsg::Start));
+    assert!(
+        app.status.starts_with("Nothing to export yet"),
+        "{}",
+        app.status
+    );
+    assert!(run_task(asked).is_empty(), "a save dialog was asked for");
+    // Any one of what an export holds is enough.
+    let bookmark = bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "pub fn origin() -> Point {".into(),
+        note: None,
+    };
+    app.proj.bookmarks.push(bookmark.clone());
+    assert!(app.has_reading_record(), "a bookmark");
+    app.proj.bookmarks.clear();
+    app.proj
+        .walk
+        .library
+        .push(crate::ai::walkthrough::Walkthrough {
+            title: "A tour".into(),
+            scope: String::new(),
+            steps: Vec::new(),
+        });
+    assert!(app.has_reading_record(), "a saved walkthrough");
+    app.proj.walk.library.clear();
+    assert!(!app.has_reading_record());
     app.proj.notes.push(notes::Note {
         rel: "src/lib.rs".into(),
         symbol: "origin".into(),

@@ -1291,6 +1291,42 @@ fn enter_in_a_form_field_submits_it() {
     );
 }
 
+/// L9: while an AI field differs from what Settings opened on, its page
+/// says that it is not saved yet and is saved as Settings closes — by ×,
+/// Esc or a click outside — and offers to discard it; with none changed,
+/// neither.
+#[test]
+fn settings_say_what_closing_keeps_and_offer_to_discard_it() {
+    let mut app = reader_app();
+    for page in [
+        crate::SettingsPage::LanguageModel,
+        crate::SettingsPage::Embeddings,
+    ] {
+        let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(page)));
+        let _ = app.update(Message::Settings(crate::SettingsMsg::Discard));
+        assert!(!shows(&mut sim_of(&app), "Not saved yet"), "{page:?}");
+        assert!(!shows(&mut sim_of(&app), "Discard changes"), "{page:?}");
+        app.settings.embed_key = "typed".into();
+        app.settings.model = "typed".into();
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Not saved yet"), "{page:?}");
+        assert!(
+            shows(
+                &mut sim,
+                "Saved when Settings closes, by ×, Esc or a click outside."
+            ),
+            "{page:?}"
+        );
+        assert!(
+            matches!(
+                click(sim_of(&app), "Discard changes").as_slice(),
+                [Message::Settings(crate::SettingsMsg::Discard)]
+            ),
+            "{page:?}"
+        );
+    }
+}
+
 /// A16 / E2-11: an import map with nothing in it yet says the project is
 /// being indexed, not that it has no imports; and a running Explain All
 /// shows its progress in one place — the status bar's chip — with the
@@ -3021,6 +3057,7 @@ fn forgetting_a_key_keeps_the_discard_notice() {
 #[test]
 fn leave_to_build_names_the_project_it_is_for() {
     let consent = crate::LspConsent {
+        on_path: None,
         language: "rust".into(),
         server_name: "rust-analyzer".into(),
         version: "1".into(),
@@ -3038,11 +3075,51 @@ fn leave_to_build_names_the_project_it_is_for() {
     ));
 }
 
+/// L22: the download question offers the server's own program already on
+/// this computer, saying where it is — and only when one was found. Its
+/// button, like Allow, counts only once the question has been read.
+#[test]
+fn the_download_question_offers_the_program_already_here() {
+    let mut consent = crate::LspConsent {
+        on_path: None,
+        language: "rust".into(),
+        server_name: "rust-analyzer".into(),
+        version: "1".into(),
+        provision: crate::LspProvision::Download(clew_core::lsp::registry::Download {
+            url: "https://example.invalid/rust-analyzer.gz",
+            sha256: clew_core::lsp::registry::Sha256::of(b""),
+            archive: clew_core::lsp::registry::Archive::Gzip,
+            binary: "rust-analyzer",
+        }),
+        dest_dir: PathBuf::new(),
+    };
+    {
+        let mut sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, true));
+        assert!(shows(&mut sim, "Download"));
+        assert!(!shows(&mut sim, "Use that one"));
+        assert!(!shows(&mut sim, "already on this computer"));
+    }
+
+    consent.on_path = Some(PathBuf::from("/opt/tools/rust-analyzer"));
+    let mut sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, true));
+    assert!(shows(
+        &mut sim,
+        "rust-analyzer is already on this computer, at /opt/tools/rust-analyzer."
+    ));
+    assert!(matches!(
+        click(sim, "Use that one").as_slice(),
+        [Message::Lsp(crate::LspMsg::ConsentUsePath(4))]
+    ));
+    let sim = sim_elem(super::lsp_consent_modal(&consent, 4, 0, false));
+    assert!(click(sim, "Use that one").is_empty(), "not yet read");
+}
+
 /// F#8: consent questions are asked one at a time, and the modal says when
 /// more wait behind the one on screen.
 #[test]
 fn the_consent_modal_says_how_many_more_wait() {
     let consent = crate::LspConsent {
+        on_path: None,
         language: "rust".into(),
         server_name: "rust-analyzer".into(),
         version: "1".into(),
@@ -5016,6 +5093,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
         )),
     );
     let consent = crate::LspConsent {
+        on_path: None,
         language: "rust".into(),
         server_name: "rust-analyzer".into(),
         version: "1".into(),
@@ -5109,6 +5187,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
     };
     use std::hash::Hash;
     let consent = crate::LspConsent {
+        on_path: None,
         language: "rust".into(),
         server_name: "rust-analyzer".into(),
         version: "1".into(),
@@ -8138,6 +8217,7 @@ fn the_context_menu_offers_the_languages_own_action() {
 fn the_insight_popup_shows_the_answer_and_where_it_points() {
     let mut app = reader_app();
     app.proj.insight = Some(crate::Insight {
+        anchor: None,
         token: 1,
         kind: crate::InsightKind::ExpandMacro,
         title: "Expansion of MAX".into(),
@@ -10889,6 +10969,11 @@ fn the_connect_forms_error_stands_beside_connect() {
     );
     let said = place(Some(why), "Host and user are required.");
     let connect = place(Some(why), "Connect");
+    let mut sim = sim_elem(super::connect::connect_picker(&app, &form, Some(why)));
+    assert!(
+        text_at(&mut sim, move |t| t == why, 1).is_none(),
+        "the error is said twice"
+    );
     assert!(
         (said.center_y() - connect.center_y()).abs() < 2.0,
         "{said:?} is not beside {connect:?}"
@@ -11116,4 +11201,110 @@ fn the_status_bars_place_shows_it_opens_something() {
             .any(|m| matches!(m, Message::Connect(ConnectMsg::Open))),
         "nothing past its words: {sent:?}"
     );
+}
+
+/// What Clew says with a name in it — "Connecting to `prod`…", the MCP
+/// server's, the host key's command — shows the name in the reader's
+/// quotation marks: the backticks the message was written with stood in
+/// plain text as marks of their own.
+#[test]
+fn a_said_name_is_shown_in_quotation_marks_not_backticks() {
+    let mut app = reader_app();
+    app.status = "Opened `src/lib.rs`".into();
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Opened \u{201c}src/lib.rs\u{201d}"));
+    assert!(!shows(&mut sim, "`"), "a backtick is on screen");
+    // A setting's detail line, as the Language servers page and the
+    // integrations write theirs.
+    let row = super::form::item(
+        "Server",
+        Some("Run `cargo` first".to_string()),
+        super::slot(),
+    );
+    let mut sim = sim_elem(row);
+    assert!(shows(&mut sim, "Run \u{201c}cargo\u{201d} first"));
+    assert!(!shows(&mut sim, "`"));
+    // Connect's error, beside its button.
+    let form = crate::ConnectUi::default();
+    let mut sim = sim_elem(super::connect::connect_picker(
+        &app,
+        &form,
+        Some("Could not reach `prod`"),
+    ));
+    assert!(shows(&mut sim, "Could not reach \u{201c}prod\u{201d}"));
+    assert!(!shows(&mut sim, "`"));
+    // Why a host's key is asked about again.
+    let target = port_2222_target();
+    let mut sim = sim_elem(super::connect::host_key_changed_prompt(
+        &target,
+        "The key `prod` offers has changed",
+        "host",
+        true,
+    ));
+    assert!(shows(&mut sim, "The key \u{201c}prod\u{201d} offers"));
+    assert!(!shows(&mut sim, "`"));
+    // What the integrations say, and what went wrong with them.
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Integrations,
+    )));
+    app.settings.integrations.note = Some("Added `files`".into());
+    app.settings.integrations.errors = vec!["Could not start `git`".into()];
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Added \u{201c}files\u{201d}"));
+    assert!(shows(&mut sim, "Could not start \u{201c}git\u{201d}"));
+    assert!(!shows(&mut sim, "`"));
+}
+
+/// L20: "Why line N exists" opens where it was asked — under the line
+/// right-clicked, a line's height clear of it, or over it when there is too
+/// little room under it — not pinned near the window's top, far from the
+/// line it is about. So does the language's own answer (a macro's
+/// expansion).
+#[test]
+fn the_why_popup_opens_at_the_line_it_is_about() {
+    let mut app = reader_app();
+    let at = |app: &App, title: &'static str| {
+        text_at(&mut sim_of(app), move |t| t == title, 0)
+            .unwrap_or_else(|| panic!("{title:?} is not on screen"))
+    };
+    let why = |anchor| crate::app::model::BlameWhy {
+        token: 1,
+        title: "Why line 8 exists".into(),
+        commits: vec![("0ec3696".into(), "fix the findings".into())],
+        loading: true,
+        prepared: Vec::new(),
+        anchor,
+    };
+    let lh = app.line_height();
+    app.proj.blame_why = Some(why(Some(400.0)));
+    let under = at(&app, "Why line 8 exists");
+    assert!(under.y > 400.0 + lh, "{under:?} is not under the line");
+    assert!(
+        under.y < 400.0 + lh + 60.0,
+        "{under:?} is far from the line"
+    );
+    // Low in the window: over the line, its whole panel above it.
+    let low = WINDOW.height - 60.0;
+    app.proj.blame_why = Some(why(Some(low)));
+    let over = at(&app, "Why line 8 exists");
+    assert!(
+        over.y + over.height < low - lh,
+        "{over:?} is not over the line"
+    );
+    // Asked from no point (the palette): near the top, as before.
+    app.proj.blame_why = Some(why(None));
+    assert!(at(&app, "Why line 8 exists").y < 200.0);
+    app.proj.blame_why = None;
+    app.proj.insight = Some(crate::Insight {
+        anchor: Some(400.0),
+        token: 1,
+        kind: crate::InsightKind::ExpandMacro,
+        title: "Expansion of MAX".into(),
+        loading: true,
+        prepared: Vec::new(),
+        defined: None,
+    });
+    let insight = at(&app, "Expansion of MAX");
+    assert!(insight.y > 400.0 + lh, "{insight:?} is not under the line");
 }

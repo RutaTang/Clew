@@ -362,7 +362,7 @@ impl App {
     /// changed — restarted now if one is running — and by the next debug
     /// session. A Python choice changes what is in effect, so the Settings
     /// view lists it again.
-    fn choose(&mut self, next: LanguageChoices) -> Task<Message> {
+    pub(crate) fn choose(&mut self, next: LanguageChoices) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };

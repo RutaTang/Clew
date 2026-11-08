@@ -1219,6 +1219,7 @@ impl App {
 
     pub(crate) fn on_why_is_this_here(&mut self) -> Task<Message> {
         let menu = self.proj.context_menu.take();
+        let anchor = menu.map(|m| m.y);
         let pane = menu.map(|m| m.pane).unwrap_or(self.proj.active);
         let menu_line = menu.map(|m| m.line);
         if self.proj.project.is_none() {
@@ -1289,6 +1290,7 @@ impl App {
             commits: commits.clone(),
             loading: true,
             prepared: Vec::new(),
+            anchor,
         });
         // The answer is only meaningful for the project it was asked in: its
         // stamp is checked on arrival, so a reply that outlives a project
@@ -1375,12 +1377,15 @@ impl App {
             }
         };
         let (prepared, task) = self.prepare_segments(&md);
+        // Where the question was asked, the answer stays.
+        let anchor = self.proj.blame_why.as_ref().and_then(|b| b.anchor);
         self.proj.blame_why = Some(BlameWhy {
             token,
             title,
             commits,
             loading: false,
             prepared,
+            anchor,
         });
         task
     }

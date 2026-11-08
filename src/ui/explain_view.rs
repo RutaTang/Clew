@@ -891,6 +891,18 @@ pub(crate) fn lsp_consent_modal(
                     .wrapping(Wrapping::WordOrGlyph)
             })
         })
+        // The server's own program already on this computer: said, and
+        // offered in place of the download.
+        .push(consent.on_path.as_ref().map(|program| {
+            text(tr!(
+                "{server} is already on this computer, at {path}.",
+                server = crate::app::model::shown(&consent.server_name),
+                path = program.display()
+            ))
+            .size(ts::BODY)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::WordOrGlyph)
+        }))
         // Asked one at a time: say that more follow, so answering this one
         // and seeing another does not read as the same question again.
         .push(more_questions(waiting))
@@ -901,6 +913,15 @@ pub(crate) fn lsp_consent_modal(
                     .style(theme::toolbar_button)
                     .padding([6, 16])
                     .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
+                consent.on_path.as_ref().map(|_| crate::ui::fresh::allow(
+                    ready,
+                    button(text(tr!("Use that one")).size(ts::BASE))
+                        .style(theme::toolbar_button)
+                        .padding([6, 16])
+                        .on_press_maybe(
+                            ready.then_some(Message::Lsp(LspMsg::ConsentUsePath(number)))
+                        )
+                )),
                 crate::ui::fresh::allow(
                     ready,
                     button(text(action).size(ts::BASE))

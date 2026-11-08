@@ -1819,7 +1819,19 @@ pub enum LspMsg {
     CommandAllowed(u64),
     /// Decline the project's language-server command (question number).
     CommandDismissed(u64),
+    /// The download prompt's "Use that one": run the server's own program
+    /// found on PATH instead (`LspConsent::on_path`).
+    ConsentUsePath(u64),
     ConsentDismissed(u64),
+    /// The program the download question for `language` would fetch is on
+    /// PATH by its `name`, at `program`, and runs: the question offers it
+    /// (`LspConsent::on_path`).
+    FoundOnPath {
+        stamp: Stamp,
+        language: String,
+        name: &'static str,
+        program: PathBuf,
+    },
     DownloadResult {
         stamp: Stamp,
         language: String,
@@ -1943,6 +1955,9 @@ pub enum SettingsMsg {
     Open,
     OpenAt(SettingsPage),
     Close,
+    /// Put the AI fields back as Settings opened on them: what was typed
+    /// there is kept as Settings closes, unless discarded first.
+    Discard,
     /// Show one of Settings' pages.
     Page(SettingsPage),
     /// Ask the model the Language model page's fields name for a word, to
@@ -2696,11 +2711,13 @@ impl LspMsg {
             | LspMsg::DownloadResult { stamp, .. }
             | LspMsg::Fetched { stamp, .. }
             | LspMsg::Staged { stamp, .. }
+            | LspMsg::FoundOnPath { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
             LspMsg::ConsentAllowed(..)
             | LspMsg::CommandAllowed(..)
             | LspMsg::CommandDismissed(..)
             | LspMsg::ConsentDismissed(..)
+            | LspMsg::ConsentUsePath(..)
             | LspMsg::Removed { .. }
             | LspMsg::ToggleInlayHints
             | LspMsg::TogglePanel
@@ -2811,6 +2828,7 @@ impl SettingsMsg {
             | SettingsMsg::Open
             | SettingsMsg::OpenAt(..)
             | SettingsMsg::Close
+            | SettingsMsg::Discard
             | SettingsMsg::Page(..)
             | SettingsMsg::ProviderPicked(..)
             | SettingsMsg::KeyChanged(..)

@@ -71,6 +71,9 @@ pub(crate) enum Placement {
     Center,
     /// Horizontally centered, this far below the window's top edge.
     Top(f32),
+    /// Horizontally centered, its bottom edge this far above the window's
+    /// bottom edge.
+    Bottom(f32),
     /// Pinned under a control in the top-right corner (a dropdown).
     TopRight { top: f32, right: f32 },
     /// Pinned under a control in the top-left corner (the app menu).
@@ -118,6 +121,13 @@ pub(crate) fn modal<'a>(
             top,
             ..Padding::ZERO
         }),
+        Placement::Bottom(bottom) => frame
+            .align_x(iced::Center)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .padding(Padding {
+                bottom,
+                ..Padding::ZERO
+            }),
         Placement::TopRight { top, right } => frame
             .align_x(iced::alignment::Horizontal::Right)
             .padding(Padding {

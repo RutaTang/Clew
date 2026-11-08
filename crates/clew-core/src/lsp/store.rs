@@ -470,7 +470,7 @@ pub fn find_on_path_unresolved(binary: &str) -> Option<PathBuf> {
 }
 
 /// [`find_on_path_unresolved`] over an explicit search path.
-pub(crate) fn find_in_unresolved(path: &OsStr, binary: &str) -> Option<PathBuf> {
+pub fn find_in_unresolved(path: &OsStr, binary: &str) -> Option<PathBuf> {
     find_in(path, binary, false)
 }
 

@@ -98,6 +98,8 @@ fn rule<'a>() -> Element<'a, Message> {
 fn label<'a>(label: String, about: Option<String>) -> Element<'a, Message> {
     let mut col = column![text(label).size(ts::BASE).color(theme::fg())].spacing(2);
     if let Some(about) = about {
+        // Its names in the reader's quotation marks, not backticks.
+        let about = crate::i18n::quoted(&about).into_owned();
         col = col.push(
             text(about)
                 .size(ts::SMALL)

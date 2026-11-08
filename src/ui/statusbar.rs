@@ -480,8 +480,9 @@ fn status_left(app: &App, room: f32) -> Element<'_, Message> {
     // What is open, in counts — unless Clew has something to say.
     let said = if !app.status.is_empty() {
         // A status the back end wrote as it is (an error passed straight
-        // through) in the reader's language too.
-        Some(crate::i18n::message(&app.status))
+        // through) in the reader's language too, its names in the reader's
+        // quotation marks, not backticks.
+        Some(crate::i18n::quoted(&crate::i18n::message(&app.status)).into_owned())
     } else {
         app.proj.project.as_ref().map(|project| {
             let files = project.files.len();

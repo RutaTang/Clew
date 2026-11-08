@@ -21,7 +21,12 @@ impl App {
         let Some(kind) = menu.insight else {
             return Task::none();
         };
-        self.start_insight(kind, menu.pane, menu.line, menu.col)
+        let task = self.start_insight(kind, menu.pane, menu.line, menu.col);
+        // Opened where it was asked from.
+        if let Some(insight) = self.proj.insight.as_mut() {
+            insight.anchor = Some(menu.y);
+        }
+        task
     }
 
     /// The same at the active pane's caret (`ge`), for its language.
@@ -71,6 +76,7 @@ impl App {
             loading: true,
             prepared: Vec::new(),
             defined: None,
+            anchor: None,
         });
         let stamp = self.stamp();
         let done = move |result| {

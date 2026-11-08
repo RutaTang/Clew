@@ -265,14 +265,102 @@ impl App {
             .link
             .lsp
             .insert(language.to_string(), LspSlot::AwaitingConsent);
+        // The server's own program already on this computer is offered in
+        // place of fetching Clew's copy — once it is seen to run, off the UI
+        // thread: the question is asked meanwhile, and asked again with the
+        // offer (`LspMsg::FoundOnPath`).
+        let name = path_name(&provision);
+        // Looked for in the task (a Finder-opened app's PATH is the login
+        // shell's, asked once and maybe not yet answered), on the PATH a
+        // test set for this thread when it set one.
+        let path = path_set_here();
+        let fetched = provision.clone();
         self.proj.pending_lsp_consent.offer(LspConsent {
             language: language.to_string(),
             server_name: server.server_name,
             version: server.version,
             provision,
             dest_dir,
+            on_path: None,
         });
-        Task::none()
+        let Some(name) = name else {
+            return Task::none();
+        };
+        let stamp = self.transport_stamp();
+        let language = language.to_string();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let path = path.unwrap_or_else(clew_core::linerpc::child_path);
+                    on_path_for(&fetched, Some(&path)).filter(|program| runs_here(program))
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            move |runs| match runs {
+                Some(program) => Message::Lsp(LspMsg::FoundOnPath {
+                    stamp: stamp.clone(),
+                    language: language.clone(),
+                    name,
+                    program,
+                }),
+                None => Message::Noop,
+            },
+        )
+    }
+
+    /// The program the download question for `language` would fetch was
+    /// found on PATH and runs: the question, if it is still waiting, is
+    /// asked again offering it — under a number of its own, so the new
+    /// button is read before it counts.
+    pub(crate) fn on_lsp_found_on_path(
+        &mut self,
+        language: String,
+        name: &'static str,
+        program: PathBuf,
+    ) {
+        let Some(mut consent) = self
+            .proj
+            .pending_lsp_consent
+            .iter()
+            .find(|c| c.language == language && path_name(&c.provision) == Some(name))
+            .cloned()
+        else {
+            return;
+        };
+        if consent.on_path.as_deref() == Some(program.as_path()) {
+            return;
+        }
+        consent.on_path = Some(program);
+        self.proj.pending_lsp_consent.offer(consent);
+    }
+
+    /// The download prompt's "Use that one": the program found on PATH is
+    /// chosen as the language's server — as Settings → Language servers
+    /// chooses one — and started, nothing fetched.
+    pub(crate) fn on_lsp_consent_use_path(&mut self, number: u64) -> Task<Message> {
+        if !self.may_allow(&crate::app::model::Question::LspConsent(number)) {
+            return Task::none();
+        }
+        let Some(c) = self.proj.pending_lsp_consent.answer(number) else {
+            return Task::none();
+        };
+        let Some(program) = c.on_path else {
+            return Task::none();
+        };
+        let mut next = self.proj.lang_choices.clone();
+        next.servers.get_or_insert_with(Default::default).insert(
+            c.language.clone(),
+            clew_protocol::ServerChoice {
+                command: program.to_string_lossy().into_owned(),
+                args: None,
+            },
+        );
+        // Out of the slot it waited in, so the choice starts it afresh.
+        self.proj.link.lsp.remove(&c.language);
+        let chosen = self.choose(next);
+        Task::batch([chosen, self.ensure_lsp(&c.language)])
     }
 
     /// Hash the repository-named `command` (with its args and init options —
@@ -586,6 +674,7 @@ impl App {
                     .lsp
                     .insert(language.to_string(), LspSlot::AwaitingConsent);
                 self.proj.pending_lsp_consent.offer(LspConsent {
+                    on_path: None,
                     language: language.to_string(),
                     server_name: server.server_name,
                     version: server.version,
@@ -1522,6 +1611,16 @@ impl App {
                 Task::none()
             }
             LspMsg::ConsentAllowed(number) => self.on_lsp_consent_allowed(number),
+            LspMsg::ConsentUsePath(number) => self.on_lsp_consent_use_path(number),
+            LspMsg::FoundOnPath {
+                language,
+                name,
+                program,
+                ..
+            } => {
+                self.on_lsp_found_on_path(language, name, program);
+                Task::none()
+            }
             LspMsg::CommandAllowed(number) => self.on_lsp_command_allowed(number),
             LspMsg::CommandDismissed(number) => {
                 if let Some(c) = self.proj.pending_lsp_command.answer(number) {
@@ -1650,6 +1749,85 @@ impl App {
                 // Force a fresh provisioning attempt for this language.
                 self.proj.link.lsp.remove(&language);
                 self.ensure_lsp(&language)
+            }
+        }
+    }
+}
+
+/// The PATH a test set for its thread ([`SEARCH_PATH`]) for a server's
+/// own program to be looked for on, in place of the one Clew's programs
+/// are given (`linerpc::child_path`: on macOS, an app opened from the
+/// Finder is given the login shell's).
+#[cfg(test)]
+fn path_set_here() -> Option<std::ffi::OsString> {
+    SEARCH_PATH.with(|path| path.borrow().clone())
+}
+
+/// See the test build's: none.
+#[cfg(not(test))]
+fn path_set_here() -> Option<std::ffi::OsString> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The PATH [`path_set_here`] gives on this thread, in place of the
+    /// process's, which every test shares.
+    pub(crate) static SEARCH_PATH: std::cell::RefCell<Option<std::ffi::OsString>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The program of the name the server `provision` fetches would have, when
+/// one is on `path` — found as the shell finds it, a link kept as a link:
+/// a version manager's shim runs what it is named for.
+pub(crate) fn on_path_for(
+    provision: &LspProvision,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    lsp::store::find_in_unresolved(path?, path_name(provision)?)
+}
+
+/// The name the program the server `provision` fetches goes by on PATH —
+/// where it lands in the download (`clangd_22.1.6/bin/clangd`,
+/// `node_modules/.bin/pyright-langserver`) is not its name there. None for
+/// a provision that fetches no program of its own.
+pub(crate) fn path_name(provision: &LspProvision) -> Option<&'static str> {
+    let binary = match provision {
+        LspProvision::Download(d) => d.binary,
+        LspProvision::Install(i) => i.binary,
+        _ => return None,
+    };
+    std::path::Path::new(binary).file_name()?.to_str()
+}
+
+/// Whether `program` runs here: asked its version with nothing to read, it
+/// exits in success within a few seconds. A program on PATH can be a
+/// version manager's shim for a tool that is not installed — rustup's
+/// `rust-analyzer` without the component, pyenv's for another Python — that
+/// is there only to fail when run.
+pub(crate) fn runs_here(program: &std::path::Path) -> bool {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = clew_core::spawn::command(program)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
             }
         }
     }

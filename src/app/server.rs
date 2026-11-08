@@ -1733,6 +1733,7 @@ impl App {
                         // Slot stays AwaitingConsent; on Allow the client
                         // sends `LspInstall` and the reply lands right here.
                         self.proj.pending_lsp_consent.offer(LspConsent {
+                            on_path: None,
                             language,
                             server_name: server,
                             version,
@@ -1747,6 +1748,7 @@ impl App {
                         // pushes it and resolves again — the reply lands here.
                         let version = String::new();
                         self.proj.pending_lsp_consent.offer(LspConsent {
+                            on_path: None,
                             language,
                             server_name: server,
                             version,

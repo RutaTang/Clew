@@ -813,6 +813,10 @@ pub struct SettingsDraft {
     /// what tells "the user cleared this field" apart from "the user never
     /// touched it".
     pub ai_snapshot: (llm::Config, embed::Config),
+    /// The AI fields as the form was filled with them, as typed — what
+    /// Discard changes puts back (`ai_snapshot` holds them as a config
+    /// reads them: trimmed, a blank model filled in).
+    pub ai_opened: Option<AiFields>,
     /// A save of the AI fields failed since Settings opened, its reason said
     /// in the status bar: the next Close closes, saved or not (see
     /// `App::close_settings`).
@@ -821,6 +825,48 @@ pub struct SettingsDraft {
     pub integrations: crate::app::integrations::IntegrationsDraft,
     /// The page Settings shows: one feature's settings at a time.
     pub page: SettingsPage,
+}
+
+/// The fields of Settings that are kept as it closes, not as they change —
+/// the two AI pages' — as the form holds them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiFields {
+    pub provider: llm::Provider,
+    pub key: String,
+    pub model: String,
+    pub base_url: String,
+    pub embed_key: String,
+    pub embed_model: String,
+    pub embed_base_url: String,
+    pub embed_here: bool,
+}
+
+impl AiFields {
+    /// The fields as `draft` holds them now.
+    pub fn of(draft: &SettingsDraft) -> AiFields {
+        AiFields {
+            provider: draft.provider,
+            key: draft.key.clone(),
+            model: draft.model.clone(),
+            base_url: draft.base_url.clone(),
+            embed_key: draft.embed_key.clone(),
+            embed_model: draft.embed_model.clone(),
+            embed_base_url: draft.embed_base_url.clone(),
+            embed_here: draft.embed_here,
+        }
+    }
+
+    /// Put these back into `draft`.
+    pub fn put_back(self, draft: &mut SettingsDraft) {
+        draft.provider = self.provider;
+        draft.key = self.key;
+        draft.model = self.model;
+        draft.base_url = self.base_url;
+        draft.embed_key = self.embed_key;
+        draft.embed_model = self.embed_model;
+        draft.embed_base_url = self.embed_base_url;
+        draft.embed_here = self.embed_here;
+    }
 }
 
 /// The pages of Settings, one for each feature, in the order its list shows
@@ -893,6 +939,7 @@ impl Default for SettingsDraft {
                 ),
                 embed::Config::from_parts(String::new(), String::new(), String::new()),
             ),
+            ai_opened: None,
             save_failed: false,
             integrations: Default::default(),
             page: SettingsPage::Appearance,

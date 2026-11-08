@@ -139,6 +139,7 @@ impl App {
             ),
         );
         self.settings.embed_here_snapshot = self.settings.embed_here;
+        self.settings.ai_opened = Some(crate::app::state::AiFields::of(&self.settings));
         self.settings.save_failed = false;
         // What a test found last time was about fields since filled anew.
         self.forget_connection_test();
@@ -507,6 +508,16 @@ impl App {
                 self.sync_server_listing()
             }
             SettingsMsg::Close => self.close_settings(),
+            SettingsMsg::Discard => {
+                // The AI fields as Settings opened on them: closing then
+                // keeps nothing of what was typed.
+                if let Some(opened) = self.settings.ai_opened.clone() {
+                    opened.put_back(&mut self.settings);
+                    self.forget_connection_test();
+                    self.settings.save_failed = false;
+                }
+                Task::none()
+            }
             SettingsMsg::ProviderPicked(p) => {
                 // The drop-down sends the provider already picked too: that
                 // changes nothing. It used to put the provider's defaults over

@@ -708,6 +708,7 @@ impl App {
             adapter = install.name()
         );
         self.proj.pending_lsp_consent.offer(LspConsent {
+            on_path: None,
             language: String::new(),
             server_name: install.name().to_string(),
             version: install.version().to_string(),

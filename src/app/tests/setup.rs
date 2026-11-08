@@ -554,8 +554,12 @@ fn set_up_looks_afresh_for_what_is_now_in_hand() {
     let _ = std::fs::remove_dir_all(&store);
     let _env = data_dir_override(&store);
     let mut app = scanned_app("setup-one-click-fresh");
+    // A server that takes leave to build and nothing fetched: what the
+    // click does needs no network. One to download made the task below a
+    // real download of rust-analyzer, waited on whole — and it hung,
+    // now and then, where the network did.
     let needs = SetupServer {
-        builds: false,
+        fetch: Fetch::Nothing,
         ..builds_and_downloads()
     };
     app.proj.setup_missing = vec![needs];
