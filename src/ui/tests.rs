@@ -1446,6 +1446,40 @@ fn a_download_in_progress_is_cancelled_from_its_banner() {
     );
 }
 
+/// A file's row in the Files view's tree is counted as the tree lays its
+/// rows out: each folder's row, its rows when open, then its files.
+#[test]
+fn a_files_row_is_where_the_tree_lays_it() {
+    let tree = crate::fs_scan::DirNode {
+        dirs: vec![(
+            "a".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![(
+                    "b".into(),
+                    crate::fs_scan::DirNode {
+                        dirs: vec![],
+                        files: vec!["x.rs".into()],
+                    },
+                )],
+                files: vec!["y.rs".into()],
+            },
+        )],
+        files: vec!["z.rs".into()],
+    };
+    let open = |dirs: &[&str]| -> std::collections::HashSet<String> {
+        dirs.iter().map(|d| d.to_string()).collect()
+    };
+    let at = |dirs: &[&str], rel: &str| super::tree_row_index(&tree, &open(dirs), rel);
+    // a, (b closed), y.rs, z.rs
+    assert_eq!(at(&["a"], "a/y.rs"), Some(2));
+    assert_eq!(at(&["a"], "z.rs"), Some(3));
+    assert_eq!(at(&["a"], "a/b/x.rs"), None, "behind a closed folder");
+    // a, b, x.rs, y.rs, z.rs
+    assert_eq!(at(&["a", "a/b"], "a/b/x.rs"), Some(2));
+    assert_eq!(at(&["a", "a/b"], "z.rs"), Some(4));
+    assert_eq!(at(&[], "z.rs"), Some(1));
+}
+
 /// The reading trail's row stands from the first file on, the file alone
 /// until there is a way back: it came with the first jump, and moved the
 /// code down a row.

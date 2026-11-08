@@ -756,6 +756,10 @@ impl App {
                 }),
                 None => Task::none(),
             },
+            WindowMsg::FilesTreeScrolled { offset, height } => {
+                self.proj.tree_scroll = Some((offset, height));
+                Task::none()
+            }
             WindowMsg::MarginTabPicked(tab) => {
                 self.margin_tab = tab;
                 self.show_right_panel = true;

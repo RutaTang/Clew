@@ -64,6 +64,11 @@ impl App {
             Some(history) => Task::batch([task, history]),
             None => task,
         };
+        // The Files view shows where the file being read is.
+        let task = match self.sync_tree_reveal() {
+            Some(reveal) => Task::batch([task, reveal]),
+            None => task,
+        };
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {

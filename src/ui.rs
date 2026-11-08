@@ -56,6 +56,7 @@ mod panels;
 pub(crate) use panels::*;
 mod sidebar;
 pub(crate) use sidebar::*;
+pub(crate) use sidebar::{TREE_ROW_GAP, TREE_ROW_H, tree_row_index};
 mod toolbar;
 pub(crate) use toolbar::*;
 mod sheet;
@@ -249,6 +250,11 @@ pub fn code_scroll_id(pane: usize) -> iced::widget::Id {
 
 pub fn finder_input_id() -> iced::widget::Id {
     iced::widget::Id::new("finder-input")
+}
+
+/// The Files view's tree, scrolled to the file being read.
+pub fn files_tree_id() -> iced::widget::Id {
+    iced::widget::Id::new("files-tree")
 }
 
 /// The finder's result list, so the selection can be scrolled into view.

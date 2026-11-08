@@ -2061,6 +2061,12 @@ pub enum WindowMsg {
     ToggleMaximize,
     /// The reading panel's view picked.
     MarginTabPicked(MarginTab),
+    /// The Files view's tree scrolled: where it is, and how much of it
+    /// shows.
+    FilesTreeScrolled {
+        offset: f32,
+        height: f32,
+    },
     /// Whether the window is maximized now, for its button to show.
     MaximizedIs(bool),
     /// Whether the window system composites the window over the desktop
@@ -2857,6 +2863,7 @@ impl WindowMsg {
             | WindowMsg::FileFilterEscaped
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
+            | WindowMsg::FilesTreeScrolled { .. }
             | WindowMsg::MaximizedIs(..)
             | WindowMsg::Composited(..)
             | WindowMsg::SoftwareRenderer(..) => None,

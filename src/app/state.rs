@@ -1832,6 +1832,12 @@ pub struct ProjectSession {
     /// The commits that touched the file being read, for the margin's
     /// History: its file, and them once they come.
     pub margin_history: Option<(PathBuf, Option<FileHistory>)>,
+    /// The file the Files view's tree was last opened and scrolled to, so
+    /// it is revealed once a file, as it comes on the sheet.
+    pub tree_revealed: Option<String>,
+    /// Where the Files view's tree is scrolled, and how much of it shows;
+    /// `None` until it has been scrolled.
+    pub tree_scroll: Option<(f32, f32)>,
     /// Numbers the time-travel requests — each start (`time_start`), each
     /// revision a session asks for (`TimeTravel::generation`) — so no two
     /// share one. A reply applies only while its own request is still the
@@ -2229,6 +2235,8 @@ impl Default for ProjectSession {
             time_travel: Default::default(),
             time_travel_at: None,
             margin_history: None,
+            tree_revealed: None,
+            tree_scroll: None,
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),

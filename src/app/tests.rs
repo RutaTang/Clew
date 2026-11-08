@@ -13919,6 +13919,54 @@ fn the_margin_history_lists_commits_and_opens_time_travel_on_the_one_picked() {
     );
 }
 
+/// The file being read is revealed in the Files view as it comes on the
+/// sheet: its folders opened, its row scrolled to when it is out of view
+/// and not when it shows already; and with the view hidden, when it shows.
+#[test]
+fn the_files_view_reveals_the_file_being_read() {
+    let root = fixture_project("tree-reveal");
+    std::fs::create_dir_all(root.join("src/deep/er")).unwrap();
+    std::fs::write(root.join("src/deep/er/far.rs"), "fn far() {}\n").unwrap();
+    // Folders listed before it, a row each.
+    for i in 0..12 {
+        std::fs::create_dir_all(root.join(format!("src/c{i:02}"))).unwrap();
+        std::fs::write(root.join(format!("src/c{i:02}/m.rs")), "fn m() {}\n").unwrap();
+    }
+    let mut app = blank_app();
+    scan_synchronously(&mut app, root);
+    app.show_left_sidebar = false;
+    app.sidebar = SidebarTab::Files;
+    open_synchronously(&mut app, "src/deep/er/far.rs", None);
+    assert!(
+        app.proj.expanded.is_empty(),
+        "the tree not showing, nothing opened"
+    );
+    assert!(app.proj.tree_revealed.is_none());
+
+    // The view shown: its folders open, and the row, past what a short
+    // window shows of the tree, scrolled to.
+    app.show_left_sidebar = true;
+    app.window_height = 300.0;
+    let reveal = app.sync_tree_reveal();
+    for dir in ["src", "src/deep", "src/deep/er"] {
+        assert!(app.proj.expanded.contains(dir), "{dir} not opened");
+    }
+    assert!(reveal.is_some(), "out of view: scrolled to");
+    assert_eq!(
+        app.proj.tree_revealed.as_deref(),
+        Some("src/deep/er/far.rs")
+    );
+    // Once a file: it stays put while read.
+    assert!(app.sync_tree_reveal().is_none());
+
+    // A file in view already: opened to, not scrolled to.
+    app.proj.tree_scroll = Some((0.0, 2000.0));
+    open_synchronously(&mut app, "src/lib.rs", None);
+    assert_eq!(app.proj.tree_revealed.as_deref(), Some("src/lib.rs"));
+    app.proj.tree_revealed = None;
+    assert!(app.sync_tree_reveal().is_none(), "in view: no scroll");
+}
+
 /// D1-19: git failing is reported as a failure. A history that could not be
 /// read is not "No git history", and a revision git could not produce is not
 /// shown as an empty file.

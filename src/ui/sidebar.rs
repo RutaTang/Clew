@@ -685,10 +685,53 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
             left: 10.0,
         }),
     )
+    .id(crate::ui::files_tree_id())
+    .on_scroll(|v| {
+        Message::Window(WindowMsg::FilesTreeScrolled {
+            offset: v.absolute_offset().y,
+            height: v.bounds().height,
+        })
+    })
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill)
     .into()
+}
+
+/// The row `rel` is drawn at in the Files view's tree with `expanded`
+/// folders open — counted as [`append_tree_rows`] lays them out, each
+/// folder's own row, then its rows when open, then its files; `None` while a
+/// closed folder holds it.
+pub(crate) fn tree_row_index(
+    tree: &DirNode,
+    expanded: &std::collections::HashSet<String>,
+    rel: &str,
+) -> Option<usize> {
+    fn walk(
+        node: &DirNode,
+        prefix: &str,
+        expanded: &std::collections::HashSet<String>,
+        rel: &str,
+        row: &mut usize,
+    ) -> Option<usize> {
+        for (name, child) in &node.dirs {
+            let dir = join_rel(prefix, name);
+            *row += 1;
+            if expanded.contains(&dir)
+                && let Some(found) = walk(child, &dir, expanded, rel, row)
+            {
+                return Some(found);
+            }
+        }
+        for name in &node.files {
+            if join_rel(prefix, name) == rel {
+                return Some(*row);
+            }
+            *row += 1;
+        }
+        None
+    }
+    walk(tree, "", expanded, rel, &mut 0)
 }
 
 /// Most files the filter lists: a filter as short as one letter matches
@@ -760,8 +803,8 @@ fn quiet_icon(glyph: Glyph, color: iced::Color) -> Element<'static, Message> {
 }
 
 /// Height of a row of the file tree, and the gap between rows.
-const TREE_ROW_H: f32 = 28.0;
-const TREE_ROW_GAP: f32 = 1.0;
+pub(crate) const TREE_ROW_H: f32 = 28.0;
+pub(crate) const TREE_ROW_GAP: f32 = 1.0;
 /// Height of the Files view's filter field.
 const FILTER_H: f32 = 30.0;
 /// The room between the sidebar's views, its filter and its list.

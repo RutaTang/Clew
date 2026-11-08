@@ -1098,6 +1098,52 @@ impl App {
 }
 
 impl App {
+    /// The file being read, revealed in the Files view once it comes on the
+    /// sheet: its folders opened, and its row scrolled into view when it is
+    /// not in it already. Only while the tree shows (the view picked, no
+    /// filter): a file opened with it hidden is revealed when it shows.
+    /// `None` when there is nothing to scroll.
+    pub(crate) fn sync_tree_reveal(&mut self) -> Option<Task<Message>> {
+        let rel = self.active_viewer()?.rel.clone();
+        if self.proj.tree_revealed.as_deref() == Some(rel.as_str())
+            || !self.show_left_sidebar
+            || self.sidebar != SidebarTab::Files
+            || !self.file_filter.trim().is_empty()
+        {
+            return None;
+        }
+        self.proj.tree_revealed = Some(rel.clone());
+        for (at, _) in rel.match_indices('/') {
+            self.proj.expanded.insert(rel[..at].to_string());
+        }
+        let tree = &self.proj.project.as_ref()?.tree;
+        let row = ui::tree_row_index(tree, &self.proj.expanded, &rel)?;
+        let pitch = ui::TREE_ROW_H + ui::TREE_ROW_GAP;
+        let (top, bottom) = (row as f32 * pitch, (row + 1) as f32 * pitch);
+        // Before it has been scrolled, it shows from its top, about as much
+        // of it as the window has room for under the chrome.
+        let (offset, height) = self
+            .proj
+            .tree_scroll
+            .unwrap_or((0.0, (self.window_height - TREE_CHROME_H).max(0.0)));
+        if top >= offset && bottom <= offset + height {
+            return None;
+        }
+        Some(iced::widget::operation::scroll_to(
+            ui::files_tree_id(),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: (top - height / 2.0).max(0.0),
+            },
+        ))
+    }
+}
+
+/// About how much of the window's height is not the Files view's tree: the
+/// top bar, the sidebar's tabs and filter, the status bar.
+const TREE_CHROME_H: f32 = 160.0;
+
+impl App {
     /// Handle a [`NavMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_nav(&mut self, message: NavMsg) -> Task<Message> {
