@@ -9566,3 +9566,46 @@ fn every_page_over_the_code_has_its_close() {
     let _ = app.update(Message::Docs(crate::DocsMsg::ClosePage));
     assert!(app.proj.docs.page.is_none());
 }
+
+/// The ⋯ menu's rows name the keys that do what they do, on the row and,
+/// where the rows are laid on the strip, in their tips — as every other tool
+/// does: they named none, as though they had none.
+#[test]
+fn the_tools_menu_rows_name_their_keys() {
+    use super::ToolsRow;
+    let keyed = [
+        (ToolsRow::ExplainAll, crate::keymap::Action::ExplainAll),
+        (ToolsRow::Walkthrough, crate::keymap::Action::Walkthrough),
+        (ToolsRow::LspServers, crate::keymap::Action::LspServers),
+        (ToolsRow::Shortcuts, crate::keymap::Action::Shortcuts),
+    ];
+    let mut app = reader_app();
+    open_tools_menu(&mut app);
+    let size = Size::new(WINDOW.width, app.window_height);
+    for (row, action) in keyed {
+        let caps = app.keymap.chord(action).caps();
+        let mut sim = sim_sized(&app, size);
+        let shown = text_at(&mut sim, |t| t == caps, 0);
+        assert!(shown.is_some(), "{row:?} does not say {caps}");
+    }
+
+    // On the strip: in the tip.
+    app.show_tools_menu = false;
+    app.window_height = 1000.0;
+    assert!(super::tools_on_strip(&app));
+    let size = Size::new(WINDOW.width, app.window_height);
+    for (row, action) in keyed {
+        let at = super::strip_slot_center(&app, super::StripSlot::Row(row)).unwrap();
+        let last = super::split_caps(&app.keymap.chord(action).caps())
+            .pop()
+            .unwrap();
+        super::tip::warm_now();
+        let mut sim = sim_sized(&app, size);
+        sim.point_at(at);
+        let _ = sim.simulate([Event::Mouse(iced::mouse::Event::CursorMoved {
+            position: at,
+        })]);
+        let key = text_at(&mut sim, |t| t == last, 0);
+        assert!(key.is_some(), "{row:?}'s tip does not say {last}");
+    }
+}

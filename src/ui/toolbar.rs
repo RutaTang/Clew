@@ -892,7 +892,7 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
                     strip_button(glyph, theme::fg_muted(), false, msg.is_some())
                         .on_press_maybe(msg),
                     label,
-                    None,
+                    tools_row_action(row).and_then(caps),
                     tooltip::Position::Left,
                 )
             }
@@ -995,6 +995,23 @@ fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
     design.max(widest_row).max(widest_heading).ceil()
 }
 
+/// The shortcut that does what a ⋯ menu row does, where there is one:
+/// shown on the row, and in its tip on the strip.
+pub(crate) fn tools_row_action(row: ToolsRow) -> Option<Action> {
+    match row {
+        ToolsRow::ExplainAll => Some(Action::ExplainAll),
+        ToolsRow::Walkthrough => Some(Action::Walkthrough),
+        ToolsRow::LspServers => Some(Action::LspServers),
+        ToolsRow::Shortcuts => Some(Action::Shortcuts),
+        ToolsRow::Glossary
+        | ToolsRow::OpenFolder
+        | ToolsRow::OpenRemote
+        | ToolsRow::ExportNotes
+        | ToolsRow::SetUp
+        | ToolsRow::Tutorial => None,
+    }
+}
+
 /// What a ⋯ menu row says.
 fn tools_row_label(row: ToolsRow) -> &'static str {
     match row {
@@ -1036,10 +1053,15 @@ pub(crate) fn tools_menu_w(app: &App) -> f32 {
             .filter(|_| app.proj.explain.running)
             .map(|(_, total)| (total, total)),
     );
+    let chord = |r: ToolsRow| {
+        tools_row_action(r).map_or(0.0, |a| {
+            super::sheet::text_width(&app.keymap.chord(a).caps(), ts::SMALL, crate::fonts::UI)
+        })
+    };
     let rows: Vec<(&str, f32)> = TOOLS_MENU_ROWS
         .iter()
-        .map(|&r| (tools_row_label(r), 0.0))
-        .chain([(cancel.as_str(), 0.0)])
+        .map(|&r| (tools_row_label(r), chord(r)))
+        .chain([(cancel.as_str(), chord(ToolsRow::ExplainAll))])
         .collect();
     let headings: Vec<&str> = TOOLS_MENU_HEADINGS
         .iter()
@@ -1206,8 +1228,8 @@ fn menu_chord<'a>(app: &App, action: Action) -> Element<'a, Message> {
 }
 
 /// The ⋯ menu: what the strip has no room for, in [`TOOLS_MENU_ROWS`] order,
-/// opening to the left of its button. Its rows are a glyph and a name: the
-/// keys of those that have them are in the palette and the shortcuts.
+/// opening to the left of its button. Its rows are a glyph, a name, and the
+/// keys of those that have them.
 pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (i, &r) in TOOLS_MENU_ROWS.iter().enumerate() {
@@ -1218,7 +1240,8 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             items.push(menu_heading(crate::i18n::lookup(heading)));
         }
         let (glyph, label, msg) = tools_row(app, r);
-        let item = menu_item(Some(glyph), label, slot(), msg);
+        let keys = tools_row_action(r).map_or_else(slot, |a| menu_chord(app, a));
+        let item = menu_item(Some(glyph), label, keys, msg);
         items.push(item);
     }
     let rows = Column::with_children(items).spacing(MENU_ROW_SPACING);

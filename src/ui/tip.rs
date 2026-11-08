@@ -34,6 +34,13 @@ fn keep_warm(now: Instant) {
     WARM_UNTIL.with(|w| w.set(Some(now + WARM)));
 }
 
+/// As though a tooltip had just been put away: the next shows at once —
+/// for a test that reads one without waiting out [`DELAY`].
+#[cfg(test)]
+pub(crate) fn warm_now() {
+    keep_warm(Instant::now());
+}
+
 /// `content`, naming itself with `tip` on its `position` side once the
 /// pointer has rested on it.
 pub(crate) fn tip<'a, Message: 'a>(
@@ -301,6 +308,19 @@ impl<Message> overlay::Overlay<Message, Theme, Renderer> for Bubble<'_, '_, Mess
         let x = x.clamp(0.0, (bounds.width - size.width).max(0.0));
         let y = y.clamp(0.0, (bounds.height - size.height).max(0.0));
         laid.move_to(Point::new(x, y))
+    }
+
+    /// Its words are found as any others on screen are (by an operation —
+    /// a test reading what a tip says, a screen reader).
+    fn operate(
+        &mut self,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        operation: &mut dyn widget::Operation,
+    ) {
+        self.tip
+            .as_widget_mut()
+            .operate(self.tree, layout, renderer, operation);
     }
 
     fn draw(
