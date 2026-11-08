@@ -4874,7 +4874,7 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
     );
     check(
         |ready| open_sheet(&root, ready),
-        ("Not now", |m| {
+        ("Skip setup", |m| {
             matches!(m, Message::Project(ProjectMsg::OpenWithoutSetup(_)))
         }),
         None,

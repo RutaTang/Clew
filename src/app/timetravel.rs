@@ -637,29 +637,28 @@ impl App {
 
     /// The commits that touched the file being read, asked for as the
     /// margin's History shows it: once a file while it shows, and anew each
-    /// time it is shown again (a commit may have come meanwhile).
-    pub(crate) fn sync_margin_history(&mut self) -> Task<Message> {
+    /// time it is shown again (a commit may have come meanwhile). `None` when
+    /// there is nothing to ask.
+    pub(crate) fn sync_margin_history(&mut self) -> Option<Task<Message>> {
         if !self.show_right_panel || self.margin_tab != crate::MarginTab::History {
             self.proj.margin_history = None;
-            return Task::none();
+            return None;
         }
-        let Some((abs, rel)) = self.active_viewer().map(|v| (v.abs.clone(), v.rel.clone())) else {
-            return Task::none();
-        };
+        let (abs, rel) = self
+            .active_viewer()
+            .map(|v| (v.abs.clone(), v.rel.clone()))?;
         if self
             .proj
             .margin_history
             .as_ref()
             .is_some_and(|(asked, _)| *asked == abs)
         {
-            return Task::none();
+            return None;
         }
-        let Some(git) = self.git_source() else {
-            return Task::none();
-        };
+        let git = self.git_source()?;
         self.proj.margin_history = Some((abs.clone(), None));
         let stamp = self.stamp();
-        Task::perform(
+        Some(Task::perform(
             async move {
                 git.run::<Vec<git::HistCommit>>(clew_protocol::GitOp::FileHistory {
                     rel,
@@ -674,7 +673,7 @@ impl App {
                     result,
                 })
             },
-        )
+        ))
     }
 
     pub(crate) fn on_time_travel_goto(&mut self, idx: usize) -> Task<Message> {

@@ -58,7 +58,12 @@ impl App {
         // The question's field holds the question, however it was set.
         self.sync_ask_editor();
         // The margin's History lists the commits of the file being read.
-        let task = Task::batch([task, self.sync_margin_history()]);
+        // Batched only when it asks: a batch is a task even of none, and an
+        // update that asks for nothing returns none.
+        let task = match self.sync_margin_history() {
+            Some(history) => Task::batch([task, history]),
+            None => task,
+        };
         // An answer that came with Ask put away is read once its card is
         // open, whichever way it was opened.
         if self.ask_view.is_open() {
