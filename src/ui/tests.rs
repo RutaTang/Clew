@@ -12264,6 +12264,11 @@ fn audited_states() -> Vec<(String, App)> {
         let _ = app.update(Message::Editor(EditorMsg::RunAction(action)));
         states.push((format!("{action:?}"), app));
     }
+    // The sidebar's More views menu.
+    let mut app = base_clone(&base);
+    app.show_left_sidebar = true;
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewsMenu));
+    states.push(("the views menu".into(), app));
     // The context menu over the code, and a tree with rows.
     let mut app = base_clone(&base);
     app.proj.context_menu = Some(crate::ContextMenu {
@@ -12576,4 +12581,47 @@ fn rows_scrolled_away_have_no_code() {
     assert!(!rows("f799.rs"), "the last, far below, has none");
     assert!(dealt.len() < 200, "{} codes", dealt.len());
     assert!(dealt.iter().all(|(c, _)| c.len() == 2));
+}
+
+/// The sidebar's ⋯ lists the views not on its strip — a function's calls
+/// among them — and picking one shows it, the menu put away, the ⋯ raised
+/// while it shows; Esc puts the menu away too.
+#[test]
+fn the_more_views_menu_lists_the_views_off_the_strip() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    let more = crate::ui::heard::gather(&app)
+        .into_iter()
+        .find(|t| t.title == "More views")
+        .expect("the ⋯ is offered");
+    let _ = app.update(more.message);
+    assert!(app.show_views_menu);
+    let mut sim = sim_of(&app);
+    for name in [
+        "Call hierarchy",
+        "Value flow",
+        "Imports",
+        "Your notes",
+        "API docs",
+    ] {
+        assert!(shows(&mut sim, name), "{name} listed");
+    }
+    assert!(!shows(&mut sim, "Bookmarks"), "a view on the strip is not");
+    drop(sim);
+    assert!(matches!(
+        super::escape_message(&app),
+        Some(Message::Window(WindowMsg::ToggleViewsMenu))
+    ));
+    let sent = click(sim_of(&app), "Call hierarchy");
+    for message in sent {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.sidebar, crate::SidebarTab::Calls);
+    assert!(!app.show_views_menu, "put away");
+    // Its menu hangs under the ⋯, within the sidebar.
+    let _ = app.update(Message::Window(WindowMsg::ToggleViewsMenu));
+    let mut sim = sim_of(&app);
+    let row = text_at(&mut sim, |t| t == "API docs", 0).expect("listed");
+    assert!(row.x + row.width <= app.sidebar_width, "{row:?}");
+    assert!(row.y > super::toolbar::TOOLBAR_H + 30.0, "{row:?}");
 }

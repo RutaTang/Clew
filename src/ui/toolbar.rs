@@ -1213,6 +1213,50 @@ fn menu_item<'a>(
     b.into()
 }
 
+/// The width of the sidebar's More views menu.
+const VIEWS_MENU_W: f32 = 220.0;
+
+/// The sidebar's More views menu, from the ⋯ after its views: the views
+/// not on the strip — a function's calls, a value's flow, the imports,
+/// the reader's notes, the API docs — the one showing checked.
+pub(crate) fn views_menu(app: &App) -> Element<'_, Message> {
+    use super::sidebar::{
+        SIDEBAR_TABS, STRIP_VIEWS, VIEWS_ROW_H, VIEWS_ROW_RIGHT_PAD, VIEWS_ROW_TOP, tab_glyph,
+        tab_name,
+    };
+    let items: Vec<Element<'_, Message>> = SIDEBAR_TABS
+        .iter()
+        .skip(STRIP_VIEWS)
+        .map(|(_, tab)| {
+            let trailing: Element<'_, Message> = if app.sidebar == *tab && app.show_left_sidebar {
+                glyph::icon(Glyph::Check, theme::accent(), 13.0)
+            } else {
+                slot()
+            };
+            menu_item(
+                Some(tab_glyph(*tab)),
+                tab_name(*tab).to_string(),
+                trailing,
+                Some(Message::Window(WindowMsg::SidebarTabPicked(*tab))),
+            )
+        })
+        .collect();
+    let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
+        .width(VIEWS_MENU_W)
+        .padding(MENU_PAD)
+        .style(theme::modal_panel);
+    // Hung from the ⋯, its right edge under the row's.
+    let left = (app.sidebar_width - VIEWS_ROW_RIGHT_PAD - VIEWS_MENU_W).max(4.0);
+    modal(
+        panel,
+        Placement::TopLeft {
+            top: body_top(app) + VIEWS_ROW_TOP + VIEWS_ROW_H + 3.0,
+            left,
+        },
+        Backdrop::Clear(Message::Window(WindowMsg::ToggleViewsMenu)),
+    )
+}
+
 /// A heading over a group of menu rows, naming it.
 fn menu_heading<'a>(label: &'a str) -> Element<'a, Message> {
     container(ts::set_in(

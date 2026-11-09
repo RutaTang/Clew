@@ -28,6 +28,16 @@ pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
 /// title of its own.
 pub(crate) const STRIP_VIEWS: usize = 6;
 
+/// The width of the ⋯ after the strip's views, which lists the rest.
+pub(crate) const MORE_VIEWS_W: f32 = 28.0;
+
+/// Where the strip's views stand: their top edge below the top bar, and
+/// their row's right edge (the ⋯'s) from the sidebar's left — what the
+/// More views menu hangs from.
+pub(crate) const VIEWS_ROW_TOP: f32 = 2.0;
+pub(crate) const VIEWS_ROW_RIGHT_PAD: f32 = 10.0 + 2.0;
+pub(crate) const VIEWS_ROW_H: f32 = 28.0 + 2.0 * 2.0;
+
 /// A view's icon on its tab.
 pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
     match tab {
@@ -105,6 +115,11 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                 tooltip::Position::Bottom,
             )
         };
+    // A view not on the strip, opened by what shows it or from the ⋯.
+    let elsewhere = SIDEBAR_TABS
+        .iter()
+        .skip(STRIP_VIEWS)
+        .any(|(_, t)| *t == app.sidebar);
     let mut tabs_row = Row::new().spacing(2);
     for (_, this) in SIDEBAR_TABS.iter().take(STRIP_VIEWS) {
         tabs_row = tabs_row.push(segment(
@@ -115,13 +130,41 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
             Message::Window(WindowMsg::SidebarTabPicked(*this)),
         ));
     }
-    let tabs = container(tabs_row).padding(2).style(theme::trough);
+    // The views not on the strip, from a menu: raised while one of them
+    // shows, or the menu is open.
+    let more = tip_at(
+        button(
+            container(glyph::icon(
+                Glyph::More,
+                if elsewhere || app.show_views_menu {
+                    theme::fg_bright()
+                } else {
+                    theme::fg_muted()
+                },
+                15.0,
+            ))
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::Center)
+            .align_y(iced::Center),
+        )
+        .style(theme::segment(elsewhere || app.show_views_menu))
+        .padding(0)
+        .width(Length::Fixed(MORE_VIEWS_W))
+        .height(Length::Fixed(28.0))
+        .on_press(super::heard::said(
+            tr!("More views"),
+            Message::Window(WindowMsg::ToggleViewsMenu),
+        )),
+        tr!("More views"),
+        None,
+        tooltip::Position::Bottom,
+    );
+    let tabs = container(tabs_row.push(more))
+        .padding(2)
+        .style(theme::trough);
     // A view not on the strip, opened by what shows it, is named over it,
     // with the way back to the files.
-    let elsewhere = SIDEBAR_TABS
-        .iter()
-        .skip(STRIP_VIEWS)
-        .any(|(_, t)| *t == app.sidebar);
     let titled: Element<'_, Message> = if elsewhere {
         container(
             row![

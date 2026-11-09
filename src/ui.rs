@@ -354,6 +354,8 @@ pub(crate) enum ActiveOverlay<'a> {
     TargetMenu,
     AppMenu,
     ViewMenu,
+    /// The sidebar's More views menu.
+    ViewsMenu,
     Graph(crate::Overlay),
     Finder,
     ContextMenu(&'a crate::ContextMenu),
@@ -409,6 +411,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::AppMenu
     } else if app.show_view_menu {
         O::ViewMenu
+    } else if app.show_views_menu {
+        O::ViewsMenu
     } else if let Some(overlay) = app.proj.overlay {
         O::Graph(overlay)
     } else if app.proj.finder.open {
@@ -452,6 +456,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::TargetMenu => "target-menu",
             Self::AppMenu => "app-menu",
             Self::ViewMenu => "view-menu",
+            Self::ViewsMenu => "views-menu",
             Self::Graph(_) => "graph",
             Self::ContextMenu(_) => "context-menu",
             Self::BpCondition(_)
@@ -511,6 +516,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::TargetMenu => target_menu(app),
             Self::AppMenu => app_menu(app),
             Self::ViewMenu => view_menu(app),
+            Self::ViewsMenu => toolbar::views_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::Finder => finder_modal(app),
             Self::ContextMenu(menu) => context_menu(app, menu),
@@ -544,6 +550,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
             Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
             Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),
+            Self::ViewsMenu => Message::Window(WindowMsg::ToggleViewsMenu),
             Self::Graph(_) => Message::Graph(GraphMsg::CloseOverlay),
             Self::Finder => Message::Nav(NavMsg::FinderClosed),
             Self::ContextMenu(_) => Message::Hover(HoverMsg::ContextMenuClosed),

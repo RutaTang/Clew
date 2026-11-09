@@ -2164,6 +2164,8 @@ pub enum WindowMsg {
     ToggleAppMenu,
     /// Open / close the reader's View menu (the file tools' View ▾).
     ToggleViewMenu,
+    /// Open / close the sidebar's More views menu (the ⋯ after its views).
+    ToggleViewsMenu,
     /// The Files view's filter changed.
     FileFilterChanged(String),
     /// Enter in the Files view's filter: open the first file it lists.
@@ -3009,6 +3011,7 @@ impl WindowMsg {
             | WindowMsg::NoFileDialog
             | WindowMsg::ToggleAppMenu
             | WindowMsg::ToggleViewMenu
+            | WindowMsg::ToggleViewsMenu
             | WindowMsg::FileFilterChanged(..)
             | WindowMsg::FileFilterSubmitted
             | WindowMsg::FileFilterEscaped
