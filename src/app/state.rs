@@ -1758,6 +1758,9 @@ pub struct ProjectSession {
     /// the trees and the finder can say the index is incomplete instead of
     /// silently missing files.
     pub index_cap_note: Option<String>,
+    /// The files that build left out for their size, by their path in the
+    /// project, with it ([`crate::graph::index::Indexed::too_large`]).
+    pub index_too_large: Vec<(String, u64)>,
     /// Project-wide Rust type relations (traits implemented / implementors),
     /// built off-thread after indexing and rebuilt as Rust files change; feeds
     /// the hover structure peek.
@@ -1799,6 +1802,10 @@ pub struct ProjectSession {
     /// Import cycles in the project, recomputed when the graph changes (cached so
     /// the sidebar banner doesn't re-run cycle detection every frame).
     pub import_cycles: Vec<Vec<PathBuf>>,
+    /// The notes under the Imports tab's header the reader opened (its
+    /// import cycles, the files the index left out): each a row that shows
+    /// what it is about under it once pressed.
+    pub import_notes_open: Vec<crate::app::message::ImportNote>,
     /// How often each file changed over the recent history, for the graphs'
     /// change-frequency overlay: loaded when a graph overlay opens
     /// (`App::ensure_churn`), kept for a while (`churn_at`), `None` for a
@@ -2271,6 +2278,7 @@ impl Default for ProjectSession {
             symbol_index_rev: Default::default(),
             indexing: Default::default(),
             index_cap_note: Default::default(),
+            index_too_large: Vec::new(),
             structure: Default::default(),
             structure_rev: Default::default(),
             structure_building: Default::default(),
@@ -2282,6 +2290,7 @@ impl Default for ProjectSession {
             import_tree: Default::default(),
             import_tree_token: Default::default(),
             import_cycles: Default::default(),
+            import_notes_open: Vec::new(),
             churn: None,
             churn_at: None,
             churn_rev: 0,

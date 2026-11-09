@@ -39,7 +39,6 @@ pub struct Palette {
     pub bg: Color,        // editor background
     pub bg_panel: Color,  // sidebar / toolbar background
     pub bg_hover: Color,  // subtle hover wash
-    pub bg_active: Color, // pressed / active control
     pub selected: Color,  // selected list row (accent-tinted)
     pub fg: Color,        // primary text
     pub fg_bright: Color, // emphasised / selected text
@@ -112,7 +111,6 @@ const CLEW_DARK_PAL: Palette = Palette {
     bg: rgb(0x18181b),
     bg_panel: rgb(0x121214),
     bg_hover: rgb(0x222226),
-    bg_active: rgb(0x2a2a2f),
     selected: rgb(0x26262b),
     fg: rgb(0xededef),
     fg_bright: rgb(0xfafafa),
@@ -158,7 +156,6 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xffffff),
     bg_panel: rgb(0xf4f4f5),
     bg_hover: rgb(0xebebee),
-    bg_active: rgb(0xe2e2e6),
     selected: rgb(0xe6e6ea),
     fg: rgb(0x18181b),
     fg_bright: rgb(0x09090b),
@@ -204,7 +201,6 @@ const ONE_DARK_PAL: Palette = Palette {
     bg: rgb(0x282c34),
     bg_panel: rgb(0x21252b),
     bg_hover: rgb(0x2d323c),
-    bg_active: rgb(0x353c48),
     selected: rgb(0x2f3a4c),
     fg: rgb(0xabb2bf),
     fg_bright: rgb(0xdfe4ec),
@@ -248,7 +244,6 @@ const ONE_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xfafafa),
     bg_panel: rgb(0xeff1f3),
     bg_hover: rgb(0xe4e7ea),
-    bg_active: rgb(0xd7dbe0),
     selected: rgb(0xd3e3fb),
     fg: rgb(0x383a42),
     fg_bright: rgb(0x1b1d23),
@@ -294,7 +289,6 @@ const GRUVBOX_DARK_PAL: Palette = Palette {
     bg: rgb(0x32302f),
     bg_panel: rgb(0x282828),
     bg_hover: rgb(0x3c3836),
-    bg_active: rgb(0x504945),
     selected: rgb(0x45403d),
     fg: rgb(0xebdbb2),
     fg_bright: rgb(0xfbf1c7),
@@ -338,7 +332,6 @@ const GRUVBOX_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xf2e5bc),
     bg_panel: rgb(0xebdbb2),
     bg_hover: rgb(0xe8d9a8),
-    bg_active: rgb(0xd5c4a1),
     selected: rgb(0xdcc9a0),
     fg: rgb(0x3c3836),
     fg_bright: rgb(0x282828),
@@ -386,7 +379,6 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xf4ecd8),
     bg_panel: rgb(0xece3cc),
     bg_hover: rgb(0xe7ddc4),
-    bg_active: rgb(0xddd0b2),
     selected: rgb(0xe4d7ad),
     fg: rgb(0x4a4436),
     fg_bright: rgb(0x2e2a20),
@@ -430,7 +422,6 @@ const PAPER_DARK_PAL: Palette = Palette {
     bg: rgb(0x262019),
     bg_panel: rgb(0x1f1a14),
     bg_hover: rgb(0x302921),
-    bg_active: rgb(0x3b3228),
     selected: rgb(0x3a3025),
     fg: rgb(0xd9cba8),
     fg_bright: rgb(0xf0e6cb),
@@ -478,7 +469,6 @@ const CYBERPUNK_PAL: Palette = Palette {
     bg: rgb(0x0f0b1e),
     bg_panel: rgb(0x0a0816),
     bg_hover: rgb(0x1a1530),
-    bg_active: rgb(0x251d40),
     selected: rgb(0x2a1f47),
     fg: rgb(0xe5e0ff),
     fg_bright: rgb(0xffffff),
@@ -893,9 +883,6 @@ pub fn bg_panel() -> Color {
 }
 pub fn bg_hover() -> Color {
     active().bg_hover
-}
-pub fn bg_active() -> Color {
-    active().bg_active
 }
 pub fn selected() -> Color {
     active().selected

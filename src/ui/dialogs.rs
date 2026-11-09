@@ -29,8 +29,6 @@ const BAR_DETAIL_SIZE: f32 = 12.0;
 const FINDER_INPUT_H: f32 = 52.0;
 /// The command bar's corners, as the design rounds them.
 const FINDER_RADIUS: f32 = 12.0;
-/// Height of the finder's foot, the line of key hints under its results.
-const FINDER_FOOT_H: f32 = 32.0;
 
 /// Modal to set a breakpoint's condition — the program only stops there when the
 /// expression is true. Empty condition sets a plain breakpoint.
@@ -333,12 +331,24 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     // symbol a reader is looking for may simply not be in it — say so under
     // the list (outside it, so row `i` still starts at `i * FINDER_ROW_H`).
     let cap_note: Element<'_, Message> = match index_cap_note(app) {
-        Some(note) if app.proj.finder.mode == FinderMode::Symbols => {
-            text(tr!("Index incomplete: {note}", note = note))
-                .size(ts::CAPTION)
-                .color(theme::dim())
-                .into()
-        }
+        Some(note) if app.proj.finder.mode == FinderMode::Symbols => container(
+            row![
+                glyph::icon(Glyph::Info, theme::fg_muted(), 12.0),
+                text(tr!("Index incomplete: {note}", note = note))
+                    .size(ts::CAPTION)
+                    .color(theme::dim()),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 16.0,
+            bottom: 10.0,
+            left: 16.0,
+        })
+        .width(Fill)
+        .into(),
         _ => slot(),
     };
     let panel = container(iced::widget::column![
@@ -347,7 +357,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         // The design's gap between what the list holds, and no padding
         // inside it: row `i` starts at exactly `i * FINDER_ROW_H` (its
         // height and the gap after it) for `reveal_finder_selection`.
-        // Capped so the foot under it always shows.
+        // Capped so the panel never runs past the window.
         container(
             scrollable(
                 Column::with_children(rows)
@@ -359,11 +369,9 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             .style(theme::overlay_scrollbar)
             .height(iced::Length::Shrink),
         )
-        .max_height(FINDER_MAX_H - FINDER_INPUT_H - FINDER_FOOT_H - 24.0)
+        .max_height(FINDER_MAX_H - FINDER_INPUT_H - 24.0)
         .padding(6),
         cap_note,
-        hairline(),
-        finder_footer(),
     ])
     .width(FINDER_W)
     .max_height(FINDER_MAX_H)
@@ -377,40 +385,6 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         Placement::Top(FINDER_TOP),
         Backdrop::Dim(Some(Message::Nav(NavMsg::FinderClosed))),
     )
-}
-
-/// The palette's foot: how to move through it, open a result, and leave.
-fn finder_footer<'a>() -> Element<'a, Message> {
-    // The keys by their names on the keyboard, never translated.
-    let enter = tr!(
-        "{key} to open",
-        key = if crate::keymap::MAC_KEYS {
-            "Return"
-        } else {
-            "Enter"
-        }
-    );
-    let hint = |what: String| {
-        ts::set_in(
-            text(what).color(theme::dim()),
-            FINDER_FOOT_H,
-            ts::INTER,
-            ts::SMALL,
-        )
-    };
-    container(
-        row![
-            hint(tr!("{keys} to move", keys = "↑ ↓")),
-            hint(enter),
-            hint(tr!("{key} to close", key = "Esc"))
-        ]
-        .spacing(16)
-        .align_y(iced::Center),
-    )
-    .height(Length::Fixed(FINDER_FOOT_H))
-    .align_y(iced::Center)
-    .padding([0, 16])
-    .into()
 }
 
 /// One finder result: a fixed-height, full-width button. `pick` opens what

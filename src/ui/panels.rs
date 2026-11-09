@@ -391,17 +391,34 @@ fn tree_note_row<'a>(depth: usize, note: String) -> Element<'a, Message> {
     .into()
 }
 
-/// A one-line banner under a tree's header (cycles, what the index left out).
-fn tree_banner<'a>(note: String, color: iced::Color) -> Element<'a, Message> {
-    container(text(note).size(ts::CAPTION).color(color))
-        .padding(Padding {
-            top: 3.0,
-            right: 8.0,
-            bottom: 3.0,
-            left: 10.0,
-        })
-        .width(Fill)
-        .into()
+/// A tree traced from code since changed, said under its header with what
+/// traces it again (`refresh`): a press, not a key the reader is told of.
+fn stale_note<'a>(refresh: Message) -> Element<'a, Message> {
+    let label = tr!("Code changed since this was traced");
+    container(
+        row![
+            glyph::icon(Glyph::Info, theme::fg_muted(), 12.0),
+            text(label)
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            button(text(tr!("Refresh")).size(ts::SMALL))
+                .style(theme::toolbar_button)
+                .padding([2, 7])
+                .on_press(super::heard::said(tr!("Refresh"), refresh)),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 3.0,
+        right: 8.0,
+        bottom: 3.0,
+        left: 10.0,
+    })
+    .width(Fill)
+    .into()
 }
 
 /// What the symbol index left out of the open project (its file / size caps),
@@ -889,15 +906,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             "Ask {agent} about this codebase…",
             agent = crate::app::integrations::acp_label(agent)
         ),
-        // Once there is a conversation, what is typed is a reply — and, in
-        // the large window, where there is room to say it, the microphone's
-        // key as another way to give it.
-        None if !app.proj.ask_turns.is_empty() && app.ask_view == crate::AskView::Expanded => {
-            tr!(
-                "Reply, or press {keys} to talk",
-                keys = app.keymap.chord(crate::keymap::Action::Voice).caps()
-            )
-        }
+        // Once there is a conversation, what is typed is a reply. (How to
+        // talk instead is the microphone's own tooltip's to say.)
         None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
         None => tr!("Ask about this codebase…").to_string(),
     };
@@ -1730,22 +1740,281 @@ fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
     super::toolbar::icon_action(crate::glyph::Glyph::ExpandAll, tr!("Expand all"), Some(msg))
 }
 
+/// Height of one side of a [`direction_switch`].
+const SWITCH_SIDE_H: f32 = 24.0;
+
 /// Which way a tree reads (callers or callees, imports or importers): a
-/// small segmented control, the way it reads raised; the other switches.
+/// segmented control across the panel, as the sidebar's views are — two
+/// equal halves, each label centred in its own, the way it reads raised;
+/// the other switches.
 fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a, Message> {
     container(
         Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
-            button(text(label).size(ts::SMALL))
-                .style(theme::segment(chosen))
-                .padding([1, 7])
-                .on_press_maybe((!chosen).then(|| super::heard::said(label, msg)))
-                .into()
+            button(
+                container(
+                    text(label)
+                        .size(ts::SMALL)
+                        .font(if chosen {
+                            crate::fonts::UI_MEDIUM
+                        } else {
+                            crate::fonts::UI
+                        })
+                        .wrapping(Wrapping::None),
+                )
+                .center_x(Fill)
+                .center_y(Fill),
+            )
+            .style(theme::segment(chosen))
+            .padding(0)
+            .width(Fill)
+            .height(Length::Fixed(SWITCH_SIDE_H))
+            .on_press_maybe((!chosen).then(|| super::heard::said(label, msg)))
+            .into()
         }))
-        .spacing(1),
+        .spacing(2),
     )
     .padding(2)
+    .width(Fill)
     .style(theme::trough)
     .into()
+}
+
+/// A note under a tree's header: what the tree cannot show by itself, as a
+/// quiet row — its glyph, what it says, and, when there is more to it, a
+/// chevron that shows that under it (`about`, while `open`).
+fn tree_note<'a>(
+    glyph: Glyph,
+    label: String,
+    open: bool,
+    toggle: Option<Message>,
+    about: impl FnOnce() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    let face = row![
+        glyph::icon(glyph, theme::fg_muted(), 12.0),
+        text(label.clone())
+            .size(ts::SMALL)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
+        space().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let note: Element<'a, Message> = match toggle {
+        Some(toggle) => button(face.push(glyph::icon(
+            if open {
+                Glyph::ChevronDown
+            } else {
+                Glyph::ChevronRight
+            },
+            theme::dim(),
+            10.0,
+        )))
+        .style(theme::list_row(false))
+        .padding([3, 6])
+        .width(Fill)
+        .on_press(super::heard::said(&label, toggle))
+        .into(),
+        None => container(face).padding([3, 6]).width(Fill).into(),
+    };
+    let mut col = Column::new().push(note);
+    if open {
+        // Under the label: its text, and the text of the links in it, start
+        // where the label's does (a link's own padding is the last 4).
+        col = col.push(
+            container(about())
+                .padding(Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 4.0,
+                    left: NOTE_TEXT_X - 4.0,
+                })
+                .width(Fill),
+        );
+    }
+    container(col)
+        .padding(Padding {
+            top: 2.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .width(Fill)
+        .into()
+}
+
+/// Where a [`tree_note`]'s label starts, past its glyph: what is shown
+/// under it starts there too.
+const NOTE_TEXT_X: f32 = 24.0;
+
+/// A line of what a [`tree_note`] shows under it that is not a link: set
+/// in by a link's padding, so its text starts where the links' text does,
+/// and its end where the note's chevron ends.
+fn note_line<'a>(line: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(line)
+        .padding(Padding {
+            top: 0.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .width(Fill)
+        .into()
+}
+
+/// What [`tree_note`] shows under it, in a column that scrolls once it is
+/// taller than `max` — the tree below keeps its room.
+fn note_list<'a>(rows: Vec<Element<'a, Message>>, max: f32) -> Element<'a, Message> {
+    container(
+        scrollable(Column::with_children(rows).spacing(2).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Length::Shrink),
+    )
+    .max_height(max)
+    .width(Fill)
+    .into()
+}
+
+/// The import cycle the file the tree is of (`focus`) is in, as a note
+/// under the Imports tab's header: how many files it shares it with, and —
+/// opened — those files, each opened by a press. A cycle is files that
+/// import one another, directly or through others (a strongly connected
+/// part of the graph: a file is in one at most). Most languages allow it —
+/// Rust among them, where a module's use of its own enclosing module is no
+/// part of one (`imports::EdgeKind::Enclosing`) — so it is said as what it
+/// is, never as a warning; the project's every cycle is the import graph's.
+fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'a, Message> {
+    use crate::app::message::ImportNote;
+    let Some(cycle) = app
+        .proj
+        .import_cycles
+        .iter()
+        .find(|c| c.iter().any(|f| f == focus))
+    else {
+        return slot();
+    };
+    let others = cycle.len().saturating_sub(1);
+    let open = app.proj.import_notes_open.contains(&ImportNote::Cycles);
+    let label = trn!(
+        "In an import cycle with 1 other file",
+        "In an import cycle with {n} other files",
+        others
+    );
+    tree_note(
+        Glyph::Refresh,
+        label,
+        open,
+        Some(Message::Graph(GraphMsg::ToggleImportNote(
+            ImportNote::Cycles,
+        ))),
+        move || {
+            let caption = note_line(
+                text(tr!(
+                    "Files that import one another, directly or through others."
+                ))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .wrapping(Wrapping::Word),
+            );
+            // The cycle's files, set apart by dots: they import one another
+            // in no order a line of arrows could honestly draw.
+            let mut files: Vec<Element<'a, Message>> = Vec::new();
+            for (i, f) in cycle.iter().enumerate() {
+                if i > 0 {
+                    files.push(text("·").size(ts::SMALL).color(theme::dim()).into());
+                }
+                files.push(cycle_file(app, f, f == focus));
+            }
+            let files = Row::with_children(files)
+                .spacing(1)
+                .align_y(iced::Center)
+                .wrap()
+                .vertical_spacing(1)
+                .into();
+            note_list(vec![caption, files], 180.0)
+        },
+    )
+}
+
+/// One file of an import cycle: its name, opening it — the one the tree
+/// is of in the medium weight, and every one's path in the project said on
+/// hover (two `mod.rs` of a cycle are told apart there).
+fn cycle_file<'a>(app: &App, file: &std::path::Path, focus: bool) -> Element<'a, Message> {
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let face = button(
+        text(name.clone())
+            .size(ts::SMALL)
+            .font(if focus {
+                crate::fonts::UI_MEDIUM
+            } else {
+                crate::fonts::UI
+            })
+            .color(if focus {
+                theme::fg_bright()
+            } else {
+                theme::accent()
+            })
+            .wrapping(Wrapping::None),
+    )
+    .style(theme::list_row(false))
+    .padding([1, 4])
+    .on_press(super::heard::said(
+        &name,
+        Message::Editor(EditorMsg::OpenAbs {
+            abs: file.to_path_buf(),
+            line: None,
+            push: true,
+        }),
+    ));
+    super::toolbar::tip_at(face, app.rel_of(file), None, tooltip::Position::Bottom)
+}
+
+/// The files the symbol index left out, as a note under the Imports tab's
+/// header: how many and why — and, opened, each by its path, with its size.
+/// Their imports are not in this tree. (A file the index left out because
+/// the project has more than it takes is counted, not listed: there can be
+/// tens of thousands.)
+fn index_left_out_note(app: &App) -> Element<'_, Message> {
+    use crate::app::message::ImportNote;
+    let Some(note) = index_cap_note(app) else {
+        return slot();
+    };
+    let files = &app.proj.index_too_large;
+    let open = !files.is_empty() && app.proj.import_notes_open.contains(&ImportNote::LeftOut);
+    tree_note(
+        Glyph::Info,
+        note.to_string(),
+        open,
+        (!files.is_empty()).then_some(Message::Graph(GraphMsg::ToggleImportNote(
+            ImportNote::LeftOut,
+        ))),
+        move || {
+            let rows = files
+                .iter()
+                .map(|(rel, size)| {
+                    note_line(
+                        row![
+                            text(rel.as_str())
+                                .size(ts::SMALL)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::None),
+                            space().width(Fill),
+                            text(super::explain_view::human_size(*size))
+                                .size(ts::CAPTION)
+                                .color(theme::dim())
+                                .wrapping(Wrapping::None),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Center),
+                    )
+                })
+                .collect();
+            note_list(rows, 140.0)
+        },
+    )
 }
 
 /// The FLOW tab: the traced identifier's occurrences under the role each
@@ -2056,13 +2325,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     // is nothing to say): inserting it pushed the tree's scrollable down a
     // position, iced rebuilt it at the top, and the reader lost their place.
     let stale: Element<'_, Message> = if tree.stale {
-        tree_banner(
-            format!(
-                "⟳ {}",
-                tr!("Code changed — press {keys} to refresh", keys = "gc")
-            ),
-            theme::warning(),
-        )
+        stale_note(Message::Calls(CallsMsg::Refresh))
     } else {
         slot()
     };
@@ -2210,22 +2473,13 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         }
     }
 
-    // Both banners sit in slots that are always there (zero-size while there
+    // Both notes sit in slots that are always there (zero-size while there
     // is nothing to say), so one appearing never moves the tree's scrollable
     // to another position — where iced would rebuild it at the top.
-    let cycles: Element<'_, Message> = match app.proj.import_cycles.len() {
-        0 => slot(),
-        n => tree_banner(
-            format!("⚠ {}", trn!("1 import cycle", "{n} import cycles", n)),
-            theme::warning(),
-        ),
-    };
+    let cycles = import_cycles_note(app, &tree.root_path);
     // The graph under this tree is built from the symbol index; files the
     // index had to leave out have no edges here, so say which were left out.
-    let capped: Element<'_, Message> = match index_cap_note(app) {
-        Some(note) => tree_banner(tr!("Index incomplete: {note}", note = note), theme::dim()),
-        None => slot(),
-    };
+    let capped = index_left_out_note(app);
     column![
         header,
         cycles,

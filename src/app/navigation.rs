@@ -378,10 +378,10 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = crate::keymap::local_keys(&tr!(
-                    "No {language} server ready (⌘T to search symbols)",
+                self.status = tr!(
+                    "No {language} server ready",
                     language = crate::app::languages::language_name(lang)
-                ));
+                );
                 return Task::none();
             }
         };

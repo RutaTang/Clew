@@ -1221,7 +1221,7 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     } else if app.proj.search.query.trim().chars().count() == 1 {
         // One character, which matches most of a project, is searched for
         // only when asked (see `search_when_typing_pauses`).
-        Some((tr!("Press Enter to search").to_string(), theme::dim()))
+        Some((tr!("Keep typing to search").to_string(), theme::dim()))
     } else {
         None
     };
@@ -1545,11 +1545,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         return empty_state(
             Glyph::Bookmark,
             tr!("No bookmarks yet"),
-            if crate::keymap::MAC_KEYS {
-                tr!("Press ⌘D to bookmark the current line.")
-            } else {
-                tr!("Press Ctrl+D to bookmark the current line.")
-            },
+            tr!("The lines you bookmark are listed here."),
             None,
         );
     }

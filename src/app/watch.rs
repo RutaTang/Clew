@@ -332,7 +332,7 @@ impl App {
         // `TreeUpdated`).
         tasks.push(self.schedule_imports());
         // If a file the open call hierarchy references changed, the tree
-        // may now be out of date — flag it (re-run `gc` to refresh).
+        // may now be out of date — flag it (its note's Refresh traces it again).
         if let Some(t) = &mut self.proj.call_graph
             && !t.stale
             && touched.iter().any(|p| t.depends_on(p))
@@ -587,6 +587,7 @@ impl App {
         // — and kept, so the trees and the finder built on it can say so too.
         let cap_note = indexed.cap_note();
         self.proj.index_cap_note = cap_note.clone();
+        self.proj.index_too_large = indexed.too_large.clone();
         // Seed the change-detection registry from the same tree read — but the
         // read describes the tree as it was when this build was SPAWNED, and
         // the watcher (plus every file the reader opened) kept writing the

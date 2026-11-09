@@ -5287,6 +5287,69 @@ fn a_superseded_refine_pass_is_stopped() {
     assert!(refined(&run_task(fourth)));
 }
 
+/// A call tree traced from code since changed is traced again from its own
+/// function, the way it reads — asked where the tree found it, of the
+/// server it was built with — not from wherever the caret is now.
+#[tokio::test]
+async fn a_stale_call_tree_is_traced_again_from_its_own_function() {
+    let (mut app, root) = calls_project(
+        "calls-refresh",
+        &[(
+            "src/lib.rs",
+            "pub fn a() {}\n\n\n\n\n\n\npub fn origin() {}\n",
+        )],
+        false,
+    );
+    let (rust, server) = stub_lsp_server(&root, StubAnswers::Nothing).await;
+    app.proj
+        .link
+        .lsp
+        .insert("rust".into(), LspSlot::Ready(rust));
+    let origin = lsp::client::CallItem {
+        name: "origin".into(),
+        detail: String::new(),
+        kind: 12,
+        path: root.join("src/lib.rs"),
+        line: 7,
+        character: 7,
+        raw: serde_json::json!({}),
+    };
+    app.call_token += 1;
+    let token = app.call_token;
+    app.proj.call_pending = Some(token);
+    let _ = app.update(Message::Calls(CallsMsg::Prepared {
+        stamp: app.stamp(),
+        token,
+        direction: callgraph::Direction::Outgoing,
+        lang: "rust",
+        items: vec![origin],
+    }));
+    app.proj.call_graph.as_mut().unwrap().stale = true;
+
+    let refresh = app.update(Message::Calls(CallsMsg::Refresh));
+    let landed = run_task_async(refresh).await;
+    assert_eq!(
+        server.prepared(7),
+        1,
+        "the tree's own function was not asked"
+    );
+    assert!(
+        matches!(
+            landed.as_slice(),
+            [Message::Calls(CallsMsg::Prepared {
+                direction: callgraph::Direction::Outgoing,
+                lang: "rust",
+                ..
+            })]
+        ),
+        "{landed:?}"
+    );
+    // With no tree, there is nothing to trace again.
+    app.proj.call_graph = None;
+    let refresh = app.update(Message::Calls(CallsMsg::Refresh));
+    assert!(run_task_async(refresh).await.is_empty());
+}
+
 /// Children fetched from a replaced call tree must not graft onto the new one
 /// (node ids are bare indices).
 #[test]
@@ -16086,7 +16149,7 @@ async fn a_refine_begun_before_the_index_landed_gives_way_to_it() {
     // The index left a file out, which its landing says: said either way.
     let files = app.proj.project.as_ref().unwrap().files.clone();
     let mut indexed = index::build_indexed(&root, files);
-    indexed.too_large = 1;
+    indexed.too_large = vec![("src/big.rs".into(), 5 << 20)];
     let indexed = app.update(Message::Watch(WatchMsg::SymbolIndexDone {
         stamp: app.stamp(),
         indexed,
@@ -16098,7 +16161,7 @@ async fn a_refine_begun_before_the_index_landed_gives_way_to_it() {
     );
     assert!(app.status.contains("finished indexing"), "{}", app.status);
     assert!(
-        app.status.contains("1 file too large"),
+        app.status.contains("1 file over 4 MB not indexed"),
         "the refinement's hand-back hid the index's cap note: {}",
         app.status
     );

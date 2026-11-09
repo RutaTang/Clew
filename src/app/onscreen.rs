@@ -430,11 +430,7 @@ impl App {
     fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
         if undoes(&target) {
-            self.status = tr!(
-                "“{text}” → {command}? Confirm or press Esc",
-                text = text,
-                command = target.shown
-            );
+            self.status = tr!("“{text}” → {command}?", text = text, command = target.shown);
             self.voice.hear(Heard {
                 text,
                 outcome: HeardOutcome::Confirm(target.shown.clone()),

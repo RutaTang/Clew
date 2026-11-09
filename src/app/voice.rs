@@ -958,10 +958,7 @@ impl App {
                             .is_some_and(|store| downloading(&store.path(chosen)));
                         let switch = chosen.id != id && !self.voice.installed(chosen) && !coming;
                         self.status = if switch || chosen.id == id {
-                            tr!(
-                                "{model} is ready — press the voice key to talk",
-                                model = name
-                            )
+                            tr!("{model} is ready", model = name)
                         } else {
                             tr!("{model} is downloaded", model = name)
                         };
@@ -1169,7 +1166,7 @@ impl App {
                         "Listening… say yes to run {command}, or no",
                         command = waiting.said()
                     ),
-                    None => tr!("Listening… say a command or a question (Esc cancels)").into(),
+                    None => tr!("Listening… say a command or a question").into(),
                 };
             }
             Err(e) => {
@@ -1434,7 +1431,7 @@ impl App {
             };
             if command.asks_when_said() {
                 self.status = tr!(
-                    "“{text}” → {command}? Confirm or press Esc",
+                    "“{text}” → {command}?",
                     text = text,
                     command = crate::i18n::lookup(&said)
                 );

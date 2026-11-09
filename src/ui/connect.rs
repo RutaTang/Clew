@@ -164,7 +164,7 @@ pub(crate) fn settings_modal(app: &App) -> Element<'_, Message> {
         app.settings_drafts_changed().then(|| {
             form::item(
                 tr!("Not saved yet"),
-                Some(tr!("Saved when Settings closes, by ×, Esc or a click outside.").into()),
+                Some(tr!("Saved when Settings closes.").into()),
                 form::action(
                     tr!("Discard changes"),
                     Some(Message::Settings(SettingsMsg::Discard)),
@@ -2467,12 +2467,23 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     let mut cmds = Vec::new();
     for action in Action::ALL {
         let binding: Element<'_, Message> = if app.rebinding == Some(action) {
-            container(
-                text(tr!("Press new keys… (Esc to cancel)"))
-                    .size(ts::BODY)
-                    .color(theme::accent()),
-            )
-            .padding([3, 8])
+            row![
+                container(
+                    text(tr!("Press new keys…"))
+                        .size(ts::BODY)
+                        .color(theme::accent()),
+                )
+                .padding([3, 8]),
+                button(text(tr!("Cancel")).size(ts::BODY))
+                    .style(theme::toolbar_button)
+                    .padding([3, 8])
+                    .on_press(super::heard::said(
+                        tr!("Cancel"),
+                        Message::Window(WindowMsg::RebindCancel),
+                    )),
+            ]
+            .spacing(4)
+            .align_y(iced::Center)
             .into()
         } else {
             let pill = button(

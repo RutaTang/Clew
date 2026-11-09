@@ -49,11 +49,7 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
             tr!("No file open"),
-            if crate::keymap::MAC_KEYS {
-                tr!("Pick a file from the tree, or press ⌘P.")
-            } else {
-                tr!("Pick a file from the tree, or press Ctrl+P.")
-            },
+            tr!("Pick a file from the tree."),
             None,
         ))
         .on_press(Message::Editor(EditorMsg::PaneFocused(pane)))
@@ -163,38 +159,19 @@ pub(crate) fn time_travel_banner<'a>(
     tt: &'a TimeTravel,
     commit: Option<&'a crate::git::HistCommit>,
 ) -> Element<'a, Message> {
-    // A tidy "Exit  esc" — the little keycap reads as a control and teaches the
-    // shortcut, instead of a bare ✕ glyph.
-    let keycap = container(text("esc").size(ts::CAPTION).color(theme::fg_muted()))
-        .padding(Padding {
-            top: 1.0,
-            right: 5.0,
-            bottom: 1.0,
-            left: 5.0,
-        })
-        .style(|_: &iced::Theme| iced::widget::container::Style {
-            background: Some(theme::bg_active().into()),
-            border: iced::Border {
-                radius: 3.0.into(),
-                width: 1.0,
-                color: theme::hairline(),
-            },
-            ..Default::default()
-        });
-    let exit = button(
-        row![
-            text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()),
-            keycap
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .style(theme::toolbar_button)
-    .padding([2, 8])
-    .on_press(super::heard::said(
+    // Its key on hover, as every control of the chrome says its own.
+    let exit = super::toolbar::tip_at(
+        button(text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(super::heard::said(
+                tr!("Exit Time Travel"),
+                Message::TimeTravel(TimeTravelMsg::Exit),
+            )),
         tr!("Exit Time Travel"),
-        Message::TimeTravel(TimeTravelMsg::Exit),
-    ));
+        Some("Esc".to_string()),
+        iced::widget::tooltip::Position::Bottom,
+    );
 
     let Some(c) = commit else {
         let head = row![

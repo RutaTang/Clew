@@ -537,6 +537,17 @@ const PILL_BARS: [f32; 7] = [5.0, 9.0, 13.0, 8.0, 11.0, 6.0, 9.0];
 
 /// A small borderless control of the card's header.
 fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Message> {
+    header_button_keyed(g, tip, None, msg)
+}
+
+/// A [`header_button`] whose tooltip also shows its key (`keys`), in the
+/// keycap every control's tooltip shows its own in.
+fn header_button_keyed<'a>(
+    g: Glyph,
+    tip: &'a str,
+    keys: Option<&str>,
+    msg: Message,
+) -> Element<'a, Message> {
     super::tip_at(
         button(container(glyph::icon(g, theme::fg_muted(), 15.0)).center(Fill))
             .style(theme::toolbar_button)
@@ -545,7 +556,7 @@ fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Messag
             .padding(0)
             .on_press(super::heard::said(tip, msg)),
         tip,
-        None,
+        keys.map(str::to_string),
         tooltip::Position::Bottom,
     )
 }
@@ -658,21 +669,19 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
             Message::Ask(AskMsg::NewSession),
         ))
         .push(if large {
-            header_button(
+            header_button_keyed(
                 Glyph::Shrink,
-                tr!("Shrink (Esc)"),
+                tr!("Shrink"),
+                Some("Esc"),
                 Message::Ask(AskMsg::Shrink),
             )
         } else {
             header_button(Glyph::Expand, tr!("Expand"), Message::Ask(AskMsg::Expand))
         })
-        .push(header_button(
+        .push(header_button_keyed(
             Glyph::Close,
-            if large {
-                tr!("Close Ask")
-            } else {
-                tr!("Close Ask (Esc)")
-            },
+            tr!("Close Ask"),
+            (!large).then_some("Esc"),
             Message::Ask(AskMsg::Close),
         ));
     let card: Element<'_, Message> = column![

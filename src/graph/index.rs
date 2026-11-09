@@ -69,16 +69,21 @@ pub struct Indexed {
     /// has more than [`MAX_INDEX_FILES`] of them — the UI states the cap
     /// instead of silently missing symbols.
     pub over_cap: usize,
-    /// Indexable files skipped for exceeding [`MAX_INDEX_FILE_BYTES`].
-    pub too_large: usize,
+    /// Indexable files skipped for exceeding [`MAX_INDEX_FILE_BYTES`], by
+    /// their path in the project — named, so the reader can tell which. A
+    /// generated one (a parser table, a bundle: [`is_generated_source`]) is
+    /// not among them: it is no one's code to look up.
+    ///
+    /// [`is_generated_source`]: clew_core::fs_scan::is_generated_source
+    pub too_large: Vec<(String, u64)>,
 }
 
 impl Indexed {
     /// A one-line note on what the index left out, or `None` when it is
-    /// complete: "Indexed 20000 files; 1234 more not indexed (limit 20000);
-    /// 3 too large (over 512 KiB)".
+    /// complete: "1234 more files not indexed (limit 20000); 2 files over
+    /// 4 MB not indexed" — the files themselves are [`Self::too_large`].
     pub fn cap_note(&self) -> Option<String> {
-        if self.over_cap == 0 && self.too_large == 0 {
+        if self.over_cap == 0 && self.too_large.is_empty() {
             return None;
         }
         let mut parts = Vec::new();
@@ -90,12 +95,12 @@ impl Indexed {
                 limit = MAX_INDEX_FILES
             ));
         }
-        if self.too_large > 0 {
+        if !self.too_large.is_empty() {
             parts.push(trn!(
-                "1 file too large (over {size} KiB)",
-                "{n} files too large (over {size} KiB)",
-                self.too_large,
-                size = MAX_INDEX_FILE_BYTES / 1024
+                "1 file over {size} MB not indexed",
+                "{n} files over {size} MB not indexed",
+                self.too_large.len(),
+                size = MAX_INDEX_FILE_BYTES / (1024 * 1024)
             ));
         }
         Some(parts.join("; "))
@@ -370,6 +375,18 @@ fn read_capped(f: &std::fs::File, max: u64) -> Option<Vec<u8>> {
     (bytes.len() as u64 <= max).then_some(bytes)
 }
 
+/// Whether the file open at `f` shows, in its first KiB, that a tool wrote
+/// it ([`clew_core::fs_scan::is_machine_written_head`]: a generated file's
+/// banner, a minifier's lines) — read through a small cap, from where the
+/// handle stands (the start, just opened).
+fn machine_written_head(f: &std::fs::File) -> bool {
+    let mut head = Vec::new();
+    if f.take(8 * 1024).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    clew_core::fs_scan::is_machine_written_head(&String::from_utf8_lossy(&head))
+}
+
 /// Cold index build (no cache): read + parse every supported file. Blocking.
 /// Retained for tests; the runtime always warm-starts via [`build_indexed_warm`].
 #[cfg(test)]
@@ -449,7 +466,10 @@ fn build_core_capped(
             continue;
         };
         if meta.len() > MAX_INDEX_FILE_BYTES {
-            indexed.too_large += 1;
+            // Named, unless its first lines say a tool wrote it.
+            if !machine_written_head(&f) {
+                indexed.too_large.push((file.rel.clone(), meta.len()));
+            }
             continue;
         }
         let size = meta.len();
@@ -495,8 +515,15 @@ fn build_core_capped(
                 }
                 let facts = match String::from_utf8(bytes) {
                     // One parse for all three (see `analyze_file`).
-                    Ok(content) => analyze_file(&file.abs, &file.rel, &content, lang),
-                    Err(_) => FileFacts::default(), // binary — nothing to extract
+                    Ok(content) if !clew_core::fs_scan::is_minified_source(&content) => {
+                        analyze_file(&file.abs, &file.rel, &content, lang)
+                    }
+                    // Binary, or a minifier's output (a vendored webpack
+                    // bundle): nothing a reader looks up — its thousands of
+                    // one-letter names would bury theirs in the finder, the
+                    // call graph and every search of the index. Cached
+                    // empty, so it is not read again until it changes.
+                    _ => FileFacts::default(),
                 };
                 let symbols = facts
                     .symbols
@@ -845,6 +872,78 @@ fn not_a_test() {}
     /// The cap counts indexable files only: non-source files sorting first
     /// must not use up the budget, and whatever the cap leaves out is counted
     /// so the UI can say so.
+    /// The index takes every file the viewer opens: one of a few hundred
+    /// KiB — a long test module, a big hand-written table — was left out
+    /// for its size, the reader finding no outline, imports or calls for a
+    /// file they could read. One past the cap is named, with its size; one
+    /// past it that a tool wrote (a parser table, a bundle) is no one's code
+    /// to look up, and is not.
+    #[test]
+    fn a_large_file_is_indexed_and_one_too_large_is_named_unless_generated() {
+        let dir = clew_core::testutil::TempDir::new("index-too-large");
+        let file = |name: &str, body: String| {
+            std::fs::write(dir.join(name), body).unwrap();
+            FileEntry {
+                abs: dir.join(name),
+                rel: name.to_string(),
+            }
+        };
+        let cap = MAX_INDEX_FILE_BYTES as usize;
+        // `n` bytes of ordinary lines, as a hand-written file runs.
+        let padding = |n: usize| {
+            "// a comment of an ordinary length, as written by hand\n".repeat(n / 50 + 1)
+        };
+        let minified = |n: usize| {
+            let body = "function e(t){return t}var n=e(1);".repeat(n / 30 + 1);
+            format!("!function(){{{body}}}();")
+        };
+        let files = vec![
+            // Over the old 512 KiB cap, well inside this one.
+            file(
+                "long.rs",
+                format!("pub fn long_one() {{}}\n{}", padding(600 * 1024)),
+            ),
+            file(
+                "huge.rs",
+                format!("pub fn huge_one() {{}}\n{}", padding(cap)),
+            ),
+            file(
+                "parser.c",
+                format!(
+                    "/* Automatically @generated by tree-sitter */\nint table[] = {{0}};\n{}",
+                    padding(cap)
+                ),
+            ),
+            // A minifier's bundle, as vendored in salvo (Swagger UI's): in
+            // the cap, indexed empty — over it, not named either.
+            file("bundle.js", minified(64 * 1024)),
+            file("huge.min.js", minified(cap + 1)),
+        ];
+        let (indexed, _) = build_core(&dir, &files, &cache::Store::default());
+        assert!(
+            indexed.by_file.contains_key(&dir.join("long.rs")),
+            "a file the viewer opens is indexed"
+        );
+        assert!(
+            indexed
+                .by_file
+                .get(&dir.join("bundle.js"))
+                .is_none_or(|symbols| symbols.is_empty()),
+            "a bundle's one-letter names are no one's to look up"
+        );
+        let sizes: Vec<(&str, u64)> = indexed
+            .too_large
+            .iter()
+            .map(|(rel, size)| (rel.as_str(), *size))
+            .collect();
+        let huge = std::fs::metadata(dir.join("huge.rs")).unwrap().len();
+        assert_eq!(sizes, [("huge.rs", huge)]);
+        assert_eq!(
+            indexed.cap_note().as_deref(),
+            Some("1 file over 4 MB not indexed")
+        );
+    }
+
     #[test]
     fn the_index_cap_applies_after_the_language_filter_and_is_reported() {
         let dir = clew_core::testutil::TempDir::new("index-cap-test");

@@ -76,10 +76,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use files::list_dir;
 use gitops::validate_git_op;
-use index::{
-    MAX_INDEX_FILE_BYTES, build_docs, build_project_calls_graph, full_symbol_payload,
-    publish_project_symbols,
-};
+use index::{build_docs, build_project_calls_graph, full_symbol_payload, publish_project_symbols};
 pub use lsp_gate::{SharedApprovals, approved_init_options, lsp_command_allowed};
 use process::{
     MAX_PROC_INPUT_BYTES, SharedProcs, Spawned, failed_spawn_is_ours, kill_removed, register_proc,
@@ -2147,8 +2144,11 @@ fn read_sources(root: &Path, rels: Vec<clew_protocol::Rel>, budget: usize) -> Ev
         // again next time.
         let path = root.join(&rel);
         let (read, steady) = read_steadily(&path, || {
-            let read =
-                clew_core::fs_scan::read_confined_capped_checked(root, &path, MAX_INDEX_FILE_BYTES);
+            let read = clew_core::fs_scan::read_confined_capped_checked(
+                root,
+                &path,
+                clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES,
+            );
             #[cfg(test)]
             sources_faults::hit(&path);
             read
@@ -3095,7 +3095,7 @@ mod tests {
         let budget = 2 * cost + cost / 2;
         let huge = "y".repeat(3 * cost);
         std::fs::write(root.join("src/huge.rs"), &huge).unwrap();
-        let cap = super::MAX_INDEX_FILE_BYTES as usize + 1;
+        let cap = clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES as usize + 1;
         std::fs::write(root.join("src/over.rs"), "z".repeat(cap)).unwrap();
         let rels: Vec<String> = [
             "src/huge.rs",
@@ -3369,7 +3369,7 @@ mod tests {
         let path = root.join("saved.rs");
         let saved = "fn saved() -> &'static str {\n    \"café\"\n}\n";
         let mid_character = &saved.as_bytes()[..saved.find('é').unwrap() + 1];
-        let past_the_cap = "x".repeat(super::MAX_INDEX_FILE_BYTES as usize + 1);
+        let past_the_cap = "x".repeat(clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES as usize + 1);
         let half_saved = "fn saved() -> &'static str {\n";
         for (during, what) in [
             (mid_character, "refused as NotUtf8"),

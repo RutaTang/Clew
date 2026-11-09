@@ -71,12 +71,17 @@ pub enum EdgeKind {
     /// modules and children that `use crate::…` its items would otherwise
     /// all sit in one "cycle".
     Reexport,
-    /// A Rust glob import of an enclosing module (`use super::*;`,
-    /// `use crate::*;`): the module tree's namespace brought into scope,
-    /// which says nothing about which of the ancestor's items are used. With
-    /// the ancestor's re-export of the child, it closed a loop for every
-    /// child written that way.
-    AncestorGlob,
+    /// A Rust `use` of what an enclosing module holds — its namespace
+    /// (`use super::*;`, `use crate::*;`) or an item it defines
+    /// (`use super::Config;`, `use crate::Error;` of one in the crate root).
+    /// A child module is part of the module that declares it: it reaching
+    /// into its own enclosing module is the module tree's inside, not one
+    /// file depending on another, and Rust allows it without a word. With
+    /// the ancestor's use of the child, it closed a "cycle" for every module
+    /// whose children share its types — the normal shape of a Rust crate
+    /// (salvo's `compression` crate: `lib.rs` uses its `encoder::Encoder`,
+    /// `encoder.rs` the root's `CompressionAlgo`).
+    Enclosing,
     /// A Rust `use` of a name found nowhere — no module file, no re-export,
     /// no item the symbol index lists — taken to be an item of the module it
     /// was reached through, by elimination: a name an external glob supplies,
@@ -1622,15 +1627,31 @@ impl Resolver {
     }
 
     /// What a resolved Rust `use` edge from `from` means (see [`EdgeKind`]):
-    /// a re-export, a glob of an enclosing module, or a dependency.
-    fn rust_use_kind(&self, raw: &RawImport, from: &Path, target: &Target) -> EdgeKind {
+    /// a re-export, a use of an enclosing module, a guess (`inferred`: the
+    /// name was found nowhere), or a dependency. A guess is said to be one
+    /// wherever it points — but a glob of an enclosing module names no item
+    /// to guess about.
+    fn rust_use_kind(
+        &self,
+        raw: &RawImport,
+        from: &Path,
+        target: &Target,
+        inferred: bool,
+    ) -> EdgeKind {
         let u = RustUse::parse(&raw.module);
         if u.reexport {
             return EdgeKind::Reexport;
         }
-        let glob = u.glob || u.names_an_enclosing_module();
+        let namespace = u.glob || u.names_an_enclosing_module();
         match target {
-            Target::Internal(t) if glob && self.is_rust_ancestor(t, from) => EdgeKind::AncestorGlob,
+            Target::Internal(t) if self.is_rust_ancestor(t, from) => {
+                if inferred && !namespace {
+                    EdgeKind::Inferred
+                } else {
+                    EdgeKind::Enclosing
+                }
+            }
+            _ if inferred => EdgeKind::Inferred,
             _ => EdgeKind::Use,
         }
     }
@@ -3308,10 +3329,7 @@ impl ImportGraph {
                 let kind = if r.is_mod_decl {
                     EdgeKind::ModDecl
                 } else if lang == "rust" {
-                    match resolver.rust_use_kind(r, file, &target) {
-                        EdgeKind::Use if inferred => EdgeKind::Inferred,
-                        kind => kind,
-                    }
+                    resolver.rust_use_kind(r, file, &target, inferred)
                 } else {
                     EdgeKind::Use
                 };
@@ -5384,6 +5402,64 @@ mod resolution_tests {
             .collect()
     }
 
+    /// A child module is part of the module that declares it: using what
+    /// that module defines (`use super::CompressionAlgo;`, `use
+    /// crate::Error;`) is not a dependency a cycle is made of, while the
+    /// module's own use of its child is. Two siblings that use each other
+    /// still are one — salvo's shapes, both of them: its `compression`
+    /// crate's root and children, and its core's `handler.rs` and
+    /// `routing.rs` (`Handler` takes a `FlowCtrl`, the router holds
+    /// handlers).
+    #[test]
+    fn a_child_using_its_enclosing_module_is_no_cycle_but_siblings_are() {
+        let root = Path::new("/salvo");
+        let sources: &[(&str, &str)] = &[
+            (
+                "src/lib.rs",
+                "mod encoder;\nmod stream;\nmod handler;\nmod routing;\n\
+                 pub use handler::Handler;\npub use routing::FlowCtrl;\n\
+                 use encoder::Encoder;\nuse stream::EncodeStream;\n\
+                 pub enum CompressionAlgo { Gzip }\npub struct Error;\n",
+            ),
+            (
+                "src/encoder.rs",
+                "use super::CompressionAlgo;\nuse crate::Error;\npub struct Encoder;\n",
+            ),
+            (
+                "src/stream.rs",
+                "use super::{CompressionAlgo, Encoder};\npub struct EncodeStream;\n",
+            ),
+            (
+                "src/handler.rs",
+                "use crate::FlowCtrl;\npub trait Handler { fn handle(&self, c: &mut FlowCtrl); }\n",
+            ),
+            (
+                "src/routing.rs",
+                "use crate::Handler;\npub struct FlowCtrl { handlers: Vec<Box<dyn Handler>> }\n",
+            ),
+        ];
+        let g = graph_from_sources(root, sources);
+        let p = |f: &str| root.join(f);
+        assert_eq!(
+            kinds(&g, &p("src/encoder.rs"), &p("src/lib.rs")),
+            [EdgeKind::Enclosing, EdgeKind::Enclosing]
+        );
+        assert_eq!(
+            internal_uses(&g, &p("src/lib.rs")),
+            [p("src/encoder.rs"), p("src/stream.rs")],
+            "the root's use of its children is a dependency"
+        );
+        assert_eq!(
+            internal_uses(&g, &p("src/stream.rs")),
+            [p("src/encoder.rs")],
+            "a sibling's item, reached through super, is"
+        );
+        assert_eq!(
+            g.cycles(),
+            vec![vec![p("src/handler.rs"), p("src/routing.rs")]]
+        );
+    }
+
     /// This repository's own shape, both of its facades included:
     ///   * the crate root declares its modules and re-exports them —
     ///     `pub(crate) use editor::{codeview, viewer};`, a message type, and
@@ -5505,7 +5581,7 @@ mod resolution_tests {
         );
         assert_eq!(
             kinds(&g, &p("src/app/model.rs"), &p("src/main.rs")),
-            [EdgeKind::AncestorGlob]
+            [EdgeKind::Enclosing]
         );
         // A glob of a SIBLING is a dependency like any other import.
         assert_eq!(
@@ -5541,7 +5617,7 @@ mod resolution_tests {
         );
         assert_eq!(
             kinds(&g, &p("src/ui/panes.rs"), &p("src/ui.rs")),
-            [EdgeKind::AncestorGlob]
+            [EdgeKind::Enclosing]
         );
         assert_eq!(
             internal_uses(&g, &p("src/ui.rs")),
@@ -5589,8 +5665,9 @@ mod resolution_tests {
     /// item the symbol index lists — is inferred to be an item of the module
     /// it was reached through: drawn there, but not a dependency, so it cannot
     /// close a cycle. A `const` or `static` is an item like any other (the
-    /// outline tags them), so a `use` of one is a real dependency — and a
-    /// cycle it closes is still reported.
+    /// outline tags them): found, not guessed — of the enclosing module here,
+    /// a sibling's in the second graph, where the cycle it closes is still
+    /// reported.
     #[test]
     fn a_name_found_nowhere_is_inferred_and_closes_no_cycle() {
         let root = Path::new("/c");
@@ -5613,7 +5690,7 @@ mod resolution_tests {
         );
         assert_eq!(
             kinds(&g, &p("src/b.rs"), &p("src/lib.rs")),
-            [EdgeKind::Use, EdgeKind::Use]
+            [EdgeKind::Enclosing, EdgeKind::Enclosing]
         );
         // lib.rs → a.rs (`use crate::a::run`) and a.rs → lib.rs (inferred):
         // no cycle. A real dependency back would be one.
@@ -5621,14 +5698,15 @@ mod resolution_tests {
         let g = graph_from_sources(
             root,
             &[
+                ("src/lib.rs", "mod a;\nmod b;\n"),
+                ("src/a.rs", "use crate::b::LIMIT;\npub fn run() {}\n"),
                 (
-                    "src/lib.rs",
-                    "mod a;\nuse crate::a::run;\npub const LIMIT: usize = 1;\n",
+                    "src/b.rs",
+                    "use crate::a::run;\npub const LIMIT: usize = 1;\n",
                 ),
-                ("src/a.rs", "use crate::LIMIT;\npub fn run() {}\n"),
             ],
         );
-        assert_eq!(g.cycles(), [vec![p("src/a.rs"), p("src/lib.rs")]]);
+        assert_eq!(g.cycles(), [vec![p("src/a.rs"), p("src/b.rs")]]);
     }
 
     /// An inference stays one across re-export hops. `crate::Gen` is not in
@@ -5679,7 +5757,7 @@ mod resolution_tests {
         raw.insert(root.join("src/shell.rs"), vec![ri("super")]);
         let g = ImportGraph::build(raw, &r, lang_of);
         let (main, shell) = (root.join("src/main.rs"), root.join("src/shell.rs"));
-        assert_eq!(kinds(&g, &shell, &main), [EdgeKind::AncestorGlob]);
+        assert_eq!(kinds(&g, &shell, &main), [EdgeKind::Enclosing]);
         assert!(internal_uses(&g, &shell).is_empty());
         assert!(g.cycles().is_empty());
     }
@@ -5773,15 +5851,16 @@ mod resolution_tests {
                 ("crate::Unknown".into(), Target::Internal(p("src/main.rs"))),
             ]
         );
-        // The root's own item is a dependency; the names nothing is known
-        // to supply are only inferred to be the root's.
+        // The root's own item is the enclosing module's — no dependency of
+        // one file on another; the names nothing is known to supply are only
+        // inferred to be the root's.
         let kind_of = |spec: &str| {
             g.imports(&p("src/user.rs"))
                 .iter()
                 .find(|e| e.specifier == spec)
                 .map(|e| e.kind)
         };
-        assert_eq!(kind_of("crate::Local"), Some(EdgeKind::Use));
+        assert_eq!(kind_of("crate::Local"), Some(EdgeKind::Enclosing));
         assert_eq!(kind_of("crate::Private"), Some(EdgeKind::Inferred));
         assert_eq!(kind_of("crate::Unknown"), Some(EdgeKind::Inferred));
     }

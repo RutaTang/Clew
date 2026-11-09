@@ -788,6 +788,11 @@ impl App {
                 self.keymap_notice = None;
                 Task::none()
             }
+            WindowMsg::RebindCancel => {
+                self.rebinding = None;
+                self.keymap_notice = None;
+                Task::none()
+            }
             WindowMsg::RebindReset(action) => {
                 self.rebinding = None;
                 if let Err(other) = self.keymap.reset(action) {

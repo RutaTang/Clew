@@ -1079,7 +1079,7 @@ pub(crate) fn read_explain_sources(
             let read = clew_core::fs_scan::read_confined_capped_checked(
                 root,
                 f,
-                index::MAX_INDEX_FILE_BYTES,
+                clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES,
             );
             #[cfg(test)]
             save_faults::hit(f);
@@ -1638,8 +1638,11 @@ pub(crate) fn gather_fn_detail_input(
     // check, no regular-file check and no cap at all, and shipped whatever it
     // read into the LLM prompt — and a FIFO sitting at one of those cached
     // paths would block whichever thread reads it.
-    let content =
-        clew_core::fs_scan::read_confined_capped(root, &file, index::MAX_INDEX_FILE_BYTES)?;
+    let content = clew_core::fs_scan::read_confined_capped(
+        root,
+        &file,
+        clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES,
+    )?;
     gather_fn_detail_from(&file, &content, name, ordinal, summaries)
 }
 
@@ -3277,13 +3280,13 @@ mod tests {
         #[cfg(unix)]
         std::os::unix::fs::symlink(&secret, &leak).unwrap();
 
-        // A regular project file past the index cap.
+        // A regular project file past Explain's cap.
         let big = dir.join("big.rs");
         std::fs::write(
             &big,
             format!(
                 "fn too_big() {{\n    let _ = 3;\n}}\n// {}\n",
-                "x".repeat(index::MAX_INDEX_FILE_BYTES as usize)
+                "x".repeat(clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES as usize)
             ),
         )
         .unwrap();

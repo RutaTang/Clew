@@ -2591,6 +2591,16 @@ impl App {
                 self.refresh_import_tree();
                 Task::none()
             }
+            GraphMsg::ToggleImportNote(note) => {
+                let open = &mut self.proj.import_notes_open;
+                match open.iter().position(|n| *n == note) {
+                    Some(at) => {
+                        open.remove(at);
+                    }
+                    None => open.push(note),
+                }
+                Task::none()
+            }
             GraphMsg::ImportExpandAll => {
                 if let (Some(mut tree), Some(root)) = (
                     self.proj.import_tree.take(),

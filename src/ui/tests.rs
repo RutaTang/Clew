@@ -1080,14 +1080,36 @@ fn a_sidebar_banner_appearing_keeps_the_trees_scroll() {
         deep.y > 100.0,
         "the wheel did not scroll the tree: {deep:?}"
     );
-    let banners: [Toggle; 2] = [
+    let banners: [Toggle; 4] = [
         (
-            "the cycles banner",
-            Box::new(|app| app.proj.import_cycles = vec![vec![PathBuf::from("/x.rs")]]),
+            "the cycles note",
+            Box::new(|app| {
+                let lib = app.proj.import_tree.as_ref().unwrap().root_path.clone();
+                app.proj.import_cycles = vec![vec![PathBuf::from("/x.rs"), lib]];
+            }),
         ),
         (
-            "the incomplete-index banner",
-            Box::new(|app| app.proj.index_cap_note = Some("3 too large".into())),
+            "the incomplete-index note",
+            Box::new(|app| {
+                app.proj.index_cap_note = Some("1 file over 4 MB not indexed".into());
+                app.proj.index_too_large = vec![("big.c".into(), 5 << 20)];
+            }),
+        ),
+        (
+            "the cycles note opened",
+            Box::new(|app| {
+                app.proj
+                    .import_notes_open
+                    .push(crate::app::message::ImportNote::Cycles)
+            }),
+        ),
+        (
+            "the incomplete-index note opened",
+            Box::new(|app| {
+                app.proj
+                    .import_notes_open
+                    .push(crate::app::message::ImportNote::LeftOut)
+            }),
         ),
     ];
     for (what, show) in banners {
@@ -1145,6 +1167,16 @@ fn the_call_trees_stale_banner_keeps_the_trees_scroll() {
         offset,
         Some(deep),
         "the stale banner reset the tree's scroll"
+    );
+    // It says what changed, and refreshes by a press — no key to be told of.
+    let mut tab = sim_elem(super::calls_tab(&app));
+    assert!(shows(&mut tab, "Code changed since this was traced"));
+    assert!(!shows(&mut tab, "press"));
+    let _ = tab.click("Refresh");
+    let sent: Vec<Message> = tab.into_messages().collect();
+    assert!(
+        matches!(sent.as_slice(), [Message::Calls(CallsMsg::Refresh)]),
+        "{sent:?}"
     );
 }
 
@@ -1310,13 +1342,7 @@ fn settings_say_what_closing_keeps_and_offer_to_discard_it() {
         app.settings.model = "typed".into();
         let mut sim = sim_of(&app);
         assert!(shows(&mut sim, "Not saved yet"), "{page:?}");
-        assert!(
-            shows(
-                &mut sim,
-                "Saved when Settings closes, by ×, Esc or a click outside."
-            ),
-            "{page:?}"
-        );
+        assert!(shows(&mut sim, "Saved when Settings closes."), "{page:?}");
         assert!(
             matches!(
                 click(sim_of(&app), "Discard changes").as_slice(),
@@ -5596,12 +5622,12 @@ fn a_one_letter_search_says_it_waits_for_enter() {
     app.proj.search.query = "f".into();
     assert!(shows(
         &mut sim_elem(super::sidebar::search_tab(&app)),
-        "Press Enter to search"
+        "Keep typing to search"
     ));
     app.proj.search.query = "fn".into();
     assert!(!shows(
         &mut sim_elem(super::sidebar::search_tab(&app)),
-        "Press Enter to search"
+        "Keep typing to search"
     ));
 }
 
@@ -5686,18 +5712,97 @@ fn the_index_cap_is_shown_in_the_import_tree_and_the_symbol_finder() {
         root.join("src/lib.rs"),
         crate::imports::Dir::Imports,
     ));
-    app.proj.index_cap_note = Some("3 too large (over 512 KiB)".into());
-    assert!(shows(
-        &mut sim_elem(super::imports_tab(&app)),
-        "Index incomplete: 3 too large (over 512 KiB)"
-    ));
+    app.proj.index_cap_note = Some("1 file over 4 MB not indexed".into());
+    app.proj.index_too_large = vec![("vendor/big.c".into(), 9_200_000)];
+    let mut tab = sim_elem(super::imports_tab(&app));
+    assert!(shows(&mut tab, "1 file over 4 MB not indexed"));
+    // Which file, and how large, once the note is opened.
+    assert!(!shows(&mut tab, "vendor/big.c"));
+    let _ = tab.click("1 file over 4 MB not indexed");
+    let sent: Vec<Message> = tab.into_messages().collect();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Graph(GraphMsg::ToggleImportNote(
+                crate::app::message::ImportNote::LeftOut
+            ))]
+        ),
+        "{sent:?}"
+    );
+    for message in sent {
+        let _ = app.update(message);
+    }
+    let mut tab = sim_elem(super::imports_tab(&app));
+    assert!(shows(&mut tab, "vendor/big.c"));
+    assert!(shows(&mut tab, "8.8 MB"));
+    drop(tab);
     app.proj.finder.open = true;
     app.proj.finder.mode = crate::finder::FinderMode::Symbols;
-    assert!(shows(&mut sim_of(&app), "Index incomplete: 3 too large"));
+    assert!(shows(
+        &mut sim_of(&app),
+        "Index incomplete: 1 file over 4 MB not indexed"
+    ));
     // A note belongs to its project's session, and leaves with it.
     app.forget_project_state();
     assert!(app.proj.index_cap_note.is_none());
     assert!(!shows(&mut sim_of(&app), "Index incomplete"));
+}
+
+/// The Imports tab's cycle note: of the cycle the tree's own file is in,
+/// and only that one (a cycle elsewhere in the project is the import
+/// graph's), said quietly — a cycle is no error in most languages — as how
+/// many files it shares it with; opened, it names them, each opening its
+/// file when pressed.
+#[test]
+fn the_files_import_cycle_opens_to_its_files_and_opens_each() {
+    use crate::app::message::ImportNote;
+    let mut app = reader_app();
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let lib = root.join("src/lib.rs");
+    app.proj.import_tree = Some(crate::imports::ImportTree::new(
+        &crate::imports::ImportGraph::default(),
+        &root,
+        lib.clone(),
+        crate::imports::Dir::Imports,
+    ));
+    let elsewhere = vec![root.join("src/a.rs"), root.join("src/b.rs")];
+    app.proj.import_cycles = vec![elsewhere.clone()];
+    assert!(
+        !shows(&mut sim_elem(super::imports_tab(&app)), "import cycle"),
+        "a cycle lib.rs is not in is no note of lib.rs's"
+    );
+    let with_lib = vec![root.join("src/c.rs"), lib.clone(), root.join("src/d.rs")];
+    app.proj.import_cycles = vec![elsewhere, with_lib];
+    let mut tab = sim_elem(super::imports_tab(&app));
+    assert!(shows(&mut tab, "In an import cycle with 2 other files"));
+    assert!(!shows(&mut tab, "c.rs"), "shut, the note names no file");
+    let _ = tab.click("In an import cycle with 2 other files");
+    for message in tab.into_messages().collect::<Vec<_>>() {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.proj.import_notes_open, [ImportNote::Cycles]);
+
+    let mut tab = sim_elem(super::imports_tab(&app));
+    assert!(shows(&mut tab, "Files that import one another"));
+    assert!(shows(&mut tab, "c.rs") && shows(&mut tab, "d.rs"));
+    assert!(!shows(&mut tab, "a.rs"), "only lib.rs's cycle is listed");
+    let _ = tab.click("d.rs");
+    let sent: Vec<Message> = tab.into_messages().collect();
+    assert!(
+        matches!(
+            sent.as_slice(),
+            [Message::Editor(EditorMsg::OpenAbs { abs, line: None, push: true })]
+                if *abs == root.join("src/d.rs")
+        ),
+        "{sent:?}"
+    );
+
+    // Pressed again, the note shuts.
+    let _ = app.update(Message::Graph(GraphMsg::ToggleImportNote(
+        ImportNote::Cycles,
+    )));
+    assert!(app.proj.import_notes_open.is_empty());
+    assert!(!shows(&mut sim_elem(super::imports_tab(&app)), "c.rs"));
 }
 
 /// I3 / E1-6: an equation or diagram the renderer could not draw shows its

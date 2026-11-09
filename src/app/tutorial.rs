@@ -227,7 +227,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         .demo(tab(SidebarTab::Trail)),
         TutStep::new(
             tr!("Bookmarks"),
-            tr!("⌘D bookmarks the line you are on."),
+            tr!("The lines you bookmark, to come back to."),
             Anchor::Sidebar,
         )
         .demo(tab(SidebarTab::Marks)),
@@ -259,7 +259,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // -- Working in the reader ------------------------------------------
         TutStep::new(
             tr!("Split and compare"),
-            tr!("⌘\\ splits the view in two."),
+            tr!("Read two files side by side."),
             Anchor::Main,
         )
         .demo_opt(open_demo.clone()),
@@ -353,7 +353,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         ),
         TutStep::new(
             tr!("Open another project"),
-            tr!("A folder on this machine, or code on another over SSH. ⌘N opens one in a new window."),
+            tr!("A folder on this machine, or code on another over SSH."),
             menu_rows(ToolsRow::OpenFolder, ToolsRow::OpenRemote),
         ),
         TutStep::new(

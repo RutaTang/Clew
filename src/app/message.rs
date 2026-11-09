@@ -784,6 +784,10 @@ pub enum CallsMsg {
     /// Open the call hierarchy of the function the margin's Calls is about
     /// (its "Open the call hierarchy").
     OfFunction,
+    /// Trace the call tree's function again, the way it reads, where its
+    /// language server says it is: what its "code changed" note's Refresh
+    /// sends.
+    Refresh,
     /// `prepareCallHierarchy` resolved the anchor item(s). `token` was minted
     /// at request time; only the awaited request may install a tree.
     Prepared {
@@ -812,6 +816,15 @@ pub enum CallsMsg {
     Direction,
     /// Recursively expand the whole tree (to the project boundary).
     ExpandAll,
+}
+
+/// A note under the Imports tab's header (`ui::panels::imports_tab`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportNote {
+    /// The project's import cycles.
+    Cycles,
+    /// The files the symbol index left out for their size.
+    LeftOut,
 }
 
 /// The project graphs and their overlays: imports and the call graph.
@@ -857,6 +870,9 @@ pub enum GraphMsg {
     ImportExpand { token: u64, id: usize },
     /// Flip the import tree between Imports and Importers.
     ImportDirection,
+    /// Show, or put away, what a note under the Imports tab's header is
+    /// about: the cycles themselves, the files left out.
+    ToggleImportNote(ImportNote),
     /// Recursively expand the whole import tree (to the project boundary).
     ImportExpandAll,
     /// Open a project-wide graph overlay (or switch which one).
@@ -2061,6 +2077,8 @@ pub enum WindowMsg {
     OpenShortcuts,
     /// Begin capturing a new chord for an action (click a binding).
     RebindStart(keymap::Action),
+    /// Stop capturing one, the binding as it was.
+    RebindCancel,
     /// Reset one action's binding to its default.
     RebindReset(keymap::Action),
     /// Reset every binding to its default.
@@ -2392,6 +2410,7 @@ impl CallsMsg {
             CallsMsg::Requested
             | CallsMsg::FromMenu
             | CallsMsg::OfFunction
+            | CallsMsg::Refresh
             | CallsMsg::ExpandNode { .. }
             | CallsMsg::Direction
             | CallsMsg::ExpandAll => None,
@@ -2415,6 +2434,7 @@ impl GraphMsg {
             | GraphMsg::ProjectCallsRefined { stamp, .. } => Some(Origin::Stamped(stamp)),
             GraphMsg::ImportExpand { .. }
             | GraphMsg::ImportDirection
+            | GraphMsg::ToggleImportNote(..)
             | GraphMsg::ImportExpandAll
             | GraphMsg::OpenOverlay(..)
             | GraphMsg::CloseOverlay
@@ -2886,6 +2906,7 @@ impl WindowMsg {
             | WindowMsg::ToggleTargetMenu
             | WindowMsg::OpenShortcuts
             | WindowMsg::RebindStart(..)
+            | WindowMsg::RebindCancel
             | WindowMsg::RebindReset(..)
             | WindowMsg::RebindResetAll
             | WindowMsg::ToggleInlineSummaries
