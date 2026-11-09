@@ -388,7 +388,8 @@ fn keep_listening_waits_for_clew_to_finish() {
     std::fs::write(store.path(model), b"a model").unwrap();
     app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
     app.ask_view = AskView::Compact;
-    let _ = app.update(Message::Voice(VoiceMsg::SetKeepListening(true)));
+    // On already, as when the question was said (switching it on listens).
+    app.voice.keep_listening = true;
     asked(&mut app, 1, true);
     delta(&mut app, 1, "The total adds every price.");
     ended(&mut app, 1, StreamOutcome::Done);
@@ -723,7 +724,8 @@ fn keep_listening_survives_a_voice_that_fails() {
     std::fs::write(store.path(model), b"a model").unwrap();
     app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
     app.ask_view = AskView::Compact;
-    let _ = app.update(Message::Voice(VoiceMsg::SetKeepListening(true)));
+    // On already, as when the question was said (switching it on listens).
+    app.voice.keep_listening = true;
     asked(&mut app, 1, true);
     // The answer ends while its sentence is still being made, and that
     // sentence fails: clew-speak is gone.
@@ -801,6 +803,65 @@ fn speech_ends_with_its_conversation() {
     settle(&mut app, task);
     assert!(!app.voice.speech.is_speaking());
     let _ = voice;
+}
+
+/// A question queued while a spoken answer came in is asked once Clew has
+/// said that answer, not as soon as its last words have come: asked then,
+/// as a question asked anew it stopped Clew mid-answer, and the rest of
+/// what the reader was listening to went unsaid. Its Send now still asks
+/// it at once, over what is being said.
+#[test]
+fn a_queued_question_waits_for_the_answer_to_be_said() {
+    let (mut app, voice, output) = speech_app("speech-queue-waits");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.ask_pins.push(crate::app::model::AskPin {
+        rel: "README.md".into(),
+        file: root.join("README.md"),
+        line: 1,
+        code: "# shop".into(),
+    });
+    app.llm_config_cache = Some(Some(super::unreachable_llm()));
+    let answered = |app: &mut App, question: &str| {
+        let stream = app.mint_request_id();
+        asked(app, stream, true);
+        app.proj.link.agent_stream = Some(stream);
+        delta(app, stream, "The total adds every price. Then");
+        app.proj.ask_input = question.into();
+        let _ = app.update(Message::Ask(AskMsg::Submit));
+        delta(app, stream, " it rounds.");
+        let task = app.update(Message::Ask(AskMsg::AgentTurnEnded {
+            stamp: app.stamp(),
+            stream,
+            outcome: StreamOutcome::Done,
+        }));
+        settle(app, task);
+    };
+    answered(&mut app, "and the tax?");
+    assert!(app.voice.speech.is_speaking(), "stopped mid-answer");
+    assert_eq!(voice.texts().len(), 2, "{:?}", voice.texts());
+    assert_eq!(
+        app.proj.ask_queue,
+        vec![("and the tax?".to_string(), false)],
+        "asked over the answer being said"
+    );
+    // Said: the next is asked. (Its answer, from a model never reached, is
+    // not waited for.)
+    output.lock().unwrap().idle = true;
+    let _ = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let _ = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    assert!(!app.voice.speech.is_speaking());
+    assert!(app.proj.ask_queue.is_empty(), "not asked once said");
+    assert!(app.proj.inflight.ask_retrieval.is_some(), "{}", app.status);
+    let _ = app.update(Message::Ask(AskMsg::Stop));
+
+    // Send now: asked at once, what is being said stopped for it.
+    answered(&mut app, "and the discount?");
+    assert!(app.voice.speech.is_speaking());
+    let _ = app.update(Message::Ask(AskMsg::SendQueuedNow(0)));
+    assert!(!app.voice.speech.is_speaking());
+    assert!(app.proj.ask_queue.is_empty(), "Send now waited");
+    assert!(app.proj.inflight.ask_retrieval.is_some(), "{}", app.status);
 }
 
 /// Deleting the session on screen ends what is said of it — another

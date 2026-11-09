@@ -104,6 +104,46 @@ impl App {
         }
     }
 
+    /// The open call tree traced again from its own function — asked where
+    /// the tree found it, of the server the tree was built with, the way it
+    /// reads — as code it was traced from has changed. The caret is not
+    /// asked: it may be on another name by now.
+    pub(crate) fn refresh_call_hierarchy(&mut self) -> Task<Message> {
+        let Some(tree) = &self.proj.call_graph else {
+            return Task::none();
+        };
+        let Some(root) = tree.roots().first().and_then(|&r| tree.get(r)) else {
+            return Task::none();
+        };
+        let (lang, direction) = (tree.lang, tree.direction);
+        let (path, line, character) = (root.item.path.clone(), root.item.line, root.item.character);
+        let Some(LspSlot::Ready(client)) = self.proj.link.lsp.get(lang) else {
+            self.status = tr!(
+                "No {language} server ready",
+                language = crate::app::languages::language_name(lang)
+            );
+            return Task::none();
+        };
+        let client = client.clone();
+        self.status = tr!("Building call hierarchy…").into();
+        self.call_token += 1;
+        let token = self.call_token;
+        self.proj.call_pending = Some(token);
+        let stamp = self.stamp();
+        Task::perform(
+            async move { client.prepare_call_hierarchy(&path, line, character).await },
+            move |items| {
+                Message::Calls(CallsMsg::Prepared {
+                    stamp: stamp.clone(),
+                    token,
+                    direction,
+                    lang,
+                    items,
+                })
+            },
+        )
+    }
+
     pub(crate) fn on_call_hierarchy_prepared(
         &mut self,
         token: u64,
@@ -320,6 +360,7 @@ impl App {
                 self.call_hierarchy_at(menu.pane, menu.line, menu.col)
             }
             CallsMsg::OfFunction => self.call_hierarchy_of_function(),
+            CallsMsg::Refresh => self.refresh_call_hierarchy(),
             CallsMsg::Prepared {
                 token,
                 direction,

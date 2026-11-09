@@ -7,6 +7,7 @@ use iced::widget::{column, row};
 
 /// Modal frame shared by the project-graph overlays: a titled panel with a
 /// List/Map toggle, over a dismissable backdrop.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn graph_modal_frame<'a>(
     title: &'a str,
     graph_mode: bool,
@@ -14,6 +15,8 @@ pub(crate) fn graph_modal_frame<'a>(
     graph_spin: bool,
     graph_heat: bool,
     extra: Option<Element<'a, Message>>,
+    picked: Option<Element<'a, Message>>,
+    window: iced::Size,
     body: Element<'a, Message>,
 ) -> Element<'a, Message> {
     // Header controls are icon buttons; each names itself on hover (`chrome_tip`).
@@ -22,7 +25,7 @@ pub(crate) fn graph_modal_frame<'a>(
             button(glyph::icon(g, theme::fg_muted(), 16.0))
                 .style(theme::toolbar_button)
                 .padding([4, 8])
-                .on_press(msg),
+                .on_press(super::heard::said(tip, msg)),
             tip,
             None,
         )
@@ -53,38 +56,50 @@ pub(crate) fn graph_modal_frame<'a>(
             )
         });
     }
-    if graph_mode {
-        header = header.push(if graph_3d {
-            icon_btn(
-                Glyph::Plane,
-                tr!("Flatten to 2D"),
-                Message::Graph(GraphMsg::Toggle3D),
-            )
-        } else {
-            icon_btn(
-                Glyph::Cube,
-                tr!("Show in 3D"),
-                Message::Graph(GraphMsg::Toggle3D),
-            )
-        });
-        // Heat: colour by how often each file changed, instead of by language.
-        header = header.push(chrome_tip(
-            button(
-                text(if graph_heat {
-                    format!("{} ●", tr!("Heat"))
-                } else {
-                    tr!("Heat").to_string()
-                })
-                .size(ts::SMALL)
-                .color(if graph_heat {
-                    theme::danger()
-                } else {
-                    theme::fg_muted()
-                }),
-            )
-            .style(theme::toolbar_button)
+    // Back to where the map starts: its zoom, its pan, its turn.
+    // Two choices side by side, the one in effect lit: what each is, in
+    // words — shapes for 2D and the map read as ◇ and ▽.
+    let pair = |a: (String, bool), b: (String, bool), msg: Message| -> Element<'a, Message> {
+        let seg = |(label, on): (String, bool)| {
+            button(text(label.clone()).size(ts::SMALL).color(if on {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            }))
+            .style(theme::toggle(on))
             .padding([4, 8])
-            .on_press(Message::Graph(GraphMsg::ToggleHeat)),
+            .on_press_maybe((!on).then(|| super::heard::said(&label, msg.clone())))
+        };
+        row![seg(a), seg(b)].spacing(2).into()
+    };
+    if graph_mode {
+        header = header.push(icon_btn(
+            Glyph::Recenter,
+            tr!("Fit the map"),
+            Message::Graph(GraphMsg::FitView),
+        ));
+    }
+    if graph_mode {
+        header = header.push(pair(
+            ("2D".to_string(), !graph_3d),
+            ("3D".to_string(), graph_3d),
+            Message::Graph(GraphMsg::Toggle3D),
+        ));
+        // Heat: colour by how often each file changed, instead of by language.
+        // A toggle: lit while on, its word the same either way — a dot
+        // added after it widened the button, and moved those beside it.
+        header = header.push(chrome_tip(
+            button(text(tr!("Heat")).size(ts::SMALL).color(if graph_heat {
+                theme::fg()
+            } else {
+                theme::fg_muted()
+            }))
+            .style(theme::toggle(graph_heat))
+            .padding([4, 8])
+            .on_press(super::heard::said(
+                tr!("Heat"),
+                Message::Graph(GraphMsg::ToggleHeat),
+            )),
             if graph_heat {
                 tr!("Color by language")
             } else {
@@ -94,27 +109,31 @@ pub(crate) fn graph_modal_frame<'a>(
         ));
     }
     header = header
-        .push(if graph_mode {
-            icon_btn(
-                Glyph::List,
-                tr!("List view"),
-                Message::Graph(GraphMsg::OverlayViewToggle),
-            )
-        } else {
-            icon_btn(
-                Glyph::Graph,
-                tr!("Map view"),
-                Message::Graph(GraphMsg::OverlayViewToggle),
-            )
-        })
+        .push(pair(
+            (tr!("Map").to_string(), graph_mode),
+            (tr!("List").to_string(), !graph_mode),
+            Message::Graph(GraphMsg::OverlayViewToggle),
+        ))
         .push(icon_btn(
             Glyph::Close,
             tr!("Close"),
             Message::Graph(GraphMsg::CloseOverlay),
         ));
-    let panel = container(column![header, body].spacing(12))
-        .width(GRAPH_MODAL_W)
-        .max_height(GRAPH_MODAL_MAX_H)
+    // As large as the window allows, an edge of it left round — it was
+    // 760 × 640 in any window, a big map squeezed into the middle of a big
+    // screen — and never smaller than that where the window has room.
+    let width = (window.width - 2.0 * GRAPH_MODAL_EDGE)
+        .min(GRAPH_MODAL_MAX_W)
+        .max(GRAPH_MODAL_W.min(window.width - 2.0 * MODAL_MARGIN));
+    let height = (window.height - 2.0 * GRAPH_MODAL_EDGE)
+        .max(GRAPH_MODAL_MAX_H.min(window.height - 2.0 * MODAL_MARGIN));
+    let mut parts = column![header].spacing(12);
+    if let Some(picked) = picked {
+        parts = parts.push(picked);
+    }
+    let panel = container(parts.push(body))
+        .width(width)
+        .max_height(height)
         .padding(MODAL_PAD)
         .style(theme::modal_panel);
 
@@ -126,6 +145,8 @@ pub(crate) fn graph_modal_frame<'a>(
 }
 
 pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element<'_, Message> {
+    // Its list's rows counted from 1, as voice picks them.
+    super::heard::list();
     let title = match overlay {
         crate::Overlay::ProjectImports => tr!("Project Import Graph"),
         crate::Overlay::ProjectCalls => tr!("Project Call Graph"),
@@ -135,17 +156,35 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
     // The call graph can be refined to exact LSP edges; show its control/status.
     let extra: Option<Element<'_, Message>> = match overlay {
         crate::Overlay::ProjectCalls => Some(if let Some(progress) = app.refine_progress_label() {
-            text(progress)
-                .size(ts::SMALL)
-                .color(theme::warning())
-                .into()
+            // As wide as it reads at its end: counting, its left edge — and
+            // what it said — shook at every file.
+            let widest = match app.proj.project_calls.refine_progress {
+                Some((_, total)) if total > 0 => {
+                    tr!("Refining {done}/{total}…", done = total, total = total)
+                }
+                _ => progress.clone(),
+            };
+            super::steady::slot(
+                text(progress.clone())
+                    .size(ts::SMALL)
+                    .color(theme::warning()),
+                &progress,
+                &[&widest],
+                ts::SMALL,
+            )
         } else if let Some(precise) = app.precise_label() {
             text(precise).size(ts::SMALL).color(theme::accent()).into()
         } else {
+            // With no project there is nothing to refine.
             button(text(tr!("Refine with LSP")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([3, 10])
-                .on_press(Message::Graph(GraphMsg::RefineProjectCalls))
+                .on_press_maybe(app.proj.project.is_some().then(|| {
+                    super::heard::said(
+                        tr!("Refine with LSP"),
+                        Message::Graph(GraphMsg::RefineProjectCalls),
+                    )
+                }))
                 .into()
         }),
         crate::Overlay::ProjectImports => None,
@@ -167,6 +206,39 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             crate::Overlay::ProjectMaps => project_maps_body(app),
         }
     };
+    // The node picked: what it is and where, and the way into it.
+    let picked = app.proj.graph_pick.as_ref().filter(|_| app.graph_mode).map(
+        |pick| -> Element<'_, Message> {
+            let place = app
+                .proj
+                .project
+                .as_ref()
+                .and_then(|p| pick.file.strip_prefix(&p.root).ok())
+                .map(|rel| rel.display().to_string())
+                .unwrap_or_default();
+            row![
+                text(pick.label.as_str())
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(iced::widget::text::Wrapping::None),
+                container(
+                    text(place)
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(iced::widget::text::Wrapping::None)
+                )
+                .width(Fill)
+                .clip(true),
+                button(text(tr!("Open")).size(ts::SMALL))
+                    .style(theme::primary_button)
+                    .padding([3, 12])
+                    .on_press(super::heard::said(tr!("Open"), (*pick.open).clone())),
+            ]
+            .spacing(10)
+            .align_y(iced::Center)
+            .into()
+        },
+    );
     graph_modal_frame(
         title,
         app.graph_mode,
@@ -174,6 +246,8 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         app.graph_spin,
         app.graph_heat,
         extra,
+        picked,
+        iced::Size::new(app.window_width, app.window_height),
         body,
     )
 }
@@ -190,7 +264,10 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
     };
     // While the project is still being scanned/indexed the graph is legitimately
     // empty — say so, rather than "Nothing to show" (which reads as "no data").
-    let empty_msg = if app.proj.project_calls.building {
+    let empty_msg = if app.proj.project.is_none() {
+        // Not "Nothing to show.", which reads as a project with nothing in it.
+        tr!("Open a project to see its map")
+    } else if app.proj.project_calls.building {
         tr!("Building call graph…")
     } else if app.scanning || app.proj.indexing {
         tr!("Indexing the project…")
@@ -224,7 +301,8 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
                 .flatten(),
             app.proj.churn_rev,
         )
-        .with_visited(Some(trace_files(app)), app.debug.trace_rev),
+        .with_visited(Some(trace_files(app)), app.debug.trace_rev)
+        .with_fit(app.graph_fit_rev),
     )
     .width(Fill)
     .height(Fill);
@@ -311,6 +389,8 @@ pub(crate) struct GraphCanvas<'a> {
     pub(crate) visited: Option<std::sync::Arc<std::collections::HashSet<std::path::PathBuf>>>,
     /// The generation of `visited`: part of the scene cache's key.
     pub(crate) visited_rev: u64,
+    /// Bumped to put the camera back where it starts (`GraphMsg::FitView`).
+    pub(crate) fit_rev: u64,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -333,7 +413,14 @@ impl<'a> GraphCanvas<'a> {
             paint_rev: 0,
             visited: None,
             visited_rev: 0,
+            fit_rev: 0,
         }
+    }
+
+    /// Put the camera back where it starts each time `rev` moves on.
+    pub(crate) fn with_fit(mut self, rev: u64) -> Self {
+        self.fit_rev = rev;
+        self
     }
 
     /// Ring the nodes of the files in `visited` (the last debug run's
@@ -512,6 +599,11 @@ pub(crate) struct GraphState {
     /// The bounds and hovered node the last tick computed for.
     last_bounds: iced::Size,
     last_hover: Option<usize>,
+    /// The node clicked once (its index, under the layout signature it was
+    /// clicked in): a click on it again opens it.
+    picked: Option<(usize, u64)>,
+    /// The `GraphCanvas::fit_rev` the camera was last put back at.
+    fit_rev: u64,
     /// The scene minus the hovered node, re-tessellated only when it changes.
     scene: iced::widget::canvas::Cache,
     /// What `scene` was drawn for: the hovered node, the theme revision and
@@ -565,6 +657,8 @@ impl Default for GraphState {
             dirty: true,
             last_bounds: iced::Size::ZERO,
             last_hover: None,
+            picked: None,
+            fit_rev: 0,
             scene: iced::widget::canvas::Cache::new(),
             scene_key: std::cell::Cell::new(None),
         }
@@ -621,11 +715,14 @@ const FADE_FULL_NODES: f32 = 24.0;
 /// The lead-in a camera's start or stop eases its target in by, so the
 /// motion's acceleration builds from nought rather than jumping.
 const LEAD_TAU: f32 = 0.09;
-/// Turns of the spin the 3D framing is measured at, and the room it
-/// leaves for a node's farthest falling between two of them (cos of half
-/// a step, inverted, with a margin).
+/// Turns of the spin, and tilts of the camera, the 3D framing is measured
+/// at, and the room it leaves for a node's farthest falling between two of
+/// them (cos of half the larger step, inverted, with a margin).
 const SPIN_SAMPLES: usize = 24;
-const SPIN_SAMPLE_SLACK: f32 = 1.012;
+const TILT_SAMPLES: usize = 11;
+const SPIN_SAMPLE_SLACK: f32 = 1.016;
+/// How far the camera tilts up or down, in radians.
+const PITCH_LIMIT: f32 = 1.45;
 /// Fastest a fling turns the camera, radians per second.
 const MAX_TURN: f32 = 8.0;
 /// The camera's angles a switch to 3D swings to from flat.
@@ -864,6 +961,20 @@ impl GraphCanvas<'_> {
         ]
     }
 
+    /// The message that picks node `i` (see `GraphPick`), if it opens to
+    /// anything.
+    pub(crate) fn pick_message(&self, i: usize) -> Option<Message> {
+        let node = self.layout.nodes.get(i)?;
+        let open = self.open_message(i)?;
+        Some(Message::Graph(GraphMsg::Picked(Some(
+            crate::app::model::GraphPick {
+                label: node.label.clone(),
+                file: node.file.clone(),
+                open: Box::new(open),
+            },
+        ))))
+    }
+
     /// The message that opens node `i`, if it is still part of this layout.
     pub(crate) fn open_message(&self, i: usize) -> Option<Message> {
         let node = self.layout.nodes.get(i)?;
@@ -1033,7 +1144,7 @@ impl GraphCanvas<'_> {
             }
             st.yaw += st.yaw_vel * dt;
             let pitch = st.pitch + st.pitch_vel * dt;
-            st.pitch = pitch.clamp(-1.45, 1.45);
+            st.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
             if st.pitch != pitch {
                 st.pitch_vel = 0.0;
             }
@@ -1142,13 +1253,12 @@ impl GraphCanvas<'_> {
             if n == 0 { 0.0 } else { (lo + hi) / 2.0 }
         });
         // In 3D: how far out each node is drawn — across and up — at the
-        // farthest it gets in a whole turn of the spin at this tilt, its
-        // perspective included. The spin only turns the camera round the
-        // upright axis, so the framing it gives holds at every angle of it
-        // (a spin never makes it breathe), yet is no bigger than the graph
-        // needs: a sphere round a flat or tall graph left half the frame
-        // empty. A tilt (an orbit up or down) eases it to the new bound.
-        let pitch = st.pitch * e;
+        // farthest it gets at any angle the camera can take: a whole turn of
+        // the spin, at every tilt an orbit reaches, its perspective
+        // included. Turning the camera — the spin, a drag, a fling — then
+        // never zooms: the framing holds at every angle of it. It was the
+        // farthest of a turn at the tilt of the moment, and a drag up or
+        // down zoomed the graph in and out under the hand.
         let (mut across, mut up): (Vec<f32>, Vec<f32>) = st
             .pos
             .iter()
@@ -1158,11 +1268,17 @@ impl GraphCanvas<'_> {
                     p[1] - box_center[1],
                     p[2] - box_center[2],
                 ];
-                (0..SPIN_SAMPLES).fold((0.0f32, 0.0f32), |(x, y), k| {
-                    let yaw = k as f32 * std::f32::consts::TAU / SPIN_SAMPLES as f32;
-                    let (rx, ry, _, _) = Self::project_view(rotate(d, yaw, pitch));
-                    (x.max(rx.abs()), y.max(ry.abs()))
-                })
+                let mut far = (0.0f32, 0.0f32);
+                for t in 0..TILT_SAMPLES {
+                    let pitch =
+                        -PITCH_LIMIT + 2.0 * PITCH_LIMIT * t as f32 / (TILT_SAMPLES - 1) as f32;
+                    for k in 0..SPIN_SAMPLES {
+                        let yaw = k as f32 * std::f32::consts::TAU / SPIN_SAMPLES as f32;
+                        let (rx, ry, _, _) = Self::project_view(rotate(d, yaw, pitch));
+                        far = (far.0.max(rx.abs()), far.1.max(ry.abs()));
+                    }
+                }
+                far
             })
             .unzip();
         across.sort_by(f32::total_cmp);
@@ -1629,6 +1745,25 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
     ) -> Option<iced::widget::canvas::Action<Message>> {
         use iced::mouse;
         use iced::widget::canvas::Action;
+        // The camera put back where it starts, asked from the header.
+        if state.fit_rev != self.fit_rev {
+            state.fit_rev = self.fit_rev;
+            state.zoom_target = 1.0;
+            state.zoom_at = None;
+            state.zoom_vel = 0.0;
+            state.pan = iced::Vector::new(0.0, 0.0);
+            state.yaw = 0.6;
+            state.pitch = 0.35;
+            state.yaw_vel = 0.0;
+            state.pitch_vel = 0.0;
+            state.touch();
+            if !matches!(
+                event,
+                iced::Event::Window(iced::window::Event::RedrawRequested(_))
+            ) {
+                return Some(Action::request_redraw());
+            }
+        }
         match event {
             // Drive the live simulation: one step per frame while anything
             // moves, requesting the next frame only then — a settled map stops
@@ -1695,7 +1830,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 match state.drag {
                     Drag::Orbit => {
                         state.yaw += dx * 0.008;
-                        state.pitch = (state.pitch + dy * 0.008).clamp(-1.45, 1.45);
+                        state.pitch = (state.pitch + dy * 0.008).clamp(-PITCH_LIMIT, PITCH_LIMIT);
                     }
                     Drag::Pan => {
                         state.pan = iced::Vector::new(state.pan.x + dx, state.pan.y + dy);
@@ -1721,15 +1856,30 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 let was = state.drag;
                 state.drag = Drag::None;
                 state.touch();
-                // A grab that barely moved is a click → open the node — if it
-                // still belongs to the layout on screen.
+                // A grab that barely moved is a click — on a node still part of
+                // the layout on screen: the first picks it (what it is, over
+                // the map), a second opens it.
                 if let Drag::Node(i, sig) = was
                     && state.moved < 5.0
                     && sig == state.sig
                     && sig == layout_sig(self.layout)
-                    && let Some(msg) = self.open_message(i)
                 {
-                    return Some(Action::publish(msg).and_capture());
+                    let msg = if state.picked == Some((i, sig)) {
+                        self.open_message(i)
+                    } else {
+                        state.picked = Some((i, sig));
+                        self.pick_message(i)
+                    };
+                    if let Some(msg) = msg {
+                        return Some(Action::publish(msg).and_capture());
+                    }
+                }
+                // A click off the nodes puts the picked one down.
+                if !matches!(was, Drag::Node(..)) && state.moved < 5.0 && state.picked.is_some() {
+                    state.picked = None;
+                    return Some(
+                        Action::publish(Message::Graph(GraphMsg::Picked(None))).and_capture(),
+                    );
                 }
                 // A moved node re-settles its neighbourhood.
                 state.alpha = state.alpha.max(0.2);
@@ -1887,9 +2037,10 @@ pub(crate) fn import_file_row<'a>(app: &'a App, file: &RankedFile) -> Element<'a
         bottom: 2.0,
         left: 10.0,
     })
-    .on_press(Message::Graph(GraphMsg::OverlayOpenImports(
-        path.to_path_buf(),
-    )))
+    .on_press(super::heard::row(
+        || path.display().to_string(),
+        Message::Graph(GraphMsg::OverlayOpenImports(path.to_path_buf())),
+    ))
     .into()
 }
 
@@ -2064,10 +2215,13 @@ pub(crate) fn call_symbol_row<'a>(
         bottom: 2.0,
         left: 10.0,
     })
-    .on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-        abs: n.file.clone(),
-        line: n.line,
-    }))
+    .on_press(super::heard::row(
+        || n.name.clone(),
+        Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: n.file.clone(),
+            line: n.line,
+        }),
+    ))
     .into()
 }
 
@@ -2194,16 +2348,42 @@ pub(crate) fn project_calls_body(app: &App) -> Element<'_, Message> {
 pub(crate) fn project_types_body(app: &App) -> Element<'_, Message> {
     let g = &app.proj.type_graph;
     if g.is_empty() {
-        let msg = if app.docs_loading() {
-            tr!("Building the API docs…")
+        // Said for what it is: the map is drawn from the API index, and an
+        // index never built is no project without types — it said "No types
+        // found" of a project of a thousand.
+        let never_built = app.proj.docs.generation == 0;
+        let (msg, build) = if app.docs_loading() {
+            (tr!("Building the API docs…"), false)
         } else if app.scanning || app.proj.indexing {
-            tr!("Indexing the project…")
+            (tr!("Indexing the project…"), false)
+        } else if never_built && !app.server.is_up() {
+            (
+                tr!(
+                    "The type map is drawn from the project's API index, which Clew's server builds — and it is not running."
+                ),
+                false,
+            )
+        } else if never_built {
+            (
+                tr!("The type map is drawn from the project's API index, not built yet."),
+                true,
+            )
         } else {
-            tr!("No types found in this project.")
+            (tr!("No types found in this project."), false)
         };
-        return container(text(msg).size(ts::BODY).color(theme::dim()))
-            .padding(8)
-            .into();
+        let mut said = column![text(msg).size(ts::BODY).color(theme::dim())].spacing(10);
+        if build {
+            said = said.push(
+                button(text(tr!("Build the API Index")).size(ts::BODY))
+                    .style(theme::primary_button)
+                    .padding([4, 12])
+                    .on_press(super::heard::said(
+                        tr!("Build the API Index"),
+                        Message::Docs(DocsMsg::Refresh),
+                    )),
+            );
+        }
+        return container(said).padding(8).into();
     }
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
@@ -2289,16 +2469,24 @@ pub(crate) fn map_picker(app: &App) -> Option<Element<'_, Message>> {
         .selected_map_index()
         .and_then(|i| choices.get(i).cloned());
     match choices.len() {
-        0 => app.proj.maps_building.then(|| {
-            text(tr!("Reading the project's maps…"))
-                .size(ts::SMALL)
-                .color(theme::dim())
-                .into()
-        }),
+        // While they are read, the body says so — once: the header said it
+        // too, a line above.
+        0 => None,
         _ => Some(
-            pick_list(choices, selected, |c: MapChoice| {
-                Message::Graph(GraphMsg::SelectMap(c.id))
-            })
+            {
+                // Each map said by its name.
+                if super::heard::gathering() {
+                    for c in &choices {
+                        super::heard::said(
+                            &c.title,
+                            Message::Graph(GraphMsg::SelectMap(c.id.clone())),
+                        );
+                    }
+                }
+                pick_list(choices, selected, |c: MapChoice| {
+                    Message::Graph(GraphMsg::SelectMap(c.id))
+                })
+            }
             .style(theme::pick)
             .menu_style(theme::pick_menu)
             .text_size(ts::SMALL)
@@ -2399,10 +2587,13 @@ pub(crate) fn project_maps_body(app: &App) -> Element<'_, Message> {
                 .width(Fill)
                 .padding([3, 8]);
             if !n.file.is_empty() {
-                button = button.on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-                    abs: root.join(&n.file),
-                    line: n.line.max(1),
-                }));
+                button = button.on_press(super::heard::row(
+                    || n.label.clone(),
+                    Message::Graph(GraphMsg::OverlayOpenAt {
+                        abs: root.join(&n.file),
+                        line: n.line.max(1),
+                    }),
+                ));
             }
             rows.push(button.into());
             let mut lines: Vec<String> = n
@@ -2467,10 +2658,13 @@ pub(crate) fn type_row(app: &App, id: usize, trailing: String) -> Element<'_, Me
     .style(theme::list_row(false))
     .width(Fill)
     .padding([3, 8])
-    .on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-        abs: t.file.clone(),
-        line: t.line,
-    }))
+    .on_press(super::heard::row(
+        || t.name.clone(),
+        Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: t.file.clone(),
+            line: t.line,
+        }),
+    ))
     .into()
 }
 
@@ -2638,7 +2832,10 @@ pub(crate) fn churn_rows(app: &App) -> Vec<Element<'_, Message>> {
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding([3, 8])
-                .on_press(Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 1 }))
+                .on_press(super::heard::row(
+                    || path.display().to_string(),
+                    Message::Graph(GraphMsg::OverlayOpenAt { abs, line: 1 }),
+                ))
                 .into(),
         );
     }
@@ -2918,9 +3115,12 @@ mod tests {
         assert!(c.open_message(2).is_some());
     }
 
-    /// A click (press + release without moving) on a live node opens it.
+    /// A click (press + release without moving) on a live node picks it —
+    /// what it is, over the map — and a second click opens it: a first
+    /// click closed the map on a node the reader may only have wanted to
+    /// look at. A click off the nodes puts the picked one down.
     #[test]
-    fn a_click_on_a_node_opens_it() {
+    fn a_click_on_a_node_picks_it_and_a_second_opens_it() {
         let l = layout(3);
         let c = canvas(&l, false, false);
         let mut st = GraphState::default();
@@ -2937,22 +3137,80 @@ mod tests {
         let release = iced::Event::Mouse(iced::mouse::Event::ButtonReleased(
             iced::mouse::Button::Left,
         ));
-        let program = |e: &iced::Event, st: &mut GraphState| {
-            <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
-                &c, st, e, BOUNDS, at,
-            )
+        let click = |st: &mut GraphState, at| {
+            let program = |e: &iced::Event, st: &mut GraphState| {
+                <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+                    &c, st, e, BOUNDS, at,
+                )
+            };
+            let _ = program(&press, st);
+            program(&release, st)
+                .expect("the release is handled")
+                .into_inner()
+                .0
         };
-        let _ = program(&press, &mut st);
-        assert!(matches!(st.drag, Drag::Node(1, _)));
-        let (published, _, _) = program(&release, &mut st)
-            .expect("the release is handled")
-            .into_inner();
-        match published {
+        match click(&mut st, at) {
+            Some(Message::Graph(GraphMsg::Picked(Some(pick)))) => {
+                assert_eq!(pick.file, std::path::PathBuf::from("/p/file_1.rs"));
+                assert!(matches!(
+                    *pick.open,
+                    Message::Graph(GraphMsg::OverlayOpenImports(_))
+                ));
+            }
+            other => panic!("expected the node to be picked, got {other:?}"),
+        }
+        match click(&mut st, at) {
             Some(Message::Graph(GraphMsg::OverlayOpenImports(file))) => {
                 assert_eq!(file, std::path::PathBuf::from("/p/file_1.rs"))
             }
             other => panic!("expected the node to open, got {other:?}"),
         }
+        // A click on nothing puts it down; the next on it picks it again.
+        let off = iced::advanced::mouse::Cursor::Available(Point::new(2.0, 2.0));
+        assert!(matches!(
+            click(&mut st, off),
+            Some(Message::Graph(GraphMsg::Picked(None)))
+        ));
+        assert!(matches!(
+            click(&mut st, at),
+            Some(Message::Graph(GraphMsg::Picked(Some(_))))
+        ));
+    }
+
+    /// Fit puts the camera back where it starts: zoom, pan and turn.
+    #[test]
+    fn fit_puts_the_camera_back() {
+        let l = layout(3);
+        let mut st = GraphState {
+            zoom_target: 3.0,
+            pan: iced::Vector::new(120.0, -40.0),
+            yaw: 2.0,
+            ..Default::default()
+        };
+        let c = canvas(&l, true, false).with_fit(1);
+        let redraw = iced::Event::Window(iced::window::Event::RedrawRequested(
+            std::time::Instant::now(),
+        ));
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            &c,
+            &mut st,
+            &redraw,
+            BOUNDS,
+            iced::advanced::mouse::Cursor::Unavailable,
+        );
+        assert_eq!(st.zoom_target, 1.0);
+        assert_eq!(st.pan, iced::Vector::new(0.0, 0.0));
+        assert!((st.yaw - 0.6).abs() < 0.2, "{}", st.yaw);
+        // Once: it is not put back again until asked.
+        st.zoom_target = 2.0;
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            &c,
+            &mut st,
+            &redraw,
+            BOUNDS,
+            iced::advanced::mouse::Cursor::Unavailable,
+        );
+        assert_eq!(st.zoom_target, 2.0);
     }
 
     /// Where each node is drawn.
@@ -3177,22 +3435,26 @@ mod tests {
             "{:?}",
             st.shift
         );
-        // A whole turn of the spin: always inside the padding, and out to
-        // its edge on one axis somewhere in the turn — the frame used, not
-        // half of it.
+        // Every angle the camera can take — a whole turn of the spin, at
+        // every tilt: always inside the padding, and out to its edge on one
+        // axis at some angle — the frame used, not half of it.
         let (half_w, half_h) = (
             BOUNDS.width / 2.0 - GRAPH_PAD,
             BOUNDS.height / 2.0 - GRAPH_PAD,
         );
         let (mut far_x, mut far_y) = (0.0f32, 0.0f32);
-        let yaw = st.yaw;
-        for k in 0..360 {
-            st.yaw = yaw + k as f32 * std::f32::consts::TAU / 360.0;
-            for (x, y) in on_screen(&c, &st) {
-                far_x = far_x.max((x - BOUNDS.width / 2.0).abs());
-                far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
+        let (yaw, pitch) = (st.yaw, st.pitch);
+        for t in 0..=40 {
+            st.pitch = -PITCH_LIMIT + 2.0 * PITCH_LIMIT * t as f32 / 40.0;
+            for k in 0..360 {
+                st.yaw = yaw + k as f32 * std::f32::consts::TAU / 360.0;
+                for (x, y) in on_screen(&c, &st) {
+                    far_x = far_x.max((x - BOUNDS.width / 2.0).abs());
+                    far_y = far_y.max((y - BOUNDS.height / 2.0).abs());
+                }
             }
         }
+        st.pitch = pitch;
         assert!(
             far_x <= half_w + 0.5 && far_y <= half_h + 0.5,
             "{far_x} {far_y}"
@@ -3212,6 +3474,37 @@ mod tests {
                     st.pitch
                 );
             }
+        }
+    }
+
+    /// Dragging the 3D map turns it and nothing more: tilted up and down,
+    /// as an orbit tilts it, it is drawn at one scale throughout. The fit
+    /// was the farthest a node got in a turn at the tilt of the moment, and
+    /// a drag up or down zoomed the graph in and out under the hand.
+    #[test]
+    fn tilting_the_3d_map_never_zooms_it() {
+        let l = layout(40);
+        let (mut st, t0, f) = settled(&l, true);
+        let c = canvas(&l, true, false);
+        let scale = st.fit_scale;
+        assert!(scale > 0.0);
+        st.drag = Drag::Orbit;
+        for (k, frame) in (f..f + 120).enumerate() {
+            st.pitch = (k as f32 * 0.05).sin() * 1.4;
+            st.yaw += 0.02;
+            let now = t0 + std::time::Duration::from_micros(16_667 * frame as u64);
+            let _ = c.tick(
+                &mut st,
+                BOUNDS,
+                now,
+                iced::advanced::mouse::Cursor::Unavailable,
+            );
+            assert!(
+                (st.fit_scale - scale).abs() / scale < 1e-3,
+                "zoomed at pitch {}: {} from {scale}",
+                st.pitch,
+                st.fit_scale
+            );
         }
     }
 

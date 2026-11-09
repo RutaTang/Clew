@@ -47,6 +47,44 @@ impl App {
             Some(jump) => Task::batch([task, jump]),
             None => task,
         };
+        // The first-run question about updates, once nothing else asks.
+        let task = match self.ask_update_consent() {
+            Some(ask) => Task::batch([task, ask]),
+            None => task,
+        };
+        // A notice on the status line is timed from when it was first said,
+        // whichever message said it.
+        self.note_status();
+        // The question's field holds the question, however it was set.
+        self.sync_ask_editor();
+        // The margin's History lists the commits of the file being read.
+        // Batched only when it asks: a batch is a task even of none, and an
+        // update that asks for nothing returns none.
+        let task = match self.sync_margin_history() {
+            Some(history) => Task::batch([task, history]),
+            None => task,
+        };
+        // The Files view shows where the file being read is, and what the
+        // working tree changes.
+        let task = match self.sync_tree_reveal() {
+            Some(reveal) => Task::batch([task, reveal]),
+            None => task,
+        };
+        let task = match self.sync_git_status() {
+            Some(read) => Task::batch([task, read]),
+            None => task,
+        };
+        // An answer that came with Ask put away is read once its card is
+        // open, whichever way it was opened.
+        if self.ask_view.is_open() {
+            self.proj.ask_unread = false;
+        }
+        // A question queued while an answer came in is asked once nothing is
+        // answering, whichever message ended the answer.
+        let task = match self.send_next_queued() {
+            Some(ask) => Task::batch([task, ask]),
+            None => task,
+        };
         // A call-graph refinement holding files — or a full pass held — for
         // a language server starting or loading the project (see
         // `settle_refine_wait`), whichever message readied it.
@@ -344,12 +382,11 @@ impl App {
         if self.show_tools_menu && crate::app::tutorial::closes_tools_menu(&message) {
             self.show_tools_menu = false;
         }
-        // So does a pick from the app menu, or from the View menu.
+        // So does a pick from the app menu. The View menu's rows are
+        // switches, and stay up as they are flipped, several in a row: it
+        // goes as a click away from it, or Escape, puts it away.
         if self.show_app_menu && crate::ui::closes_app_menu(&message) {
             self.show_app_menu = false;
-        }
-        if self.show_view_menu && crate::ui::closes_view_menu(&message) {
-            self.show_view_menu = false;
         }
         match message {
             Message::Server(message) => self.update_server(message),

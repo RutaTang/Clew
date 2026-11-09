@@ -79,7 +79,7 @@ pub(crate) fn ask_is_card(app: &App) -> bool {
 pub(crate) fn ask_place(app: &App) -> Option<AskPlace> {
     let (top, bottom) = band(app);
     match app.ask_view {
-        AskView::Closed | AskView::Hidden => None,
+        AskView::Hidden => None,
         AskView::Compact => {
             let (right, _) = corner(app);
             let width = ASK_CARD_W
@@ -192,15 +192,11 @@ pub(crate) fn ask_layer(app: &App) -> Element<'_, Message> {
     stack![backdrop, frame].into()
 }
 
-/// The pill Ask hides to: what voice is doing while it hears, works out the
-/// words, waits for a yes, speaks, or has just done what was said — else Ask's own
-/// face, a click from opening. `None` when Ask is put away and voice has
-/// nothing to say.
+/// The pill Ask hides and closes to: what voice is doing while it hears,
+/// works out the words, waits for a yes, speaks, or has just done what was
+/// said — else Ask's own face, a click from opening.
 fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
     let voice = pill_voice(app);
-    if app.ask_view == AskView::Closed && voice.is_none() {
-        return None;
-    }
     let listening = app.voice.is_listening();
     let mic = tip_at(
         button(
@@ -242,9 +238,41 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
     let face: Element<'_, Message> = match voice {
         Some(said) => said,
         None => {
-            let turns = app.proj.ask_turns.len();
-            let mut face = row![
-                glyph::icon(Glyph::Message, theme::accent(), 15.0),
+            // Ask's face, and nothing more: a count of its answers beside it
+            // said nothing the card does not, and moved the pill's edge as
+            // it grew.
+            // An answer that came while the card was put away: a dot on
+            // the mark, until the card is opened — nothing beside it, so
+            // the pill keeps its size.
+            let mark: Element<'_, Message> = if app.proj.ask_unread {
+                stack![
+                    glyph::icon(Glyph::Message, theme::accent(), 15.0),
+                    container(
+                        container(space().width(UNREAD_DOT).height(UNREAD_DOT)).style(
+                            |_: &iced::Theme| container::Style {
+                                background: Some(theme::accent().into()),
+                                // Ringed in the pill's surface, apart
+                                // from the mark it sits on.
+                                border: iced::Border {
+                                    color: crate::theme::active().elevated,
+                                    width: 1.5,
+                                    radius: (UNREAD_DOT / 2.0).into(),
+                                },
+                                ..container::Style::default()
+                            }
+                        )
+                    )
+                    .width(Length::Fixed(15.0))
+                    .height(Length::Fixed(15.0))
+                    .align_x(iced::Right)
+                    .align_y(iced::Top),
+                ]
+                .into()
+            } else {
+                glyph::icon(Glyph::Message, theme::accent(), 15.0)
+            };
+            let face = row![
+                mark,
                 text(tr!("Ask"))
                     .size(ts::BASE)
                     .font(crate::fonts::UI_MEDIUM)
@@ -252,18 +280,14 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
             ]
             .spacing(9)
             .align_y(iced::Center);
-            if turns > 0 {
-                face = face.push(
-                    text(trn!("1 answer", "{n} answers", turns))
-                        .size(ts::SMALL)
-                        .color(theme::dim()),
-                );
-            }
             tip_at(
                 button(face)
-                    .style(theme::toolbar_button)
-                    .padding([4, 6])
-                    .on_press(Message::Ask(AskMsg::Open)),
+                    .style(theme::pill_face)
+                    .padding([4, 8])
+                    .on_press(super::heard::said(
+                        tr!("Open Ask"),
+                        Message::Ask(AskMsg::Open),
+                    )),
                 tr!("Ask"),
                 Some(app.keymap.chord(crate::keymap::Action::ToggleAsk).caps()),
                 tooltip::Position::Top,
@@ -285,20 +309,41 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
     )
 }
 
-/// What voice says on the pill: listening (how loud, and Esc), working out
+/// What voice says on the pill: listening (how loud), working out
 /// the words, a command waiting for a yes — or, for a moment, what was
 /// just heard and what came of it. `None` when it has nothing to say, or the
 /// card says it.
 fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
     // Listening, working out the words, Clew speaking, a command waiting
     // for a yes.
-    if let Some(bar) = voice_bar(app, true) {
+    if let Some(bar) = voice_bar(app) {
         return Some(
             container(bar)
                 .padding(Padding {
                     left: 8.0,
                     ..Padding::ZERO
                 })
+                .into(),
+        );
+    }
+    // A question answered with the card put away (one said aloud is):
+    // the pill says so, a click opening the card on it.
+    if !app.ask_view.is_open() && app.ask_stream_active() {
+        let line = phase_line(
+            glyph::icon(Glyph::Message, theme::accent(), 14.0),
+            phase_words()[3],
+            super::meter::ripple(&PILL_BARS),
+        );
+        return Some(
+            button(line)
+                .style(theme::pill_face)
+                .padding(Padding {
+                    top: 4.0,
+                    right: 8.0,
+                    bottom: 4.0,
+                    left: 8.0,
+                })
+                .on_press(Message::Ask(AskMsg::Open))
                 .into(),
         );
     }
@@ -319,7 +364,8 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
             tr!("{command}?", command = crate::i18n::lookup(title)),
             theme::dim(),
         ),
-        // A question opened the card, which says it.
+        // A question sent is being answered, which the pill says above;
+        // one kept for the reader to send waits in the card, open on it.
         HeardOutcome::Asked => return None,
         HeardOutcome::Nothing => (
             Glyph::Mic,
@@ -491,15 +537,26 @@ const PILL_BARS: [f32; 7] = [5.0, 9.0, 13.0, 8.0, 11.0, 6.0, 9.0];
 
 /// A small borderless control of the card's header.
 fn header_button<'a>(g: Glyph, tip: &'a str, msg: Message) -> Element<'a, Message> {
+    header_button_keyed(g, tip, None, msg)
+}
+
+/// A [`header_button`] whose tooltip also shows its key (`keys`), in the
+/// keycap every control's tooltip shows its own in.
+fn header_button_keyed<'a>(
+    g: Glyph,
+    tip: &'a str,
+    keys: Option<&str>,
+    msg: Message,
+) -> Element<'a, Message> {
     super::tip_at(
         button(container(glyph::icon(g, theme::fg_muted(), 15.0)).center(Fill))
             .style(theme::toolbar_button)
             .width(Length::Fixed(HEADER_BUTTON))
             .height(Length::Fixed(HEADER_BUTTON))
             .padding(0)
-            .on_press(msg),
+            .on_press(super::heard::said(tip, msg)),
         tip,
-        None,
+        keys.map(str::to_string),
         tooltip::Position::Bottom,
     )
 }
@@ -523,8 +580,10 @@ const ASK_HEADER_PAD: Padding = Padding {
 /// left, so the input stays in view under them however long either runs.
 fn card_fits(app: &App) -> bool {
     // With its menu of sessions open, the card is as tall as it may be, so
-    // the menu is inside it.
-    ask_is_card(app) && !app.ask_sessions_menu
+    // the menu is inside it. While an answer comes in, too: fitted, the
+    // card grew up the window a line at a time, its header moving with
+    // every line said.
+    ask_is_card(app) && !app.ask_sessions_menu && !app.ask_stream_active()
 }
 
 /// The card: its header (what it is, what is being read, size, close),
@@ -579,7 +638,10 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         }
     })
     .padding([4, 6])
-    .on_press(Message::Ask(AskMsg::SessionsMenu(!menu_open)));
+    .on_press(super::heard::said(
+        tr!("Sessions"),
+        Message::Ask(AskMsg::SessionsMenu(!menu_open)),
+    ));
     let mut header = row![glyph::icon(Glyph::Message, theme::accent(), 15.0), title]
         .spacing(6)
         .align_y(iced::Center);
@@ -596,30 +658,30 @@ fn ask_card(app: &App, place: AskPlace) -> Element<'_, Message> {
         );
     }
     header = header.push(space().width(Fill));
-    // A new session; hidden to the pill, made large or small again, put away.
+    // A new session; made large or small again; put away to the pill. No
+    // Hide beside Close: both put it away to the pill (Close stops Clew
+    // speaking too), and Hide's chevron was the session menu's again. Esc
+    // is named on the one it does: Shrink when large, Close when a card.
     header = header
         .push(header_button(
             Glyph::Plus,
             tr!("New session"),
             Message::Ask(AskMsg::NewSession),
         ))
-        .push(header_button(
-            Glyph::ChevronDown,
-            tr!("Hide (Esc)"),
-            Message::Ask(AskMsg::Hide),
-        ))
         .push(if large {
-            header_button(
+            header_button_keyed(
                 Glyph::Shrink,
-                tr!("Shrink (Esc)"),
+                tr!("Shrink"),
+                Some("Esc"),
                 Message::Ask(AskMsg::Shrink),
             )
         } else {
             header_button(Glyph::Expand, tr!("Expand"), Message::Ask(AskMsg::Expand))
         })
-        .push(header_button(
+        .push(header_button_keyed(
             Glyph::Close,
             tr!("Close Ask"),
+            (!large).then_some("Esc"),
             Message::Ask(AskMsg::Close),
         ));
     let card: Element<'_, Message> = column![
@@ -738,18 +800,6 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
         .as_ref()
         .and_then(|p| p.root.file_name())
         .map(|n| n.to_string_lossy().into_owned());
-    let new = button(
-        row![
-            glyph::icon(Glyph::Plus, theme::accent(), 14.0),
-            text(tr!("New session")).size(ts::BASE).color(theme::fg()),
-        ]
-        .spacing(9)
-        .align_y(iced::Center),
-    )
-    .style(theme::menu_row)
-    .padding([7, 9])
-    .width(Fill)
-    .on_press(Message::Ask(AskMsg::NewSession));
     // The search over the sessions' names, questions and answers.
     let search = container(
         row![
@@ -769,6 +819,7 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     .style(theme::field(!app.ask_sessions_query.is_empty()));
     let found = app.found_ask_sessions();
     let mut list = Column::new().spacing(1);
+    super::heard::list();
     for (session, how) in &found {
         let current = app.proj.ask_session == Some(session.id);
         let questions = session.turns.len();
@@ -812,16 +863,15 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
             .spacing(9)
             .align_y(iced::Center),
         )
-        .style(move |t: &iced::Theme, status| {
-            if current {
-                theme::list_row(true)(t, status)
-            } else {
-                theme::menu_row(t, status)
-            }
-        })
+        // The one open is marked by its dot alone: filled as well, it was a
+        // second lit row beside the one under the pointer.
+        .style(theme::menu_row)
         .padding([6, 9])
         .width(Fill)
-        .on_press(Message::Ask(AskMsg::SwitchSession(session.id)));
+        .on_press(super::heard::row(
+            || crate::app::ask_sessions::shown_title(&session.title).to_string(),
+            Message::Ask(AskMsg::SwitchSession(session.id)),
+        ));
         let mut line = row![pick].spacing(2).align_y(iced::Center);
         if !current {
             line = line.push(tip_at(
@@ -830,7 +880,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                     .width(Length::Fixed(24.0))
                     .height(Length::Fixed(24.0))
                     .padding(0)
-                    .on_press(Message::Ask(AskMsg::DeleteSession(session.id))),
+                    .on_press(super::heard::said_to(
+                        tr!("Forget"),
+                        crate::app::ask_sessions::shown_title(&session.title),
+                        Message::Ask(AskMsg::DeleteSession(session.id)),
+                    )),
                 tr!("Forget this session"),
                 None,
                 tooltip::Position::Right,
@@ -866,16 +920,17 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
     };
     // Searching is worth it once there is more than one to look through —
     // and the field stays while what it holds still filters the menu, so
-    // it can be cleared.
-    let top = if app.proj.ask_sessions.len() > 1 || !app.ask_sessions_query.is_empty() {
-        column![search, new].spacing(4)
-    } else {
-        column![new]
-    };
+    // it can be cleared. A new session is the header's +, beside the menu:
+    // not offered a second time in it.
+    let searching = app.proj.ask_sessions.len() > 1 || !app.ask_sessions_query.is_empty();
+    let mut menu = Column::new().spacing(1);
+    if searching {
+        menu = menu
+            .push(search)
+            .push(container(hairline()).padding([3, 2]));
+    }
     container(opaque(
-        column![
-            top,
-            container(hairline()).padding([3, 2]),
+        menu.push(
             container(
                 text(heading)
                     .size(ts::SMALL)
@@ -883,9 +938,8 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
                     .color(theme::dim()),
             )
             .padding([4, 9]),
-            body,
-        ]
-        .spacing(1),
+        )
+        .push(body),
     ))
     .width(SESSIONS_MENU_W)
     .max_height(SESSIONS_MENU_MAX_H)
@@ -897,19 +951,11 @@ fn sessions_menu(app: &App) -> Element<'_, Message> {
 /// What voice is doing, as the pill says it — and the card's composer, in
 /// place of what is typed: listening (the red dot, how loud), transcribing
 /// (the bars rippling on their own), Clew speaking (the speaker, how loud),
-/// a command waiting for a yes (Run, Cancel). The pill (`pill`) says Esc
-/// stops it; the composer has room for no more than what is happening, its
-/// round button the way to stop it ([`voice_lit`]). `None` while voice is
-/// idle.
-pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
-    // A row of what is happening, and on the pill the key that stops it.
-    let with_esc = |line: iced::widget::Row<'static, Message>| -> Element<'static, Message> {
-        if pill {
-            line.push(keycap("Esc".to_string())).into()
-        } else {
-            line.into()
-        }
-    };
+/// a command waiting for a yes (Run, Cancel). On the pill and in the
+/// composer alike, no more than what is happening: the round button beside
+/// it is the way to stop it ([`voice_lit`]) — a key named beside it too
+/// said the same thing twice. `None` while voice is idle.
+pub(crate) fn voice_bar(app: &App) -> Option<Element<'_, Message>> {
     let small = |label: &'static str, msg: Message, primary: bool| {
         button(text(label).size(ts::SMALL))
             .style(if primary {
@@ -918,24 +964,30 @@ pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
                 theme::toolbar_button
             })
             .padding([2, 8])
-            .on_press(msg)
+            .on_press(super::heard::said(label, msg))
     };
-    if let Some(title) = app
+    if let Some(waiting) = app
         .voice
         .confirm
         .as_ref()
         .filter(|_| app.voice.phase == VoicePhase::Idle)
     {
+        use crate::app::voice::Waiting;
+        // A command is run; a button pressed by a word is pressed.
+        let (asked, go) = match waiting {
+            Waiting::Command(_) => (
+                tr!("Run “{command}”?", command = waiting.said()),
+                tr!("Run"),
+            ),
+            Waiting::Press { .. } => (tr!("{command}?", command = waiting.said()), tr!("Yes")),
+        };
         return Some(
             row![
-                text(tr!(
-                    "Run “{command}”?",
-                    command = crate::i18n::lookup(title)
-                ))
-                .size(ts::BASE)
-                .color(theme::fg())
-                .wrapping(Wrapping::None),
-                small(tr!("Run"), Message::Voice(VoiceMsg::Confirm), true),
+                text(asked)
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                small(go, Message::Voice(VoiceMsg::Confirm), true),
                 small(tr!("Cancel"), Message::Voice(VoiceMsg::Cancel), false),
             ]
             .spacing(6)
@@ -943,57 +995,91 @@ pub(crate) fn voice_bar(app: &App, pill: bool) -> Option<Element<'_, Message>> {
             .into(),
         );
     }
+    // Listening, working out the words, speaking: the mark before the word
+    // (the red dot, nothing, the speaker) and the word itself each in a
+    // place as wide as the widest of them, so the meter after them stays
+    // where it is as one turns to the next — on the pill, its left edge
+    // and the mark jumped at every change, and in the composer the meter
+    // slid along the row.
+    let words = phase_words();
+    let line = phase_line;
     match app.voice.phase {
-        VoicePhase::Listening { level, .. } => Some(with_esc(
-            row![
-                container(space().width(REC_DOT).height(REC_DOT)).style(|_: &iced::Theme| {
-                    container::Style {
-                        background: Some(theme::recording().into()),
-                        border: iced::border::rounded(REC_DOT / 2.0),
-                        ..container::Style::default()
-                    }
-                }),
-                text(tr!("listening now\u{4}Listening"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                super::meter::level_meter(&PILL_BARS, level),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )),
+        VoicePhase::Listening { level, .. } => Some(Element::from(line(
+            container(space().width(REC_DOT).height(REC_DOT))
+                .style(|_: &iced::Theme| container::Style {
+                    background: Some(theme::recording().into()),
+                    border: iced::border::rounded(REC_DOT / 2.0),
+                    ..container::Style::default()
+                })
+                .into(),
+            words[0],
+            super::meter::level_meter(&PILL_BARS, level),
+        ))),
         // What was said, being worked out: the bars ripple on their own.
-        VoicePhase::Transcribing { .. } => Some(with_esc(
-            row![
-                text(tr!("transcribing now\u{4}Transcribing"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                super::meter::ripple(&PILL_BARS),
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )),
+        VoicePhase::Transcribing { .. } => Some(Element::from(line(
+            space().into(),
+            words[1],
+            super::meter::ripple(&PILL_BARS),
+        ))),
         // Clew speaking, as it listens: the speaker in the dot's place —
         // the bars rippling while what it says is still being made.
-        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(with_esc(
-            row![
-                glyph::icon(Glyph::Speaker, theme::accent(), 14.0),
-                text(tr!("speaking now\u{4}Speaking"))
-                    .size(ts::BASE)
-                    .color(theme::fg())
-                    .wrapping(Wrapping::None),
-                if app.voice.speech.preparing() {
-                    super::meter::ripple(&PILL_BARS)
-                } else {
-                    super::meter::level_meter(&PILL_BARS, app.voice.speech.level)
-                },
-            ]
-            .spacing(8)
-            .align_y(iced::Center),
-        )),
+        VoicePhase::Idle if app.voice.speech.is_speaking() => Some(Element::from(line(
+            glyph::icon(Glyph::Speaker, theme::accent(), 14.0),
+            words[2],
+            if app.voice.speech.preparing() {
+                super::meter::ripple(&PILL_BARS)
+            } else {
+                super::meter::level_meter(&PILL_BARS, app.voice.speech.level)
+            },
+        ))),
         VoicePhase::Idle => None,
     }
+}
+
+/// The dot on the pill's mark for an answer not read yet.
+const UNREAD_DOT: f32 = 7.0;
+
+/// The place of the mark before what voice is doing: the speaker's width,
+/// the widest of them.
+const MARK_W: f32 = 14.0;
+
+/// What the pill and the composer say is happening: listening, working out
+/// the words, speaking — and, on the pill, answering.
+fn phase_words() -> [&'static str; 4] {
+    [
+        tr!("listening now\u{4}Listening"),
+        tr!("transcribing now\u{4}Transcribing"),
+        tr!("speaking now\u{4}Speaking"),
+        tr!("answering now\u{4}Answering"),
+    ]
+}
+
+/// One of [`phase_words`] as a line: its mark, the word — in a place as
+/// wide as the widest of them, so what follows stays where it is as one
+/// turns to the next — and its meter.
+fn phase_line(
+    mark: Element<'static, Message>,
+    word: &'static str,
+    meter: Element<'static, Message>,
+) -> iced::widget::Row<'static, Message> {
+    let word = super::steady::slot(
+        text(word)
+            .size(ts::BASE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
+        word,
+        &phase_words(),
+        ts::BASE,
+    );
+    row![
+        container(mark)
+            .width(Length::Fixed(MARK_W))
+            .align_x(iced::Center),
+        word,
+        meter,
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
 }
 
 /// The voice key's round button, `side` across, lit in the accent while
@@ -1025,7 +1111,7 @@ pub(crate) fn voice_lit(app: &App, side: f32, icon: f32) -> Option<Element<'_, M
         .padding(0)
         .width(Length::Fixed(side))
         .height(Length::Fixed(side))
-        .on_press(Message::Voice(message));
+        .on_press(super::heard::said(tip, Message::Voice(message)));
 
     Some(tip_at(lit, tip, chord, tooltip::Position::Top))
 }

@@ -84,7 +84,7 @@ struct Node {
     preferred: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct History {
     nodes: Vec<Node>,
     current: Option<usize>,
@@ -195,6 +195,14 @@ impl History {
         changed
     }
 
+    /// Put back the trail `kept` was a copy of — the visits made since
+    /// dropped — telling views that kept its ids they went stale.
+    pub fn restore(&mut self, kept: History) {
+        let renumbered = self.renumbered.max(kept.renumbered) + 1;
+        *self = kept;
+        self.renumbered = renumbered;
+    }
+
     pub fn back(&mut self) -> Option<Loc> {
         let cur = self.current?;
         let parent = self.nodes[cur].parent?;
@@ -226,6 +234,20 @@ impl History {
             at = node.parent;
         }
         out.reverse();
+        out
+    }
+
+    /// The files visited, most recently first, each once: at most `n`.
+    pub fn recent_files(&self, n: usize) -> Vec<&Path> {
+        let mut out: Vec<&Path> = Vec::new();
+        for node in self.nodes.iter().rev() {
+            if out.len() >= n {
+                break;
+            }
+            if !out.contains(&node.loc.path.as_path()) {
+                out.push(&node.loc.path);
+            }
+        }
         out
     }
 

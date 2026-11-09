@@ -239,8 +239,20 @@ impl SavedConnection {
     /// the second line: a clear message instead of a confusing ssh error, and
     /// no `-oProxyCommand=…` typed into a field is ever an option anywhere.
     pub fn validate(&self) -> Result<(), String> {
+        self.check().map_err(|(_, why)| why)
+    }
+
+    /// [`SavedConnection::validate`], with the field of the form what is
+    /// wrong is in: the form marks it.
+    pub fn check(&self) -> Result<(), (crate::ConnectField, String)> {
+        use crate::ConnectField;
         // The host's field, or the user's.
-        let plain = |host: bool, v: &str| -> Result<(), String> {
+        let plain = |host: bool, v: &str| -> Result<(), (ConnectField, String)> {
+            let field = if host {
+                ConnectField::Host
+            } else {
+                ConnectField::User
+            };
             let refusal = if v.is_empty() {
                 if host {
                     tr!("The host is required.")
@@ -265,16 +277,22 @@ impl SavedConnection {
             } else {
                 return Ok(());
             };
-            Err(refusal.into())
+            Err((field, refusal.into()))
         };
         plain(true, self.host.trim())?;
         plain(false, self.user.trim())?;
         if self.port == 0 {
-            return Err(tr!("The port must be between 1 and 65535.").into());
+            return Err((
+                ConnectField::Port,
+                tr!("The port must be between 1 and 65535.").into(),
+            ));
         }
         let identity = self.identity.trim();
         if identity.starts_with('-') || identity.chars().any(char::is_control) {
-            return Err(tr!("The identity file path is not a usable path.").into());
+            return Err((
+                ConnectField::Identity,
+                tr!("The identity file path is not a usable path.").into(),
+            ));
         }
         Ok(())
     }

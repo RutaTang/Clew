@@ -78,7 +78,7 @@ pub(crate) fn size_status(files: usize, symbols: usize) -> String {
 /// rows the server panel shows (`ProjectSession::project_languages`). Taken
 /// again whenever the file list is: set once, at open, a language whose
 /// first file came later had no row, and one whose last file went kept it.
-fn served_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
+pub(crate) fn served_languages(files: &[fs_scan::FileEntry]) -> Vec<String> {
     file_languages(files)
         .into_iter()
         .filter(|l| lsp::registry::default_for_language(l).is_some())
@@ -443,6 +443,7 @@ impl App {
         // saved Settings).
         self.invalidate_llm_config();
         self.proj.project_languages = served_languages(&result.files);
+        self.proj.code_languages = super::setup::setup_languages(&result.files);
         self.proj.file_languages = file_languages(&result.files);
         let files = Arc::new(result.files);
         self.proj.project = Some(Project {
@@ -870,6 +871,8 @@ impl App {
         // What the setup sheet asked for, now that the explanations it
         // would redo are known.
         tasks.push(self.apply_pending_setup());
+        // What the servers still take, now that `lsp.toml` is known.
+        tasks.push(self.look_for_missing_setup());
         // Language servers asked for before `lsp.toml` was known — after the
         // sheet's: a server it fetches is on its way, and is waited for.
         // Asked first, each popped the very download question the sheet's
@@ -900,13 +903,22 @@ impl App {
             return Task::none();
         }
         self.proj.tree_rescans.1 = seq;
+        let languages_before = self.proj.project_languages.clone();
         if let Some(p) = &mut self.proj.project {
             p.tree = result.tree;
             p.files = Arc::new(result.files);
             p.truncated = result.truncated;
             self.proj.project_languages = served_languages(&p.files);
+            self.proj.code_languages = super::setup::setup_languages(&p.files);
             self.proj.file_languages = file_languages(&p.files);
         }
+        // A language whose first file came, or whose last went: what its
+        // server takes is looked at again.
+        let look = if self.proj.project_languages != languages_before {
+            self.look_for_missing_setup()
+        } else {
+            Task::none()
+        };
         self.proj.tracked_ignored = report.tracked_ignored.iter().cloned().collect();
         self.refresh_finder();
         // The file set changed, so imports that were unresolved (or
@@ -923,7 +935,7 @@ impl App {
         // is part of the file set, so it is where the structure index can
         // learn its `impl` blocks — the watcher batch that saw the creation
         // ran against the tree as it was before it (see `on_files_rehashed`).
-        Task::batch([cycles, self.request_structure_build()])
+        Task::batch([cycles, self.request_structure_build(), look])
     }
 
     /// Swap a server-sent file list into the project that is already open,
@@ -985,6 +997,7 @@ impl App {
         );
         let configs_changed = configs(&project.files) != configs_before;
         self.proj.project_languages = served_languages(&project.files);
+        self.proj.code_languages = super::setup::setup_languages(&project.files);
         self.proj.file_languages = file_languages(&project.files);
         // Marked in the tree, as a local rescan marks them.
         self.proj.tracked_ignored = tracked_ignored.into_iter().collect();
@@ -1215,6 +1228,16 @@ impl App {
                 Task::none()
             }
             ProjectMsg::SetupApply => self.on_setup_apply(),
+            ProjectMsg::MissingSetupFound { seq, servers, .. } => {
+                self.on_missing_setup_found(seq, servers)
+            }
+            ProjectMsg::GitStatusRead { result, .. } => {
+                self.proj.git_status_loading = false;
+                // Not a repository (or git refused): no marks, not old ones.
+                self.proj.git_status = result.unwrap_or_default().into_iter().collect();
+                Task::none()
+            }
+            ProjectMsg::SetUpMissing => self.on_set_up_missing(),
             ProjectMsg::SetupClose => {
                 // A first open's sheet is answered with Open or Not now.
                 if self

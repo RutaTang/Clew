@@ -204,13 +204,59 @@ fn the_agent_lists_and_runs_the_windows_commands() {
     assert!(sent[0].1.contains(LIST_COMMANDS), "{}", sent[0].1);
 }
 
+/// A setting that turns the microphone on and keeps it on, sends what it
+/// hears, or sends the project's code somewhere else is the reader's to
+/// change: the agent asking for it waits for their yes, on a card that
+/// says why. One that only changes how the window looks runs.
+#[test]
+fn the_agent_asks_before_a_setting_that_listens_or_sends() {
+    let (mut app, stream, mut rx) = turn_app("wt-private");
+    app.asking.delay = std::time::Duration::ZERO;
+    let listening = app.voice.keep_listening;
+    for (call_id, title) in [
+        (1, "Keep listening: On"),
+        (2, "Send spoken questions to Ask right away: On"),
+        (3, "Embeddings: A service"),
+    ] {
+        let _ = call(
+            &mut app,
+            stream,
+            call_id,
+            RUN_COMMAND,
+            json!({ "title": title }),
+        );
+        assert!(results(&mut rx).is_empty(), "{title} ran without asking");
+        let turn = app.proj.ask_turns.last().unwrap();
+        let card = turn
+            .extras
+            .approvals
+            .iter()
+            .find(|a| a.key == ApprovalKey::Window { call: call_id })
+            .unwrap_or_else(|| panic!("no card for {title}"));
+        assert!(card.title.contains(title), "{}", card.title);
+    }
+    assert_eq!(app.voice.keep_listening, listening, "it changed unasked");
+    // How the window looks is the agent's to change.
+    let _ = call(
+        &mut app,
+        stream,
+        4,
+        RUN_COMMAND,
+        json!({"title": "Theme: Dark"}),
+    );
+    assert_eq!(
+        results(&mut rx),
+        [(4, "Ran “Theme: Dark”.".to_string(), false)]
+    );
+}
+
 /// A command that costs something waits for the user's answer on a card;
 /// a no is told to the turn; a turn that ended is answered nothing more.
 #[test]
 fn a_costly_command_waits_for_the_users_yes() {
     let (mut app, stream, mut rx) = turn_app("wt-costly");
     app.asking.delay = std::time::Duration::ZERO;
-    app.ask_view = AskView::Closed;
+    app.ask_view = AskView::Hidden;
     let _ = call(
         &mut app,
         stream,

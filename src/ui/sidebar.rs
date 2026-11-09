@@ -52,16 +52,18 @@ pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
         SidebarTab::Semantic => tr!("Find by meaning"),
         SidebarTab::Marks => tr!("Bookmarks"),
         SidebarTab::Trail => tr!("Reading trail"),
-        SidebarTab::Calls => tr!("Calls"),
+        SidebarTab::Calls => tr!("Call hierarchy"),
         SidebarTab::Flow => tr!("Value flow"),
         SidebarTab::Imports => tr!("Imports"),
         SidebarTab::Walk => tr!("Walkthroughs"),
-        SidebarTab::Notes => tr!("Reading notes"),
+        SidebarTab::Notes => tr!("Your notes"),
         SidebarTab::Docs => tr!("API docs"),
     }
 }
 
 pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
+    // The view's rows a list voice counts down: "open the third one".
+    super::heard::list();
     // The views as a segmented row of icons, each naming itself on hover;
     // the chosen one raised as a chip.
     let segment = |glyph: Glyph, chosen: bool, name: &'static str, msg: Message| {
@@ -85,7 +87,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
             .padding(0)
             .width(Fill)
             .height(Length::Fixed(28.0))
-            .on_press(msg),
+            .on_press(super::heard::said(name, msg)),
             name,
             None,
             tooltip::Position::Bottom,
@@ -120,9 +122,10 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 13.0))
                         .style(theme::icon_button(false))
                         .padding(5)
-                        .on_press(Message::Window(WindowMsg::SidebarTabPicked(
-                            SidebarTab::Files,
-                        ))),
+                        .on_press(super::heard::said(
+                            tr!("Close"),
+                            Message::Window(WindowMsg::SidebarTabPicked(SidebarTab::Files,))
+                        )),
                     tr!("Back to the files"),
                     None,
                     tooltip::Position::Bottom,
@@ -169,7 +172,7 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
                     button(glyph::icon(Glyph::Close, theme::dim(), 12.0))
                         .style(theme::toolbar_button)
                         .padding(3)
-                        .on_press(cleared.clone()),
+                        .on_press(super::heard::said(tr!("Clear filter"), cleared.clone())),
                     tr!("Clear filter"),
                     None,
                     tooltip::Position::Bottom,
@@ -242,7 +245,10 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
-            .on_press(Message::Walk(WalkMsg::GenerateDiff)),
+            .on_press(super::heard::said(
+                tr!("Review branch changes"),
+                Message::Walk(WalkMsg::GenerateDiff)
+            )),
     ]
     .spacing(4);
     // The last debug run, once it stopped somewhere: a tour of the path it
@@ -263,7 +269,10 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([4, 10])
             .width(Fill)
-            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+            .on_press(super::heard::said(
+                tr!("Walk the last run"),
+                Message::Walk(WalkMsg::GenerateTrace),
+            )),
         );
     }
     let review = container(actions).padding(Padding {
@@ -327,17 +336,27 @@ pub(crate) fn scope_label(scope: &str) -> String {
 pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
     let is_search = app.walk_ui.mode == crate::WalkMode::Search;
     // Two segments, the mode in use raised; only the other is pressable (it
-    // flips mode). On a line of its own: beside the field it left the field
-    // too narrow to say what it is for.
+    // flips mode). On a line of its own — beside the field it left the field
+    // too narrow to say what it is for — and across it, in halves, as tall
+    // as a field: two small chips at its start sat cramped against its edge
+    // with the line's room empty beside them.
     let seg = |label: &str, active: bool| {
-        button(text(label.to_string()).size(ts::SMALL))
-            .style(theme::segment(active))
-            .padding([2, 10])
-            .on_press_maybe((!active).then_some(Message::Walk(WalkMsg::ToggleMode)))
+        button(
+            container(text(label.to_string()).size(ts::BODY))
+                .width(Fill)
+                .align_x(iced::Center),
+        )
+        .style(theme::segment(active))
+        .padding([5, 0])
+        .width(Fill)
+        .on_press_maybe(
+            (!active).then(|| super::heard::said(label, Message::Walk(WalkMsg::ToggleMode))),
+        )
     };
     let toggle =
-        container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(1))
+        container(row![seg(tr!("Search"), is_search), seg(tr!("New"), !is_search)].spacing(2))
             .padding(2)
+            .width(Fill)
             .style(theme::trough);
 
     let placeholder = if is_search {
@@ -360,7 +379,10 @@ pub(crate) fn walk_header(app: &App) -> Element<'_, Message> {
             button(text(tr!("Generate")).size(ts::SMALL))
                 .style(theme::secondary_button)
                 .padding([5, 10])
-                .on_press(Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone()))),
+                .on_press(super::heard::said(
+                    tr!("Generate"),
+                    Message::Walk(WalkMsg::Generate(app.walk_ui.input.clone())),
+                )),
         );
     }
     container(column![toggle, field].spacing(8))
@@ -462,11 +484,14 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
             bottom: 6.0,
             left: 8.0,
         })
-        .on_press(if is_open {
-            Message::Walk(WalkMsg::Back)
-        } else {
-            Message::Walk(WalkMsg::Open(wt.scope.clone()))
-        });
+        .on_press(super::heard::row(
+            || scope_label(&wt.scope),
+            if is_open {
+                Message::Walk(WalkMsg::Back)
+            } else {
+                Message::Walk(WalkMsg::Open(wt.scope.clone()))
+            },
+        ));
         let tour_row: Element<'_, Message> = if busy {
             title.into()
         } else {
@@ -475,11 +500,19 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                     button(text("↻").size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 9])
-                        .on_press(Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))),
+                        .on_press(super::heard::said_to(
+                            tr!("Regenerate"),
+                            &scope_label(&wt.scope),
+                            Message::Walk(WalkMsg::Regenerate(wt.scope.clone()))
+                        )),
                     button(glyph::icon(Glyph::Close, theme::fg_muted(), 12.0))
                         .style(theme::toolbar_button)
                         .padding([7, 9])
-                        .on_press(Message::Walk(WalkMsg::Delete(wt.scope.clone()))),
+                        .on_press(super::heard::said_to(
+                            tr!("Delete"),
+                            &scope_label(&wt.scope),
+                            Message::Walk(WalkMsg::Delete(wt.scope.clone()))
+                        )),
                 ]
                 .spacing(2),
             )
@@ -525,10 +558,13 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         bottom: 4.0,
                         left: 22.0,
                     })
-                    .on_press(Message::Walk(WalkMsg::Goto {
-                        scope: wt.scope.clone(),
-                        step: si,
-                    })),
+                    .on_press(super::heard::row(
+                        || step.title.clone(),
+                        Message::Walk(WalkMsg::Goto {
+                            scope: wt.scope.clone(),
+                            step: si,
+                        }),
+                    )),
                 );
             }
         }
@@ -561,14 +597,28 @@ pub(crate) fn walk_narration<'a>(
         button(text("‹").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
-            .on_press(Message::Walk(WalkMsg::Step(-1))),
-        text(format!("{}/{}", cur + 1, n))
-            .size(ts::SMALL)
-            .color(theme::dim()),
+            .on_press(super::heard::said(
+                tr!("Previous step"),
+                Message::Walk(WalkMsg::Step(-1))
+            )),
+        // As wide as it reads at the last step: the ‹ before it moved as
+        // the count gained a digit, under the pointer stepping through.
+        {
+            let said = format!("{}/{}", cur + 1, n);
+            super::steady::slot(
+                text(said.clone()).size(ts::SMALL).color(theme::dim()),
+                &said,
+                &[&format!("{n}/{n}")],
+                ts::SMALL,
+            )
+        },
         button(text("›").size(ts::EMPHASIS))
             .style(theme::toolbar_button)
             .padding([1, 8])
-            .on_press(Message::Walk(WalkMsg::Step(1))),
+            .on_press(super::heard::said(
+                tr!("Next step"),
+                Message::Walk(WalkMsg::Step(1))
+            )),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -669,10 +719,95 @@ pub(crate) fn files_tab(app: &App) -> Element<'_, Message> {
             left: 10.0,
         }),
     )
+    .id(crate::ui::files_tree_id())
+    .on_scroll(|v| {
+        Message::Window(WindowMsg::FilesTreeScrolled {
+            offset: v.absolute_offset().y,
+            height: v.bounds().height,
+        })
+    })
     .direction(thin_scroll())
     .style(theme::overlay_scrollbar)
     .height(Fill)
     .into()
+}
+
+/// What the working tree changes in the file at `rel`, as git letters it —
+/// `M`odified, `A`dded, `U`ntracked, `R`enamed, `D`eleted, `!` in conflict —
+/// in a colour of its own, the letter saying it as well as the colour.
+pub(crate) fn file_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
+    match app.proj.git_status.get(rel) {
+        Some(&letter) => text(letter.to_string())
+            .size(ts::SMALL)
+            .font(crate::fonts::CODE)
+            .color(change_color(letter))
+            .into(),
+        None => space().width(0).into(),
+    }
+}
+
+/// A folder holding a change: a dot, as editors mark one.
+fn dir_change_mark<'a>(app: &App, rel: &str) -> Element<'a, Message> {
+    let inside = format!("{rel}/");
+    if app
+        .proj
+        .git_status
+        .keys()
+        .any(|changed| changed.starts_with(&inside))
+    {
+        text("●")
+            .size(ts::CAPTION)
+            .color(theme::with_alpha(theme::warning(), 0.8))
+            .into()
+    } else {
+        space().width(0).into()
+    }
+}
+
+/// The colour of a change's letter.
+fn change_color(letter: char) -> iced::Color {
+    match letter {
+        'A' | 'U' => theme::success(),
+        'D' | '!' => theme::danger(),
+        'R' => theme::info(),
+        _ => theme::warning(),
+    }
+}
+
+/// The row `rel` is drawn at in the Files view's tree with `expanded`
+/// folders open — counted as [`append_tree_rows`] lays them out, each
+/// folder's own row, then its rows when open, then its files; `None` while a
+/// closed folder holds it.
+pub(crate) fn tree_row_index(
+    tree: &DirNode,
+    expanded: &std::collections::HashSet<String>,
+    rel: &str,
+) -> Option<usize> {
+    fn walk(
+        node: &DirNode,
+        prefix: &str,
+        expanded: &std::collections::HashSet<String>,
+        rel: &str,
+        row: &mut usize,
+    ) -> Option<usize> {
+        for (name, child) in &node.dirs {
+            let dir = join_rel(prefix, name);
+            *row += 1;
+            if expanded.contains(&dir)
+                && let Some(found) = walk(child, &dir, expanded, rel, row)
+            {
+                return Some(found);
+            }
+        }
+        for name in &node.files {
+            if join_rel(prefix, name) == rel {
+                return Some(*row);
+            }
+            *row += 1;
+        }
+        None
+    }
+    walk(tree, "", expanded, rel, &mut 0)
 }
 
 /// Most files the filter lists: a filter as short as one letter matches
@@ -721,6 +856,8 @@ fn filtered_file_rows<'a>(
                         .size(ts::SMALL)
                         .color(theme::dim())
                         .wrapping(Wrapping::None),
+                    space().width(Fill),
+                    file_change_mark(app, &f.rel),
                 ]
                 .spacing(6)
                 .align_y(iced::Center),
@@ -728,10 +865,13 @@ fn filtered_file_rows<'a>(
             .style(theme::list_row(is_current))
             .width(Fill)
             .padding([4, 8])
-            .on_press(Message::Editor(EditorMsg::OpenRel {
-                rel: f.rel.clone(),
-                line: None,
-            }))
+            .on_press(super::heard::row(
+                || f.rel.clone(),
+                Message::Editor(EditorMsg::OpenRel {
+                    rel: f.rel.clone(),
+                    line: None,
+                }),
+            ))
             .into(),
         );
     }
@@ -744,8 +884,8 @@ fn quiet_icon(glyph: Glyph, color: iced::Color) -> Element<'static, Message> {
 }
 
 /// Height of a row of the file tree, and the gap between rows.
-const TREE_ROW_H: f32 = 28.0;
-const TREE_ROW_GAP: f32 = 1.0;
+pub(crate) const TREE_ROW_H: f32 = 28.0;
+pub(crate) const TREE_ROW_GAP: f32 = 1.0;
 /// Height of the Files view's filter field.
 const FILTER_H: f32 = 30.0;
 /// The room between the sidebar's views, its filter and its list.
@@ -795,6 +935,8 @@ pub(crate) fn append_tree_rows<'a>(
                 ts::INTER,
                 ts::BASE,
             ),
+            space().width(Fill),
+            dir_change_mark(app, &rel),
         ]
         .spacing(6)
         .height(Fill)
@@ -805,7 +947,10 @@ pub(crate) fn append_tree_rows<'a>(
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
-                .on_press(Message::Project(ProjectMsg::ToggleDir(rel.clone())))
+                .on_press(super::heard::row(
+                    || name.to_string(),
+                    Message::Project(ProjectMsg::ToggleDir(rel.clone())),
+                ))
                 .into(),
         );
         if expanded {
@@ -855,6 +1000,8 @@ pub(crate) fn append_tree_rows<'a>(
                 ts::BASE,
             ),
             mark,
+            space().width(Fill),
+            file_change_mark(app, &rel),
         ]
         .spacing(6)
         .height(Fill)
@@ -865,7 +1012,10 @@ pub(crate) fn append_tree_rows<'a>(
                 .width(Fill)
                 .height(Length::Fixed(TREE_ROW_H))
                 .padding(pad)
-                .on_press(Message::Editor(EditorMsg::OpenRel { rel, line: None }))
+                .on_press(super::heard::row(
+                    || name.to_string(),
+                    Message::Editor(EditorMsg::OpenRel { rel, line: None }),
+                ))
                 .into(),
         );
     }
@@ -949,7 +1099,7 @@ pub(crate) fn empty_state<'a>(
             button(text(label.to_string()).size(ts::BASE))
                 .style(theme::toolbar_button)
                 .padding([7, 16])
-                .on_press(msg),
+                .on_press(super::heard::said(label, msg)),
         );
     }
     center(col).padding(20).into()
@@ -981,10 +1131,13 @@ pub(crate) fn join_rel(prefix: &str, name: &str) -> String {
     }
 }
 
+/// The side of a match-option toggle beside the search field.
+const OPTION_SIDE: f32 = 30.0;
+
 pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
     use crate::SearchOpt;
 
-    let input = text_input(tr!("Search in project…"), &app.proj.search.query)
+    let input = text_input(tr!("Search text…"), &app.proj.search.query)
         .style(theme::input)
         .id(search_input_id())
         .on_input(|v| Message::Nav(NavMsg::SearchQueryChanged(v)))
@@ -993,18 +1146,45 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         .padding(7);
 
     // Match-option toggles: case-sensitive, whole-word, regex — as round as
-    // the fields, outlined while off, filled in the accent while on.
-    let chip = |label: &'static str, active: bool, opt: SearchOpt| -> Element<'_, Message> {
-        button(text(label).size(ts::BODY).font(crate::fonts::CODE))
-            .style(theme::toggle(active))
-            .padding([3, 8])
-            .on_press(Message::Nav(NavMsg::SearchToggle(opt)))
-            .into()
+    // the fields, outlined while off, filled in the accent while on. Beside
+    // the field they qualify, each a square of one size, its mark centred:
+    // on a row of their own under it, each as wide as its mark, they read
+    // as three odd chips apart from the search.
+    let chip = |label: &'static str, tip: &'static str, active: bool, opt: SearchOpt| {
+        super::toolbar::tip_at(
+            button(container(text(label).size(ts::BODY).font(crate::fonts::CODE)).center(Fill))
+                .style(theme::toggle(active))
+                .padding(0)
+                .width(Length::Fixed(OPTION_SIDE))
+                .height(Length::Fixed(OPTION_SIDE))
+                .on_press(super::heard::said(
+                    tip,
+                    Message::Nav(NavMsg::SearchToggle(opt)),
+                )),
+            tip,
+            None,
+            tooltip::Position::Bottom,
+        )
     };
     let options = row![
-        chip("Aa", app.proj.search.case_sensitive, SearchOpt::Case),
-        chip("W", app.proj.search.whole_word, SearchOpt::WholeWord),
-        chip(".*", app.proj.search.regex, SearchOpt::Regex),
+        chip(
+            "Aa",
+            tr!("Match case"),
+            app.proj.search.case_sensitive,
+            SearchOpt::Case
+        ),
+        chip(
+            "W",
+            tr!("Whole word"),
+            app.proj.search.whole_word,
+            SearchOpt::WholeWord
+        ),
+        chip(
+            ".*",
+            tr!("Regular expression"),
+            app.proj.search.regex,
+            SearchOpt::Regex
+        ),
     ]
     .spacing(4);
 
@@ -1037,17 +1217,11 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
         } else {
             crate::app::count_matches(n)
         };
-        // A language server's list in place of the search's results says
-        // which list it is.
-        let msg = match &app.proj.search.listing {
-            Some(list) => format!("{list} · {msg}"),
-            None => msg,
-        };
         Some((msg, theme::dim()))
     } else if app.proj.search.query.trim().chars().count() == 1 {
         // One character, which matches most of a project, is searched for
         // only when asked (see `search_when_typing_pauses`).
-        Some((tr!("Press Enter to search").to_string(), theme::dim()))
+        Some((tr!("Keep typing to search").to_string(), theme::dim()))
     } else {
         None
     };
@@ -1078,18 +1252,43 @@ pub(crate) fn search_tab(app: &App) -> Element<'_, Message> {
                 bottom: 1.0,
                 left: 8.0,
             })
-            .on_press(Message::Editor(EditorMsg::OpenAbs {
-                abs: hit.abs.clone(),
-                line: Some(hit.line),
-                push: true,
-            }))
+            .on_press(super::heard::row(
+                || format!("{} {}", hit.rel, hit.line),
+                Message::Editor(EditorMsg::OpenAbs {
+                    abs: hit.abs.clone(),
+                    line: Some(hit.line),
+                    push: true,
+                }),
+            ))
             .into(),
         );
     }
 
-    let mut col = column![input, options, include, exclude]
-        .spacing(6)
-        .padding(8);
+    // A language server's list (the references to a name, its several
+    // definitions) is a list of its own, headed by what it lists, with a way
+    // back to the search: it took the search's place under the search's
+    // own empty fields, "(references)" the only word of what it was.
+    let mut col = match &app.proj.search.listing {
+        Some(list) => column![
+            row![
+                text(list.clone())
+                    .size(ts::BASE)
+                    .color(theme::fg())
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Fill),
+                super::chrome::close_button(Message::Nav(NavMsg::ListingClosed)),
+            ]
+            .spacing(6)
+            .align_y(iced::Center)
+        ],
+        None => column![
+            row![input, options].spacing(6).align_y(iced::Center),
+            include,
+            exclude
+        ],
+    }
+    .spacing(6)
+    .padding(8);
     if let Some((status, color)) = status_line {
         col = col.push(text(status).size(ts::SMALL).color(color));
     }
@@ -1229,7 +1428,10 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
         button(text(tr!("Clear")).size(ts::CAPTION).color(theme::dim()))
             .style(theme::list_row(false))
             .padding([1, 6])
-            .on_press(Message::Reading(ReadingMsg::HistoryClear)),
+            .on_press(super::heard::said(
+                tr!("Clear the trail"),
+                Message::Reading(ReadingMsg::HistoryClear)
+            )),
     ]
     .align_y(iced::Center)
     .padding(Padding {
@@ -1318,10 +1520,13 @@ pub(crate) fn trail_tab(app: &App) -> Element<'_, Message> {
             bottom: 3.0,
             left: 6.0,
         })
-        .on_press(Message::Reading(ReadingMsg::HistoryJump {
-            id: v.id,
-            loc: v.loc.clone(),
-        }));
+        .on_press(super::heard::row(
+            || loc_label(&v.loc, v.label.as_deref()),
+            Message::Reading(ReadingMsg::HistoryJump {
+                id: v.id,
+                loc: v.loc.clone(),
+            }),
+        ));
 
         rows.push(jump.into());
     }
@@ -1340,11 +1545,7 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         return empty_state(
             Glyph::Bookmark,
             tr!("No bookmarks yet"),
-            if crate::keymap::MAC_KEYS {
-                tr!("Press ⌘D to bookmark the current line.")
-            } else {
-                tr!("Press Ctrl+D to bookmark the current line.")
-            },
+            tr!("The lines you bookmark are listed here."),
             None,
         );
     }
@@ -1408,17 +1609,22 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::BookmarkNoteEdit(
-                bm.rel.clone(),
-                bm.line,
-            )));
+            .on_press(super::heard::said_to_with(
+                tr!("Edit note"),
+                || format!("{} {}", bm.rel, bm.line),
+                Message::Reading(ReadingMsg::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
+            ));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::BookmarkRemoved {
-                rel: bm.rel.clone(),
-                line: bm.line,
-            }));
+            .on_press(super::heard::said_to_with(
+                tr!("Remove"),
+                || format!("{} {}", bm.rel, bm.line),
+                Message::Reading(ReadingMsg::BookmarkRemoved {
+                    rel: bm.rel.clone(),
+                    line: bm.line,
+                }),
+            ));
         rows.push(
             button(row![main, pencil, close].spacing(2).align_y(iced::Center))
                 .style(theme::list_row(false))
@@ -1429,10 +1635,13 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
                     bottom: 2.0,
                     left: 8.0,
                 })
-                .on_press(Message::Editor(EditorMsg::OpenRel {
-                    rel: bm.rel.clone(),
-                    line: Some(bm.line),
-                }))
+                .on_press(super::heard::row(
+                    || format!("{} {}", bm.rel, bm.line),
+                    Message::Editor(EditorMsg::OpenRel {
+                        rel: bm.rel.clone(),
+                        line: Some(bm.line),
+                    }),
+                ))
                 .into(),
         );
     }
@@ -1488,7 +1697,7 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
 /// Every reading note in the project, file by file.
 fn notes_list(app: &App) -> Element<'_, Message> {
     if app.proj.notes.is_empty() {
-        return empty_state(Glyph::Note, tr!("No reading notes yet"), "", None);
+        return empty_state(Glyph::Note, tr!("No notes of your own yet"), "", None);
     }
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
@@ -1508,10 +1717,14 @@ fn notes_list(app: &App) -> Element<'_, Message> {
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Understood"),
+                &n.symbol,
+                Message::Reading(ReadingMsg::NoteToggleUnderstood {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
 
         // Symbol name + its live location (or a "detached" flag when orphaned).
         let loc: Element<'_, Message> = match line {
@@ -1569,17 +1782,25 @@ fn notes_list(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::NoteEditStart {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Edit note"),
+                &n.symbol,
+                Message::Reading(ReadingMsg::NoteEditStart {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(Message::Reading(ReadingMsg::NoteRemove {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Remove"),
+                &n.symbol,
+                Message::Reading(ReadingMsg::NoteRemove {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
         // The name area jumps; the toggle/pencil/✕ capture their own clicks.
         let jump = button(main)
             .style(theme::list_row(false))
@@ -1590,10 +1811,13 @@ fn notes_list(app: &App) -> Element<'_, Message> {
                 bottom: 2.0,
                 left: 4.0,
             })
-            .on_press(Message::Reading(ReadingMsg::NoteJump {
-                rel: n.rel.clone(),
-                symbol: n.symbol.clone(),
-            }));
+            .on_press(super::heard::row(
+                || n.symbol.clone(),
+                Message::Reading(ReadingMsg::NoteJump {
+                    rel: n.rel.clone(),
+                    symbol: n.symbol.clone(),
+                }),
+            ));
         rows.push(
             row![toggle, jump, pencil, close]
                 .spacing(1)
@@ -1657,41 +1881,70 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
         .size(ts::BASE)
         .padding(7);
 
-    let press =
-        (!app.proj.building_embeddings).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    let building = app.proj.building_embeddings;
+    // It is built from the notes Explain All writes, by an embedding model:
+    // with neither, there is nothing it can do, and it is drawn so — it
+    // looked ready, and answered in the status bar.
+    let can_build = !app.proj.explain.cache.is_empty() && app.embed_available;
+    let press = (!building && can_build).then_some(Message::Semantic(SemanticMsg::BuildIndex));
+    // While it builds, the button's own icon turns, in its place: words
+    // that came in for the build ("Building…", "Building the index…") moved
+    // what stood beside them, and the count went for as long as it ran.
+    let icon = |size: f32| -> Element<'_, Message> {
+        if building {
+            super::meter::spinning(crate::glyph::Glyph::Refresh, theme::accent(), size)
+        } else {
+            crate::glyph::icon(crate::glyph::Glyph::Refresh, theme::fg_muted(), size)
+        }
+    };
     // The first build is asked for in words; building again, as the other
     // rebuilds are, by its icon.
     let build: Element<'_, Message> = if n == 0 {
         button(
-            text(if app.proj.building_embeddings {
-                tr!("Building…")
-            } else {
-                tr!("Build index")
-            })
-            .size(ts::SMALL),
+            row![icon(13.0), text(tr!("Build index")).size(ts::SMALL)]
+                .spacing(6)
+                .align_y(iced::Center),
         )
         .style(theme::toolbar_button)
         .padding([2, 8])
-        .on_press_maybe(press)
+        .on_press_maybe(press.map(|m| super::heard::said(tr!("Build index"), m)))
         .into()
     } else {
-        super::toolbar::icon_action(crate::glyph::Glyph::Refresh, tr!("Rebuild"), press)
+        super::toolbar::busy_action(
+            crate::glyph::Glyph::Refresh,
+            tr!("Rebuild"),
+            Some(Message::Semantic(SemanticMsg::BuildIndex)),
+            building,
+        )
     };
     // The index builds itself from explanation summaries (automatically, after
     // Explain All) — so the hint only reports state, never asks for a manual step.
-    let info = text(if app.proj.building_embeddings {
-        tr!("Building the index…").to_string()
-    } else if n > 0 {
-        trn!("1 indexed", "{n} indexed", n)
-    } else if app.proj.explain.cache.is_empty() {
-        tr!("Run Explain All to enable semantic search.").to_string()
-    } else if !app.embed_available {
-        app.embed_missing.clone()
+    let info: Element<'_, Message> = if n == 0 && app.proj.explain.cache.is_empty() {
+        // The step that gets there, as a link.
+        button(
+            text(tr!("Explain All…"))
+                .size(ts::CAPTION)
+                .color(theme::accent()),
+        )
+        .style(theme::icon_button(false))
+        .padding([2, 6])
+        .on_press(super::heard::said(
+            tr!("Explain All…"),
+            super::toolbar::explain_all_message(app),
+        ))
+        .into()
     } else {
-        tr!("Preparing the index…").to_string()
-    })
-    .size(ts::CAPTION)
-    .color(theme::dim());
+        text(if n > 0 {
+            trn!("1 indexed", "{n} indexed", n)
+        } else if !app.embed_available {
+            app.embed_missing.clone()
+        } else {
+            tr!("Preparing the index…").to_string()
+        })
+        .size(ts::CAPTION)
+        .color(theme::dim())
+        .into()
+    };
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
     rows.push(
@@ -1725,7 +1978,7 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             button(
                 column![
                     row![
-                        text(label)
+                        text(label.clone())
                             .size(ts::BODY)
                             .color(theme::accent())
                             .wrapping(Wrapping::None),
@@ -1745,7 +1998,10 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 6])
-            .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
+            .on_press(super::heard::row(
+                || label.clone(),
+                Message::Semantic(SemanticMsg::OpenNode(node.clone())),
+            ))
             .into(),
         );
     }
@@ -1767,7 +2023,9 @@ pub(crate) fn semantic_tab(app: &App) -> Element<'_, Message> {
 
 /// A clickable chip for a retrieved source node — jumps to the code on press,
 /// showing the similarity score when it came from the ranked retrieval.
-pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Element<'a, Message> {
+/// A chip naming what grounded an answer, opening it. Its name only: a
+/// score beside it ("87%") read as a grade of the answer.
+pub(crate) fn source_chip<'a>(node: &crate::explain::Node) -> Element<'a, Message> {
     use crate::explain::Node;
     let label = match node {
         Node::Function { name, .. } => name.clone(),
@@ -1777,18 +2035,9 @@ pub(crate) fn source_chip<'a>(node: &crate::explain::Node, score: f32) -> Elemen
             .unwrap_or("?")
             .to_string(),
     };
-    let pct = if score > 0.0 {
-        format!("  {}%", (score * 100.0).round() as i32)
-    } else {
-        String::new()
-    };
-    button(
-        text(format!("{label}{pct}"))
-            .size(ts::CAPTION)
-            .color(theme::dim()),
-    )
-    .style(theme::toolbar_button)
-    .padding([1, 6])
-    .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
-    .into()
+    button(text(label).size(ts::CAPTION).color(theme::dim()))
+        .style(theme::toolbar_button)
+        .padding([1, 6])
+        .on_press(Message::Semantic(SemanticMsg::OpenNode(node.clone())))
+        .into()
 }

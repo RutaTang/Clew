@@ -77,10 +77,13 @@ pub(crate) fn notebook_pane<'a>(
             button(text(label).size(ts::SMALL).color(theme::fg_muted()))
                 .style(theme::toolbar_button)
                 .padding([1, 8])
-                .on_press(Message::Editor(EditorMsg::NbExpandAll {
-                    pane,
-                    expand: !all_expanded,
-                })),
+                .on_press(super::heard::said(
+                    label,
+                    Message::Editor(EditorMsg::NbExpandAll {
+                        pane,
+                        expand: !all_expanded,
+                    }),
+                )),
         );
     }
     let body = scrollable(

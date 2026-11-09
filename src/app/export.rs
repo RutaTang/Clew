@@ -238,6 +238,15 @@ impl App {
         }))
     }
 
+    /// Whether the reader has gathered anything an export holds of theirs:
+    /// a note, a bookmark, a file read, a saved walkthrough.
+    pub(crate) fn has_reading_record(&self) -> bool {
+        !self.proj.notes.is_empty()
+            || !self.proj.bookmarks.is_empty()
+            || !self.proj.history.flatten().is_empty()
+            || !self.proj.walk.library.is_empty()
+    }
+
     /// Handle an [`ExportMsg`]: this feature's share of what `dispatch`
     /// routes.
     pub(crate) fn update_export(&mut self, message: ExportMsg) -> Task<Message> {
@@ -247,6 +256,17 @@ impl App {
                     self.status = tr!("Open a project to export its reading notes").into();
                     return Task::none();
                 };
+                // Nothing the reader has gathered: said, with no file to
+                // pick for an export of nothing of theirs (L13). The
+                // glossary is the project's, not theirs.
+                if !self.has_reading_record() {
+                    self.status = tr!(
+                        "Nothing to export yet: notes, bookmarks, the files read and saved \
+                         walkthroughs are what an export holds"
+                    )
+                    .into();
+                    return Task::none();
+                }
                 // The glossary is built from the docs index, which is only
                 // built on demand: start it while the reader picks a file.
                 self.ensure_docs();

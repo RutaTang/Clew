@@ -220,6 +220,48 @@ pub(crate) enum HeardOutcome {
     Failed(String),
 }
 
+/// What was heard and waits for a yes before it is done.
+#[derive(Debug, Clone)]
+pub(crate) enum Waiting {
+    /// A palette command, by its title.
+    Command(String),
+    /// Something on screen ([`crate::ui::heard`]): as it is shown, and
+    /// what its press sends.
+    Press {
+        shown: String,
+        message: Box<Message>,
+    },
+}
+
+impl Waiting {
+    /// What it is called, in the reader's language.
+    pub(crate) fn said(&self) -> &str {
+        match self {
+            Waiting::Command(title) => crate::i18n::lookup(title),
+            Waiting::Press { shown, .. } => shown,
+        }
+    }
+
+    /// What the pill says was done, once it is: a command's title, which
+    /// the pill shows translated, or what was pressed as it was shown.
+    fn done(&self) -> String {
+        match self {
+            Waiting::Command(title) => title.clone(),
+            Waiting::Press { shown, .. } => shown.clone(),
+        }
+    }
+}
+
+impl App {
+    /// Do what waited for a yes.
+    fn run_waiting(&mut self, waiting: Waiting) -> Task<Message> {
+        match waiting {
+            Waiting::Command(title) => self.run_palette(&title),
+            Waiting::Press { message, .. } => self.update(*message),
+        }
+    }
+}
+
 /// A model being downloaded.
 pub(crate) struct ModelDownload {
     pub done: u64,
@@ -439,8 +481,8 @@ pub(crate) struct VoiceState {
     /// When it was heard: the pill in the corner says it for a moment
     /// ([`HEARD_SHOWN`]).
     pub heard_at: Option<Instant>,
-    /// A command heard that asks before it runs: its title.
-    pub confirm: Option<String>,
+    /// A command heard that asks before it runs.
+    pub confirm: Option<Waiting>,
     /// Models downloading, by id.
     pub downloads: HashMap<&'static str, ModelDownload>,
     /// The last download's failure, by model id.
@@ -835,10 +877,7 @@ impl App {
             | VoiceMsg::RemoveSpeech(_)
             | VoiceMsg::SpeechRemoved { .. }) => self.update_speech(message),
             VoiceMsg::Toggle => self.on_voice_toggle(),
-            VoiceMsg::SetKeepListening(on) => {
-                self.voice.keep_listening = on;
-                Task::none()
-            }
+            VoiceMsg::SetKeepListening(on) => self.set_keep_listening(on),
             VoiceMsg::Stop => self.stop_listening(),
             VoiceMsg::Cancel => {
                 self.cancel_voice();
@@ -856,14 +895,28 @@ impl App {
             | VoiceMsg::TurnDownloaded(_)
             | VoiceMsg::RemoveTurn
             | VoiceMsg::TurnRemoved(_)) => self.on_turn_settings(message),
-            VoiceMsg::Transcribed { token, result } => self.on_transcribed(token, result),
+            VoiceMsg::Transcribed { token, result } => {
+                let ours = self.voice.phase == (VoicePhase::Transcribing { token });
+                let cancelled = result.as_ref().is_err_and(|e| e == "cancelled");
+                let task = self.on_transcribed(token, result);
+                // Keep listening: what was said is done with — a command
+                // run, a place gone to, a yes waited for, nothing caught —
+                // and the microphone opens for what comes next. Not after a
+                // question sent: its answer is waited for
+                // (`on_ask_stream_ended`), or Clew would hear itself say it.
+                if ours && !cancelled && !self.ask_stream_active() {
+                    Task::batch([task, self.resume_listening()])
+                } else {
+                    task
+                }
+            }
             VoiceMsg::Confirm => match self.voice.confirm.take() {
-                Some(title) => {
+                Some(waiting) => {
                     self.voice.heard = self.voice.heard.take().map(|h| Heard {
-                        outcome: HeardOutcome::Ran(title.clone()),
+                        outcome: HeardOutcome::Ran(waiting.done()),
                         ..h
                     });
-                    self.run_palette(&title)
+                    self.run_waiting(waiting)
                 }
                 None => Task::none(),
             },
@@ -905,10 +958,7 @@ impl App {
                             .is_some_and(|store| downloading(&store.path(chosen)));
                         let switch = chosen.id != id && !self.voice.installed(chosen) && !coming;
                         self.status = if switch || chosen.id == id {
-                            tr!(
-                                "{model} is ready — press the voice key to talk",
-                                model = name
-                            )
+                            tr!("{model} is ready", model = name)
                         } else {
                             tr!("{model} is downloaded", model = name)
                         };
@@ -1014,10 +1064,50 @@ impl App {
         }
     }
 
-    /// After an answer, with Keep listening on: the microphone opens again
-    /// for what is said next — while the conversation is open, nothing is
-    /// heard or waiting for a yes, and there is a model to hear it with
-    /// (this never sends the reader to Settings for one).
+    /// Keep listening on: switched on, the microphone opens at once —
+    /// there is nothing else to press — and after it is heard each time,
+    /// again ([`App::resume_listening`]). Switched off, a listen that has
+    /// heard nothing yet is put away; one that is hearing someone ends as
+    /// it would have.
+    fn set_keep_listening(&mut self, on: bool) -> Task<Message> {
+        self.voice.keep_listening = on;
+        if !on {
+            self.voice.speech.listen_after = false;
+            let unheard = self
+                .voice
+                .listening_now()
+                .is_some_and(|l| l.silence_after_speech().is_none());
+            if unheard {
+                if let Some((listening, _)) = self.voice.listening.take() {
+                    drop(listening.stop());
+                }
+                self.voice.phase = VoicePhase::Idle;
+                self.status = tr!("Stopped listening").into();
+            }
+            return Task::none();
+        }
+        // While a question is answered, its end opens the microphone.
+        if self.ask_stream_active() {
+            return Task::none();
+        }
+        if self.voice.speech.is_speaking() {
+            self.voice.speech.listen_after = true;
+            return Task::none();
+        }
+        if self.voice.phase == VoicePhase::Idle {
+            // No model yet: start_listening says so, and opens Settings on
+            // the download.
+            return self.start_listening();
+        }
+        Task::none()
+    }
+
+    /// With Keep listening on, once what was said is done with — a
+    /// command run, an answer given and said: the microphone opens again
+    /// for what is said next, while nothing is being heard and there is a
+    /// model to hear it with (this never sends the reader to Settings for
+    /// one). The conversation need not be open: the pill says Clew is
+    /// listening. A command waiting for a yes is listened for too.
     pub(crate) fn resume_listening(&mut self) -> Task<Message> {
         // Not while Clew speaks: the microphone would hear it. Once all is
         // said, this is asked again.
@@ -1025,10 +1115,10 @@ impl App {
             self.voice.speech.listen_after = true;
             return Task::none();
         }
+        // A question queued is asked next, and its answer waited for.
         let ready = self.voice.keep_listening
-            && self.ask_view.is_open()
             && self.voice.phase == VoicePhase::Idle
-            && self.voice.confirm.is_none()
+            && self.proj.ask_queue.is_empty()
             && self.voice.installed(self.voice.prefs.model());
         if ready {
             self.start_listening()
@@ -1043,12 +1133,23 @@ impl App {
         // be the yes (or the no).
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
-            self.status = tr!(
-                "Voice needs a speech model on this computer — download {model} ({size} MB) \
-                 in Settings → Voice",
-                model = crate::i18n::lookup(model.name),
-                size = model.size_mb
-            );
+            // Another one here: it is not that there is none.
+            let another = models::MODELS.iter().any(|m| self.voice.installed(m));
+            self.status = if another {
+                tr!(
+                    "{model} is not downloaded yet — download it ({size} MB) in Settings → \
+                     Voice, or choose one that is",
+                    model = crate::i18n::lookup(model.name),
+                    size = model.size_mb
+                )
+            } else {
+                tr!(
+                    "Voice needs a speech model on this computer — download {model} ({size} MB) \
+                     in Settings → Voice",
+                    model = crate::i18n::lookup(model.name),
+                    size = model.size_mb
+                )
+            };
             return self.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
         }
         match (self.voice.open_mic)(MAX_SECONDS) {
@@ -1061,11 +1162,11 @@ impl App {
                 self.turn_listening_began();
                 self.voice.heard = None;
                 self.status = match &self.voice.confirm {
-                    Some(title) => tr!(
+                    Some(waiting) => tr!(
                         "Listening… say yes to run {command}, or no",
-                        command = crate::i18n::lookup(title)
+                        command = waiting.said()
                     ),
-                    None => tr!("Listening… say a command or a question (Esc cancels)").into(),
+                    None => tr!("Listening… say a command or a question").into(),
                 };
             }
             Err(e) => {
@@ -1112,6 +1213,15 @@ impl App {
         if listening.silence_after_speech().is_none()
             && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
         {
+            if self.voice.keep_listening {
+                // Listening on, as asked: the quiet is let go, and the
+                // microphone listens afresh for what is said next.
+                if let Some((listening, _)) = self.voice.listening.take() {
+                    drop(listening.stop());
+                }
+                self.voice.phase = VoicePhase::Idle;
+                return self.start_listening();
+            }
             self.cancel_voice();
             self.voice.hear(Heard {
                 text: String::new(),
@@ -1233,25 +1343,22 @@ impl App {
         }
         // The answer to a command waiting for a yes; anything else said
         // instead puts it away and is read as itself.
-        if let Some(title) = self.voice.confirm.take() {
+        if let Some(waiting) = self.voice.confirm.take() {
             match crate::app::spoken::yes_or_no(&text) {
                 Some(true) => {
                     self.status = tr!(
                         "“{text}” → {command}",
                         text = text,
-                        command = crate::i18n::lookup(&title)
+                        command = waiting.said()
                     );
                     self.voice.hear(Heard {
                         text,
-                        outcome: HeardOutcome::Ran(title.clone()),
+                        outcome: HeardOutcome::Ran(waiting.done()),
                     });
-                    return self.run_palette(&title);
+                    return self.run_waiting(waiting);
                 }
                 Some(false) => {
-                    self.status = tr!(
-                        "Didn't run {command}",
-                        command = crate::i18n::lookup(&title)
-                    );
+                    self.status = tr!("Didn't run {command}", command = waiting.said());
                     self.voice.heard = None;
                     return Task::none();
                 }
@@ -1259,53 +1366,20 @@ impl App {
             }
         }
         if self.voice.prefs.run_commands {
-            let commands = self.palette_commands();
-            let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
-            // Said in English, or as the palette shows it in the reader's
-            // language.
-            let found = clew_voice::intent::command(&text, &titles).or_else(|| {
-                let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
-                said_as_shown(crate::i18n::current(), &text, &shown)
-            });
-            if let Some(i) = found {
-                let command = &commands[i];
-                let title = command.title.clone();
-                if command.asks_when_said() {
-                    self.status = tr!(
-                        "“{text}” → {command}? Confirm or press Esc",
-                        text = text,
-                        command = crate::i18n::lookup(&title)
-                    );
-                    self.voice.confirm = Some(title.clone());
-                    self.voice.hear(Heard {
-                        text,
-                        outcome: HeardOutcome::Confirm(title),
-                    });
-                    return Task::none();
-                }
-                self.status = tr!(
-                    "“{text}” → {command}",
-                    text = text,
-                    command = crate::i18n::lookup(&title)
-                );
-                self.voice.hear(Heard {
-                    text,
-                    outcome: HeardOutcome::Ran(title.clone()),
-                });
-                return self.run_palette(&title);
+            if let Some(task) = self.heard_command(&text) {
+                return task;
             }
-            // A line, a file, a symbol, words to look for: said with what
-            // no title names.
-            if let Some((done, task)) = self.spoken(&text) {
-                return self.did_as_said(text, done, task);
-            }
+        } else if let Some(task) = self.heard_commands_back_on(&text) {
+            return task;
         }
-        // A question: to Ask, with the window open on it.
+        // A question: to Ask. Sent, it is answered where Ask is — the card
+        // is not opened over the code for it: the pill says it is being
+        // answered, and the answer is read aloud. Kept for the reader to
+        // send, it waits in the card's input, open on it.
         self.voice.hear(Heard {
             text: text.clone(),
             outcome: HeardOutcome::Asked,
         });
-        self.reveal_ask();
         let mut input = self.proj.ask_input.trim_end().to_string();
         if !input.is_empty() {
             input.push(' ');
@@ -1313,15 +1387,116 @@ impl App {
         input.push_str(&text);
         self.proj.ask_input = input;
         self.proj.ask_spoken = true;
-        if self.voice.prefs.send_questions && !self.ask_stream_active() {
+        if self.voice.prefs.send_questions {
+            // While one is answered, it is queued, and asked next.
             self.status = tr!("Asking “{text}”", text = text);
             return self.update(Message::Ask(AskMsg::Submit));
         }
+        self.reveal_ask();
         self.code_focused = false;
         Task::batch([
             operation::focus(ui::ask_input_id()),
             operation::move_cursor_to_end(ui::ask_input_id()),
         ])
+    }
+
+    /// Do the command `text` names, if it names one: the question on
+    /// screen answered, a dialog's button, what is on top put away; a
+    /// palette command; a setting's choice; a button, a choice or a list's
+    /// row on screen; a phrase with a value. `None` leaves it to Ask.
+    fn heard_command(&mut self, text: &str) -> Option<Task<Message>> {
+        // What is on screen, as it is drawn now.
+        let targets = crate::ui::heard::gather(self);
+        // A dialog takes the voice before anything, as it takes the pointer.
+        if let Some(task) = self.heard_on_screen(text, &targets, true) {
+            return Some(task);
+        }
+        let commands = self.palette_commands();
+        let titles: Vec<&str> = commands.iter().map(|c| c.title.as_str()).collect();
+        // Said in English, or as the palette shows it in the reader's
+        // language.
+        let found = clew_voice::intent::command(text, &titles).or_else(|| {
+            let shown: Vec<&str> = commands.iter().map(|c| c.shown()).collect();
+            said_as_shown(crate::i18n::current(), text, &shown)
+        });
+        if let Some(i) = found {
+            let command = &commands[i];
+            let title = command.title.clone();
+            // What the pill says it ran: the title the reader sees, made of
+            // parts where the catalogs translate it so.
+            let said = if command.shown_as.is_some() {
+                command.shown().to_string()
+            } else {
+                title.clone()
+            };
+            if command.asks_when_said() {
+                self.status = tr!(
+                    "“{text}” → {command}?",
+                    text = text,
+                    command = crate::i18n::lookup(&said)
+                );
+                self.voice.confirm = Some(Waiting::Command(title));
+                self.voice.hear(Heard {
+                    text: text.to_string(),
+                    outcome: HeardOutcome::Confirm(said),
+                });
+                return Some(Task::none());
+            }
+            self.status = tr!(
+                "“{text}” → {command}",
+                text = text,
+                command = crate::i18n::lookup(&said)
+            );
+            self.voice.hear(Heard {
+                text: text.to_string(),
+                outcome: HeardOutcome::Ran(said),
+            });
+            return Some(self.run_palette(&title));
+        }
+        // A setting's choice, said as anyone says it: "change the app's
+        // language to French".
+        if let Some(task) = self.heard_choice(text, |_| true) {
+            return Some(task);
+        }
+        // What is on screen, by its name or its place in a list.
+        if let Some(task) = self.heard_on_screen(text, &targets, false) {
+            return Some(task);
+        }
+        // A line, a file, a symbol, words to look for: said with what no
+        // title names.
+        if let Some((done, task)) = self.spoken(text) {
+            return Some(self.did_as_said(text.to_string(), done, task));
+        }
+        None
+    }
+
+    /// Spoken commands turned off, what is said goes to Ask — but for
+    /// turning them back on, which nothing else hands-free could do.
+    fn heard_commands_back_on(&mut self, text: &str) -> Option<Task<Message>> {
+        self.heard_choice(text, |m| {
+            matches!(m, Message::Voice(VoiceMsg::SetRunCommands(true)))
+        })
+    }
+
+    /// Make the setting's choice `text` asks for ([`crate::app::choices::
+    /// chosen`]), if `wanted` takes it.
+    fn heard_choice(
+        &mut self,
+        text: &str,
+        wanted: impl Fn(&Message) -> bool,
+    ) -> Option<Task<Message>> {
+        let settings = self.settings_choices();
+        let (s, c) = crate::app::choices::chosen(text, &settings)?;
+        let choice = settings[s].choices[c].clone();
+        if !wanted(&choice.message) {
+            return None;
+        }
+        self.status = tr!("“{text}” → {command}", text = text, command = choice.shown);
+        self.voice.hear(Heard {
+            text: text.to_string(),
+            outcome: HeardOutcome::Ran(choice.shown),
+        });
+        Some(self.update(choice.message))
     }
 
     /// `text` came to `done` ([`App::spoken`]): said on the status

@@ -363,7 +363,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
             format!("{} is not available for this platform", server.server_name)
         } else {
             format!(
-                "{} {} is not available: Clew ships a verified {} only at {}. Remove the `version` from .clew/lsp.toml, or set an explicit `command`.",
+                "{} {} is not available: Clew ships a verified {} only at {}. Remove the version from .clew/lsp.toml, or set a command of your own there.",
                 server.server_name, server.version, server.server_name, spec.version
             )
         });
@@ -378,8 +378,7 @@ pub fn locate(server: &EffectiveServer) -> Located {
             return match find_on_path_unresolved(binary) {
                 Some(p) => Located::Ready(p),
                 None => Located::Unsupported(format!(
-                    "'{binary}' not found on PATH — {}, or choose where it is in Settings → \
-                     Languages",
+                    "'{binary}' not found on PATH — {}, or choose where it is",
                     install_hint(binary)
                 )),
             };
@@ -406,11 +405,11 @@ fn install_hint(binary: &str) -> &'static str {
     match binary {
         "dart" => "install the Dart or Flutter SDK",
         "lake" => "install Lean with elan",
-        "jdtls" => "install Eclipse JDT LS (e.g. `brew install jdtls`)",
-        "ruby-lsp" => "install it with `gem install ruby-lsp`",
-        "csharp-ls" => "install it with `dotnet tool install --global csharp-ls`",
+        "jdtls" => "install Eclipse JDT LS (with Homebrew: “brew install jdtls”)",
+        "ruby-lsp" => "install it with “gem install ruby-lsp”",
+        "csharp-ls" => "install it with “dotnet tool install --global csharp-ls”",
         "elp" => "install the Erlang Language Platform (elp) from its releases",
-        "haskell-language-server-wrapper" => "install it with ghcup (`ghcup install hls`)",
+        "haskell-language-server-wrapper" => "install it with “ghcup install hls”",
         _ => "install its toolchain",
     }
 }
@@ -471,7 +470,7 @@ pub fn find_on_path_unresolved(binary: &str) -> Option<PathBuf> {
 }
 
 /// [`find_on_path_unresolved`] over an explicit search path.
-pub(crate) fn find_in_unresolved(path: &OsStr, binary: &str) -> Option<PathBuf> {
+pub fn find_in_unresolved(path: &OsStr, binary: &str) -> Option<PathBuf> {
     find_in(path, binary, false)
 }
 
@@ -612,7 +611,7 @@ fn toolchain_tool(tool: &str, path: Option<&OsStr>) -> Result<PathBuf, String> {
         .ok_or_else(|| {
             format!(
                 "'{tool}' is required to install this server but was not found on PATH; \
-                 install it, or set a custom `command` in .clew/lsp.toml"
+                 install it, or choose a server program of your own"
             )
         })
 }
@@ -1499,6 +1498,32 @@ mod tests {
 
         let err = toolchain_tool("cargo", None).unwrap_err();
         assert!(err.contains("not found on PATH"), "{err}");
+    }
+
+    /// What a server that cannot be had says to do is plain words: no
+    /// markup shown as it is, and no page of Clew's named — it is said on the
+    /// page that lists the servers as well as in the status bar, which opens
+    /// that page.
+    #[test]
+    fn what_a_missing_server_says_to_do_is_plain_words() {
+        let mut said: Vec<String> = [
+            "dart",
+            "lake",
+            "jdtls",
+            "ruby-lsp",
+            "csharp-ls",
+            "elp",
+            "haskell-language-server-wrapper",
+            "something-else",
+        ]
+        .into_iter()
+        .map(|binary| install_hint(binary).to_string())
+        .collect();
+        said.push(toolchain_tool("cargo", None).unwrap_err());
+        for words in &said {
+            assert!(!words.contains('`'), "{words}");
+            assert!(!words.contains("Settings"), "{words}");
+        }
     }
 
     /// F10: a toolchain install stops — with everything it started — when

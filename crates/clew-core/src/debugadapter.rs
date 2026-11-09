@@ -263,7 +263,7 @@ pub fn resolve(
             )))
         }
         "java" => {
-            // The JDK chosen for the project (Settings → Languages), else
+            // The JDK chosen for the project (Settings → Language servers), else
             // the PATH's.
             let chosen = choices
                 .java
@@ -2010,7 +2010,7 @@ mod tests {
     }
 
     /// A Java program is debugged by clew-server's own adapter, with the JDK
-    /// chosen for the project (Settings → Languages), else the PATH's.
+    /// chosen for the project (Settings → Language servers), else the PATH's.
     #[test]
     #[cfg(unix)]
     fn java_runs_under_clew_servers_own_adapter_with_the_chosen_jdk() {

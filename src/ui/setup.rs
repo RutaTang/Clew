@@ -16,6 +16,29 @@ use crate::tr;
 /// Room under a tick for what it takes, lined up with its label.
 const DETAIL_INDENT: f32 = 26.0;
 
+/// The sheet's language-servers row, as `(ticked, changeable, line)`, or
+/// none. Listed once the look is in; the row stands from the first frame,
+/// ticked as it will be (they are set up unless the reader says not), and
+/// its line keeps two lines' room: the look landing neither ticks it nor
+/// grows the sheet under Open. Nothing to set up is done, not declined. A
+/// project on another machine has nothing to say of them on a first open,
+/// from the first frame on: its servers ask on its host.
+pub(crate) fn servers_row(
+    setup: Option<&ProjectSetup>,
+    mode: SetupMode,
+    remote: bool,
+) -> Option<(bool, bool, String)> {
+    match setup
+        .and_then(|s| s.census.as_ref())
+        .map(|c| c.servers.as_slice())
+    {
+        None => Some((true, false, tr!("Checking the project…").to_string())),
+        Some([]) if remote && mode == SetupMode::Open => None,
+        Some([]) => Some((true, false, tr!("Ready.").to_string())),
+        Some(list) => Some((setup.is_some_and(|s| s.servers), true, servers_line(list))),
+    }
+}
+
 /// The sheet for `root`: `setup` as it stands (a first open's before its
 /// look at the project is in may not have one yet). `asked` holds back a
 /// first open's Open until it can have been read, as every question's
@@ -42,14 +65,21 @@ pub(crate) fn setup_sheet<'a>(
         SetupMode::Explain => tr!("Explain {name}?", name = name),
     };
     let title = text(title).size(ts::TITLE).color(theme::fg());
-    // A first open's ×, as Escape: the project is not opened.
+    // A first open's ×, as Escape: the project is not opened — said in its
+    // tip, beside Skip setup, which opens it.
     let header: Element<'a, Message> = if mode == SetupMode::Open {
         row![
             title,
             space().width(Fill),
-            super::chrome::close_button(Message::Project(ProjectMsg::ConsentDenied(
-                root.to_path_buf()
-            ))),
+            super::chrome::close_button_saying(
+                // "No" to opening it.
+                super::heard::answer(
+                    tr!("Close without opening"),
+                    super::heard::Answer::No,
+                    Message::Project(ProjectMsg::ConsentDenied(root.to_path_buf())),
+                ),
+                tr!("Close without opening"),
+            ),
         ]
         .align_y(iced::Center)
         .into()
@@ -78,7 +108,8 @@ pub(crate) fn setup_sheet<'a>(
     let choice = |label: &'a str,
                   on: bool,
                   toggle: Option<fn(bool) -> Message>,
-                  detail: String|
+                  detail: String,
+                  lines: f32|
      -> Element<'a, Message> {
         let tick = checkbox(on)
             .style(theme::check)
@@ -86,13 +117,24 @@ pub(crate) fn setup_sheet<'a>(
             .size(16)
             .spacing(10)
             .text_size(ts::BASE);
+        if let Some(toggle) = toggle {
+            super::heard::switch(label, on, toggle);
+        }
         column![
             match toggle {
                 Some(toggle) => tick.on_toggle(toggle),
                 None => tick,
             },
-            container(text(detail).size(ts::SMALL).color(theme::dim())).padding(Padding {
-                left: DETAIL_INDENT,
+            container(row![
+                // The room the line keeps, whatever it says for now: a pixel
+                // wide (a row drops what has no width), taken off the indent.
+                space()
+                    .width(1)
+                    .height(lines * text::LineHeight::default().to_absolute(ts::SMALL.into()).0),
+                text(detail).size(ts::SMALL).color(theme::dim()),
+            ])
+            .padding(Padding {
+                left: DETAIL_INDENT - 1.0,
                 ..Padding::ZERO
             }),
         ]
@@ -102,35 +144,13 @@ pub(crate) fn setup_sheet<'a>(
 
     match mode {
         SetupMode::Open | SetupMode::Manage => {
-            // The servers: listed once the look is in; a first open with
-            // none to set up says nothing of them.
-            let servers = census.map(|c| c.servers.as_slice());
-            match servers {
-                None => {
-                    body = body.push(choice(
-                        tr!("Language servers"),
-                        false,
-                        None,
-                        tr!("Checking the project…").into(),
-                    ))
-                }
-                Some([]) if mode == SetupMode::Open => {}
-                Some([]) => {
-                    body = body.push(choice(
-                        tr!("Language servers"),
-                        false,
-                        None,
-                        tr!("Ready.").into(),
-                    ))
-                }
-                Some(list) => {
-                    body = body.push(choice(
-                        tr!("Language servers"),
-                        setup.is_some_and(|s| s.servers),
-                        Some(|on| Message::Project(ProjectMsg::SetupServers(on))),
-                        servers_line(list),
-                    ));
-                }
+            if let Some((on, changeable, detail)) =
+                servers_row(setup, mode, app.connection.is_remote())
+            {
+                let toggle = changeable.then_some(
+                    (|on| Message::Project(ProjectMsg::SetupServers(on))) as fn(bool) -> Message,
+                );
+                body = body.push(choice(tr!("Language servers"), on, toggle, detail, 2.0));
             }
             let can_explain =
                 app.llm_available && !matches!(census.map(|c| c.calls), Some(Some(0)));
@@ -139,7 +159,33 @@ pub(crate) fn setup_sheet<'a>(
                 setup.is_some_and(|s| s.explain),
                 can_explain.then_some(|on| Message::Project(ProjectMsg::SetupExplain(on))),
                 explain_says,
+                1.0,
             ));
+            // No key: where one is added, a click away — the line said
+            // "in Settings" and left the reader to find it.
+            if !app.llm_available {
+                body = body.push(
+                    container(
+                        button(
+                            text(tr!("Add an API Key…"))
+                                .size(ts::SMALL)
+                                .color(theme::accent()),
+                        )
+                        .style(theme::icon_button(false))
+                        .padding([2, 6])
+                        .on_press(super::heard::said(
+                            tr!("Add an API Key…"),
+                            Message::Settings(crate::SettingsMsg::OpenAt(
+                                crate::SettingsPage::LanguageModel,
+                            )),
+                        )),
+                    )
+                    .padding(Padding {
+                        left: DETAIL_INDENT - 6.0,
+                        ..Padding::ZERO
+                    }),
+                );
+            }
         }
         SetupMode::Explain => {
             body = body.push(text(explain_says).size(ts::BODY).color(theme::fg_muted()));
@@ -166,12 +212,12 @@ pub(crate) fn setup_sheet<'a>(
             false,
         ),
     };
-    // A first open's Not now opens the project, with nothing set up: an
+    // A first open's Skip setup opens the project, with nothing set up: an
     // answer to the question as Open is, so pressed only once it can have
     // been read. Not opening it at all is the ×, or Escape.
     let (decline_label, decline, decline_gated) = if mode == SetupMode::Open {
         (
-            tr!("Not now"),
+            tr!("Skip setup"),
             Message::Project(ProjectMsg::OpenWithoutSetup(root.to_path_buf())),
             true,
         )
@@ -190,29 +236,52 @@ pub(crate) fn setup_sheet<'a>(
         }
         _ => false,
     };
-    let ready = (!gated || asked.ready) && something;
+    // Open sets up what the look found: held until it is in, so it is not
+    // pressed for less than the sheet is about to say — nor where the line
+    // above it is still settling.
+    let looking = setup.is_some() && census.is_none();
+    let ready = (!gated || asked.ready) && something && !looking;
     let accept_button = button(text(accept).size(ts::BASE))
         .style(theme::primary_button)
         .padding([6, 16])
-        .on_press_maybe(ready.then_some(accept_msg));
+        .on_press_maybe(
+            ready.then(|| super::heard::answer(accept, super::heard::Answer::Yes, accept_msg)),
+        );
     let decline_ready = !decline_gated || asked.ready;
     let decline_button = button(text(decline_label).size(ts::BASE))
         .style(theme::toolbar_button)
         .padding([6, 16])
-        .on_press_maybe(decline_ready.then_some(decline));
+        .on_press_maybe(decline_ready.then(|| {
+            // Skip setup opens the project: no "no" to opening it, which
+            // the × is; Cancel is.
+            if decline_gated {
+                super::heard::said(decline_label, decline)
+            } else {
+                super::heard::answer(decline_label, super::heard::Answer::No, decline)
+            }
+        }));
     let decline_button: Element<'a, Message> = if decline_gated {
         crate::ui::fresh::allow(decline_ready, decline_button)
     } else {
         decline_button.into()
     };
+    // Held while the look is on its way, it says why where the pointer
+    // rests: inert with nothing said, it read as broken (L24).
+    let accept_button = crate::ui::fresh::allow(ready, accept_button);
+    let accept_button = if looking {
+        super::toolbar::tip_at(
+            accept_button,
+            tr!("Ready once the project is checked"),
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
+    } else {
+        accept_button
+    };
     body = body.push(
-        row![
-            space().width(Fill),
-            decline_button,
-            crate::ui::fresh::allow(ready, accept_button),
-        ]
-        .spacing(10)
-        .align_y(iced::Center),
+        row![space().width(Fill), decline_button, accept_button,]
+            .spacing(10)
+            .align_y(iced::Center),
     );
 
     let panel = container(body)

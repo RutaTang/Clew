@@ -274,6 +274,22 @@ pub enum ProjectMsg {
     SetupExplain(bool),
     /// The sheet's Apply (or Explain).
     SetupApply,
+    /// The working tree's changes read, for the Files view's marks (see
+    /// `App::sync_git_status`).
+    GitStatusRead {
+        stamp: Stamp,
+        result: Result<Vec<(String, char)>, String>,
+    },
+    /// A look at what the open project's language servers still take to
+    /// set up is in (see `App::look_for_missing_setup`); `seq` says which.
+    MissingSetupFound {
+        stamp: Stamp,
+        seq: u64,
+        servers: Vec<crate::app::setup::SetupServer>,
+    },
+    /// The status bar's Set up: every language server that still takes
+    /// something, set up in one click.
+    SetUpMissing,
     /// Put the sheet away (not a first open's: that is answered).
     SetupClose,
     /// The client-side (fallback) scan finished. Its stamp is transport-bound
@@ -493,6 +509,8 @@ pub enum EditorMsg {
     ModifiersChanged(keyboard::Modifiers),
     FindOpened,
     FindQueryChanged(String),
+    /// The find bar's Match case, Whole word or Regular expression.
+    FindToggle(crate::SearchOpt),
     FindStep(i32),
     FindClosed,
     /// Toggle "skim" for the active file: fold function/method bodies to
@@ -594,6 +612,9 @@ pub enum HoverMsg {
 #[derive(Debug, Clone)]
 pub enum NavMsg {
     SearchQueryChanged(String),
+    /// Put away a language server's list (references, definitions) and go
+    /// back to the search.
+    ListingClosed,
     /// Typing in the search sidebar paused: search, if `typed` is still the
     /// latest edit ([`SearchState::typed`](crate::app::model::SearchState)).
     SearchSettled {
@@ -763,6 +784,10 @@ pub enum CallsMsg {
     /// Open the call hierarchy of the function the margin's Calls is about
     /// (its "Open the call hierarchy").
     OfFunction,
+    /// Trace the call tree's function again, the way it reads, where its
+    /// language server says it is: what its "code changed" note's Refresh
+    /// sends.
+    Refresh,
     /// `prepareCallHierarchy` resolved the anchor item(s). `token` was minted
     /// at request time; only the awaited request may install a tree.
     Prepared {
@@ -793,9 +818,23 @@ pub enum CallsMsg {
     ExpandAll,
 }
 
+/// A note under the Imports tab's header (`ui::panels::imports_tab`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportNote {
+    /// The project's import cycles.
+    Cycles,
+    /// The files the symbol index left out for their size.
+    LeftOut,
+}
+
 /// The project graphs and their overlays: imports and the call graph.
 #[derive(Debug, Clone)]
 pub enum GraphMsg {
+    /// A node of the map was clicked: what it is, and how to open it — or
+    /// a click off them put the one picked down.
+    Picked(Option<crate::app::model::GraphPick>),
+    /// Put the map's camera back where it starts: zoom, pan and turn.
+    FitView,
     /// A remote project's tsconfig/jsconfig path mappings were fetched from
     /// the host (see `App::fetch_remote_ts_configs`); applied only to the
     /// project instance they were fetched for, and only while no later fetch
@@ -831,6 +870,9 @@ pub enum GraphMsg {
     ImportExpand { token: u64, id: usize },
     /// Flip the import tree between Imports and Importers.
     ImportDirection,
+    /// Show, or put away, what a note under the Imports tab's header is
+    /// about: the cycles themselves, the files left out.
+    ToggleImportNote(ImportNote),
     /// Recursively expand the whole import tree (to the project boundary).
     ImportExpandAll,
     /// Open a project-wide graph overlay (or switch which one).
@@ -1009,6 +1051,9 @@ pub enum OverviewMsg {
     ShowStats,
     /// Recompute the code statistics regardless of freshness (the Refresh button).
     RefreshStats,
+    /// Put the overview or the statistics away: the code they covered is
+    /// shown again.
+    Close,
     /// A stats computation finished for the project its stamp names — or
     /// failed, which is not an empty report (see `on_stats_done`).
     StatsDone {
@@ -1118,6 +1163,8 @@ pub enum SemanticMsg {
 /// The Ask panel: questions, answers streaming in, pinned selections.
 #[derive(Debug, Clone)]
 pub enum AskMsg {
+    /// The question's field was typed in, clicked in or moved through.
+    Edit(iced::widget::text_editor::Action),
     /// Toolbar "Ask" (⇧⌘A): open the Ask window as a card, or put it away.
     Toggle,
     /// Open the Ask window (as a card, when it is put away) with its input
@@ -1149,6 +1196,13 @@ pub enum AskMsg {
     Submit,
     /// Ask a suggested (context-aware) question: fill the input and submit it.
     Suggested(String),
+    /// The model's questions for "Try asking" came, for where the reader
+    /// was (`app::suggest`).
+    SuggestionsCame {
+        stamp: Stamp,
+        key: crate::app::suggest::SuggestKey,
+        result: Result<String, String>,
+    },
     /// The question's embedding vector came back (retrieval step). The stamp
     /// names the project the question was asked in.
     Retrieved {
@@ -1208,6 +1262,11 @@ pub enum AskMsg {
     /// the provider locally (the client AI endpoint). See
     /// [`crate::App::ask_stream_active`] for when a Stop button applies.
     Stop,
+    /// Send the queued question at this place now: the answer coming in is
+    /// stopped, and it is asked next.
+    SendQueuedNow(usize),
+    /// Take the queued question at this place off the queue.
+    DropQueued(usize),
     /// Clear the whole Ask conversation.
     Clear,
     /// Remove the pinned code-selection context with this identity
@@ -1473,6 +1532,15 @@ impl LanguagesMsg {
 /// Git history in the reader: time travel and "Why is this here?".
 #[derive(Debug, Clone)]
 pub enum TimeTravelMsg {
+    /// Step back through the file's history from the commit `sha` (the
+    /// margin's History, a commit picked).
+    StartAt { sha: String },
+    /// The commits that touched `abs`, for the margin's History.
+    MarginHistory {
+        stamp: Stamp,
+        abs: PathBuf,
+        result: Result<Vec<crate::git::HistCommit>, String>,
+    },
     /// Explain why the right-clicked line (or selection) exists, from git blame.
     WhyIsThisHere,
     /// The "why is this here?" answer finished generating.
@@ -1767,7 +1835,19 @@ pub enum LspMsg {
     CommandAllowed(u64),
     /// Decline the project's language-server command (question number).
     CommandDismissed(u64),
+    /// The download prompt's "Use that one": run the server's own program
+    /// found on PATH instead (`LspConsent::on_path`).
+    ConsentUsePath(u64),
     ConsentDismissed(u64),
+    /// The program the download question for `language` would fetch is on
+    /// PATH by its `name`, at `program`, and runs: the question offers it
+    /// (`LspConsent::on_path`).
+    FoundOnPath {
+        stamp: Stamp,
+        language: String,
+        name: &'static str,
+        program: PathBuf,
+    },
     DownloadResult {
         stamp: Stamp,
         language: String,
@@ -1845,6 +1925,8 @@ pub enum DocsMsg {
     /// Open the doc page for the symbol under the cursor (from the code view's
     /// right-click menu).
     ViewFromMenu,
+    /// Put the doc page away: the code it covered is shown again.
+    ClosePage,
 }
 
 /// The settings modal and the appearance.
@@ -1889,8 +1971,19 @@ pub enum SettingsMsg {
     Open,
     OpenAt(SettingsPage),
     Close,
+    /// Put the AI fields back as Settings opened on them: what was typed
+    /// there is kept as Settings closes, unless discarded first.
+    Discard,
     /// Show one of Settings' pages.
     Page(SettingsPage),
+    /// Ask the model the Language model page's fields name for a word, to
+    /// see that they reach it.
+    TestConnection,
+    /// What Test connection `number` found: the model's name, or why not.
+    ConnectionTested {
+        number: u64,
+        result: Result<String, String>,
+    },
     /// LLM settings draft edits.
     ProviderPicked(llm::Provider),
     KeyChanged(String),
@@ -1984,6 +2077,8 @@ pub enum WindowMsg {
     OpenShortcuts,
     /// Begin capturing a new chord for an action (click a binding).
     RebindStart(keymap::Action),
+    /// Stop capturing one, the binding as it was.
+    RebindCancel,
     /// Reset one action's binding to its default.
     RebindReset(keymap::Action),
     /// Reset every binding to its default.
@@ -2015,6 +2110,12 @@ pub enum WindowMsg {
     ToggleMaximize,
     /// The reading panel's view picked.
     MarginTabPicked(MarginTab),
+    /// The Files view's tree scrolled: where it is, and how much of it
+    /// shows.
+    FilesTreeScrolled {
+        offset: f32,
+        height: f32,
+    },
     /// Whether the window is maximized now, for its button to show.
     MaximizedIs(bool),
     /// Whether the window system composites the window over the desktop
@@ -2135,7 +2236,9 @@ impl ProjectMsg {
         match self {
             ProjectMsg::ScanDone { stamp, .. }
             | ProjectMsg::StateLoaded { stamp, .. }
-            | ProjectMsg::TreeUpdated { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | ProjectMsg::TreeUpdated { stamp, .. }
+            | ProjectMsg::MissingSetupFound { stamp, .. }
+            | ProjectMsg::GitStatusRead { stamp, .. } => Some(Origin::Stamped(stamp)),
             ProjectMsg::OpenFolderPressed
             | ProjectMsg::FolderPicked(..)
             | ProjectMsg::ConsentAllowed(..)
@@ -2146,6 +2249,7 @@ impl ProjectMsg {
             | ProjectMsg::SetupServers(..)
             | ProjectMsg::SetupExplain(..)
             | ProjectMsg::SetupApply
+            | ProjectMsg::SetUpMissing
             | ProjectMsg::SetupClose
             | ProjectMsg::ToggleDir(..) => None,
         }
@@ -2196,6 +2300,7 @@ impl EditorMsg {
             | EditorMsg::ModifiersChanged(..)
             | EditorMsg::FindOpened
             | EditorMsg::FindQueryChanged(..)
+            | EditorMsg::FindToggle(..)
             | EditorMsg::FindStep(..)
             | EditorMsg::FindClosed
             | EditorMsg::SkimFile
@@ -2246,6 +2351,7 @@ impl NavMsg {
             | NavMsg::LocationPreviews { stamp, .. }
             | NavMsg::PreviewsStyled { stamp, .. } => Some(Origin::Stamped(stamp)),
             NavMsg::SearchQueryChanged(..)
+            | NavMsg::ListingClosed
             | NavMsg::SearchSubmitted
             | NavMsg::SearchToggle(..)
             | NavMsg::SearchIncludeChanged(..)
@@ -2304,6 +2410,7 @@ impl CallsMsg {
             CallsMsg::Requested
             | CallsMsg::FromMenu
             | CallsMsg::OfFunction
+            | CallsMsg::Refresh
             | CallsMsg::ExpandNode { .. }
             | CallsMsg::Direction
             | CallsMsg::ExpandAll => None,
@@ -2327,6 +2434,7 @@ impl GraphMsg {
             | GraphMsg::ProjectCallsRefined { stamp, .. } => Some(Origin::Stamped(stamp)),
             GraphMsg::ImportExpand { .. }
             | GraphMsg::ImportDirection
+            | GraphMsg::ToggleImportNote(..)
             | GraphMsg::ImportExpandAll
             | GraphMsg::OpenOverlay(..)
             | GraphMsg::CloseOverlay
@@ -2336,6 +2444,8 @@ impl GraphMsg {
             | GraphMsg::Toggle3D
             | GraphMsg::ToggleSpin
             | GraphMsg::ToggleHeat
+            | GraphMsg::Picked(..)
+            | GraphMsg::FitView
             | GraphMsg::SelectMap(..)
             | GraphMsg::RefineProjectCalls => None,
         }
@@ -2386,7 +2496,8 @@ impl OverviewMsg {
             OverviewMsg::Show
             | OverviewMsg::Generate
             | OverviewMsg::ShowStats
-            | OverviewMsg::RefreshStats => None,
+            | OverviewMsg::RefreshStats
+            | OverviewMsg::Close => None,
         }
     }
 }
@@ -2508,7 +2619,8 @@ impl AskMsg {
             | AskMsg::AcpEvent { stamp, .. }
             | AskMsg::AcpTurnEnded { stamp, .. }
             | AskMsg::AcpOptionSet { stamp, .. }
-            | AskMsg::AcpCancelOverdue { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | AskMsg::AcpCancelOverdue { stamp, .. }
+            | AskMsg::SuggestionsCame { stamp, .. } => Some(Origin::Stamped(stamp)),
             AskMsg::Toggle
             | AskMsg::Open
             | AskMsg::Expand
@@ -2522,9 +2634,12 @@ impl AskMsg {
             | AskMsg::DeleteSession(..)
             | AskMsg::Close
             | AskMsg::InputChanged(..)
+            | AskMsg::Edit(..)
             | AskMsg::Submit
             | AskMsg::Suggested(..)
             | AskMsg::Stop
+            | AskMsg::SendQueuedNow(..)
+            | AskMsg::DropQueued(..)
             | AskMsg::Clear
             | AskMsg::Unpin(..)
             | AskMsg::PinGoto(..)
@@ -2546,8 +2661,10 @@ impl TimeTravelMsg {
             | TimeTravelMsg::Ready { stamp, .. }
             | TimeTravelMsg::Step { stamp, .. }
             | TimeTravelMsg::WhyDone { stamp, .. }
-            | TimeTravelMsg::StoryDone { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | TimeTravelMsg::StoryDone { stamp, .. }
+            | TimeTravelMsg::MarginHistory { stamp, .. } => Some(Origin::Stamped(stamp)),
             TimeTravelMsg::WhyIsThisHere
+            | TimeTravelMsg::StartAt { .. }
             | TimeTravelMsg::BlameWhyClose
             | TimeTravelMsg::Start { .. }
             | TimeTravelMsg::Goto(..)
@@ -2614,11 +2731,13 @@ impl LspMsg {
             | LspMsg::DownloadResult { stamp, .. }
             | LspMsg::Fetched { stamp, .. }
             | LspMsg::Staged { stamp, .. }
+            | LspMsg::FoundOnPath { stamp, .. }
             | LspMsg::PanelListed { stamp, .. } => Some(Origin::Stamped(stamp)),
             LspMsg::ConsentAllowed(..)
             | LspMsg::CommandAllowed(..)
             | LspMsg::CommandDismissed(..)
             | LspMsg::ConsentDismissed(..)
+            | LspMsg::ConsentUsePath(..)
             | LspMsg::Removed { .. }
             | LspMsg::ToggleInlayHints
             | LspMsg::TogglePanel
@@ -2698,7 +2817,8 @@ impl DocsMsg {
             | DocsMsg::ToggleShowAll
             | DocsMsg::ToggleGrouping
             | DocsMsg::Select { .. }
-            | DocsMsg::ViewFromMenu => None,
+            | DocsMsg::ViewFromMenu
+            | DocsMsg::ClosePage => None,
         }
     }
 }
@@ -2709,6 +2829,8 @@ impl SettingsMsg {
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
             SettingsMsg::SetThemePref(..)
+            | SettingsMsg::TestConnection
+            | SettingsMsg::ConnectionTested { .. }
             | SettingsMsg::SetLanguage(..)
             | SettingsMsg::SystemAppearanceChanged
             | SettingsMsg::ThemeResynced
@@ -2726,6 +2848,7 @@ impl SettingsMsg {
             | SettingsMsg::Open
             | SettingsMsg::OpenAt(..)
             | SettingsMsg::Close
+            | SettingsMsg::Discard
             | SettingsMsg::Page(..)
             | SettingsMsg::ProviderPicked(..)
             | SettingsMsg::KeyChanged(..)
@@ -2783,6 +2906,7 @@ impl WindowMsg {
             | WindowMsg::ToggleTargetMenu
             | WindowMsg::OpenShortcuts
             | WindowMsg::RebindStart(..)
+            | WindowMsg::RebindCancel
             | WindowMsg::RebindReset(..)
             | WindowMsg::RebindResetAll
             | WindowMsg::ToggleInlineSummaries
@@ -2798,6 +2922,7 @@ impl WindowMsg {
             | WindowMsg::FileFilterEscaped
             | WindowMsg::ToggleMaximize
             | WindowMsg::MarginTabPicked(..)
+            | WindowMsg::FilesTreeScrolled { .. }
             | WindowMsg::MaximizedIs(..)
             | WindowMsg::Composited(..)
             | WindowMsg::SoftwareRenderer(..) => None,

@@ -26,6 +26,16 @@ pub struct FindState {
     /// to those raw (line, col) triples, so once the pane shows anything else
     /// they describe a file that is no longer on screen.
     pub doc: Option<DocId>,
+    /// Match case: on, always; off, only once the query has a capital in it
+    /// (smart case), as project search means it.
+    pub case_sensitive: bool,
+    /// Match whole words only.
+    pub whole_word: bool,
+    /// The query is a regular expression.
+    pub regex: bool,
+    /// The query, a regular expression, is not one: nothing matches, and
+    /// the field says so.
+    pub invalid: bool,
 }
 
 impl FindState {
@@ -34,7 +44,14 @@ impl FindState {
     /// `current` near the previous position when possible.
     pub fn recompute(&mut self, doc: DocId, lines: &[HlLine]) {
         let prev = self.matches.get(self.current).copied();
-        self.matches = find_matches(&self.query, lines);
+        (self.matches, self.invalid) = if self.whole_word || self.regex {
+            match_with_options(self, lines)
+        } else {
+            (
+                find_matches_cased(&self.query, lines, self.case_sensitive),
+                false,
+            )
+        };
         self.doc = Some(doc);
         self.current = match prev {
             Some((line, _, _)) => self.matches.iter().position(|m| m.0 >= line).unwrap_or(0),
@@ -62,12 +79,20 @@ fn line_text(line: &HlLine) -> String {
     line.spans.iter().map(|(t, _)| t.as_str()).collect()
 }
 
-/// All matches of `query` across `lines`, in document order.
+/// All matches of `query` across `lines`, in document order, its case
+/// mattering once it has a capital in it.
+#[cfg(test)]
 pub fn find_matches(query: &str, lines: &[HlLine]) -> Vec<Match> {
+    find_matches_cased(query, lines, false)
+}
+
+/// All matches of `query` across `lines`, in document order: its case
+/// mattering when `case`, or once it has a capital in it.
+fn find_matches_cased(query: &str, lines: &[HlLine], case: bool) -> Vec<Match> {
     if query.is_empty() {
         return Vec::new();
     }
-    let case_sensitive = query.chars().any(|c| c.is_uppercase());
+    let case_sensitive = case || query.chars().any(|c| c.is_uppercase());
     let needle: Vec<char> = if case_sensitive {
         query.chars().collect()
     } else {
@@ -120,6 +145,36 @@ pub fn find_matches(query: &str, lines: &[HlLine]) -> Vec<Match> {
         }
     }
     out
+}
+
+/// The matches of a whole-word or regular-expression find: by project
+/// search's own matcher, its byte ranges in each line's text turned into
+/// display columns. And whether the query, a pattern, is not one.
+fn match_with_options(find: &FindState, lines: &[HlLine]) -> (Vec<Match>, bool) {
+    if find.query.is_empty() {
+        return (Vec::new(), false);
+    }
+    let opts = clew_core::search::SearchOptions {
+        query: find.query.clone(),
+        case_sensitive: find.case_sensitive,
+        whole_word: find.whole_word,
+        regex: find.regex,
+        ..Default::default()
+    };
+    let Some(matcher) = clew_core::search::PreviewMatcher::of_search(&opts) else {
+        // Not empty, so not a pattern.
+        return (Vec::new(), true);
+    };
+    let mut out = Vec::new();
+    for (li, line) in lines.iter().enumerate() {
+        let text = line_text(line);
+        // The display column at each byte where a char starts.
+        let column = |byte: usize| text[..byte].chars().count();
+        for (start, end) in matcher.ranges(&text) {
+            out.push((li, column(start), column(end)));
+        }
+    }
+    (out, false)
 }
 
 #[cfg(test)]
@@ -187,6 +242,53 @@ mod tests {
             find_matches("ai", &plain_lines("a\u{130}z\n")),
             vec![(0, 0, 2)]
         );
+    }
+
+    /// L14: Match case, Whole word and Regular expression, as project
+    /// search has them; a pattern that is not one matches nothing, and says
+    /// so.
+    #[test]
+    fn the_options_narrow_what_matches() {
+        let lines = plain_lines("foo Foo food\nlet x = f(a1 + b22);\n");
+        let mut find = FindState {
+            query: "foo".into(),
+            ..Default::default()
+        };
+        let found = |find: &mut FindState| {
+            find.recompute(("a.rs".into(), 1), &lines);
+            find.matches.clone()
+        };
+        assert_eq!(found(&mut find), [(0, 0, 3), (0, 4, 7), (0, 8, 11)]);
+        find.case_sensitive = true;
+        assert_eq!(found(&mut find), [(0, 0, 3), (0, 8, 11)]);
+        find.whole_word = true;
+        assert_eq!(found(&mut find), [(0, 0, 3)]);
+        find.case_sensitive = false;
+        assert_eq!(found(&mut find), [(0, 0, 3), (0, 4, 7)]);
+        find.whole_word = false;
+        find.regex = true;
+        find.query = r"[a-z]\d+".into();
+        assert_eq!(found(&mut find), [(1, 10, 12), (1, 15, 18)]);
+        assert!(!find.invalid);
+        find.query = "(".into();
+        assert!(found(&mut find).is_empty());
+        assert!(find.invalid, "a pattern that is not one says so");
+        find.regex = false;
+        assert!(!found(&mut find).is_empty(), "as text, ( is found");
+        assert!(!find.invalid);
+    }
+
+    /// Columns after a character of more than one byte are display
+    /// columns, as the plain find's are.
+    #[test]
+    fn option_matches_are_in_display_columns() {
+        let lines = plain_lines("é foo\n");
+        let find = FindState {
+            query: "foo".into(),
+            whole_word: true,
+            ..Default::default()
+        };
+        assert_eq!(match_with_options(&find, &lines).0, [(0, 2, 5)]);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Explanation rendering (markdown/SVG), consent modals, section header.
 
+use super::heard;
 use super::*;
 // Explicit macro imports shadow the glob from `super`, disambiguating
 // iced's column!/row! from the prelude macros of the same name.
@@ -417,6 +418,8 @@ pub(crate) fn call_flow_rows<'a>(
             // live one.
             let is_live = to_call && live_parent.as_deref() == Some(n.name.as_str());
             let live = theme::success();
+            // Wrapped, the place under the name where the margin is narrow:
+            // cut at its edge, the two read as one clipped word.
             let mut r = row![
                 text(arrow)
                     .size(ts::SMALL)
@@ -428,7 +431,7 @@ pub(crate) fn call_flow_rows<'a>(
             if is_live {
                 r = r.push(text(tr!("● live")).size(ts::CAPTION).color(live));
             }
-            let mut col = column![r].spacing(1);
+            let mut col = column![r.wrap()].spacing(1);
             if !summary.is_empty() {
                 col = col.push(one_line_desc(&summary, 64));
             }
@@ -447,7 +450,7 @@ pub(crate) fn call_flow_rows<'a>(
                     .style(theme::list_row(false))
                     .width(Fill)
                     .padding([3, 6])
-                    .on_press(msg)
+                    .on_press(heard::said(&n.name, msg))
                     .into(),
             );
         }
@@ -526,12 +529,26 @@ fn reached_from_rows<'a>(
             )
         },
     );
+    // A test that calls this itself is under Tests: not again here, as the
+    // one step of a chain.
+    let chains: Vec<&Vec<usize>> = paths
+        .iter()
+        .filter(|chain| {
+            !(chain.len() == 2 && {
+                let first = g.node(chain[0]);
+                app.is_test_symbol(&first.file, &first.name)
+            })
+        })
+        .collect();
+    if chains.is_empty() && !paths.is_empty() {
+        return out;
+    }
     out.push(section_header(tr!("Reached from")));
-    if paths.is_empty() {
+    if chains.is_empty() {
         out.push(caption(tr!("No entry point reaches this").into()));
         return out;
     }
-    for chain in paths.iter() {
+    for chain in chains {
         let mut steps: Vec<Element<'a, Message>> = Vec::new();
         let last = chain.len().saturating_sub(1);
         for (i, &step) in chain.iter().enumerate() {
@@ -562,11 +579,14 @@ fn reached_from_rows<'a>(
                 button(label)
                     .style(theme::list_row(false))
                     .padding([1, 4])
-                    .on_press(Message::Semantic(SemanticMsg::OpenNode(Node::Function {
-                        file: n.file.clone(),
-                        name: n.name.clone(),
-                        ordinal: g.ordinals().get(step).copied().unwrap_or(0),
-                    })))
+                    .on_press(heard::said(
+                        &n.name,
+                        Message::Semantic(SemanticMsg::OpenNode(Node::Function {
+                            file: n.file.clone(),
+                            name: n.name.clone(),
+                            ordinal: g.ordinals().get(step).copied().unwrap_or(0),
+                        })),
+                    ))
                     .into(),
             );
             steps.push(text("›").size(ts::SMALL).color(theme::dim()).into());
@@ -639,7 +659,10 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
                 .style(theme::list_row(false))
                 .width(Fill)
                 .padding([3, 6])
-                .on_press(Message::Explain(ExplainMsg::Show(n.clone())))
+                .on_press(heard::said(
+                    label,
+                    Message::Explain(ExplainMsg::Show(n.clone())),
+                ))
                 .into(),
             );
         }
@@ -649,7 +672,7 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
         button(text(label.to_string()).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([2, 8])
-            .on_press(msg)
+            .on_press(heard::said(label, msg))
     };
     let mut actions: Vec<Element<'_, Message>> = Vec::new();
     // Functions get a summary ⇄ per-block-detail toggle.
@@ -668,7 +691,10 @@ pub(crate) fn explain_content(app: &App) -> Element<'_, Message> {
             .into()
         });
     }
-    if app.llm_available {
+    // Not explained yet: what explains it, where the note says so.
+    if !app.proj.explain.running && !app.proj.explain.cache.contains_key(node) {
+        actions.push(act(tr!("Explain All"), super::toolbar::explain_all_message(app)).into());
+    } else if app.llm_available {
         actions.push(
             act(
                 tr!("Re-explain"),
@@ -872,6 +898,18 @@ pub(crate) fn lsp_consent_modal(
                     .wrapping(Wrapping::WordOrGlyph)
             })
         })
+        // The server's own program already on this computer: said, and
+        // offered in place of the download.
+        .push(consent.on_path.as_ref().map(|program| {
+            text(tr!(
+                "{server} is already on this computer, at {path}.",
+                server = crate::app::model::shown(&consent.server_name),
+                path = program.display()
+            ))
+            .size(ts::BODY)
+            .color(theme::fg_muted())
+            .wrapping(Wrapping::WordOrGlyph)
+        }))
         // Asked one at a time: say that more follow, so answering this one
         // and seeing another does not read as the same question again.
         .push(more_questions(waiting))
@@ -881,15 +919,33 @@ pub(crate) fn lsp_consent_modal(
                 button(text(tr!("Not now")).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::ConsentDismissed(number))),
+                    .on_press(heard::answer(
+                        tr!("Not now"),
+                        heard::Answer::No,
+                        Message::Lsp(LspMsg::ConsentDismissed(number))
+                    )),
+                // Each Allow offered to the voice only once it can be
+                // pressed: read first, said yes to after.
+                consent.on_path.as_ref().map(|_| crate::ui::fresh::allow(
+                    ready,
+                    button(text(tr!("Use that one")).size(ts::BASE))
+                        .style(theme::toolbar_button)
+                        .padding([6, 16])
+                        .on_press_maybe(ready.then(|| heard::said(
+                            tr!("Use that one"),
+                            Message::Lsp(LspMsg::ConsentUsePath(number))
+                        )))
+                )),
                 crate::ui::fresh::allow(
                     ready,
-                    button(text(action).size(ts::BASE))
+                    button(text(action.clone()).size(ts::BASE))
                         .style(theme::primary_button)
                         .padding([6, 16])
-                        .on_press_maybe(
-                            ready.then_some(Message::Lsp(LspMsg::ConsentAllowed(number)))
-                        )
+                        .on_press_maybe(ready.then(|| heard::answer(
+                            &action,
+                            heard::Answer::Yes,
+                            Message::Lsp(LspMsg::ConsentAllowed(number))
+                        )))
                 ),
             ]
             .spacing(10)
@@ -909,13 +965,19 @@ pub(crate) fn lsp_consent_modal(
 }
 
 /// "N more questions are waiting…", under a question `waiting` more follow;
-/// nothing under the last.
-fn more_questions<'a>(waiting: usize) -> Option<Element<'a, Message>> {
+/// under the last, its line held empty. The dialog is centred: a line
+/// coming as more questions queued moved its buttons under the hand on its
+/// way to them.
+fn more_questions<'a>(waiting: usize) -> Element<'a, Message> {
     let said = match waiting {
-        0 => return None,
+        0 => String::new(),
         n => trn!("1 more after this", "{n} more after this", n),
     };
-    Some(text(said).size(ts::SMALL).color(theme::dim()).into())
+    text(said)
+        .size(ts::SMALL)
+        .line_height(ts::normal_line(ts::SMALL))
+        .color(theme::dim())
+        .into()
 }
 
 /// Confirm what the project's own `lsp.toml` asks clew to do for a language:
@@ -1012,15 +1074,21 @@ pub(crate) fn lsp_command_modal(
                 button(text(decline).size(ts::BASE))
                     .style(theme::primary_button)
                     .padding([6, 16])
-                    .on_press(Message::Lsp(LspMsg::CommandDismissed(number))),
+                    .on_press(heard::answer(
+                        decline,
+                        heard::Answer::No,
+                        Message::Lsp(LspMsg::CommandDismissed(number))
+                    )),
                 crate::ui::fresh::allow(
                     ready,
                     button(text(accept).size(ts::BASE))
                         .style(theme::toolbar_button)
                         .padding([6, 16])
-                        .on_press_maybe(
-                            ready.then_some(Message::Lsp(LspMsg::CommandAllowed(number)))
-                        )
+                        .on_press_maybe(ready.then(|| heard::answer(
+                            accept,
+                            heard::Answer::Yes,
+                            Message::Lsp(LspMsg::CommandAllowed(number))
+                        )))
                 ),
             ]
             .spacing(10)

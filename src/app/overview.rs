@@ -347,6 +347,21 @@ impl App {
 }
 
 impl App {
+    /// Put away the page covering the code — a doc page, the overview, the
+    /// statistics, the glossary — and say whether there was one: Esc, and
+    /// Back over a file, go to the code under it first.
+    pub(crate) fn put_away_page(&mut self) -> bool {
+        let covered = self.proj.docs.page.is_some()
+            || self.proj.overview.showing
+            || self.proj.stats.showing
+            || self.proj.glossary.showing;
+        self.proj.docs.page = None;
+        self.proj.overview.showing = false;
+        self.proj.stats.showing = false;
+        self.proj.glossary.showing = false;
+        covered
+    }
+
     /// Handle a [`OverviewMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_overview(&mut self, message: OverviewMsg) -> Task<Message> {
@@ -368,6 +383,11 @@ impl App {
                 self.start_stats(false)
             }
             OverviewMsg::RefreshStats => self.start_stats(true),
+            OverviewMsg::Close => {
+                self.proj.overview.showing = false;
+                self.proj.stats.showing = false;
+                Task::none()
+            }
             OverviewMsg::StatsDone { rev, report, .. } => self.on_stats_done(rev, report),
             OverviewMsg::Generate => self.on_generate_overview(),
             OverviewMsg::Done {

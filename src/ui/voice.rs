@@ -29,6 +29,12 @@ impl std::fmt::Display for LanguageChoice {
 /// One model's row: picked or not (a radio's mark), what it is, and at
 /// its right whether it is here — its download, or getting it.
 fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
+    // Its Download, Remove and Cancel said with its name, as every model
+    // has them: "Download Whisper Small".
+    super::heard::about(crate::i18n::lookup(model.name), || model_row_of(app, model))
+}
+
+fn model_row_of<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
     let picked = app.voice.prefs.model == model.id;
     let installed = app.voice.installed(model);
     let state: Element<'a, Message> = if let Some(d) = app.voice.downloads.get(model.id) {
@@ -36,30 +42,11 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
             .total
             .unwrap_or(u64::from(model.size_mb) * 1_000_000)
             .max(1);
-        let share = (d.done as f32 / total as f32).clamp(0.0, 1.0);
-        row![
-            container(super::meter::eased_bar(
-                share,
-                70.0,
-                4.0,
-                theme::progress,
-                super::meter::PROGRESS,
-            ))
-            .width(70),
-            text(tr!(
-                "{percent}%",
-                percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim()),
-            form::action(
-                tr!("Cancel"),
-                Some(Message::Voice(VoiceMsg::CancelDownload(model.id)))
-            ),
-        ]
-        .spacing(8)
-        .align_y(iced::Center)
-        .into()
+        getting(
+            d.done,
+            total,
+            Message::Voice(VoiceMsg::CancelDownload(model.id)),
+        )
     } else if installed {
         row![
             text(tr!("Downloaded"))
@@ -82,12 +69,22 @@ fn model_row<'a>(app: &'a App, model: &'static Model) -> Element<'a, Message> {
             form::action(&label, msg).into()
         }
     };
-    let detail = column![
+    let mut detail = column![
         text(crate::i18n::lookup(model.about))
             .size(ts::SMALL)
             .color(theme::dim())
             .wrapping(Wrapping::WordOrGlyph),
     ];
+    // The one chosen and not here yet — the first one chosen, Small, is
+    // not: chosen, it says what being chosen does until it is here.
+    if picked && !installed && !app.voice.downloads.contains_key(model.id) {
+        detail = detail.push(
+            text(tr!("Voice uses this model once it is downloaded."))
+                .size(ts::SMALL)
+                .color(theme::accent())
+                .wrapping(Wrapping::WordOrGlyph),
+        );
+    }
     let mut rows = column![form::choice_with(
         crate::i18n::lookup(model.name),
         Some(detail.into()),
@@ -122,17 +119,7 @@ impl std::fmt::Display for VoiceChoice {
 /// What a voice is called: Supertone's F1…M5 as a woman's or a man's
 /// voice and its number; a named one by its name.
 fn voice_name(voice: &Voice) -> String {
-    let mut chars = voice.name.chars();
-    let kind = chars.next();
-    let number: String = chars.collect();
-    if !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()) {
-        match kind {
-            Some('F') => return tr!("Female voice {n}", n = number),
-            Some('M') => return tr!("Male voice {n}", n = number),
-            _ => {}
-        }
-    }
-    voice.name.to_string()
+    crate::app::choices::voice_called(crate::i18n::current(), voice.name)
 }
 
 /// A pace as the picker lists it: "0.8×", "1×", "1.25×".
@@ -161,6 +148,12 @@ impl std::fmt::Display for SpeedChoice {
 /// One speech model's row: what it is and its license, and at its right
 /// whether it is here — Try and Remove — its download, or getting it.
 fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, Message>> {
+    super::heard::about(crate::i18n::lookup(model.name), || {
+        speech_row_of(app, model)
+    })
+}
+
+fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, Message>> {
     let installed = app.speech_installed(model);
     let state: Element<'a, Message> = if let Some(d) = app.voice.speech.downloads.get(model.id) {
         getting(
@@ -235,9 +228,12 @@ fn speech_row<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a, M
     rows
 }
 
-/// A download under way: how far it is, and its Cancel.
-fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
+/// A download under way: how far it is, and its Cancel. The share is said
+/// in a slot as wide as "100%" reads, so its bar does not move as it grows.
+pub(crate) fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
     let share = (done as f32 / total.max(1) as f32).clamp(0.0, 1.0);
+    let percent = |share: f64| tr!("{percent}%", percent = crate::i18n::decimal(share, 0));
+    let said = percent(f64::from(share) * 100.0);
     row![
         container(super::meter::eased_bar(
             share,
@@ -247,12 +243,12 @@ fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
             super::meter::PROGRESS,
         ))
         .width(70),
-        text(tr!(
-            "{percent}%",
-            percent = crate::i18n::decimal(f64::from(share) * 100.0, 0)
-        ))
-        .size(ts::SMALL)
-        .color(theme::dim()),
+        super::steady::slot(
+            text(said.clone()).size(ts::SMALL).color(theme::dim()),
+            &said,
+            &[&percent(100.0)],
+            ts::SMALL,
+        ),
         form::action(tr!("Cancel"), Some(cancel)),
     ]
     .spacing(8)
@@ -264,6 +260,10 @@ fn getting<'a>(done: u64, total: u64, cancel: Message) -> Element<'a, Message> {
 /// whether it is here — Remove — its download, or getting it; and what
 /// last went wrong with it.
 fn turn_rows(app: &App) -> Vec<Element<'_, Message>> {
+    super::heard::about(clew_voice::turn::MODEL.name, || turn_rows_of(app))
+}
+
+fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
     use clew_voice::turn::{self as smart, MODEL};
     let installed = app.voice.store.as_ref().is_some_and(smart::installed);
     let state: Element<'_, Message> = if let Some(d) = &app.voice.turn.download {
@@ -335,7 +335,6 @@ fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
 /// The settings' Voice section: which model listens, and how what it hears
 /// is used. Its changes take effect, and are saved, at once.
 pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
-    let chord = app.keymap.chord(crate::keymap::Action::Voice).caps();
     let models = MODELS.iter().map(|model| model_row(app, model)).collect();
     let mut listening = Vec::new();
     if !app.voice.prefs.model().english_only {
@@ -368,24 +367,11 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
     ));
     listening.extend(turn_rows(app));
-    let mut parts = vec![
-        form::note(tr!(
-            "Press {chord} and speak. Speech stays on this computer.",
-            chord = chord
-        ))
-        .into(),
+    // Groups, and no captions around them: the voice key is on the button
+    // it starts, and where models are kept is no setting.
+    form::page(vec![
         form::group(tr!("Model"), None, None, models),
         form::group(tr!("Listening"), None, None, listening),
         form::group(tr!("Speaking"), None, None, speaking_rows(app)),
-    ];
-    if let Some(store) = &app.voice.store {
-        parts.push(
-            form::note(tr!(
-                "Models are stored in {path}",
-                path = store.dir().display()
-            ))
-            .into(),
-        );
-    }
-    form::page(parts)
+    ])
 }

@@ -1203,7 +1203,10 @@ pub(crate) fn explanation_text(cached: Option<&explain::Cached>) -> String {
             c.summary
         ),
         Some(c) => c.summary.clone(),
-        None => tr!("Not explained yet — run Explain All from the ⋯ menu.").to_string(),
+        // What explains it is offered beside this, where it is shown — not
+        // named by where it is: "the ⋯ menu" was no menu on screen once its
+        // tools were laid on the strip.
+        None => tr!("Not explained yet.").to_string(),
     }
 }
 
@@ -1269,7 +1272,11 @@ impl App {
             } => self.on_explain_done(generation, cache, failures, *tally, written),
             ExplainMsg::RefreshAll => self.on_refresh_all(),
             ExplainMsg::Show(node) => {
+                // A note is shown on the margin's Notes: left on Calls or
+                // History, the margin opened on them and the note asked for
+                // (the file banner's click, the file's Explain) did not show.
                 self.show_right_panel = true;
+                self.margin_tab = MarginTab::Notes;
                 self.show_explanation(node)
             }
             ExplainMsg::ReexplainNode => self.on_reexplain_node(),

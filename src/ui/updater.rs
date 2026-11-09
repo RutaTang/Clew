@@ -73,9 +73,25 @@ pub(crate) fn update_banner(app: &App) -> Option<Element<'_, Message>> {
                 ),
                 _ => slot(),
             };
+            // As wide as it reads when it is done: the count gaining a digit
+            // or turning from KB to MB moved its own words about.
+            let widest = match total {
+                Some(t) if t > 0 => super::steady::widest_figure(&tr!(
+                    "Downloading Clew {version}…  {done} / {total}",
+                    version = version,
+                    done = human_size(t),
+                    total = human_size(t)
+                )),
+                _ => label.clone(),
+            };
             row![
                 dot(),
-                text(label).size(ts::BODY).color(theme::fg_muted()),
+                super::steady::slot(
+                    text(label.clone()).size(ts::BODY).color(theme::fg_muted()),
+                    &label,
+                    &[&widest],
+                    ts::BODY,
+                ),
                 space().width(Fill),
                 meter,
                 action_button(
@@ -151,13 +167,17 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
         if busy {
             b
         } else {
-            b.on_press(Message::Updater(UpdaterMsg::InstallStart))
+            b.on_press(super::heard::answer(
+                tr!("Update now"),
+                super::heard::Answer::Yes,
+                Message::Updater(UpdaterMsg::InstallStart),
+            ))
         }
     };
 
     let panel = container(
         column![
-            text(format!("clew {version}"))
+            text(format!("Clew {version}"))
                 .size(ts::TITLE)
                 .color(theme::fg_bright()),
             text(tr!("What's new"))
@@ -169,7 +189,11 @@ pub(crate) fn update_notes_modal(app: &App) -> Element<'_, Message> {
                 button(text(tr!("Later")).size(ts::BASE))
                     .style(theme::toolbar_button)
                     .padding([6, 16])
-                    .on_press(Message::Updater(UpdaterMsg::CloseNotes)),
+                    .on_press(super::heard::answer(
+                        tr!("Later"),
+                        super::heard::Answer::No,
+                        Message::Updater(UpdaterMsg::CloseNotes),
+                    )),
                 update_now,
             ]
             .spacing(10)
@@ -197,7 +221,7 @@ fn dot() -> Element<'static, Message> {
 fn action_button(label: &'static str, msg: Message, primary: bool) -> Element<'static, Message> {
     let b = button(text(label).size(ts::BODY))
         .padding([4, 12])
-        .on_press(msg);
+        .on_press(super::heard::said(label, msg));
     if primary {
         b.style(theme::primary_button).into()
     } else {
@@ -214,6 +238,9 @@ fn dismiss_button() -> Element<'static, Message> {
     ))
     .style(theme::toolbar_button)
     .padding([2, 6])
-    .on_press(Message::Updater(UpdaterMsg::BannerDismissed))
+    .on_press(super::heard::said(
+        tr!("Dismiss"),
+        Message::Updater(UpdaterMsg::BannerDismissed),
+    ))
     .into()
 }

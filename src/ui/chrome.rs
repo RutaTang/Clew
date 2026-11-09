@@ -36,6 +36,10 @@ pub(crate) const DIALOG_W: f32 = 560.0;
 /// The command bar: the design's 580 inside its 1 px border.
 pub(crate) const FINDER_W: f32 = 582.0;
 pub(crate) const GRAPH_MODAL_W: f32 = 760.0;
+/// The widest the graph window grows in a wide window, and the room it
+/// leaves round it.
+pub(crate) const GRAPH_MODAL_MAX_W: f32 = 1600.0;
+pub(crate) const GRAPH_MODAL_EDGE: f32 = 48.0;
 /// Width of the reading-target dropdown.
 pub(crate) const TARGET_MENU_W: f32 = 172.0;
 /// Width of the tutorial's callout card.
@@ -67,6 +71,9 @@ pub(crate) enum Placement {
     Center,
     /// Horizontally centered, this far below the window's top edge.
     Top(f32),
+    /// Horizontally centered, its bottom edge this far above the window's
+    /// bottom edge.
+    Bottom(f32),
     /// Pinned under a control in the top-right corner (a dropdown).
     TopRight { top: f32, right: f32 },
     /// Pinned under a control in the top-left corner (the app menu).
@@ -114,6 +121,13 @@ pub(crate) fn modal<'a>(
             top,
             ..Padding::ZERO
         }),
+        Placement::Bottom(bottom) => frame
+            .align_x(iced::Center)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .padding(Padding {
+                bottom,
+                ..Padding::ZERO
+            }),
         Placement::TopRight { top, right } => frame
             .align_x(iced::alignment::Horizontal::Right)
             .padding(Padding {
@@ -164,6 +178,15 @@ pub(crate) struct Prompt<'a> {
 
 /// Build a [`Prompt`] dialog. Enter submits, Esc / a backdrop click cancels.
 pub(crate) fn prompt_modal(p: Prompt<'_>) -> Element<'_, Message> {
+    // What is said is its words; its Save is "yes", its Cancel "no".
+    super::heard::field(p.value, p.on_input);
+    let cancel = super::heard::answer(tr!("Cancel"), super::heard::Answer::No, p.cancel.clone());
+    let submit = super::heard::answer(p.submit_label, super::heard::Answer::Yes, p.submit.clone());
+    let p = Prompt {
+        cancel,
+        submit,
+        ..p
+    };
     let panel = container(
         column![
             text(p.title).size(ts::EMPHASIS).color(theme::fg()),
@@ -239,11 +262,18 @@ pub(crate) fn slot<'a>() -> Element<'a, Message> {
 }
 
 /// Side of a panel's close button.
-const CLOSE_SIDE: f32 = 28.0;
+pub(crate) const CLOSE_SIDE: f32 = 28.0;
 
 /// The × at the end of a panel's title (Settings, Connect, Glossary, the
 /// language servers): quiet until the pointer is over it, named in its tip.
 pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
+    close_button_saying(msg, tr!("Close"))
+}
+
+/// A [`close_button`] whose tip says what closing does, where that is more
+/// than closing (the first-open sheet's: the project is not opened).
+pub(crate) fn close_button_saying<'a>(msg: Message, tip: &'a str) -> Element<'a, Message> {
+    let msg = super::heard::said(tip, msg);
     super::chrome_tip(
         button(container(glyph::icon(Glyph::Close, theme::fg_muted(), 14.0)).center(Fill))
             .style(theme::icon_button(false))
@@ -251,7 +281,7 @@ pub(crate) fn close_button<'a>(msg: Message) -> Element<'a, Message> {
             .height(CLOSE_SIDE)
             .padding(0)
             .on_press(msg),
-        tr!("Close"),
+        tip,
         Some("Esc".to_string()),
     )
 }

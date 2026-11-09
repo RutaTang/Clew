@@ -37,6 +37,10 @@ pub(crate) use dialogs::*;
 mod tutorial;
 pub(crate) use tutorial::*;
 mod statusbar;
+// Text that changes while it is watched, in a slot that does not.
+pub(crate) mod steady;
+// Tooltips that wait for the pointer to rest.
+pub(crate) mod tip;
 pub(crate) use statusbar::*;
 mod panes;
 pub(crate) use panes::*;
@@ -52,6 +56,7 @@ mod panels;
 pub(crate) use panels::*;
 mod sidebar;
 pub(crate) use sidebar::*;
+pub(crate) use sidebar::{TREE_ROW_GAP, TREE_ROW_H, tree_row_index};
 mod toolbar;
 pub(crate) use toolbar::*;
 mod sheet;
@@ -74,6 +79,7 @@ mod updater;
 pub(crate) use updater::*;
 mod askfloat;
 mod form;
+pub(crate) mod heard;
 mod meter;
 mod setup;
 pub(crate) use askfloat::*;
@@ -247,6 +253,11 @@ pub fn finder_input_id() -> iced::widget::Id {
     iced::widget::Id::new("finder-input")
 }
 
+/// The Files view's tree, scrolled to the file being read.
+pub fn files_tree_id() -> iced::widget::Id {
+    iced::widget::Id::new("files-tree")
+}
+
 /// The finder's result list, so the selection can be scrolled into view.
 pub fn finder_list_id() -> iced::widget::Id {
     iced::widget::Id::new("finder-list")
@@ -364,7 +375,7 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Why(bw)
     } else if let Some(insight) = &app.proj.insight {
         O::Insight(insight)
-    } else if app.show_tools_menu {
+    } else if app.show_tools_menu && !tools_on_strip(app) {
         O::ToolsMenu
     } else if app.show_target_menu {
         O::TargetMenu
@@ -470,7 +481,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::ViewMenu => view_menu(app),
             Self::Graph(overlay) => project_graph_modal(app, overlay),
             Self::Finder => finder_modal(app),
-            Self::ContextMenu(menu) => context_menu(menu),
+            Self::ContextMenu(menu) => context_menu(app, menu),
             Self::Hover(hover) => hover_tooltip(hover),
         }
     }
@@ -525,6 +536,7 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// deeper), its scrollable was rebuilt at offset 0 and reported that offset,
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
+    heard::layer(heard::Layer::Window);
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
     let frame = app.window_frame;
@@ -564,8 +576,19 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // the overlay layer (at most one overlay), so the palette or a menu
     // opens above Ask too; and, above everything, the tutorial — whose
     // callout stays on top while it drives the UI underneath.
+    // Each layer said as it is built, for what voice may press
+    // (`heard::gather`): a dialog holding the keys leaves nothing under it.
+    heard::layer(heard::Layer::Ask);
     let ask = ask_layer(app);
-    let overlay = active_overlay(app).map_or_else(slot, |o| o.view(app));
+    let overlay = active_overlay(app).map_or_else(slot, |o| {
+        heard::layer(if o.holds_keys() {
+            heard::Layer::Overlay
+        } else {
+            heard::Layer::Window
+        });
+        o.view(app)
+    });
+    heard::layer(heard::Layer::Tutorial);
     let tutorial = if app.tutorial.is_some() {
         tutorial_overlay(app)
     } else {

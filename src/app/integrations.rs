@@ -601,16 +601,19 @@ impl App {
                         id: "once".into(),
                         label: tr!("Allow").into(),
                         allows: true,
+                        always: false,
                     },
                     ApprovalOption {
                         id: "always".into(),
                         label: tr!("Always allow {tool}", tool = target.tool.name),
                         allows: true,
+                        always: true,
                     },
                     ApprovalOption {
                         id: "deny".into(),
                         label: tr!("Deny").into(),
                         allows: false,
+                        always: false,
                     },
                 ],
             });
@@ -985,10 +988,11 @@ impl App {
         };
         let stream = self.mint_request_id();
         self.proj.ask_input.clear();
+        let spoken = std::mem::take(&mut self.proj.ask_spoken);
         self.proj.ask_turns.push(AskTurn {
             stream,
             question,
-            spoken: std::mem::take(&mut self.proj.ask_spoken),
+            spoken,
             streaming: true,
             extras: TurnExtras {
                 agent: Some(label.clone()),
@@ -996,7 +1000,11 @@ impl App {
             },
             ..AskTurn::default()
         });
-        self.reveal_ask();
+        // Said aloud, it is answered without the card opening over the code
+        // (see `on_transcribed`).
+        if !spoken {
+            self.reveal_ask();
+        }
         let link = self
             .proj
             .acp
@@ -1576,6 +1584,7 @@ impl App {
                             id: o.id.clone(),
                             label: o.name.clone(),
                             allows: o.kind.starts_with("allow"),
+                            always: o.kind.ends_with("always"),
                         })
                         .collect(),
                 );
@@ -2144,6 +2153,7 @@ pub(crate) fn with_a_decline(
         id: id.clone(),
         label: tr!("Decline").into(),
         allows: false,
+        always: false,
     });
     (options, Some(id))
 }

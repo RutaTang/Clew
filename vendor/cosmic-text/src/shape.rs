@@ -180,7 +180,15 @@ fn shape_fallback(
     assert_eq!(rtl, span_rtl);
 
     let attrs = attrs_list.get_span(start_run);
-    let mut rb_font_features = Vec::new();
+    // clew patch: figures of one width (`tnum`) unless the text asks for
+    // others — a count, a timer, a caret's place no longer moves what stands
+    // beside it as its digits change. Asked for first, so a feature the text
+    // sets (later in the list) wins.
+    let mut rb_font_features = vec![harfrust::Feature::new(
+        harfrust::Tag::new(b"tnum"),
+        1,
+        0..usize::MAX,
+    )];
 
     // Convert attrs::Feature to harfrust::Feature
     for feature in &attrs.font_features.features {

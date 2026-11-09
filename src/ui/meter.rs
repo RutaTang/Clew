@@ -436,6 +436,97 @@ impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Bar {
     }
 }
 
+/// How long the busy icon takes to turn once.
+const SPIN_PERIOD: f32 = 1.0;
+
+/// `glyph` in `color`, `size` across, turning: something at work, said by
+/// its own icon going round where it stands at rest — no words coming and
+/// going beside it to move what is there.
+pub(crate) fn spinning<'a, Message: 'a>(
+    glyph: crate::glyph::Glyph,
+    color: iced::Color,
+    size: f32,
+) -> Element<'a, Message> {
+    Element::new(Spinner {
+        handle: crate::glyph::handle(glyph, color),
+        size,
+    })
+}
+
+struct Spinner {
+    handle: iced::widget::svg::Handle,
+    size: f32,
+}
+
+impl<Message> Widget<Message, iced::Theme, iced::Renderer> for Spinner {
+    fn tag(&self) -> tree::Tag {
+        tree::Tag::of::<Rippling>()
+    }
+
+    fn state(&self) -> tree::State {
+        tree::State::new(Rippling::default())
+    }
+
+    fn size(&self) -> Size<Length> {
+        Size::new(Length::Fixed(self.size), Length::Fixed(self.size))
+    }
+
+    fn layout(
+        &mut self,
+        _tree: &mut Tree,
+        _renderer: &iced::Renderer,
+        limits: &layout::Limits,
+    ) -> layout::Node {
+        layout::atomic(limits, Length::Fixed(self.size), Length::Fixed(self.size))
+    }
+
+    fn update(
+        &mut self,
+        tree: &mut Tree,
+        event: &Event,
+        _layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _renderer: &iced::Renderer,
+        _clipboard: &mut dyn Clipboard,
+        shell: &mut Shell<'_, Message>,
+        _viewport: &Rectangle,
+    ) {
+        let Event::Window(iced::window::Event::RedrawRequested(now)) = event else {
+            return;
+        };
+        let state = tree.state.downcast_mut::<Rippling>();
+        state.since.get_or_insert(*now);
+        state.now = Some(*now);
+        // It turns for as long as it is shown: while the work runs.
+        shell.request_redraw();
+    }
+
+    fn draw(
+        &self,
+        tree: &Tree,
+        renderer: &mut iced::Renderer,
+        _theme: &iced::Theme,
+        _style: &renderer::Style,
+        layout: Layout<'_>,
+        _cursor: mouse::Cursor,
+        _viewport: &Rectangle,
+    ) {
+        use iced::advanced::svg::Renderer as _;
+        let state = tree.state.downcast_ref::<Rippling>();
+        let turned = match (state.since, state.now) {
+            (Some(since), Some(now)) => now.duration_since(since).as_secs_f32() / SPIN_PERIOD,
+            _ => 0.0,
+        };
+        let bounds = layout.bounds();
+        renderer.draw_svg(
+            iced::advanced::svg::Svg::new(self.handle.clone())
+                .rotation(iced::Radians(turned.fract() * std::f32::consts::TAU)),
+            bounds,
+            bounds.expand(self.size / 4.0),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

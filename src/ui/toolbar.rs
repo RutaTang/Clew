@@ -118,8 +118,28 @@ pub(crate) fn icon_action<'a>(
     name: &'a str,
     message: Option<Message>,
 ) -> Element<'a, Message> {
+    busy_action(glyph, name, message, false)
+}
+
+/// [`icon_action`] for work that runs a while: while it is `busy`, its icon
+/// turns in its place — words that came in for it moved what stood beside
+/// them — and it cannot be pressed again.
+pub(crate) fn busy_action<'a>(
+    glyph: crate::glyph::Glyph,
+    name: &'a str,
+    message: Option<Message>,
+    busy: bool,
+) -> Element<'a, Message> {
+    let icon = if busy {
+        super::meter::spinning(glyph, theme::accent(), 15.0)
+    } else {
+        crate::glyph::icon(glyph, theme::fg_muted(), 15.0)
+    };
+    let message = message
+        .filter(|_| !busy)
+        .map(|m| super::heard::said(name, m));
     chrome_tip(
-        button(container(crate::glyph::icon(glyph, theme::fg_muted(), 15.0)).center(Fill))
+        button(container(icon).center(Fill))
             .style(theme::icon_button(false))
             .padding(0)
             .width(24)
@@ -133,7 +153,7 @@ pub(crate) fn icon_action<'a>(
 /// [`chrome_tip`], on a given side of the control.
 pub(crate) fn tip_at<'a>(
     control: impl Into<Element<'a, Message>>,
-    name: &'a str,
+    name: impl iced::widget::text::IntoFragment<'a>,
     shortcut: Option<String>,
     side: tooltip::Position,
 ) -> Element<'a, Message> {
@@ -168,10 +188,7 @@ pub(crate) fn tip_at<'a>(
         .style(theme::tip);
     // No padding of the tooltip's own (iced's is 5) round the bubble: it
     // set the bubble 5 further from what it names than the design's 10.
-    tooltip(control, bubble, side)
-        .gap(TIP_GAP)
-        .padding(0)
-        .into()
+    super::tip::tip(control, bubble, side).gap(TIP_GAP).into()
 }
 
 /// A tooltip's shortcut, as its keys: each a cap of its own on the bubble,
@@ -211,13 +228,9 @@ const KEYCAP_MIN_W: f32 = 18.0;
 /// Size of a tooltip's words.
 const TIP_SIZE: f32 = 12.0;
 
-/// A shortcut, drawn as its keys: one cap for each (⌘ ⇧ A, or Ctrl Shift A).
-pub(crate) fn keycap<'a>(caps: String) -> Element<'a, Message> {
-    caps_in(caps, crate::fonts::UI_MEDIUM, CapSize::FIELD)
-}
-
-/// [`keycap`] on a control (the chat field), whose words keep the face's
-/// own spacing (`fonts::in_control`).
+/// A shortcut on a control (the chat field), drawn as its keys — one cap
+/// for each (⌘ ⇧ A, or Ctrl Shift A) — whose words keep the face's own
+/// spacing (`fonts::in_control`).
 fn control_keycap<'a>(caps: String) -> Element<'a, Message> {
     caps_in(
         caps,
@@ -226,8 +239,8 @@ fn control_keycap<'a>(caps: String) -> Element<'a, Message> {
     )
 }
 
-/// [`keycap`] at the size the design gives the keys of a row of the
-/// command bar.
+/// A shortcut drawn as its keys, at the size the design gives the keys of a
+/// row of the command bar.
 pub(crate) fn row_keycap<'a>(caps: String) -> Element<'a, Message> {
     caps_in(caps, crate::fonts::UI_MEDIUM, CapSize::ROW)
 }
@@ -314,9 +327,28 @@ pub(crate) fn split_caps(caps: &str) -> Vec<String> {
 }
 
 /// A borderless icon button of the chrome.
+/// How strongly a strip control that can do nothing now is drawn.
+pub(crate) const DISABLED_OPACITY: f32 = 0.35;
+
 fn icon_button<'a>(glyph: Glyph, color: iced::Color, on: bool) -> button::Button<'a, Message> {
+    strip_button(glyph, color, on, true)
+}
+
+/// A strip control: `glyph` in `color`, lit when `on`, faded when it can
+/// do nothing (`able` false).
+fn strip_button<'a>(
+    glyph: Glyph,
+    color: iced::Color,
+    on: bool,
+    able: bool,
+) -> button::Button<'a, Message> {
+    let mark = if able {
+        glyph::icon(glyph, color, ICON)
+    } else {
+        glyph::icon_faded(glyph, color, ICON, DISABLED_OPACITY)
+    };
     button(
-        container(glyph::icon(glyph, color, ICON))
+        container(mark)
             .width(Fill)
             .height(Fill)
             .align_x(iced::Center)
@@ -532,7 +564,7 @@ fn window_buttons(app: &App) -> Element<'_, Message> {
                 .padding(0)
                 .width(Length::Fixed(WIN_BTN_W))
                 .height(Fill)
-                .on_press(msg),
+                .on_press(super::heard::said(label, msg)),
             label,
             None,
         )
@@ -575,16 +607,27 @@ fn search_field(app: &App) -> Element<'_, Message> {
     let face = button(
         row![
             glyph::icon(Glyph::Search, theme::fg_muted(), 15.0),
-            container(ts::set_in(
-                text(tr!("Search files, symbols and commands"))
+            // Cut to the room the field leaves it, with an ellipsis: clipped,
+            // it stopped mid-word at its edge.
+            container(iced::widget::responsive(|room| {
+                let label = tr!("Search files, symbols and commands");
+                ts::set_in(
+                    text(super::steady::cut(
+                        label,
+                        room.width,
+                        ts::BASE,
+                        crate::fonts::UI,
+                    ))
                     .font(crate::fonts::in_control(crate::fonts::UI))
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
-                FIELD_H - 2.0,
-                ts::INTER,
-                ts::BASE,
-            ))
+                    FIELD_H - 2.0,
+                    ts::INTER,
+                    ts::BASE,
+                )
+            }))
             .width(Fill)
+            .height(Length::Fixed(FIELD_H - 2.0))
             .clip(true),
             control_keycap(chord),
         ]
@@ -592,24 +635,20 @@ fn search_field(app: &App) -> Element<'_, Message> {
         .height(Fill)
         .align_y(iced::Center),
     )
-    .style(theme::field_face)
-    .padding(0)
-    .width(Fill)
-    .height(Fill)
+    // The whole field is the button, so the pointer shades all of it: the
+    // design's 12 before and 6 after, inside its 1 px edge (which iced draws
+    // inside the box).
+    .style(theme::field_button)
+    .padding(Padding {
+        top: 1.0,
+        right: 6.0 + 1.0,
+        bottom: 1.0,
+        left: 12.0 + 1.0,
+    })
+    .width(Length::Fixed(rect.width))
+    .height(Length::Fixed(FIELD_H))
     .on_press(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
-    // The design's 12 before and 6 after, inside the field's 1 px edge
-    // (which iced draws inside the box).
-    container(face)
-        .padding(Padding {
-            top: 1.0,
-            right: 6.0 + 1.0,
-            bottom: 1.0,
-            left: 12.0 + 1.0,
-        })
-        .width(Length::Fixed(rect.width))
-        .height(Length::Fixed(FIELD_H))
-        .style(theme::field(false))
-        .into()
+    face.into()
 }
 
 // ---------------------------------------------------------------- tool strip
@@ -662,22 +701,169 @@ pub(crate) fn body_top(app: &App) -> f32 {
     TOOLBAR_H + update_banner_height(app)
 }
 
-/// Centre of a strip tool, in window coordinates.
-pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
-    let x = app.window_width - STRIP_W / 2.0;
-    let y = match tool {
-        StripTool::Settings => app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - ICON_BTN / 2.0,
-        tool => {
-            let i = STRIP_TOP.iter().position(|t| *t == tool).unwrap_or(0);
-            let rules = STRIP_RULE_BEFORE.iter().filter(|&&r| r <= i).count();
-            body_top(app)
-                + STRIP_PAD_TOP
-                + i as f32 * (ICON_BTN + STRIP_SPACING)
-                + rules as f32 * (STRIP_RULE_H + STRIP_SPACING)
-                + ICON_BTN / 2.0
+/// One slot down the strip: a tool, a row of the ⋯ menu laid on the strip,
+/// or a group's rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StripSlot {
+    Tool(StripTool),
+    Row(ToolsRow),
+    Rule,
+}
+
+/// The least room left between the strip's last tool and Settings at its
+/// foot.
+const STRIP_FOOT_GAP: f32 = 12.0;
+
+/// The strip's slots from the top (Settings, at its foot, apart). Where the
+/// strip is tall enough, the ⋯ menu's rows are laid on it too, in their
+/// groups, and the ⋯ is not there: a menu of what the strip had room to
+/// show was a click more for each of them. Shorter, they stay in the menu.
+pub(crate) fn strip_slots(app: &App) -> Vec<StripSlot> {
+    let top = |with_more: bool| {
+        let mut slots = Vec::new();
+        for (i, t) in STRIP_TOP.iter().enumerate() {
+            if *t == StripTool::More && !with_more {
+                continue;
+            }
+            if STRIP_RULE_BEFORE.contains(&i) {
+                slots.push(StripSlot::Rule);
+            }
+            slots.push(StripSlot::Tool(*t));
         }
+        slots
     };
-    iced::Point::new(x, y)
+    let mut inline = top(false);
+    for (i, row) in TOOLS_MENU_ROWS.iter().enumerate() {
+        if i == 0 || TOOLS_MENU_SEPARATORS.contains(&i) {
+            inline.push(StripSlot::Rule);
+        }
+        inline.push(StripSlot::Row(*row));
+    }
+    let height = |slots: &[StripSlot]| {
+        slots
+            .iter()
+            .map(|s| match s {
+                StripSlot::Rule => STRIP_RULE_H,
+                _ => ICON_BTN,
+            })
+            .sum::<f32>()
+            + slots.len().saturating_sub(1) as f32 * STRIP_SPACING
+    };
+    let room = app.window_height
+        - body_top(app)
+        - STATUSBAR_H
+        - STRIP_PAD_TOP
+        - STRIP_PAD_BOTTOM
+        - ICON_BTN
+        - STRIP_FOOT_GAP;
+    if height(&inline) <= room {
+        inline
+    } else {
+        top(true)
+    }
+}
+
+/// Whether the ⋯ menu's rows are on the strip (see [`strip_slots`]).
+pub(crate) fn tools_on_strip(app: &App) -> bool {
+    strip_slots(app)
+        .iter()
+        .any(|s| matches!(s, StripSlot::Row(_)))
+}
+
+/// Centre of a slot down the strip, in window coordinates; `None` when it
+/// is not there (the ⋯ while the menu's rows are on the strip, a row while
+/// they are in the menu).
+pub(crate) fn strip_slot_center(app: &App, slot: StripSlot) -> Option<iced::Point> {
+    let x = app.window_width - STRIP_W / 2.0;
+    if slot == StripSlot::Tool(StripTool::Settings) {
+        let y = app.window_height - STATUSBAR_H - STRIP_PAD_BOTTOM - ICON_BTN / 2.0;
+        return Some(iced::Point::new(x, y));
+    }
+    let mut y = body_top(app) + STRIP_PAD_TOP;
+    for s in strip_slots(app) {
+        let h = match s {
+            StripSlot::Rule => STRIP_RULE_H,
+            _ => ICON_BTN,
+        };
+        if s == slot {
+            return Some(iced::Point::new(x, y + h / 2.0));
+        }
+        y += h + STRIP_SPACING;
+    }
+    None
+}
+
+/// Centre of a strip tool, in window coordinates. The ⋯, while the menu's
+/// rows are on the strip in its place, is where the first of them is.
+pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
+    strip_slot_center(app, StripSlot::Tool(tool))
+        .or_else(|| strip_slot_center(app, StripSlot::Row(TOOLS_MENU_ROWS[0])))
+        .unwrap_or_else(|| iced::Point::new(app.window_width - STRIP_W / 2.0, body_top(app)))
+}
+
+/// What a tool of the strip shows and does: its icon, its name, its
+/// shortcut, and its message.
+pub(crate) fn strip_tool(
+    app: &App,
+    tool: StripTool,
+) -> (Glyph, &'static str, Option<String>, Message) {
+    let caps = |action: Action| Some(app.keymap.chord(action).caps());
+    match tool {
+        StripTool::Overview => (
+            Glyph::Layout,
+            tr!("Overview"),
+            None,
+            Message::Overview(OverviewMsg::Show),
+        ),
+        StripTool::Stats => (
+            Glyph::Stats,
+            tr!("Stats"),
+            None,
+            Message::Overview(OverviewMsg::ShowStats),
+        ),
+        StripTool::Debug => (
+            Glyph::Debug,
+            tr!("Debug"),
+            caps(Action::StartDebug),
+            Message::Debug(DebugMsg::Start),
+        ),
+        StripTool::CallGraph => (
+            Glyph::Network,
+            tr!("Call Graph"),
+            caps(Action::CallGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
+        ),
+        StripTool::ImportGraph => (
+            Glyph::ImportGraph,
+            tr!("Import Graph"),
+            caps(Action::ImportGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
+        ),
+        StripTool::TypeMap => (
+            Glyph::TypeMap,
+            tr!("Type Map"),
+            caps(Action::TypeGraph),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
+        ),
+        StripTool::ProjectMaps => (
+            Glyph::ProjectMaps,
+            tr!("Project Maps"),
+            caps(Action::ProjectMaps),
+            Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
+        ),
+        StripTool::More => (
+            Glyph::More,
+            tr!("More"),
+            None,
+            Message::Window(WindowMsg::ToggleToolsMenu),
+        ),
+        StripTool::Settings => (
+            Glyph::Settings,
+            tr!("Settings"),
+            Some(crate::keymap::local_keys("⌘,")),
+            Message::Settings(SettingsMsg::Open),
+        ),
+    }
 }
 
 /// The tool strip: the project's tools down the window's right edge, each
@@ -685,67 +871,17 @@ pub(crate) fn strip_tool_center(app: &App, tool: StripTool) -> iced::Point {
 pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let tool = |tool: StripTool| -> Element<'_, Message> {
-        let (glyph, label, shortcut, msg) = match tool {
-            StripTool::Overview => (
-                Glyph::Overview,
-                tr!("Overview"),
-                None,
-                Message::Overview(OverviewMsg::Show),
-            ),
-            StripTool::Stats => (
-                Glyph::Stats,
-                tr!("Stats"),
-                None,
-                Message::Overview(OverviewMsg::ShowStats),
-            ),
-            StripTool::Debug => (
-                Glyph::Debug,
-                tr!("Debug"),
-                caps(Action::StartDebug),
-                Message::Debug(DebugMsg::Start),
-            ),
-            StripTool::CallGraph => (
-                Glyph::Network,
-                tr!("Call Graph"),
-                caps(Action::CallGraph),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectCalls)),
-            ),
-            StripTool::ImportGraph => (
-                Glyph::ImportGraph,
-                tr!("Import Graph"),
-                caps(Action::ImportGraph),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectImports)),
-            ),
-            StripTool::TypeMap => (
-                Glyph::TypeMap,
-                tr!("Type Map"),
-                caps(Action::TypeGraph),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectTypes)),
-            ),
-            StripTool::ProjectMaps => (
-                Glyph::ProjectMaps,
-                tr!("Project Maps"),
-                caps(Action::ProjectMaps),
-                Message::Graph(GraphMsg::OpenOverlay(crate::Overlay::ProjectMaps)),
-            ),
-            StripTool::More => (
-                Glyph::More,
-                tr!("More"),
-                None,
-                Message::Window(WindowMsg::ToggleToolsMenu),
-            ),
-            StripTool::Settings => (
-                Glyph::Settings,
-                tr!("Settings"),
-                Some(crate::keymap::local_keys("⌘,")),
-                Message::Settings(SettingsMsg::Open),
-            ),
-        };
+        let (glyph, label, shortcut, msg) = strip_tool(app, tool);
         // Its menu open, the ⋯ is lit: drawn in the text's colour.
         let on = tool == StripTool::More && app.show_tools_menu;
         let tint = if on { theme::fg() } else { theme::fg_muted() };
+        // What reads a project does nothing with none open: drawn so, and
+        // pressed, nothing — they looked as ready as the rest.
+        let able =
+            app.proj.project.is_some() || matches!(tool, StripTool::More | StripTool::Settings);
         tip_at(
-            icon_button(glyph, tint, on).on_press(msg),
+            strip_button(glyph, tint, on, able)
+                .on_press_maybe(able.then(|| super::heard::said(label, msg))),
             label,
             shortcut,
             tooltip::Position::Left,
@@ -770,11 +906,21 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .spacing(STRIP_SPACING)
         .align_x(iced::Center);
-    for (i, t) in STRIP_TOP.iter().enumerate() {
-        if STRIP_RULE_BEFORE.contains(&i) {
-            strip = strip.push(rule());
-        }
-        strip = strip.push(tool(*t));
+    for slot in strip_slots(app) {
+        strip = strip.push(match slot {
+            StripSlot::Rule => rule().into(),
+            StripSlot::Tool(t) => tool(t),
+            StripSlot::Row(row) => {
+                let (glyph, label, msg) = tools_row(app, row);
+                tip_at(
+                    strip_button(glyph, theme::fg_muted(), false, msg.is_some())
+                        .on_press_maybe(msg.map(|m| super::heard::said(&label, m))),
+                    label,
+                    tools_row_action(row).and_then(caps),
+                    tooltip::Position::Left,
+                )
+            }
+        });
     }
     strip = strip
         .push(space().height(Fill))
@@ -873,11 +1019,28 @@ fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
     design.max(widest_row).max(widest_heading).ceil()
 }
 
+/// The shortcut that does what a ⋯ menu row does, where there is one:
+/// shown on the row, and in its tip on the strip.
+pub(crate) fn tools_row_action(row: ToolsRow) -> Option<Action> {
+    match row {
+        ToolsRow::ExplainAll => Some(Action::ExplainAll),
+        ToolsRow::Walkthrough => Some(Action::Walkthrough),
+        ToolsRow::LspServers => Some(Action::LspServers),
+        ToolsRow::Shortcuts => Some(Action::Shortcuts),
+        ToolsRow::Glossary
+        | ToolsRow::OpenFolder
+        | ToolsRow::OpenRemote
+        | ToolsRow::ExportNotes
+        | ToolsRow::SetUp
+        | ToolsRow::Tutorial => None,
+    }
+}
+
 /// What a ⋯ menu row says.
-fn tools_row_label(row: ToolsRow) -> &'static str {
+pub(crate) fn tools_row_label(row: ToolsRow) -> &'static str {
     match row {
         ToolsRow::ExplainAll => tr!("Explain All"),
-        ToolsRow::Walkthrough => tr!("Walkthrough"),
+        ToolsRow::Walkthrough => tr!("Walkthroughs"),
         ToolsRow::Glossary => tr!("Glossary"),
         ToolsRow::OpenFolder => tr!("Open Folder…"),
         ToolsRow::OpenRemote => tr!("Open Remote…"),
@@ -914,10 +1077,15 @@ pub(crate) fn tools_menu_w(app: &App) -> f32 {
             .filter(|_| app.proj.explain.running)
             .map(|(_, total)| (total, total)),
     );
+    let chord = |r: ToolsRow| {
+        tools_row_action(r).map_or(0.0, |a| {
+            super::sheet::text_width(&app.keymap.chord(a).caps(), ts::SMALL, crate::fonts::UI)
+        })
+    };
     let rows: Vec<(&str, f32)> = TOOLS_MENU_ROWS
         .iter()
-        .map(|&r| (tools_row_label(r), 0.0))
-        .chain([(cancel.as_str(), 0.0)])
+        .map(|&r| (tools_row_label(r), chord(r)))
+        .chain([(cancel.as_str(), chord(ToolsRow::ExplainAll))])
         .collect();
     let headings: Vec<&str> = TOOLS_MENU_HEADINGS
         .iter()
@@ -939,10 +1107,32 @@ const MENU_SEP_H: f32 = 11.0;
 /// Gap between the strip and a menu it opened.
 const STRIP_MENU_GAP: f32 = 3.0;
 
+/// Room the ⋯ menu keeps from the window's foot, and from the top bar.
+const MENU_EDGE: f32 = 8.0;
+
+/// The ⋯ menu panel's height, every row of it shown.
+pub(crate) fn tools_menu_h() -> f32 {
+    2.0 * MENU_PAD
+        + TOOLS_MENU_ROWS.len() as f32 * (MENU_ROW_H + MENU_ROW_SPACING)
+        + TOOLS_MENU_SEPARATORS.len() as f32 * (MENU_SEP_H + MENU_ROW_SPACING)
+        + TOOLS_MENU_HEADINGS.len() as f32 * (MENU_HEADING_H + MENU_ROW_SPACING)
+}
+
 /// Distance of the ⋯ menu panel from the window's top edge: level with the
-/// ⋯ button it opens from.
+/// ⋯ button it opens from — or raised so it ends above the window's foot,
+/// but not over the top bar. The strip falls back to ⋯ in a short window,
+/// where the menu hung from the button ran past the foot: its last rows
+/// could not be reached.
 pub(crate) fn tools_menu_top(app: &App) -> f32 {
-    strip_tool_center(app, StripTool::More).y - ICON_BTN / 2.0
+    let at_button = strip_tool_center(app, StripTool::More).y - ICON_BTN / 2.0;
+    let ends_at_foot = app.window_height - MENU_EDGE - tools_menu_h();
+    at_button.min(ends_at_foot).max(TOOLBAR_H + MENU_EDGE)
+}
+
+/// The most the ⋯ menu panel may take: what is left under its top; past
+/// it, its rows scroll.
+pub(crate) fn tools_menu_room(app: &App) -> f32 {
+    (app.window_height - MENU_EDGE - tools_menu_top(app)).max(MENU_ROW_H)
 }
 
 /// Distance of the ⋯ menu panel from the window's right edge: just left of
@@ -952,6 +1142,20 @@ pub(crate) const TOOLS_MENU_RIGHT: f32 = STRIP_W + STRIP_MENU_GAP;
 /// Window-space rectangle covering `count` consecutive ⋯ menu rows starting
 /// at row `first`, spanning the item column (inside the panel's padding).
 pub(crate) fn tools_menu_rows_rect(app: &App, first: usize, count: usize) -> iced::Rectangle {
+    let last = (first + count.max(1) - 1).min(TOOLS_MENU_ROWS.len() - 1);
+    // On the strip, where it had room for them: their buttons there.
+    if let (Some(a), Some(b)) = (
+        strip_slot_center(app, StripSlot::Row(TOOLS_MENU_ROWS[first])),
+        strip_slot_center(app, StripSlot::Row(TOOLS_MENU_ROWS[last])),
+    ) {
+        let half = ICON_BTN / 2.0;
+        return iced::Rectangle {
+            x: a.x - half,
+            y: a.y - half,
+            width: ICON_BTN,
+            height: b.y - a.y + ICON_BTN,
+        };
+    }
     let top = tools_menu_top(app);
     let top_of = |i: usize| {
         let seps = TOOLS_MENU_SEPARATORS.iter().filter(|&&s| s <= i).count() as f32;
@@ -987,7 +1191,7 @@ fn menu_item<'a>(
         row![
             container(gutter).width(15),
             ts::set_in(
-                text(label).wrapping(Wrapping::None),
+                text(label.clone()).wrapping(Wrapping::None),
                 MENU_ROW_H,
                 ts::INTER,
                 ts::BASE
@@ -1004,7 +1208,7 @@ fn menu_item<'a>(
     .height(Length::Fixed(MENU_ROW_H))
     .padding([0, 9]);
     if let Some(msg) = msg {
-        b = b.on_press(msg);
+        b = b.on_press(super::heard::said(&label, msg));
     }
     b.into()
 }
@@ -1048,10 +1252,9 @@ fn menu_chord<'a>(app: &App, action: Action) -> Element<'a, Message> {
 }
 
 /// The ⋯ menu: what the strip has no room for, in [`TOOLS_MENU_ROWS`] order,
-/// opening to the left of its button. Its rows are a glyph and a name: the
-/// keys of those that have them are in the palette and the shortcuts.
+/// opening to the left of its button. Its rows are a glyph, a name, and the
+/// keys of those that have them.
 pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
-    let has_project = app.proj.project.is_some();
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (i, &r) in TOOLS_MENU_ROWS.iter().enumerate() {
         if TOOLS_MENU_SEPARATORS.contains(&i) {
@@ -1060,92 +1263,22 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         if let Some(&(_, heading)) = TOOLS_MENU_HEADINGS.iter().find(|&&(h, _)| h == i) {
             items.push(menu_heading(crate::i18n::lookup(heading)));
         }
-        let item = match r {
-            // While a pass runs the row cancels it — the bottom-up pass is
-            // thousands of model calls on a big repo, so it must be
-            // stoppable; with no key configured it routes to Settings.
-            ToolsRow::ExplainAll if app.proj.explain.running => menu_item(
-                Some(Glyph::Close),
-                cancel_explaining_label(app.proj.explain.progress),
-                slot(),
-                Some(Message::Explain(ExplainMsg::Cancel)),
-            ),
-            ToolsRow::ExplainAll => menu_item(
-                Some(Glyph::TextLines),
-                tr!("Explain All").into(),
-                slot(),
-                // Asking first what it costs (the setup sheet), or for a key,
-                // on the page of Settings that takes it.
-                Some(if app.llm_available {
-                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
-                } else {
-                    Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
-                }),
-            ),
-            ToolsRow::Walkthrough => menu_item(
-                Some(Glyph::ListOrdered),
-                tr!("Walkthrough").into(),
-                slot(),
-                Some(Message::Window(WindowMsg::SidebarTabPicked(
-                    SidebarTab::Walk,
-                ))),
-            ),
-            ToolsRow::Glossary => menu_item(
-                Some(Glyph::Book),
-                tr!("Glossary").into(),
-                slot(),
-                has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
-            ),
-            ToolsRow::OpenFolder => menu_item(
-                Some(Glyph::FolderOpen),
-                tr!("Open Folder…").into(),
-                slot(),
-                Some(Message::Project(ProjectMsg::OpenFolderPressed)),
-            ),
-            ToolsRow::OpenRemote => menu_item(
-                Some(Glyph::Servers),
-                tr!("Open Remote…").into(),
-                slot(),
-                Some(Message::Connect(ConnectMsg::Open)),
-            ),
-            ToolsRow::ExportNotes => menu_item(
-                Some(Glyph::Export),
-                tr!("Export Notes…").into(),
-                slot(),
-                has_project.then_some(Message::Export(ExportMsg::Start)),
-            ),
-            ToolsRow::SetUp => menu_item(
-                Some(Glyph::Settings),
-                tr!("Set Up Project…").into(),
-                slot(),
-                has_project.then_some(Message::Project(ProjectMsg::SetupShow(
-                    crate::app::setup::SetupMode::Manage,
-                ))),
-            ),
-            ToolsRow::LspServers => menu_item(
-                Some(Glyph::Plug),
-                tr!("Language Servers").into(),
-                slot(),
-                Some(Message::Lsp(LspMsg::TogglePanel)),
-            ),
-            ToolsRow::Shortcuts => menu_item(
-                Some(Glyph::Shortcuts),
-                tr!("Keyboard Shortcuts").into(),
-                slot(),
-                Some(Message::Window(WindowMsg::OpenShortcuts)),
-            ),
-            // The tour needs a project to show: without one the row stays
-            // (the menu keeps its shape) but is inert.
-            ToolsRow::Tutorial => menu_item(
-                Some(Glyph::Help),
-                tr!("Tutorial").into(),
-                slot(),
-                has_project.then_some(Message::Tutorial(TutorialMsg::Start)),
-            ),
-        };
+        let (glyph, label, msg) = tools_row(app, r);
+        let keys = tools_row_action(r).map_or_else(slot, |a| menu_chord(app, a));
+        let item = menu_item(Some(glyph), label, keys, msg);
         items.push(item);
     }
-    let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
+    let rows = Column::with_children(items).spacing(MENU_ROW_SPACING);
+    let room = tools_menu_room(app);
+    // A window shorter than the menu: its rows scroll in what there is.
+    let rows: Element<'_, Message> = if tools_menu_h() > room {
+        scrollable(rows)
+            .height(Length::Fixed(room - 2.0 * MENU_PAD))
+            .into()
+    } else {
+        rows.into()
+    };
+    let panel = container(rows)
         .width(tools_menu_w(app))
         .padding(MENU_PAD)
         // The design's ⋯ menu is rounded 11.
@@ -1158,6 +1291,90 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
         },
         Backdrop::Clear(Message::Window(WindowMsg::ToggleToolsMenu)),
     )
+}
+
+/// What Explain All does, wherever it is offered: asks first what it costs
+/// (the setup sheet), or for a key, on the page of Settings that takes it.
+pub(crate) fn explain_all_message(app: &App) -> Message {
+    if app.llm_available {
+        Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain))
+    } else {
+        Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel))
+    }
+}
+
+/// What a row of the ⋯ menu shows and does — in the menu, or on the strip
+/// where there is room for it ([`strip_slots`]): its icon, its name, and
+/// its message (`None` while it can do nothing, as without a project).
+pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Message>) {
+    let has_project = app.proj.project.is_some();
+    match row {
+        // While a pass runs the row cancels it — the bottom-up pass is
+        // thousands of model calls on a big repo, so it must be
+        // stoppable; with no key configured it routes to Settings.
+        ToolsRow::ExplainAll if app.proj.explain.running => (
+            Glyph::Close,
+            cancel_explaining_label(app.proj.explain.progress),
+            Some(Message::Explain(ExplainMsg::Cancel)),
+        ),
+        ToolsRow::ExplainAll => (
+            Glyph::TextLines,
+            tr!("Explain All").into(),
+            Some(explain_all_message(app)),
+        ),
+        ToolsRow::Walkthrough => (
+            Glyph::Compass,
+            tr!("Walkthroughs").into(),
+            Some(Message::Window(WindowMsg::SidebarTabPicked(
+                SidebarTab::Walk,
+            ))),
+        ),
+        ToolsRow::Glossary => (
+            Glyph::Dictionary,
+            tr!("Glossary").into(),
+            has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
+        ),
+        ToolsRow::OpenFolder => (
+            Glyph::FolderOpen,
+            tr!("Open Folder…").into(),
+            Some(Message::Project(ProjectMsg::OpenFolderPressed)),
+        ),
+        ToolsRow::OpenRemote => (
+            Glyph::Remote,
+            tr!("Open Remote…").into(),
+            Some(Message::Connect(ConnectMsg::Open)),
+        ),
+        ToolsRow::ExportNotes => (
+            Glyph::Export,
+            tr!("Export Notes…").into(),
+            has_project.then_some(Message::Export(ExportMsg::Start)),
+        ),
+        // Not Settings' gear: on the strip it stood over Settings itself.
+        ToolsRow::SetUp => (
+            Glyph::CheckCircle,
+            tr!("Set Up Project…").into(),
+            has_project.then_some(Message::Project(ProjectMsg::SetupShow(
+                crate::app::setup::SetupMode::Manage,
+            ))),
+        ),
+        ToolsRow::LspServers => (
+            Glyph::Plug,
+            tr!("Language Servers").into(),
+            Some(Message::Lsp(LspMsg::TogglePanel)),
+        ),
+        ToolsRow::Shortcuts => (
+            Glyph::Shortcuts,
+            tr!("Keyboard Shortcuts").into(),
+            Some(Message::Window(WindowMsg::OpenShortcuts)),
+        ),
+        // The tour needs a project to show: without one the row stays
+        // (the menu keeps its shape) but is inert.
+        ToolsRow::Tutorial => (
+            Glyph::Help,
+            tr!("Tutorial").into(),
+            has_project.then_some(Message::Tutorial(TutorialMsg::Start)),
+        ),
+    }
 }
 
 // ------------------------------------------------------- the View menu
@@ -1203,21 +1420,6 @@ impl ViewRow {
             ViewRow::Margin => Message::Window(WindowMsg::ToggleRightPanel),
         }
     }
-}
-
-/// Whether `message` is a pick from the View menu, which closes it.
-pub(crate) fn closes_view_menu(message: &Message) -> bool {
-    matches!(
-        message,
-        Message::Window(WindowMsg::ToggleInlineSummaries)
-            | Message::Window(WindowMsg::ToggleFileBanner)
-            | Message::Explain(ExplainMsg::ToggleBlocks)
-            | Message::Lsp(LspMsg::ToggleInlayHints)
-            | Message::Window(WindowMsg::ToggleInlineBlame)
-            | Message::Window(WindowMsg::ToggleIndentGuides)
-            | Message::Window(WindowMsg::ToggleMinimap)
-            | Message::Window(WindowMsg::ToggleRightPanel)
-    )
 }
 
 /// Distance of the View menu from the window's top edge: under the file
@@ -1304,12 +1506,23 @@ pub(crate) fn view_menu(app: &App) -> Element<'_, Message> {
                     app.proj.explain.view,
                     Some(crate::explain::Node::Function { .. })
                 );
-            menu_item(
+            let item = menu_item(
                 Some(glyph),
                 label.into(),
                 check(on),
                 enabled.then(|| r.message()),
-            )
+            );
+            // Inert, it says why where the pointer rests.
+            if enabled {
+                item
+            } else {
+                tip_at(
+                    item,
+                    tr!("Explain a function to read its explanation in blocks"),
+                    None,
+                    tooltip::Position::Right,
+                )
+            }
         })
         .collect();
     let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
@@ -1346,11 +1559,11 @@ fn app_menu_w(app: &App) -> f32 {
 }
 
 /// The rows of the app menu that are not keymap actions, top first.
-fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
+pub(crate) fn app_menu_head(app: &App) -> Vec<(Glyph, &'static str, Option<String>, Message)> {
     let _ = app;
     vec![
         (
-            Glyph::Folder,
+            Glyph::FolderOpen,
             tr!("Open Folder…"),
             None,
             Message::Project(ProjectMsg::OpenFolderPressed),
@@ -1384,8 +1597,8 @@ pub(crate) fn closes_app_menu(message: &Message) -> bool {
 
 /// The app menu of Windows and Linux, from the top bar's ☰: what macOS keeps
 /// in its menu bar — opening a folder or a host, Settings, and every keymap
-/// action under the title the menu bar gives it (Edit, View, Go), each with
-/// its shortcut.
+/// action under the title the menu bar gives it (Edit, View, Tools, Go),
+/// each with its shortcut.
 pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
     let mut items: Vec<Element<'_, Message>> = Vec::new();
     for (glyph, label, chord, msg) in app_menu_head(app) {
@@ -1428,10 +1641,12 @@ pub(crate) fn app_menu(app: &App) -> Element<'_, Message> {
         Some(Message::Window(WindowMsg::Close)),
     ));
     let max_h = (app.window_height - TOOLBAR_H - 24.0).max(160.0);
+    // Its scroller shows at rest: in a short window, the rows that run
+    // past its bottom had nothing to say they were there.
     let panel = container(
         scrollable(Column::with_children(items).spacing(MENU_ROW_SPACING))
             .direction(thin_scroll())
-            .style(theme::overlay_scrollbar),
+            .style(theme::cue_scrollbar),
     )
     .width(app_menu_w(app))
     .max_height(max_h)
@@ -1472,7 +1687,10 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             .style(theme::menu_row)
             .width(Fill)
             .padding([5, 8])
-            .on_press(Message::Reading(ReadingMsg::TargetSelected(t)))
+            .on_press(super::heard::said_with(
+                || super::statusbar::target_label(&t),
+                Message::Reading(ReadingMsg::TargetSelected(t.clone())),
+            ))
             .into()
         })
         .collect();
@@ -1520,13 +1738,46 @@ mod tests {
         assert_eq!(seen.len(), TOOLS_MENU_ROWS.len());
     }
 
+    /// Where the strip is tall enough, the ⋯ menu's rows are laid on it, in
+    /// their groups, after the strip's own tools — and the ⋯ is not there;
+    /// shorter, the ⋯ is, and they are in its menu. The tutorial's hole for
+    /// a row is its button on the strip, then.
+    #[test]
+    fn the_menus_tools_are_on_the_strip_where_it_has_room() {
+        let mut app = crate::app::tests::blank_app();
+        app.window_width = 1280.0;
+        app.window_height = 900.0;
+        assert!(tools_on_strip(&app));
+        let slots = strip_slots(&app);
+        assert!(!slots.contains(&StripSlot::Tool(StripTool::More)));
+        for row in TOOLS_MENU_ROWS {
+            assert!(slots.contains(&StripSlot::Row(row)), "{row:?}");
+        }
+        let center = |slot| strip_slot_center(&app, slot).unwrap().y;
+        let maps = center(StripSlot::Tool(StripTool::ProjectMaps));
+        let first = center(StripSlot::Row(ToolsRow::ExplainAll));
+        let last = center(StripSlot::Row(ToolsRow::Tutorial));
+        assert!(first > maps);
+        let settings = center(StripSlot::Tool(StripTool::Settings));
+        assert!(last + ICON_BTN / 2.0 + STRIP_FOOT_GAP <= settings - ICON_BTN / 2.0);
+        let hole = tools_menu_rows_rect(&app, ToolsRow::Glossary.index(), 1);
+        let glossary = strip_slot_center(&app, StripSlot::Row(ToolsRow::Glossary)).unwrap();
+        assert!(hole.contains(glossary), "{hole:?} {glossary:?}");
+
+        app.window_height = 600.0;
+        assert!(!tools_on_strip(&app));
+        assert!(strip_slots(&app).contains(&StripSlot::Tool(StripTool::More)));
+        assert!(strip_slot_center(&app, StripSlot::Row(ToolsRow::Glossary)).is_none());
+    }
+
     /// The strip's slots go down one pitch apart, a rule's slot more after
     /// each group, and follow the window's right edge.
     #[test]
     fn the_strip_slots_follow_the_groups_and_the_right_edge() {
         let mut app = crate::app::tests::blank_app();
         app.window_width = 1280.0;
-        app.window_height = 900.0;
+        // Short enough for the ⋯ to be on the strip.
+        app.window_height = 600.0;
         let y = |app: &App, t| strip_tool_center(app, t).y;
         let pitch = ICON_BTN + STRIP_SPACING;
         let rule = STRIP_RULE_H + STRIP_SPACING;

@@ -127,6 +127,10 @@ pub enum Motion {
 /// enclosing blocks of the line there.
 pub const STICKY_MAX: usize = 5;
 
+/// How many lines after a function's first a signature may run over, its
+/// body's region headed within them (`Viewer::skim_headers`).
+const SKIM_SIGNATURE_LINES: usize = 12;
+
 #[derive(Debug, Clone)]
 pub struct Viewer {
     pub abs: PathBuf,
@@ -597,11 +601,26 @@ impl Viewer {
     }
 
     /// The fold headers of the functions starting at `sig_lines` (0-based):
-    /// each the first header within a few lines of its signature.
+    /// each the body's — of the regions headed in the few lines from its
+    /// signature (and before the next one's), the one that runs on longest.
+    /// The first header found was a signature's parameters when they ran
+    /// over several lines: Skim folded them and left the body open.
     fn skim_headers(&self, sig_lines: &[usize]) -> Vec<usize> {
-        sig_lines
+        let mut starts: Vec<usize> = sig_lines.to_vec();
+        starts.sort_unstable();
+        starts
             .iter()
-            .filter_map(|&l0| (l0..=l0.saturating_add(4)).find(|&l| self.is_fold_header(l)))
+            .enumerate()
+            .filter_map(|(i, &l0)| {
+                let next = starts.get(i + 1).copied().unwrap_or(usize::MAX);
+                let last = l0
+                    .saturating_add(SKIM_SIGNATURE_LINES)
+                    .min(next.saturating_sub(1));
+                (l0..=last)
+                    .filter_map(|l| self.fold_at(l))
+                    .max_by_key(|&(_, end)| end)
+                    .map(|(h, _)| h)
+            })
             .collect()
     }
 
@@ -1019,6 +1038,34 @@ mod tests {
             Arc::new(source),
             lines,
         )
+    }
+
+    /// Skim folds a function's body, not its parameters: a signature that
+    /// runs over several lines heads a region of its own first, and Skim
+    /// folded that and left the body open. A short function right before
+    /// another does not take the next one's body for its own.
+    #[test]
+    fn skim_folds_the_body_not_a_long_signature() {
+        let source = "fn total(\n    items: &[u32],\n    tax: u32,\n) -> u32 {\n    \
+                      let sum: u32 = items.iter().sum();\n    sum * tax\n}\n\
+                      fn one() -> u32 { 1 }\nfn two() -> u32 {\n    2\n}\n";
+        let lines = plain_lines(source);
+        let mut v = Viewer::new(
+            PathBuf::from("/tmp/total.rs"),
+            "total.rs".into(),
+            Some("rust"),
+            Arc::new(source.to_string()),
+            lines,
+        );
+        // The parameters' region and the body's both open within the first
+        // lines of `total`.
+        assert!(v.is_fold_header(0) && v.is_fold_header(3), "{:?}", v.folds);
+        v.skim_bodies(&[0, 7, 8]);
+        assert!(v.collapsed.contains(&3), "the body: {:?}", v.collapsed);
+        assert!(!v.collapsed.contains(&0), "not the parameters");
+        // `one` is a line of its own: nothing of `two`'s is folded for it.
+        assert!(v.collapsed.contains(&8));
+        assert_eq!(v.collapsed.len(), 2, "{:?}", v.collapsed);
     }
 
     /// The code view's caches know a document by its generation, which moves

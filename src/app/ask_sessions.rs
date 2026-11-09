@@ -369,6 +369,9 @@ impl App {
         }
         self.keep_ask_session();
         self.proj.ask_turns.clear();
+        // What was queued was for that conversation.
+        self.proj.ask_queue.clear();
+        self.proj.ask_queue_held = false;
         self.proj.ask_pins.clear();
         self.proj.asking = false;
         if let Some(link) = self.proj.acp.as_mut() {
@@ -385,7 +388,9 @@ impl App {
         let stop = self.leave_ask_session();
         self.proj.ask_session = None;
         self.reveal_ask();
-        Task::batch([stop, self.on_open_ask()])
+        // A new session: questions to try written afresh.
+        let suggest = self.ask_for_suggestions(true);
+        Task::batch([stop, self.on_open_ask(), suggest])
     }
 
     /// Go back to session `id`: its questions and answers on the card, the
@@ -446,6 +451,8 @@ impl App {
             self.stop_speaking();
             let stop = self.stop_ask_streams();
             self.proj.ask_turns.clear();
+            self.proj.ask_queue.clear();
+            self.proj.ask_queue_held = false;
             self.proj.ask_pins.clear();
             self.proj.asking = false;
             self.proj.ask_session = None;

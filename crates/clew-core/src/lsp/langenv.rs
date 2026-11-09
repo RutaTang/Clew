@@ -53,8 +53,151 @@ use serde_json::{Value, json};
 pub fn detect(language: &str, _server: &str, root: &Path) -> Option<Value> {
     match language {
         "python" => Some(python_settings(&find_python_env(root)?)),
+        "rust" => rust_projects(root),
         _ => None,
     }
+}
+
+/// How deep under the project [`cargo_projects`] looks for a workspace:
+/// `examples/Cargo.toml`, `tools/xtask/Cargo.toml` and the like.
+const CARGO_DEPTH: usize = 4;
+/// The most entries [`cargo_projects`] walks: a bound on a vast tree.
+const CARGO_WALK_CAP: usize = 50_000;
+/// A `Cargo.toml` larger than this is no project's manifest.
+const MANIFEST_MAX_BYTES: u64 = 1 << 20;
+/// The most projects [`cargo_projects`] links. A tree of more packages than
+/// this, apart from any workspace, is not one rust-analyzer can load each
+/// of in any case; past it, the walk stops reading manifests.
+const CARGO_MAX_PROJECTS: usize = 64;
+
+/// What a `Cargo.toml` declares, by its tables: a workspace, a package, or
+/// neither.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManifestKind {
+    Workspace,
+    Package,
+}
+
+/// `manifest`'s kind, read from its table headers (`[workspace]`,
+/// `[workspace.dependencies]`, `[package]`) and top-level dotted keys
+/// (`workspace.members = …`) — not parsed whole: this runs as a language
+/// server starts, over every manifest of a tree, and parsing each as TOML
+/// held a window still for seconds on a tree of a thousand crates.
+fn manifest_kind(manifest: &str) -> Option<ManifestKind> {
+    let mut kind = None;
+    let mut top_level = true;
+    for line in manifest.lines() {
+        let line = line.trim_start();
+        let (key, is_header) = match line.strip_prefix('[') {
+            // `[[bin]]` and the like: an array of tables, its own.
+            Some(rest) if !rest.starts_with('[') => (rest.trim_start(), true),
+            Some(_) => {
+                top_level = false;
+                continue;
+            }
+            None if top_level => (line, false),
+            None => continue,
+        };
+        if is_header {
+            top_level = false;
+        }
+        let named = |name: &str| {
+            key.strip_prefix(name).is_some_and(|after| {
+                let after = after.trim_start();
+                if is_header {
+                    after.starts_with(']') || after.starts_with('.')
+                } else {
+                    after.starts_with('.') || after.starts_with('=')
+                }
+            })
+        };
+        if named("workspace") {
+            return Some(ManifestKind::Workspace);
+        }
+        if named("package") {
+            kind = Some(ManifestKind::Package);
+        }
+    }
+    kind
+}
+
+/// rust-analyzer's `linkedProjects` for `root`, when it holds Cargo
+/// projects past the one at its top, which is all rust-analyzer finds of
+/// itself: a repository whose `examples/` is a workspace of its own (as
+/// many are, to keep the examples' dependencies out of the library's) had
+/// every file in it read as part of no crate — no definition, no
+/// implementation, no type, with the server saying it was ready.
+fn rust_projects(root: &Path) -> Option<Value> {
+    let projects = cargo_projects(root);
+    let top_only = projects.len() == 1 && projects[0] == root.join("Cargo.toml");
+    if projects.is_empty() || top_only {
+        return None;
+    }
+    let linked: Vec<String> = projects
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    Some(json!({ "linkedProjects": linked }))
+}
+
+/// The Cargo projects under `root` a reader of it wants loaded: each
+/// workspace (a `Cargo.toml` with `[workspace]`), and each package no
+/// workspace above it holds. Within [`CARGO_DEPTH`], past what `.gitignore`
+/// and the build directories leave out. Read, never run: a manifest is
+/// parsed as TOML here, and only rust-analyzer — which the user lets build
+/// the project — runs `cargo` on it.
+pub fn cargo_projects(root: &Path) -> Vec<PathBuf> {
+    let walker = ignore::WalkBuilder::new(root)
+        .max_depth(Some(CARGO_DEPTH))
+        .follow_links(false)
+        .filter_entry(|entry| {
+            !(entry.file_type().is_some_and(|t| t.is_dir())
+                && crate::fs_scan::is_noise_dir(entry.file_name()))
+        })
+        .build();
+    let mut workspaces: Vec<PathBuf> = Vec::new();
+    let mut packages: Vec<PathBuf> = Vec::new();
+    for entry in walker.flatten().take(CARGO_WALK_CAP) {
+        if entry.file_name() != "Cargo.toml" || !entry.file_type().is_some_and(|t| t.is_file()) {
+            continue;
+        }
+        let path = entry.into_path();
+        // A crate `cargo vendor` copied into the project — it leaves the
+        // crate's checksums beside its manifest — is one of its
+        // dependencies, not a project: beside a package at the top, every
+        // vendored crate was linked, and rust-analyzer loaded and built each
+        // as a workspace of its own.
+        if path.with_file_name(".cargo-checksum.json").is_file() {
+            continue;
+        }
+        let too_big = std::fs::metadata(&path).map_or(true, |m| m.len() > MANIFEST_MAX_BYTES);
+        let kind = (!too_big)
+            .then(|| std::fs::read_to_string(&path).ok())
+            .flatten()
+            .and_then(|text| manifest_kind(&text));
+        match kind {
+            Some(ManifestKind::Workspace) => workspaces.push(path),
+            Some(ManifestKind::Package) => packages.push(path),
+            None => {}
+        }
+        if workspaces.len() + packages.len() >= CARGO_MAX_PROJECTS * 4 {
+            break;
+        }
+    }
+    // A package under a workspace's folder is that workspace's (or one it
+    // leaves out, which is rare enough to read as its).
+    let dirs: Vec<&Path> = workspaces.iter().filter_map(|w| w.parent()).collect();
+    packages.retain(|p| {
+        let Some(dir) = p.parent() else {
+            return false;
+        };
+        !dirs.iter().any(|w| dir.starts_with(w))
+    });
+    let mut projects = workspaces;
+    projects.extend(packages);
+    projects.sort();
+    projects.truncate(CARGO_MAX_PROJECTS);
+    projects
 }
 
 /// The settings the user's `choices` give `language`'s server in `root`, or
@@ -384,9 +527,12 @@ pub fn merge(
     choices: &LanguageChoices,
 ) -> Result<Option<Value>, String> {
     let chosen = chosen(language, root, choices);
+    // What the user chose replaces what was found — an interpreter for an
+    // interpreter — but for Rust they are of different things: the features
+    // and target chosen, and the workspaces found to load.
     let detected = match chosen {
-        Some(_) => None,
-        None => detect(language, &server.server_name, root),
+        Some(_) if language != "rust" => None,
+        _ => detect(language, &server.server_name, root),
     };
     let chosen = match language {
         "go" => keep_build_flags(chosen, explicit.as_ref()),
@@ -405,6 +551,14 @@ fn layer(base: Option<Value>, over: Option<Value>) -> Option<Value> {
         }
         (base, over) => base.or(over),
     }
+}
+
+/// Whether clew's own install of the server `server_name` is kept from
+/// running the project's code by settings of clew's ([`pinned`]) — which a
+/// program of the user's in its place runs without: one is not offered in
+/// place of clew's install for it.
+pub fn pins(server_name: &str) -> bool {
+    server_name == "typescript-language-server"
 }
 
 /// The settings clew sends its own store binary `exe` for `server` in every
@@ -428,7 +582,7 @@ pub fn pinned(
     server: &crate::lsp::config::EffectiveServer,
     exe: &Path,
 ) -> Result<Option<Value>, String> {
-    if server.command.is_some() || server.chosen.is_some() {
+    if server.command.is_some() || server.chosen.is_some() || !pins(&server.server_name) {
         return Ok(None);
     }
     match server.server_name.as_str() {
@@ -1446,6 +1600,165 @@ mod tests {
         let root = crate::testutil::scoped_dir(&format!("langenv-{tag}"));
         std::fs::create_dir_all(&root).unwrap();
         root
+    }
+
+    /// A repository whose `examples/` is a Cargo workspace of its own — as
+    /// salvo's is — has rust-analyzer told to load it too, beside the
+    /// repository's own: each workspace, and a package no workspace above it
+    /// holds; not the members of either, nor what a build left in `target/`.
+    /// Its files were read as part of no crate: no definition anywhere.
+    #[test]
+    fn nested_cargo_workspaces_are_linked() {
+        let root = scratch("cargo-nested");
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n");
+        write("crates/core/Cargo.toml", "[package]\nname = \"core\"\n");
+        write("examples/Cargo.toml", "[workspace]\nmembers = [\"*\"]\n");
+        write(
+            "examples/otel/Cargo.toml",
+            "[package]\nname = \"otel\"\nversion.workspace = true\n",
+        );
+        write("target/debug/build/x/Cargo.toml", "[workspace]\n");
+        write("broken/Cargo.toml", "this is [not toml");
+        assert_eq!(
+            cargo_projects(&root),
+            vec![root.join("Cargo.toml"), root.join("examples/Cargo.toml")]
+        );
+        let linked = detect("rust", "rust-analyzer", &root).expect("linked projects");
+        assert_eq!(linked["linkedProjects"].as_array().unwrap().len(), 2);
+        // Features chosen in Settings do not take the workspaces away: the
+        // two are of different things, and both reach the server.
+        let choices = LanguageChoices {
+            rust: Some(RustChoices {
+                all_features: true,
+                ..RustChoices::default()
+            }),
+            ..LanguageChoices::default()
+        };
+        let server = crate::lsp::config::ProjectLspConfig::default()
+            .resolve("rust")
+            .unwrap();
+        let exe = root.join("rust-analyzer");
+        let merged = merge("rust", &server, &exe, &root, None, &choices)
+            .unwrap()
+            .unwrap();
+        assert_eq!(merged["linkedProjects"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["cargo"]["features"], "all", "{merged}");
+
+        // A repository with no manifest at its top, and packages apart in it
+        // (a service and its tools): each is linked.
+        let apart = scratch("cargo-apart");
+        for dir in ["service", "tools/lint"] {
+            std::fs::create_dir_all(apart.join(dir)).unwrap();
+            std::fs::write(
+                apart.join(dir).join("Cargo.toml"),
+                "[package]\nname = \"x\"\n",
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            cargo_projects(&apart),
+            vec![
+                apart.join("service/Cargo.toml"),
+                apart.join("tools/lint/Cargo.toml")
+            ]
+        );
+    }
+
+    /// The crates `cargo vendor` copied into a project — each with its
+    /// checksums beside it — are its dependencies, not projects of their
+    /// own, and are not linked; a package apart (`fuzz/`) still is. Beside a
+    /// package at the top, every vendored crate was linked, and
+    /// rust-analyzer loaded and built each as a workspace of its own.
+    #[test]
+    fn vendored_crates_are_not_linked() {
+        let root = scratch("cargo-vendored");
+        let write = |rel: &str, text: &str| {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        write("Cargo.toml", "[package]\nname = \"app\"\n");
+        for name in ["serde", "itoa"] {
+            write(
+                &format!("vendor/{name}/Cargo.toml"),
+                &format!("[package]\nname = \"{name}\"\n"),
+            );
+            write(
+                &format!("vendor/{name}/.cargo-checksum.json"),
+                "{\"files\":{},\"package\":\"0\"}",
+            );
+        }
+        write(
+            "fuzz/Cargo.toml",
+            "[package]\nname = \"app-fuzz\"\n\n[workspace]\nmembers = [\".\"]\n",
+        );
+        assert_eq!(
+            cargo_projects(&root),
+            vec![root.join("Cargo.toml"), root.join("fuzz/Cargo.toml")]
+        );
+    }
+
+    /// A manifest's kind is read from its tables and top-level dotted keys,
+    /// without parsing it whole — and not from a key of the same name inside
+    /// another table, or a table of a longer name.
+    #[test]
+    fn a_manifest_is_known_by_its_tables() {
+        use ManifestKind::*;
+        let cases: &[(&str, Option<ManifestKind>)] = &[
+            ("[package]\nname = \"a\"\n", Some(Package)),
+            ("[workspace]\nmembers = [\"a\"]\n", Some(Workspace)),
+            ("[package]\nname = \"a\"\n\n[workspace]\n", Some(Workspace)),
+            ("[workspace.dependencies]\nserde = \"1\"\n", Some(Workspace)),
+            ("  [ workspace ]\n", Some(Workspace)),
+            ("workspace.members = [\"a\"]\n", Some(Workspace)),
+            ("package.name = \"a\"\n", Some(Package)),
+            ("[dependencies]\nworkspace = true\n", None),
+            ("[dependencies]\nserde.workspace = true\n", None),
+            ("[[bin]]\nname = \"workspace\"\n", None),
+            ("[packages]\n", None),
+            ("[workspaces]\n", None),
+            ("# [workspace]\n[lib]\n", None),
+            ("", None),
+        ];
+        for (manifest, kind) in cases {
+            assert_eq!(manifest_kind(manifest), *kind, "{manifest:?}");
+        }
+    }
+
+    /// However many packages a tree holds apart, no more than
+    /// CARGO_MAX_PROJECTS are linked: rust-analyzer could not load each in
+    /// any case, and reading every manifest held the window still.
+    #[test]
+    fn a_tree_of_many_packages_links_a_bounded_few() {
+        let root = scratch("cargo-many");
+        for n in 0..CARGO_MAX_PROJECTS + 10 {
+            let dir = root.join(format!("crates/c{n:03}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Cargo.toml"),
+                format!("[package]\nname = \"c{n}\"\n"),
+            )
+            .unwrap();
+        }
+        let projects = cargo_projects(&root);
+        assert_eq!(projects.len(), CARGO_MAX_PROJECTS);
+        assert_eq!(projects[0], root.join("crates/c000/Cargo.toml"));
+    }
+
+    /// A project of one workspace at its top is left to rust-analyzer, which
+    /// finds that itself.
+    #[test]
+    fn one_workspace_at_the_top_needs_no_linking() {
+        let root = scratch("cargo-single");
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"one\"\n").unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        assert_eq!(cargo_projects(&root), vec![root.join("Cargo.toml")]);
+        assert_eq!(detect("rust", "rust-analyzer", &root), None);
     }
 
     /// A "system Python" outside any project root, returning its `bin`

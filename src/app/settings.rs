@@ -7,6 +7,11 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// Most tokens Test connection lets the model answer with.
+/// Enough for a word, and for a model that thinks before it answers to be
+/// cut short — an answer all the same.
+const CONNECTION_TEST_TOKENS: u32 = 16;
+
 impl App {
     /// The chat-model config, read once and then served from
     /// `llm_config_cache` (see there for when it is re-read).
@@ -32,15 +37,58 @@ impl App {
         match self.llm_config() {
             Some(cfg) => Ok(cfg),
             None => {
-                self.status = tr!(
-                    "Add an API key in Settings ({path})",
-                    path = llm::config_hint()
-                );
+                // Not where the key is kept: Settings, opened here, is where
+                // it is added (the file's whole path filled the status line).
+                self.status = tr!("Add an API key in Settings").into();
                 Err(Task::done(Message::Settings(SettingsMsg::OpenAt(
                     SettingsPage::LanguageModel,
                 ))))
             }
         }
+    }
+
+    /// Test connection: one word asked of the model the Language model
+    /// page's fields name, as they stand — saved or not.
+    pub(crate) fn on_test_connection(&mut self) -> Task<Message> {
+        self.settings.connection_tests += 1;
+        let number = self.settings.connection_tests;
+        let cfg = llm::Config::from_form(
+            self.settings.provider,
+            self.settings.key.clone(),
+            self.settings.model.clone(),
+            self.settings.base_url.clone(),
+        );
+        if cfg.base_url.is_empty() || cfg.model.is_empty() {
+            self.settings.connection_test = crate::app::state::ConnectionTest::Failed(
+                tr_noop!("Name the model and its endpoint first.").to_string(),
+            );
+            return Task::none();
+        }
+        self.settings.connection_test = crate::app::state::ConnectionTest::Testing(number);
+        // Asked the way every call is made: through the server, for a
+        // project on another machine.
+        let ai = self.ai_client();
+        Task::perform(
+            async move {
+                let model = cfg.model.clone();
+                ai.complete(
+                    cfg,
+                    "Reply with the single word OK.",
+                    "OK?".into(),
+                    CONNECTION_TEST_TOKENS,
+                )
+                .await
+                .map(|_| model)
+            },
+            move |result| Message::Settings(SettingsMsg::ConnectionTested { number, result }),
+        )
+    }
+
+    /// The fields changed: what a test found is not about them any more,
+    /// and a test on its way is not taken.
+    fn forget_connection_test(&mut self) {
+        self.settings.connection_test = crate::app::state::ConnectionTest::Untried;
+        self.settings.connection_tests += 1;
     }
 
     pub(crate) fn on_open_settings(&mut self) -> Task<Message> {
@@ -91,7 +139,10 @@ impl App {
             ),
         );
         self.settings.embed_here_snapshot = self.settings.embed_here;
+        self.settings.ai_opened = Some(crate::app::state::AiFields::of(&self.settings));
         self.settings.save_failed = false;
+        // What a test found last time was about fields since filled anew.
+        self.forget_connection_test();
         self.settings.integrations.note = None;
         self.refresh_integrations();
         self.settings.open = true;
@@ -213,8 +264,10 @@ impl App {
                         fields = fields.join(", ")
                     )
                 } else if self.llm_available {
+                    // Not in parentheses: a provider's name may have its own
+                    // ("Custom (OpenAI-compatible)").
                     tr!(
-                        "Settings saved ({provider})",
+                        "Settings saved — using {provider}",
                         provider = crate::i18n::lookup(cfg.provider.label())
                     )
                 } else {
@@ -385,6 +438,17 @@ impl App {
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_settings(&mut self, message: SettingsMsg) -> Task<Message> {
         match message {
+            // Picked with Settings shut — said, or run from the command bar:
+            // picked as its page would pick it, and kept as closing it
+            // keeps it. Only its draft changed, which nothing then saved.
+            msg @ (SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+                if !self.settings.open =>
+            {
+                let opened = self.on_open_settings();
+                let picked = self.update_settings(msg);
+                let closed = self.close_settings();
+                Task::batch([opened, picked, closed])
+            }
             SettingsMsg::SetThemePref(pref) => {
                 self.set_theme(pref);
                 Task::none()
@@ -455,6 +519,16 @@ impl App {
                 self.sync_server_listing()
             }
             SettingsMsg::Close => self.close_settings(),
+            SettingsMsg::Discard => {
+                // The AI fields as Settings opened on them: closing then
+                // keeps nothing of what was typed.
+                if let Some(opened) = self.settings.ai_opened.clone() {
+                    opened.put_back(&mut self.settings);
+                    self.forget_connection_test();
+                    self.settings.save_failed = false;
+                }
+                Task::none()
+            }
             SettingsMsg::ProviderPicked(p) => {
                 // The drop-down sends the provider already picked too: that
                 // changes nothing. It used to put the provider's defaults over
@@ -464,6 +538,7 @@ impl App {
                     return Task::none();
                 }
                 self.settings.provider = p;
+                self.forget_connection_test();
                 // Back to the provider Settings opened on: its model and base
                 // URL as they were then, so a wrong pick undone costs nothing.
                 // Another provider: its defaults (the user can still edit
@@ -483,14 +558,29 @@ impl App {
             }
             SettingsMsg::KeyChanged(s) => {
                 self.settings.key = s;
+                self.forget_connection_test();
                 Task::none()
             }
             SettingsMsg::ModelChanged(s) => {
                 self.settings.model = s;
+                self.forget_connection_test();
                 Task::none()
             }
             SettingsMsg::BaseUrlChanged(s) => {
                 self.settings.base_url = s;
+                self.forget_connection_test();
+                Task::none()
+            }
+            SettingsMsg::TestConnection => self.on_test_connection(),
+            SettingsMsg::ConnectionTested { number, result } => {
+                if self.settings.connection_test
+                    == crate::app::state::ConnectionTest::Testing(number)
+                {
+                    self.settings.connection_test = match result {
+                        Ok(model) => crate::app::state::ConnectionTest::Answered(model),
+                        Err(e) => crate::app::state::ConnectionTest::Failed(e),
+                    };
+                }
                 Task::none()
             }
             SettingsMsg::Saved => self.on_settings_saved(),

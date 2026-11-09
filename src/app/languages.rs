@@ -33,6 +33,28 @@ pub(crate) fn language_names<S: AsRef<str>>(keys: &[S]) -> String {
 }
 
 impl App {
+    /// The languages Settings → Language servers lists, each with its
+    /// server: those the project's code is written in, those given a server
+    /// program of the user's own, and any other of the project's whose
+    /// server was asked for (a file of it opened) — not every language one
+    /// stray file is in.
+    pub(crate) fn listed_languages(&self) -> Vec<String> {
+        let mut rows = self.proj.code_languages.clone();
+        if let Some(servers) = &self.proj.lang_choices.servers {
+            rows.extend(servers.keys().cloned());
+        }
+        rows.extend(
+            self.proj
+                .project_languages
+                .iter()
+                .filter(|l| self.proj.link.lsp.contains_key(l.as_str()))
+                .cloned(),
+        );
+        rows.sort();
+        rows.dedup();
+        rows
+    }
+
     /// Read the user's choices for the open project's languages, off the UI
     /// thread; they land as `LanguagesMsg::ChoicesLoaded`. Language servers
     /// asked for meanwhile wait for them (`ensure_lsp`).
@@ -77,7 +99,11 @@ impl App {
                 // for meanwhile: on their way, they are waited for, where
                 // asked first they each popped the very download question
                 // the sheet's tick had answered, and the tick was skipped.
-                let mut tasks = vec![self.refresh_build_facts(), self.apply_pending_setup()];
+                let mut tasks = vec![
+                    self.refresh_build_facts(),
+                    self.apply_pending_setup(),
+                    self.look_for_missing_setup(),
+                ];
                 // The servers asked for meanwhile — each waits on, if the
                 // project's other state is still loading, that instead.
                 for language in std::mem::take(&mut self.proj.inflight.deferred_lsp) {
@@ -336,7 +362,7 @@ impl App {
     /// changed — restarted now if one is running — and by the next debug
     /// session. A Python choice changes what is in effect, so the Settings
     /// view lists it again.
-    fn choose(&mut self, next: LanguageChoices) -> Task<Message> {
+    pub(crate) fn choose(&mut self, next: LanguageChoices) -> Task<Message> {
         let Some(root) = self.proj.project.as_ref().map(|p| p.root.clone()) else {
             return Task::none();
         };
@@ -352,21 +378,27 @@ impl App {
         self.proj.lang_choices = next.clone();
         let host = self.connection.approval_host().map(str::to_string);
         let stamp = self.stamp();
-        let mut tasks = vec![Task::perform(
-            async move {
-                tokio::task::spawn_blocking(move || {
-                    lsp::choices::save(host.as_deref(), &root, &next)
-                })
-                .await
-                .unwrap_or_else(|_| Err(tr!("the save failed").to_string()))
-            },
-            move |result| {
-                Message::Languages(LanguagesMsg::Saved {
-                    stamp: stamp.clone(),
-                    result,
-                })
-            },
-        )];
+        // A server program of the user's takes nothing to set up; clew's
+        // own again may.
+        let look = self.look_for_missing_setup();
+        let mut tasks = vec![
+            look,
+            Task::perform(
+                async move {
+                    tokio::task::spawn_blocking(move || {
+                        lsp::choices::save(host.as_deref(), &root, &next)
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err(tr!("the save failed").to_string()))
+                },
+                move |result| {
+                    Message::Languages(LanguagesMsg::Saved {
+                        stamp: stamp.clone(),
+                        result,
+                    })
+                },
+            ),
+        ];
         for language in changed {
             if self.proj.link.lsp.contains_key(&language) {
                 tasks.push(self.update_lsp(LspMsg::Restart(language)));

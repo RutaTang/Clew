@@ -335,6 +335,8 @@ pub(crate) fn names_trail_stops(kind: &str) -> bool {
     )
 }
 
+/// How many of the files read lately lead the file finder with nothing typed.
+const RECENT_FILES: usize = 20;
 impl App {
     /// Run a navigation request from the active pane's cursor.
     pub(crate) fn goto_at_cursor(&mut self, kind: GotoKind) -> Task<Message> {
@@ -376,10 +378,10 @@ impl App {
         let client = match self.proj.link.lsp.get(lang) {
             Some(LspSlot::Ready(c)) => c.clone(),
             _ => {
-                self.status = crate::keymap::local_keys(&tr!(
-                    "No {language} server ready (⌘T to search symbols)",
+                self.status = tr!(
+                    "No {language} server ready",
                     language = crate::app::languages::language_name(lang)
-                ));
+                );
                 return Task::none();
             }
         };
@@ -459,7 +461,11 @@ impl App {
                     count = targets.len()
                 );
                 self.proj.nav_term = self.proj.goto_term.clone();
-                self.show_locations(tr!("(definitions)"), targets, self.proj.goto_encoding)
+                let title = match self.proj.nav_term.as_deref() {
+                    Some(name) => tr!("Definitions of “{name}”", name = name),
+                    None => tr!("Definitions").to_string(),
+                };
+                self.show_locations(&title, targets, self.proj.goto_encoding)
             }
             Ok(targets) if !targets.is_empty() => {
                 let t = &targets[0];
@@ -498,7 +504,11 @@ impl App {
                     refs.len()
                 );
                 self.proj.nav_term = self.proj.refs_term.clone();
-                self.show_locations(tr!("(references)"), refs, self.proj.refs_encoding)
+                let title = match self.proj.nav_term.as_deref() {
+                    Some(name) => tr!("References to “{name}”", name = name),
+                    None => tr!("References").to_string(),
+                };
+                self.show_locations(&title, refs, self.proj.refs_encoding)
             }
             Ok(_) => {
                 self.status = tr!("No references").into();
@@ -844,7 +854,8 @@ impl App {
                 if let Some(p) = &self.proj.project {
                     let files = p.files.clone();
                     let symbols = self.fresh_symbol_index();
-                    self.proj.finder.refresh_files(&files, &symbols);
+                    let recent = self.proj.history.recent_files(RECENT_FILES);
+                    self.proj.finder.refresh_files(&files, &symbols, &recent);
                 }
             }
             FinderMode::Symbols => {
@@ -1087,6 +1098,84 @@ impl App {
 }
 
 impl App {
+    /// The file being read, revealed in the Files view once it comes on the
+    /// sheet: its folders opened, and its row scrolled into view when it is
+    /// not in it already. Only while the tree shows (the view picked, no
+    /// filter): a file opened with it hidden is revealed when it shows.
+    /// `None` when there is nothing to scroll.
+    pub(crate) fn sync_tree_reveal(&mut self) -> Option<Task<Message>> {
+        let rel = self.active_viewer()?.rel.clone();
+        if self.proj.tree_revealed.as_deref() == Some(rel.as_str())
+            || !self.show_left_sidebar
+            || self.sidebar != SidebarTab::Files
+            || !self.file_filter.trim().is_empty()
+        {
+            return None;
+        }
+        self.proj.tree_revealed = Some(rel.clone());
+        for (at, _) in rel.match_indices('/') {
+            self.proj.expanded.insert(rel[..at].to_string());
+        }
+        let tree = &self.proj.project.as_ref()?.tree;
+        let row = ui::tree_row_index(tree, &self.proj.expanded, &rel)?;
+        let pitch = ui::TREE_ROW_H + ui::TREE_ROW_GAP;
+        let (top, bottom) = (row as f32 * pitch, (row + 1) as f32 * pitch);
+        // Before it has been scrolled, it shows from its top, about as much
+        // of it as the window has room for under the chrome.
+        let (offset, height) = self
+            .proj
+            .tree_scroll
+            .unwrap_or((0.0, (self.window_height - TREE_CHROME_H).max(0.0)));
+        if top >= offset && bottom <= offset + height {
+            return None;
+        }
+        Some(iced::widget::operation::scroll_to(
+            ui::files_tree_id(),
+            iced::widget::scrollable::AbsoluteOffset {
+                x: 0.0,
+                y: (top - height / 2.0).max(0.0),
+            },
+        ))
+    }
+}
+
+impl App {
+    /// The working tree's changes read anew when they may have changed, for
+    /// the Files view's marks: while the tree shows (they are read for
+    /// nothing else), one read at a time, another after it when something
+    /// changed meanwhile. `None` when there is nothing to read.
+    pub(crate) fn sync_git_status(&mut self) -> Option<Task<Message>> {
+        if !self.proj.git_status_stale
+            || self.proj.git_status_loading
+            || !self.show_left_sidebar
+            || self.sidebar != SidebarTab::Files
+        {
+            return None;
+        }
+        let git = self.git_source()?;
+        self.proj.git_status_stale = false;
+        self.proj.git_status_loading = true;
+        let stamp = self.stamp();
+        Some(Task::perform(
+            async move {
+                git.run::<Vec<(String, char)>>(clew_protocol::GitOp::WorkingStatus)
+                    .await
+            },
+            move |result| {
+                Message::Project(ProjectMsg::GitStatusRead {
+                    stamp: stamp.clone(),
+                    result,
+                })
+            },
+        ))
+    }
+}
+
+/// About how much of the window's height is not the Files view's tree: the
+/// top bar, the sidebar's tabs and filter, the status bar.
+const TREE_CHROME_H: f32 = 160.0;
+
+impl App {
     /// Handle a [`NavMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_nav(&mut self, message: NavMsg) -> Task<Message> {
@@ -1124,6 +1213,15 @@ impl App {
                 self.search_when_typing_pauses()
             }
             NavMsg::SearchSubmitted => self.run_search(),
+            // Back to the search, as it was asked.
+            NavMsg::ListingClosed => {
+                self.clear_search_results();
+                if self.proj.search.query.trim().is_empty() {
+                    Task::none()
+                } else {
+                    self.run_search()
+                }
+            }
             NavMsg::SearchDone { seq, result, .. } => {
                 // Only the latest submission may paint the Search sidebar.
                 if seq == self.proj.search_seq {

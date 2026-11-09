@@ -141,6 +141,9 @@ pub(crate) fn path_at(history: &[git::HistCommit], sha: &str, rel: &str) -> Stri
         .map_or_else(|| rel.to_string(), |c| c.path.clone())
 }
 
+/// How many of a file's commits the margin's History lists.
+const MARGIN_HISTORY_COMMITS: usize = 30;
+
 impl App {
     /// Resolve the scope a Time Travel run should use. `symbol` = the reader
     /// asked for "this symbol" (the toolbar entry asks for the whole file, the
@@ -615,7 +618,62 @@ impl App {
             }
             None => {}
         }
-        Task::done(Message::TimeTravel(TimeTravelMsg::Goto(0)))
+        // At the commit asked for (the margin's History), else the newest.
+        let first = self
+            .proj
+            .time_travel_at
+            .take()
+            .and_then(|sha| {
+                self.proj
+                    .time_travel
+                    .as_ref()?
+                    .commits
+                    .iter()
+                    .position(|c| c.sha == sha)
+            })
+            .unwrap_or(0);
+        Task::done(Message::TimeTravel(TimeTravelMsg::Goto(first)))
+    }
+
+    /// The commits that touched the file being read, asked for as the
+    /// margin's History shows it: once a file while it shows, and anew each
+    /// time it is shown again (a commit may have come meanwhile). `None` when
+    /// there is nothing to ask.
+    pub(crate) fn sync_margin_history(&mut self) -> Option<Task<Message>> {
+        if !self.show_right_panel || self.margin_tab != crate::MarginTab::History {
+            self.proj.margin_history = None;
+            return None;
+        }
+        let (abs, rel) = self
+            .active_viewer()
+            .map(|v| (v.abs.clone(), v.rel.clone()))?;
+        if self
+            .proj
+            .margin_history
+            .as_ref()
+            .is_some_and(|(asked, _)| *asked == abs)
+        {
+            return None;
+        }
+        let git = self.git_source()?;
+        self.proj.margin_history = Some((abs.clone(), None));
+        let stamp = self.stamp();
+        Some(Task::perform(
+            async move {
+                git.run::<Vec<git::HistCommit>>(clew_protocol::GitOp::FileHistory {
+                    rel,
+                    limit: MARGIN_HISTORY_COMMITS,
+                })
+                .await
+            },
+            move |result| {
+                Message::TimeTravel(TimeTravelMsg::MarginHistory {
+                    stamp: stamp.clone(),
+                    abs: abs.clone(),
+                    result,
+                })
+            },
+        ))
     }
 
     pub(crate) fn on_time_travel_goto(&mut self, idx: usize) -> Task<Message> {
@@ -1161,6 +1219,8 @@ impl App {
 
     pub(crate) fn on_why_is_this_here(&mut self) -> Task<Message> {
         let menu = self.proj.context_menu.take();
+        // Where the pointer asked — none from the palette's stand-in.
+        let anchor = menu.filter(|m| m.by_pointer).map(|m| m.y);
         let pane = menu.map(|m| m.pane).unwrap_or(self.proj.active);
         let menu_line = menu.map(|m| m.line);
         if self.proj.project.is_none() {
@@ -1231,6 +1291,7 @@ impl App {
             commits: commits.clone(),
             loading: true,
             prepared: Vec::new(),
+            anchor,
         });
         // The answer is only meaningful for the project it was asked in: its
         // stamp is checked on arrival, so a reply that outlives a project
@@ -1317,12 +1378,15 @@ impl App {
             }
         };
         let (prepared, task) = self.prepare_segments(&md);
+        // Where the question was asked, the answer stays.
+        let anchor = self.proj.blame_why.as_ref().and_then(|b| b.anchor);
         self.proj.blame_why = Some(BlameWhy {
             token,
             title,
             commits,
             loading: false,
             prepared,
+            anchor,
         });
         task
     }
@@ -1345,7 +1409,24 @@ impl App {
                 self.proj.blame_why = None;
                 Task::none()
             }
-            TimeTravelMsg::Start { symbol } => self.on_time_travel_start(symbol),
+            TimeTravelMsg::Start { symbol } => {
+                // A plain start lands on the newest commit, whatever a pick
+                // from the margin's History that never came to be asked.
+                self.proj.time_travel_at = None;
+                self.on_time_travel_start(symbol)
+            }
+            TimeTravelMsg::StartAt { sha } => {
+                self.proj.time_travel_at = Some(sha);
+                self.on_time_travel_start(false)
+            }
+            TimeTravelMsg::MarginHistory { abs, result, .. } => {
+                if let Some((asked, got)) = self.proj.margin_history.as_mut()
+                    && *asked == abs
+                {
+                    *got = Some(result);
+                }
+                Task::none()
+            }
             TimeTravelMsg::Ready {
                 generation,
                 abs,

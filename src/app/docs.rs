@@ -277,6 +277,10 @@ impl App {
                 Task::none()
             }
             DocsMsg::ViewFromMenu => self.on_view_docs_from_menu(),
+            DocsMsg::ClosePage => {
+                self.proj.docs.page = None;
+                Task::none()
+            }
         }
     }
 }

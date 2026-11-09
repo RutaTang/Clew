@@ -131,7 +131,10 @@ impl App {
                 // by locking every server's state three more times.
                 LspSlot::Ready(_) => match self.proj.link.lsp_snapshots.get(lang) {
                     Some(Ok(snap)) => {
+                        // Diagnostics on their way from a server that says
+                        // no more of its work: read when they come.
                         snap.progress.is_some()
+                            || snap.awaiting_diagnostics
                             || self.proj.link.seen_diag_version.get(lang).copied()
                                 != Some(snap.diag_version)
                             || self.proj.link.seen_inlay_epoch.get(lang).copied()
@@ -262,14 +265,108 @@ impl App {
             .link
             .lsp
             .insert(language.to_string(), LspSlot::AwaitingConsent);
+        // The server's own program already on this computer is offered in
+        // place of fetching Clew's copy — once it is seen to run, off the UI
+        // thread: the question is asked meanwhile, and asked again with the
+        // offer (`LspMsg::FoundOnPath`).
+        // Not for a server clew's own install keeps from running the
+        // project's code (typescript-language-server, whose TypeScript it
+        // pins): the user's program in its place would run the
+        // repository's `tsserver.js`, one click from a question that says
+        // nothing of it.
+        let name = path_name(&provision).filter(|_| !lsp::langenv::pins(&server.server_name));
+        // Looked for in the task (a Finder-opened app's PATH is the login
+        // shell's, asked once and maybe not yet answered), on the PATH a
+        // test set for this thread when it set one.
+        let path = path_set_here();
+        let fetched = provision.clone();
         self.proj.pending_lsp_consent.offer(LspConsent {
             language: language.to_string(),
             server_name: server.server_name,
             version: server.version,
             provision,
             dest_dir,
+            on_path: None,
         });
-        Task::none()
+        let Some(name) = name else {
+            return Task::none();
+        };
+        let stamp = self.transport_stamp();
+        let language = language.to_string();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let path = path.unwrap_or_else(clew_core::linerpc::child_path);
+                    on_path_for(&fetched, Some(&path))
+                        .filter(|program| worth_offering(program, &path))
+                })
+                .await
+                .ok()
+                .flatten()
+            },
+            move |runs| match runs {
+                Some(program) => Message::Lsp(LspMsg::FoundOnPath {
+                    stamp: stamp.clone(),
+                    language: language.clone(),
+                    name,
+                    program,
+                }),
+                None => Message::Noop,
+            },
+        )
+    }
+
+    /// The program the download question for `language` would fetch was
+    /// found on PATH and runs: the question, if it is still waiting, is
+    /// asked again offering it — under a number of its own, so the new
+    /// button is read before it counts.
+    pub(crate) fn on_lsp_found_on_path(
+        &mut self,
+        language: String,
+        name: &'static str,
+        program: PathBuf,
+    ) {
+        let Some(mut consent) = self
+            .proj
+            .pending_lsp_consent
+            .iter()
+            .find(|c| c.language == language && path_name(&c.provision) == Some(name))
+            .cloned()
+        else {
+            return;
+        };
+        if consent.on_path.as_deref() == Some(program.as_path()) {
+            return;
+        }
+        consent.on_path = Some(program);
+        self.proj.pending_lsp_consent.offer(consent);
+    }
+
+    /// The download prompt's "Use that one": the program found on PATH is
+    /// chosen as the language's server — as Settings → Language servers
+    /// chooses one — and started, nothing fetched.
+    pub(crate) fn on_lsp_consent_use_path(&mut self, number: u64) -> Task<Message> {
+        if !self.may_allow(&crate::app::model::Question::LspConsent(number)) {
+            return Task::none();
+        }
+        let Some(c) = self.proj.pending_lsp_consent.answer(number) else {
+            return Task::none();
+        };
+        let Some(program) = c.on_path else {
+            return Task::none();
+        };
+        let mut next = self.proj.lang_choices.clone();
+        next.servers.get_or_insert_with(Default::default).insert(
+            c.language.clone(),
+            clew_protocol::ServerChoice {
+                command: program.to_string_lossy().into_owned(),
+                args: None,
+            },
+        );
+        // Out of the slot it waited in, so the choice starts it afresh.
+        self.proj.link.lsp.remove(&c.language);
+        let chosen = self.choose(next);
+        Task::batch([chosen, self.ensure_lsp(&c.language)])
     }
 
     /// Hash the repository-named `command` (with its args and init options —
@@ -583,6 +680,7 @@ impl App {
                     .lsp
                     .insert(language.to_string(), LspSlot::AwaitingConsent);
                 self.proj.pending_lsp_consent.offer(LspConsent {
+                    on_path: None,
                     language: language.to_string(),
                     server_name: server.server_name,
                     version: server.version,
@@ -1247,6 +1345,19 @@ impl App {
         })
     }
 
+    /// Whether `language`'s server is at work — starting, or saying what it
+    /// is doing (indexing, building) — in words that change as it goes.
+    pub fn lsp_busy(&self, language: &str) -> bool {
+        match self.proj.link.lsp.get(language) {
+            Some(LspSlot::Starting) => true,
+            Some(LspSlot::Ready(_)) => matches!(
+                self.proj.link.lsp_snapshots.get(language),
+                Some(Ok(s)) if s.error.is_none() && s.progress.is_some()
+            ),
+            _ => false,
+        }
+    }
+
     /// Status text and the action button for a language row in the server
     /// panel. Distinguishes running / installed-but-idle / not-downloaded so an
     /// installed server never shows a misleading "Download".
@@ -1506,6 +1617,16 @@ impl App {
                 Task::none()
             }
             LspMsg::ConsentAllowed(number) => self.on_lsp_consent_allowed(number),
+            LspMsg::ConsentUsePath(number) => self.on_lsp_consent_use_path(number),
+            LspMsg::FoundOnPath {
+                language,
+                name,
+                program,
+                ..
+            } => {
+                self.on_lsp_found_on_path(language, name, program);
+                Task::none()
+            }
             LspMsg::CommandAllowed(number) => self.on_lsp_command_allowed(number),
             LspMsg::CommandDismissed(number) => {
                 if let Some(c) = self.proj.pending_lsp_command.answer(number) {
@@ -1538,13 +1659,14 @@ impl App {
                 }
                 // Finished: nothing left for its guard to stop.
                 self.proj.link.lsp_installs.remove(&language);
+                let look = self.look_for_missing_setup();
                 match result {
                     Ok(exe) => {
                         self.status = tr!(
                             "{language} server installed",
                             language = crate::app::languages::language_name(&language)
                         );
-                        self.start_lsp_with(&language, exe)
+                        Task::batch([self.start_lsp_with(&language, exe), look])
                     }
                     Err(e) => {
                         self.status = tr!(
@@ -1553,7 +1675,7 @@ impl App {
                             error = e
                         );
                         self.proj.link.lsp.insert(language, LspSlot::Failed(e));
-                        Task::none()
+                        look
                     }
                 }
             }
@@ -1569,7 +1691,8 @@ impl App {
                     return Task::none();
                 }
                 self.proj.link.lsp_installs.remove(&language);
-                self.on_lsp_fetched(language, result)
+                let fetched = self.on_lsp_fetched(language, result);
+                Task::batch([fetched, self.look_for_missing_setup()])
             }
             LspMsg::Staged {
                 stamp,
@@ -1606,7 +1729,8 @@ impl App {
                     Ok(()) => tr!("Removed {name} {version}", name = name, version = version),
                     Err(e) => tr!("Remove failed: {error}", error = e),
                 };
-                self.refresh_server_panel()
+                // A server the project needs, gone: offered to set up again.
+                Task::batch([self.refresh_server_panel(), self.look_for_missing_setup()])
             }
             LspMsg::ToggleInlayHints => self.on_toggle_inlay_hints(),
             LspMsg::TogglePanel => {
@@ -1631,6 +1755,120 @@ impl App {
                 // Force a fresh provisioning attempt for this language.
                 self.proj.link.lsp.remove(&language);
                 self.ensure_lsp(&language)
+            }
+        }
+    }
+}
+
+/// The PATH a test set for its thread ([`SEARCH_PATH`]) for a server's
+/// own program to be looked for on, in place of the one Clew's programs
+/// are given (`linerpc::child_path`: on macOS, an app opened from the
+/// Finder is given the login shell's).
+#[cfg(test)]
+fn path_set_here() -> Option<std::ffi::OsString> {
+    SEARCH_PATH.with(|path| path.borrow().clone())
+}
+
+/// See the test build's: none.
+#[cfg(not(test))]
+fn path_set_here() -> Option<std::ffi::OsString> {
+    None
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The PATH [`path_set_here`] gives on this thread, in place of the
+    /// process's, which every test shares.
+    pub(crate) static SEARCH_PATH: std::cell::RefCell<Option<std::ffi::OsString>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// The program of the name the server `provision` fetches would have, when
+/// one is on `path` — found as the shell finds it, a link kept as a link:
+/// a version manager's shim runs what it is named for.
+pub(crate) fn on_path_for(
+    provision: &LspProvision,
+    path: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    lsp::store::find_in_unresolved(path?, path_name(provision)?)
+}
+
+/// The name the program the server `provision` fetches goes by on PATH —
+/// where it lands in the download (`clangd_22.1.6/bin/clangd`,
+/// `node_modules/.bin/pyright-langserver`) is not its name there. None for
+/// a provision that fetches no program of its own.
+pub(crate) fn path_name(provision: &LspProvision) -> Option<&'static str> {
+    let binary = match provision {
+        LspProvision::Download(d) => d.binary,
+        LspProvision::Install(i) => i.binary,
+        _ => return None,
+    };
+    std::path::Path::new(binary).file_name()?.to_str()
+}
+
+/// Whether the server's own `program`, found on PATH, is worth offering in
+/// place of Clew's copy. A program on PATH can be a version manager's shim
+/// for a tool that is not installed — rustup's `rust-analyzer` without the
+/// component, asdf's or pyenv's for another version — there only to fail
+/// when run. One that answers its version is asked it ([`version_args`]);
+/// one with no way to ask (pyright's server, VS Code's) is offered as found,
+/// unless it is such a shim: those are kept in a `shims` folder (asdf,
+/// mise, pyenv, rbenv, nodenv), and only running it would tell.
+pub(crate) fn worth_offering(program: &std::path::Path, path: &std::ffi::OsStr) -> bool {
+    let name = program.file_stem().and_then(|n| n.to_str()).unwrap_or("");
+    match version_args(name) {
+        Some(args) => runs_here(program, args, path),
+        None => !program.components().any(|c| c.as_os_str() == "shims"),
+    }
+}
+
+/// How the server program `name` is asked its version, for those that
+/// answer it: `gopls version`, `--version` for the rest — and taplo whether
+/// it has its language server at all (`taplo lsp --help`): npm's
+/// `@taplo/cli` answers `--version` and has none. Pyright's server and VS
+/// Code's (JSON, HTML, CSS) take no such flag — they refuse to start
+/// without a connection — nor does intelephense or csharp-ls.
+pub(crate) fn version_args(name: &str) -> Option<&'static [&'static str]> {
+    match name {
+        "gopls" => Some(&["version"]),
+        "taplo" => Some(&["lsp", "--help"]),
+        "rust-analyzer" | "clangd" | "zls" | "haskell-language-server-wrapper" => {
+            Some(&["--version"])
+        }
+        _ => None,
+    }
+}
+
+/// Whether `program` runs here: asked with `args`, with nothing to read, it
+/// exits in success within a few seconds — run as the server would be, on
+/// the PATH it was found on (a `#!/usr/bin/env node` server finds its
+/// `node` there: an app opened from the Finder has none on its own), and
+/// away from any project.
+pub(crate) fn runs_here(program: &std::path::Path, args: &[&str], path: &std::ffi::OsStr) -> bool {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = clew_core::spawn::command(program)
+        .args(args)
+        .env("PATH", path)
+        .current_dir(clew_core::linerpc::neutral_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
             }
         }
     }

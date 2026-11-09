@@ -256,7 +256,7 @@ impl std::fmt::Display for McpError {
                 ..
             } => write!(
                 f,
-                "the server needs you to sign in (HTTP {status}) — Settings → MCP servers → Sign in"
+                "the server needs you to sign in (HTTP {status}) — Settings → Integrations → Sign in"
             ),
             // Two messages, not one with an optional tail: each is then
             // whole, and said whole in the reader's language.

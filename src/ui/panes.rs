@@ -15,8 +15,8 @@ pub(crate) fn editor_shell(inner: Element<'_, Message>) -> Element<'_, Message> 
 
 /// One code pane.
 ///
-/// Its skeleton is fixed — `column![header slot, stack![content, find slot]]`
-/// — whatever is showing, so opening the find bar or splitting the view never
+/// Its skeleton is fixed — `column![header slot, find slot, content]` —
+/// whatever is showing, so opening the find bar or splitting the view never
 /// moves the content to another position in the widget tree. (Both used to:
 /// the find bar wrapped the content in a new `Stack` and the split header
 /// pushed it down a slot, and either rebuilt the code view's scrollable at the
@@ -49,18 +49,16 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
         (None, None) => mouse_area(empty_state(
             Glyph::Note,
             tr!("No file open"),
-            if crate::keymap::MAC_KEYS {
-                tr!("Pick a file from the tree, or press ⌘P.")
-            } else {
-                tr!("Pick a file from the tree, or press Ctrl+P.")
-            },
+            tr!("Pick a file from the tree."),
             None,
         ))
         .on_press(Message::Editor(EditorMsg::PaneFocused(pane)))
         .into(),
     };
 
-    // The find bar floats over the top-right of the active pane.
+    // The find bar stands over the active pane's code, in a row of its own:
+    // floated over the code, it hid the lines under it — the file's first
+    // ones, and a match scrolled to the top of the view.
     let find: Element<'_, Message> =
         if app.proj.find.open && pane == app.proj.active && time_travel.is_none() {
             find_bar(app)
@@ -72,7 +70,7 @@ pub(crate) fn pane_view(app: &App, pane: usize) -> Element<'_, Message> {
     } else {
         slot()
     };
-    column![header, stack![editor_shell(content), find]]
+    column![header, find, editor_shell(content)]
         .width(Fill)
         .height(Fill)
         .into()
@@ -161,35 +159,19 @@ pub(crate) fn time_travel_banner<'a>(
     tt: &'a TimeTravel,
     commit: Option<&'a crate::git::HistCommit>,
 ) -> Element<'a, Message> {
-    // A tidy "Exit  esc" — the little keycap reads as a control and teaches the
-    // shortcut, instead of a bare ✕ glyph.
-    let keycap = container(text("esc").size(ts::CAPTION).color(theme::fg_muted()))
-        .padding(Padding {
-            top: 1.0,
-            right: 5.0,
-            bottom: 1.0,
-            left: 5.0,
-        })
-        .style(|_: &iced::Theme| iced::widget::container::Style {
-            background: Some(theme::bg_active().into()),
-            border: iced::Border {
-                radius: 3.0.into(),
-                width: 1.0,
-                color: theme::hairline(),
-            },
-            ..Default::default()
-        });
-    let exit = button(
-        row![
-            text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()),
-            keycap
-        ]
-        .spacing(6)
-        .align_y(iced::Center),
-    )
-    .style(theme::toolbar_button)
-    .padding([2, 8])
-    .on_press(Message::TimeTravel(TimeTravelMsg::Exit));
+    // Its key on hover, as every control of the chrome says its own.
+    let exit = super::toolbar::tip_at(
+        button(text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()))
+            .style(theme::toolbar_button)
+            .padding([2, 8])
+            .on_press(super::heard::said(
+                tr!("Exit Time Travel"),
+                Message::TimeTravel(TimeTravelMsg::Exit),
+            )),
+        tr!("Exit Time Travel"),
+        Some("Esc".to_string()),
+        iced::widget::tooltip::Position::Bottom,
+    );
 
     let Some(c) = commit else {
         let head = row![
@@ -256,7 +238,10 @@ pub(crate) fn time_travel_banner<'a>(
         )
         .style(theme::toolbar_button)
         .padding([2, 8])
-        .on_press(Message::TimeTravel(TimeTravelMsg::Why))
+        .on_press(super::heard::said(
+            tr!("What & why?"),
+            Message::TimeTravel(TimeTravelMsg::Why),
+        ))
         .into()
     };
 
@@ -319,8 +304,18 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     let last = n.saturating_sub(1);
     // `then` (lazy) — not `then_some` — so `idx - 1` isn't evaluated (underflowing
     // usize) when idx is 0.
-    let older = (tt.idx < last).then(|| Message::TimeTravel(TimeTravelMsg::Goto(tt.idx + 1)));
-    let newer = (tt.idx > 0).then(|| Message::TimeTravel(TimeTravelMsg::Goto(tt.idx - 1)));
+    let older = (tt.idx < last).then(|| {
+        super::heard::said(
+            tr!("Older"),
+            Message::TimeTravel(TimeTravelMsg::Goto(tt.idx + 1)),
+        )
+    });
+    let newer = (tt.idx > 0).then(|| {
+        super::heard::said(
+            tr!("Newer"),
+            Message::TimeTravel(TimeTravelMsg::Goto(tt.idx - 1)),
+        )
+    });
     let step = |g: Glyph, msg: Option<Message>| {
         let on = msg.is_some();
         let mut b = button(glyph::icon(
@@ -355,7 +350,10 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
     )
     .style(theme::toolbar_button)
     .padding([2, 8])
-    .on_press(Message::TimeTravel(TimeTravelMsg::ToggleScope));
+    .on_press(super::heard::said(
+        tr!("Change scope"),
+        Message::TimeTravel(TimeTravelMsg::ToggleScope),
+    ));
 
     let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
         if tt.story_loading {
@@ -377,11 +375,27 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
             button(text(label).size(ts::SMALL).color(color))
                 .style(theme::toolbar_button)
                 .padding([2, 8])
-                .on_press(Message::TimeTravel(TimeTravelMsg::Story))
+                .on_press(super::heard::said(
+                    label,
+                    Message::TimeTravel(TimeTravelMsg::Story),
+                ))
                 .into()
         }
     } else {
         space().into()
+    };
+    // Writing the story, Story, Hide story: in a place as wide as the widest
+    // of them (and a button's padding), at the bar's end — turning from one
+    // to the next moved the scope, the count and the arrows before it.
+    let story: Element<'_, Message> = if matches!(tt.scope, TimeScope::Symbol { .. }) {
+        let widest = super::steady::widest(
+            &[tr!("Writing the story…"), tr!("Hide story"), tr!("Story")],
+            ts::SMALL,
+            crate::fonts::UI,
+        );
+        container(story).width(widest + 16.0).into()
+    } else {
+        story
     };
 
     container(
@@ -397,9 +411,19 @@ pub(crate) fn time_travel_bar(tt: &TimeTravel) -> Element<'_, Message> {
                 tr!("Newer commit"),
                 Some(crate::keymap::local_keys("⌘→"))
             ),
-            text(format!("{} / {}", tt.idx + 1, n))
-                .size(ts::SMALL)
-                .color(theme::dim()),
+            // As wide as it reads at the last commit: scrubbing past the
+            // tenth moved the arrow before it and the slider's end. Counted
+            // as the slider runs, from the oldest: it counted from the
+            // newest, down as the slider went up.
+            {
+                let said = format!("{} / {}", n - tt.idx, n);
+                super::steady::slot(
+                    text(said.clone()).size(ts::SMALL).color(theme::dim()),
+                    &said,
+                    &[&format!("{n} / {n}")],
+                    ts::SMALL,
+                )
+            },
             space().width(16),
             scope_btn,
             story,
@@ -439,7 +463,10 @@ pub(crate) fn time_travel_story<'a>(
         button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
             .style(theme::toolbar_button)
             .padding([4, 6])
-            .on_press(Message::TimeTravel(TimeTravelMsg::Story)),
+            .on_press(super::heard::said(
+                tr!("Hide story"),
+                Message::TimeTravel(TimeTravelMsg::Story)
+            )),
     ]
     .align_y(iced::Center);
     let body = scrollable(
@@ -510,11 +537,19 @@ pub(crate) fn diff_view<'a>(
     // `DiffState::new` — not per repaint). Never narrower than the pane: a
     // diff of short lines tinted its added lines and hunk headers only as
     // far as its longest line, a third of the way across.
-    let content_width = row_width(
-        d.max_cols,
-        mono_advance(app.font_size),
-        DIFF_PAD_LEFT + DIFF_PAD_RIGHT,
-    );
+    let advance = mono_advance(app.font_size);
+    // The numbers' columns: the widest number, before and after, a space
+    // between — then the mark (+, −) of what happened to the line.
+    let gutter_cols = d
+        .runs
+        .iter()
+        .find(|r| r.kind != DiffKind::Hunk)
+        .and_then(|r| r.gutter.lines().next())
+        .map_or(0, |g| g.chars().count());
+    let gutter_w = (gutter_cols as f32 + 1.0) * advance + DIFF_PAD_LEFT;
+    let mark_w = 2.0 * advance;
+    let content_width =
+        row_width(d.max_cols, advance, DIFF_PAD_LEFT + DIFF_PAD_RIGHT) + gutter_w + mark_w;
     let body = iced::widget::responsive(move |size| {
         let run_width = diff_run_width(content_width, size.width);
         // One text block per run of same-kind lines rather than a widget per
@@ -522,7 +557,34 @@ pub(crate) fn diff_view<'a>(
         // layout work on a long diff — prepared once, borrowed here.
         let mut rows: Vec<Element<'a, Message>> = Vec::new();
         for run in &d.runs {
-            let (bg, fg) = match run.kind {
+            let code_text = |t: &'a str, color: iced::Color| {
+                text(t)
+                    .font(crate::fonts::CODE)
+                    .size(app.font_size)
+                    .color(color)
+                    .wrapping(Wrapping::None)
+            };
+            // Where a hunk is: a quiet line naming the place, not git's
+            // `@@ -12,7 +12,9 @@`.
+            if run.kind == DiffKind::Hunk {
+                rows.push(
+                    container(code_text(run.text.as_str(), theme::dim()))
+                        .width(Length::Fixed(run_width))
+                        .padding(Padding {
+                            top: 6.0,
+                            right: DIFF_PAD_RIGHT,
+                            bottom: 2.0,
+                            left: gutter_w + mark_w,
+                        })
+                        .style(|_: &iced::Theme| container::Style {
+                            background: Some(theme::with_alpha(theme::accent(), 0.06).into()),
+                            ..container::Style::default()
+                        })
+                        .into(),
+                );
+                continue;
+            }
+            let (bg, mark_color) = match run.kind {
                 DiffKind::Add => (
                     Some(theme::with_alpha(theme::success(), 0.14)),
                     theme::success(),
@@ -531,27 +593,41 @@ pub(crate) fn diff_view<'a>(
                     Some(theme::with_alpha(theme::danger(), 0.14)),
                     theme::danger(),
                 ),
-                DiffKind::Hunk => (
-                    Some(theme::with_alpha(theme::accent(), 0.12)),
-                    theme::accent(),
-                ),
-                DiffKind::Header => (None, theme::dim()),
-                DiffKind::Context => (None, theme::fg()),
+                _ => (None, theme::dim()),
             };
-            let mut cell = container(
-                text(run.text.as_str())
-                    .font(crate::fonts::CODE)
-                    .size(app.font_size)
-                    .color(fg)
-                    .wrapping(Wrapping::None),
-            )
-            .width(Length::Fixed(run_width))
-            .padding(Padding {
-                top: 0.0,
-                right: DIFF_PAD_RIGHT,
-                bottom: 0.0,
-                left: DIFF_PAD_LEFT,
-            });
+            // The code, coloured as the editor colours it.
+            let spans: Vec<iced::widget::text::Span<'a, Message>> = run
+                .spans
+                .iter()
+                .map(|(t, style)| {
+                    iced::widget::span(t.as_str())
+                        .color(
+                            style
+                                .and_then(crate::highlight::style_color)
+                                .unwrap_or(theme::code_fg()),
+                        )
+                        .font(crate::fonts::CODE)
+                        .size(app.font_size)
+                })
+                .collect();
+            let line = row![
+                container(code_text(run.gutter.as_str(), theme::dim()))
+                    .width(Length::Fixed(gutter_w))
+                    .padding(Padding {
+                        left: DIFF_PAD_LEFT,
+                        ..Padding::ZERO
+                    }),
+                container(code_text(run.marks.as_str(), mark_color)).width(Length::Fixed(mark_w)),
+                iced::widget::rich_text(spans).wrapping(Wrapping::None),
+            ];
+            let mut cell = container(line)
+                .width(Length::Fixed(run_width))
+                .padding(Padding {
+                    top: 0.0,
+                    right: DIFF_PAD_RIGHT,
+                    bottom: 0.0,
+                    left: 0.0,
+                });
             if let Some(bg) = bg {
                 cell = cell.style(move |_: &iced::Theme| container::Style {
                     background: Some(bg.into()),
@@ -602,7 +678,7 @@ const DIFF_PAD_LEFT: f32 = 10.0;
 const DIFF_PAD_RIGHT: f32 = 8.0;
 /// Columns a tab advances in the reader (the highlighter expands tabs to this
 /// many spaces, so the diff draws them the same way).
-const TAB_COLS: usize = 4;
+pub(crate) const TAB_COLS: usize = 4;
 
 /// A diff line as the view draws it: tabs expanded like the code view's, and a
 /// blank line kept one space wide so it does not collapse.
@@ -684,8 +760,14 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
         )
     };
 
+    let find = &app.proj.find;
+    // A pattern that is not one is marked, as a field in error is.
     let input = text_input(tr!("Find in file…"), &app.proj.find.query)
-        .style(theme::input)
+        .style(if find.invalid {
+            theme::input_marked
+        } else {
+            theme::input
+        })
         .id(find_input_id())
         .on_input(|v| Message::Editor(EditorMsg::FindQueryChanged(v)))
         .on_submit(Message::Editor(EditorMsg::FindStep(1)))
@@ -700,9 +782,46 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
             .on_press(msg)
     };
 
+    // Match case, whole word, regular expression: as project search has
+    // them, and as it means them — off, the case matters only once the
+    // query has a capital in it.
+    let option = |label: &'static str, tip: &'static str, on: bool, opt: crate::SearchOpt| {
+        super::toolbar::tip_at(
+            button(container(text(label).size(ts::BODY).font(crate::fonts::CODE)).center(Fill))
+                .style(theme::toggle(on))
+                .padding(0)
+                .width(Length::Fixed(FIND_OPTION_SIDE))
+                .height(Length::Fixed(FIND_OPTION_SIDE))
+                .on_press(super::heard::said(
+                    tip,
+                    Message::Editor(EditorMsg::FindToggle(opt)),
+                )),
+            tip,
+            None,
+            tooltip::Position::Bottom,
+        )
+    };
     let bar = container(
         row![
             input,
+            option(
+                "Aa",
+                tr!("Match case"),
+                find.case_sensitive,
+                crate::SearchOpt::Case
+            ),
+            option(
+                "W",
+                tr!("Whole word"),
+                find.whole_word,
+                crate::SearchOpt::WholeWord
+            ),
+            option(
+                ".*",
+                tr!("Regular expression"),
+                find.regex,
+                crate::SearchOpt::Regex
+            ),
             text(count).size(ts::SMALL).color(theme::dim()).width(46),
             btn(Glyph::ChevronLeft, Message::Editor(EditorMsg::FindStep(-1))),
             btn(Glyph::ChevronRight, Message::Editor(EditorMsg::FindStep(1))),
@@ -714,23 +833,24 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
     .padding(6)
     .style(theme::modal_panel);
 
-    // Pin to the top-right of the pane. Its panel takes every press and
-    // hover over it: the count and the gaps between its controls took none,
-    // and a press on one reached the code drawn under it (the caret moved
-    // there, a ⌘-press went to a definition, a rest asked for a peek of the
-    // token hidden there). The row it is pinned in does not, or the code to
-    // its left could not be clicked.
+    // At the right of its row over the code, on the sheet. Its panel takes
+    // every press and hover over it, the count and the gaps between its
+    // controls included.
     container(iced::widget::opaque(bar))
         .width(Fill)
         .align_x(iced::alignment::Horizontal::Right)
         .padding(Padding {
             top: 6.0,
             right: 16.0,
-            bottom: 0.0,
+            bottom: 6.0,
             left: 0.0,
         })
+        .style(theme::on_sheet)
         .into()
 }
+
+/// The side of each of the find bar's option toggles.
+const FIND_OPTION_SIDE: f32 = 26.0;
 
 pub(crate) fn pane_header(app: &App, pane: usize) -> Element<'_, Message> {
     let active = app.proj.active == pane;
@@ -802,11 +922,11 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
         button(text(primary.0.to_string()).size(ts::EMPHASIS))
             .style(theme::primary_button)
             .padding([8, 20])
-            .on_press(primary.1),
+            .on_press(super::heard::said(primary.0, primary.1)),
         button(text(secondary.0.to_string()).size(ts::EMPHASIS))
             .style(theme::secondary_button)
             .padding([8, 20])
-            .on_press(secondary.1),
+            .on_press(super::heard::said(secondary.0, secondary.1)),
     ]
     .spacing(10);
 
@@ -854,9 +974,11 @@ pub(crate) fn markdown_pane<'a>(
     v: &Viewer,
     items: &'a [iced::widget::markdown::Item],
 ) -> Element<'a, Message> {
-    let doc =
-        iced::widget::markdown::view(items, theme::markdown_settings_at(theme::DOCUMENT_SIZE))
-            .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
+    let doc = iced::widget::markdown::view(
+        items,
+        theme::document_markdown_settings_at(theme::DOCUMENT_SIZE),
+    )
+    .map(|url| Message::Content(ContentMsg::OpenLink(url.to_string())));
     let body = container(doc).padding([16, 28]).max_width(920);
     mouse_area(reader_scroll(
         scrollable(body)
@@ -1042,13 +1164,20 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     // pinned above the code. Dismissable (toggle back via the More menu). Its
     // slot is always there, so the summary arriving mid-read (Explain All
     // fills the cache as you scroll) does not rebuild the scroller below it.
-    let banner = if app.show_file_banner {
+    //
+    // Not while the margin shows the file's own note — the caret between
+    // functions, the Notes open beside the code: it said the same twice.
+    let file_node = crate::explain::Node::File(v.abs.clone());
+    let margin_says_it = right_panel_shown(app)
+        && app.margin_tab == crate::app::model::MarginTab::Notes
+        && app.proj.explain.view.as_ref() == Some(&file_node);
+    let banner = if app.show_file_banner && !margin_says_it {
         app.proj
             .explain
             .cache
-            .get(&crate::explain::Node::File(v.abs.clone()))
+            .get(&file_node)
             .filter(|c| !crate::explain::is_error_summary(&c.summary))
-            .map(|c| file_banner(first_sentence(&crate::app::shown_summary(c))))
+            .map(|c| file_banner(first_sentence(&crate::app::shown_summary(c)), file_node))
     } else {
         None
     };
@@ -1064,15 +1193,30 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
 /// Room above the code's first line.
 const CODE_TOP_PAD: f32 = 6.0;
 
-/// A one-line file summary pinned at the top of the code view.
-pub(crate) fn file_banner<'a>(summary: String) -> Element<'a, Message> {
+/// A one-line file summary pinned at the top of the code view: a click on
+/// it shows the file's whole note in the margin. (A "›" before it read as
+/// something to open, and opened nothing.)
+pub(crate) fn file_banner<'a>(summary: String, file: crate::explain::Node) -> Element<'a, Message> {
     container(
         row![
-            text("›").size(ts::BODY).color(theme::accent()),
-            text(summary)
-                .size(ts::BODY)
-                .color(theme::fg_muted())
-                .width(Fill),
+            super::toolbar::tip_at(
+                button(
+                    text(summary)
+                        .size(ts::BODY)
+                        .color(theme::fg_muted())
+                        .wrapping(Wrapping::None),
+                )
+                .style(theme::toolbar_button)
+                .padding([2, 6])
+                .width(Fill)
+                .on_press(super::heard::said(
+                    tr!("Show the file's note"),
+                    Message::Explain(ExplainMsg::Show(file))
+                )),
+                tr!("Show the file's note"),
+                None,
+                tooltip::Position::Bottom,
+            ),
             button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                 .style(theme::toolbar_button)
                 .padding([4, 6])
@@ -1208,7 +1352,7 @@ fn notes_beside_code<'a>(
     ordinals: Vec<u32>,
 ) -> Element<'a, Message> {
     use crate::explain::Node;
-    iced::widget::responsive(move |size| {
+    let build = move |size: iced::Size| {
         let lh = app.line_height();
         // The code runs down to the margin's foot; what is above it in the
         // pane (a banner, the find bar) is the difference in height.
@@ -1318,9 +1462,21 @@ fn notes_beside_code<'a>(
                 left: 4.0 - NOTE_EDGE,
             })
             .into()
-    })
-    .into()
+    };
+    // Built only when laid out, which a gathering of what voice can press
+    // never does: built once more for it, here, so a note's buttons are
+    // said as clicked.
+    if super::heard::gathering() {
+        drop(build(iced::Size::new(
+            MARGIN_GATHER_W,
+            v.viewport_h.max(1.0),
+        )));
+    }
+    iced::widget::responsive(build).into()
 }
+
+/// The width the margin's notes are built at when only gathered.
+const MARGIN_GATHER_W: f32 = 320.0;
 
 /// A note's head: the name it is about (as code, for a function) and what
 /// kind of thing that is, where.
@@ -1371,7 +1527,7 @@ fn plain_note<'a>(
 ) -> Element<'a, Message> {
     button(
         column![
-            note_head(name, meta, true, false),
+            note_head(name.clone(), meta, true, false),
             text(summary)
                 .size(super::explain_view::NOTE_SIZE)
                 .line_height(super::explain_view::NOTE_LINE_HEIGHT)
@@ -1383,7 +1539,10 @@ fn plain_note<'a>(
     .width(Fill)
     .height(Fill)
     .padding([3.0, 14.0 + NOTE_EDGE])
-    .on_press(Message::Editor(EditorMsg::OutlineJump(line)))
+    .on_press(super::heard::row(
+        || name.clone(),
+        Message::Editor(EditorMsg::OutlineJump(line)),
+    ))
     .into()
 }
 
@@ -1537,6 +1696,7 @@ fn active_note<'a>(
 ) -> Element<'a, Message> {
     let code = matches!(of, NoteOf::Function { .. });
     let action = |glyph: Glyph, label: String, accent: bool, msg: Message| {
+        let msg = super::heard::said(&label, msg);
         let tint = if accent {
             theme::accent()
         } else {
@@ -1585,20 +1745,41 @@ fn active_note<'a>(
         Some(None) => tr!("Uncommitted").to_string(),
         None => tr!("History").to_string(),
     };
-    let actions = row![
-        action(
+    // Not explained yet: what explains it, first, where the note says so.
+    let node = match (of, v) {
+        (NoteOf::Function { sym, ordinal }, Some(v)) => Some(crate::explain::Node::Function {
+            file: v.abs.clone(),
+            name: sym.name.clone(),
+            ordinal,
+        }),
+        (NoteOf::File, Some(v)) => Some(crate::explain::Node::File(v.abs.clone())),
+        _ => None,
+    };
+    let unexplained =
+        !app.proj.explain.running && node.is_some_and(|n| !app.proj.explain.cache.contains_key(&n));
+    let mut actions = row![].spacing(2).align_y(iced::Center);
+    if unexplained {
+        actions = actions.push(action(
+            Glyph::TextLines,
+            tr!("Explain All").into(),
+            true,
+            super::toolbar::explain_all_message(app),
+        ));
+    }
+    let actions = actions
+        .push(action(
             Glyph::Network,
             calls_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::Calls)),
-        ),
-        action(
+        ))
+        .push(action(
             Glyph::Clock,
             history_label,
             false,
             Message::Window(WindowMsg::MarginTabPicked(crate::MarginTab::History)),
-        ),
-        action(
+        ))
+        .push(action(
             Glyph::Message,
             tr!("Ask").into(),
             true,
@@ -1607,10 +1788,7 @@ fn active_note<'a>(
                 name = name,
                 file = app.active_viewer().map_or("", |v| v.rel.as_str())
             ))),
-        ),
-    ]
-    .spacing(2)
-    .align_y(iced::Center);
+        ));
     let said = scrollable(
         Column::with_children(super::explain_view::render_note(
             app,
@@ -1679,7 +1857,10 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
     .style(theme::menu_row)
     .width(Fill)
     .padding([6, 8])
-    .on_press(Message::Calls(CallsMsg::OfFunction));
+    .on_press(super::heard::said(
+        tr!("Calls of this function"),
+        Message::Calls(CallsMsg::OfFunction),
+    ));
     scrollable(
         column![Column::with_children(rows).spacing(8).width(Fill), open,]
             .spacing(10)
@@ -1696,66 +1877,105 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
     .into()
 }
 
-/// The margin's History: the ways into how this code came to be.
+/// The margin's History: the commits that made the file being read, newest
+/// first — each a way into Time Travel at it — and, under them, the ways
+/// into how the function and the line came to be. It was four links, two
+/// of them the header's own Diff and Time Travel again.
 fn margin_history(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them ("open the second").
+    super::heard::list();
     let in_function = matches!(
         app.proj.explain.view,
         Some(crate::explain::Node::Function { .. })
     );
-    let row_of = |glyph: Glyph, title: &'static str, detail: &'static str, msg: Message| {
-        button(
-            row![
-                container(glyph::icon(glyph, theme::fg_muted(), 15.0)).padding([2, 0]),
-                column![
-                    text(title).size(ts::BASE).color(theme::fg()),
-                    text(detail).size(ts::SMALL).color(theme::dim()),
-                ]
-                .spacing(2),
-            ]
-            .spacing(10)
-            .align_y(iced::alignment::Vertical::Top),
-        )
-        .style(theme::menu_row)
-        .width(Fill)
-        .padding([8, 10])
-        .on_press(msg)
+    let note = |s: String| -> Element<'_, Message> {
+        container(text(s).size(ts::SMALL).color(theme::dim()))
+            .padding([6, 10])
+            .into()
     };
     let mut rows = Column::new().spacing(2);
+    let file = app.active_viewer().map(|v| &v.abs);
+    match app
+        .proj
+        .margin_history
+        .as_ref()
+        .filter(|(abs, _)| Some(abs) == file)
+        .map(|(_, got)| got)
+    {
+        None | Some(None) => rows = rows.push(note(tr!("Reading the file's history…").into())),
+        Some(Some(Err(e))) => rows = rows.push(note(crate::i18n::message(e))),
+        Some(Some(Ok(commits))) if commits.is_empty() => {
+            rows = rows.push(note(tr!("No commit has touched this file yet.").into()))
+        }
+        Some(Some(Ok(commits))) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            for c in commits {
+                let short: String = c.sha.chars().take(7).collect();
+                rows = rows.push(
+                    button(
+                        column![
+                            text(c.subject.clone())
+                                .size(ts::BODY)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::WordOrGlyph),
+                            text(format!(
+                                "{short}  ·  {}  ·  {}",
+                                c.author,
+                                crate::i18n::ago(c.time, now)
+                            ))
+                            .size(ts::SMALL)
+                            .color(theme::dim())
+                            .wrapping(Wrapping::WordOrGlyph),
+                        ]
+                        .spacing(2),
+                    )
+                    .style(theme::menu_row)
+                    .width(Fill)
+                    .padding([6, 10])
+                    .on_press(super::heard::row(
+                        || c.subject.clone(),
+                        Message::TimeTravel(TimeTravelMsg::StartAt { sha: c.sha.clone() }),
+                    )),
+                );
+            }
+        }
+    }
+    // What only this tab offers: the function's own history, and why the
+    // line under the caret is there.
+    let link = |title: &'static str, msg: Message| {
+        button(text(title).size(ts::SMALL).color(theme::accent()))
+            .style(theme::icon_button(false))
+            .padding([3, 6])
+            .on_press(super::heard::said(title, msg))
+    };
+    let mut links = row![].spacing(6);
     if in_function {
-        rows = rows.push(row_of(
-            Glyph::TimeTravel,
+        links = links.push(link(
             tr!("This function through time"),
-            tr!("Step through its history, commit by commit."),
             Message::TimeTravel(TimeTravelMsg::Start { symbol: true }),
         ));
     }
-    rows = rows
-        .push(row_of(
-            Glyph::TimeTravel,
-            tr!("This file through time"),
-            tr!("Step back through the whole file's commits."),
-            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
-        ))
-        .push(row_of(
-            Glyph::Info,
-            tr!("Why is this line here?"),
-            tr!("The commits that shaped the current line, explained."),
-            Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
-        ))
-        .push(row_of(
-            Glyph::Diff,
-            tr!("Changes since the last commit"),
-            tr!("See what's new in this file."),
-            Message::Editor(EditorMsg::ToggleDiff),
-        ));
-    container(rows)
-        .padding(Padding {
-            top: 2.0,
-            right: 8.0,
-            bottom: 8.0,
-            left: 8.0,
-        })
-        .into()
+    links = links.push(link(
+        tr!("Why is this line here?"),
+        Message::TimeTravel(TimeTravelMsg::WhyIsThisHere),
+    ));
+    scrollable(
+        column![rows, container(links.wrap()).padding([4, 4])]
+            .spacing(6)
+            .padding(Padding {
+                top: 2.0,
+                right: 8.0,
+                bottom: 8.0,
+                left: 8.0,
+            }),
+    )
+    .direction(thin_scroll())
+    .style(theme::overlay_scrollbar)
+    .height(Fill)
+    .into()
 }
 
 /// A 1px horizontal divider spanning the panel width.
@@ -1904,7 +2124,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
+            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
         }
         if let Some(n) = note.filter(|n| !n.text.is_empty()) {
             // The reader's own note, in accent so it's distinct from the
@@ -1940,7 +2160,7 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
                 })
                 .max_width(TIP_MAX_W)
                 .style(theme::modal_panel);
-            col = col.push(tooltip(line, bubble, tooltip::Position::Bottom).gap(4));
+            col = col.push(super::tip::tip(line, bubble, tooltip::Position::Bottom).gap(4.0));
         }
 
         // Leading "understood" toggle and trailing note pencil sit inside
@@ -1955,10 +2175,14 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         let toggle = button(glyph::icon(cg, gcolor, 13.0))
             .style(theme::icon_button(false))
             .padding([4, 4])
-            .on_press(Message::Reading(ReadingMsg::NoteToggleUnderstood {
-                rel: v.rel.clone(),
-                symbol: symbol.name.clone(),
-            }));
+            .on_press(super::heard::said_to(
+                tr!("Understood"),
+                &symbol.name,
+                Message::Reading(ReadingMsg::NoteToggleUnderstood {
+                    rel: v.rel.clone(),
+                    symbol: symbol.name.clone(),
+                }),
+            ));
         let pencil = button(glyph::icon(
             Glyph::Edit,
             if has_text {
@@ -1970,10 +2194,14 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
         ))
         .style(theme::icon_button(false))
         .padding([4, 4])
-        .on_press(Message::Reading(ReadingMsg::NoteEditStart {
-            rel: v.rel.clone(),
-            symbol: symbol.name.clone(),
-        }));
+        .on_press(super::heard::said_to(
+            tr!("Edit note"),
+            &symbol.name,
+            Message::Reading(ReadingMsg::NoteEditStart {
+                rel: v.rel.clone(),
+                symbol: symbol.name.clone(),
+            }),
+        ));
         // Top-align so the toggle circle and pencil sit on the kind-badge/name
         // line rather than floating in the middle of the multi-line row.
         let jump = button(
@@ -1989,7 +2217,10 @@ pub(crate) fn outline_content(app: &App) -> Element<'_, Message> {
             bottom: 2.0,
             left: 2.0,
         })
-        .on_press(Message::Editor(EditorMsg::OutlineJump(symbol.line)));
+        .on_press(super::heard::row(
+            || symbol.name.clone(),
+            Message::Editor(EditorMsg::OutlineJump(symbol.line)),
+        ));
         rows.push(jump.into());
     }
 
@@ -2111,7 +2342,74 @@ mod tests {
                 text: line,
             }],
         );
-        assert_eq!(diff.max_cols, 6);
+        // Its `+` is drawn in a column of its own, not in the line.
+        assert_eq!(diff.max_cols, 5);
+    }
+
+    /// A diff reads as code does: git's headers are not drawn, a hunk is a
+    /// quiet line naming where it is, each line has its numbers before and
+    /// after and its mark apart, and the code is coloured as the editor
+    /// colours it. It was git's raw text — `diff --git`, `index`,
+    /// `@@ -10,2 +10,3 @@` — in one colour per kind.
+    #[test]
+    fn a_diff_reads_as_code_does() {
+        use crate::git::{DiffKind, DiffLine};
+        let line = |kind, text: &str| DiffLine {
+            kind,
+            text: text.into(),
+        };
+        let d = crate::DiffState::new(
+            std::path::PathBuf::from("/p/src/main.rs"),
+            "src/main.rs".into(),
+            vec![
+                line(DiffKind::Header, "diff --git a/src/main.rs b/src/main.rs"),
+                line(DiffKind::Header, "index 1a2b3c..4d5e6f 100644"),
+                line(DiffKind::Header, "--- a/src/main.rs"),
+                line(DiffKind::Header, "+++ b/src/main.rs"),
+                line(DiffKind::Hunk, "@@ -10,2 +10,2 @@ fn main() {"),
+                line(DiffKind::Context, "    let x = 1;"),
+                line(DiffKind::Remove, "-    println!(\"old\");"),
+                line(DiffKind::Add, "+    println!(\"new\");"),
+            ],
+        );
+        let kinds: Vec<DiffKind> = d.runs.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                DiffKind::Hunk,
+                DiffKind::Context,
+                DiffKind::Remove,
+                DiffKind::Add
+            ]
+        );
+        assert!(d.runs.iter().all(|r| !r.text.contains("diff --git")));
+        assert_eq!(d.runs[0].text, "⋯  fn main() {");
+        assert_eq!(d.runs[1].gutter, "10 10");
+        assert_eq!(d.runs[2].gutter, "11   ");
+        assert_eq!(d.runs[3].gutter, "   11");
+        assert_eq!(d.runs[2].marks, "−");
+        assert_eq!(d.runs[3].marks, "+");
+        assert_eq!(d.runs[3].text, "    println!(\"new\");");
+        // Coloured: the string is a string.
+        assert!(
+            d.runs[3]
+                .spans
+                .iter()
+                .any(|(t, s)| t.contains("new") && s.is_some()),
+            "{:?}",
+            d.runs[3].spans
+        );
+        // A hunk git names no place for.
+        let bare = crate::DiffState::new(
+            std::path::PathBuf::from("/p/a.txt"),
+            "a.txt".into(),
+            vec![
+                line(DiffKind::Hunk, "@@ -1 +1 @@"),
+                line(DiffKind::Add, "+x"),
+            ],
+        );
+        assert_eq!(bare.runs[0].text, "⋯");
+        assert_eq!(bare.runs[1].gutter, "  1");
     }
 
     /// The advance is measured by the text engine, not assumed at 0.6 em —

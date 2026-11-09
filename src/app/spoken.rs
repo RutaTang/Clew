@@ -30,6 +30,12 @@ enum Kind {
     Watch,
     /// Stop watching one.
     Unwatch,
+    /// Search the project by meaning.
+    Meaning,
+    /// Filter the files the sidebar lists.
+    Filter,
+    /// Write a walkthrough of a part of the project.
+    Walk,
 }
 
 /// What says yes to a command that waits for one, and what says no: the
@@ -71,6 +77,44 @@ pub(crate) fn yes_or_no(said: &str) -> Option<bool> {
     }
 }
 
+/// Whether `said` is nothing but a yes, or nothing but a no ("yes", "yes,
+/// do it", "no thanks" is not): how a question on screen is answered,
+/// where what only opens with a yes ("run the tests") must not allow
+/// what it asks.
+pub(crate) fn only_yes_or_no(said: &str) -> Option<bool> {
+    let said: Vec<String> = plain(said).split(' ').map(str::to_string).collect();
+    if said.iter().all(|w| w.is_empty()) {
+        return None;
+    }
+    let made_of = |list: &'static str| -> bool {
+        let phrases: Vec<Vec<String>> = [list, crate::i18n::lookup(list)]
+            .into_iter()
+            .flat_map(|l| l.split([',', '，', '、']))
+            .map(plain)
+            .filter(|p| !p.is_empty())
+            .map(|p| p.split(' ').map(str::to_string).collect())
+            .collect();
+        // Whether the first `i` words are made of the list's phrases.
+        let mut made = vec![false; said.len() + 1];
+        made[0] = true;
+        for i in 0..said.len() {
+            if made[i] {
+                for p in &phrases {
+                    if said[i..].starts_with(p) {
+                        made[i + p.len()] = true;
+                    }
+                }
+            }
+        }
+        made[said.len()]
+    };
+    match (made_of(YES), made_of(NO)) {
+        (true, false) => Some(true),
+        (false, true) => Some(false),
+        _ => None,
+    }
+}
+
 /// The phrases said with a value, in the order they are tried — after the
 /// palette's titles, so that a title wins: said with its value, a phrase
 /// is no title's words (the extra word is the value), and a translation
@@ -82,6 +126,12 @@ const PHRASES: &[(Kind, &str)] = &[
     (Kind::Breakpoint, tr_noop!("breakpoint on line {n}")),
     (Kind::Line, tr_noop!("go to line {n}")),
     (Kind::Line, tr_noop!("line {n}")),
+    (Kind::Meaning, tr_noop!("search by meaning for {text}")),
+    (Kind::Meaning, tr_noop!("find code that {text}")),
+    (Kind::Filter, tr_noop!("filter the files by {text}")),
+    (Kind::Filter, tr_noop!("filter files by {text}")),
+    (Kind::Walk, tr_noop!("walk me through {text}")),
+    (Kind::Walk, tr_noop!("write a walkthrough of {text}")),
     (Kind::Search, tr_noop!("search the project for {text}")),
     (Kind::Search, tr_noop!("search for {text}")),
     (Kind::ScrollDown, tr_noop!("scroll down {n}")),
@@ -199,6 +249,44 @@ impl App {
                 let task = self.update(Message::Debug(DebugMsg::WatchAdd));
                 self.debug.watch_input = typed;
                 did(tr!("Watching “{text}”", text = value), task)
+            }
+            Kind::Meaning => {
+                self.proj.project.as_ref()?;
+                let shown = self.update(Message::Window(WindowMsg::SidebarTabPicked(
+                    SidebarTab::Semantic,
+                )));
+                let typed = self.update(Message::Semantic(SemanticMsg::QueryChanged(
+                    value.to_string(),
+                )));
+                let run = self.update(Message::Semantic(SemanticMsg::Search));
+                did(
+                    tr!("Search by meaning for “{text}”", text = value),
+                    Task::batch([shown, typed, run]),
+                )
+            }
+            Kind::Filter => {
+                self.proj.project.as_ref()?;
+                let shown = self.update(Message::Window(WindowMsg::SidebarTabPicked(
+                    SidebarTab::Files,
+                )));
+                let typed = self.update(Message::Window(WindowMsg::FileFilterChanged(
+                    value.to_string(),
+                )));
+                did(
+                    tr!("Files filtered by “{text}”", text = value),
+                    Task::batch([shown, typed]),
+                )
+            }
+            Kind::Walk => {
+                self.proj.project.as_ref()?;
+                let shown = self.update(Message::Window(WindowMsg::SidebarTabPicked(
+                    SidebarTab::Walk,
+                )));
+                let run = self.update(Message::Walk(WalkMsg::Generate(value.to_string())));
+                did(
+                    tr!("Walkthrough of “{text}”", text = value),
+                    Task::batch([shown, run]),
+                )
             }
             Kind::Unwatch => {
                 let wanted = squeezed(value);
@@ -406,7 +494,7 @@ fn said_form(text: &str, mend: bool) -> String {
 
 /// A line number said: in figures ("30", "#30") or in English words ("thirty
 /// five").
-fn number(text: &str) -> Option<usize> {
+pub(crate) fn number(text: &str) -> Option<usize> {
     let text = text.trim().trim_start_matches('#').to_lowercase();
     let text = text.as_str();
     // "10 lines": the count said with what it counts.
@@ -524,6 +612,32 @@ fn squeezed(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A question on screen is answered only by what is all a yes or all
+    /// a no: what merely opens with one ("run the tests") is not.
+    #[test]
+    fn a_question_is_answered_by_a_yes_alone() {
+        for said in ["yes", "Yes, do it.", "ok", "go ahead please", "run it"] {
+            assert_eq!(only_yes_or_no(said), Some(true), "{said:?}");
+        }
+        for said in ["no", "No.", "cancel", "not now", "never mind"] {
+            assert_eq!(only_yes_or_no(said), Some(false), "{said:?}");
+        }
+        for said in [
+            "run the tests",
+            "yes and explain it",
+            "no idea why",
+            "nothing",
+            "",
+        ] {
+            assert_eq!(only_yes_or_no(said), None, "{said:?}");
+        }
+        assert_eq!(
+            yes_or_no("run the tests"),
+            Some(true),
+            "where opening counts"
+        );
+    }
 
     /// A phrase gives its value however it is said around it: in either
     /// case, with a full stop, with "please" — and only as a word of its

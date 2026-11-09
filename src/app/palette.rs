@@ -31,12 +31,17 @@ pub(crate) struct PaletteCommand {
     /// Its key, when it has one: a chord (`⌘⇧C`) or a reading key (`gd`).
     pub(crate) keys: Option<String>,
     pub(crate) action: PaletteAction,
+    /// What the row says, when its title is made of parts the catalogs
+    /// translate one by one ("Language: French" — "Langue : Français").
+    pub(crate) shown_as: Option<String>,
 }
 
 impl PaletteCommand {
     /// What the row says: its title, in the reader's language.
     pub(crate) fn shown(&self) -> &str {
-        crate::i18n::lookup(&self.title)
+        self.shown_as
+            .as_deref()
+            .unwrap_or_else(|| crate::i18n::lookup(&self.title))
     }
 
     /// Whether running it costs something beyond what the window shows —
@@ -59,6 +64,35 @@ impl PaletteCommand {
             ),
             PaletteAction::Goto(_) | PaletteAction::Insight => false,
         }
+    }
+
+    /// Whether the agent, running it, asks the user first: what costs
+    /// something ([`Self::costly`]), and a setting that changes what the
+    /// microphone takes in and what is done with it, where the project's
+    /// code is sent, or what is downloaded — the reader's to decide, never
+    /// a model's, which could otherwise turn on a microphone that listens
+    /// on and sends what it hears. The reader saying such a setting
+    /// changes it, as clicking it does.
+    pub(crate) fn asks_the_agent(&self) -> bool {
+        self.costly() || self.private()
+    }
+
+    /// Whether it is one of the settings [`Self::asks_the_agent`] keeps to
+    /// the reader.
+    fn private(&self) -> bool {
+        let (PaletteAction::Send(message) | PaletteAction::AtCaret(message)) = &self.action else {
+            return false;
+        };
+        matches!(
+            message,
+            Message::Voice(
+                VoiceMsg::SetKeepListening(_)
+                    | VoiceMsg::SetSendQuestions(_)
+                    | VoiceMsg::SetRunCommands(_)
+                    | VoiceMsg::PickModel(_)
+            ) | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+                | Message::Updater(UpdaterMsg::SetAuto(_))
+        )
     }
 
     /// Whether the reader, saying it, is asked first: what [`Self::costly`]
@@ -157,13 +191,27 @@ impl PaletteCommand {
                 tr!("This uses the AI model, which costs money."),
             ),
             Message::Project(ProjectMsg::OpenFolderPressed) => (
-                Glyph::Folder,
+                Glyph::FolderOpen,
                 tr!("This opens another folder in this window."),
             ),
             Message::Connect(ConnectMsg::Open) => {
                 (Glyph::Remote, tr!("This connects to another computer."))
             }
             Message::Export(_) => (Glyph::Export, tr!("This writes a file.")),
+            Message::Voice(VoiceMsg::PickModel(_)) => {
+                (Glyph::Mic, tr!("This can download a voice model."))
+            }
+            Message::Voice(_) => (
+                Glyph::Mic,
+                tr!("This changes what the microphone hears, and what is done with it."),
+            ),
+            Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_)) => {
+                (Glyph::Network, tr!("This changes where your code is sent."))
+            }
+            Message::Updater(UpdaterMsg::SetAuto(_)) => (
+                Glyph::Network,
+                tr!("This changes whether Clew checks online for updates."),
+            ),
             _ => (Glyph::Play, tr!("This runs one of the window's commands.")),
         }
     }
@@ -412,6 +460,7 @@ impl App {
                     .active_viewer()
                     .and_then(|v| v.lang_key)
                     .and_then(InsightKind::for_lang);
+                let served = self.served(pane);
                 self.proj.context_menu = Some(ContextMenu {
                     pane,
                     line,
@@ -419,6 +468,8 @@ impl App {
                     x: 0.0,
                     y: 0.0,
                     insight,
+                    served,
+                    by_pointer: false,
                 });
                 self.update(message)
             }
@@ -443,6 +494,7 @@ impl App {
                 title,
                 keys,
                 action,
+                shown_as: None,
             });
         };
         let send = PaletteAction::Send;
@@ -652,7 +704,10 @@ impl App {
                 tr_noop!("Settings: Integrations"),
                 SettingsPage::Integrations,
             ),
-            (tr_noop!("Settings: Languages"), SettingsPage::Languages),
+            (
+                tr_noop!("Settings: Language Servers"),
+                SettingsPage::Languages,
+            ),
             (
                 tr_noop!("Settings: Keyboard Shortcuts"),
                 SettingsPage::Shortcuts,
@@ -857,17 +912,17 @@ impl App {
             send(Message::Connect(ConnectMsg::Open)),
         );
 
-        // The appearance.
-        for (pref, title) in [
-            (theme::ThemePref::Light, tr_noop!("Theme: Light")),
-            (theme::ThemePref::Dark, tr_noop!("Theme: Dark")),
-            (theme::ThemePref::System, tr_noop!("Theme: Match System")),
-        ] {
-            add(
-                title.into(),
-                None,
-                send(Message::Settings(SettingsMsg::SetThemePref(pref))),
-            );
+        // Every setting's every choice: the language, the theme, how voice
+        // listens and speaks ("Language: French", "Read answers aloud: Off").
+        for setting in self.settings_choices() {
+            for choice in setting.choices {
+                out.push(PaletteCommand {
+                    title: choice.title,
+                    keys: None,
+                    action: PaletteAction::Send(choice.message),
+                    shown_as: Some(choice.shown),
+                });
+            }
         }
         out
     }
@@ -878,15 +933,15 @@ impl App {
 fn sidebar_title(tab: SidebarTab) -> &'static str {
     match tab {
         SidebarTab::Files => tr_noop!("Sidebar: Files"),
-        SidebarTab::Search => tr_noop!("Sidebar: Search"),
+        SidebarTab::Search => tr_noop!("Sidebar: Search Text"),
         SidebarTab::Semantic => tr_noop!("Sidebar: Find by Meaning"),
         SidebarTab::Marks => tr_noop!("Sidebar: Bookmarks"),
-        SidebarTab::Trail => tr_noop!("Sidebar: Trail"),
-        SidebarTab::Calls => tr_noop!("Sidebar: Calls"),
+        SidebarTab::Trail => tr_noop!("Sidebar: Reading Trail"),
+        SidebarTab::Calls => tr_noop!("Sidebar: Call Hierarchy"),
         SidebarTab::Flow => tr_noop!("Sidebar: Value Flow"),
         SidebarTab::Imports => tr_noop!("Sidebar: Imports"),
         SidebarTab::Walk => tr_noop!("Sidebar: Walkthroughs"),
-        SidebarTab::Notes => tr_noop!("Sidebar: Notes"),
-        SidebarTab::Docs => tr_noop!("Sidebar: Docs"),
+        SidebarTab::Notes => tr_noop!("Sidebar: Your Notes"),
+        SidebarTab::Docs => tr_noop!("Sidebar: API Docs"),
     }
 }

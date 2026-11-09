@@ -60,6 +60,65 @@ pub struct Layout {
     pub total: usize,
 }
 
+/// Labels that name different places are told apart: a file's by as many
+/// of the folders over it as it takes (`app/mod.rs`, `ui/mod.rs`), anything
+/// else's by its file after it (`new · lib.rs`, then `new · app/lib.rs`).
+/// A map of a crate had a dozen nodes called `mod.rs`.
+pub fn distinguish_labels(nodes: &mut [NodeInput]) {
+    let tail = |file: &std::path::Path, parts: usize| -> String {
+        let names: Vec<String> = file
+            .components()
+            .rev()
+            .take(parts)
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect();
+        names.into_iter().rev().collect::<Vec<_>>().join("/")
+    };
+    let mut by_label: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    for (i, n) in nodes.iter().enumerate() {
+        by_label.entry(n.label.clone()).or_default().push(i);
+    }
+    for (label, same) in by_label {
+        let files: HashSet<&PathBuf> = same.iter().map(|&i| &nodes[i].file).collect();
+        if same.len() < 2 || files.len() < 2 {
+            continue;
+        }
+        let files_named = same.iter().all(|&i| {
+            nodes[i].file.file_name().map(|f| f.to_string_lossy()) == Some(label.as_str().into())
+        });
+        let deepest = same
+            .iter()
+            .map(|&i| nodes[i].file.components().count())
+            .max()
+            .unwrap_or(1);
+        // Each as few folders as tell it from the others — or all of them.
+        let named = |i: usize, parts: usize| -> String {
+            if files_named {
+                tail(&nodes[i].file, parts + 1)
+            } else {
+                format!("{label} · {}", tail(&nodes[i].file, parts))
+            }
+        };
+        let mut names: Vec<Option<String>> = vec![None; same.len()];
+        for parts in 1..=deepest {
+            let at: Vec<String> = same.iter().map(|&i| named(i, parts)).collect();
+            for (k, name) in at.iter().enumerate() {
+                if names[k].is_none() && at.iter().filter(|n| *n == name).count() == 1 {
+                    names[k] = Some(name.clone());
+                }
+            }
+        }
+        let names: Vec<String> = same
+            .iter()
+            .enumerate()
+            .map(|(k, &i)| names[k].take().unwrap_or_else(|| named(i, deepest)))
+            .collect();
+        for (&i, name) in same.iter().zip(names) {
+            nodes[i].label = name;
+        }
+    }
+}
+
 const SPACE: f32 = 1000.0;
 const ITERATIONS: usize = 300;
 
@@ -74,11 +133,12 @@ pub fn layout(nodes: Vec<NodeInput>, mut edges: Vec<(usize, usize)>) -> Layout {
     edges.dedup();
     // Cap huge graphs to their highest-degree nodes so the O(n²) layout on the
     // UI thread stays cheap (and the map stays legible).
-    let (nodes, mut edges) = if nodes.len() > MAX_LAYOUT_NODES {
+    let (mut nodes, mut edges) = if nodes.len() > MAX_LAYOUT_NODES {
         cap_by_weight(nodes, edges, MAX_LAYOUT_NODES)
     } else {
         (nodes, edges)
     };
+    distinguish_labels(&mut nodes);
     let n = nodes.len();
     if n == 0 {
         return Layout::default();
@@ -339,6 +399,57 @@ pub fn fr_step3(
     alpha: f32,
     dt: f32,
 ) -> f32 {
+    // In steps no longer than `MAX_STEP`: a frame of a 60 Hz display is
+    // stepped as two, of a 120 Hz one as one, so either moves the graph
+    // alike — one long step of forces this stiff overshot where two short
+    // ones did not.
+    let steps = (dt.max(0.0) / MAX_STEP).ceil().max(1.0);
+    let mut energy = 0.0;
+    for _ in 0..steps as usize {
+        energy = step_with(pos, vel, edges, pinned, k, alpha, dt / steps, &FORCES);
+    }
+    energy
+}
+
+/// The longest step of simulated time [`fr_step3`] takes at once: half a
+/// [`REFERENCE_DT`], a 120 Hz frame's.
+const MAX_STEP: f32 = REFERENCE_DT / 2.0;
+
+/// The strengths of the live simulation's forces, each a multiple of the
+/// ideal edge length `k`'s.
+#[derive(Debug, Clone, Copy)]
+struct Forces {
+    /// Repulsion between every pair, `repel · k² / d` — a little more than
+    /// Fruchterman–Reingold's `k² / d`, for an open shape rather than a knot.
+    repel: f32,
+    /// An edge's pull, `spring · d² / k` — softer than their `d² / k`, so
+    /// densely linked files do not collapse into one another.
+    spring: f32,
+    /// The pull toward the centre, `gravity · k · d`. The canvas fits the
+    /// graph's radius to its frame, so how much room nodes have on screen is
+    /// how far apart they are against how far the farthest drift: a pull too
+    /// weak let loosely linked files float far out, the fit shrank to hold
+    /// them, and every cluster was drawn as a crowd of overlapping discs.
+    gravity: f32,
+}
+
+const FORCES: Forces = Forces {
+    repel: 1.8,
+    spring: 0.45,
+    gravity: 0.012,
+};
+
+#[allow(clippy::too_many_arguments)]
+fn step_with(
+    pos: &mut [V3],
+    vel: &mut [V3],
+    edges: &[(usize, usize)],
+    pinned: Option<usize>,
+    k: f32,
+    alpha: f32,
+    dt: f32,
+    forces: &Forces,
+) -> f32 {
     let n = pos.len();
     if n == 0 {
         return 0.0;
@@ -354,9 +465,7 @@ pub fn fr_step3(
                 pos[i][2] - pos[j][2],
             ];
             let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(0.01);
-            // A little extra repulsion (vs the ideal FR `k²/d`) spreads the graph
-            // into an open, readable shape rather than a tight central knot.
-            let f = 1.8 * k * k / dist;
+            let f = forces.repel * k * k / dist;
             for c in 0..3 {
                 let u = d[c] / dist * f;
                 disp[i][c] += u;
@@ -375,9 +484,7 @@ pub fn fr_step3(
             pos[a][2] - pos[b][2],
         ];
         let dist = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt().max(0.01);
-        // Softer edge springs (vs the ideal FR `d²/k`) so densely-connected hubs
-        // don't collapse into one another.
-        let f = 0.55 * dist * dist / k;
+        let f = forces.spring * dist * dist / k;
         for c in 0..3 {
             let u = d[c] / dist * f;
             disp[a][c] -= u;
@@ -396,9 +503,9 @@ pub fn fr_step3(
             continue;
         }
         for c in 0..3 {
-            // Weak centering gravity — just enough to keep disconnected pieces
-            // from drifting off, without compressing the graph into the middle.
-            disp[i][c] += -pos[i][c] * 0.005 * k;
+            // Centering gravity: keeps loose pieces from drifting off, so the
+            // fit leaves the rest room (see `Forces::gravity`).
+            disp[i][c] += -pos[i][c] * forces.gravity * k;
             vel[i][c] = (vel[i][c] + disp[i][c] * alpha * dt) * damping;
         }
         let sp = (vel[i][0].powi(2) + vel[i][1].powi(2) + vel[i][2].powi(2)).sqrt();
@@ -538,6 +645,40 @@ fn connected_components(n: usize, edges: &[(usize, usize)]) -> Vec<Vec<usize>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Nodes of one name in different places are told apart, by as little
+    /// as it takes.
+    #[test]
+    fn labels_of_different_places_are_told_apart() {
+        let node = |label: &str, file: &str| NodeInput {
+            label: label.into(),
+            file: PathBuf::from(file),
+            line: 1,
+            weight: 1.0,
+            cyclic: false,
+        };
+        let mut nodes = vec![
+            node("mod.rs", "/p/src/app/mod.rs"),
+            node("mod.rs", "/p/src/ui/mod.rs"),
+            node("mod.rs", "/p/crates/x/src/ui/mod.rs"),
+            node("main.rs", "/p/src/main.rs"),
+            node("new", "/p/src/a.rs"),
+            node("new", "/p/src/b.rs"),
+        ];
+        distinguish_labels(&mut nodes);
+        let labels: Vec<&str> = nodes.iter().map(|n| n.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "app/mod.rs",
+                "p/src/ui/mod.rs",
+                "x/src/ui/mod.rs",
+                "main.rs",
+                "new · a.rs",
+                "new · b.rs"
+            ]
+        );
+    }
 
     fn ni(label: &str) -> NodeInput {
         NodeInput {
@@ -725,6 +866,125 @@ mod tests {
         assert!((full - COOLING).abs() < 1e-6);
         assert_eq!(cool(0.5, 0.0), 0.5);
         assert_eq!(cool(0.5, -1.0), 0.5, "a negative dt never heats");
+    }
+
+    /// A graph of clusters, as a project's imports make one: dense groups
+    /// of files, a few links between them. Its nodes, and its edges.
+    fn clustered() -> (Vec<NodeInput>, Vec<(usize, usize)>) {
+        let sizes = [30usize, 25, 20, 20, 15, 10];
+        let mut nodes = Vec::new();
+        let mut edges = Vec::new();
+        let mut start = 0;
+        for (c, &size) in sizes.iter().enumerate() {
+            for i in 0..size {
+                nodes.push(ni(&format!("c{c}n{i}")));
+                // Each file imports three of its cluster's: a dense group.
+                for j in 1..=3 {
+                    let to = start + (i * 7 + j * 5) % size;
+                    if to != start + i {
+                        edges.push((start + i, to));
+                    }
+                }
+            }
+            // And its cluster's first file one of the last cluster's.
+            if c > 0 {
+                edges.push((start, start - 1));
+            }
+            start += size;
+        }
+        (nodes, edges)
+    }
+
+    /// The live simulation run as the canvas runs it, from the canvas's
+    /// seed, until it comes to rest: where the nodes end up.
+    fn settled(nodes: Vec<NodeInput>, edges: Vec<(usize, usize)>) -> Vec<V3> {
+        let laid = layout(nodes, edges);
+        let n = laid.nodes.len();
+        let mut pos: Vec<V3> = laid
+            .nodes
+            .iter()
+            .enumerate()
+            .map(|(i, nd)| {
+                let z = (((i * 61) % 100) as f32 / 100.0 - 0.5) * WORLD * 0.8;
+                [(nd.x - 0.5) * WORLD, (nd.y - 0.5) * WORLD, z]
+            })
+            .collect();
+        let mut vel = vec![[0.0f32; 3]; n];
+        let k = ideal_k(n);
+        let mut alpha = 1.0f32;
+        let dt = 4.0 / 60.0;
+        while alpha > 0.02 {
+            fr_step3(&mut pos, &mut vel, &laid.edges, None, k, alpha, dt);
+            alpha = cool(alpha, dt);
+        }
+        pos
+    }
+
+    /// How crowded a settled graph is on screen: the share of nodes whose
+    /// nearest other node is closer than `near` of the graph's own radius
+    /// (its 90th percentile distance from its centre) — on a screen that
+    /// fits the graph, as good as on top of it.
+    fn crowded(pos: &[V3], near: f32) -> f32 {
+        let n = pos.len() as f32;
+        let c: V3 = std::array::from_fn(|a| pos.iter().map(|p| p[a]).sum::<f32>() / n);
+        let dist = |p: &V3, q: &V3| {
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        };
+        let mut radii: Vec<f32> = pos.iter().map(|p| dist(p, &c)).collect();
+        radii.sort_by(f32::total_cmp);
+        let radius = radii[((radii.len() - 1) as f32 * 0.9) as usize];
+        let crowded = pos
+            .iter()
+            .enumerate()
+            .filter(|&(i, p)| {
+                pos.iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(_, q)| dist(p, q))
+                    .fold(f32::MAX, f32::min)
+                    < near * radius
+            })
+            .count();
+        crowded as f32 / n
+    }
+
+    /// A graph of clusters settles with room between its nodes, on a screen
+    /// that fits it: no node has another within 6% of the graph's radius,
+    /// and half have none within a tenth of it, about. With the centre's
+    /// pull as weak as it was, loosely linked files floated far out, and a
+    /// quarter of the nodes were that near one another — drawn, overlapping.
+    #[test]
+    fn a_settled_graph_leaves_room_between_its_nodes() {
+        let (nodes, edges) = clustered();
+        let pos = settled(nodes, edges);
+        assert_eq!(crowded(&pos, 0.06), 0.0);
+        assert!(nearest(&pos) > 0.095, "{}", nearest(&pos));
+    }
+
+    /// The median distance from a node to its nearest, as a share of the
+    /// graph's radius (its 90th percentile distance from its centre).
+    fn nearest(pos: &[V3]) -> f32 {
+        let n = pos.len() as f32;
+        let c: V3 = std::array::from_fn(|a| pos.iter().map(|p| p[a]).sum::<f32>() / n);
+        let dist = |p: &V3, q: &V3| {
+            ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+        };
+        let mut radii: Vec<f32> = pos.iter().map(|p| dist(p, &c)).collect();
+        radii.sort_by(f32::total_cmp);
+        let radius = radii[((radii.len() - 1) as f32 * 0.9) as usize];
+        let mut nn: Vec<f32> = pos
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                pos.iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != i)
+                    .map(|(_, q)| dist(p, q))
+                    .fold(f32::MAX, f32::min)
+            })
+            .collect();
+        nn.sort_by(f32::total_cmp);
+        nn[nn.len() / 2] / radius
     }
 
     #[test]

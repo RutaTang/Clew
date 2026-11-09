@@ -618,7 +618,7 @@ async fn a_sources_reply_tells_a_missing_file_from_an_unreadable_one() {
     std::fs::write(outside.join("secret.rs"), "fn secret() {}\n").unwrap();
     std::os::unix::fs::symlink(outside.join("secret.rs"), root.join("src/leak.rs")).unwrap();
     std::os::unix::fs::symlink(root.join("src/nowhere.rs"), root.join("src/dangling.rs")).unwrap();
-    let cap = clew_core::fs_scan::MAX_INDEX_FILE_BYTES as usize;
+    let cap = clew_core::fs_scan::MAX_EXPLAIN_FILE_BYTES as usize;
     std::fs::write(root.join("src/big.rs"), "x".repeat(cap + 1)).unwrap();
     std::fs::write(root.join("src/latin1.rs"), b"// caf\xe9\n").unwrap();
     std::fs::write(root.join("src/locked.rs"), "fn locked() {}\n").unwrap();

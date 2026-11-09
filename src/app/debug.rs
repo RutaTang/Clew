@@ -127,6 +127,16 @@ impl App {
                         type_hint: None,
                     }
                 }
+                // None at all: one for this project, in its language.
+                Err(_) if !root.join(".clew").join("launch.json").exists() => {
+                    let lang = self.active_viewer().and_then(|v| v.lang_key);
+                    self.status = tr!(
+                        "Create {path} with {example}",
+                        path = Path::new(".clew").join("launch.json").display(),
+                        example = crate::app::tasks::launch_example(&root, lang)
+                    );
+                    return Task::none();
+                }
                 Err(e) => {
                     self.status = e;
                     return Task::none();
@@ -698,6 +708,7 @@ impl App {
             adapter = install.name()
         );
         self.proj.pending_lsp_consent.offer(LspConsent {
+            on_path: None,
             language: String::new(),
             server_name: install.name().to_string(),
             version: install.version().to_string(),

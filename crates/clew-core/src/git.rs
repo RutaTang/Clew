@@ -2055,6 +2055,62 @@ pub fn changed_files(root: &Path, base: &str) -> Result<Vec<(String, char)>, Git
     Ok(parse_name_status_z(&out))
 }
 
+/// The files the working tree changes against HEAD — staged or not, and
+/// those git does not track yet — under the project directory, as
+/// `(root-relative path, letter)`: `M`odified, `A`dded, `D`eleted,
+/// `R`enamed, `U`ntracked, `!` in conflict.
+pub fn working_status(root: &Path) -> Result<Vec<(String, char)>, GitError> {
+    let git = Git::open(root)?;
+    let out = git.bytes(
+        [
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=dirty",
+            END_OF_OPTIONS,
+            ".",
+        ],
+        GIT_TIMEOUT,
+    )?;
+    Ok(parse_status_z(&out, &git.repo))
+}
+
+/// `status --porcelain=v1 -z` output: `XY path\0` per entry, the path from
+/// the repository's top; a rename's or a copy's then followed by the path it
+/// came from, which is skipped. Each entry's letter is the change that
+/// matters to a reader: a conflict, then what is untracked, added, deleted
+/// or renamed, else modified.
+fn parse_status_z(out: &[u8], repo: &Repo) -> Vec<(String, char)> {
+    let mut fields = out.split(|&b| b == 0).filter(|f| !f.is_empty());
+    let mut files = Vec::new();
+    while let Some(entry) = fields.next() {
+        let (Some(&x), Some(&y), Some(path)) = (entry.first(), entry.get(1), entry.get(3..)) else {
+            continue;
+        };
+        let (x, y) = (x as char, y as char);
+        if matches!(x, 'R' | 'C') {
+            fields.next();
+        }
+        let letter = match (x, y) {
+            ('U', _) | (_, 'U') | ('A', 'A') | ('D', 'D') => '!',
+            ('?', '?') => 'U',
+            ('!', '!') => continue,
+            ('A', _) => 'A',
+            ('D', _) | (_, 'D') => 'D',
+            ('R', _) => 'R',
+            _ => 'M',
+        };
+        let Ok(path) = std::str::from_utf8(path) else {
+            continue;
+        };
+        if let Some(rel) = repo.root_rel(path) {
+            files.push((rel, letter));
+        }
+    }
+    files
+}
+
 /// `--name-status -z` output: `STATUS\0path\0`, or `R100\0old\0new\0` /
 /// `C75\0src\0dst\0` for renames and copies (whose final path is taken). Paths
 /// are raw bytes under `-z` — no quoting to undo.
@@ -3140,6 +3196,7 @@ pub fn run_op(root: &Path, op: clew_protocol::GitOp) -> Result<clew_protocol::Gi
         GitOp::CommitSubjects { base } => GitResult::CommitSubjects(commit_subjects(root, &base)?),
         GitOp::ChangedFiles { base } => GitResult::ChangedFiles(changed_files(root, &base)?),
         GitOp::Churn { commits } => GitResult::Churn(churn(root, commits)?),
+        GitOp::WorkingStatus => GitResult::WorkingStatus(working_status(root)?),
         GitOp::RangePatch { base, max_bytes } => {
             GitResult::RangePatch(range_patch(root, &base, max_bytes)?)
         }

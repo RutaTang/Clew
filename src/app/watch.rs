@@ -14,6 +14,10 @@ impl App {
     /// dropped. Only refreshes what already exists — the first build of each
     /// artifact stays an explicit user action.
     pub(crate) fn on_files_changed(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        // What the working tree changes is read anew (`sync_git_status`).
+        if !paths.is_empty() {
+            self.proj.git_status_stale = true;
+        }
         // A file the resolver reads for the whole project (go.mod, a
         // tsconfig, a base a tsconfig `extends` under any name) changed:
         // every import resolves again, against a resolver that reads it anew.
@@ -328,7 +332,7 @@ impl App {
         // `TreeUpdated`).
         tasks.push(self.schedule_imports());
         // If a file the open call hierarchy references changed, the tree
-        // may now be out of date — flag it (re-run `gc` to refresh).
+        // may now be out of date — flag it (its note's Refresh traces it again).
         if let Some(t) = &mut self.proj.call_graph
             && !t.stale
             && touched.iter().any(|p| t.depends_on(p))
@@ -583,6 +587,7 @@ impl App {
         // — and kept, so the trees and the finder built on it can say so too.
         let cap_note = indexed.cap_note();
         self.proj.index_cap_note = cap_note.clone();
+        self.proj.index_too_large = indexed.too_large.clone();
         // Seed the change-detection registry from the same tree read — but the
         // read describes the tree as it was when this build was SPAWNED, and
         // the watcher (plus every file the reader opened) kept writing the

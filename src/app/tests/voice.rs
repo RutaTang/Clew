@@ -179,7 +179,10 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
 fn a_costly_command_asks_first() {
     let (mut app, script, _) = voice_app("voice-costly", "explain all");
     say(&mut app, &script);
-    assert_eq!(app.voice.confirm.as_deref(), Some("Explain All"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
     assert!(!app.settings.open, "nothing ran yet");
     assert!(app.voice.is_busy());
     // Esc: no.
@@ -187,14 +190,17 @@ fn a_costly_command_asks_first() {
         keyboard::Key::Named(keyboard::key::Named::Escape),
         keyboard::Modifiers::empty(),
     ));
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert!(!app.settings.open);
     // Again, and yes: it runs (with no key to pay for it, Settings asks
     // for one).
     say(&mut app, &script);
-    assert_eq!(app.voice.confirm.as_deref(), Some("Explain All"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
     let _ = app.update(Message::Voice(VoiceMsg::Confirm));
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert!(app.settings.open, "the pass asked for a key");
     assert_eq!(
         app.voice.heard.as_ref().map(|h| &h.outcome),
@@ -225,10 +231,11 @@ fn a_question_heard_goes_to_ask() {
     let _ = app.update(Message::Ask(AskMsg::InputChanged(typed)));
     assert!(!app.proj.ask_spoken, "typed over, it is typed");
     // Asked at once when the setting says so — here with no model to ask,
-    // so the question waits in the input, said why.
+    // so the question waits in the input, said why. Asked so, it does not
+    // open the card over the code.
     let (mut app, script, _) = voice_app("voice-question-send", "where is the origin defined");
     say(&mut app, &script);
-    assert_eq!(app.ask_view, AskView::Compact);
+    assert!(!app.ask_view.is_open(), "{:?}", app.ask_view);
     assert_eq!(app.proj.ask_input, "where is the origin defined");
     assert!(!app.status.starts_with("Asking"), "{}", app.status);
     // A command the user turned off running: also a question.
@@ -240,9 +247,106 @@ fn a_question_heard_goes_to_ask() {
     assert_eq!(app.proj.ask_input, "open the call graph");
 }
 
+/// A question said aloud is asked without the card opening over the code
+/// (someone finding their way by voice does not want it over what they
+/// went to): it is answered where Ask is, and an answer that comes with the
+/// card put away is marked on the pill until the card is opened.
+#[test]
+fn a_question_said_is_answered_without_opening_the_card() {
+    let (mut app, script, _) = voice_app("voice-question-hidden", "where is the origin defined");
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    // Grounded on a pinned line, it is asked with no index.
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.proj.ask_pins.push(crate::app::model::AskPin {
+        rel: "src/lib.rs".into(),
+        file: root.join("src/lib.rs"),
+        line: 1,
+        code: "pub struct Point;".into(),
+    });
+    say(&mut app, &script);
+    assert!(app.proj.asking, "asked: {}", app.status);
+    assert!(!app.ask_view.is_open(), "{:?}", app.ask_view);
+    assert!(!app.proj.ask_unread);
+    // Its answer comes with the card put away: marked, until it is opened.
+    app.proj.asking = false;
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 7,
+        question: "where is the origin defined".into(),
+        spoken: true,
+        streaming: true,
+        ..Default::default()
+    });
+    let _ = app.on_ask_stream_ended(7, clew_protocol::StreamOutcome::Done);
+    assert!(app.proj.ask_unread);
+    let _ = app.update(Message::Ask(AskMsg::Open));
+    assert!(app.ask_view.is_open());
+    assert!(!app.proj.ask_unread, "read once the card is open");
+    // Answered with the card open, nothing is marked.
+    app.proj.ask_turns.push(crate::app::model::AskTurn {
+        stream: 8,
+        question: "and the end?".into(),
+        streaming: true,
+        ..Default::default()
+    });
+    let _ = app.on_ask_stream_ended(8, clew_protocol::StreamOutcome::Done);
+    assert!(!app.proj.ask_unread);
+}
+
+/// Keep listening, switched on, listens at once — there is nothing else to
+/// press — and switched off before anything is said, stops.
+#[test]
+fn keep_listening_listens_as_it_is_switched_on() {
+    let (mut app, _script, _) = voice_app("voice-keep-on", "");
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
+    assert!(app.voice.is_listening(), "{}", app.status);
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(false)));
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    // Someone speaking as it is switched off is heard to the end.
+    let (mut app, script, _) = voice_app("voice-keep-off-speaking", "");
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
+    script.lock().unwrap().silence = Some(0.2);
+    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(false)));
+    assert!(app.voice.is_listening());
+}
+
+/// Keep listening: once what was said is done with — a command run, a
+/// place gone to, a yes waited for — the microphone opens again, card open
+/// or not; a quiet that goes on is let go and listened past, not reported
+/// as a microphone that hears nothing.
+#[test]
+fn keep_listening_listens_again_after_a_command() {
+    let (mut app, script, _) = voice_app("voice-keep-command", "open the call graph");
+    app.voice.keep_listening = true;
+    assert!(!app.ask_view.is_open());
+    say(&mut app, &script);
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+    // A command that waits for a yes is listened for.
+    let (mut app, script, _) = voice_app("voice-keep-confirm", "explain all");
+    app.voice.keep_listening = true;
+    say(&mut app, &script);
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Explain All")
+    );
+    assert!(app.voice.is_listening());
+    assert!(app.status.contains("say yes"), "{}", app.status);
+    // Nothing said for long: listened past, quietly.
+    script.lock().unwrap().silence = None;
+    if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
+        *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
+    }
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+    assert!(!app.status.contains("Nothing was heard"), "{}", app.status);
+    // Esc puts it away, and it stays away until asked for again.
+    let _ = app.update(Message::Voice(VoiceMsg::Cancel));
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+}
+
 /// Keep listening: once Clew has answered, the microphone opens again for
-/// what is said next — not after a Stop, not with the switch off, and not
-/// with the conversation put away.
+/// what is said next — not after a Stop, not with the switch off — with the
+/// conversation open or put away to its pill, which says it listens.
 #[test]
 fn keep_listening_opens_the_microphone_after_an_answer() {
     use clew_protocol::StreamOutcome;
@@ -274,11 +378,15 @@ fn keep_listening_opens_the_microphone_after_an_answer() {
     turn(&mut app, 3);
     let _ = app.on_ask_stream_ended(3, StreamOutcome::Stopped);
     assert_eq!(app.voice.phase, VoicePhase::Idle);
-    // Put away, the conversation hears nothing.
-    app.ask_view = AskView::Closed;
+    // Put away to its pill, it listens all the same.
+    app.ask_view = AskView::Hidden;
     turn(&mut app, 4);
     let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { .. }),
+        "{:?}",
+        app.voice.phase
+    );
 }
 
 /// Nothing heard, nothing done; a recognizer that fails says why.
@@ -963,19 +1071,22 @@ fn the_debugger_is_driven_by_voice() {
 
     // Starting asks; "no" says no, "yes" runs it.
     say_words(&mut app, &script, "Start debugging.");
-    assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Start Debugging")
+    );
     say_words(&mut app, &script, "No, never mind.");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert!(app.status.contains("Start Debugging"), "{}", app.status);
     say_words(&mut app, &script, "Start debugging.");
     say_words(&mut app, &script, "Yes, run it.");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert_eq!(ran(&app), Some("Start Debugging"));
     // Something else said instead puts the question away and is read as
     // itself.
     say_words(&mut app, &script, "Start debugging.");
     say_words(&mut app, &script, "go to line 2");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
     assert_eq!(caret_line(&app), Some(2));
 
     // A program stopped: each step runs as said.
@@ -1001,12 +1112,15 @@ fn the_debugger_is_driven_by_voice() {
     ] {
         say_words(&mut app, &script, said);
         assert_eq!(ran(&app), Some(title), "{said}: {}", app.status);
-        assert_eq!(app.voice.confirm, None, "{said}");
+        assert!(app.voice.confirm.is_none(), "{said}");
     }
     say_words(&mut app, &script, "Stop debugging.");
-    assert_eq!(app.voice.confirm.as_deref(), Some("Debug: Stop"));
+    assert_eq!(
+        app.voice.confirm.as_ref().map(|w| w.said()),
+        Some("Debug: Stop")
+    );
     say_words(&mut app, &script, "cancel");
-    assert_eq!(app.voice.confirm, None);
+    assert!(app.voice.confirm.is_none());
 
     say_words(&mut app, &script, "Watch cart total.");
     assert_eq!(app.debug.watches, ["cart total"]);
@@ -1014,7 +1128,7 @@ fn the_debugger_is_driven_by_voice() {
     assert!(app.debug.watches.is_empty());
     say_words(&mut app, &script, "Turn on hover evaluation.");
     assert_eq!(
-        app.voice.confirm.as_deref(),
+        app.voice.confirm.as_ref().map(|w| w.said()),
         Some("Debug: Turn On Hover Evaluation"),
         "evaluating in the program as the mouse moves asks"
     );
@@ -1115,7 +1229,14 @@ fn phrases_are_heard_in_the_readers_language() {
         assert_eq!(ran(&app), Some("Find References"), "{}", app.status);
         assert!(app.proj.search.query.is_empty());
         say_words(&mut app, &script, "Démarrer le débogage");
-        assert_eq!(app.voice.confirm.as_deref(), Some("Start Debugging"));
+        assert!(
+            matches!(
+                &app.voice.confirm,
+                Some(crate::app::voice::Waiting::Command(t)) if t == "Start Debugging"
+            ),
+            "{:?}",
+            app.voice.confirm
+        );
         say_words(&mut app, &script, "Oui, vas-y.");
         assert_eq!(ran(&app), Some("Start Debugging"), "{}", app.status);
     });
@@ -1209,10 +1330,16 @@ fn every_command_runs_when_its_name_is_said() {
         ("full screen", "Window: Full Screen"),
         ("maximize", "Window: Toggle Maximize"),
         ("maximize the window", "Window: Toggle Maximize"),
-        // The sidebar's tab, as before the margin's were listed.
-        ("notes", "Sidebar: Notes"),
-        ("show calls", "Sidebar: Calls"),
+        // The sidebar's tabs, by their names: the reader's own notes, said
+        // as theirs, apart from the margin's.
+        ("my notes", "Sidebar: Your Notes"),
+        ("show my notes", "Sidebar: Your Notes"),
+        // The caret's own command, of the same name, unless the sidebar is
+        // said.
+        ("call hierarchy", "Call Hierarchy"),
+        ("sidebar call hierarchy", "Sidebar: Call Hierarchy"),
         ("margin notes", "Margin Notes"),
+        ("margin calls", "Margin Calls"),
         ("margin history", "Margin History"),
     ] {
         assert_eq!(
@@ -1621,4 +1748,397 @@ fn a_model_being_removed_judges_nothing() {
     drop(removal);
     assert!(app.turn_model().is_some(), "here again once it is let go");
     assert!(judge.asked.lock().unwrap().is_empty());
+}
+
+/// L10: the voice key with the model chosen not on this computer says so,
+/// and opens Settings → Voice: that there is no model at all only when
+/// there is none — another one downloaded, it says which is missing and
+/// that one that is here can be chosen.
+#[test]
+fn the_voice_key_says_which_model_is_missing() {
+    let mut app = blank_app();
+    let store = own_store(&mut app, "voice-key-missing");
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.is_listening());
+    assert!(
+        app.status.starts_with("Voice needs a speech model"),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.settings.page, SettingsPage::Voice);
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    // Base downloaded, Small still the one chosen.
+    let base = clew_voice::models::find("base.en").unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(base), b"x").unwrap();
+    app.voice.reset_for_test();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.is_listening());
+    assert_eq!(
+        app.status,
+        "Small is not downloaded yet — download it (190 MB) in Settings → Voice, or choose \
+         one that is"
+    );
+    assert!(app.settings.open);
+    assert_eq!(app.settings.page, SettingsPage::Voice);
+}
+
+/// The sentence that found nothing: the interface's language changed as
+/// it is said — its name misheard — by the command the palette and the
+/// agent run too. (Made, it would change every test's language: what it
+/// makes is checked, not made.)
+#[test]
+fn the_apps_language_is_changed_as_it_is_said() {
+    use crate::i18n::{Lang, LangPref};
+    let app = blank_app();
+    let settings = app.settings_choices();
+    for said in [
+        "change the app's language to frensh",
+        "Change the app's language to French.",
+        "switch to French",
+    ] {
+        let (s, c) = crate::app::choices::chosen(said, &settings).expect(said);
+        let choice = &settings[s].choices[c];
+        assert_eq!(choice.title, "Language: French", "{said:?}");
+        assert!(
+            matches!(
+                choice.message,
+                Message::Settings(SettingsMsg::SetLanguage(LangPref::Chosen(Lang::Fr)))
+            ),
+            "{said:?}: {:?}",
+            choice.message
+        );
+    }
+    // The palette lists it, for the keyboard and for the agent.
+    let palette = app.palette_commands();
+    let french = palette
+        .iter()
+        .find(|c| c.title == "Language: French")
+        .expect("the palette offers the language");
+    assert!(matches!(
+        french.action,
+        crate::app::palette::PaletteAction::Send(Message::Settings(SettingsMsg::SetLanguage(
+            LangPref::Chosen(Lang::Fr)
+        )))
+    ));
+    assert!(!french.costly(), "the agent runs it without asking");
+}
+
+/// A setting said is changed — the window's own, here, as the language
+/// is every window's — and a switch is turned off and on by its name.
+#[test]
+fn a_setting_said_is_changed() {
+    let (mut app, script, _) = voice_app("voice-setting", "");
+    assert!(app.voice.prefs.speak);
+    say_words(&mut app, &script, "Turn off read answers aloud.");
+    assert!(!app.voice.prefs.speak, "{}", app.status);
+    assert_eq!(ran(&app), Some("Read answers aloud: Off"));
+    say_words(&mut app, &script, "turn read answers aloud back on");
+    assert!(app.voice.prefs.speak, "{}", app.status);
+    say_words(&mut app, &script, "set the voice language to French");
+    assert_eq!(
+        app.voice.prefs.language.as_deref(),
+        Some("fr"),
+        "{}",
+        app.status
+    );
+    // Spoken commands off, what is said goes to Ask — but for turning them
+    // back on, which nothing else said could.
+    say_words(&mut app, &script, "turn off spoken commands");
+    assert!(!app.voice.prefs.run_commands, "{}", app.status);
+    app.voice.prefs.send_questions = false;
+    say_words(&mut app, &script, "dark mode");
+    assert_eq!(
+        app.voice.heard.as_ref().map(|h| &h.outcome),
+        Some(&HeardOutcome::Asked)
+    );
+    app.proj.ask_input.clear();
+    say_words(&mut app, &script, "turn spoken commands on");
+    assert!(app.voice.prefs.run_commands, "{}", app.status);
+}
+
+/// A dialog takes what is said as it takes the pointer: a note's words
+/// typed into it, its Save said by name; Settings put away by "close".
+#[test]
+fn a_dialog_is_filled_and_answered_by_voice() {
+    let (mut app, script, _) = voice_app("voice-dialog", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let seed = vec![bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "fn".into(),
+        note: None,
+    }];
+    bookmarks::save(&root, &seed).unwrap();
+    app.proj.bookmarks = bookmarks::load(&root);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteEdit(
+        "src/lib.rs".into(),
+        3,
+    )));
+    // What only opens as a yes does ("run …") is no answer to the
+    // question on top: it is the note's words.
+    say_words(&mut app, &script, "run the tests");
+    assert!(app.proj.note_edit.is_some(), "{}", app.status);
+    let _ = app.update(Message::Reading(ReadingMsg::BookmarkNoteInput(
+        String::new(),
+    )));
+    say_words(&mut app, &script, "Why this line matters.");
+    say_words(&mut app, &script, "and what it returns");
+    say_words(&mut app, &script, "Save");
+    assert!(app.proj.note_edit.is_none(), "{}", app.status);
+    assert_eq!(
+        app.proj.bookmarks.first().and_then(|b| b.note.as_deref()),
+        Some("Why this line matters and what it returns")
+    );
+
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    assert!(app.settings.open);
+    say_words(&mut app, &script, "close");
+    assert!(!app.settings.open, "{}", app.status);
+    // Put away as Esc does, by a word no button of it carries.
+    let _ = app.update(Message::Settings(SettingsMsg::Open));
+    say_words(&mut app, &script, "never mind");
+    assert!(!app.settings.open, "{}", app.status);
+}
+
+/// A row of the list in view is picked by its place in it, as it is
+/// counted down the list.
+#[test]
+fn a_rows_place_in_the_list_picks_it() {
+    let (mut app, script, _) = voice_app("voice-row", "");
+    let _ = app.update(Message::Window(WindowMsg::SidebarTabPicked(
+        SidebarTab::Files,
+    )));
+    let _ = app.update(Message::Window(WindowMsg::FileFilterChanged("s".into())));
+    let listed: Vec<String> = crate::ui::filtered_files(app.proj.project.as_ref().unwrap(), "s")
+        .map(|f| f.rel.clone())
+        .collect();
+    assert!(listed.len() >= 2, "{listed:?}");
+    say_words(&mut app, &script, "open the second one");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.clone()),
+        Some(listed[1].clone()),
+        "{}",
+        app.status
+    );
+    // Opened, a file may ask about its language's server: a question on
+    // top takes what is said, and is answered so.
+    if crate::ui::active_overlay(&app).is_some() {
+        say_words(&mut app, &script, "not now");
+        assert!(crate::ui::active_overlay(&app).is_none(), "{}", app.status);
+    }
+    say_words(&mut app, &script, "the first result");
+    assert_eq!(
+        app.active_viewer().map(|v| v.rel.clone()),
+        Some(listed[0].clone()),
+        "{}",
+        app.status
+    );
+}
+
+/// What undoes something waits for a yes when it is said — a word may
+/// have been misheard — and a no leaves it.
+#[test]
+fn what_undoes_waits_for_a_yes() {
+    let (mut app, script, _) = voice_app("voice-undoes", "");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    let seed = vec![bookmarks::Bookmark {
+        rel: "src/lib.rs".into(),
+        line: 3,
+        preview: "fn".into(),
+        note: None,
+    }];
+    bookmarks::save(&root, &seed).unwrap();
+    app.proj.bookmarks = bookmarks::load(&root);
+    let _ = app.update(Message::Window(WindowMsg::SidebarTabPicked(
+        SidebarTab::Marks,
+    )));
+    say_words(&mut app, &script, "remove src/lib.rs 3");
+    assert!(
+        matches!(
+            &app.voice.confirm,
+            Some(crate::app::voice::Waiting::Press { .. })
+        ),
+        "{}",
+        app.status
+    );
+    assert_eq!(app.proj.bookmarks.len(), 1, "not before a yes");
+    say_words(&mut app, &script, "no");
+    assert_eq!(app.proj.bookmarks.len(), 1);
+    say_words(&mut app, &script, "remove src/lib.rs 3");
+    say_words(&mut app, &script, "yes");
+    assert!(app.proj.bookmarks.is_empty(), "{}", app.status);
+}
+
+/// A target of the window, as `ui::heard` offers one.
+fn on_screen(
+    title: &str,
+    message: Message,
+    layer: crate::ui::heard::Layer,
+    answer: Option<crate::ui::heard::Answer>,
+) -> crate::ui::heard::Target {
+    crate::ui::heard::Target {
+        title: title.into(),
+        shown: title.into(),
+        message,
+        layer,
+        row: None,
+        answer,
+        typing: None,
+    }
+}
+
+/// "Never mind" and "cancel" put away what is on top: they answer a
+/// question only when it is the one on top — a dialog — never a card in
+/// Ask the reader was not looking at, which "no" still answers.
+#[test]
+fn a_word_that_closes_answers_only_the_question_on_top() {
+    use crate::ui::heard::{Answer, Layer};
+    let mut app = blank_app();
+    let deny = |layer| {
+        on_screen(
+            "Deny",
+            Message::Window(WindowMsg::OpenShortcuts),
+            layer,
+            Some(Answer::No),
+        )
+    };
+    let card = [deny(Layer::Ask)];
+    assert!(app.heard_on_screen("never mind", &card, true).is_none());
+    assert!(!app.status.contains("Deny"), "{}", app.status);
+    assert!(app.heard_on_screen("no", &card, true).is_some());
+    assert!(app.status.contains("Deny"), "{}", app.status);
+    app.status.clear();
+    let dialog = [deny(Layer::Overlay)];
+    assert!(app.heard_on_screen("never mind", &dialog, true).is_some());
+    assert!(app.status.contains("Deny"), "{}", app.status);
+}
+
+/// Said to a dialog with a field and a list — the command bar — a row's
+/// place opens that row; it is not typed into the field.
+#[test]
+fn a_rows_place_said_to_the_command_bar_opens_it() {
+    use crate::ui::heard::Layer;
+    let mut app = blank_app();
+    let mut targets = vec![crate::ui::heard::Target {
+        typing: Some((String::new(), |q| {
+            Message::Nav(NavMsg::FinderQueryChanged(q))
+        })),
+        ..on_screen("", Message::Noop, Layer::Overlay, None)
+    }];
+    for i in 1..=3 {
+        targets.push(crate::ui::heard::Target {
+            row: Some((1, i)),
+            ..on_screen(
+                &format!("file{i}.rs"),
+                Message::Window(WindowMsg::OpenShortcuts),
+                Layer::Overlay,
+                None,
+            )
+        });
+    }
+    assert!(
+        app.heard_on_screen("the second one", &targets, true)
+            .is_some()
+    );
+    assert!(app.status.contains("file2.rs"), "{}", app.status);
+    assert!(!app.status.contains("Typed"), "{}", app.status);
+}
+
+/// A button that costs something, pressed by a word that may have been
+/// misheard, waits for a yes as the command said does — Explain, here —
+/// but the answer to a question asked is pressed: it was asked already.
+#[test]
+fn a_costly_button_said_waits_for_a_yes() {
+    use crate::ui::heard::{Answer, Layer};
+    let mut app = blank_app();
+    let explain = Message::Editor(EditorMsg::RunAction(crate::keymap::Action::ExplainAll));
+    let targets = [on_screen(
+        "Explain All",
+        explain.clone(),
+        Layer::Window,
+        None,
+    )];
+    assert!(
+        app.heard_on_screen("explain all", &targets, false)
+            .is_some()
+    );
+    assert!(
+        matches!(
+            &app.voice.confirm,
+            Some(crate::app::voice::Waiting::Press { .. })
+        ),
+        "{}",
+        app.status
+    );
+    app.voice.confirm = None;
+    let asked = [on_screen(
+        "Explain All",
+        explain,
+        Layer::Overlay,
+        Some(Answer::Yes),
+    )];
+    assert!(app.heard_on_screen("explain all", &asked, true).is_some());
+    assert!(app.voice.confirm.is_none(), "an answer is asked again");
+}
+
+/// The model's provider, picked with Settings shut — said, or run from
+/// the command bar — is kept, as picked on its page and closed: only the
+/// page's draft changed, which nothing then saved.
+#[test]
+fn a_provider_picked_with_settings_shut_is_kept() {
+    let data = test_dir("voice-provider-shut");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let _keys = EnvVars::new()
+        .remove("ANTHROPIC_API_KEY")
+        .remove("OPENAI_API_KEY")
+        .remove("DEEPSEEK_API_KEY");
+    let mut app = blank_app();
+    assert!(!app.settings.open);
+    let before = app.settings.provider;
+    let other = crate::llm::Provider::ALL
+        .into_iter()
+        .find(|p| *p != before)
+        .expect("another provider");
+    let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(other)));
+    assert!(!app.settings.open, "Settings stays shut");
+    assert_eq!(
+        crate::llm::Config::current_or_default().provider,
+        other,
+        "{}",
+        app.status
+    );
+}
+
+/// What is on screen is the reader's to press by voice, never the agent's:
+/// a question's answers are no palette command.
+#[test]
+fn what_is_on_screen_is_not_the_agents() {
+    let mut app = blank_app();
+    let _ = app.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
+    let targets = crate::ui::heard::gather(&app);
+    assert!(
+        targets.iter().any(|t| t.title.starts_with("Download")),
+        "{:?}",
+        targets.iter().map(|t| &t.title).collect::<Vec<_>>()
+    );
+    // A switch by its name and state, and a picker's every choice.
+    for title in [
+        "Run spoken commands: Off",
+        "Run spoken commands: On",
+        "1.25×",
+    ] {
+        assert!(targets.iter().any(|t| t.title == title), "{title}");
+    }
+    // Each model's Download named with it, as every model has one.
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.title.starts_with("Download") && t.title.ends_with(": Large Turbo")),
+        "{:?}",
+        targets.iter().map(|t| &t.title).collect::<Vec<_>>()
+    );
+    let palette = app.palette_commands();
+    assert!(!palette.iter().any(|c| c.title.starts_with("Download")));
 }

@@ -168,6 +168,14 @@ pub struct ServerState {
     /// project as it changes (a check after a save), not the loading of it
     /// ([`ServerState::loading`]).
     settled: bool,
+    /// When a document's text last went to the server (opened, or changed
+    /// on disk): what it finds in it is published after, and the window,
+    /// which reads this state only when something wakes it, waits for that
+    /// ([`Snapshot::awaiting_diagnostics`]). `None` before the first.
+    synced: Option<Instant>,
+    /// The server has published diagnostics — an empty list included —
+    /// since `synced`.
+    published: bool,
     /// When `initialized` went out: until the server has said anything of
     /// its work, it counts as loading for a grace after this ([`LOAD_GRACE`],
     /// or [`STATUS_GRACE`] for one that reports its status). `None` before
@@ -233,8 +241,19 @@ pub struct Snapshot {
     /// ([`LspClient::log_tail`]) only when this moved, instead of on every
     /// repaint.
     pub log_version: u64,
+    /// A document's text went to the server ([`DIAGNOSTICS_WAIT`] ago at
+    /// most) and it has published nothing since: what it finds is on its
+    /// way. A server idle by then — pyright, for one — says nothing more
+    /// of its work, and a window that polls only while one works left its
+    /// diagnostics unread: ✘ 0 for a file with two errors.
+    pub awaiting_diagnostics: bool,
     diagnostics: DiagMap,
 }
+
+/// The longest a window waits for the diagnostics of a document it sent:
+/// past it, a server that published nothing is taken to have nothing to
+/// say, and the window stops polling for it.
+pub const DIAGNOSTICS_WAIT: Duration = Duration::from_secs(20);
 
 impl Snapshot {
     /// This file's diagnostics as of the snapshot (empty if none).
@@ -301,8 +320,18 @@ impl ServerState {
             diag_version: self.diag_version,
             inlay_epoch: self.inlay_epoch,
             log_version: self.log_version,
+            awaiting_diagnostics: !self.published
+                && self
+                    .synced
+                    .is_some_and(|at| at.elapsed() < DIAGNOSTICS_WAIT),
             diagnostics: Arc::clone(&self.diagnostics),
         }
+    }
+
+    /// A document's text went to the server: its diagnostics are awaited.
+    fn note_synced(&mut self) {
+        self.synced = Some(Instant::now());
+        self.published = false;
     }
 }
 
@@ -804,6 +833,14 @@ impl LspClient {
         })
     }
 
+    /// The state notes a document's text went out: its diagnostics are
+    /// awaited ([`Snapshot::awaiting_diagnostics`]).
+    fn note_synced(&self) {
+        if let Ok(mut s) = self.state.lock() {
+            s.note_synced();
+        }
+    }
+
     /// Notify the server a document is open (send full text). `language_id`
     /// is clew's key for the language, sent as the LSP identifier the
     /// language's servers know it by (Lean's is `lean4`).
@@ -812,6 +849,7 @@ impl LspClient {
             "lean" => "lean4",
             other => other,
         };
+        self.note_synced();
         self.notify(
             "textDocument/didOpen",
             json!({
@@ -828,6 +866,7 @@ impl LspClient {
     /// Notify the server that an open document's full text changed on disk
     /// (whole-document sync). `version` must strictly increase per document.
     pub fn did_change(&self, path: &Path, version: i64, text: &str) {
+        self.note_synced();
         self.notify(
             "textDocument/didChange",
             json!({
@@ -1602,6 +1641,9 @@ fn handle_notification(method: &str, value: &Value, state: &Arc<Mutex<ServerStat
             }
         }
         "textDocument/publishDiagnostics" => {
+            // Whatever it says, and of whichever file: the server has
+            // spoken since the last document went to it.
+            s.published = true;
             let Some(uri) = params.and_then(|p| p.get("uri")).and_then(Value::as_str) else {
                 return;
             };
@@ -3187,6 +3229,31 @@ mod session_tests {
     /// the project as it changes, not its loading. rust-analyzer's grace is
     /// longer: its first status is due at once, and one that never comes
     /// means a server that sends none.
+    /// A document's text sent to the server is awaited: its diagnostics
+    /// are on their way until the server publishes anything — an empty
+    /// list included, for any file — or [`DIAGNOSTICS_WAIT`] passes.
+    #[test]
+    fn a_sent_documents_diagnostics_are_awaited_until_published() {
+        let state = Arc::new(Mutex::new(ServerState::default()));
+        let awaiting =
+            |state: &Arc<Mutex<ServerState>>| snapshot_of(state).unwrap().awaiting_diagnostics;
+        assert!(!awaiting(&state), "nothing sent, nothing awaited");
+        state.lock().unwrap().note_synced();
+        assert!(awaiting(&state));
+        let cleared = json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/publishDiagnostics",
+            "params": {"uri": "file:///elsewhere.py", "diagnostics": []}
+        });
+        handle_notification("textDocument/publishDiagnostics", &cleared, &state);
+        assert!(!awaiting(&state), "an empty list is an answer too");
+        state.lock().unwrap().note_synced();
+        assert!(awaiting(&state), "sent again: awaited again");
+        state.lock().unwrap().synced =
+            Some(Instant::now() - DIAGNOSTICS_WAIT - Duration::from_secs(1));
+        assert!(!awaiting(&state), "past the wait, nothing is awaited");
+    }
+
     #[test]
     fn the_grace_of_a_just_started_server_is_bounded() {
         let long_ago = Instant::now() - STATUS_GRACE - Duration::from_secs(1);

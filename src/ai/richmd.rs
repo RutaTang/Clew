@@ -193,8 +193,10 @@ pub fn linkify_citations(md: &str, resolve: impl Fn(&str) -> Option<String>) -> 
                 }
             }
         }
-        let mut last = 0;
-        for (start, end) in code_spans(line) {
+        let spans = code_spans(line);
+        // Each citation found: where it is, what it says, where it goes.
+        let mut cited: Vec<(usize, usize, &str, String)> = Vec::new();
+        for &(start, end) in &spans {
             let run = line[start..].bytes().take_while(|&b| b == b'`').count();
             let code = &line[start + run..end - run];
             // Already a link's text (`[`x`](…)`): leave it alone.
@@ -203,14 +205,52 @@ pub fn linkify_citations(md: &str, resolve: impl Fn(&str) -> Option<String>) -> 
                 continue;
             }
             if let Some(target) = citation_target(code, &resolve) {
-                out.push_str(&line[last..start]);
-                out.push('[');
-                out.push_str(&line[start..end]);
-                out.push_str("](<clew:");
-                out.push_str(&target);
-                out.push_str(">)");
-                last = end;
+                cited.push((start, end, code, target));
             }
+        }
+        // A citation written in brackets, `[src/app.rs:12]`, where the code
+        // span was asked for: a link too, not text in brackets. Not a
+        // link's text (`[x](…)`, `[x][y]`), an image's, a footnote's
+        // (`[^1]`), or what a code span holds.
+        for (open, _) in line.match_indices('[') {
+            let Some(len) = line[open + 1..].find(']') else {
+                continue;
+            };
+            let close = open + 1 + len;
+            let inside = &line[open + 1..close];
+            let before = line[..open].chars().next_back();
+            let after = line[close + 1..].chars().next();
+            if inside.contains(['[', '`', '^'])
+                || matches!(before, Some('!' | '[' | ']'))
+                || matches!(after, Some('(' | '[' | ']' | ':'))
+                || spans.iter().any(|&(s, e)| s < close + 1 && open < e)
+            {
+                continue;
+            }
+            if let Some(target) = citation_target(inside, &resolve) {
+                cited.push((open, close + 1, inside, target));
+            }
+        }
+        cited.sort_by_key(|&(start, ..)| start);
+        let mut last = 0;
+        for (start, end, said, target) in cited {
+            if start < last {
+                continue;
+            }
+            out.push_str(&line[last..start]);
+            out.push('[');
+            if line[start..].starts_with('`') {
+                out.push_str(&line[start..end]);
+            } else {
+                // In a code span of its own, as the asked-for form is.
+                out.push('`');
+                out.push_str(said);
+                out.push('`');
+            }
+            out.push_str("](<clew:");
+            out.push_str(&target);
+            out.push_str(">)");
+            last = end;
         }
         out.push_str(&line[last..]);
     }
@@ -1106,6 +1146,41 @@ mod tests {
         // Non-files keep their code-chip form; fenced code is untouched.
         assert!(out.contains("`Vec<String>`"));
         assert!(out.contains("let a = `src/main.rs:1`;"));
+    }
+
+    /// L11: a citation written in brackets where the code span was asked
+    /// for — `[src/ui/toolbar.rs:90]` — is a link as well; a link, an
+    /// image, a footnote, a TOML section and text that names no file are
+    /// left as they are.
+    #[test]
+    fn citations_in_brackets_linkify_too() {
+        let resolve =
+            |p: &str| matches!(p, "src/ui/toolbar.rs" | "Cargo.toml").then(|| p.to_string());
+        let out = linkify_citations(
+            "Drawn at [src/ui/toolbar.rs:90], set in [Cargo.toml].",
+            resolve,
+        );
+        assert_eq!(
+            out,
+            "Drawn at [`src/ui/toolbar.rs:90`](<clew:src/ui/toolbar.rs:90>), set in \
+             [`Cargo.toml`](<clew:Cargo.toml>)."
+        );
+        for kept in [
+            "[src/ui/toolbar.rs:90](https://example.com)",
+            "![src/ui/toolbar.rs](img.png)",
+            "[src/ui/toolbar.rs][ref]",
+            "[^1] and [[bin]] in [no/such/file.rs:3]",
+            "`[src/ui/toolbar.rs:90]` as code",
+        ] {
+            assert_eq!(linkify_citations(kept, resolve), kept);
+        }
+        // Both forms on one line, each linked once.
+        let both = linkify_citations("`Cargo.toml` and [src/ui/toolbar.rs:9]", resolve);
+        assert_eq!(
+            both,
+            "[`Cargo.toml`](<clew:Cargo.toml>) and \
+             [`src/ui/toolbar.rs:9`](<clew:src/ui/toolbar.rs:9>)"
+        );
     }
 
     #[test]

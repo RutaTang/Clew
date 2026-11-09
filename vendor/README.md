@@ -58,6 +58,13 @@ characters. The i18n test `korean_lines_break_between_words` keeps it.
 Upstream cosmic-text has no such option up to 0.19.0; keep this patch (or
 an equivalent setting, if one arrives) when the others are dropped.
 
+A fifth patch shapes every run with tabular figures (`tnum`) unless its
+attributes ask otherwise (`shape_fallback` in `src/shape.rs`): Inter's
+digits are of different widths, so a count, a progress figure, a timer or
+the caret's line and column grew and shrank as its digits changed, and
+moved what stood beside it. iced 0.14 has no way to ask for a font feature;
+when it has, ask for `tnum` there and drop this patch.
+
 ## iced_wgpu 0.14.0
 
 iced 0.14's GPU renderer. On Windows it presents to a window's own swap

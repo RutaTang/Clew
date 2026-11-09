@@ -31,9 +31,9 @@ pub(crate) const VOICE_MODELS: &[&str] = &[
     tr_noop!("Quick and accurate for commands and short questions in English."),
     tr_noop!("Small"),
     tr_noop!("Fastest multilingual model, for lower-memory computers."),
-    tr_noop!("Medium (Large v3 Turbo)"),
+    tr_noop!("Large Turbo"),
     tr_noop!("Best balance of accuracy and speed, in any language."),
-    tr_noop!("Large (Large v3)"),
+    tr_noop!("Large"),
     tr_noop!("Highest accuracy, for powerful computers."),
 ];
 

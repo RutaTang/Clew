@@ -481,6 +481,54 @@ pub fn lookup(english: &str) -> &str {
     })
 }
 
+/// `english` in `lang`, as [`lookup`] gives it in the language spoken now:
+/// how a reader of `lang` calls a thing, whatever the interface speaks.
+pub fn lookup_in(lang: Lang, english: &str) -> &str {
+    let found = match lang {
+        Lang::En => None,
+        lang => catalog(lang).get(english).copied(),
+    };
+    found.unwrap_or_else(|| {
+        english
+            .rsplit_once('\u{4}')
+            .map_or(english, |(_, text)| text)
+    })
+}
+
+/// The English `shown` was translated from, in the language spoken now —
+/// what a reader may say for a control that shows it, in English — or
+/// `None` when it is no catalog's translation (or the interface speaks
+/// English). Of two texts translated alike, the first in order, the same
+/// every time.
+pub fn english_of(shown: &str) -> Option<&'static str> {
+    type Back = HashMap<&'static str, &'static str>;
+    static BACK: [OnceLock<Back>; 5] = [
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+        OnceLock::new(),
+    ];
+    let lang = current();
+    if lang == Lang::En {
+        return None;
+    }
+    let back = BACK[usize::from(lang.to_u8())].get_or_init(|| {
+        let mut back = Back::new();
+        for (english, text) in catalog(lang) {
+            let english: &'static str = english.as_str();
+            // Its words without the sense they are meant in.
+            let english = english.rsplit_once('\u{4}').map_or(english, |(_, t)| t);
+            let kept = back.entry(*text).or_insert(english);
+            if english < *kept {
+                *kept = english;
+            }
+        }
+        back
+    });
+    back.get(shown).copied()
+}
+
 /// `template` with each `{name}` replaced by its argument's value. `{{`
 /// and `}}` are braces.
 pub fn format(template: &str, args: &[(&str, &dyn Display)]) -> String {
@@ -597,6 +645,110 @@ fn fill<'t>(parts: &[Part], text: &'t str, filled: &mut Vec<(&'static str, &'t s
 /// A template a message fits: its text, what fills each place, and how
 /// many bytes of it are words.
 type Fit<'t> = (&'static str, Vec<(&'static str, &'t str)>, usize);
+
+/// `text` as it is shown in the interface: each name a message sets in
+/// backticks — Markdown's code span, as the model and the Markdown views
+/// read it, `cargo` or `{name}` filled — set in the reader's quotation
+/// marks instead (“cargo”, « cargo », 「cargo」). Shown as typed, the
+/// backticks stood in plain text as marks of their own. So is a name GNU
+/// programs quote as `name' in what they say (an error passed through):
+/// its apostrophe closes it where it ends a word — `foldl'` and
+/// `&'static str` keep theirs, and a span's own single-quoted words
+/// (`ssh-keygen -f '/a b/known_hosts'`) theirs. A lone backtick, and a run
+/// of them (a double span, a fence), is left as it is.
+pub fn quoted(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('`') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let (open, close) = match current() {
+        Lang::En | Lang::Zh => ("\u{201c}", "\u{201d}"),
+        Lang::Fr => ("\u{ab}\u{a0}", "\u{a0}\u{bb}"),
+        Lang::Ja => ("\u{300c}", "\u{300d}"),
+        Lang::Ko => ("\u{2018}", "\u{2019}"),
+    };
+    // Every index below is a backtick's, an apostrophe's or a line break's:
+    // ASCII, so a boundary of any text around them.
+    let bytes = text.as_bytes();
+    let run = |at: usize| bytes[at..].iter().take_while(|&&b| b == b'`').count();
+    // Whether what follows an apostrophe goes on with the word it is in —
+    // `foldl'`'s backtick, `&'static`, a file name's `l'été` — rather than
+    // ending a GNU `name'`: a letter of a Latin script (an apostrophe in
+    // French, Italian or English names), a digit, `_`, `'` or a backtick.
+    // Text in another script after it (`x'は`) is the message going on.
+    let continues_word = |rest: &str| {
+        rest.chars().next().is_some_and(|c| {
+            c.is_ascii_alphanumeric()
+                || "_'`".contains(c)
+                || (c.is_alphabetic() && ('\u{c0}'..='\u{24f}').contains(&c))
+        })
+    };
+    // Where the span a lone backtick opens just before `from` closes: at
+    // the next lone backtick, or at an apostrophe that ends a word — on
+    // the same line, after something. An apostrophe that starts a word (at
+    // the span's start, or after a space) opens a single-quoted stretch of
+    // the span's own — a shell command's `'/a path'` — and the next one
+    // closes it, unless it is the shell's own escape of an apostrophe
+    // inside one (`'O'\''Brien'`): neither ends the span.
+    let close_of = |from: usize| {
+        let mut quoting = false;
+        let mut at = from;
+        while let Some(&b) = bytes.get(at) {
+            match b {
+                b'\n' => return None,
+                b'`' => return (at > from && run(at) == 1).then_some(at),
+                b'\'' if quoting && bytes[at..].starts_with(b"'\\''") => at += 3,
+                b'\'' if quoting => quoting = false,
+                b'\'' if at == from || bytes[at - 1].is_ascii_whitespace() => quoting = true,
+                b'\'' if !continues_word(&text[at + 1..]) => return Some(at),
+                _ => {}
+            }
+            at += 1;
+        }
+        None
+    };
+    // Whether a lone backtick at `at` can open a span: where a name starts —
+    // the text's start, after a space, an opening bracket or quote, or
+    // after text in another script (Chinese and Japanese set no space
+    // before it). One inside a word or a list of characters (`^_`|~`, the
+    // characters a header name may hold) is a mark of its own.
+    let opens = |at: usize| {
+        at == 0 || {
+            let before = bytes[at - 1];
+            !before.is_ascii() || before.is_ascii_whitespace() || b"([{<\"'".contains(&before)
+        }
+    };
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(found) = text[at..].find('`') {
+        let tick = at + found;
+        let ticks = run(tick);
+        if ticks > 1 {
+            at = tick + ticks;
+            continue;
+        }
+        if !opens(tick) {
+            at = tick + 1;
+            continue;
+        }
+        match close_of(tick + 1) {
+            Some(end) => {
+                out.push_str(&text[copied..tick]);
+                out.push_str(open);
+                out.push_str(&text[tick + 1..end]);
+                out.push_str(close);
+                copied = end + 1;
+                at = end + 1;
+            }
+            None => at = tick + 1,
+        }
+    }
+    if copied == 0 {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
+    std::borrow::Cow::Owned(out)
+}
 
 /// A message template: its text, its parts, and how many bytes of it are
 /// words (what a match is ranked by).
@@ -1026,6 +1178,19 @@ mod tests {
             .unwrap_or_else(|e| panic!("{} catalog does not parse: {e}", lang.code()))
     }
 
+    /// What a control shows in the reader's language is known by the
+    /// English it was translated from, and by itself in English.
+    #[test]
+    fn a_translation_is_known_by_its_english() {
+        with_lang(Lang::Fr, || {
+            assert_eq!(english_of("Annuler"), Some("Cancel"));
+            assert_eq!(english_of("no such text"), None);
+            assert_eq!(lookup_in(Lang::Zh, "Cancel"), "取消");
+            assert_eq!(lookup_in(Lang::En, "Cancel"), "Cancel");
+        });
+        assert_eq!(english_of("Cancel"), None, "English is its own");
+    }
+
     /// Every piece of text the program shows has a translation in every
     /// language — a new string left out of a catalog shows in English to a
     /// reader of another language.
@@ -1051,6 +1216,125 @@ mod tests {
                 keys.len(),
                 &missing[..missing.len().min(15)]
             );
+        }
+    }
+
+    /// A name a message sets in backticks is shown in the reader's
+    /// quotation marks, the backticks gone; text with no code span, and a
+    /// stray backtick, stay as they are.
+    #[test]
+    fn a_code_span_is_shown_in_the_readers_quotation_marks() {
+        assert_eq!(
+            quoted("Connecting to `prod`…"),
+            "Connecting to \u{201c}prod\u{201d}…"
+        );
+        assert_eq!(
+            quoted("`a` and `b`"),
+            "\u{201c}a\u{201d} and \u{201c}b\u{201d}"
+        );
+        assert!(matches!(quoted("no names"), std::borrow::Cow::Borrowed(_)));
+        for kept in [
+            "a lone ` mark",
+            "``",
+            "a ``double`` span",
+            "split `a\nb` lines",
+            "``x`",
+            "`a``",
+        ] {
+            assert_eq!(quoted(kept), kept, "{kept:?}");
+        }
+        // A run of backticks opens nothing, and the backtick after it is a
+        // span's own.
+        assert_eq!(
+            quoted("a ``double`` and `y`"),
+            "a ``double`` and \u{201c}y\u{201d}"
+        );
+        // GNU's `name' quoting, in an error passed through; an apostrophe in
+        // a name stays the name's.
+        assert_eq!(
+            quoted("cannot stat `a': no; see `b'"),
+            "cannot stat \u{201c}a\u{201d}: no; see \u{201c}b\u{201d}"
+        );
+        // The characters a header name may hold, a backtick among them, and
+        // the form a header takes after them.
+        assert_eq!(
+            quoted(
+                "a header name holds letters, digits and !#$%&'*+-.^_`|~) \u{2014} write each as `Name: value`"
+            ),
+            "a header name holds letters, digits and !#$%&'*+-.^_`|~) \u{2014} write each as \u{201c}Name: value\u{201d}"
+        );
+        // A file name with an apostrophe before an accented letter is one
+        // name; text in another script after `name' goes on after it.
+        assert_eq!(
+            quoted("Opened `l'été.md`"),
+            "Opened \u{201c}l'été.md\u{201d}"
+        );
+        assert_eq!(
+            quoted("`x'は見つかりません"),
+            "\u{201c}x\u{201d}は見つかりません"
+        );
+        // A name with no space before it in a script that sets none.
+        assert_eq!(quoted("已打开`a.rs`"), "已打开\u{201c}a.rs\u{201d}");
+        // The shell's escape of an apostrophe inside a quoted path.
+        assert_eq!(
+            quoted(
+                "forget it \u{2014} `ssh-keygen -f '/home/o'\\''brien/.ssh/known_hosts' -R host` \u{2014} then"
+            ),
+            "forget it \u{2014} \u{201c}ssh-keygen -f '/home/o'\\''brien/.ssh/known_hosts' -R host\u{201d} \u{2014} then"
+        );
+        // A command's own single quotes, as Clew writes them round a path
+        // with a space or a host with its port, are the command's.
+        assert_eq!(
+            quoted(
+                "forget it \u{2014} `ssh-keygen -f '/Users/me/Library/Application Support/clew/known_hosts' -R '[example.com]:2222'` \u{2014} then"
+            ),
+            "forget it \u{2014} \u{201c}ssh-keygen -f '/Users/me/Library/Application Support/clew/known_hosts' -R '[example.com]:2222'\u{201d} \u{2014} then"
+        );
+        assert_eq!(
+            quoted("run `git commit -m 'fix it'` first"),
+            "run \u{201c}git commit -m 'fix it'\u{201d} first"
+        );
+        assert_eq!(
+            quoted("Opened `foldl'` and `&'static str`"),
+            "Opened \u{201c}foldl'\u{201d} and \u{201c}&'static str\u{201d}"
+        );
+        with_lang(Lang::Fr, || {
+            assert_eq!(quoted("`x`"), "\u{ab}\u{a0}x\u{a0}\u{bb}")
+        });
+        with_lang(Lang::Ja, || assert_eq!(quoted("`x`"), "\u{300c}x\u{300d}"));
+        with_lang(Lang::Ko, || assert_eq!(quoted("`x`"), "\u{2018}x\u{2019}"));
+        with_lang(Lang::Zh, || assert_eq!(quoted("`x`"), "\u{201c}x\u{201d}"));
+    }
+
+    /// A text that sends the reader to a page of Settings ("… in Settings →
+    /// Voice") names one there is, by its title, and in every language by
+    /// the title that page has in it: a page renamed left "Settings →
+    /// Languages" pointing at nothing, and a group named as a page did too.
+    #[test]
+    fn every_settings_page_a_text_names_is_one() {
+        let titles: Vec<&str> = crate::SettingsPage::ALL.map(|p| p.title()).into();
+        let keys = source_keys();
+        let naming: Vec<(&String, &str)> = keys
+            .keys()
+            .filter_map(|k| {
+                let after = k.split_once("Settings → ")?.1;
+                let title = titles.iter().find(|t| after.starts_with(**t));
+                assert!(title.is_some(), "{k:?} names no page of Settings");
+                title.map(|t| (k, *t))
+            })
+            .collect();
+        assert!(naming.len() >= 3, "{naming:?}");
+        for lang in Lang::ALL.into_iter().filter(|l| *l != Lang::En) {
+            let catalog = catalog_entries(lang);
+            for (key, title) in &naming {
+                let page = &catalog[*title];
+                assert!(
+                    catalog[*key].contains(page.as_str()),
+                    "{}: {:?} does not name the page as its title does ({page:?})",
+                    lang.code(),
+                    catalog[*key]
+                );
+            }
         }
     }
 

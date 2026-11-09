@@ -73,6 +73,31 @@ pub(crate) enum PaneCover<'a> {
     Glossary,
 }
 
+impl PaneCover<'_> {
+    /// A page the reader opened over the code — one × (or Esc) puts away —
+    /// rather than the window having nothing else to show.
+    pub(crate) fn is_page(&self) -> bool {
+        !matches!(self, PaneCover::Scanning | PaneCover::Welcome)
+    }
+}
+
+/// A page with nothing to head it yet (a step to take, work under way),
+/// its words in the middle and the × that puts it away where a headed page
+/// has it.
+fn closable_center<'a>(
+    content: impl Into<Element<'a, Message>>,
+    close: Message,
+) -> Element<'a, Message> {
+    container(column![
+        row![space().width(Fill), super::chrome::close_button(close)],
+        center(content),
+    ])
+    .width(Fill)
+    .height(Fill)
+    .padding([20, 28])
+    .into()
+}
+
 /// What covers the code panes right now, if anything (see [`PaneCover`]).
 pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
     Some(if app.scanning {
@@ -201,15 +226,18 @@ pub(crate) fn kind_badge(kind: &str) -> &str {
 /// The DOCS sidebar tab: a filterable tree of files → public API items. Clicking
 /// an item opens its doc page in the main pane.
 pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
+    super::heard::list();
     if app.proj.docs.files.is_empty() {
         return if app.docs_loading() {
             empty_state(Glyph::Sparkle, tr!("Building docs…"), "", None)
         } else {
+            // Nothing was built to build again: the project is read for its
+            // doc comments once more.
             empty_state(
                 Glyph::Note,
                 tr!("No documentation"),
                 "",
-                Some((tr!("Rebuild"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
     }
@@ -223,10 +251,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
         .padding(6)
         .width(Fill);
     let chip = |label: String, msg: Message| {
-        button(text(label).size(ts::SMALL))
+        button(text(label.clone()).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 8])
-            .on_press(msg)
+            .on_press(super::heard::said(&label, msg))
     };
     let group_btn = chip(
         if app.docs_view.by_module {
@@ -317,7 +345,10 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([3, 8])
-            .on_press(Message::Docs(DocsMsg::ToggleFile(label.clone())))
+            .on_press(super::heard::row(
+                || label.clone(),
+                Message::Docs(DocsMsg::ToggleFile(label.clone())),
+            ))
             .into(),
         );
         if expanded {
@@ -343,10 +374,13 @@ pub(crate) fn docs_tab(app: &App) -> Element<'_, Message> {
                     .style(theme::list_row(is_sel))
                     .width(Fill)
                     .padding([3, 8])
-                    .on_press(Message::Docs(DocsMsg::Select {
-                        rel: rel.to_string(),
-                        item: ii,
-                    }))
+                    .on_press(super::heard::row(
+                        || item.name.clone(),
+                        Message::Docs(DocsMsg::Select {
+                            rel: rel.to_string(),
+                            item: ii,
+                        }),
+                    ))
                     .into(),
                 );
             }
@@ -423,11 +457,16 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
         button(text(tr!("View source")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([3, 12])
-            .on_press(Message::Editor(EditorMsg::OpenRel {
-                rel: page.rel.clone(),
-                line: top_line,
-            })),
+            .on_press(super::heard::said(
+                tr!("View source"),
+                Message::Editor(EditorMsg::OpenRel {
+                    rel: page.rel.clone(),
+                    line: top_line,
+                })
+            )),
+        super::chrome::close_button(Message::Docs(DocsMsg::ClosePage)),
     ]
+    .spacing(8)
     .align_y(iced::Center);
 
     let mut blocks: Vec<Element<'a, Message>> = Vec::new();
@@ -508,20 +547,14 @@ pub(crate) fn docs_page<'a>(page: &'a crate::DocPage) -> Element<'a, Message> {
 /// The architecture-overview "home": the generated overview, a prompt to
 /// generate it, or a generation-in-progress note.
 pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
-    let regen = |label: &'static str| {
-        button(text(label).size(ts::BODY))
-            .style(theme::toolbar_button)
-            .padding([3, 12])
-            .on_press(Message::Overview(OverviewMsg::Generate))
-    };
-
+    let close = || Message::Overview(OverviewMsg::Close);
     if app.proj.overview.generating {
-        return center(
+        return closable_center(
             text(tr!("Generating architecture overview…"))
                 .size(ts::EMPHASIS)
                 .color(theme::dim()),
-        )
-        .into();
+            close(),
+        );
     }
 
     if app.proj.overview.markdown.is_some() {
@@ -533,12 +566,15 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             // An icon, as the chrome's actions are, named by its tooltip —
             // the height of the header's title line: the page below sits
             // where it did.
-            super::toolbar::icon_action(
+            super::toolbar::busy_action(
                 Glyph::Refresh,
                 tr!("Regenerate"),
                 Some(Message::Overview(OverviewMsg::Generate)),
+                app.proj.overview.generating,
             ),
+            super::chrome::close_button(close()),
         ]
+        .spacing(8)
         .align_y(iced::Center);
         // The module map, drawn natively (same engine as the Import Graph
         // overlay), sits at the top; the LLM prose follows.
@@ -588,32 +624,56 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         .into();
     }
 
-    // Not generated yet.
-    let action: Element<'_, Message> = if !app.llm_available {
-        text(tr!("Add an API key in Settings to generate the overview."))
-            .size(ts::BODY)
-            .color(theme::dim())
-            .into()
-    } else if app.proj.explain.cache.is_empty() {
-        text(tr!("Run Explain All first."))
-            .size(ts::BODY)
-            .color(theme::dim())
-            .into()
-    } else {
-        regen(tr!("Generate overview")).into()
+    // Not generated yet: what it is written from, and the one step that
+    // gets there — a button, each of them. They were words alone ("Run
+    // Explain All first."), and the page a dead end.
+    let step = |label: &'static str, msg: Message| {
+        button(text(label).size(ts::BODY))
+            .style(theme::primary_button)
+            .padding([5, 14])
+            .on_press(super::heard::said(label, msg))
     };
-    center(
+    let (why, action) = if !app.llm_available {
+        (
+            tr!("The overview is written by the AI model you choose in Settings."),
+            step(
+                tr!("Add an API Key…"),
+                Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
+            ),
+        )
+    } else if app.proj.explain.cache.is_empty() {
+        (
+            tr!("The overview is written from the project's notes, which Explain All writes."),
+            step(
+                tr!("Explain All…"),
+                super::toolbar::explain_all_message(app),
+            ),
+        )
+    } else {
+        (
+            tr!("A map of the project's parts, written from its notes."),
+            step(
+                tr!("Generate overview"),
+                Message::Overview(OverviewMsg::Generate),
+            ),
+        )
+    };
+    closable_center(
         column![
             text(tr!("Architecture Overview"))
                 .size(ts::HEADING)
                 .color(theme::fg()),
+            text(why)
+                .size(ts::BODY)
+                .color(theme::fg_muted())
+                .align_x(iced::Center),
             action,
         ]
         .spacing(12)
         .align_x(iced::Center)
         .max_width(560),
+        close(),
     )
-    .into()
 }
 
 /// Group a large integer with thousands separators, e.g. `12345` → `12,345`
@@ -622,10 +682,28 @@ pub(crate) fn fmt_thousands(n: usize) -> String {
     crate::i18n::number(n as u64)
 }
 
-/// A stable, readable color for the language at rank `i` in the bar/table.
+/// A stable, readable color for the language at rank `i` in the bar/table:
+/// one of its own while the series lasts, the grey of "the rest" after —
+/// the series came round again, and two languages read as one.
 pub(crate) fn lang_color(i: usize) -> iced::Color {
-    theme::series_color(i)
+    theme::series_distinct()
+        .get(i)
+        .copied()
+        .unwrap_or_else(theme::dim)
 }
+
+/// A language's share of the code, as the table says it: to a tenth of a
+/// percent, a sliver as under that rather than as a column of 0.00%.
+pub(crate) fn share_label(share: f64) -> String {
+    if share > 0.0 && share < 0.05 {
+        tr!("<{percent}%", percent = crate::i18n::decimal(0.1, 1))
+    } else {
+        tr!("{percent}%", percent = crate::i18n::decimal(share, 1))
+    }
+}
+
+/// The width of the table's language column.
+const LANG_COL_W: f32 = 150.0;
 
 /// A small filled square used as a color key next to a language row.
 pub(crate) fn color_swatch(color: iced::Color) -> Element<'static, Message> {
@@ -668,9 +746,20 @@ pub(crate) fn language_bar(report: &crate::stats::StatsReport) -> Element<'_, Me
     if portions.is_empty() {
         return space().height(12).into();
     }
+    // The languages past the colours' series, one grey stretch together.
+    let colored = theme::series_distinct().len();
+    let rest: u16 = portions.iter().skip(colored).sum();
+    let mut stretches: Vec<(u16, iced::Color)> = portions
+        .into_iter()
+        .take(colored)
+        .enumerate()
+        .map(|(i, portion)| (portion, lang_color(i)))
+        .collect();
+    if rest > 0 {
+        stretches.push((rest, lang_color(colored)));
+    }
     let mut bar = Row::new();
-    for (i, portion) in portions.into_iter().enumerate() {
-        let color = lang_color(i);
+    for (portion, color) in stretches {
         bar = bar.push(
             container(space())
                 .width(Length::FillPortion(portion))
@@ -712,10 +801,11 @@ pub(crate) fn stat_cell(label: &str, value: usize) -> Element<'_, Message> {
 /// The code-statistics "home": totals, a language-proportion bar, a per-language
 /// breakdown, and the largest files (each row opens the file).
 pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
-    let refresh = super::toolbar::icon_action(
+    let refresh = super::toolbar::busy_action(
         Glyph::Refresh,
         tr!("Refresh"),
         Some(Message::Overview(OverviewMsg::RefreshStats)),
+        app.proj.stats.building,
     );
 
     // Nothing to show yet: computing, or a project with no counted code.
@@ -725,7 +815,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         } else {
             tr!("No code files to count in this project.")
         };
-        return center(
+        return closable_center(
             column![
                 text(tr!("Code Statistics"))
                     .size(ts::HEADING)
@@ -735,8 +825,8 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
             .spacing(12)
             .align_x(iced::Center)
             .max_width(560),
-        )
-        .into();
+            Message::Overview(OverviewMsg::Close),
+        );
     };
 
     // A recompute running over already-shown (stale) numbers.
@@ -756,13 +846,19 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         updating,
         space().width(10),
         refresh,
+        space().width(8),
+        super::chrome::close_button(Message::Overview(OverviewMsg::Close)),
     ]
     .align_y(iced::Center);
 
     let t = &report.totals;
     // "Code files" (tokei-counted source files), not the tree's total file count —
     // labelled explicitly so the two numbers don't read as a contradiction.
+    // The project's files beside its code files: the status bar counts the
+    // first, and the one number alone read as a contradiction of it.
+    let all_files = app.proj.project.as_ref().map_or(0, |p| p.files.len());
     let summary = row![
+        stat_cell(tr!("Files"), all_files),
         stat_cell(tr!("Code files"), t.files),
         stat_cell(tr!("Lines"), t.lines()),
         stat_cell(tr!("Code"), t.code),
@@ -785,7 +881,7 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
     let table_header = row![
         // Match the color swatch's width so headers line up with the cells below.
         space().width(10),
-        head(tr!("programming language\u{4}Language"), 150.0),
+        head(tr!("programming language\u{4}Language"), LANG_COL_W),
         head(tr!("Files"), 70.0),
         head(tr!("Code"), 90.0),
         head(tr!("Comments"), 90.0),
@@ -800,16 +896,19 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         table = table.push(
             row![
                 color_swatch(lang_color(i)),
-                cell(l.name.clone(), 150.0, theme::fg()),
+                // A name longer than its column cut, not wrapped onto a
+                // second line that broke the table's rows.
+                cell(
+                    super::steady::elide_end(&l.name, ts::BODY, crate::fonts::UI, LANG_COL_W),
+                    LANG_COL_W,
+                    theme::fg(),
+                )
+                .wrapping(Wrapping::None),
                 cell(fmt_thousands(l.files), 70.0, theme::fg_muted()),
                 cell(fmt_thousands(l.code), 90.0, theme::fg()),
                 cell(fmt_thousands(l.comments), 90.0, theme::fg_muted()),
                 cell(fmt_thousands(l.blanks), 80.0, theme::fg_muted()),
-                cell(
-                    tr!("{percent}%", percent = crate::i18n::decimal(share, 2)),
-                    70.0,
-                    theme::dim(),
-                ),
+                cell(share_label(share), 70.0, theme::dim()),
             ]
             .spacing(8)
             .align_y(iced::Center),
@@ -847,11 +946,14 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
                 left: 8.0,
             });
         if let Some(root) = &root {
-            b = b.on_press(Message::Editor(EditorMsg::OpenAbs {
-                abs: root.join(&f.rel),
-                line: None,
-                push: true,
-            }));
+            b = b.on_press(super::heard::row(
+                || f.rel.clone(),
+                Message::Editor(EditorMsg::OpenAbs {
+                    abs: root.join(&f.rel),
+                    line: None,
+                    push: true,
+                }),
+            ));
         }
         files = files.push(b);
     }
@@ -867,6 +969,9 @@ pub(crate) fn stats_home(app: &App) -> Element<'_, Message> {
         space().height(14),
         section(tr!("Largest files")),
         files,
+        // Room under the last row clear of the Ask pill floating at the
+        // window's foot, which covered it.
+        space().height(super::askfloat::PILL_H + super::askfloat::ASK_MARGIN),
     ]
     .spacing(8)
     .width(Fill)
@@ -896,6 +1001,7 @@ pub(crate) const GLOSSARY_ROWS_SHOWN: usize = 200;
 /// The Glossary page: the project's terms, in sections by kind, each a
 /// button to its definition; a filter on top (`app::glossary`).
 pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
+    super::heard::list();
     use crate::app::glossary::TermKind;
     let glossary = app.glossary();
     let header = row![
@@ -916,7 +1022,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
             (
                 tr!("No terms yet"),
                 "",
-                Some((tr!("Rebuild"), Message::Docs(DocsMsg::Refresh))),
+                Some((tr!("Look again"), Message::Docs(DocsMsg::Refresh))),
             )
         };
         return container(
@@ -983,7 +1089,7 @@ pub(crate) fn glossary_home(app: &App) -> Element<'_, Message> {
                 button(text(term.name.clone()).size(ts::BASE).color(theme::fg()))
                     .style(theme::toolbar_button)
                     .padding([2, 6])
-                    .on_press(open),
+                    .on_press(super::heard::row(|| term.name.clone(), open)),
                 text(term.shown_badge().to_string())
                     .size(ts::SMALL)
                     .color(theme::accent())

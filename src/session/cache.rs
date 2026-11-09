@@ -80,7 +80,11 @@ use crate::incremental::Version;
 /// it; an assignment in a nested function, a pattern's names, a parameter's
 /// default leave a receiver untyped, and a comment or a keyword argument
 /// binds nothing; an older entry typed by them or lost the captured type.
-pub(crate) const CACHE_VERSION: u32 = 17;
+/// 18: a minifier's output is indexed empty
+/// (`clew_core::fs_scan::is_minified_source`), and files up to the viewer's
+/// size are read; an older store holds a bundle's names, or nothing of a
+/// file between the old and the new cap.
+pub(crate) const CACHE_VERSION: u32 = 18;
 
 /// A cached symbol (the index entry minus the paths, which are reconstructed
 /// from the project root + relative path on load).

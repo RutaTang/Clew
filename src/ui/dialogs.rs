@@ -11,6 +11,16 @@ use iced::widget::row;
 pub(crate) const FINDER_ROW_H: f32 = 39.0;
 /// The gap between the list's rows (and headings), inside their pitch.
 const FINDER_ROW_GAP: f32 = 1.0;
+/// What a finder row has inside it to lay its parts in: the panel less its
+/// border, the list's padding and the row's own (the scrollbar floats in
+/// the list's padding, clear of the rows' text).
+const FINDER_ROW_INNER_W: f32 = super::chrome::FINDER_W - 2.0 - 2.0 * 6.0 - 2.0 * 10.0;
+/// A file row's icon, and the gap between its parts.
+const FILE_ICON_W: f32 = 15.0;
+const FILE_ROW_GAP: f32 = 11.0;
+/// A symbol row's kind column, and the gap between its parts.
+const SYMBOL_KIND_W: f32 = 40.0;
+const SYMBOL_ROW_GAP: f32 = 10.0;
 /// Height of a heading over a group of the command bar's suggestions.
 pub(crate) const FINDER_HEAD_H: f32 = 29.0;
 /// Size of a command bar row's detail (a symbol's file and line).
@@ -19,8 +29,6 @@ const BAR_DETAIL_SIZE: f32 = 12.0;
 const FINDER_INPUT_H: f32 = 52.0;
 /// The command bar's corners, as the design rounds them.
 const FINDER_RADIUS: f32 = 12.0;
-/// Height of the finder's foot, the line of key hints under its results.
-const FINDER_FOOT_H: f32 = 32.0;
 
 /// Modal to set a breakpoint's condition — the program only stops there when the
 /// expression is true. Empty condition sets a plain breakpoint.
@@ -74,6 +82,27 @@ pub(crate) fn reading_note_modal(edit: &(String, String, String)) -> Element<'_,
     })
 }
 
+/// Where the "why is this here?" popup opens: under the point it was
+/// asked from — the right-click on the line, a line's height clear of it —
+/// or, with too little room under it for the popup, over it; asked from no
+/// point, near the top of the window.
+pub(crate) fn why_placement(app: &App, anchor: Option<f32>) -> Placement {
+    let Some(y) = anchor else {
+        return Placement::Top(WHY_TOP);
+    };
+    let clear = app.line_height();
+    let floor = app.window_height - STATUSBAR_H;
+    if y + clear + WHY_ROOM <= floor {
+        Placement::Top(y + clear)
+    } else {
+        Placement::Bottom((app.window_height - y + clear).max(STATUSBAR_H))
+    }
+}
+
+/// The least room the popup is opened into under the line: its title, its
+/// commits and a few lines of answer.
+const WHY_ROOM: f32 = 220.0;
+
 /// The "Why is this here?" popup: the git-grounded explanation of why a line or
 /// selection exists, with the commit(s) it cites. Async — "Thinking…" until the
 /// answer lands.
@@ -121,7 +150,10 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
             button(text(tr!("Close")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::TimeTravel(TimeTravelMsg::BlameWhyClose)),
+                .on_press(super::heard::said(
+                    tr!("Close"),
+                    Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
+                )),
         ]);
 
     let panel = container(col)
@@ -131,7 +163,7 @@ pub(crate) fn why_modal<'a>(app: &'a App, bw: &'a crate::BlameWhy) -> Element<'a
         .style(theme::modal_panel);
     modal(
         panel,
-        Placement::Top(WHY_TOP),
+        why_placement(app, bw.anchor),
         Backdrop::Dim(Some(Message::TimeTravel(TimeTravelMsg::BlameWhyClose))),
     )
 }
@@ -157,14 +189,20 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
             button(text(tr!("Open Definition")).size(ts::BODY))
                 .style(theme::toolbar_button)
                 .padding([4, 12])
-                .on_press(Message::Hover(HoverMsg::InsightOpenDefinition)),
+                .on_press(super::heard::said(
+                    tr!("Open Definition"),
+                    Message::Hover(HoverMsg::InsightOpenDefinition),
+                )),
         );
     }
     buttons = buttons.push(
         button(text(tr!("Close")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([4, 12])
-            .on_press(Message::Hover(HoverMsg::InsightClose)),
+            .on_press(super::heard::said(
+                tr!("Close"),
+                Message::Hover(HoverMsg::InsightClose),
+            )),
     );
     let col = Column::new()
         .spacing(8)
@@ -188,7 +226,7 @@ pub(crate) fn insight_modal<'a>(app: &'a App, insight: &'a crate::Insight) -> El
         .style(theme::modal_panel);
     modal(
         panel,
-        Placement::Top(WHY_TOP),
+        why_placement(app, insight.anchor),
         Backdrop::Dim(Some(Message::Hover(HoverMsg::InsightClose))),
     )
 }
@@ -211,7 +249,13 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             ts::field_in(
                 text_input(placeholder, &app.proj.finder.query)
                     .id(finder_input_id())
-                    .on_input(|v| Message::Nav(NavMsg::FinderQueryChanged(v)))
+                    .on_input({
+                        // What is said that names no row is typed in it.
+                        super::heard::field(&app.proj.finder.query, |v| {
+                            Message::Nav(NavMsg::FinderQueryChanged(v))
+                        });
+                        |v| Message::Nav(NavMsg::FinderQueryChanged(v))
+                    })
                     .on_submit(Message::Nav(NavMsg::FinderConfirm))
                     .style(theme::bare_input),
                 FINDER_INPUT_H,
@@ -232,6 +276,8 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     });
 
     let mut rows: Vec<Element<'_, Message>> = Vec::new();
+    // Its rows a list voice counts down (`heard::row`).
+    super::heard::list();
     if app.proj.finder.is_commands() {
         finder_command_rows(app, &mut rows);
     } else if let Some(n) = app.proj.finder.goto_line() {
@@ -285,12 +331,24 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     // symbol a reader is looking for may simply not be in it — say so under
     // the list (outside it, so row `i` still starts at `i * FINDER_ROW_H`).
     let cap_note: Element<'_, Message> = match index_cap_note(app) {
-        Some(note) if app.proj.finder.mode == FinderMode::Symbols => {
-            text(tr!("Index incomplete: {note}", note = note))
-                .size(ts::CAPTION)
-                .color(theme::dim())
-                .into()
-        }
+        Some(note) if app.proj.finder.mode == FinderMode::Symbols => container(
+            row![
+                glyph::icon(Glyph::Info, theme::fg_muted(), 12.0),
+                text(tr!("Index incomplete: {note}", note = note))
+                    .size(ts::CAPTION)
+                    .color(theme::dim()),
+            ]
+            .spacing(6)
+            .align_y(iced::Center),
+        )
+        .padding(Padding {
+            top: 0.0,
+            right: 16.0,
+            bottom: 10.0,
+            left: 16.0,
+        })
+        .width(Fill)
+        .into(),
         _ => slot(),
     };
     let panel = container(iced::widget::column![
@@ -299,7 +357,7 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
         // The design's gap between what the list holds, and no padding
         // inside it: row `i` starts at exactly `i * FINDER_ROW_H` (its
         // height and the gap after it) for `reveal_finder_selection`.
-        // Capped so the foot under it always shows.
+        // Capped so the panel never runs past the window.
         container(
             scrollable(
                 Column::with_children(rows)
@@ -311,11 +369,9 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
             .style(theme::overlay_scrollbar)
             .height(iced::Length::Shrink),
         )
-        .max_height(FINDER_MAX_H - FINDER_INPUT_H - FINDER_FOOT_H - 24.0)
+        .max_height(FINDER_MAX_H - FINDER_INPUT_H - 24.0)
         .padding(6),
         cap_note,
-        hairline(),
-        finder_footer(),
     ])
     .width(FINDER_W)
     .max_height(FINDER_MAX_H)
@@ -331,48 +387,17 @@ pub(crate) fn finder_modal(app: &App) -> Element<'_, Message> {
     )
 }
 
-/// The palette's foot: how to move through it, open a result, and leave.
-fn finder_footer<'a>() -> Element<'a, Message> {
-    // The keys by their names on the keyboard, never translated.
-    let enter = tr!(
-        "{key} to open",
-        key = if crate::keymap::MAC_KEYS {
-            "Return"
-        } else {
-            "Enter"
-        }
-    );
-    let hint = |what: String| {
-        ts::set_in(
-            text(what).color(theme::dim()),
-            FINDER_FOOT_H,
-            ts::INTER,
-            ts::SMALL,
-        )
-    };
-    container(
-        row![
-            hint(tr!("{keys} to move", keys = "↑ ↓")),
-            hint(enter),
-            hint(tr!("{key} to close", key = "Esc"))
-        ]
-        .spacing(16)
-        .align_y(iced::Center),
-    )
-    .height(Length::Fixed(FINDER_FOOT_H))
-    .align_y(iced::Center)
-    .padding([0, 16])
-    .into()
-}
-
 /// One finder result: a fixed-height, full-width button. `pick` opens what
 /// the row shows — its target itself, not an index into a list a rescan or a
 /// re-index replaces.
 fn finder_row<'a>(
     content: impl Into<Element<'a, Message>>,
     selected: bool,
+    label: String,
     pick: Message,
 ) -> Element<'a, Message> {
+    // Said by what it shows, or by its place in the list.
+    let pick = super::heard::row(move || label, pick);
     button(
         container(content)
             .height(Fill)
@@ -431,6 +456,7 @@ fn bar_row<'a>(
         Some(keys) => super::toolbar::row_keycap(keys),
         None => slot(),
     };
+    let label = title.clone();
     finder_row(
         row![
             glyph::icon(glyph, tint, 15.0),
@@ -447,6 +473,7 @@ fn bar_row<'a>(
         .spacing(11)
         .align_y(iced::Center),
         selected,
+        label,
         pick,
     )
 }
@@ -494,7 +521,8 @@ fn suggestion_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
                 match title.as_str() {
                     _ if *recent => Glyph::TimeTravel,
                     "Open Remote…" => Glyph::Remote,
-                    _ => Glyph::Folder,
+                    "Open Folder…" => Glyph::FolderOpen,
+                    _ => Glyph::Prompt,
                 },
                 theme::dim(),
                 crate::i18n::lookup(title).to_string(),
@@ -530,9 +558,9 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
         let selected = pos == app.proj.finder.selected;
         if let Some(command) = app.palette.get(idx) {
             rows.push(bar_row(
-                Glyph::ChevronRight,
+                Glyph::Prompt,
                 theme::dim(),
-                crate::i18n::lookup(&command.title).to_string(),
+                command.shown().to_string(),
                 None,
                 command.keys.clone(),
                 selected,
@@ -548,11 +576,18 @@ fn bar_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Message>>) {
             Some((d, n)) => (d, n),
             None => ("", entry.rel.as_str()),
         };
+        // Its folder in what the row leaves beside its icon, name and the
+        // keys' place, cut at the start.
+        let dir_room = FINDER_ROW_INNER_W
+            - FILE_ICON_W
+            - 3.0 * FILE_ROW_GAP
+            - super::steady::width_of(name, ts::READING, crate::fonts::UI);
+        let dir = super::steady::elide_start(dir, BAR_DETAIL_SIZE, crate::fonts::UI, dir_room);
         rows.push(bar_row(
             Glyph::File,
             theme::dim(),
             crate::highlight::in_order(name).into_owned(),
-            Some(crate::highlight::in_order(dir).into_owned()),
+            Some(crate::highlight::in_order(&dir).into_owned()),
             None,
             selected,
             Message::Nav(NavMsg::FinderPick {
@@ -608,20 +643,28 @@ pub(crate) fn finder_file_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Mess
             Some((d, n)) => (d, n),
             None => ("", entry.rel.as_str()),
         };
+        // Its folder in what the row has left beside its name, cut at the
+        // start: the end of a path says where it is.
+        let dir_room = FINDER_ROW_INNER_W
+            - FILE_ICON_W
+            - 3.0 * FILE_ROW_GAP
+            - super::steady::width_of(name, ts::READING, crate::fonts::UI);
+        let dir = super::steady::elide_start(dir, ts::SMALL, crate::fonts::UI, dir_room);
         rows.push(finder_row(
             row![
-                glyph::icon(Glyph::File, theme::dim(), 15.0),
+                glyph::icon(Glyph::File, theme::dim(), FILE_ICON_W),
                 // In the order they are spelled (`highlight::in_order`).
                 text(crate::highlight::in_order(name)).size(ts::READING),
                 space().width(Fill),
-                text(crate::highlight::in_order(dir))
+                text(crate::highlight::in_order(&dir).into_owned())
                     .size(ts::SMALL)
                     .color(theme::dim())
                     .wrapping(Wrapping::None),
             ]
-            .spacing(11)
+            .spacing(FILE_ROW_GAP)
             .align_y(iced::Center),
             pos == app.proj.finder.selected,
+            entry.rel.clone(),
             Message::Nav(NavMsg::FinderPick {
                 abs: entry.abs.clone(),
                 line: None,
@@ -644,13 +687,14 @@ pub(crate) fn finder_command_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, M
         };
         rows.push(finder_row(
             row![
-                text(crate::i18n::lookup(&command.title).to_string()).size(ts::READING),
+                text(command.shown().to_string()).size(ts::READING),
                 space().width(Fill),
                 keys,
             ]
             .spacing(10)
             .align_y(iced::Center),
             pos == app.proj.finder.selected,
+            command.shown().to_string(),
             Message::Nav(NavMsg::PaletteRun(command.title.clone())),
         ));
     }
@@ -668,25 +712,34 @@ pub(crate) fn finder_symbol_rows<'a>(app: &'a App, rows: &mut Vec<Element<'a, Me
 
 /// A symbol in the finder: its kind, its name, where it is.
 fn symbol_row<'a>(entry: &'a crate::index::SymbolEntry, selected: bool) -> Element<'a, Message> {
+    // Where it is, in what the row has left beside its kind and name, cut
+    // at the start.
+    let place_room = FINDER_ROW_INNER_W
+        - SYMBOL_KIND_W
+        - 2.0 * SYMBOL_ROW_GAP
+        - super::steady::width_of(&entry.name, ts::READING, crate::fonts::UI);
+    let place = super::steady::elide_start(
+        &format!("{}:{}", entry.rel, entry.line),
+        ts::SMALL,
+        crate::fonts::UI,
+        place_room,
+    );
     finder_row(
         row![
             text(short_kind(&entry.kind))
                 .size(ts::CAPTION)
                 .color(theme::kind_color(&entry.kind))
-                .width(40),
+                .width(SYMBOL_KIND_W),
             text(crate::highlight::in_order(&entry.name)).size(ts::READING),
-            text(format!(
-                "{}:{}",
-                crate::highlight::in_order(&entry.rel),
-                entry.line
-            ))
-            .size(ts::SMALL)
-            .color(theme::dim())
-            .wrapping(Wrapping::None),
+            text(crate::highlight::in_order(&place).into_owned())
+                .size(ts::SMALL)
+                .color(theme::dim())
+                .wrapping(Wrapping::None),
         ]
-        .spacing(10)
+        .spacing(SYMBOL_ROW_GAP)
         .align_y(iced::Center),
         selected,
+        entry.name.clone(),
         Message::Nav(NavMsg::FinderPick {
             abs: entry.abs.clone(),
             line: Some(entry.line),

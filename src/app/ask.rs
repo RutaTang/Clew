@@ -8,6 +8,12 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The output budget of one request for an Ask answer — the agent's own.
+/// An answer longer than that is carried on where it stopped
+/// (`llm::carry_on`), not cut: the budget sets how long each request runs,
+/// not how long an answer may be.
+pub(crate) const ANSWER_TOKENS: u32 = 4_000;
+
 /// One retrieved node's part of an Ask answer's context, as far as memory can
 /// say (see `App::ask_context_items`); a function's body is added by
 /// [`assemble_ask_context`].
@@ -131,8 +137,82 @@ pub(crate) fn pin_context(pin: &AskPin) -> String {
     )
 }
 
+/// Most lines of the open file a question is answered from when nothing
+/// else grounds it ([`App::open_file_pin`]).
+const OPEN_FILE_LINES: usize = 240;
+
+/// The open file's lines, as the context of a question nothing else
+/// grounds: said to be the file the reader has open, not a selection.
+pub(crate) fn open_file_context(pin: &AskPin) -> String {
+    let last = pin.line + pin.code.lines().count().saturating_sub(1);
+    format!(
+        "### The file the reader has open — {} (L{}–L{last})\n{}\n",
+        explain::prompt_label(&pin.rel),
+        pin.line,
+        explain::fenced(
+            highlight::detect(Path::new(&pin.rel)).unwrap_or(""),
+            &pin.code
+        )
+    )
+}
+
 /// The user turn of a retrieval-mode Ask answer: the untrusted-data note once,
 /// first — before any repository text — then the question, then the context.
+/// Where in `md` a streaming answer is settled up to, from `from` (itself
+/// such a place): just after the last blank line that ends a block — not
+/// one inside a code block or a display formula, which go on past it. What
+/// is before it reads the same however the answer goes on, and is drawn as
+/// it will stay; `from` when no block has ended since.
+pub(crate) fn settle_point(md: &str, from: usize) -> usize {
+    let Some(rest) = md.get(from..) else {
+        return from;
+    };
+    // The fence a code block opened with (its mark and length), while in one.
+    let mut fence: Option<(char, usize)> = None;
+    let mut math = false;
+    let mut settled = from;
+    let mut at = from;
+    for line in rest.split_inclusive('\n') {
+        at += line.len();
+        // A line still being written ends nothing.
+        if !line.ends_with('\n') {
+            break;
+        }
+        let body = line.trim_end_matches(['\n', '\r']);
+        let lead = body.len() - body.trim_start_matches(' ').len();
+        let mark = &body[lead.min(3)..];
+        let run = |c: char| mark.chars().take_while(|&m| m == c).count();
+        match fence {
+            Some((c, n)) => {
+                if lead <= 3 && run(c) >= n && mark.trim_start_matches(c).trim().is_empty() {
+                    fence = None;
+                }
+                continue;
+            }
+            None if lead <= 3 && (run('`') >= 3 || run('~') >= 3) => {
+                let c = if run('`') >= 3 { '`' } else { '~' };
+                fence = Some((c, run(c)));
+                continue;
+            }
+            None => {}
+        }
+        // A display formula: `$$` on a line of its own opens or closes it;
+        // one that opens and closes on its line is whole.
+        let trimmed = body.trim();
+        if trimmed.starts_with("$$") {
+            let whole = trimmed.len() > 2 && trimmed.ends_with("$$");
+            if !whole {
+                math = !math;
+            }
+            continue;
+        }
+        if !math && trimmed.is_empty() {
+            settled = at;
+        }
+    }
+    settled
+}
+
 pub(crate) fn ask_user_prompt(question: &str, context: &str) -> String {
     format!(
         "{}\n\nQuestion: {question}\n\nCode context:\n{context}",
@@ -181,7 +261,10 @@ impl App {
     pub(crate) fn on_open_ask(&mut self) -> Task<Message> {
         self.reveal_ask();
         self.code_focused = false;
-        operation::focus(ui::ask_input_id())
+        // Questions to try, written for where the reader is, when there are
+        // none for here yet.
+        let suggest = self.ask_for_suggestions(false);
+        Task::batch([operation::focus(ui::ask_input_id()), suggest])
     }
 
     /// A turn waiting for the user to answer one of its approvals says
@@ -189,7 +272,7 @@ impl App {
     /// finished answer is (code as code, links as links) rather than as the
     /// raw text a streaming answer shows.
     pub(crate) fn settle_waiting_answers(&mut self) -> Task<Message> {
-        let waiting: Vec<(usize, String)> = self
+        let waiting: Vec<(usize, usize)> = self
             .proj
             .ask_turns
             .iter()
@@ -197,15 +280,26 @@ impl App {
             .filter(|(_, t)| {
                 t.streaming && !t.extras.approvals.is_empty() && !t.answer_md.trim().is_empty()
             })
-            .map(|(i, t)| (i, t.answer_md.clone()))
+            .map(|(i, t)| (i, t.answer_md.len()))
             .collect();
-        let mut tasks = Vec::new();
-        for (i, md) in waiting {
-            let (prepared, task) = self.prepare_segments(&md);
-            self.proj.ask_turns[i].answer = prepared;
-            tasks.push(task);
-        }
+        let tasks: Vec<_> = waiting
+            .into_iter()
+            .map(|(i, end)| self.settle_answer_to(i, end))
+            .collect();
         Task::batch(tasks)
+    }
+
+    /// Keep the question's field holding `ask_input`, whichever way it was
+    /// set (a question said, one put back from the queue, a send that
+    /// cleared it): drawn anew with the caret at its end.
+    pub(crate) fn sync_ask_editor(&mut self) {
+        use iced::widget::text_editor::{Action, Content, Motion};
+        if self.proj.ask_editor.text() != self.proj.ask_input {
+            self.proj.ask_editor = Content::with_text(&self.proj.ask_input);
+            self.proj
+                .ask_editor
+                .perform(Action::Move(Motion::DocumentEnd));
+        }
     }
 
     /// Bring the conversation on screen without taking the keyboard: a card
@@ -216,14 +310,11 @@ impl App {
         }
     }
 
-    /// Put Ask away — its pill too — the keyboard back with the code.
+    /// Close Ask to its pill, the keyboard back with the code: as hiding
+    /// it does, and the conversation says no more.
     pub(crate) fn close_ask(&mut self) {
-        // Put away, the conversation says no more.
         self.stop_speaking();
-        self.ask_sessions_menu = false;
-        self.ask_sessions_query.clear();
-        self.ask_view = AskView::Closed;
-        self.code_focused = true;
+        self.hide_ask();
     }
 
     /// Hide the card to its pill in the corner, the keyboard back with the
@@ -248,7 +339,7 @@ impl App {
         match self.ask_view {
             AskView::Expanded => self.ask_view = AskView::Compact,
             AskView::Compact => self.hide_ask(),
-            AskView::Hidden | AskView::Closed => return false,
+            AskView::Hidden => return false,
         }
         true
     }
@@ -258,13 +349,20 @@ impl App {
         if question.is_empty() {
             return Task::none();
         }
-        // One answer at a time, whatever produces it. The input submits on
-        // Enter whether or not the Ask button is enabled, and a second
-        // question while one is being answered used to start a SECOND answer
-        // (the retrieval path, beside a running agent turn) or report a
-        // missing index that is not missing. The question stays in the input.
+        // What the card said of the last question that could not be asked
+        // is said again only if this one cannot be either.
+        self.proj.ask_notice = None;
+        // A question asked while one is being answered waits its turn: it
+        // is queued, and asked once nothing is answering
+        // (`send_next_queued`). One answer at a time, whatever produces it —
+        // a second question used to start a SECOND answer (the retrieval
+        // path, beside a running agent turn) or report a missing index that
+        // is not missing; then it was turned away, to be asked again by hand.
+        self.proj.ask_queue_held = false;
         if self.ask_stream_active() {
-            self.status = tr!("Still answering — wait, or press Stop").into();
+            let spoken = std::mem::take(&mut self.proj.ask_spoken);
+            self.proj.ask_queue.push((question, spoken));
+            self.proj.ask_input.clear();
             return Task::none();
         }
         // A new question: what Clew was saying of the last answer stops.
@@ -302,6 +400,33 @@ impl App {
         self.on_ask_submit_rag(question, spoken)
     }
 
+    /// The open file around where the reader is — the caret, else the top
+    /// of the view — as what a question is answered from when nothing else
+    /// grounds it (no index, nothing pinned, no debugger paused): up to
+    /// [`OPEN_FILE_LINES`] of it. Without it such a question was refused,
+    /// said why only on the status line, while the card waited.
+    pub(crate) fn open_file_pin(&self) -> Option<AskPin> {
+        let v = self.active_viewer()?;
+        let lines: Vec<&str> = v.source.lines().collect();
+        if lines.is_empty() {
+            return None;
+        }
+        let at = v
+            .caret
+            .map(|(line, _)| line)
+            .unwrap_or_else(|| (v.scroll_y / self.line_height().max(1.0)).max(0.0) as usize);
+        let start = at
+            .saturating_sub(OPEN_FILE_LINES / 2)
+            .min(lines.len().saturating_sub(OPEN_FILE_LINES));
+        let end = (start + OPEN_FILE_LINES).min(lines.len());
+        Some(AskPin {
+            rel: v.rel.clone(),
+            file: v.abs.clone(),
+            line: start + 1,
+            code: lines[start..end].join("\n"),
+        })
+    }
+
     /// The pre-agent Ask path: retrieval (embed → top-K) + one streamed
     /// completion. Kept as the fallback when an agent turn can't run.
     ///
@@ -321,7 +446,9 @@ impl App {
             self.drop_foreign_embed_index(ecfg);
         }
         let has_index = !self.proj.embed_index.entries.is_empty() && ecfg.is_some();
-        let grounded = self.debug_context().is_some() || !self.proj.ask_pins.is_empty();
+        let grounded = self.debug_context().is_some()
+            || !self.proj.ask_pins.is_empty()
+            || self.open_file_pin().is_some();
         if !has_index && !grounded {
             // Be specific when a pass is already building the index, so a
             // question asked mid-"Explain All" doesn't read as a silent no-op
@@ -332,8 +459,10 @@ impl App {
             } else if self.proj.explain.running || self.proj.building_embeddings {
                 tr!("Building the semantic index — ask again when it's ready").into()
             } else {
-                tr!("Build the semantic index first (Find by meaning → Build index)").into()
+                tr!("Open a file to ask about it, or build the semantic index to ask about the whole project").into()
             };
+            // Said in the card too, where the question was asked.
+            self.proj.ask_notice = Some(self.status.clone());
             return Task::none();
         }
         if self.proj.project.is_none() {
@@ -347,7 +476,11 @@ impl App {
             self.proj.ask_input.clear();
             self.proj.ask_spoken = false;
         }
-        self.reveal_ask();
+        // Said aloud, it is answered without the card opening over the code
+        // (see `on_transcribed`).
+        if !spoken {
+            self.reveal_ask();
+        }
         self.proj.asking = true;
         let stamp = self.stamp();
         // The stream id is minted now, at submit: it is the identity the
@@ -574,6 +707,14 @@ impl App {
         for pin in &self.proj.ask_pins {
             prologue.push_str(&pin_context(pin));
         }
+        // Nothing else to stand on: the file the reader has open.
+        if space.is_none()
+            && self.proj.ask_pins.is_empty()
+            && self.debug_context().is_none()
+            && let Some(pin) = self.open_file_pin()
+        {
+            prologue.push_str(&open_file_context(&pin));
+        }
         let items = self.ask_context_items(&nodes);
         // A remote project's bodies cannot be read here: a same-pathed local
         // file must never stand in for them — the summaries alone carry them.
@@ -696,6 +837,7 @@ impl App {
             spoken,
             answer_md: String::new(),
             answer: Vec::new(),
+            settled: 0,
             sources,
             steps: Vec::new(),
             streaming: true,
@@ -726,7 +868,7 @@ impl App {
                     stream: stream_id,
                     system,
                     messages: msgs,
-                    max_tokens: 1024,
+                    max_tokens: ANSWER_TOKENS,
                 },
             });
             // Not handed over: no `ChatStreamDone` will ever come for it.
@@ -773,7 +915,7 @@ impl App {
                             &cfg,
                             &system,
                             &messages,
-                            1024,
+                            ANSWER_TOKENS,
                             &mut forward,
                             &move || listening.is_closed(),
                         ) {
@@ -882,13 +1024,18 @@ impl App {
             spoken,
             answer_md: String::new(),
             answer: Vec::new(),
+            settled: 0,
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
             extras: Default::default(),
         });
         self.proj.asking = false;
-        self.reveal_ask();
+        // Said aloud, it is answered without the card opening over the code
+        // (see `on_transcribed`).
+        if !spoken {
+            self.reveal_ask();
+        }
 
         self.proj.link.agent_stream = Some(stream_id);
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<AgentPiece>();
@@ -976,15 +1123,21 @@ impl App {
         // Route by stream id. "The last streaming turn" also matches a turn
         // belonging to another question — or, after a project switch, to a
         // conversation in another project entirely.
-        let Some(turn) = self
+        let Some(idx) = self
             .proj
             .ask_turns
-            .iter_mut()
-            .find(|t| t.stream == stream && t.streaming)
+            .iter()
+            .position(|t| t.stream == stream && t.streaming)
         else {
             return Task::none();
         };
-        turn.answer_md.push_str(&text);
+        self.proj.ask_turns[idx].answer_md.push_str(&text);
+        // A block that has ended is drawn as it will stay.
+        let settle = {
+            let turn = &self.proj.ask_turns[idx];
+            settle_point(&turn.answer_md, turn.settled)
+        };
+        let drawn = self.settle_answer_to(idx, settle);
         // First token(s): the answer is streaming, not "thinking".
         self.proj.asking = false;
         // A question said aloud: its answer is said too, as it comes.
@@ -997,7 +1150,35 @@ impl App {
                 y: f32::MAX,
             },
         );
-        Task::batch([said, follow])
+        Task::batch([said, follow, drawn])
+    }
+
+    /// Draw turn `idx`'s answer as it will stay up to `to` (a place
+    /// [`settle_point`] found, or its end): what came since it was last
+    /// settled is prepared and added on. Its whole text is never prepared
+    /// again, so nothing drawn moves.
+    pub(crate) fn settle_answer_to(&mut self, idx: usize, to: usize) -> Task<Message> {
+        let Some(turn) = self.proj.ask_turns.get_mut(idx) else {
+            return Task::none();
+        };
+        // The text replaced under it (an empty answer given its reason): drawn
+        // anew.
+        if turn.settled > turn.answer_md.len() || !turn.answer_md.is_char_boundary(turn.settled) {
+            turn.answer.clear();
+            turn.settled = 0;
+        }
+        let to = to.min(turn.answer_md.len());
+        if to <= turn.settled || !turn.answer_md.is_char_boundary(to) {
+            return Task::none();
+        }
+        let chunk = turn.answer_md[turn.settled..to].to_string();
+        turn.settled = to;
+        if chunk.trim().is_empty() {
+            return Task::none();
+        }
+        let (prepared, task) = self.prepare_segments(&chunk);
+        self.proj.ask_turns[idx].answer.extend(prepared);
+        task
     }
 
     pub(crate) fn on_ask_stream_ended(
@@ -1022,6 +1203,10 @@ impl App {
             return Task::none();
         };
         self.proj.asking = false;
+        // Answered with the card put away: the pill marks it, to be read.
+        if !self.ask_view.is_open() && !matches!(outcome, StreamOutcome::Stopped) {
+            self.proj.ask_unread = true;
+        }
         // Its tool calls waiting for an answer wait for nothing now (a
         // disconnect ends a server's turn here): their cards go with it, or
         // the first of them stood between the user and every later card.
@@ -1051,12 +1236,26 @@ impl App {
             if let Some(reason) = empty_reason
                 && turn.answer_md.trim().is_empty()
             {
+                // In place of what was there (blank lines, settled as they
+                // came): drawn from its start.
                 turn.answer_md = reason;
+                turn.answer.clear();
+                turn.settled = 0;
+            } else if matches!(outcome, StreamOutcome::Stopped) {
+                // Stopped part-way: said so where it stops — it ended mid-
+                // sentence, or mid-heading, with nothing to tell it from an
+                // answer that was whole. A code block it stopped in is
+                // closed first, or the mark would be read as code.
+                if turn.answer_md.matches("```").count() % 2 == 1 {
+                    turn.answer_md.push_str("\n```");
+                }
+                turn.answer_md
+                    .push_str(&format!("\n\n*{}*", tr!("Stopped here.")));
             }
             turn.answer_md.clone()
         };
-        let (prepared, task) = self.prepare_segments(&md);
-        self.proj.ask_turns[idx].answer = prepared;
+        // The rest of it, added to what is drawn already: nothing drawn moves.
+        let task = self.settle_answer_to(idx, md.len());
         // Answered: the session is kept as it now stands.
         self.keep_ask_session();
         let to_bottom = operation::scroll_to(
@@ -1176,9 +1375,66 @@ impl App {
 
     /// Stop the in-flight answer where it actually runs — the Stop button.
     pub(crate) fn on_agent_stop(&mut self) -> Task<Message> {
-        // Stop is for the answer, as it is written and as it is said.
+        // Stop is for the answer, as it is written and as it is said — and
+        // holds what is queued after it, which a Stop may well be about.
         self.stop_speaking();
+        self.proj.ask_queue_held = true;
         self.stop_ask_streams()
+    }
+
+    /// The queued question at `at` asked now: moved to the front of the
+    /// queue, the queue let go, and the answer coming in stopped, and what
+    /// is said of the last — it is asked as soon as nothing is answering
+    /// (`send_next_queued`).
+    pub(crate) fn send_queued_now(&mut self, at: usize) -> Task<Message> {
+        if at >= self.proj.ask_queue.len() {
+            return Task::none();
+        }
+        let question = self.proj.ask_queue.remove(at);
+        self.proj.ask_queue.insert(0, question);
+        // Said still, an answer that has come holds the queue (see
+        // `send_next_queued`): asked now, it is not waited for.
+        self.stop_speaking();
+        let stop = if self.ask_stream_active() {
+            self.stop_ask_streams()
+        } else {
+            Task::none()
+        };
+        self.proj.ask_queue_held = false;
+        stop
+    }
+
+    /// Ask the first queued question, once nothing is answering and the
+    /// queue is not held: as if it were typed and sent, whatever the input
+    /// holds meanwhile kept there. Run after every message
+    /// ([`App::update`]), so whichever way an answer ends — done, stopped,
+    /// failed — the next is asked.
+    ///
+    /// An answer read aloud is still being given while Clew says it, after
+    /// its last words have come: asked then, the next question stopped
+    /// Clew mid-answer, as a question asked anew does (`on_ask_submit`).
+    pub(crate) fn send_next_queued(&mut self) -> Option<Task<Message>> {
+        if self.proj.ask_queue.is_empty()
+            || self.proj.ask_queue_held
+            || self.ask_stream_active()
+            || self.voice.speech.is_speaking()
+            || self.proj.project.is_none()
+        {
+            return None;
+        }
+        let (question, spoken) = self.proj.ask_queue.remove(0);
+        let draft = std::mem::replace(&mut self.proj.ask_input, question.clone());
+        let draft_spoken = std::mem::replace(&mut self.proj.ask_spoken, spoken);
+        let task = self.on_ask_submit();
+        // Asked, the question has left the input; not asked (no key, say),
+        // it goes back to the head of the queue, held, for the user to see.
+        if self.proj.ask_input.trim() == question.trim() {
+            self.proj.ask_queue.insert(0, (question, spoken));
+            self.proj.ask_queue_held = true;
+        }
+        self.proj.ask_input = draft;
+        self.proj.ask_spoken = draft_spoken;
+        Some(task)
     }
 
     /// Stop every Ask answer in progress, wherever it runs:
@@ -1325,14 +1581,23 @@ impl App {
     }
 
     /// Context-aware starter questions for the Ask panel, most specific first:
-    /// about any pinned selection, the symbol/file under the cursor, then the
-    /// codebase. Static templates — instant and free.
+    /// about any pinned selection, then the model's, written for where the
+    /// reader is — or, until they come (or with no key), templates for the
+    /// symbol or file under the cursor and the codebase.
     pub fn suggested_questions(&self) -> Vec<String> {
         let mut qs: Vec<String> = Vec::new();
         if !self.proj.ask_pins.is_empty() {
             qs.push(tr!("Explain the attached code.").into());
             qs.push(tr!("Why is the attached code written this way?").into());
         }
+        // The model's, written for where the reader is, when they have come
+        // — a few at random each new session (`app::suggest`).
+        if let Some(written) = self.ai_suggestions() {
+            qs.extend(written);
+            qs.truncate(crate::app::suggest::SHOWN);
+            return qs;
+        }
+        // Else the few that fit any project, and where the reader is.
         match self.cursor_target() {
             Some(explain::Node::Function { name, .. }) => {
                 qs.push(tr!("What calls `{name}`?", name = name));
@@ -1351,7 +1616,7 @@ impl App {
         }
         qs.push(tr!("What is the entry point of this codebase?").into());
         qs.push(tr!("How does data flow through the app?").into());
-        qs.truncate(4);
+        qs.truncate(crate::app::suggest::SHOWN);
         qs
     }
 
@@ -1392,6 +1657,10 @@ impl App {
         match message {
             AskMsg::Toggle => self.on_toggle_ask(),
             AskMsg::Open => self.on_open_ask(),
+            AskMsg::SuggestionsCame { key, result, .. } => {
+                self.on_suggestions(key, result);
+                Task::none()
+            }
             AskMsg::Expand => {
                 self.ask_view = AskView::Expanded;
                 self.code_focused = false;
@@ -1441,6 +1710,15 @@ impl App {
                 self.proj.ask_spoken = false;
                 Task::none()
             }
+            AskMsg::Edit(action) => {
+                let edits = action.is_edit();
+                self.proj.ask_editor.perform(action);
+                if edits {
+                    self.proj.ask_input = self.proj.ask_editor.text();
+                    self.proj.ask_spoken = false;
+                }
+                Task::none()
+            }
             AskMsg::Suggested(q) => {
                 self.proj.ask_input = q;
                 self.proj.ask_spoken = false;
@@ -1467,6 +1745,13 @@ impl App {
                 stream, outcome, ..
             } => self.on_agent_turn_ended(stream, outcome),
             AskMsg::Stop => self.on_agent_stop(),
+            AskMsg::SendQueuedNow(at) => self.send_queued_now(at),
+            AskMsg::DropQueued(at) => {
+                if at < self.proj.ask_queue.len() {
+                    self.proj.ask_queue.remove(at);
+                }
+                Task::none()
+            }
             AskMsg::StreamEnded {
                 stream, outcome, ..
             } => self.on_ask_stream_ended(stream, outcome),
@@ -1479,6 +1764,8 @@ impl App {
                 // question until the abandoned turn finished.
                 self.stop_speaking();
                 let stop = self.stop_ask_streams();
+                self.proj.ask_queue.clear();
+                self.proj.ask_queue_held = false;
                 self.proj.ask_turns.clear();
                 self.proj.ask_pins.clear();
                 // Cleared, the session goes from the menu too.
@@ -1546,5 +1833,35 @@ impl App {
                 ..
             } => self.on_acp_option_set(agent, session, option, value, result),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::settle_point;
+
+    /// Where a streaming answer settles: after a block's blank line — not
+    /// one inside a code block or a formula, nor a line still being written.
+    #[test]
+    fn an_answer_settles_where_a_block_ends() {
+        let md = "First.\n\nSecond, being wri";
+        assert_eq!(settle_point(md, 0), "First.\n\n".len());
+        // From where it settled, nothing new has ended.
+        assert_eq!(settle_point(md, 8), 8);
+        let code = "Intro\n\n```rust\nfn a() {}\n\nfn b() {}\n";
+        assert_eq!(settle_point(code, 0), "Intro\n\n".len());
+        let closed = format!("{code}```\n\nAfter");
+        assert_eq!(settle_point(&closed, 0), closed.len() - "After".len());
+        let tilde = "~~~\na\n\nb\n";
+        assert_eq!(settle_point(tilde, 0), 0);
+        let math = "$$\na\n\nb\n$$\n\nAfter";
+        assert_eq!(settle_point(math, 0), math.len() - "After".len());
+        let one_line = "$$x^2$$\n\nAfter";
+        assert_eq!(settle_point(one_line, 0), one_line.len() - "After".len());
+        // A blank line still being written ends nothing yet.
+        assert_eq!(settle_point("Para.\n", 0), 0);
+        assert_eq!(settle_point("Para.\n\n", 0), "Para.\n\n".len());
+        // Out of range: where it was.
+        assert_eq!(settle_point("ab", 9), 9);
     }
 }

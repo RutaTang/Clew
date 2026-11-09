@@ -235,10 +235,10 @@ pub enum WalkMode {
 /// bottom-right corner, or large and centred over the dimmed window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AskView {
-    /// Put away: nothing in the corner, but for voice's pill while it
-    /// hears. The shortcut, the voice key or the palette bring Ask back.
-    Closed,
     /// Hidden to the pill in the bottom-right corner, the conversation kept.
+    /// Closed too: the pill is how Ask is found again. Put away with nothing
+    /// in the corner, a click on the card's × left no way back to it but a
+    /// shortcut, and Ask seemed to have gone.
     #[default]
     Hidden,
     /// A card in the bottom-right corner, over the margin's corner: the code
@@ -425,9 +425,15 @@ pub struct AskTurn {
     /// Raw markdown answer, replayed to the LLM as history so follow-ups have
     /// the prior exchange in context. Accumulates token-by-token while streaming.
     pub answer_md: String,
-    /// The answer rendered as ordered display segments (filled when the stream
-    /// finishes; empty while streaming, when `answer_md` is shown as plain text).
+    /// The answer rendered as ordered display segments. While it streams,
+    /// what of it is settled — its whole paragraphs, code blocks and
+    /// formulas, `answer_md[..settled]` — is here, drawn as it will stay; only
+    /// the paragraph still being written is drawn as plain text. It was all
+    /// plain text until the end — `##`, backticks and `-` as typed — and then
+    /// redrawn at once, the answer jumping as it changed.
     pub answer: Vec<PreparedSeg>,
+    /// How much of `answer_md` is in `answer`, in bytes (see there).
+    pub settled: usize,
     /// The retrieved nodes (with similarity scores) that grounded this answer,
     /// shown beneath it as clickable source chips.
     pub sources: Vec<(explain::Node, f32)>,
@@ -492,6 +498,9 @@ pub struct ApprovalOption {
     pub label: String,
     /// Whether it lets the call run (the primary styling).
     pub allows: bool,
+    /// Whether it answers every such call from now on ("Always allow…"),
+    /// not this one: never what a bare "yes" or "no" said answers.
+    pub always: bool,
 }
 
 /// How a step chip's tool call stands.
@@ -788,6 +797,11 @@ pub struct BlameWhy {
     pub loading: bool,
     /// The rendered answer (empty while loading).
     pub prepared: Vec<PreparedSeg>,
+    /// Where in the window it was asked from — the right-click on the line
+    /// — for the popup to open there, under the line or over it; `None`,
+    /// asked from no point, near the top. Pinned near the top, it opened
+    /// far from the line it was about.
+    pub anchor: Option<f32>,
 }
 
 /// A time-travel session: scrub the active file (or one function's line range)
@@ -912,6 +926,13 @@ pub struct ContextMenu {
     /// The language's own action here, when its file's language has one
     /// ([`InsightKind::for_lang`]).
     pub insight: Option<InsightKind>,
+    /// Whether the file's language server is ready: what only it can answer
+    /// (the go-tos, the call hierarchy) waits for it, drawn so.
+    pub served: bool,
+    /// Opened by the pointer, at `x`, `y` — not the palette's stand-in at
+    /// the caret, which has no place on the screen: a popup asked from it
+    /// opens where one asked from the keyboard does.
+    pub by_pointer: bool,
 }
 
 /// What a language can say about the code under the cursor that no other
@@ -987,6 +1008,9 @@ pub struct Insight {
     pub prepared: Vec<PreparedSeg>,
     /// Where the answer points, for its Open button.
     pub defined: Option<(String, usize)>,
+    /// Where in the window it was asked from (the right-click), for the
+    /// popup to open there; `None` near the top (see `BlameWhy::anchor`).
+    pub anchor: Option<f32>,
 }
 
 impl GotoKind {
@@ -1104,36 +1128,192 @@ pub struct DiffState {
     pub max_cols: usize,
 }
 
-/// One run of same-kind diff lines as the diff view draws it.
+/// The node of a map the reader clicked: what it is called, the file it is
+/// in, and the message that opens it. A click picks a node — its place said
+/// over the map, an Open beside it — and a click on the one picked opens
+/// it: a first click closed the map on a node the reader may only have
+/// wanted to look at.
+#[derive(Debug, Clone)]
+pub struct GraphPick {
+    pub label: String,
+    pub file: PathBuf,
+    pub open: Box<crate::Message>,
+}
+
+/// One run of same-kind diff lines as the diff view draws it: its code
+/// coloured as the editor colours it, its lines' numbers beside it — before
+/// and after — and the mark of what happened to them. A hunk is a run of
+/// its own: a quiet line naming where it is (`fn main()`), not git's
+/// `@@ -12,7 +12,9 @@`. Git's own headers (`diff --git`, `index`, `---`,
+/// `+++`) are not drawn: the view's header names the file.
 #[derive(Debug, Clone)]
 pub struct DiffRun {
     pub kind: git::DiffKind,
-    /// The run's lines as drawn (`ui::diff_display_text`), joined.
+    /// The run's code as drawn (`ui::diff_display_text`), its lines joined,
+    /// without the `+`/`-`/` ` git marks them with.
     pub text: String,
+    /// The numbers of its lines, before and after, one line each.
+    pub gutter: String,
+    /// What happened to each of its lines (`+`, `−`), one line each.
+    pub marks: String,
+    /// The run's code, coloured: `(words, style)`, a `\n` span between lines.
+    pub spans: Vec<(String, Option<u8>)>,
 }
 
 impl DiffState {
     pub fn new(abs: PathBuf, rel: String, lines: Vec<git::DiffLine>) -> Self {
+        use git::DiffKind;
         let shown = &lines[..lines.len().min(crate::ui::MAX_DIFF_ROWS)];
+        // A line's code: git's mark off.
+        let code = |l: &git::DiffLine| -> String {
+            let t = l.text.as_str();
+            match l.kind {
+                DiffKind::Add | DiffKind::Remove | DiffKind::Context => t
+                    .get(1..)
+                    .filter(|_| t.starts_with(['+', '-', ' ']))
+                    .unwrap_or(t),
+                DiffKind::Hunk | DiffKind::Header => t,
+            }
+            .to_string()
+        };
+        // Coloured as the file's language, each side as it reads: the lines
+        // after (context and added) together, and the lines before (context
+        // and removed) — a string or a comment over several lines coloured as
+        // one. A very long diff is drawn plain.
+        let lang = crate::highlight::detect(&abs);
+        let side = |keep: fn(DiffKind) -> bool| -> Vec<crate::highlight::HlLine> {
+            let src: Vec<String> = shown.iter().filter(|l| keep(l.kind)).map(code).collect();
+            let src = src.join("\n");
+            if shown.len() > DIFF_HIGHLIGHT_MAX {
+                crate::highlight::plain_lines(&src)
+            } else {
+                crate::highlight::highlight_lines(&src, lang)
+            }
+        };
+        let after = side(|k| matches!(k, DiffKind::Context | DiffKind::Add));
+        let before = side(|k| matches!(k, DiffKind::Context | DiffKind::Remove));
+        let (mut a, mut b) = (0usize, 0usize);
+        // Line numbers, from each hunk's header.
+        let (mut old_no, mut new_no) = (0usize, 0usize);
+        struct Row {
+            kind: DiffKind,
+            text: String,
+            gutter: (Option<usize>, Option<usize>),
+            spans: Vec<(String, Option<u8>)>,
+        }
+        let mut rows: Vec<Row> = Vec::new();
+        for l in shown {
+            let text = crate::ui::diff_display_text(&code(l));
+            let plain = || vec![(text.clone(), None)];
+            let row = match l.kind {
+                DiffKind::Header => continue,
+                DiffKind::Hunk => {
+                    let (old, new, place) = hunk_header(&l.text);
+                    (old_no, new_no) = (old, new);
+                    Row {
+                        kind: DiffKind::Hunk,
+                        text: place.clone(),
+                        gutter: (None, None),
+                        spans: vec![(place, None)],
+                    }
+                }
+                DiffKind::Context => {
+                    let spans = after.get(a).map(|h| h.spans.clone());
+                    a += 1;
+                    b += 1;
+                    let row = Row {
+                        kind: l.kind,
+                        spans: spans.filter(|s| !s.is_empty()).unwrap_or_else(plain),
+                        text,
+                        gutter: (Some(old_no), Some(new_no)),
+                    };
+                    old_no += 1;
+                    new_no += 1;
+                    row
+                }
+                DiffKind::Add => {
+                    let spans = after.get(a).map(|h| h.spans.clone());
+                    a += 1;
+                    let row = Row {
+                        kind: l.kind,
+                        spans: spans.filter(|s| !s.is_empty()).unwrap_or_else(plain),
+                        text,
+                        gutter: (None, Some(new_no)),
+                    };
+                    new_no += 1;
+                    row
+                }
+                DiffKind::Remove => {
+                    let spans = before.get(b).map(|h| h.spans.clone());
+                    b += 1;
+                    let row = Row {
+                        kind: l.kind,
+                        spans: spans.filter(|s| !s.is_empty()).unwrap_or_else(plain),
+                        text,
+                        gutter: (Some(old_no), None),
+                    };
+                    old_no += 1;
+                    row
+                }
+            };
+            rows.push(row);
+        }
         // Of what is drawn (`ui::diff_display_text`): a direction control
         // is drawn as U+FFFD, a column where it took none, and a `\r` not
         // at all.
-        let max_cols = shown
+        let max_cols = rows
             .iter()
-            .map(|l| crate::ui::display_cols(&crate::highlight::line_in_order(&l.text)))
+            .map(|r| crate::ui::display_cols(&crate::highlight::line_in_order(&r.text)))
             .max()
             .unwrap_or(0);
-        let runs = shown
-            .chunk_by(|a, b| a.kind == b.kind)
-            .map(|run| DiffRun {
-                kind: run[0].kind,
-                text: run
-                    .iter()
-                    .map(|l| crate::ui::diff_display_text(&l.text))
-                    .collect::<Vec<_>>()
+        let widest_no = rows
+            .iter()
+            .flat_map(|r| [r.gutter.0, r.gutter.1])
+            .flatten()
+            .max()
+            .unwrap_or(0)
+            .to_string()
+            .len();
+        let number = |n: Option<usize>| match n {
+            Some(n) => format!("{n:>widest_no$}"),
+            None => " ".repeat(widest_no),
+        };
+        let runs =
+            rows.chunk_by(|x, y| x.kind == y.kind)
+                .map(|run| DiffRun {
+                    kind: run[0].kind,
+                    text: run
+                        .iter()
+                        .map(|r| r.text.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    gutter: run
+                        .iter()
+                        .map(|r| format!("{} {}", number(r.gutter.0), number(r.gutter.1)))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    marks: vec![
+                        match run[0].kind {
+                            DiffKind::Add => "+",
+                            DiffKind::Remove => "−",
+                            _ => " ",
+                        };
+                        run.len()
+                    ]
                     .join("\n"),
-            })
-            .collect();
+                    spans: run
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(i, r)| {
+                            let tabs = r.spans.iter().map(|(t, s)| {
+                                (t.replace('\t', &" ".repeat(crate::ui::TAB_COLS)), *s)
+                            });
+                            let gap = (i > 0).then(|| ("\n".to_string(), None));
+                            gap.into_iter().chain(tabs)
+                        })
+                        .collect(),
+                })
+                .collect();
         DiffState {
             abs,
             rel,
@@ -1142,6 +1322,33 @@ impl DiffState {
             max_cols,
         }
     }
+}
+
+/// Past this many lines a diff is drawn without colouring it: preparing it
+/// is done as it arrives, on the window's own thread.
+const DIFF_HIGHLIGHT_MAX: usize = 3000;
+
+/// What a hunk's header says: where its first line is before and after, and
+/// the place it is in (`fn main()`) — `⋯` when git names none.
+fn hunk_header(header: &str) -> (usize, usize, String) {
+    let mut parts = header.splitn(3, "@@");
+    let _ = parts.next();
+    let ranges = parts.next().unwrap_or("");
+    let place = parts.next().unwrap_or("").trim();
+    let start = |sign: char| {
+        ranges
+            .split_whitespace()
+            .find_map(|r| r.strip_prefix(sign))
+            .and_then(|r| r.split(',').next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or(1)
+    };
+    let place = if place.is_empty() {
+        "⋯".to_string()
+    } else {
+        format!("⋯  {place}")
+    };
+    (start('-'), start('+'), place)
 }
 
 /// State of the language server for one language.
@@ -1564,6 +1771,11 @@ pub struct LspConsent {
     pub version: String,
     pub provision: LspProvision,
     pub dest_dir: PathBuf,
+    /// The server's own program on this computer's `PATH` (an absolute
+    /// directory of it), for a download or install asked here: what the
+    /// reader may run instead of fetching Clew's copy. Asked to download
+    /// rust-analyzer with one in hand, there was no saying so.
+    pub on_path: Option<PathBuf>,
 }
 
 impl LspConsent {
@@ -1683,7 +1895,7 @@ pub enum ReadKind {
 
 /// One rendered entry on a doc page: a symbol with its signature and its doc
 /// comment parsed to markdown items (which the markdown widget borrows).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DocEntryView {
     pub name: String,
     pub kind: String,
@@ -1696,7 +1908,7 @@ pub struct DocEntryView {
 
 /// The doc page shown in the main pane: the selected item followed by its
 /// public members (like a rustdoc type page), all in one file.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DocPage {
     pub rel: String,
     pub entries: Vec<DocEntryView>,
@@ -1717,6 +1929,9 @@ pub struct ConnectUi {
     /// run AI calls. Off by default; see `App::remote_ai_opt_in`.
     pub send_ai_keys: bool,
     pub stage: ConnectStage,
+    /// The fields what the form says is wrong is about, marked until each
+    /// is edited.
+    pub marked: Vec<ConnectField>,
 }
 
 impl Default for ConnectUi {
@@ -1729,12 +1944,13 @@ impl Default for ConnectUi {
             identity: String::new(),
             send_ai_keys: false,
             stage: ConnectStage::Picking,
+            marked: Vec::new(),
         }
     }
 }
 
 /// Which field of the new-connection form an edit targets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectField {
     Name,
     Host,

@@ -25,8 +25,7 @@ const HEADER_ROW_PAD: Padding = Padding {
     bottom: 6.0,
     left: 0.0,
 };
-/// Height of the header's trail row, when there is a trail to show: the
-/// trail 22 high, with 12 under it.
+/// Height of the header's trail row: the trail 22 high, with 12 under it.
 pub(crate) const TRAIL_ROW_H: f32 = 34.0;
 /// Height of a stop of the trail, a button.
 const TRAIL_STOP_H: f32 = 22.0;
@@ -35,24 +34,18 @@ const TRAIL_STOP_H: f32 = 22.0;
 const HEADER_CONTROL_H: f32 = 28.0;
 /// Height of a margin tab.
 const MARGIN_TAB_H: f32 = 26.0;
-/// Room under the first row when there is no trail under it.
-const NO_TRAIL_PAD: f32 = 6.0;
 /// How many stops of the reading trail the header shows, the current last.
 const TRAIL_STOPS: usize = 4;
 
 /// Height of the sheet's header as drawn now: its first row, the trail row
-/// when there is a trail, and the rule under them — or nothing, with no file
-/// on the sheet.
+/// and the rule under them — or nothing, with no file on the sheet. The
+/// trail row stands from the first file on, one stop long until there is a
+/// way back: it came with the first jump, and moved the code down a row.
 pub(crate) fn sheet_header_height(app: &App) -> f32 {
     if !header_shows(app) {
         return 0.0;
     }
-    let trail = if trail_shows(app) {
-        TRAIL_ROW_H
-    } else {
-        NO_TRAIL_PAD
-    };
-    SHEET_HEADER_ROW_H + trail + 1.0
+    SHEET_HEADER_ROW_H + TRAIL_ROW_H + 1.0
 }
 
 /// Width of `content` set at `size` in `font`, as a text widget lays it
@@ -139,12 +132,44 @@ fn title_parts(v: &Viewer) -> (String, String) {
     }
 }
 
-/// Width of a labelled tool of the header ([`file_tool`]).
-fn file_tool_w(label: &str) -> f32 {
+/// Width of a tool of the header ([`file_tool`]): labelled, or `short`, its
+/// glyph alone.
+fn file_tool_w(label: &str, short: bool) -> f32 {
+    if short {
+        return FILE_TOOL_PAD_X * 2.0 + FILE_TOOL_GLYPH;
+    }
     FILE_TOOL_PAD_X * 2.0
         + FILE_TOOL_GLYPH
         + FILE_TOOL_SPACING
         + text_width(label, ts::BODY, FILE_TOOL_FONT)
+}
+
+/// The least room the file's name keeps beside the header's tools: its
+/// width, up to this.
+const TITLE_MIN_W: f32 = 160.0;
+
+/// Width of the header's tools, Explain through View, labelled or `short`.
+fn file_tools_w(short: bool) -> f32 {
+    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
+        .iter()
+        .map(|l| file_tool_w(l, short))
+        .sum::<f32>();
+    tools + TOOLS_RULE_W + view_button_w(short) + 5.0 * TOOLS_SPACING
+}
+
+/// Whether the header's tools are said short — their glyphs alone, their
+/// names in their tooltips: where, labelled, they would leave the file's
+/// name less than its room. In a narrow window, or a language of longer
+/// words, the labelled tools took the whole row and the name was cut to
+/// nothing.
+fn file_tools_short(app: &App) -> bool {
+    let Some(v) = app.active_viewer() else {
+        return false;
+    };
+    let (name, _) = title_parts(v);
+    let title = text_width(&name, ts::EMPHASIS, TITLE_FONT).min(TITLE_MIN_W);
+    let room = header_right(app) - HEADER_PAD_RIGHT - (sheet_content_left(app) + HEADER_PAD_X);
+    room - TITLE_GAP / 2.0 - file_tools_w(false) < title
 }
 
 /// The face of the file's name over the sheet: a title's.
@@ -167,14 +192,15 @@ const TOOLS_RULE_W: f32 = 9.0;
 const HEADER_PAD_X: f32 = 20.0;
 const HEADER_PAD_RIGHT: f32 = 16.0;
 
-/// Width of the View menu's button.
-fn view_button_w() -> f32 {
-    VIEW_PAD.x()
-        + 14.0
-        + 6.0
-        + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
-        + 6.0
-        + VIEW_CHEVRON
+/// Width of the View menu's button: its eye, its name unless `short`, and
+/// its chevron.
+fn view_button_w(short: bool) -> f32 {
+    let named = if short {
+        0.0
+    } else {
+        6.0 + text_width(tr!("View"), ts::BODY, FILE_TOOL_FONT)
+    };
+    VIEW_PAD.x() + 14.0 + named + 6.0 + VIEW_CHEVRON
 }
 
 /// The View menu's button: the design's 9 before what it holds, 8 after,
@@ -197,11 +223,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
         return None;
     }
     let row_left = sheet_content_left(app) + HEADER_PAD_X;
-    let tools = [tr!("Explain"), tr!("Skim"), tr!("Diff"), tr!("Time Travel")]
-        .iter()
-        .map(|l| file_tool_w(l))
-        .sum::<f32>();
-    let width = tools + TOOLS_RULE_W + view_button_w() + 5.0 * TOOLS_SPACING;
+    let width = file_tools_w(file_tools_short(app));
     let x = (header_right(app) - HEADER_PAD_RIGHT - width).max(row_left);
     Some(iced::Rectangle {
         x,
@@ -215,7 +237,7 @@ pub(crate) fn file_tools_rect(app: &App) -> Option<iced::Rectangle> {
 /// of the file tools.
 pub(crate) fn view_button_rect(app: &App) -> Option<iced::Rectangle> {
     let tools = file_tools_rect(app)?;
-    let w = view_button_w();
+    let w = view_button_w(file_tools_short(app));
     Some(iced::Rectangle {
         x: tools.x + tools.width - w,
         width: w,
@@ -229,10 +251,6 @@ fn header_shows(app: &App) -> bool {
 }
 
 /// Whether the header's trail row shows: the trail has led somewhere.
-fn trail_shows(app: &App) -> bool {
-    app.proj.history.recent_path(2).len() > 1
-}
-
 /// The sheet, framed in the chrome: its header, the panes with the reading
 /// panel beside them, and the bottom (debugger) panel under them.
 ///
@@ -301,29 +319,35 @@ fn file_tool<'a>(
     on: bool,
     shortcut: Option<String>,
     msg: Message,
+    short: bool,
 ) -> Element<'a, Message> {
     let tint = if on { theme::fg() } else { theme::fg_muted() };
-    let face = button(
-        row![
-            glyph::icon(glyph, tint, FILE_TOOL_GLYPH),
-            ts::set_in(
-                text(label)
-                    .font(FILE_TOOL_FONT)
-                    .color(tint)
-                    .wrapping(Wrapping::None),
-                HEADER_CONTROL_H,
-                ts::INTER,
-                ts::BODY,
-            ),
-        ]
+    let mut face = row![glyph::icon(glyph, tint, FILE_TOOL_GLYPH)]
         .spacing(FILE_TOOL_SPACING)
-        .align_y(iced::Center),
+        .align_y(iced::Center);
+    if !short {
+        face = face.push(ts::set_in(
+            text(label)
+                .font(FILE_TOOL_FONT)
+                .color(tint)
+                .wrapping(Wrapping::None),
+            HEADER_CONTROL_H,
+            ts::INTER,
+            ts::BODY,
+        ));
+    }
+    let face = button(
+        container(face)
+            .height(Length::Fixed(HEADER_CONTROL_H))
+            .align_y(iced::Center),
     )
     .style(theme::icon_button(on))
-    .padding([0.0, FILE_TOOL_PAD_X]);
-    let face = face.on_press(msg);
+    .padding([0.0, FILE_TOOL_PAD_X])
+    .on_press(super::heard::said(label, msg));
+    // Said short, its name is in its tooltip, with its shortcut.
     match shortcut {
         Some(sc) => tip_at(face, label, Some(sc), tooltip::Position::Bottom),
+        None if short => tip_at(face, label, None, tooltip::Position::Bottom),
         None => face.into(),
     }
 }
@@ -395,7 +419,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     // A markdown file reads rendered or as its source.
     if v.md.is_some() {
         let (glyph, label) = if v.show_source {
-            (Glyph::Overview, tr!("Rendered"))
+            (Glyph::OpenBook, tr!("Rendered"))
         } else {
             (Glyph::Note, tr!("Source"))
         };
@@ -405,6 +429,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             false,
             None,
             Message::Editor(EditorMsg::ToggleMarkdownSource(app.proj.active)),
+            false,
         ));
     }
     let time_travel = time_travel_on_screen(app).is_some();
@@ -419,26 +444,36 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             }),
     )
     .padding([0.0, (TOOLS_RULE_W - 1.0) / 2.0]);
-    let view_menu = button(
-        row![
-            glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0),
-            ts::set_in(
-                text(tr!("View"))
-                    .font(FILE_TOOL_FONT)
-                    .color(theme::fg_muted())
-                    .wrapping(Wrapping::None),
-                HEADER_CONTROL_H,
-                ts::INTER,
-                ts::BODY,
-            ),
-            glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON),
-        ]
+    // Said short where the file's name would otherwise lose its room.
+    let short = file_tools_short(app);
+    let mut view_face = row![glyph::icon(Glyph::Eye, theme::fg_muted(), 14.0)]
         .spacing(6)
-        .align_y(iced::Center),
+        .align_y(iced::Center);
+    if !short {
+        view_face = view_face.push(ts::set_in(
+            text(tr!("View"))
+                .font(FILE_TOOL_FONT)
+                .color(theme::fg_muted())
+                .wrapping(Wrapping::None),
+            HEADER_CONTROL_H,
+            ts::INTER,
+            ts::BODY,
+        ));
+    }
+    let view_face = view_face.push(glyph::icon(Glyph::ChevronDown, theme::dim(), VIEW_CHEVRON));
+    let view_menu = button(
+        container(view_face)
+            .height(Length::Fixed(HEADER_CONTROL_H))
+            .align_y(iced::Center),
     )
     .style(theme::icon_button(app.show_view_menu))
     .padding(VIEW_PAD)
     .on_press(Message::Window(WindowMsg::ToggleViewMenu));
+    let view_menu: Element<'_, Message> = if short {
+        tip_at(view_menu, tr!("View"), None, tooltip::Position::Bottom)
+    } else {
+        view_menu.into()
+    };
     let tools = row![
         file_tool(
             Glyph::TextLines,
@@ -446,6 +481,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             false,
             None,
             Message::Explain(ExplainMsg::Show(crate::explain::Node::File(v.abs.clone()))),
+            short,
         ),
         file_tool(
             Glyph::Skim,
@@ -453,6 +489,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             v.skimmed(&app.skim_lines(&v.abs)),
             None,
             Message::Editor(EditorMsg::SkimFile),
+            short,
         ),
         file_tool(
             Glyph::Diff,
@@ -460,13 +497,21 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
             diffing,
             caps(Action::ToggleDiff),
             Message::Editor(EditorMsg::ToggleDiff),
+            short,
         ),
+        // A toggle, as Diff is: pressed again while it is on, it leaves —
+        // where only the Exit at the scrubber's end did.
         file_tool(
             Glyph::TimeTravel,
             tr!("Time Travel"),
             time_travel,
             caps(Action::TimeTravel),
-            Message::TimeTravel(TimeTravelMsg::Start { symbol: false }),
+            if time_travel {
+                Message::TimeTravel(TimeTravelMsg::Exit)
+            } else {
+                Message::TimeTravel(TimeTravelMsg::Start { symbol: false })
+            },
+            short,
         ),
         rule,
         view_menu,
@@ -489,11 +534,7 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
         right: HEADER_PAD_RIGHT,
         ..HEADER_ROW_PAD
     });
-    let trail: Element<'_, Message> = if trail_shows(app) {
-        trail_row(app)
-    } else {
-        space().height(Length::Fixed(NO_TRAIL_PAD)).into()
-    };
+    let trail = trail_row(app);
     // Over the margin, beside the divider, its tabs.
     let tabs: Element<'_, Message> = if right_panel(app).is_some() {
         // At the row's top, as the design has them: 14 down.
@@ -514,13 +555,37 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
 }
 
 /// The reading trail's last stops, oldest first, the current last: where
-/// the reader came from, each a click back to it.
+/// the reader came from, each a click back to it; the file on the sheet
+/// alone before there is a way back.
 fn trail_row(app: &App) -> Element<'_, Message> {
     let stops = app.proj.history.recent_path(TRAIL_STOPS);
     let last = stops.len().saturating_sub(1);
     let mut line = row![glyph::icon(Glyph::Route, theme::dim(), 13.0)]
         .spacing(6)
         .align_y(iced::Center);
+    // No visit recorded yet (a file restored, not gone to): the file on the
+    // sheet is where the trail starts.
+    if stops.is_empty()
+        && let Some(v) = app.active_viewer()
+    {
+        let name = v
+            .abs
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        line = line.push(
+            container(ts::set_in(
+                text(name)
+                    .font(crate::fonts::in_control(crate::fonts::UI_MEDIUM))
+                    .color(theme::fg())
+                    .wrapping(Wrapping::None),
+                TRAIL_STOP_H,
+                ts::INTER,
+                ts::BODY,
+            ))
+            .padding([0, 5]),
+        );
+    }
     // Where the reader is now: the function the caret is in, when it is in
     // one of the current stop's file's.
     let here = match (app.cursor_target(), stops.last()) {
@@ -539,7 +604,7 @@ fn trail_row(app: &App) -> Element<'_, Message> {
         let current = i == last;
         line = line.push(
             button(ts::set_in(
-                text(name)
+                text(name.clone())
                     .font(crate::fonts::in_control(if current {
                         crate::fonts::UI_MEDIUM
                     } else {
@@ -557,10 +622,13 @@ fn trail_row(app: &App) -> Element<'_, Message> {
             ))
             .style(theme::icon_button(false))
             .padding([0, 5])
-            .on_press(Message::Reading(ReadingMsg::HistoryJump {
-                id,
-                loc: loc.clone(),
-            })),
+            .on_press(super::heard::said(
+                &name.to_string(),
+                Message::Reading(ReadingMsg::HistoryJump {
+                    id,
+                    loc: loc.clone(),
+                }),
+            )),
         );
     }
     container(line)

@@ -753,9 +753,29 @@ pub struct ExplainState {
     pub showing_detail: bool,
 }
 
+/// What the Language model page's Test connection found, for the fields as
+/// they stood when it was asked.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum ConnectionTest {
+    #[default]
+    Untried,
+    /// On its way; its number, so an answer for fields changed since is
+    /// dropped.
+    Testing(u64),
+    /// The model named answered.
+    Answered(String),
+    /// Why it could not be reached, in English: said in the language spoken
+    /// when it is shown (`i18n::message`).
+    Failed(String),
+}
+
 /// The LLM settings modal: whether it's open, plus its draft chat / embedding
 /// endpoint fields. Defaults to a closed modal with the Anthropic provider.
 pub struct SettingsDraft {
+    /// The Language model page's Test connection, for the fields as they
+    /// stand; and the number of the last one asked.
+    pub connection_test: ConnectionTest,
+    pub connection_tests: u64,
     pub open: bool,
     pub provider: llm::Provider,
     pub key: String,
@@ -793,6 +813,10 @@ pub struct SettingsDraft {
     /// what tells "the user cleared this field" apart from "the user never
     /// touched it".
     pub ai_snapshot: (llm::Config, embed::Config),
+    /// The AI fields as the form was filled with them, as typed — what
+    /// Discard changes puts back (`ai_snapshot` holds them as a config
+    /// reads them: trimmed, a blank model filled in).
+    pub ai_opened: Option<AiFields>,
     /// A save of the AI fields failed since Settings opened, its reason said
     /// in the status bar: the next Close closes, saved or not (see
     /// `App::close_settings`).
@@ -801,6 +825,48 @@ pub struct SettingsDraft {
     pub integrations: crate::app::integrations::IntegrationsDraft,
     /// The page Settings shows: one feature's settings at a time.
     pub page: SettingsPage,
+}
+
+/// The fields of Settings that are kept as it closes, not as they change —
+/// the two AI pages' — as the form holds them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AiFields {
+    pub provider: llm::Provider,
+    pub key: String,
+    pub model: String,
+    pub base_url: String,
+    pub embed_key: String,
+    pub embed_model: String,
+    pub embed_base_url: String,
+    pub embed_here: bool,
+}
+
+impl AiFields {
+    /// The fields as `draft` holds them now.
+    pub fn of(draft: &SettingsDraft) -> AiFields {
+        AiFields {
+            provider: draft.provider,
+            key: draft.key.clone(),
+            model: draft.model.clone(),
+            base_url: draft.base_url.clone(),
+            embed_key: draft.embed_key.clone(),
+            embed_model: draft.embed_model.clone(),
+            embed_base_url: draft.embed_base_url.clone(),
+            embed_here: draft.embed_here,
+        }
+    }
+
+    /// Put these back into `draft`.
+    pub fn put_back(self, draft: &mut SettingsDraft) {
+        draft.provider = self.provider;
+        draft.key = self.key;
+        draft.model = self.model;
+        draft.base_url = self.base_url;
+        draft.embed_key = self.embed_key;
+        draft.embed_model = self.embed_model;
+        draft.embed_base_url = self.embed_base_url;
+        draft.embed_here = self.embed_here;
+    }
 }
 
 /// The pages of Settings, one for each feature, in the order its list shows
@@ -839,7 +905,7 @@ impl SettingsPage {
             SettingsPage::Embeddings => tr_noop!("Embeddings"),
             SettingsPage::Voice => tr_noop!("Voice"),
             SettingsPage::Integrations => tr_noop!("Integrations"),
-            SettingsPage::Languages => tr_noop!("Languages"),
+            SettingsPage::Languages => tr_noop!("Language servers"),
             SettingsPage::Shortcuts => tr_noop!("Keyboard shortcuts"),
         }
     }
@@ -848,6 +914,8 @@ impl SettingsPage {
 impl Default for SettingsDraft {
     fn default() -> Self {
         Self {
+            connection_test: ConnectionTest::Untried,
+            connection_tests: 0,
             open: false,
             provider: llm::Provider::Anthropic,
             key: String::new(),
@@ -871,6 +939,7 @@ impl Default for SettingsDraft {
                 ),
                 embed::Config::from_parts(String::new(), String::new(), String::new()),
             ),
+            ai_opened: None,
             save_failed: false,
             integrations: Default::default(),
             page: SettingsPage::Appearance,
@@ -938,6 +1007,10 @@ pub struct UpdateState {
     /// A manual "Check for Updates" is running, so its result is announced even
     /// when already up to date.
     pub checking: bool,
+    /// The first-run question about checking for updates waits for the
+    /// window to settle — no setup sheet, no project still opening — so it
+    /// is not put at the same moment as the sheet's.
+    pub consent_waits: bool,
     /// Whether clew checks for updates automatically at startup (persisted).
     pub auto_check: bool,
 }
@@ -952,6 +1025,7 @@ impl Default for UpdateState {
             generation: 0,
             download: None,
             checking: false,
+            consent_waits: false,
             auto_check: true,
         }
     }
@@ -1243,6 +1317,8 @@ pub struct App {
     /// recent history ([`ProjectSession::churn`]) instead of by language.
     /// Toggled from the map header; applies to every graph map.
     pub graph_heat: bool,
+    /// Bumped to put the map's camera back where it starts (`GraphMsg::FitView`).
+    pub graph_fit_rev: u64,
     /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
     pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
@@ -1286,6 +1362,13 @@ pub struct App {
     pub pending_z: bool,
     pub modifiers: keyboard::Modifiers,
     pub status: String,
+    /// What the status line said as the last message was handled, and since
+    /// when (`App::note_status`): a notice goes once it has been read
+    /// (`STATUS_LIFETIME`), so "Copied 3 lines" does not stand over the
+    /// counts all afternoon. `None` for the words the window opened with,
+    /// and for an empty line.
+    pub status_seen: String,
+    pub status_since: Option<std::time::Instant>,
     /// What the status line said last, in the wait a close or a quit is in,
     /// of the window waiting for its host (`App::show_waiting`): said once,
     /// it is not said again over what the line says since, unless that is
@@ -1588,6 +1671,9 @@ impl<V> std::ops::Deref for PerFile<V> {
     }
 }
 
+/// A file's commits as git read them (newest first), or why it could not.
+pub type FileHistory = Result<Vec<crate::git::HistCommit>, String>;
+
 /// Everything the window holds for the OPEN project: the project itself, what
 /// was derived from it, what the reader built up in it, the surfaces that
 /// show it, and the work in flight for it.
@@ -1621,6 +1707,19 @@ pub struct ProjectSession {
     pub derived_dir: Option<PathBuf>,
     /// Languages actually present in the project that clew can serve.
     pub project_languages: Vec<String>,
+    /// Of those, the ones the project's own code is written in
+    /// (`setup::setup_languages`): not a lone script in a vendored folder,
+    /// nor its JSON. What Settings → Language servers lists, with any
+    /// language whose server was asked for.
+    pub code_languages: Vec<String>,
+    /// What the last look found its language servers still take to set up
+    /// (`App::look_for_missing_setup`), and which look that was: a look
+    /// begun before the latest one saw less.
+    pub setup_missing: Vec<crate::app::setup::SetupServer>,
+    pub setup_look: u64,
+    /// The languages a one-click Set up is fetching servers for: while any
+    /// is on its way, the status bar says it is setting up.
+    pub setting_up: Vec<String>,
     /// Every language present in the project, served or not — the ones a
     /// server program of the user's can be chosen for.
     pub file_languages: Vec<String>,
@@ -1659,6 +1758,9 @@ pub struct ProjectSession {
     /// the trees and the finder can say the index is incomplete instead of
     /// silently missing files.
     pub index_cap_note: Option<String>,
+    /// The files that build left out for their size, by their path in the
+    /// project, with it ([`crate::graph::index::Indexed::too_large`]).
+    pub index_too_large: Vec<(String, u64)>,
     /// Project-wide Rust type relations (traits implemented / implementors),
     /// built off-thread after indexing and rebuilt as Rust files change; feeds
     /// the hover structure peek.
@@ -1700,6 +1802,10 @@ pub struct ProjectSession {
     /// Import cycles in the project, recomputed when the graph changes (cached so
     /// the sidebar banner doesn't re-run cycle detection every frame).
     pub import_cycles: Vec<Vec<PathBuf>>,
+    /// The notes under the Imports tab's header the reader opened (its
+    /// import cycles, the files the index left out): each a row that shows
+    /// what it is about under it once pressed.
+    pub import_notes_open: Vec<crate::app::message::ImportNote>,
     /// How often each file changed over the recent history, for the graphs'
     /// change-frequency overlay: loaded when a graph overlay opens
     /// (`App::ensure_churn`), kept for a while (`churn_at`), `None` for a
@@ -1801,6 +1907,27 @@ pub struct ProjectSession {
     pub insight: Option<Insight>,
     /// The active git time-travel session, if any.
     pub time_travel: Option<TimeTravel>,
+    /// The commit the next Time Travel session lands on (the margin's
+    /// History, a commit picked), and not the newest.
+    pub time_travel_at: Option<String>,
+    /// The commits that touched the file being read, for the margin's
+    /// History: its file, and them once they come.
+    pub margin_history: Option<(PathBuf, Option<FileHistory>)>,
+    /// The file the Files view's tree was last opened and scrolled to, so
+    /// it is revealed once a file, as it comes on the sheet.
+    pub tree_revealed: Option<String>,
+    /// Where the Files view's tree is scrolled, and how much of it shows;
+    /// `None` until it has been scrolled.
+    pub tree_scroll: Option<(f32, f32)>,
+    /// What the working tree changes against HEAD, by root-relative path:
+    /// the letter the Files view marks each with (`GitOp::WorkingStatus`).
+    pub git_status: HashMap<String, char>,
+    /// Whether the working tree may have changed since `git_status` was
+    /// read: a new project, a file changed, the window back in front (a
+    /// commit made elsewhere).
+    pub git_status_stale: bool,
+    /// A read of it on its way.
+    pub git_status_loading: bool,
     /// Numbers the time-travel requests — each start (`time_start`), each
     /// revision a session asks for (`TimeTravel::generation`) — so no two
     /// share one. A reply applies only while its own request is still the
@@ -1822,6 +1949,8 @@ pub struct ProjectSession {
     pub time_start: Option<TimeStart>,
     /// The active project-graph modal overlay, if any.
     pub overlay: Option<Overlay>,
+    /// The node of the map the reader picked (see [`GraphPick`]).
+    pub graph_pick: Option<crate::app::model::GraphPick>,
     /// Precomputed force-directed layout for the current overlay's map.
     pub graph_layout: Option<graphlayout::Layout>,
     /// The overlay `graph_layout` was laid out for: shown again when that
@@ -1962,9 +2091,33 @@ pub struct ProjectSession {
     // -- Ask ---------------------------------------------------------------------
     /// "Ask clew" Q&A: input, conversation, state.
     pub ask_input: String,
+    /// The question as its field holds it: lines that wrap and grow
+    /// (`ask_input` is its text, and what the rest of the app reads and
+    /// sets — `App::sync_ask_editor` keeps the two one).
+    pub ask_editor: iced::widget::text_editor::Content,
+    /// Questions asked while an answer was coming in, each with whether it
+    /// was said aloud: asked in turn, once nothing is answering
+    /// (`App::send_next_queued`).
+    pub ask_queue: Vec<(String, bool)>,
+    /// A Stop holds the queue: what is queued waits for its Send now, or
+    /// for the next question asked.
+    pub ask_queue_held: bool,
     /// What is in the input was said (voice put it there), not typed: the
     /// turn it becomes is marked so. Typing in the input makes it typed.
     pub ask_spoken: bool,
+    /// An answer came while Ask was put away to its pill (a question said
+    /// aloud is answered so): the pill marks it until the card is opened.
+    pub ask_unread: bool,
+    /// Why the last question could not be asked, said in the card where it
+    /// was (and on the status line): cleared by the next.
+    pub ask_notice: Option<String>,
+    /// The model's questions for "Try asking", and for where
+    /// (`app::suggest`).
+    pub suggestions: Option<crate::app::suggest::Suggestions>,
+    /// Where questions were last asked for, while the request is out.
+    pub suggest_asked: Option<crate::app::suggest::SuggestKey>,
+    /// This session's draw of which of them are offered.
+    pub suggest_draw: u64,
     pub ask_turns: Vec<AskTurn>,
     /// The project's Ask sessions, newest first, kept in its derived
     /// directory (`app::ask_sessions`).
@@ -2112,6 +2265,10 @@ impl Default for ProjectSession {
             project: None,
             derived_dir: Default::default(),
             project_languages: Default::default(),
+            code_languages: Default::default(),
+            setup_missing: Vec::new(),
+            setup_look: 0,
+            setting_up: Vec::new(),
             file_languages: Default::default(),
             registry: Default::default(),
             symbol_index: Default::default(),
@@ -2121,6 +2278,7 @@ impl Default for ProjectSession {
             symbol_index_rev: Default::default(),
             indexing: Default::default(),
             index_cap_note: Default::default(),
+            index_too_large: Vec::new(),
             structure: Default::default(),
             structure_rev: Default::default(),
             structure_building: Default::default(),
@@ -2132,6 +2290,7 @@ impl Default for ProjectSession {
             import_tree: Default::default(),
             import_tree_token: Default::default(),
             import_cycles: Default::default(),
+            import_notes_open: Vec::new(),
             churn: None,
             churn_at: None,
             churn_rev: 0,
@@ -2167,9 +2326,17 @@ impl Default for ProjectSession {
             blame_why: Default::default(),
             insight: Default::default(),
             time_travel: Default::default(),
+            time_travel_at: None,
+            margin_history: None,
+            tree_revealed: None,
+            tree_scroll: None,
+            git_status: HashMap::new(),
+            git_status_stale: true,
+            git_status_loading: false,
             time_gen: Default::default(),
             time_start: Default::default(),
             overlay: Default::default(),
+            graph_pick: None,
             graph_layout: Default::default(),
             graph_layout_for: Default::default(),
             graph_layout_rev: Default::default(),
@@ -2217,7 +2384,15 @@ impl Default for ProjectSession {
             searching_semantic: Default::default(),
             semantic_seq: Default::default(),
             ask_input: Default::default(),
+            ask_editor: Default::default(),
+            ask_queue: Vec::new(),
+            ask_queue_held: false,
             ask_spoken: false,
+            ask_unread: false,
+            ask_notice: None,
+            suggestions: None,
+            suggest_asked: None,
+            suggest_draw: 0,
             ask_turns: Default::default(),
             ask_sessions: Default::default(),
             ask_session: None,

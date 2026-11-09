@@ -39,7 +39,6 @@ pub struct Palette {
     pub bg: Color,        // editor background
     pub bg_panel: Color,  // sidebar / toolbar background
     pub bg_hover: Color,  // subtle hover wash
-    pub bg_active: Color, // pressed / active control
     pub selected: Color,  // selected list row (accent-tinted)
     pub fg: Color,        // primary text
     pub fg_bright: Color, // emphasised / selected text
@@ -112,7 +111,6 @@ const CLEW_DARK_PAL: Palette = Palette {
     bg: rgb(0x18181b),
     bg_panel: rgb(0x121214),
     bg_hover: rgb(0x222226),
-    bg_active: rgb(0x2a2a2f),
     selected: rgb(0x26262b),
     fg: rgb(0xededef),
     fg_bright: rgb(0xfafafa),
@@ -158,7 +156,6 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xffffff),
     bg_panel: rgb(0xf4f4f5),
     bg_hover: rgb(0xebebee),
-    bg_active: rgb(0xe2e2e6),
     selected: rgb(0xe6e6ea),
     fg: rgb(0x18181b),
     fg_bright: rgb(0x09090b),
@@ -172,10 +169,10 @@ const CLEW_LIGHT_PAL: Palette = Palette {
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x4b48c9),
     scrollbar: rgb(0xa1a1aa),
-    success: rgb(0x16a34a),
+    success: rgb(0x117f3a),
     warning: rgb(0xb45309),
-    danger: rgb(0xdc2626),
-    info: rgb(0x0284c7),
+    danger: rgb(0xd52222),
+    info: rgb(0x0273ae),
     find: rgb(0xf59e0b),
     selection: rgb(0xdcdbfb),
 };
@@ -204,7 +201,6 @@ const ONE_DARK_PAL: Palette = Palette {
     bg: rgb(0x282c34),
     bg_panel: rgb(0x21252b),
     bg_hover: rgb(0x2d323c),
-    bg_active: rgb(0x353c48),
     selected: rgb(0x2f3a4c),
     fg: rgb(0xabb2bf),
     fg_bright: rgb(0xdfe4ec),
@@ -220,7 +216,7 @@ const ONE_DARK_PAL: Palette = Palette {
     scrollbar: rgb(0x8a94a6),
     success: rgb(0x98c379),
     warning: rgb(0xe5c07b),
-    danger: rgb(0xe06c75),
+    danger: rgb(0xe2747d),
     info: rgb(0x56b6c2),
     find: rgb(0xe5c07b),
     selection: rgb(0x2d3a55),
@@ -248,13 +244,12 @@ const ONE_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xfafafa),
     bg_panel: rgb(0xeff1f3),
     bg_hover: rgb(0xe4e7ea),
-    bg_active: rgb(0xd7dbe0),
     selected: rgb(0xd3e3fb),
     fg: rgb(0x383a42),
     fg_bright: rgb(0x1b1d23),
     fg_muted: rgb(0x6b7280),
     dim: rgb(0x9ca3af),
-    accent: rgb(0x4078f2),
+    accent: rgb(0x1f60f0),
     warn: rgb(0xd6372c),
     border: rgb(0xcfd3d9),
     hairline: rgb(0xe6e8ec),
@@ -262,10 +257,10 @@ const ONE_LIGHT_PAL: Palette = Palette {
     on_accent: rgb(0xffffff),
     accent_hover: rgb(0x3467d6),
     scrollbar: rgb(0x9096a1),
-    success: rgb(0x50a14f),
-    warning: rgb(0xb26f00),
-    danger: rgb(0xe45649),
-    info: rgb(0x0184bc),
+    success: rgb(0x3c783b),
+    warning: rgb(0x985f00),
+    danger: rgb(0xcc2d1e),
+    info: rgb(0x0172a3),
     find: rgb(0xf5b400),
     selection: rgb(0xbcd8fb),
 };
@@ -294,7 +289,6 @@ const GRUVBOX_DARK_PAL: Palette = Palette {
     bg: rgb(0x32302f),
     bg_panel: rgb(0x282828),
     bg_hover: rgb(0x3c3836),
-    bg_active: rgb(0x504945),
     selected: rgb(0x45403d),
     fg: rgb(0xebdbb2),
     fg_bright: rgb(0xfbf1c7),
@@ -310,7 +304,7 @@ const GRUVBOX_DARK_PAL: Palette = Palette {
     scrollbar: rgb(0x7c6f64),
     success: rgb(0xb8bb26),
     warning: rgb(0xfabd2f),
-    danger: rgb(0xfb4934),
+    danger: rgb(0xfc6b5a),
     info: rgb(0x8ec07c),
     find: rgb(0xfabd2f),
     selection: rgb(0x504945),
@@ -338,7 +332,6 @@ const GRUVBOX_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xf2e5bc),
     bg_panel: rgb(0xebdbb2),
     bg_hover: rgb(0xe8d9a8),
-    bg_active: rgb(0xd5c4a1),
     selected: rgb(0xdcc9a0),
     fg: rgb(0x3c3836),
     fg_bright: rgb(0x282828),
@@ -352,10 +345,10 @@ const GRUVBOX_LIGHT_PAL: Palette = Palette {
     on_accent: rgb(0xfbf1c7),
     accent_hover: rgb(0x05505f),
     scrollbar: rgb(0xa89984),
-    success: rgb(0x79740e),
-    warning: rgb(0xb57614),
+    success: rgb(0x64600c),
+    warning: rgb(0x82550e),
     danger: rgb(0x9d0006),
-    info: rgb(0x427b58),
+    info: rgb(0x38694b),
     find: rgb(0xd79921),
     selection: rgb(0xd5c4a1),
 };
@@ -386,13 +379,12 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     bg: rgb(0xf4ecd8),
     bg_panel: rgb(0xece3cc),
     bg_hover: rgb(0xe7ddc4),
-    bg_active: rgb(0xddd0b2),
     selected: rgb(0xe4d7ad),
     fg: rgb(0x4a4436),
     fg_bright: rgb(0x2e2a20),
     fg_muted: rgb(0x857a60),
     dim: rgb(0xa99f86),
-    accent: rgb(0x3b6ea5),
+    accent: rgb(0x37669a),
     warn: rgb(0xa03e3e),
     border: rgb(0xd8ccae),
     hairline: rgb(0xe4dabf),
@@ -401,9 +393,9 @@ const PAPER_LIGHT_PAL: Palette = Palette {
     accent_hover: rgb(0x305d8c),
     scrollbar: rgb(0xb3a988),
     success: rgb(0x4c6b3c),
-    warning: rgb(0xa5762f),
+    warning: rgb(0x815c25),
     danger: rgb(0xa03e3e),
-    info: rgb(0x4a7a70),
+    info: rgb(0x416c63),
     find: rgb(0xd9a441),
     selection: rgb(0xe4d7ad),
 };
@@ -430,7 +422,6 @@ const PAPER_DARK_PAL: Palette = Palette {
     bg: rgb(0x262019),
     bg_panel: rgb(0x1f1a14),
     bg_hover: rgb(0x302921),
-    bg_active: rgb(0x3b3228),
     selected: rgb(0x3a3025),
     fg: rgb(0xd9cba8),
     fg_bright: rgb(0xf0e6cb),
@@ -478,7 +469,6 @@ const CYBERPUNK_PAL: Palette = Palette {
     bg: rgb(0x0f0b1e),
     bg_panel: rgb(0x0a0816),
     bg_hover: rgb(0x1a1530),
-    bg_active: rgb(0x251d40),
     selected: rgb(0x2a1f47),
     fg: rgb(0xe5e0ff),
     fg_bright: rgb(0xffffff),
@@ -894,9 +884,6 @@ pub fn bg_panel() -> Color {
 pub fn bg_hover() -> Color {
     active().bg_hover
 }
-pub fn bg_active() -> Color {
-    active().bg_active
-}
 pub fn selected() -> Color {
     active().selected
 }
@@ -1001,9 +988,25 @@ pub fn series_color(i: usize) -> Color {
     rgb(series_ink(tokens(), i))
 }
 
+/// How many colours [`series_color`] has before it comes round again.
+pub const SERIES_COLORS: usize = 8;
+
+/// The series' colours each once, in its order: a palette may give two
+/// kinds of token the same ink, and two series entries read as one.
+pub fn series_distinct() -> Vec<Color> {
+    let mut out: Vec<Color> = Vec::new();
+    for i in 0..SERIES_COLORS {
+        let c = series_color(i);
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// [`series_color`] for a given syntax palette.
 fn series_ink(t: &TokenColors, i: usize) -> u32 {
-    let series = [
+    let series: [u32; SERIES_COLORS] = [
         t.function,
         t.string,
         t.type_,
@@ -1193,8 +1196,30 @@ pub const PROSE_SIZE: f32 = ui_size(TextRole::Reading);
 /// Size of a markdown file's text, read as a document in the reader.
 pub const DOCUMENT_SIZE: f32 = 16.0;
 
-/// [`markdown_settings`] at a given base text size.
+/// How much larger than the prose around them its headings are, level by
+/// level, in the answers, explanations and notes Clew writes in its cards
+/// and panels: a notch each, as a chat's are. iced's own scale (a level-1
+/// heading twice the text) is a document's, and an answer's "## How it is
+/// used" stood in a card at nearly twice the size of what it headed.
+pub const PROSE_HEADING_SCALE: [f32; 6] = [1.3, 1.2, 1.1, 1.0, 1.0, 1.0];
+
+/// [`markdown_settings`] at a given base text size: prose in a card or a
+/// panel, its headings a notch over it ([`PROSE_HEADING_SCALE`]).
 pub fn markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
+    let mut settings = document_markdown_settings_at(size);
+    let [h1, h2, h3, h4, h5, h6] = PROSE_HEADING_SCALE.map(|scale| (size * scale).into());
+    settings.h1_size = h1;
+    settings.h2_size = h2;
+    settings.h3_size = h3;
+    settings.h4_size = h4;
+    settings.h5_size = h5;
+    settings.h6_size = h6;
+    settings
+}
+
+/// A markdown file read as a document in the reader: its headings at a
+/// document's scale, a level-1 one twice its text.
+pub fn document_markdown_settings_at(size: f32) -> iced::widget::markdown::Settings {
     use iced::widget::markdown;
     markdown::Settings::with_text_size(
         size,
@@ -1519,6 +1544,20 @@ pub fn field(active: bool) -> impl Fn(&Theme) -> container::Style {
 
 /// A text input with no face of its own, set inside a [`field`] (the file
 /// filter, the command palette): the field around it is the well.
+/// [`bare_input`] for a field of several lines (Ask's question).
+pub fn bare_editor(
+    _theme: &Theme,
+    _status: iced::widget::text_editor::Status,
+) -> iced::widget::text_editor::Style {
+    iced::widget::text_editor::Style {
+        background: Color::TRANSPARENT.into(),
+        border: Border::default(),
+        placeholder: dim(),
+        value: fg(),
+        selection: selection(),
+    }
+}
+
 pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::Style {
     text_input::Style {
         background: Color::TRANSPARENT.into(),
@@ -1533,6 +1572,14 @@ pub fn bare_input(_theme: &Theme, _status: text_input::Status) -> text_input::St
 /// A text field on its own: the same rounded well as [`field`] — the
 /// search field, Ask's input — its edge lit in the accent while it has the
 /// keyboard. Every field of the app looks like this one.
+/// [`input`] for a field what the form says is wrong is about: its edge in
+/// the danger colour, hovered or focused alike.
+pub fn input_marked(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let mut style = input(theme, status);
+    style.border.color = danger();
+    style
+}
+
 pub fn input(_theme: &Theme, status: text_input::Status) -> text_input::Style {
     let focused = matches!(status, text_input::Status::Focused { .. });
     let hovered = matches!(status, text_input::Status::Hovered);
@@ -1632,6 +1679,19 @@ pub fn check(_theme: &Theme, status: checkbox::Status) -> checkbox::Style {
     }
 }
 
+/// The wash a borderless control lays under the pointer, and a little
+/// deeper while pressed: faint enough that a row of them does not read as a
+/// row of boxes, and the same everywhere, so every control answers the
+/// pointer alike.
+pub fn hover_wash(status: button::Status) -> Option<iced::Background> {
+    let light = is_light();
+    match status {
+        button::Status::Hovered => Some(wash(if light { 0.055 } else { 0.075 }).into()),
+        button::Status::Pressed => Some(wash(if light { 0.09 } else { 0.11 }).into()),
+        _ => None,
+    }
+}
+
 /// An on/off option beside a field (match case, whole word, regex): as
 /// round as the field, outlined while off, filled in the accent while on.
 pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
@@ -1641,9 +1701,8 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
             background: Some(if on {
                 accent().into()
             } else {
-                Color::TRANSPARENT.into()
+                hover_wash(status).unwrap_or(Color::TRANSPARENT.into())
             }),
-            // No wash under the pointer: the label brightens instead.
             text_color: if on {
                 on_accent()
             } else if hovered {
@@ -1661,16 +1720,41 @@ pub fn toggle(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
-/// The face of a field that is really a button (the chat field opens the
-/// conversation): no fill of its own, the field around it is the well.
-/// It draws nothing under the pointer: a wash inside the field's padding
-/// read as a second box in the field.
-pub fn field_face(_theme: &Theme, _status: button::Status) -> button::Style {
+/// A field that is really a button (the search field opens the finder):
+/// the field's own well and edge ([`field`]), the whole of it a shade deeper
+/// under the pointer, its edge a little firmer. A wash inside the field's
+/// padding read as a second box in the field.
+pub fn field_button(_theme: &Theme, status: button::Status) -> button::Style {
+    let light = is_light();
+    let (shade, edge) = match status {
+        button::Status::Hovered => (if light { 0.055 } else { 0.07 }, wash(0.16)),
+        button::Status::Pressed => (if light { 0.075 } else { 0.09 }, wash(0.18)),
+        _ => (if light { 0.035 } else { 0.045 }, hairline()),
+    };
     button::Style {
-        background: None,
+        background: Some(wash(shade).into()),
         text_color: fg_muted(),
         border: Border {
-            radius: 8.0.into(),
+            color: edge,
+            width: 1.0,
+            radius: 9.0.into(),
+        },
+        ..button::Style::default()
+    }
+}
+
+/// The face on Ask's pill: a capsule as round as the pill, washed under the
+/// pointer inside it.
+pub fn pill_face(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: hover_wash(status),
+        text_color: match status {
+            button::Status::Disabled => dim(),
+            button::Status::Hovered | button::Status::Pressed => fg_bright(),
+            _ => fg(),
+        },
+        border: Border {
+            radius: 999.0.into(),
             ..Border::default()
         },
         ..button::Style::default()
@@ -1723,10 +1807,14 @@ pub fn form_choice(_theme: &Theme, status: button::Status) -> button::Style {
 }
 
 /// One segment of a segmented control: the chosen one raised as a chip,
-/// the rest quiet, their labels brightening under the pointer.
+/// the rest quiet, washed and their labels brightening under the pointer.
 pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        let background = chosen.then(|| if is_light() { Color::WHITE } else { wash(0.10) }.into());
+        let background = if chosen {
+            Some(if is_light() { Color::WHITE } else { wash(0.10) }.into())
+        } else {
+            hover_wash(status)
+        };
         let hovered = matches!(status, button::Status::Hovered | button::Status::Pressed);
         button::Style {
             background,
@@ -1755,12 +1843,22 @@ pub fn segment(chosen: bool) -> impl Fn(&Theme, button::Status) -> button::Style
 }
 
 /// A borderless icon button of the chrome (the top bar, the tool strip):
-/// no fill, under the pointer too; `on` keeps it lit (a menu it opened is
-/// showing, a panel it toggles is shown).
+/// washed under the pointer ([`hover_wash`]); `on` keeps it lit (a menu it
+/// opened is showing, a panel it toggles is shown), a shade more under the
+/// pointer.
 pub fn icon_button(on: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, status| {
-        // No fill under the pointer; `on` is a state, not a hover.
-        let background = on.then(|| wash(0.08).into());
+        let background = if on {
+            Some(
+                wash(match status {
+                    button::Status::Hovered | button::Status::Pressed => 0.11,
+                    _ => 0.08,
+                })
+                .into(),
+            )
+        } else {
+            hover_wash(status)
+        };
         button::Style {
             background,
             text_color: match status {
@@ -2010,6 +2108,20 @@ pub fn overlay_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollabl
     style
 }
 
+/// [`overlay_scrollbar`] whose scroller shows at rest, faintly: for a menu
+/// whose rows can run past the window, the one cue that more are below.
+pub fn cue_scrollbar(theme: &Theme, status: scrollable::Status) -> scrollable::Style {
+    let mut style = overlay_scrollbar(theme, status);
+    if let scrollable::Status::Active { .. } = status {
+        let scroller = scrollable::Scroller {
+            background: with_alpha(active().scrollbar, 0.35).into(),
+            border: iced::border::rounded(3),
+        };
+        style.vertical_rail.scroller = scroller;
+    }
+    style
+}
+
 /// Accent-filled primary action button (modals).
 pub fn primary_button(_theme: &Theme, status: button::Status) -> button::Style {
     let bg = match status {
@@ -2113,14 +2225,12 @@ pub fn round_button(primary: bool) -> impl Fn(&Theme, button::Status) -> button:
     }
 }
 
-/// Small toolbar button: borderless and unfilled, under the pointer too, so
-/// the toolbar reads as clean text rather than a wall of boxes; its label
-/// brightens under the pointer.
+/// Small toolbar button: borderless and unfilled at rest, so the toolbar
+/// reads as clean text rather than a wall of boxes; under the pointer,
+/// washed ([`hover_wash`]) and its label brightened.
 pub fn toolbar_button(_theme: &Theme, status: button::Status) -> button::Style {
     button::Style {
-        // No fill under the pointer (a box round the Ask pill's face, the
-        // nav arrows); the label brightens instead.
-        background: None,
+        background: hover_wash(status),
         text_color: match status {
             button::Status::Disabled => dim(),
             button::Status::Hovered | button::Status::Pressed => fg_bright(),
@@ -2160,6 +2270,49 @@ pub fn secondary_button(_theme: &Theme, status: button::Status) -> button::Style
 
 #[cfg(test)]
 mod tests {
+    /// WCAG's contrast ratio of two colours.
+    fn contrast(a: Color, b: Color) -> f32 {
+        let lum = |c: Color| {
+            let f = |x: f32| {
+                if x <= 0.03928 {
+                    x / 12.92
+                } else {
+                    ((x + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// The colours words are written in where they say something — a test's
+    /// name, a warning, an error, a link — read at 4.5:1 or more on either
+    /// of a theme's surfaces, in every theme: the light theme's green test
+    /// names were about 3:1.
+    #[test]
+    fn every_themes_meaningful_colours_read_on_its_surfaces() {
+        for theme in THEMES {
+            let p = &theme.palette;
+            for (what, ink) in [
+                ("success", p.success),
+                ("warning", p.warning),
+                ("danger", p.danger),
+                ("info", p.info),
+                ("accent", p.accent),
+            ] {
+                for (surface, bg) in [("bg", p.bg), ("bg_panel", p.bg_panel)] {
+                    let ratio = contrast(ink, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "{}: {what} on {surface} is {ratio:.2}:1",
+                        theme.id
+                    );
+                }
+            }
+        }
+    }
+
     use super::*;
 
     /// What Clew writes — explanations, answers, notes — is set in the

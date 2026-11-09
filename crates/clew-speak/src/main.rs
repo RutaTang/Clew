@@ -243,7 +243,61 @@ fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec
     else {
         return Err("nothing could be made of it".into());
     };
-    Ok(audio.samples().to_vec())
+    let mut samples = audio.samples().to_vec();
+    if family == Family::Kokoro {
+        without_hop_whine(&mut samples, tts.sample_rate());
+    }
+    Ok(samples)
+}
+
+/// How narrow each notch of [`without_hop_whine`] is: its centre over the
+/// width it takes out.
+const WHINE_Q: f64 = 20.0;
+
+/// Kokoro's int8 model whines at a fifth and two fifths of its rate — 4.8
+/// and 9.6 kHz at its 24 kHz — from its vocoder's five-sample hop, which
+/// int8 weights leave a steady tone of: measured 15 to 25 dB above what is
+/// around it, all through the speech and the pauses between (the full-size
+/// model, three times the download, about 5). Two narrow notches there, run
+/// forward and back so nothing is shifted in time, take it out and leave
+/// the rest of the voice within a fraction of a dB. (The pattern's other
+/// harmonics fold onto these two below the Nyquist frequency.)
+fn without_hop_whine(samples: &mut [f32], rate: i32) {
+    if rate <= 0 {
+        return;
+    }
+    let rate = f64::from(rate);
+    for fifths in [1.0, 2.0] {
+        let (b, a) = notch(rate * fifths / 5.0, rate, WHINE_Q);
+        biquad(samples, b, a);
+        samples.reverse();
+        biquad(samples, b, a);
+        samples.reverse();
+    }
+}
+
+/// A notch at `centre` Hz (the audio EQ cookbook's), normalized: the
+/// numerator and the denominator's last two.
+fn notch(centre: f64, rate: f64, q: f64) -> ([f64; 3], [f64; 2]) {
+    let w = std::f64::consts::TAU * centre / rate;
+    let alpha = w.sin() / (2.0 * q);
+    let a0 = 1.0 + alpha;
+    let cos = w.cos();
+    (
+        [1.0 / a0, -2.0 * cos / a0, 1.0 / a0],
+        [-2.0 * cos / a0, (1.0 - alpha) / a0],
+    )
+}
+
+/// `samples` through the biquad `b`/`a`, in place.
+fn biquad(samples: &mut [f32], b: [f64; 3], a: [f64; 2]) {
+    let (mut x1, mut x2, mut y1, mut y2) = (0.0, 0.0, 0.0, 0.0);
+    for sample in samples.iter_mut() {
+        let x = f64::from(*sample);
+        let y = b[0] * x + b[1] * x1 + b[2] * x2 - a[0] * y1 - a[1] * y2;
+        (x2, x1, y2, y1) = (x1, x, y1, y);
+        *sample = y as f32;
+    }
 }
 
 /// Samples in [-1, 1] as 16-bit little-endian PCM, in base64.
@@ -258,6 +312,58 @@ fn pcm16(samples: &[f32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// How strong `hz` is in `samples` at `rate`, in dB, over their middle
+    /// half (the filters' edges left out).
+    fn level(samples: &[f32], rate: f64, hz: f64) -> f64 {
+        let (from, to) = (samples.len() / 4, samples.len() * 3 / 4);
+        let (mut re, mut im) = (0.0, 0.0);
+        for (n, &s) in samples.iter().enumerate().take(to).skip(from) {
+            let phase = std::f64::consts::TAU * hz * n as f64 / rate;
+            re += f64::from(s) * phase.cos();
+            im += f64::from(s) * phase.sin();
+        }
+        10.0 * ((re * re + im * im) / ((to - from) as f64).powi(2)).log10()
+    }
+
+    /// Kokoro's whine at a fifth and two fifths of its rate is taken out;
+    /// the voice around it — low, middle, high, and right beside the
+    /// notches — is left as it was.
+    #[test]
+    fn the_hop_whine_is_taken_out_and_the_voice_left() {
+        let rate = 24_000.0;
+        let probes = [
+            200.0, 1_000.0, 3_000.0, 4_300.0, 7_000.0, 10_400.0, 11_000.0,
+        ];
+        let whine = [4_800.0, 9_600.0];
+        let mut samples: Vec<f32> = (0..24_000)
+            .map(|n| {
+                let t = f64::from(n) / rate;
+                probes
+                    .iter()
+                    .chain(&whine)
+                    .map(|hz| 0.05 * (std::f64::consts::TAU * hz * t).sin())
+                    .sum::<f64>() as f32
+            })
+            .collect();
+        let before: Vec<f64> = probes.iter().map(|&hz| level(&samples, rate, hz)).collect();
+        let whine_before: Vec<f64> = whine.iter().map(|&hz| level(&samples, rate, hz)).collect();
+        without_hop_whine(&mut samples, rate as i32);
+        for (hz, was) in probes.iter().zip(before) {
+            let now = level(&samples, rate, *hz);
+            assert!(
+                (now - was).abs() < 0.5,
+                "{hz} Hz went from {was:.1} to {now:.1} dB"
+            );
+        }
+        for (hz, was) in whine.iter().zip(whine_before) {
+            let now = level(&samples, rate, *hz);
+            assert!(
+                was - now > 40.0,
+                "{hz} Hz only from {was:.1} to {now:.1} dB"
+            );
+        }
+    }
 
     /// A request reads as the client writes it; what is left out is the
     /// model's own.

@@ -181,10 +181,23 @@ impl App {
                 if self.proj.find.open {
                     return self.update(Message::Editor(EditorMsg::FindClosed));
                 }
-                let marked = self
-                    .active_viewer()
-                    .is_some_and(|v| v.selection.is_some() || v.target_line.is_some());
-                if !marked && self.step_ask_down() {
+                // Ask holding the keys (its input, not the code, has them),
+                // or its menu of sessions open over it, is put away first:
+                // what the reader is looking at — a press went instead to a
+                // selection, or a jumped-to line's mark, in the code behind.
+                let ask_first =
+                    self.ask_view.is_open() && (!self.code_focused || self.ask_sessions_menu);
+                // A page over the code (the overview, a doc page) hides its
+                // selection: the card over the page goes, then the page.
+                let covered = ui::pane_cover(self).is_some_and(|c| c.is_page());
+                let marked = !covered
+                    && self
+                        .active_viewer()
+                        .is_some_and(|v| v.selection.is_some() || v.target_line.is_some());
+                if (ask_first || !marked) && self.step_ask_down() {
+                    return Task::none();
+                }
+                if covered && self.put_away_page() {
                     return Task::none();
                 }
                 if let Some(v) = self.active_viewer_mut() {

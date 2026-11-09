@@ -80,7 +80,7 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
             .style(theme::toolbar_button)
             .padding([2, 8]);
         if enabled {
-            b = b.on_press(msg);
+            b = b.on_press(super::heard::said(label, msg));
         }
         b
     };
@@ -161,10 +161,13 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
         .width(Fill)
         .padding([1, 6]);
         if let Some(p) = f.path.clone() {
-            b = b.on_press(Message::Graph(GraphMsg::OverlayOpenAt {
-                abs: p,
-                line: f.line,
-            }));
+            b = b.on_press(super::heard::said(
+                &f.name,
+                Message::Graph(GraphMsg::OverlayOpenAt {
+                    abs: p,
+                    line: f.line,
+                }),
+            ));
         }
         stack_rows.push(b.into());
     }
@@ -238,7 +241,11 @@ pub(crate) fn debug_panel(app: &App) -> Element<'_, Message> {
                 button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                     .style(theme::list_row(false))
                     .padding([0, 4])
-                    .on_press(Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone()))),
+                    .on_press(super::heard::said_to(
+                        tr!("Remove"),
+                        expr,
+                        Message::Debug(DebugMsg::WatchRemoveExpr(expr.clone())),
+                    )),
                 text(expr.clone()).size(ts::SMALL).color(theme::accent()),
                 text(" = ").size(ts::SMALL).color(theme::dim()),
                 text(val)
@@ -303,7 +310,10 @@ pub(crate) fn trace_control(app: &App) -> Element<'_, Message> {
         button(text(tr!("Walk this run")).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([2, 8])
-            .on_press(Message::Walk(WalkMsg::GenerateTrace)),
+            .on_press(super::heard::said(
+                tr!("Walk this run"),
+                Message::Walk(WalkMsg::GenerateTrace),
+            )),
     ]
     .spacing(6)
     .align_y(iced::Center)
@@ -319,7 +329,7 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
     if app.debug.hover_safe {
         return space().into();
     }
-    tooltip(
+    super::tip::tip(
         iced::widget::checkbox(app.debug_hover_eval)
             .style(theme::check)
             .label(tr!("Evaluate on hover"))
@@ -337,6 +347,7 @@ pub(crate) fn hover_eval_control(app: &App) -> Element<'_, Message> {
         .style(theme::modal_panel),
         tooltip::Position::Bottom,
     )
+    .gap(5.0)
     .into()
 }
 
@@ -380,17 +391,34 @@ fn tree_note_row<'a>(depth: usize, note: String) -> Element<'a, Message> {
     .into()
 }
 
-/// A one-line banner under a tree's header (cycles, what the index left out).
-fn tree_banner<'a>(note: String, color: iced::Color) -> Element<'a, Message> {
-    container(text(note).size(ts::CAPTION).color(color))
-        .padding(Padding {
-            top: 3.0,
-            right: 8.0,
-            bottom: 3.0,
-            left: 10.0,
-        })
-        .width(Fill)
-        .into()
+/// A tree traced from code since changed, said under its header with what
+/// traces it again (`refresh`): a press, not a key the reader is told of.
+fn stale_note<'a>(refresh: Message) -> Element<'a, Message> {
+    let label = tr!("Code changed since this was traced");
+    container(
+        row![
+            glyph::icon(Glyph::Info, theme::fg_muted(), 12.0),
+            text(label)
+                .size(ts::SMALL)
+                .color(theme::fg())
+                .wrapping(Wrapping::None),
+            space().width(Fill),
+            button(text(tr!("Refresh")).size(ts::SMALL))
+                .style(theme::toolbar_button)
+                .padding([2, 7])
+                .on_press(super::heard::said(tr!("Refresh"), refresh)),
+        ]
+        .spacing(6)
+        .align_y(iced::Center),
+    )
+    .padding(Padding {
+        top: 3.0,
+        right: 8.0,
+        bottom: 3.0,
+        left: 10.0,
+    })
+    .width(Fill)
+    .into()
 }
 
 /// What the symbol index left out of the open project (its file / size caps),
@@ -466,11 +494,19 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             && !app.server.is_up()
             && app.proj.embed_index.entries.is_empty()
             && app.proj.ask_pins.is_empty()
+            && app.proj.ask_notice.is_none()
         {
+            // What answers stand on: the open file, without more.
             convo.push(
-                text(tr!(
-                    "For grounded answers, run “Explain All” or add code with “Add to Ask”."
-                ))
+                text(if app.active_viewer().is_some() {
+                    tr!(
+                        "Answers draw on the open file. To ask about the whole project, run “Explain All”."
+                    )
+                } else {
+                    tr!(
+                        "Open a file to ask about it, or run “Explain All” to ask about the whole project."
+                    )
+                })
                 .size(ts::CAPTION)
                 .color(theme::dim())
                 .into(),
@@ -523,7 +559,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                     )
                     .style(theme::list_row(false))
                     .padding([3, 8])
-                    .on_press(Message::Ask(AskMsg::Suggested(q)))
+                    .on_press(super::heard::said_with(
+                        || strip_backticks(&q),
+                        Message::Ask(AskMsg::Suggested(q.clone())),
+                    ))
                     .into()
                 })
                 .collect();
@@ -533,6 +572,21 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // The question's bubble grows to the design's 82% of the column it is
     // in: the card's, or the margin's.
     let bubble_max = BUBBLE_SHARE * conversation_width(app);
+    // Why the last question could not be asked, where it was — the status
+    // line said it alone, and the card seemed to ignore the question.
+    let notice: Option<Element<'_, Message>> = app.proj.ask_notice.as_ref().map(|why| {
+        row![
+            glyph::icon(Glyph::Info, theme::warning(), 14.0),
+            text(crate::i18n::message(why))
+                .size(ts::SMALL)
+                .color(theme::fg_muted())
+                .width(Fill)
+                .wrapping(Wrapping::WordOrGlyph),
+        ]
+        .spacing(8)
+        .align_y(iced::Center)
+        .into()
+    });
     for turn in &app.proj.ask_turns {
         // A question said rather than typed is marked so, over it (with
         // the design's 4 between them; a typed one has neither).
@@ -651,8 +705,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             // as an answer is (`App::settle_waiting_answers`).
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         } else if turn.streaming {
-            // Live answer: "Thinking…" until the first token, then the raw text
-            // (with a cursor) as it streams; it's re-rendered richly when done.
+            // Live answer: "Thinking…" until the first token; then what has
+            // settled drawn as it will stay, and the paragraph being written
+            // as its plain words, a cursor after them — in the answer's own
+            // size and leading, so it does not move as it settles.
             if turn.answer_md.trim().is_empty() {
                 let label = if !turn.extras.approvals.is_empty() {
                     tr!("Waiting for your answer…")
@@ -663,9 +719,12 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                 };
                 convo.push(text(label).size(ts::BODY).color(theme::dim()).into());
             } else {
+                convo.extend(super::explain_view::render_answer(app, &turn.answer));
+                let writing = turn.answer_md.get(turn.settled..).unwrap_or("").trim();
                 convo.push(
-                    text(format!("{}▍", turn.answer_md))
-                        .size(ts::BASE)
+                    text(format!("{writing}▍"))
+                        .size(theme::PROSE_SIZE)
+                        .line_height(1.6)
                         .color(theme::fg())
                         .into(),
                 );
@@ -673,20 +732,22 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         } else {
             convo.extend(super::explain_view::render_answer(app, &turn.answer));
         }
-        if !turn.sources.is_empty() {
+        // What grounded the answer, under it once it is whole: they stood
+        // under half an answer, the reader's eye drawn from the words.
+        if !turn.sources.is_empty() && !turn.streaming {
             convo.push(
                 text(tr!("Sources"))
                     .size(ts::CAPTION)
                     .color(theme::dim())
                     .into(),
             );
-            let chips: Vec<Element<'_, Message>> = turn
-                .sources
-                .iter()
-                .map(|(n, s)| source_chip(n, *s))
-                .collect();
+            let chips: Vec<Element<'_, Message>> =
+                turn.sources.iter().map(|(n, _)| source_chip(n)).collect();
             convo.push(Row::with_children(chips).spacing(4).wrap().into());
         }
+    }
+    if let Some(notice) = notice {
+        convo.push(notice);
     }
     // Retrieval phase (before the answer turn exists) shows a spinner line.
     if app.proj.asking {
@@ -809,11 +870,18 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         )
                         .style(theme::toolbar_button)
                         .padding([0, 4])
-                        .on_press(Message::Ask(AskMsg::PinGoto(key))),
+                        .on_press(super::heard::said_with(
+                            || format!("{} {}", pin.rel, pin.line),
+                            Message::Ask(AskMsg::PinGoto(key)),
+                        )),
                         button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
                             .style(theme::toolbar_button)
                             .padding([0, 6])
-                            .on_press(Message::Ask(AskMsg::Unpin(key))),
+                            .on_press(super::heard::said_to(
+                                tr!("Remove"),
+                                &pin.rel,
+                                Message::Ask(AskMsg::Unpin(key)),
+                            )),
                     ]
                     .spacing(2)
                     .align_y(iced::Center),
@@ -838,40 +906,63 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             "Ask {agent} about this codebase…",
             agent = crate::app::integrations::acp_label(agent)
         ),
-        // Once there is a conversation, what is typed is a reply — and, in
-        // the large window, where there is room to say it, the microphone's
-        // key as another way to give it.
-        None if !app.proj.ask_turns.is_empty() && app.ask_view == crate::AskView::Expanded => {
-            tr!(
-                "Reply, or press {keys} to talk",
-                keys = app.keymap.chord(crate::keymap::Action::Voice).caps()
-            )
-        }
+        // Once there is a conversation, what is typed is a reply. (How to
+        // talk instead is the microphone's own tooltip's to say.)
         None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
         None => tr!("Ask about this codebase…").to_string(),
     };
-    let input = ts::field_in(
-        text_input(&placeholder, &app.proj.ask_input)
-            .id(ask_input_id())
-            .on_input(|v| Message::Ask(AskMsg::InputChanged(v)))
-            .on_submit(Message::Ask(AskMsg::Submit))
-            .style(theme::bare_input),
-        ROUND_BUTTON,
-        ts::INTER,
-        ts::READING,
-    );
+    // The question, in lines that wrap and grow — to a few, then it
+    // scrolls: one line that scrolled sideways hid the start of a long
+    // question as it was typed. Enter asks it; Shift+Enter starts a line.
+    // One line is as tall as the round buttons beside it.
+    let line_h = ts::INTER.normal(ts::READING);
+    let pad_y = ((ROUND_BUTTON - line_h) / 2.0).max(0.0);
+    let input: Element<'_, Message> = iced::widget::text_editor(&app.proj.ask_editor)
+        .id(ask_input_id())
+        .placeholder(placeholder)
+        .on_action(|a| Message::Ask(AskMsg::Edit(a)))
+        .key_binding(|press| {
+            use iced::keyboard::{Key, key::Named};
+            use iced::widget::text_editor::Binding;
+            if matches!(press.key.as_ref(), Key::Named(Named::Enter)) && !press.modifiers.shift() {
+                return Some(Binding::Custom(Message::Ask(AskMsg::Submit)));
+            }
+            Binding::from_key_press(press)
+        })
+        .font(crate::fonts::in_control(crate::fonts::UI))
+        .size(ts::READING)
+        .line_height(iced::widget::text::LineHeight::Absolute(line_h.into()))
+        .wrapping(Wrapping::WordOrGlyph)
+        .padding(Padding {
+            top: pad_y,
+            right: ts::FIELD_INSET,
+            bottom: pad_y,
+            left: ts::FIELD_INSET,
+        })
+        .height(Length::Shrink)
+        .max_height(line_h * COMPOSER_LINES + 2.0 * pad_y)
+        .style(theme::bare_editor)
+        .into();
     // The send button is the composer's primary action, a round button in
-    // the accent (a quiet one while an answer is coming in, when it does
-    // nothing). Any answer still coming in — an agent turn, a server chat
-    // stream, a local retrieval stream — can be stopped from here, not only
-    // agent turns.
+    // the accent — and the one way to stop an answer coming in: while one
+    // is, with nothing typed, it stops it (any answer — an agent turn, a
+    // server chat stream, a local retrieval stream); with something typed,
+    // it queues that, to be asked when the answer is done. A Stop of its
+    // own beside the field said the same thing in another place.
     let streaming = app.ask_stream_active();
-    let idle = !streaming;
-    let send_tint = if idle {
-        crate::theme::active().on_accent
+    let typed = !app.proj.ask_input.trim().is_empty();
+    let (send_glyph, send_tip, send_msg) = if streaming && !typed {
+        (Glyph::Stop, tr!("Stop"), Message::Ask(AskMsg::Stop))
+    } else if streaming {
+        (
+            Glyph::Send,
+            tr!("Queue it to be asked when this answer is done"),
+            Message::Ask(AskMsg::Submit),
+        )
     } else {
-        theme::dim()
+        (Glyph::Send, tr!("Ask"), Message::Ask(AskMsg::Submit))
     };
+    let send_tint = crate::theme::active().on_accent;
     let round = |glyph: Glyph, tint: iced::Color| {
         button(
             container(glyph::icon(glyph, tint, 15.0))
@@ -884,11 +975,17 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .width(Length::Fixed(ROUND_BUTTON))
         .height(Length::Fixed(ROUND_BUTTON))
     };
-    let mut ask_btn = round(Glyph::Send, send_tint).style(theme::round_button(idle));
-    if idle {
-        ask_btn = ask_btn.on_press(Message::Ask(AskMsg::Submit));
-    }
-    let ask_btn = super::toolbar::tip_at(ask_btn, tr!("Ask"), None, tooltip::Position::Top);
+    let ask_btn = round(send_glyph, send_tint)
+        .style(theme::round_button(true))
+        .on_press(super::heard::said(
+            if streaming && !typed {
+                send_tip
+            } else {
+                tr!("Send")
+            },
+            send_msg,
+        ));
+    let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
     // Or say it: the microphone, in the composer beside what is typed.
     let listening = app.voice.is_listening();
     let talk = super::toolbar::tip_at(
@@ -991,19 +1088,6 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .padding(iced::Padding::default().right(6))
         .into();
     }
-    // An answer can run long — always give the user a way out. In a place
-    // of its own, there or not: Stop coming before Ask handed Ask its state
-    // as it went, and a press held on Stop as the answer ended asked the
-    // question typed meanwhile, let go of over Ask.
-    let stop: Element<'_, Message> = if streaming {
-        button(text(tr!("Stop")).size(ts::BASE))
-            .style(theme::toolbar_button)
-            .padding([5, 12])
-            .on_press(Message::Ask(AskMsg::Stop))
-            .into()
-    } else {
-        slot()
-    };
     // A conversation by voice: once Clew has answered, listen again. The
     // design's switch — a track, its knob in from the end it is at — and
     // beside it what it does, which turns it as well.
@@ -1026,7 +1110,7 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     // While voice listens, works out the words, waits for a yes or Clew
     // speaks, what it is doing is where the question is typed.
     // As the pill says it, and the button lit as on the pill.
-    let input: Element<'_, Message> = match super::askfloat::voice_bar(app, false) {
+    let input: Element<'_, Message> = match super::askfloat::voice_bar(app) {
         Some(bar) => container(bar)
             .width(Fill)
             .height(Length::Fixed(ROUND_BUTTON))
@@ -1039,13 +1123,68 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         None => input,
     };
     let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
+    // What is queued, over the field, in a place of its own (`compose_slot`):
+    // each question to be asked once the answer coming in is done, with a
+    // way to ask it now — the answer stopped for it — and to take it back.
+    compose.push(compose_slot((!app.proj.ask_queue.is_empty()).then(|| {
+        // After a Stop the queue waits to be sent by hand: "Paused", which
+        // says so — "Held" did not.
+        let state = if app.proj.ask_queue_held {
+            tr!("Paused")
+        } else {
+            tr!("Queued")
+        };
+        Column::with_children(
+            app.proj
+                .ask_queue
+                .iter()
+                .enumerate()
+                .map(|(at, (question, _))| {
+                    row![
+                        text(state).size(ts::SMALL).color(theme::dim()),
+                        container(
+                            text(question.lines().next().unwrap_or_default().to_string())
+                                .size(ts::SMALL)
+                                .color(theme::fg_muted())
+                                .wrapping(Wrapping::None),
+                        )
+                        .width(Fill)
+                        .clip(true),
+                        button(text(tr!("Send now")).size(ts::SMALL))
+                            .style(theme::toolbar_button)
+                            .padding([2, 8])
+                            .on_press(super::heard::said(
+                                tr!("Send now"),
+                                Message::Ask(AskMsg::SendQueuedNow(at)),
+                            )),
+                        super::toolbar::tip_at(
+                            button(glyph::icon(Glyph::Close, theme::dim(), 11.0))
+                                .style(theme::icon_button(false))
+                                .padding([3, 4])
+                                .on_press(super::heard::said(
+                                    tr!("Remove queued question"),
+                                    Message::Ask(AskMsg::DropQueued(at)),
+                                )),
+                            tr!("Remove from the queue"),
+                            None,
+                            tooltip::Position::Top,
+                        ),
+                    ]
+                    .spacing(8)
+                    .align_y(iced::Center)
+                    .into()
+                }),
+        )
+        .spacing(2)
+        .into()
+    })));
     // The composer, under a rule across the card: the question as it is
-    // typed, Stop while an answer comes in, Keep listening, the microphone
-    // and send.
-    let compose_row = row![input, stop, keep_listening, talk, ask_btn]
+    // typed, Keep listening, the microphone and send — or stop.
+    // The buttons at the foot of a question of several lines, by its last.
+    let compose_row = row![input, keep_listening, talk, ask_btn]
         .spacing(8)
-        .align_y(iced::Center);
-    compose.push(row![agent, compose_row].align_y(iced::Center).into());
+        .align_y(iced::Bottom);
+    compose.push(row![agent, compose_row].align_y(iced::Bottom).into());
 
     let height = if fit { Length::Shrink } else { Fill };
     container(column![
@@ -1066,6 +1205,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
 
 /// Side of the composer's round buttons (the microphone, send).
 pub(crate) const ROUND_BUTTON: f32 = 30.0;
+/// The most lines the question's field grows to before it scrolls.
+const COMPOSER_LINES: f32 = 6.0;
 /// Size of the composer's "Keep listening", as the design sets it.
 const KEEP_LISTENING_SIZE: f32 = 12.0;
 /// The design's gap between the switch and what it says.
@@ -1219,7 +1360,24 @@ pub(crate) fn approval_card<'a>(
             })
             .height(Length::Fixed(APPROVE_BUTTON_H))
             .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
-            .on_press_maybe((ready || !option.allows).then_some(answer));
+            .on_press_maybe((ready || !option.allows).then(|| {
+                // "Yes" allows this call, "no" declines it — never one
+                // that answers every such call from now on, which is
+                // pressed by its own words ("Always allow…") alone.
+                if option.always {
+                    super::heard::said(&option.label, answer)
+                } else {
+                    super::heard::answer(
+                        &option.label,
+                        if option.allows {
+                            super::heard::Answer::Yes
+                        } else {
+                            super::heard::Answer::No
+                        },
+                        answer,
+                    )
+                }
+            }));
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)
             } else {
@@ -1280,11 +1438,14 @@ pub(crate) fn approval_card<'a>(
             )
             .style(theme::toolbar_button)
             .padding([3, 10])
-            .on_press(Message::Ask(AskMsg::AnswersPage {
-                stream,
-                key: approval.key,
-                page: (page + 1) % pages,
-            }))
+            .on_press(super::heard::said(
+                tr!("More answers"),
+                Message::Ask(AskMsg::AnswersPage {
+                    stream,
+                    key: approval.key,
+                    page: (page + 1) % pages,
+                }),
+            ))
             .into(),
         );
     }
@@ -1584,22 +1745,281 @@ fn expand_all<'a>(msg: Message) -> Element<'a, Message> {
     super::toolbar::icon_action(crate::glyph::Glyph::ExpandAll, tr!("Expand all"), Some(msg))
 }
 
+/// Height of one side of a [`direction_switch`].
+const SWITCH_SIDE_H: f32 = 24.0;
+
 /// Which way a tree reads (callers or callees, imports or importers): a
-/// small segmented control, the way it reads raised; the other switches.
+/// segmented control across the panel, as the sidebar's views are — two
+/// equal halves, each label centred in its own, the way it reads raised;
+/// the other switches.
 fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a, Message> {
     container(
         Row::with_children(sides.into_iter().map(|(label, chosen, msg)| {
-            button(text(label).size(ts::SMALL))
-                .style(theme::segment(chosen))
-                .padding([1, 7])
-                .on_press_maybe((!chosen).then_some(msg))
-                .into()
+            button(
+                container(
+                    text(label)
+                        .size(ts::SMALL)
+                        .font(if chosen {
+                            crate::fonts::UI_MEDIUM
+                        } else {
+                            crate::fonts::UI
+                        })
+                        .wrapping(Wrapping::None),
+                )
+                .center_x(Fill)
+                .center_y(Fill),
+            )
+            .style(theme::segment(chosen))
+            .padding(0)
+            .width(Fill)
+            .height(Length::Fixed(SWITCH_SIDE_H))
+            .on_press_maybe((!chosen).then(|| super::heard::said(label, msg)))
+            .into()
         }))
-        .spacing(1),
+        .spacing(2),
     )
     .padding(2)
+    .width(Fill)
     .style(theme::trough)
     .into()
+}
+
+/// A note under a tree's header: what the tree cannot show by itself, as a
+/// quiet row — its glyph, what it says, and, when there is more to it, a
+/// chevron that shows that under it (`about`, while `open`).
+fn tree_note<'a>(
+    glyph: Glyph,
+    label: String,
+    open: bool,
+    toggle: Option<Message>,
+    about: impl FnOnce() -> Element<'a, Message>,
+) -> Element<'a, Message> {
+    let face = row![
+        glyph::icon(glyph, theme::fg_muted(), 12.0),
+        text(label.clone())
+            .size(ts::SMALL)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
+        space().width(Fill),
+    ]
+    .spacing(6)
+    .align_y(iced::Center);
+    let note: Element<'a, Message> = match toggle {
+        Some(toggle) => button(face.push(glyph::icon(
+            if open {
+                Glyph::ChevronDown
+            } else {
+                Glyph::ChevronRight
+            },
+            theme::dim(),
+            10.0,
+        )))
+        .style(theme::list_row(false))
+        .padding([3, 6])
+        .width(Fill)
+        .on_press(super::heard::said(&label, toggle))
+        .into(),
+        None => container(face).padding([3, 6]).width(Fill).into(),
+    };
+    let mut col = Column::new().push(note);
+    if open {
+        // Under the label: its text, and the text of the links in it, start
+        // where the label's does (a link's own padding is the last 4).
+        col = col.push(
+            container(about())
+                .padding(Padding {
+                    top: 0.0,
+                    right: 0.0,
+                    bottom: 4.0,
+                    left: NOTE_TEXT_X - 4.0,
+                })
+                .width(Fill),
+        );
+    }
+    container(col)
+        .padding(Padding {
+            top: 2.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .width(Fill)
+        .into()
+}
+
+/// Where a [`tree_note`]'s label starts, past its glyph: what is shown
+/// under it starts there too.
+const NOTE_TEXT_X: f32 = 24.0;
+
+/// A line of what a [`tree_note`] shows under it that is not a link: set
+/// in by a link's padding, so its text starts where the links' text does,
+/// and its end where the note's chevron ends.
+fn note_line<'a>(line: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    container(line)
+        .padding(Padding {
+            top: 0.0,
+            right: 6.0,
+            bottom: 0.0,
+            left: 4.0,
+        })
+        .width(Fill)
+        .into()
+}
+
+/// What [`tree_note`] shows under it, in a column that scrolls once it is
+/// taller than `max` — the tree below keeps its room.
+fn note_list<'a>(rows: Vec<Element<'a, Message>>, max: f32) -> Element<'a, Message> {
+    container(
+        scrollable(Column::with_children(rows).spacing(2).width(Fill))
+            .direction(thin_scroll())
+            .style(theme::overlay_scrollbar)
+            .height(Length::Shrink),
+    )
+    .max_height(max)
+    .width(Fill)
+    .into()
+}
+
+/// The import cycle the file the tree is of (`focus`) is in, as a note
+/// under the Imports tab's header: how many files it shares it with, and —
+/// opened — those files, each opened by a press. A cycle is files that
+/// import one another, directly or through others (a strongly connected
+/// part of the graph: a file is in one at most). Most languages allow it —
+/// Rust among them, where a module's use of its own enclosing module is no
+/// part of one (`imports::EdgeKind::Enclosing`) — so it is said as what it
+/// is, never as a warning; the project's every cycle is the import graph's.
+fn import_cycles_note<'a>(app: &'a App, focus: &'a std::path::Path) -> Element<'a, Message> {
+    use crate::app::message::ImportNote;
+    let Some(cycle) = app
+        .proj
+        .import_cycles
+        .iter()
+        .find(|c| c.iter().any(|f| f == focus))
+    else {
+        return slot();
+    };
+    let others = cycle.len().saturating_sub(1);
+    let open = app.proj.import_notes_open.contains(&ImportNote::Cycles);
+    let label = trn!(
+        "In an import cycle with 1 other file",
+        "In an import cycle with {n} other files",
+        others
+    );
+    tree_note(
+        Glyph::Refresh,
+        label,
+        open,
+        Some(Message::Graph(GraphMsg::ToggleImportNote(
+            ImportNote::Cycles,
+        ))),
+        move || {
+            let caption = note_line(
+                text(tr!(
+                    "Files that import one another, directly or through others."
+                ))
+                .size(ts::CAPTION)
+                .color(theme::dim())
+                .wrapping(Wrapping::Word),
+            );
+            // The cycle's files, set apart by dots: they import one another
+            // in no order a line of arrows could honestly draw.
+            let mut files: Vec<Element<'a, Message>> = Vec::new();
+            for (i, f) in cycle.iter().enumerate() {
+                if i > 0 {
+                    files.push(text("·").size(ts::SMALL).color(theme::dim()).into());
+                }
+                files.push(cycle_file(app, f, f == focus));
+            }
+            let files = Row::with_children(files)
+                .spacing(1)
+                .align_y(iced::Center)
+                .wrap()
+                .vertical_spacing(1)
+                .into();
+            note_list(vec![caption, files], 180.0)
+        },
+    )
+}
+
+/// One file of an import cycle: its name, opening it — the one the tree
+/// is of in the medium weight, and every one's path in the project said on
+/// hover (two `mod.rs` of a cycle are told apart there).
+fn cycle_file<'a>(app: &App, file: &std::path::Path, focus: bool) -> Element<'a, Message> {
+    let name = file
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let face = button(
+        text(name.clone())
+            .size(ts::SMALL)
+            .font(if focus {
+                crate::fonts::UI_MEDIUM
+            } else {
+                crate::fonts::UI
+            })
+            .color(if focus {
+                theme::fg_bright()
+            } else {
+                theme::accent()
+            })
+            .wrapping(Wrapping::None),
+    )
+    .style(theme::list_row(false))
+    .padding([1, 4])
+    .on_press(super::heard::said(
+        &name,
+        Message::Editor(EditorMsg::OpenAbs {
+            abs: file.to_path_buf(),
+            line: None,
+            push: true,
+        }),
+    ));
+    super::toolbar::tip_at(face, app.rel_of(file), None, tooltip::Position::Bottom)
+}
+
+/// The files the symbol index left out, as a note under the Imports tab's
+/// header: how many and why — and, opened, each by its path, with its size.
+/// Their imports are not in this tree. (A file the index left out because
+/// the project has more than it takes is counted, not listed: there can be
+/// tens of thousands.)
+fn index_left_out_note(app: &App) -> Element<'_, Message> {
+    use crate::app::message::ImportNote;
+    let Some(note) = index_cap_note(app) else {
+        return slot();
+    };
+    let files = &app.proj.index_too_large;
+    let open = !files.is_empty() && app.proj.import_notes_open.contains(&ImportNote::LeftOut);
+    tree_note(
+        Glyph::Info,
+        note.to_string(),
+        open,
+        (!files.is_empty()).then_some(Message::Graph(GraphMsg::ToggleImportNote(
+            ImportNote::LeftOut,
+        ))),
+        move || {
+            let rows = files
+                .iter()
+                .map(|(rel, size)| {
+                    note_line(
+                        row![
+                            text(rel.as_str())
+                                .size(ts::SMALL)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::None),
+                            space().width(Fill),
+                            text(super::explain_view::human_size(*size))
+                                .size(ts::CAPTION)
+                                .color(theme::dim())
+                                .wrapping(Wrapping::None),
+                        ]
+                        .spacing(8)
+                        .align_y(iced::Center),
+                    )
+                })
+                .collect();
+            note_list(rows, 140.0)
+        },
+    )
 }
 
 /// The FLOW tab: the traced identifier's occurrences under the role each
@@ -1607,6 +2027,8 @@ fn direction_switch<'a>(sides: [(&'static str, bool, Message); 2]) -> Element<'a
 /// branched on, member access, read), each opening its line; a `Passed`
 /// row unfolds into the callee's parameter and ITS occurrences.
 pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them.
+    super::heard::list();
     let Some(tree) = &app.proj.flow else {
         return empty_state(Glyph::Search, tr!("No value trace yet"), "", None);
     };
@@ -1622,7 +2044,10 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
             button(text(tr!("Clear")).size(ts::SMALL))
                 .style(theme::toolbar_button)
                 .padding([2, 7])
-                .on_press(Message::Flow(crate::FlowMsg::Clear))
+                .on_press(super::heard::said(
+                    tr!("Clear"),
+                    Message::Flow(crate::FlowMsg::Clear),
+                ))
                 .into(),
         ],
         None,
@@ -1640,7 +2065,10 @@ pub(crate) fn flow_tab(app: &App) -> Element<'_, Message> {
                     button(text(tr!("Trace again")).size(ts::SMALL))
                         .style(theme::toolbar_button)
                         .padding([2, 7])
-                        .on_press(Message::Flow(crate::FlowMsg::Retrace)),
+                        .on_press(super::heard::said(
+                            tr!("Trace again"),
+                            Message::Flow(crate::FlowMsg::Retrace)
+                        )),
                 ]
                 .spacing(6)
                 .align_y(iced::Center),
@@ -1751,11 +2179,14 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
         .style(theme::list_row(false))
         .width(Fill)
         .padding([3, 6])
-        .on_press(Message::Editor(EditorMsg::OpenAbs {
-            abs: node.abs.clone(),
-            line: Some(node.line + 1),
-            push: true,
-        }));
+        .on_press(super::heard::row(
+            || node.text.clone(),
+            Message::Editor(EditorMsg::OpenAbs {
+                abs: node.abs.clone(),
+                line: Some(node.line + 1),
+                push: true,
+            }),
+        ));
     container(row![unfold, open].spacing(2).align_y(iced::Center))
         .padding(Padding {
             top: 0.0,
@@ -1770,6 +2201,8 @@ fn flow_row(tree: &crate::app::flow::FlowTree, id: usize, token: u64) -> Element
 /// The call-hierarchy tree: a header with the root symbol + a callers/callees
 /// toggle, then the lazily-expanded tree.
 pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them.
+    super::heard::list();
     let Some(tree) = &app.proj.call_graph else {
         // How to fill it: the tab alone gave no way in.
         return empty_state(
@@ -1853,11 +2286,14 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
         .style(theme::list_row(false))
         .width(Fill)
         .padding([1, 4])
-        .on_press(Message::Editor(EditorMsg::OpenAbs {
-            abs: node.item.path.clone(),
-            line: Some(node.item.line + 1),
-            push: true,
-        }));
+        .on_press(super::heard::row(
+            || node.item.name.clone(),
+            Message::Editor(EditorMsg::OpenAbs {
+                abs: node.item.path.clone(),
+                line: Some(node.item.line + 1),
+                push: true,
+            }),
+        ));
 
         let badge = text(kind)
             .size(ts::CAPTION)
@@ -1894,13 +2330,7 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
     // is nothing to say): inserting it pushed the tree's scrollable down a
     // position, iced rebuilt it at the top, and the reader lost their place.
     let stale: Element<'_, Message> = if tree.stale {
-        tree_banner(
-            format!(
-                "⟳ {}",
-                tr!("Code changed — press {keys} to refresh", keys = "gc")
-            ),
-            theme::warning(),
-        )
+        stale_note(Message::Calls(CallsMsg::Refresh))
     } else {
         slot()
     };
@@ -1918,6 +2348,8 @@ pub(crate) fn calls_tab(app: &App) -> Element<'_, Message> {
 /// The import tree: a header with the focus file + an Imports/Importers toggle,
 /// a cycles banner, then the lazily-expanded (but synchronous) tree.
 pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them.
+    super::heard::list();
     use crate::imports::Target;
 
     let Some(tree) = &app.proj.import_tree else {
@@ -1995,11 +2427,14 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
             .style(theme::list_row(false))
             .width(Fill)
             .padding([1, 4])
-            .on_press(Message::Editor(EditorMsg::OpenAbs {
-                abs: path.clone(),
-                line: None,
-                push: true,
-            }))
+            .on_press(super::heard::row(
+                || node.label.clone(),
+                Message::Editor(EditorMsg::OpenAbs {
+                    abs: path.clone(),
+                    line: None,
+                    push: true,
+                }),
+            ))
             .into(),
             Target::External(_) => container(
                 row![
@@ -2043,22 +2478,13 @@ pub(crate) fn imports_tab(app: &App) -> Element<'_, Message> {
         }
     }
 
-    // Both banners sit in slots that are always there (zero-size while there
+    // Both notes sit in slots that are always there (zero-size while there
     // is nothing to say), so one appearing never moves the tree's scrollable
     // to another position — where iced would rebuild it at the top.
-    let cycles: Element<'_, Message> = match app.proj.import_cycles.len() {
-        0 => slot(),
-        n => tree_banner(
-            format!("⚠ {}", trn!("1 import cycle", "{n} import cycles", n)),
-            theme::warning(),
-        ),
-    };
+    let cycles = import_cycles_note(app, &tree.root_path);
     // The graph under this tree is built from the symbol index; files the
     // index had to leave out have no edges here, so say which were left out.
-    let capped: Element<'_, Message> = match index_cap_note(app) {
-        Some(note) => tree_banner(tr!("Index incomplete: {note}", note = note), theme::dim()),
-        None => slot(),
-    };
+    let capped = index_left_out_note(app);
     column![
         header,
         cycles,
@@ -2122,7 +2548,10 @@ fn push_var_rows<'a>(
             button(line)
                 .style(theme::list_row(false))
                 .padding(0)
-                .on_press(Message::Debug(DebugMsg::ToggleVar(reference)))
+                .on_press(super::heard::said(
+                    &v.name,
+                    Message::Debug(DebugMsg::ToggleVar(reference)),
+                ))
                 .into()
         } else {
             line.into()

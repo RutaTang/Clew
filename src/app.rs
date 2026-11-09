@@ -68,6 +68,7 @@ pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;
 pub(crate) mod setup;
+pub(crate) mod suggest;
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;
@@ -85,6 +86,8 @@ mod reading;
 mod remote_state;
 mod runtime;
 pub use runtime::note_window_system;
+pub(crate) mod choices;
+pub(crate) mod onscreen;
 mod semantic;
 pub(crate) mod server;
 mod settings;

@@ -120,7 +120,10 @@ pub use payload::*;
 /// model writes on the server (Ask's agent turns) is in their language; and
 /// `Hello` and `SetAiConfig` their `locale`, for the language servers the
 /// server starts.
-pub const PROTOCOL_VERSION: u32 = 20;
+///
+/// v21: [`GitOp::WorkingStatus`] reads the working tree's changes, for the
+/// Files view's marks.
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -413,6 +416,10 @@ pub enum GitOp {
     Churn {
         commits: usize,
     },
+    /// The files the working tree changes against HEAD — staged or not, and
+    /// those git does not track yet — under the project directory: what the
+    /// Files view marks.
+    WorkingStatus,
 }
 
 /// One file's entry in a `ProjectSymbols` snapshot.

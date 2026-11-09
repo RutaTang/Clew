@@ -73,6 +73,10 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
             let r = super::askfloat::ask_corner_rect(app);
             rect(r.x, r.y, r.width, r.height)
         }
+        // The ⋯, while its rows are on the strip in its place: them.
+        Anchor::Strip(StripTool::More) if super::toolbar::tools_on_strip(app) => Some(
+            tools_menu_rows_rect(app, 0, super::toolbar::TOOLS_MENU_ROWS.len()),
+        ),
         Anchor::Strip(tool) => {
             let c = strip_tool_center(app, tool);
             rect(
@@ -205,23 +209,33 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
         button(text(tr!("Back")).size(ts::BODY))
             .style(theme::toolbar_button)
             .padding([4, 12])
-            .on_press(Message::Tutorial(TutorialMsg::Step(-1)))
+            .on_press(super::heard::said(
+                tr!("Back"),
+                Message::Tutorial(TutorialMsg::Step(-1)),
+            ))
             .into()
     } else {
         slot()
     };
     let last = step_i + 1 == total;
-    let next = button(text(if last { tr!("Done") } else { tr!("Next") }).size(ts::BODY))
+    let next_label = if last { tr!("Done") } else { tr!("Next") };
+    let next = button(text(next_label).size(ts::BODY))
         .style(theme::primary_button)
         .padding([4, 16])
-        .on_press(Message::Tutorial(TutorialMsg::Step(1)));
+        .on_press(super::heard::said(
+            next_label,
+            Message::Tutorial(TutorialMsg::Step(1)),
+        ));
     // "Skip tour" is the subtle exit, kept left and muted. Small horizontal
     // padding so its text lines up with the title/body above it, rather than
     // sitting indented by a wider button's internal padding.
     let skip = button(text(tr!("Skip tour")).size(ts::BODY).color(theme::dim()))
         .style(theme::toolbar_button)
         .padding([4, 6])
-        .on_press(Message::Tutorial(TutorialMsg::Exit));
+        .on_press(super::heard::said(
+            tr!("Skip tour"),
+            Message::Tutorial(TutorialMsg::Exit),
+        ));
 
     // Back and Next form the primary control group on the right; Skip sits on the
     // left. On the last step Next reads "Done".
@@ -306,12 +320,18 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
         Anchor::ToolbarMenu { first, count } => {
             let rows = tools_menu_rows_rect(app, first, count);
             let center = rows.y + rows.height / 2.0;
+            // Beside the strip, when the rows are on it; else the menu.
+            let beside = if super::toolbar::tools_on_strip(app) {
+                STRIP_W
+            } else {
+                menu_left
+            };
             (
                 Horizontal::Right,
                 Vertical::Top,
                 Padding {
                     top: (center - 88.0).clamp(lo, hi),
-                    right: menu_left + gap,
+                    right: beside + gap,
                     ..Padding::ZERO
                 },
             )
