@@ -10370,7 +10370,7 @@ fn the_tools_menu_fits_a_short_window() {
         assert!(
             sent_by(sim)
                 .iter()
-                .any(|m| matches!(m, Message::Window(WindowMsg::OpenShortcuts))),
+                .any(|m| matches!(m, Message::Tutorial(crate::TutorialMsg::Start))),
             "its last row clicked at {height}"
         );
     }
@@ -10798,7 +10798,7 @@ fn the_tools_menu_rows_name_their_keys() {
     use super::ToolsRow;
     let keyed = [
         (ToolsRow::ExplainAll, crate::keymap::Action::ExplainAll),
-        (ToolsRow::Shortcuts, crate::keymap::Action::Shortcuts),
+        (ToolsRow::Tutorial, crate::keymap::Action::Tutorial),
     ];
     let mut app = reader_app();
     open_tools_menu(&mut app);
@@ -11773,3 +11773,25 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
     );
 }
 
+/// The keyboard shortcuts are no tool of the strip's, nor of its ⋯ menu:
+/// they are in the app menu, with the window's other pages, and on ⌘/.
+#[test]
+fn the_shortcuts_are_in_the_app_menu_not_on_the_strip() {
+    let mut app = reader_app();
+    open_tools_menu(&mut app);
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Tutorial"), "the ⋯ menu is open");
+        assert!(!shows(&mut sim, "Keyboard Shortcuts"));
+    }
+    app.show_tools_menu = false;
+    app.show_app_menu = true;
+    let picked = click(sim_of(&app), "Keyboard Shortcuts…");
+    assert!(
+        picked.iter().any(|m| matches!(
+            m,
+            Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Shortcuts))
+        )),
+        "{picked:?}"
+    );
+}

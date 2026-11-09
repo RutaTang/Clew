@@ -21047,7 +21047,6 @@ fn every_tools_menu_row_dismisses_the_menu() {
                 crate::app::setup::SetupMode::Manage,
             ))],
             ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
-            ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
         }
     };
     for row in TOOLS_MENU_ROWS {

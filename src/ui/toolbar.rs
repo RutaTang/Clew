@@ -948,22 +948,21 @@ pub(crate) enum ToolsRow {
     Glossary,
     SetUp,
     Tutorial,
-    Shortcuts,
 }
 
 /// The ⋯ menu's rows, top to bottom, in two groups: understanding the
 /// project, and help. Each tool is where what it opens is: walkthroughs and
 /// the reader's notes (and their export) in the sidebar, opening another
 /// project in the app menu, the language servers on the status bar and in
-/// Settings — none of them here. The menu is built from this list, and the
+/// Settings, the keyboard shortcuts in the app menu and on ⌘/ — none of
+/// them here. The menu is built from this list, and the
 /// tutorial points at rows by their position in it — so the two cannot
 /// drift.
-pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 5] = [
+pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 4] = [
     ToolsRow::ExplainAll,
     ToolsRow::Glossary,
     ToolsRow::SetUp,
     ToolsRow::Tutorial,
-    ToolsRow::Shortcuts,
 ];
 
 /// The [`TOOLS_MENU_ROWS`] positions a separator stands before.
@@ -1020,7 +1019,6 @@ fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
 pub(crate) fn tools_row_action(row: ToolsRow) -> Action {
     match row {
         ToolsRow::ExplainAll => Action::ExplainAll,
-        ToolsRow::Shortcuts => Action::Shortcuts,
         ToolsRow::Glossary => Action::Glossary,
         ToolsRow::SetUp => Action::SetUpProject,
         ToolsRow::Tutorial => Action::Tutorial,
@@ -1033,7 +1031,6 @@ pub(crate) fn tools_row_label(row: ToolsRow) -> &'static str {
         ToolsRow::ExplainAll => tr!("Explain All"),
         ToolsRow::Glossary => tr!("Glossary"),
         ToolsRow::SetUp => tr!("Set Up Project…"),
-        ToolsRow::Shortcuts => tr!("Keyboard Shortcuts"),
         ToolsRow::Tutorial => tr!("Tutorial"),
     }
 }
@@ -1322,11 +1319,6 @@ pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Mess
             has_project.then_some(Message::Project(ProjectMsg::SetupShow(
                 crate::app::setup::SetupMode::Manage,
             ))),
-        ),
-        ToolsRow::Shortcuts => (
-            Glyph::Shortcuts,
-            tr!("Keyboard Shortcuts").into(),
-            Some(Message::Window(WindowMsg::OpenShortcuts)),
         ),
         // The tour brings its own project: there with one open or none.
         ToolsRow::Tutorial => (
@@ -1716,7 +1708,7 @@ mod tests {
         let center = |slot| strip_slot_center(&app, slot).unwrap().y;
         let debug = center(StripSlot::Tool(StripTool::Debug));
         let first = center(StripSlot::Row(ToolsRow::ExplainAll));
-        let last = center(StripSlot::Row(ToolsRow::Shortcuts));
+        let last = center(StripSlot::Row(ToolsRow::Tutorial));
         assert!(first > debug);
         let settings = center(StripSlot::Tool(StripTool::Settings));
         assert!(last + ICON_BTN / 2.0 + STRIP_FOOT_GAP <= settings - ICON_BTN / 2.0);
