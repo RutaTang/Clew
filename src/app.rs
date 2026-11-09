@@ -64,6 +64,7 @@ mod editor;
 pub(crate) mod embedding;
 mod explain;
 pub(crate) mod export;
+pub(crate) mod fakerun;
 pub(crate) mod flow;
 pub(crate) mod glossary;
 mod graph;

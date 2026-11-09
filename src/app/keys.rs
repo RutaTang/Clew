@@ -323,6 +323,7 @@ impl App {
             GoBack => self.update(Message::Reading(ReadingMsg::GoBack)),
             GoForward => self.update(Message::Reading(ReadingMsg::GoForward)),
             TraceValue => self.update(Message::Flow(crate::FlowMsg::AtCursor)),
+            FakeRun => self.update(Message::Fake(FakeMsg::AtCaret)),
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),

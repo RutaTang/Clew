@@ -23,10 +23,18 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
 /// The collapsible bottom panel: the debugger's, under a title strip with a
 /// collapse control. (Ask floats over the code instead: `ui::askfloat`.)
 pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
+    // A fake run's session shows while no real one runs.
+    let fake = app.debug.session.is_none() && app.proj.fake.shown();
     let title = container(
         row![
             glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
-            text(tr!("Debug")).size(ts::SMALL).color(theme::fg_bright()),
+            text(if fake {
+                tr!("Fake debug")
+            } else {
+                tr!("Debug")
+            })
+            .size(ts::SMALL)
+            .color(theme::fg_bright()),
         ]
         .spacing(6)
         .align_y(iced::Center),
@@ -50,6 +58,8 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
 
     let content: Element<'_, Message> = if app.debug.session.is_some() {
         debug_panel(app)
+    } else if fake {
+        fake_panel(app)
     } else {
         empty_state(Glyph::Debug, tr!("No debug session"), "", None)
     };

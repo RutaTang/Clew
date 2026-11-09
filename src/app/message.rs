@@ -94,6 +94,10 @@ pub enum Message {
     /// Talking to the window: listening, the words heard, the speech
     /// models. Handled in `app::voice` (`App::update_voice`).
     Voice(crate::VoiceMsg),
+    /// Fake run and fake debug: the inputs sheet, the run the model works
+    /// out, the trace stepped through. Handled in `app::fakerun`
+    /// (`App::update_fake`).
+    Fake(FakeMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -2223,6 +2227,7 @@ impl Message {
             Message::Window(m) => m.origin(),
             Message::Tutorial(m) => m.origin(),
             Message::Voice(m) => m.origin(),
+            Message::Fake(m) => m.origin(),
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }
@@ -3070,5 +3075,130 @@ impl<T> Clone for Handoff<T> {
 impl<T> std::fmt::Debug for Handoff<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("Handoff(..)")
+    }
+}
+
+/// Fake run and fake debug (`app::fakerun`).
+#[derive(Debug, Clone)]
+pub enum FakeMsg {
+    /// Fake Run… from the code's context menu.
+    FromMenu,
+    /// Fake Run on the definition the caret is in (the shortcut, the
+    /// palette).
+    AtCaret,
+    /// The sheet's `0`th field now holds `1`.
+    Field(usize, String),
+    /// Ask the model for inputs to fill the empty fields with.
+    Suggest,
+    /// The suggested inputs, one per field.
+    Suggested {
+        stamp: Stamp,
+        seq: u64,
+        result: Result<Vec<String>, String>,
+    },
+    /// Run it with the sheet's inputs.
+    Run,
+    /// Close the sheet without running.
+    CloseSheet,
+    /// The run's agent turn did something (read a file, searched): what
+    /// its step says.
+    Read {
+        stamp: Stamp,
+        stream: u64,
+        title: String,
+    },
+    /// Its answer's tokens.
+    Delta {
+        stamp: Stamp,
+        stream: u64,
+        text: String,
+    },
+    /// A step's text, the answer only if the step ends without tools.
+    Draft {
+        stamp: Stamp,
+        stream: u64,
+        text: String,
+    },
+    /// Whether that text was the answer.
+    DraftEnd {
+        stamp: Stamp,
+        stream: u64,
+        kept: bool,
+    },
+    /// The turn asked for a tool of the window's, which it was not offered.
+    ToolCalled {
+        stamp: Stamp,
+        stream: u64,
+        call: u64,
+    },
+    /// The turn ended.
+    TurnEnded {
+        stamp: Stamp,
+        stream: u64,
+        outcome: clew_protocol::StreamOutcome,
+    },
+    /// The answer of a run asked in one call.
+    Answered {
+        stamp: Stamp,
+        seq: u64,
+        result: Result<String, String>,
+    },
+    /// Stop the run being worked out.
+    Stop,
+    /// A debugger step command, on the trace.
+    Step(SimCmd),
+    /// Go to the trace's step `0` (a frame of the stack).
+    Goto(usize),
+    /// Ask about the step shown.
+    AskWhy,
+    /// Open the sheet on the inputs last run.
+    EditInputs,
+    /// Close the fake debug session.
+    Close,
+}
+
+/// A debugger's step commands, on a fake run's trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimCmd {
+    /// The line before.
+    Back,
+    /// The next line no deeper in calls.
+    Over,
+    /// The next line, into what this one calls.
+    Into,
+    /// Back in the caller.
+    Out,
+    /// On to the next breakpoint, or the end.
+    Continue,
+    /// The first line again.
+    Restart,
+}
+
+impl FakeMsg {
+    /// See [`Message::origin`]. Exhaustive on purpose — no wildcard arm — so a
+    /// new variant cannot compile until it is classified here.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            FakeMsg::Suggested { stamp, .. }
+            | FakeMsg::Read { stamp, .. }
+            | FakeMsg::Delta { stamp, .. }
+            | FakeMsg::Draft { stamp, .. }
+            | FakeMsg::DraftEnd { stamp, .. }
+            | FakeMsg::ToolCalled { stamp, .. }
+            | FakeMsg::TurnEnded { stamp, .. }
+            | FakeMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
+            FakeMsg::FromMenu
+            | FakeMsg::AtCaret
+            | FakeMsg::Field(..)
+            | FakeMsg::Suggest
+            | FakeMsg::Run
+            | FakeMsg::CloseSheet
+            | FakeMsg::Stop
+            | FakeMsg::Step(..)
+            | FakeMsg::Goto(..)
+            | FakeMsg::AskWhy
+            | FakeMsg::EditInputs
+            | FakeMsg::Close => None,
+        }
     }
 }

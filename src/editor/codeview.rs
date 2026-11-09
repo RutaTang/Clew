@@ -736,6 +736,8 @@ pub struct CodeView<'a, Message> {
     /// hollowing it would claim knowledge we do not have.
     unverified_breakpoints: HashSet<usize>,
     debug_current: Option<usize>, // 1-based current stopped line (debug)
+    /// `debug_current` is a fake debug session's line (lit in the accent).
+    debug_simulated: bool,
     /// 0-based display line → inlay chips `(display column, label)` spliced into
     /// the line at render time (inferred types, parameter names). Borrowed:
     /// the viewer owns them, and cloning both maps on every view was a
@@ -818,6 +820,7 @@ impl<'a, Message> CodeView<'a, Message> {
             cond_breakpoints: HashSet::new(),
             unverified_breakpoints: HashSet::new(),
             debug_current: None,
+            debug_simulated: false,
             inlay_hints: None,
             inlay_color: default_color,
             inactive: None,
@@ -999,6 +1002,12 @@ impl<'a, Message> CodeView<'a, Message> {
     }
 
     /// The current stopped line (1-based) while debugging — full-row highlight.
+    /// The current line is a fake debug session's, not a program's.
+    pub fn debug_simulated(mut self, simulated: bool) -> Self {
+        self.debug_simulated = simulated;
+        self
+    }
+
     pub fn debug_current(mut self, line: Option<usize>) -> Self {
         self.debug_current = line;
         self
@@ -2049,7 +2058,14 @@ where
                         },
                         ..renderer::Quad::default()
                     },
-                    theme::with_alpha(theme::warning(), 0.16),
+                    theme::with_alpha(
+                        if self.debug_simulated {
+                            theme::accent()
+                        } else {
+                            theme::warning()
+                        },
+                        0.16,
+                    ),
                 );
             } else if self.read_line() == Some(i) {
                 // Current line: a faint full-width wash of the accent — the

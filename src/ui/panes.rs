@@ -1031,6 +1031,9 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         .and_then(|d| d.current.as_ref())
         .filter(|(p, _)| *p == v.abs)
         .map(|(_, line)| *line);
+    // A fake debug session's line, in the accent: what was reasoned, not
+    // where a program stopped.
+    let fake_current = app.fake_line(&v.abs);
 
     let frame = app.window_frame;
     // The block cursor shows only on the active pane while the code view has
@@ -1077,7 +1080,8 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
     .breakpoints(breakpoints)
     .cond_breakpoints(cond_breakpoints)
     .unverified_breakpoints(unverified_breakpoints)
-    .debug_current(debug_current)
+    .debug_current(debug_current.or(fake_current))
+    .debug_simulated(debug_current.is_none() && fake_current.is_some())
     .inlay_hints(v.inlay_hints(), theme::dim())
     .inactive(v.inactive_lines())
     // The line that says why the lines under it are left out, with the

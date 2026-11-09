@@ -10,6 +10,7 @@ mod askfloat;
 #[cfg(unix)]
 mod build_app;
 mod embedding;
+mod fakerun;
 mod graph_search;
 mod insight;
 mod integrations;
@@ -22541,6 +22542,46 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             run,
             install: crate::dap::AdapterInstall::JsDebug,
         }),
+        Message::Fake(crate::FakeMsg::Suggested {
+            stamp: s(),
+            seq: 1,
+            result: Ok(Vec::new()),
+        }),
+        Message::Fake(crate::FakeMsg::Read {
+            stamp: s(),
+            stream: 1,
+            title: "stale".into(),
+        }),
+        Message::Fake(crate::FakeMsg::Delta {
+            stamp: s(),
+            stream: 1,
+            text: "stale".into(),
+        }),
+        Message::Fake(crate::FakeMsg::Draft {
+            stamp: s(),
+            stream: 1,
+            text: "stale".into(),
+        }),
+        Message::Fake(crate::FakeMsg::DraftEnd {
+            stamp: s(),
+            stream: 1,
+            kept: true,
+        }),
+        Message::Fake(crate::FakeMsg::ToolCalled {
+            stamp: s(),
+            stream: 1,
+            call: 1,
+        }),
+        Message::Fake(crate::FakeMsg::TurnEnded {
+            stamp: s(),
+            stream: 1,
+            outcome: clew_protocol::StreamOutcome::Done,
+        }),
+        Message::Fake(crate::FakeMsg::Answered {
+            stamp: s(),
+            seq: 1,
+            result: Ok(String::new()),
+        }),
     ]
 }
 
@@ -29240,6 +29281,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Connect => "connect",
             O::TourPrep(_) => "tour prep",
             O::BpCondition(_) => "breakpoint condition",
+            O::FakeRun(_) => "fake run",
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
             O::Why(_) => "why",
@@ -29263,6 +29305,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.connect = None;
         app.tour_prep = None;
         app.proj.bp_cond_edit = None;
+        app.proj.fake.sheet = None;
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
         app.proj.blame_why = None;
@@ -29323,6 +29366,15 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.connect = Some(ConnectUi::default())),
         Box::new(|a| a.tour_prep = Some(Default::default())),
         Box::new(move |a| a.proj.bp_cond_edit = Some((lib.clone(), 1, String::new()))),
+        Box::new(|a| {
+            let target = a.fake_target_at(a.proj.active, 3).expect("origin");
+            a.proj.fake.sheet = Some(crate::app::fakerun::Sheet {
+                fields: crate::fakerun::fields(&target),
+                values: vec![String::new()],
+                target,
+                suggesting: None,
+            })
+        }),
         Box::new(|a| a.proj.note_edit = Some(("src/lib.rs".into(), 1, String::new()))),
         Box::new(|a| {
             a.proj.reading_note_edit = Some(("src/lib.rs".into(), "k".into(), String::new()))
@@ -29387,7 +29439,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (19, 19),
+        (20, 20),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 

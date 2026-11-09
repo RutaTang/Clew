@@ -135,6 +135,10 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
                 keys: Some(app.keymap.chord(crate::keymap::Action::TraceValue).caps()),
                 ..plain(tr!("Trace Value"), Message::Flow(crate::FlowMsg::FromMenu))
             },
+            Row {
+                keys: Some(app.keymap.chord(crate::keymap::Action::FakeRun).caps()),
+                ..plain(tr!("Fake Run…"), Message::Fake(crate::FakeMsg::FromMenu))
+            },
             plain(tr!("Explain"), Message::Explain(ExplainMsg::FromMenu)),
             plain(tr!("Add to Ask"), Message::Ask(AskMsg::AboutSelection)),
             plain(

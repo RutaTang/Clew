@@ -34,6 +34,8 @@ mod ops;
 pub(crate) use ops::*;
 mod dialogs;
 pub(crate) use dialogs::*;
+mod fakerun;
+pub(crate) use fakerun::*;
 mod slide;
 mod tutorial;
 pub(crate) use tutorial::*;
@@ -334,6 +336,8 @@ pub(crate) enum ActiveOverlay<'a> {
     /// The sheet before the tour (under Settings, which its steps open).
     TourPrep(&'a crate::app::tutorial::TourPrep),
     BpCondition(&'a (std::path::PathBuf, usize, String)),
+    /// Fake run's inputs sheet.
+    FakeRun(&'a crate::app::fakerun::Sheet),
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
     Why(&'a crate::BlameWhy),
@@ -377,6 +381,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::TourPrep(prep)
     } else if let Some(edit) = &app.proj.bp_cond_edit {
         O::BpCondition(edit)
+    } else if let Some(sheet) = &app.proj.fake.sheet {
+        O::FakeRun(sheet)
     } else if let Some(edit) = &app.proj.note_edit {
         O::BookmarkNote(edit)
     } else if let Some(edit) = &app.proj.reading_note_edit {
@@ -438,6 +444,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Graph(_) => "graph",
             Self::ContextMenu(_) => "context-menu",
             Self::BpCondition(_)
+            | Self::FakeRun(_)
             | Self::BookmarkNote(_)
             | Self::ReadingNote(_)
             | Self::Finder
@@ -483,6 +490,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Connect => connect_modal(app),
             Self::TourPrep(prep) => tutorial::tour_prep_sheet(app, prep),
             Self::BpCondition(edit) => bp_condition_modal(app, edit),
+            Self::FakeRun(sheet) => fake_sheet(sheet),
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
             Self::Why(bw) => why_modal(app, bw),
@@ -514,6 +522,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Connect => Message::Connect(ConnectMsg::Close),
             Self::TourPrep(_) => Message::Tutorial(TutorialMsg::PrepClose),
             Self::BpCondition(_) => Message::Debug(DebugMsg::BpConditionCancel),
+            Self::FakeRun(_) => Message::Fake(crate::FakeMsg::CloseSheet),
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),
             Self::Why(_) => Message::TimeTravel(TimeTravelMsg::BlameWhyClose),

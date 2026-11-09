@@ -54,6 +54,8 @@ pub enum Action {
     GoBack,
     GoForward,
     TraceValue,
+    /// Fake Run on the definition the caret is in (`app::fakerun`).
+    FakeRun,
     ToggleAsk,
     StartDebug,
     CallGraph,
@@ -76,7 +78,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 34] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -91,6 +93,7 @@ impl Action {
         Action::GoBack,
         Action::GoForward,
         Action::TraceValue,
+        Action::FakeRun,
         Action::ToggleAsk,
         Action::StartDebug,
         Action::CallGraph,
@@ -140,6 +143,7 @@ impl Action {
             Action::Walkthrough => "walkthrough",
             Action::LspServers => "lsp_servers",
             Action::TraceValue => "trace_value",
+            Action::FakeRun => "fake_run",
             Action::Shortcuts => "shortcuts",
             Action::CommandPalette => "command_palette",
             Action::Voice => "voice",
@@ -173,6 +177,7 @@ impl Action {
             Action::GoBack => tr!("Back"),
             Action::GoForward => tr!("Forward"),
             Action::TraceValue => tr!("Trace value at cursor"),
+            Action::FakeRun => tr!("Fake run at cursor"),
             Action::ToggleAsk => tr!("Ask"),
             Action::StartDebug => tr!("Start debugging"),
             Action::CallGraph => tr!("Project call graph"),
@@ -217,6 +222,7 @@ impl Action {
             Action::GotoLine => at(MenuSection::Go, tr_noop!("Go to Line…")),
             Action::ToggleBookmark => at(MenuSection::Go, tr_noop!("Toggle Bookmark")),
             Action::TraceValue => at(MenuSection::Go, tr_noop!("Trace Value")),
+            Action::FakeRun => at(MenuSection::Tools, tr_noop!("Fake Run…")),
             Action::ToggleAsk => at(MenuSection::Tools, tr_noop!("Ask")),
             Action::StartDebug => at(MenuSection::Tools, tr_noop!("Start Debugging")),
             Action::CallGraph => at(MenuSection::Tools, tr_noop!("Call Graph")),
@@ -269,6 +275,8 @@ impl Action {
             Action::Walkthrough => Chord::cmd_shift('j'),
             Action::LspServers => Chord::cmd_shift('l'),
             Action::TraceValue => Chord::cmd_shift('v'),
+            // Fake run: eXecute it on paper.
+            Action::FakeRun => Chord::cmd_shift('x'),
             Action::Shortcuts => Chord::cmd('/'),
             Action::CommandPalette => Chord::cmd_shift('p'),
             // "Speak". Pressed again — or a pause once something was said —

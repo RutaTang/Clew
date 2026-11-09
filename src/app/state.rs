@@ -2067,6 +2067,8 @@ pub struct ProjectSession {
     /// The Walkthroughs feature — the saved-tour library and the reader/composer
     /// state for the WALK tab (see [`WalkState`]).
     pub walk: WalkState,
+    /// Fake run and fake debug (`app::fakerun`).
+    pub fake: crate::app::fakerun::FakeRun,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
     /// The Glossary page (`app::glossary`).
@@ -2386,6 +2388,7 @@ impl Default for ProjectSession {
             overview: Default::default(),
             stats: Default::default(),
             walk: Default::default(),
+            fake: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),
             last_auto_refresh: Default::default(),

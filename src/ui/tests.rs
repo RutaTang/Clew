@@ -1829,8 +1829,11 @@ fn the_chrome_geometry_matches_what_is_drawn() {
             let at = super::strip_slot_center(&app, super::StripSlot::Row(row)).unwrap();
             let sent = click_at(at);
             let expected = match row {
-                super::ToolsRow::Shortcuts => {
-                    matches!(sent.as_slice(), [Message::Window(WindowMsg::OpenShortcuts)])
+                super::ToolsRow::Tutorial => {
+                    matches!(
+                        sent.as_slice(),
+                        [Message::Tutorial(crate::TutorialMsg::Start)]
+                    )
                 }
                 super::ToolsRow::Glossary => matches!(
                     sent.as_slice(),
@@ -10353,8 +10356,7 @@ fn the_tools_menu_fits_a_short_window() {
         let top = super::tools_menu_top(&app);
         assert!(top >= super::TOOLBAR_H, "over the top bar: {top}");
         let mut sim = sim_sized(&app, size);
-        let last =
-            text_at(&mut sim, |t| t == "Keyboard Shortcuts", 0).expect("the last row is drawn");
+        let last = text_at(&mut sim, |t| t == "Tutorial", 0).expect("the last row is drawn");
         assert!(
             last.y + last.height <= height,
             "the last row runs past the foot at {height}: {last:?}"
@@ -11666,3 +11668,108 @@ fn the_why_popup_opens_at_the_line_it_is_about() {
     let insight = at(&app, "Expansion of MAX");
     assert!(insight.y > 400.0 + lh, "{insight:?} is not under the line");
 }
+
+/// A fake debug session in the bottom panel: said to be simulated, where
+/// it is in the trace, the line's values with what it changed, what the
+/// run returns — and its controls step it.
+#[test]
+fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
+    use crate::fakerun::{Step, Target, Trace};
+    let mut app = reader_app();
+    let step = |line: usize, vars: &[(&str, &str)], note: &str| Step {
+        file: "src/lib.rs".into(),
+        line,
+        function: "line_0".into(),
+        depth: 0,
+        note: note.into(),
+        vars: vars
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.to_string()))
+            .collect(),
+    };
+    app.proj.fake.sim = Some(crate::app::fakerun::Sim {
+        target: Target {
+            name: "line_0".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            line: 1,
+            end_line: 1,
+            lang: "rust".into(),
+            source: "fn line_0() { let value = 0; }".into(),
+        },
+        given: Vec::new(),
+        trace: Trace {
+            returns: "()".into(),
+            assumptions: vec!["nothing is called".into()],
+            steps: vec![
+                step(1, &[("value", "0")], "the call begins"),
+                step(1, &[("value", "7")], "value is set"),
+            ],
+            ..Trace::default()
+        },
+        at: 1,
+        ended: false,
+    });
+    app.show_bottom = true;
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Fake debug"));
+    assert!(shows(&mut sim, "simulated · not run"));
+    assert!(shows(&mut sim, "step 2 of 2"));
+    assert!(shows(&mut sim, "value is set"));
+    assert!(shows(&mut sim, "7"));
+    assert!(shows(&mut sim, "nothing is called"));
+    let over = click(sim_of(&app), "⤼ Over");
+    assert!(
+        over.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Over)))),
+        "{over:?}"
+    );
+    let back = click(sim_of(&app), "◀ Back");
+    assert!(
+        back.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Step(crate::SimCmd::Back)))),
+        "{back:?}"
+    );
+    // Its line lit in the code as the debugger's is.
+    let abs = app.proj.panes[0].as_ref().unwrap().abs.clone();
+    assert_eq!(app.fake_line(&abs), Some(1));
+}
+
+/// The inputs sheet names the target and each parameter, and Run runs it.
+#[test]
+fn the_fake_run_sheet_asks_for_each_parameter() {
+    use crate::fakerun::{Field, Target};
+    let mut app = reader_app();
+    let target = Target {
+        name: "total".into(),
+        kind: "function".into(),
+        rel: "src/lib.rs".into(),
+        line: 1,
+        end_line: 1,
+        lang: "rust".into(),
+        source: "fn total(cart: &Cart, coupon: Option<&str>) -> f64 { 0.0 }".into(),
+    };
+    let fields = crate::fakerun::fields(&target);
+    assert_eq!(fields.len(), 3);
+    assert!(matches!(&fields[0], Field::Param { name, .. } if name == "cart"));
+    app.proj.fake.sheet = Some(crate::app::fakerun::Sheet {
+        values: vec![String::new(); fields.len()],
+        fields,
+        target,
+        suggesting: None,
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Fake run"));
+    assert!(shows(&mut sim, "total"));
+    assert!(shows(&mut sim, "cart"));
+    assert!(shows(&mut sim, "coupon"));
+    assert!(shows(&mut sim, "Anything else it depends on"));
+    assert!(shows(&mut sim, "Suggest inputs"));
+    let run = click(sim_of(&app), "Run");
+    assert!(
+        run.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::Run))),
+        "{run:?}"
+    );
+}
+
