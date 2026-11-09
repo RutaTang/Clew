@@ -1764,12 +1764,15 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     /// Whether a message is the one a tool sends.
     type Sends = fn(&Message) -> bool;
     let app = reader_app();
-    let expected: [(StripTool, Sends); 9] = [
+    let expected: [(StripTool, Sends); 10] = [
         (StripTool::Overview, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::Show))
         }),
         (StripTool::Stats, |m| {
             matches!(m, Message::Overview(crate::OverviewMsg::ShowStats))
+        }),
+        (StripTool::WeakSpots, |m| {
+            matches!(m, Message::Weak(crate::WeakMsg::Show))
         }),
         (StripTool::Debug, |m| {
             matches!(m, Message::Window(WindowMsg::ToggleRunMenu))
@@ -2464,6 +2467,68 @@ fn the_context_menu_has_each_languages_own_rows() {
     assert!(
         sent.iter()
             .any(|m| matches!(m, Message::Proof(crate::ProofMsg::FromMenu))),
+        "{sent:?}"
+    );
+}
+
+/// The weak spots page says what it is, then each spot: its name, where
+/// it is, why it is listed; the row opens its code, Ask why asks.
+#[test]
+fn the_weak_spots_page_lists_each_spot_with_why() {
+    use clew_core::weakspots::{Reason, Risk, Spot};
+    let mut app = reader_app();
+    app.proj.weak.showing = true;
+    app.proj.weak.files = 12;
+    app.proj.weak.spots = Some(std::sync::Arc::new(vec![
+        Spot {
+            rel: "src/load.rs".into(),
+            name: "load".into(),
+            line: 4,
+            end_line: 90,
+            score: 20,
+            reasons: vec![
+                Reason::Long(87),
+                Reason::Deep(5),
+                Reason::Risky(Risk::Unwrap, 3),
+                Reason::Churn(24),
+            ],
+        },
+        Spot {
+            rel: "src/old.rs".into(),
+            name: String::new(),
+            line: 1,
+            end_line: 1,
+            score: 3,
+            reasons: vec![Reason::Marked(1)],
+        },
+    ]));
+    let mut sim = sim_of(&app);
+    for words in [
+        "Weak Spots",
+        "A guide to read by",
+        "2 spots, from 12 files measured",
+        "load",
+        "src/load.rs:4",
+        "87 lines",
+        "nested 5 deep",
+        "3 unwraps",
+        "changed in 24 commits",
+        "notes in the file",
+        "1 TODO or FIXME",
+    ] {
+        assert!(shows(&mut sim, words), "{words} is not shown");
+    }
+    drop(sim);
+    let sent = click(sim_of(&app), "load");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Weak(crate::WeakMsg::Open(0)))),
+        "{sent:?}"
+    );
+    let sent = click_nth(sim_of(&app), "Ask why", 1);
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Weak(crate::WeakMsg::AskWhy(1)))),
         "{sent:?}"
     );
 }

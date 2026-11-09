@@ -668,6 +668,8 @@ const STRIP_RULE_H: f32 = 11.0;
 pub(crate) enum StripTool {
     Overview,
     Stats,
+    /// The weak spots page.
+    WeakSpots,
     Debug,
     CallGraph,
     ImportGraph,
@@ -680,15 +682,16 @@ pub(crate) enum StripTool {
 }
 
 /// The strip's tools from the top, in their groups, in the order a project
-/// is come to know: the whole of it (Overview, Stats), how its parts
+/// is come to know: the whole of it (Overview, Stats, its weak spots), how its parts
 /// connect (its graphs and maps), running it (Debug) — and More. A rule
 /// stands before each group but the first ([`STRIP_RULE_BEFORE`]). The
 /// strip holds what opens over the code or below it; what opens in the
 /// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Settings
 /// stands apart, at the strip's foot.
-pub(crate) const STRIP_TOP: [StripTool; 8] = [
+pub(crate) const STRIP_TOP: [StripTool; 9] = [
     StripTool::Overview,
     StripTool::Stats,
+    StripTool::WeakSpots,
     StripTool::CallGraph,
     StripTool::ImportGraph,
     StripTool::TypeMap,
@@ -697,7 +700,7 @@ pub(crate) const STRIP_TOP: [StripTool; 8] = [
     StripTool::More,
 ];
 /// The [`STRIP_TOP`] positions a group rule stands before.
-const STRIP_RULE_BEFORE: [usize; 3] = [2, 6, 7];
+const STRIP_RULE_BEFORE: [usize; 3] = [3, 7, 8];
 
 /// Where the strip's body starts: under the top bar and the update banner.
 pub(crate) fn body_top(app: &App) -> f32 {
@@ -823,6 +826,12 @@ pub(crate) fn strip_tool(
             tr!("Stats"),
             caps(Action::Stats),
             Message::Overview(OverviewMsg::ShowStats),
+        ),
+        StripTool::WeakSpots => (
+            Glyph::WeakSpots,
+            tr!("Weak Spots"),
+            caps(Action::WeakSpots),
+            Message::Weak(crate::WeakMsg::Show),
         ),
         // Running it, four ways: for real or worked out by the model, run
         // to its end or stepped through — one button, its menu the four.
@@ -1880,7 +1889,11 @@ mod tests {
             pitch
         );
         assert_eq!(
-            y(&app, StripTool::CallGraph) - y(&app, StripTool::Stats),
+            y(&app, StripTool::WeakSpots) - y(&app, StripTool::Stats),
+            pitch
+        );
+        assert_eq!(
+            y(&app, StripTool::CallGraph) - y(&app, StripTool::WeakSpots),
             pitch + rule
         );
         assert_eq!(

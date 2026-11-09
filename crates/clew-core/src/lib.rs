@@ -118,6 +118,7 @@ pub mod structure;
 pub mod testutil;
 pub mod trust;
 pub mod update;
+pub mod weakspots;
 
 /// A project-relative path as Clew writes one — in the protocol, in its
 /// state files, on the screen: `src/app/main.rs`, separated by `/` on every

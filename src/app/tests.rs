@@ -23,6 +23,7 @@ mod setup;
 mod speech;
 mod tour;
 mod voice;
+mod weakspots;
 mod windowtools;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -22590,6 +22591,12 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
         Message::Proof(crate::ProofMsg::Answered {
             stamp: s(),
             token: 1,
+            result: Ok(Vec::new()),
+        }),
+        Message::Weak(crate::WeakMsg::Built {
+            stamp: s(),
+            rev: 1,
+            files: 0,
             result: Ok(Vec::new()),
         }),
     ]

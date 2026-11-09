@@ -69,6 +69,8 @@ pub(crate) enum PaneCover<'a> {
     Overview,
     /// The code statistics.
     Stats,
+    /// The weak spots.
+    WeakSpots,
     /// The project glossary.
     Glossary,
 }
@@ -110,6 +112,8 @@ pub(crate) fn pane_cover(app: &App) -> Option<PaneCover<'_>> {
         PaneCover::Overview
     } else if app.proj.stats.showing {
         PaneCover::Stats
+    } else if app.proj.weak.showing {
+        PaneCover::WeakSpots
     } else if app.proj.glossary.showing {
         PaneCover::Glossary
     } else {
@@ -125,6 +129,7 @@ pub(crate) fn pane_area(app: &App) -> Element<'_, Message> {
             PaneCover::Docs(page) => docs_page(page),
             PaneCover::Overview => overview_home(app),
             PaneCover::Stats => stats_home(app),
+            PaneCover::WeakSpots => super::weakspots::weak_home(app),
             PaneCover::Glossary => glossary_home(app),
         });
     }
@@ -579,28 +584,8 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         // The module map, drawn natively (same engine as the Import Graph
         // overlay), sits at the top; the LLM prose follows.
         let mut items: Vec<Element<'_, Message>> = Vec::new();
-        if let Some(layout) = app
-            .proj
-            .overview
-            .map
-            .as_ref()
-            .filter(|l| !l.nodes.is_empty())
-        {
-            items.push(
-                column![
-                    text(tr!("Module map"))
-                        .size(ts::SUBTITLE)
-                        .color(theme::fg_muted()),
-                    container(
-                        iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
-                            .width(Fill)
-                            .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
-                    )
-                    .width(Fill),
-                ]
-                .spacing(6)
-                .into(),
-            );
+        if let Some(map) = module_map(app) {
+            items.push(map);
         }
         items.extend(render_prepared(app, &app.proj.overview.prepared));
         return container(
@@ -660,21 +645,77 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
             ),
         )
     };
+    let ask = column![
+        text(why)
+            .size(ts::BODY)
+            .color(theme::fg_muted())
+            .align_x(iced::Center),
+        action,
+    ]
+    .spacing(12)
+    .align_x(iced::Center)
+    .max_width(560);
+    // The architecture, drawn from the imports, before any prose about it:
+    // the map first, what writes the prose under it.
+    if let Some(map) = module_map(app) {
+        return container(
+            column![
+                row![
+                    text(tr!("Architecture Overview"))
+                        .size(ts::HEADING)
+                        .color(theme::fg()),
+                    space().width(Fill),
+                    super::chrome::close_button(close()),
+                ]
+                .align_y(iced::Center),
+                container(map).width(Fill).max_width(860),
+                container(ask).center_x(Fill),
+            ]
+            .spacing(16),
+        )
+        .width(Fill)
+        .height(Fill)
+        .padding([20, 28])
+        .into();
+    }
     closable_center(
         column![
             text(tr!("Architecture Overview"))
                 .size(ts::HEADING)
                 .color(theme::fg()),
-            text(why)
-                .size(ts::BODY)
-                .color(theme::fg_muted())
-                .align_x(iced::Center),
-            action,
+            ask,
         ]
         .spacing(12)
         .align_x(iced::Center)
         .max_width(560),
         close(),
+    )
+}
+
+/// The overview's module map — the project's most connected files and the
+/// imports between them, drawn as the Import Graph is — when there is
+/// structure enough to draw.
+fn module_map(app: &App) -> Option<Element<'_, Message>> {
+    let layout = app
+        .proj
+        .overview
+        .map
+        .as_ref()
+        .filter(|l| !l.nodes.is_empty())?;
+    Some(
+        column![
+            text(tr!("Module map"))
+                .size(ts::SUBTITLE)
+                .color(theme::fg_muted()),
+            container(
+                iced::widget::canvas::Canvas::new(overview_map_canvas(app, layout))
+                    .width(Fill)
+                    .height(iced::Length::Fixed(OVERVIEW_MAP_H)),
+            )
+            .width(Fill),
+        ]
+        .spacing(6)
+        .into(),
     )
 }
 

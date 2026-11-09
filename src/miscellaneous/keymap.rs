@@ -77,13 +77,15 @@ pub enum Action {
     Voice,
     Overview,
     Stats,
+    /// The weak spots page (`app::weakspots`).
+    WeakSpots,
     Glossary,
     SetUpProject,
     Tutorial,
 }
 
 impl Action {
-    pub const ALL: [Action; 36] = [
+    pub const ALL: [Action; 37] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -117,6 +119,7 @@ impl Action {
         Action::Voice,
         Action::Overview,
         Action::Stats,
+        Action::WeakSpots,
         Action::Glossary,
         Action::SetUpProject,
         Action::Tutorial,
@@ -158,6 +161,7 @@ impl Action {
             Action::Voice => "voice",
             Action::Overview => "overview",
             Action::Stats => "stats",
+            Action::WeakSpots => "weak_spots",
             Action::Glossary => "glossary",
             Action::SetUpProject => "set_up_project",
             Action::Tutorial => "tutorial",
@@ -205,6 +209,7 @@ impl Action {
             Action::Voice => tr!("Talk (voice)"),
             Action::Overview => tr!("Project overview"),
             Action::Stats => tr!("Project stats"),
+            Action::WeakSpots => tr!("Weak spots"),
             Action::Glossary => tr!("Glossary"),
             Action::SetUpProject => tr!("Set up project"),
             Action::Tutorial => tr!("Tutorial"),
@@ -252,6 +257,7 @@ impl Action {
             Action::Voice => at(MenuSection::Tools, tr_noop!("Talk")),
             Action::Overview => at(MenuSection::Tools, tr_noop!("Overview")),
             Action::Stats => at(MenuSection::Tools, tr_noop!("Stats")),
+            Action::WeakSpots => at(MenuSection::Tools, tr_noop!("Weak Spots")),
             Action::Glossary => at(MenuSection::Tools, tr_noop!("Glossary")),
             Action::SetUpProject => at(MenuSection::Tools, tr_noop!("Set Up Project…")),
             Action::Tutorial => at(MenuSection::View, tr_noop!("Tutorial")),
@@ -304,6 +310,8 @@ impl Action {
             // tUtorial.
             Action::Overview => Chord::cmd_shift('o'),
             Action::Stats => Chord::cmd_shift('n'),
+            // Where the Issues are likely to be.
+            Action::WeakSpots => Chord::cmd('i'),
             Action::Glossary => Chord::cmd_shift('y'),
             Action::SetUpProject => Chord::cmd_shift('r'),
             Action::Tutorial => Chord::cmd_shift('u'),

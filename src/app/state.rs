@@ -2080,6 +2080,8 @@ pub struct ProjectSession {
     pub fake: crate::app::fakerun::FakeRun,
     /// A Lean proof being stepped through (`app::proof`).
     pub proof: Option<crate::app::proof::ProofWalk>,
+    /// The weak spots page (`app::weakspots`).
+    pub weak: crate::app::weakspots::WeakSpots,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
     /// The Glossary page (`app::glossary`).
@@ -2401,6 +2403,7 @@ impl Default for ProjectSession {
             walk: Default::default(),
             fake: Default::default(),
             proof: None,
+            weak: Default::default(),
             docs: Default::default(),
             glossary: Default::default(),
             last_auto_refresh: Default::default(),

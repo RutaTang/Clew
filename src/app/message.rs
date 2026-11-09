@@ -101,6 +101,9 @@ pub enum Message {
     /// Step Through Proof (Lean): a tactic proof walked one tactic at a
     /// time. Handled in `app::proof` (`App::update_proof`).
     Proof(ProofMsg),
+    /// The weak spots page. Handled in `app::weakspots`
+    /// (`App::update_weak`).
+    Weak(WeakMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -2256,6 +2259,7 @@ impl Message {
             Message::Voice(m) => m.origin(),
             Message::Fake(m) => m.origin(),
             Message::Proof(m) => m.origin(),
+            Message::Weak(m) => m.origin(),
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }
@@ -3109,7 +3113,43 @@ impl<T> std::fmt::Debug for Handoff<T> {
     }
 }
 
-/// Fake run and fake debug (`app::fakerun`).
+/// The weak spots page (`app::weakspots`).
+#[derive(Debug, Clone)]
+pub enum WeakMsg {
+    /// Show the page, measuring the project if it changed since.
+    Show,
+    /// Measure it again.
+    Refresh,
+    /// A pass's spots, ranked; `files` is how many files it measured.
+    Built {
+        stamp: Stamp,
+        /// The file registry's revision it measured.
+        rev: u64,
+        files: usize,
+        result: Result<Vec<clew_core::weakspots::Spot>, String>,
+    },
+    /// Open the `0`th spot's code.
+    Open(usize),
+    /// Ask about the `0`th spot.
+    AskWhy(usize),
+    /// Put the page away.
+    Close,
+}
+
+impl WeakMsg {
+    /// Where the message comes from, for `dispatch`'s ownership check.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            WeakMsg::Built { stamp, .. } => Some(Origin::Stamped(stamp)),
+            WeakMsg::Show
+            | WeakMsg::Refresh
+            | WeakMsg::Open(_)
+            | WeakMsg::AskWhy(_)
+            | WeakMsg::Close => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ProofMsg {
     /// Step Through Proof from the code's context menu.

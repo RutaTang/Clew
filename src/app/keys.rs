@@ -328,6 +328,7 @@ impl App {
             ToggleAsk => self.update(Message::Ask(AskMsg::Toggle)),
             Run => self.update(Message::Debug(DebugMsg::Run)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
+            WeakSpots => self.update(Message::Weak(WeakMsg::Show)),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),
             TypeGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectTypes))),
             ProjectMaps => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps))),

@@ -41,8 +41,13 @@ impl App {
 
     /// Recompute the native module-map layout, e.g. once the import graph finishes
     /// resolving. Cheap and synchronous — the map is a canvas, not a prose segment.
+    /// Kept up to date while it is shown — with the overview's prose, or on
+    /// the page before any prose is written — or once it has been laid out.
     pub(crate) fn refresh_overview_map(&mut self) -> Task<Message> {
-        if self.proj.overview.markdown.is_some() {
+        if self.proj.overview.markdown.is_some()
+            || self.proj.overview.showing
+            || self.proj.overview.map.is_some()
+        {
             self.set_overview_map();
         }
         Task::none()
@@ -354,10 +359,12 @@ impl App {
         let covered = self.proj.docs.page.is_some()
             || self.proj.overview.showing
             || self.proj.stats.showing
+            || self.proj.weak.showing
             || self.proj.glossary.showing;
         self.proj.docs.page = None;
         self.proj.overview.showing = false;
         self.proj.stats.showing = false;
+        self.proj.weak.showing = false;
         self.proj.glossary.showing = false;
         covered
     }
@@ -367,8 +374,14 @@ impl App {
     pub(crate) fn update_overview(&mut self, message: OverviewMsg) -> Task<Message> {
         match message {
             OverviewMsg::Show => {
+                // The architecture, drawn from the imports, is there before
+                // any prose is written about it.
+                if self.proj.overview.map.is_none() {
+                    self.set_overview_map();
+                }
                 self.proj.overview.showing = true;
                 self.proj.stats.showing = false;
+                self.proj.weak.showing = false;
                 self.proj.glossary.showing = false;
                 self.proj.docs.page = None;
                 Task::none()
@@ -386,6 +399,7 @@ impl App {
             OverviewMsg::Close => {
                 self.proj.overview.showing = false;
                 self.proj.stats.showing = false;
+                self.proj.weak.showing = false;
                 Task::none()
             }
             OverviewMsg::StatsDone { rev, report, .. } => self.on_stats_done(rev, report),

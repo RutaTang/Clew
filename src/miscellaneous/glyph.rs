@@ -39,6 +39,8 @@ pub enum Glyph {
     Sparkle,
     /// Play, and a spark: a run the AI works out (Fake Run).
     FakeRun,
+    /// A warning triangle: the project's weak spots.
+    WeakSpots,
     /// A step over, and a spark: a run the AI works out, stepped through
     /// (Fake Debug).
     FakeDebug,
@@ -226,6 +228,11 @@ fn body(g: Glyph) -> &'static str {
         }
         Sparkle => {
             "<path d='M12 4 C12.6 10 14 11.4 20 12 C14 12.6 12.6 14 12 20 C11.4 14 10 12.6 4 12 C10 11.4 11.4 10 12 4 Z'/>"
+        }
+        // A triangle with a mark in it: look here.
+        WeakSpots => {
+            "<path d='M10.3 4.2 L2.6 17.5 A2 2 0 0 0 4.3 20.5 H19.7 A2 2 0 0 0 21.4 17.5 L13.7 4.2 A2 2 0 0 0 10.3 4.2 Z'/>\
+             <path d='M12 9.5 V13.5'/><circle cx='12' cy='16.8' r='0.9' fill='STROKE' stroke='none'/>"
         }
         // Play, and the spark of what the AI writes (as on TextLines).
         FakeRun => {

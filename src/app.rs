@@ -71,6 +71,7 @@ mod graph;
 pub(crate) mod proof;
 pub(crate) mod setup;
 pub(crate) mod suggest;
+pub(crate) mod weakspots;
 #[cfg(test)]
 pub(crate) use graph::project_map_layout;
 mod hover;

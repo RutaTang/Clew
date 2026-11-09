@@ -56,7 +56,8 @@ pub use app::message::{
     AskMsg, CallsMsg, ConnectMsg, ContentMsg, DebugMsg, DocsMsg, EditorMsg, ExplainMsg, ExportMsg,
     FakeMsg, FlowMsg, GlossaryMsg, GraphMsg, HoverMsg, IntegrationsMsg, LangField, LanguagesMsg,
     LspMsg, Message, NavMsg, OverviewMsg, ProjectMsg, ProofMsg, ReadingMsg, SemanticMsg, ServerMsg,
-    SettingsMsg, SimCmd, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WindowMsg,
+    SettingsMsg, SimCmd, TimeTravelMsg, TutorialMsg, UpdaterMsg, WalkMsg, WatchMsg, WeakMsg,
+    WindowMsg,
 };
 pub(crate) use app::message::{Handoff, Origin, Stamp};
 pub(crate) use app::model::*;
