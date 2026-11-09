@@ -2154,8 +2154,24 @@ pub enum WindowMsg {
 /// The guided tour.
 #[derive(Debug, Clone)]
 pub enum TutorialMsg {
-    /// Start the interactive tutorial (from the More menu).
+    /// The tour, asked for: the sheet that gets it ready first.
     Start,
+    /// The sample is written, and looked at — or could not be.
+    SampleWritten(Result<(crate::app::tour_sample::Placed, crate::app::setup::Census), String>),
+    /// The sheet's way to what a step needs: Settings, at its page.
+    SetUp(SettingsPage),
+    /// Find by meaning, passed over for this tour.
+    SkipEmbeddings,
+    /// The sheet, closed: no tour.
+    PrepClose,
+    /// The sheet's Start the Tour.
+    Go,
+    /// Open a window and begin the tour in it: taken by the shell.
+    InNewWindow(crate::app::tutorial::TourStart),
+    /// Open the sample in this window, and begin the tour once it is open.
+    BeginIn(crate::app::tutorial::TourStart),
+    /// Begin the tour, on the sample now open.
+    Begin,
     /// Move the tutorial by `delta` steps (+1 next, -1 back); past the end ends it.
     Step(i32),
     /// End the tutorial.
@@ -2963,7 +2979,17 @@ impl TutorialMsg {
     /// new variant cannot compile until it is classified here.
     pub fn origin(&self) -> Option<Origin<'_>> {
         match self {
-            TutorialMsg::Start | TutorialMsg::Step(..) | TutorialMsg::Exit => None,
+            TutorialMsg::Start
+            | TutorialMsg::SampleWritten(_)
+            | TutorialMsg::SetUp(_)
+            | TutorialMsg::SkipEmbeddings
+            | TutorialMsg::PrepClose
+            | TutorialMsg::Go
+            | TutorialMsg::InNewWindow(_)
+            | TutorialMsg::BeginIn(_)
+            | TutorialMsg::Begin
+            | TutorialMsg::Step(..)
+            | TutorialMsg::Exit => None,
         }
     }
 }

@@ -1254,6 +1254,13 @@ pub struct App {
     pub tutorial: Option<usize>,
     /// The layout the running tour began from, given back when it ends.
     pub(crate) tutorial_layout: Option<crate::app::tutorial::TourLayout>,
+    /// The sheet before the tour, while it is up.
+    pub(crate) tour_prep: Option<crate::app::tutorial::TourPrep>,
+    /// The sample this window's tour is on: set as the window opens it,
+    /// for the tour to begin once it is open.
+    pub(crate) tour_sample: Option<crate::app::tour_sample::Placed>,
+    /// What the step on screen shows once the file it opened has loaded.
+    pub(crate) tour_then: Option<(PathBuf, Message)>,
     /// The status-bar `#[cfg]` target dropdown is open.
     pub show_target_menu: bool,
     /// The app menu of Windows and Linux (the ☰ in the top bar) is open.

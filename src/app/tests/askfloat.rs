@@ -184,32 +184,36 @@ fn the_card_stands_in_the_corner() {
 }
 
 /// The tour's Ask step shows the card; the steps after it put it away.
-/// The tour speaks of the project by its folder's name.
+/// Every place the tour puts the caret is in Tea Shop, on the name it
+/// says: a line the sample no longer has, or a name not on it, would land
+/// the step's caret on nothing.
 #[test]
-fn the_tour_names_the_project() {
-    let app = scanned_app("askfloat-tour-names");
-    let root = &app.proj.project.as_ref().expect("scanned").root;
-    let name = root.file_name().unwrap().to_string_lossy().into_owned();
+fn the_tour_lands_on_the_names_it_names() {
+    let app = scanned_app("askfloat-tour-places");
     let steps = crate::app::tutorial::steps(&app);
-    for title in [
-        "Welcome to Clew",
-        "The file tree",
-        "The overview",
-        "Project stats",
-        "The call graph",
-    ] {
-        let step = steps.iter().find(|s| s.title == title).expect(title);
-        assert!(step.body.contains(&name), "{title}: {}", step.body);
+    let places: Vec<_> = steps.iter().filter_map(|s| s.place).collect();
+    assert!(places.len() >= 5, "{}", places.len());
+    for place in places {
+        let line = crate::app::tour_sample::line_of(place.rel, place.line_has)
+            .unwrap_or_else(|| panic!("{place:?}: no such line"));
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("assets/tour/teashop")
+                .join(place.rel),
+        )
+        .unwrap();
+        let held = text.lines().nth(line - 1).unwrap();
+        assert!(held.contains(place.name), "{place:?}: {held}");
     }
 }
 
 #[test]
 fn the_tour_shows_the_ask_card() {
     let mut app = scanned_app("askfloat-tour");
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let ask_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Ask Clew, or tell it what to do")
+        .position(|s| s.title == "Ask Clew")
         .expect("an Ask step");
     while app.tutorial.is_some_and(|s| s < ask_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));

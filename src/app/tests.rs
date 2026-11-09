@@ -18,6 +18,7 @@ mod remote_state_refresh;
 mod semantic_space;
 mod setup;
 mod speech;
+mod tour;
 mod voice;
 mod windowtools;
 
@@ -4401,7 +4402,7 @@ fn an_allow_counts_once_its_question_has_been_within_reach_for_the_delay() {
     // Under the tour, then in a window without the focus: out of reach.
     for (hide, show) in [
         (
-            Message::Tutorial(TutorialMsg::Start),
+            Message::Tutorial(TutorialMsg::Begin),
             Message::Tutorial(TutorialMsg::Exit),
         ),
         (
@@ -25964,7 +25965,7 @@ fn the_tour_gives_the_layout_back() {
         Message::Tutorial(TutorialMsg::Exit),
         Message::Tutorial(TutorialMsg::Step(1_000)),
     ] {
-        let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+        let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
         assert!(app.tutorial.is_some());
         let _ = app.update(end);
@@ -29236,6 +29237,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::UpdateNotes => "update notes",
             O::Settings => "settings",
             O::Connect => "connect",
+            O::TourPrep(_) => "tour prep",
             O::BpCondition(_) => "breakpoint condition",
             O::BookmarkNote(_) => "bookmark note",
             O::ReadingNote(_) => "reading note",
@@ -29258,6 +29260,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.update.show_notes = false;
         app.settings.open = false;
         app.connect = None;
+        app.tour_prep = None;
         app.proj.bp_cond_edit = None;
         app.proj.note_edit = None;
         app.proj.reading_note_edit = None;
@@ -29317,6 +29320,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         Box::new(|a| a.update.show_notes = true),
         Box::new(|a| a.settings.open = true),
         Box::new(|a| a.connect = Some(ConnectUi::default())),
+        Box::new(|a| a.tour_prep = Some(Default::default())),
         Box::new(move |a| a.proj.bp_cond_edit = Some((lib.clone(), 1, String::new()))),
         Box::new(|a| a.proj.note_edit = Some(("src/lib.rs".into(), 1, String::new()))),
         Box::new(|a| {
@@ -29382,7 +29386,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (18, 18),
+        (19, 19),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 
@@ -34431,7 +34435,7 @@ fn the_tour_gives_the_readers_place_back() {
     dismiss_overlays(&mut app);
     let trail = |app: &App| app.proj.history.flatten().len();
     let before = trail(&app);
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     // As the tour goes: a page, another file and its visit.
     let _ = app.update(Message::Overview(OverviewMsg::ShowStats));
     open_synchronously(&mut app, "notes.txt", None);
@@ -34444,11 +34448,12 @@ fn the_tour_gives_the_readers_place_back() {
     assert_eq!(app.active_viewer().unwrap().rel, "src/lib.rs");
 }
 
-/// The tour points at the ⋯ menu's rows a group at a time, as the menu
-/// groups them — every row in one — not a step a row.
+/// The tour points at one row of the ⋯ menu — the glossary, the tool
+/// there for reading a project — and stays short: a chapter is a few
+/// steps, not a step for every row and button.
 #[test]
-fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
-    use crate::app::tutorial::{Anchor, steps};
+fn the_tour_points_at_the_glossarys_row_and_stays_short() {
+    use crate::app::tutorial::{Anchor, Chapter, steps};
     let app = scanned_app("tour-menu-groups");
     let all = steps(&app);
     let menu: Vec<(usize, usize)> = all
@@ -34458,10 +34463,18 @@ fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
             _ => None,
         })
         .collect();
-    assert_eq!(menu.len(), 2, "{menu:?}");
-    let covered: usize = menu.iter().map(|(_, n)| n).sum();
-    assert_eq!(covered, crate::ui::TOOLS_MENU_ROWS.len());
-    assert!(all.len() <= 34, "{} steps", all.len());
+    assert_eq!(menu, [(crate::ui::ToolsRow::Glossary.index(), 1)]);
+    assert!(all.len() <= 28, "{} steps", all.len());
+    // Chapters in order, each once: never back to one left behind.
+    let mut seen: Vec<Chapter> = Vec::new();
+    for step in &all {
+        if seen.last() != Some(&step.chapter) {
+            assert!(!seen.contains(&step.chapter), "{:?} again", step.chapter);
+            seen.push(step.chapter);
+        }
+    }
+    assert_eq!(seen.first(), Some(&Chapter::Welcome));
+    assert_eq!(seen.last(), Some(&Chapter::Done));
 }
 
 /// L9: Test connection asks the model the Language model page's fields

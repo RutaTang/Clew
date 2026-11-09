@@ -65,7 +65,7 @@ use iced::{Element, Subscription, Task, Theme, keyboard, window};
 use crate::app::UnsavedEdits;
 use crate::tr_noop;
 use crate::{App, Message};
-use crate::{EditorMsg, SettingsMsg, UpdaterMsg, WindowMsg};
+use crate::{EditorMsg, SettingsMsg, TutorialMsg, UpdaterMsg, WindowMsg};
 
 /// The daemon's top-level state: one `App` per open window.
 pub struct Clew {
@@ -1229,6 +1229,21 @@ pub fn update(clew: &mut Clew, message: Shell) -> Task<Shell> {
             if matches!(msg, Message::Window(WindowMsg::Close)) {
                 return clew.request_close(id, Asker::User);
             }
+            // The tour, begun in a window of its own: the project open in
+            // this one stays as it is.
+            if let Message::Tutorial(TutorialMsg::InNewWindow(start)) = msg {
+                let opened = clew.open_window(false);
+                let Some(tour) = clew.focused.filter(|new| *new != id) else {
+                    return opened;
+                };
+                return Task::batch([
+                    opened,
+                    Task::done(Shell::Window(
+                        tour,
+                        Message::Tutorial(TutorialMsg::BeginIn(start)),
+                    )),
+                ]);
+            }
             // iced draws in software a window made for a DirectComposition
             // visual, which shows none of it (`app::corners`): it found no
             // GPU to draw with after all. Clew quits, as ⌘Q does, and starts
@@ -2255,6 +2270,31 @@ mod tests {
                 .chord(crate::keymap::Action::GotoLine),
             chord
         );
+    }
+
+    /// The tour asked for in a window with a project begins in a window of
+    /// its own: the shell opens one, focused, and it opens the sample; the
+    /// window that asked keeps what it has.
+    #[tokio::test]
+    async fn the_tour_begins_in_a_window_of_its_own() {
+        let dir = test_dir("shell-tour-window");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let _env = data_dir_override(&dir);
+        let sample = crate::app::tour_sample::place(&dir.join("tour")).unwrap();
+        let mut rt = Runtime::new();
+        let first = rt.window(blank_app());
+        rt.send(Shell::Window(
+            first,
+            Message::Tutorial(TutorialMsg::InNewWindow(crate::app::tutorial::TourStart {
+                sample: sample.clone(),
+                fetch: Vec::new(),
+            })),
+        ));
+        let second = rt.clew.focused.expect("the new window");
+        assert!(second != first && rt.is_open(second));
+        assert_eq!(rt.clew.windows[&second].tour_sample.as_ref(), Some(&sample));
+        assert!(rt.clew.windows[&first].tour_sample.is_none());
     }
 
     /// And on their voice settings: read from the file, a choice whose save

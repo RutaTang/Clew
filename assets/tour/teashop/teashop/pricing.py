@@ -1,0 +1,38 @@
+"""What an order costs: its subtotal, its discounts, then tax."""
+
+from decimal import ROUND_HALF_UP, Decimal
+
+from teashop.discounts import ALL, Discount
+from teashop.models import Order
+
+TAX_RATE = Decimal("0.08")
+
+
+def subtotal(order: Order) -> Decimal:
+    return sum((line.amount for line in order.lines), Decimal(0))
+
+
+def discounts(order: Order, rules: list[Discount] = ALL) -> list[tuple[str, Decimal]]:
+    """Each rule that applies to `order`, and how much it takes off."""
+    base = subtotal(order)
+    found = []
+    for rule in rules:
+        off = cents(rule.amount_off(order, base))
+        if off > 0:
+            found.append((rule.name, off))
+    return found
+
+
+def tax(amount: Decimal) -> Decimal:
+    return amount * TAX_RATE
+
+
+def total(order: Order) -> Decimal:
+    """The amount to charge: discounts first, then tax on what is left."""
+    taken_off = sum((off for _, off in discounts(order)), Decimal(0))
+    discounted = max(subtotal(order) - taken_off, Decimal(0))
+    return cents(discounted + tax(discounted))
+
+
+def cents(amount: Decimal) -> Decimal:
+    return amount.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

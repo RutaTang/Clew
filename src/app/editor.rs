@@ -430,10 +430,12 @@ impl App {
             Some(lang) => self.ensure_lsp(lang),
             None => Task::none(),
         };
+        // What the tour's step waits to show of this file, if it does.
+        let tour = self.tour_file_loaded(&abs);
         let content = self.content_tasks(abs, source, lang_key);
         // Symbols arrive later via `Highlighted`; follow_caret there resolves the
         // enclosing function. Here it shows the file until then.
-        self.follow_caret(Task::batch([scroll, lsp_task, content]))
+        self.follow_caret(Task::batch([scroll, lsp_task, content, tour]))
     }
 
     /// Off-thread re-highlight + git-info tasks for a file's current source,

@@ -944,6 +944,19 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
         .spacing(14)
         .align_y(iced::Center);
 
+    // The way in for someone new: the tour, on a project Clew brings.
+    let tour = button(
+        text(tr!("New to Clew? Take the tour"))
+            .size(ts::BODY)
+            .color(theme::accent()),
+    )
+    .style(theme::icon_button(false))
+    .padding([4, 8])
+    .on_press(super::heard::said(
+        tr!("New to Clew? Take the tour"),
+        Message::Tutorial(crate::TutorialMsg::Start),
+    ));
+
     center(
         column![
             brand,
@@ -951,6 +964,8 @@ pub(crate) fn welcome(app: &App) -> Element<'_, Message> {
             text(subtitle).size(ts::BASE).color(theme::fg_muted()),
             space().height(22),
             actions,
+            space().height(10),
+            tour,
         ]
         .spacing(6)
         .align_x(iced::Center),

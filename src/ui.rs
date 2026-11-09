@@ -34,6 +34,7 @@ mod ops;
 pub(crate) use ops::*;
 mod dialogs;
 pub(crate) use dialogs::*;
+mod slide;
 mod tutorial;
 pub(crate) use tutorial::*;
 mod statusbar;
@@ -325,6 +326,8 @@ pub(crate) enum ActiveOverlay<'a> {
     UpdateNotes,
     Settings,
     Connect,
+    /// The sheet before the tour (under Settings, which its steps open).
+    TourPrep(&'a crate::app::tutorial::TourPrep),
     BpCondition(&'a (std::path::PathBuf, usize, String)),
     BookmarkNote(&'a (String, usize, String)),
     ReadingNote(&'a (String, String, String)),
@@ -365,6 +368,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Settings
     } else if app.connect.is_some() {
         O::Connect
+    } else if let Some(prep) = &app.tour_prep {
+        O::TourPrep(prep)
     } else if let Some(edit) = &app.proj.bp_cond_edit {
         O::BpCondition(edit)
     } else if let Some(edit) = &app.proj.note_edit {
@@ -418,6 +423,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => "update-notes",
             Self::Settings => "settings",
             Self::Connect => "connect",
+            Self::TourPrep(_) => "tour-prep",
             Self::Why(_) => "why",
             Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
@@ -470,6 +476,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => update_notes_modal(app),
             Self::Settings => settings_modal(app),
             Self::Connect => connect_modal(app),
+            Self::TourPrep(prep) => tutorial::tour_prep_sheet(app, prep),
             Self::BpCondition(edit) => bp_condition_modal(app, edit),
             Self::BookmarkNote(edit) => bookmark_note_modal(edit),
             Self::ReadingNote(edit) => reading_note_modal(edit),
@@ -500,6 +507,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::UpdateNotes => Message::Updater(UpdaterMsg::CloseNotes),
             Self::Settings => Message::Settings(SettingsMsg::Close),
             Self::Connect => Message::Connect(ConnectMsg::Close),
+            Self::TourPrep(_) => Message::Tutorial(TutorialMsg::PrepClose),
             Self::BpCondition(_) => Message::Debug(DebugMsg::BpConditionCancel),
             Self::BookmarkNote(_) => Message::Reading(ReadingMsg::BookmarkNoteCancel),
             Self::ReadingNote(_) => Message::Reading(ReadingMsg::NoteEditCancel),

@@ -1324,12 +1324,11 @@ pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Mess
             tr!("Keyboard Shortcuts").into(),
             Some(Message::Window(WindowMsg::OpenShortcuts)),
         ),
-        // The tour needs a project to show: without one the row stays
-        // (the menu keeps its shape) but is inert.
+        // The tour brings its own project: there with one open or none.
         ToolsRow::Tutorial => (
             Glyph::Help,
             tr!("Tutorial").into(),
-            has_project.then_some(Message::Tutorial(TutorialMsg::Start)),
+            Some(Message::Tutorial(TutorialMsg::Start)),
         ),
     }
 }

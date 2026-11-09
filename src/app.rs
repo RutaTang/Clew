@@ -94,6 +94,7 @@ mod settings;
 pub(crate) mod speech;
 pub(crate) mod spoken;
 mod timetravel;
+pub(crate) mod tour_sample;
 pub(crate) mod tutorial;
 mod update;
 mod updater;

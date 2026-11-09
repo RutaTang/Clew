@@ -2395,14 +2395,14 @@ fn click(sim: Sim<'_>, label: &str) -> Vec<Message> {
 #[test]
 fn the_tutorial_walks_every_step_end_to_end() {
     let mut app = reader_app();
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let total = crate::app::tutorial::steps(&app).len();
     assert!(total > 10, "the tour lost its steps: {total}");
     for i in 0..total {
         assert_eq!(app.tutorial, Some(i));
         let title = crate::app::tutorial::steps(&app)[i].title.clone();
         let mut sim = sim_of(&app);
-        let counter = format!("Step {} of {total}", i + 1);
+        let counter = format!("{} of {total}", i + 1);
         assert!(sim.find(counter.as_str()).is_ok(), "no {counter:?}");
         assert!(
             sim.find(title.as_str()).is_ok(),
@@ -2421,16 +2421,16 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
-/// Every tool on the strip has its one tutorial step, Settings the last
-/// (the type map's came in before it); and no text field holds the keyboard
-/// while the tour shows its tab — the SEARCH box did, and took the → and
-/// Enter that step the tour.
+/// Every tool on the strip for reading a project has its one tutorial
+/// step, and none has two; and no text field holds the keyboard while the
+/// tour shows its tab — the SEARCH box did, and took the → and Enter that
+/// step the tour.
 #[test]
 fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
     use crate::app::tutorial::{Anchor, steps};
     use crate::ui::StripTool;
     let mut app = reader_app();
-    let _ = app.update(Message::Tutorial(TutorialMsg::Start));
+    let _ = app.update(Message::Tutorial(TutorialMsg::Begin));
     let all = steps(&app);
     for tool in super::STRIP_TOP.into_iter().chain([StripTool::Settings]) {
         let on: Vec<&str> = all
@@ -2438,11 +2438,19 @@ fn the_tutorial_points_at_each_tool_and_leaves_no_field_holding_its_keys() {
             .filter(|s| s.anchor == Anchor::Strip(tool))
             .map(|s| s.title.as_str())
             .collect();
-        assert_eq!(on.len(), 1, "{tool:?}: {on:?}");
+        let reads = matches!(
+            tool,
+            StripTool::Overview
+                | StripTool::ProjectMaps
+                | StripTool::CallGraph
+                | StripTool::TypeMap
+                | StripTool::ImportGraph
+                | StripTool::Debug
+        );
+        assert_eq!(on.len(), usize::from(reads), "{tool:?}: {on:?}");
     }
     let at = |title: &str| all.iter().position(|s| s.title == title).unwrap();
-    assert!(all[at("Settings")].anchor == Anchor::Strip(StripTool::Settings));
-    assert!(all[at("The type map")].anchor == Anchor::Strip(StripTool::TypeMap));
+    assert!(all[at("Types and their kinds")].anchor == Anchor::Strip(StripTool::TypeMap));
     assert!(all.iter().any(|s| s.anchor == Anchor::AskCorner));
     assert!(all.iter().any(|s| s.anchor == Anchor::FileTools));
     assert!(all.iter().any(|s| s.anchor == Anchor::ViewMenu));

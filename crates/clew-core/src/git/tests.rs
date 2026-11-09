@@ -2389,3 +2389,81 @@ fn the_working_status_names_each_change_once() {
         "{inside:?}"
     );
 }
+
+/// A history written for a project Clew makes itself is the one asked for:
+/// each commit's files as they were in it, its message, its author, its date
+/// — and a path that would leave the project is refused, not written.
+#[test]
+fn a_written_history_is_the_one_asked_for() {
+    let dir = TempDir::new("written-history");
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let first = [("a.py", "x = 1\n"), ("pkg/b.py", "y = 2\n")];
+    let second = [("a.py", "x = 3\n")];
+    write_history(
+        &root,
+        ("Mira Chen", "mira@teashop.example"),
+        &[
+            NewCommit {
+                message: "Start",
+                date: "2025-03-04T10:12:00+00:00",
+                files: &first,
+            },
+            NewCommit {
+                message: "Change a\n\nWhy it changed.",
+                date: "2025-03-06T09:00:00+00:00",
+                files: &second,
+            },
+        ],
+    )
+    .unwrap();
+    let log = sh_git_out(&root, &["log", "--format=%an <%ae> %aI %cI %s"]);
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        [
+            "Mira Chen <mira@teashop.example> 2025-03-06T09:00:00Z 2025-03-06T09:00:00Z Change a"
+                .replace('Z', "+00:00"),
+            "Mira Chen <mira@teashop.example> 2025-03-04T10:12:00Z 2025-03-04T10:12:00Z Start"
+                .replace('Z', "+00:00"),
+        ]
+    );
+    let head = sh_git_out(&root, &["rev-parse", "HEAD~1"]);
+    assert_eq!(
+        file_at(&root, head.trim(), "a.py").unwrap().as_deref(),
+        Some("x = 1\n")
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.py")).unwrap(),
+        "x = 3\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("pkg/b.py")).unwrap(),
+        "y = 2\n"
+    );
+    assert_eq!(
+        commit_message(&root, sh_git_out(&root, &["rev-parse", "HEAD"]).trim())
+            .unwrap()
+            .as_deref(),
+        Some("Change a\n\nWhy it changed.")
+    );
+    assert!(
+        sh_git_out(&root, &["status", "--porcelain"])
+            .trim()
+            .is_empty(),
+        "everything written is committed"
+    );
+
+    let other = TempDir::new("written-history-out");
+    let root = std::fs::canonicalize(other.path()).unwrap();
+    let outside = [("../escaped.py", "no\n")];
+    let refused = write_history(
+        &root,
+        ("Mira Chen", "mira@teashop.example"),
+        &[NewCommit {
+            message: "Out",
+            date: "2025-03-04T10:12:00+00:00",
+            files: &outside,
+        }],
+    );
+    assert!(matches!(refused, Err(GitError::Refused(_))), "{refused:?}");
+    assert!(!root.parent().unwrap().join("escaped.py").exists());
+}

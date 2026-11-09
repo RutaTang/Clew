@@ -505,7 +505,7 @@ impl App {
     /// [`ServerLook`]): the open project's `lsp.toml` and choices when it is
     /// the one open, clew's defaults before it is; the leave to build on
     /// record either way.
-    fn server_look(&self, root: &Path) -> ServerLook {
+    pub(crate) fn server_look(&self, root: &Path) -> ServerLook {
         let open = self.proj.project.as_ref().is_some_and(|p| p.root == root);
         ServerLook {
             config: if open {
@@ -656,6 +656,8 @@ impl App {
         if intent.explain {
             tasks.push(self.on_explain_project(false));
         }
+        // The tour's sample, open and set up: its tour begins.
+        tasks.push(self.begin_tour_when_open());
         Task::batch(tasks)
     }
 

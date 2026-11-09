@@ -3148,6 +3148,78 @@ pub fn tracked_files(root: &Path) -> Result<Option<Vec<String>>, GitError> {
     ))
 }
 
+// ------------------------------------------------------- a history written
+
+/// One commit for [`write_history`]: its message, its date (the author's and
+/// the committer's, in a form git reads, such as `2025-03-04T10:12:00+00:00`),
+/// and the files it adds or changes, root-relative with `/`, as they are in
+/// it.
+pub struct NewCommit<'a> {
+    pub message: &'a str,
+    pub date: &'a str,
+    pub files: &'a [(&'a str, &'a str)],
+}
+
+/// Make `root`, an empty directory, a repository whose history is `commits`,
+/// oldest first: each one's files written, then committed by `author`
+/// (name, email) at its date. For a project Clew writes itself (the tour's
+/// sample), whose history is part of what it shows. Blocking (git
+/// subprocesses).
+///
+/// Run as every other command is ([`base_command`]): no hook, no fsmonitor,
+/// nothing fetched. What the reader's own configuration could add to a
+/// commit is pinned off as well: a signature (`commit.gpgsign`) would ask for
+/// a key, and a template directory would copy its hooks in.
+pub fn write_history(
+    root: &Path,
+    author: (&str, &str),
+    commits: &[NewCommit<'_>],
+) -> Result<(), GitError> {
+    installed_version()?;
+    let git = |args: &[&str], date: Option<&str>| -> Result<(), GitError> {
+        let mut cmd = base_command(root);
+        cmd.args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .arg("-c")
+        .arg(format!("user.name={}", author.0))
+        .arg("-c")
+        .arg(format!("user.email={}", author.1))
+        .args(args);
+        if let Some(date) = date {
+            cmd.env("GIT_AUTHOR_NAME", author.0)
+                .env("GIT_AUTHOR_EMAIL", author.1)
+                .env("GIT_AUTHOR_DATE", date)
+                .env("GIT_COMMITTER_NAME", author.0)
+                .env("GIT_COMMITTER_EMAIL", author.1)
+                .env("GIT_COMMITTER_DATE", date);
+        }
+        execute(cmd, GIT_TIMEOUT, Cap::Fail(1 << 20))?
+            .success()
+            .map(drop)
+    };
+    git(&["init", "-q", "--template="], None)?;
+    for commit in commits {
+        for (rel, text) in commit.files {
+            check_rel(rel)?;
+            let path = root.join(rel);
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| GitError::Io(e.to_string()))?;
+            }
+            std::fs::write(&path, text).map_err(|e| GitError::Io(e.to_string()))?;
+        }
+        git(&["add", "-A"], None)?;
+        git(
+            &["commit", "-q", "--no-verify", "-m", commit.message],
+            Some(commit.date),
+        )?;
+    }
+    Ok(())
+}
+
 // ----------------------------------------------------------- one operation
 
 /// Run one [`clew_protocol::GitOp`] against the repository at `root` and

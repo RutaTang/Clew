@@ -8,6 +8,7 @@ use iced::widget::{column, row};
 
 use crate::app::tutorial::{Anchor, steps};
 use crate::ui::StripTool;
+use crate::ui::slide::{GLIDE, eased, slide};
 
 /// Half the side of the spotlight hole over a single strip tool.
 const TOOL_HOLE_HALF: f32 = 19.0;
@@ -112,6 +113,88 @@ pub(crate) fn region_rect(app: &App, anchor: Anchor) -> Option<iced::Rectangle> 
     }
 }
 
+/// The rectangle `t` (eased) of the way from `a` to `b`. Nothing — the whole
+/// window dimmed — is a hole of no size in the middle of the other: the hole
+/// opens out of it, or closes into it.
+fn between(
+    a: Option<iced::Rectangle>,
+    b: Option<iced::Rectangle>,
+    t: f32,
+) -> Option<iced::Rectangle> {
+    let point = |r: iced::Rectangle| iced::Rectangle {
+        x: r.center_x(),
+        y: r.center_y(),
+        width: 0.0,
+        height: 0.0,
+    };
+    let mix = |a: iced::Rectangle, b: iced::Rectangle| iced::Rectangle {
+        x: a.x + (b.x - a.x) * t,
+        y: a.y + (b.y - a.y) * t,
+        width: a.width + (b.width - a.width) * t,
+        height: a.height + (b.height - a.height) * t,
+    };
+    match (a, b) {
+        (Some(a), Some(b)) => Some(mix(a, b)),
+        (None, Some(b)) => Some(mix(point(b), b)),
+        (Some(a), None) if t < 1.0 => Some(mix(a, point(a))),
+        _ => None,
+    }
+}
+
+/// The spotlight's way from one hole to the next: where it set out from,
+/// where it is going, when it set out, and the frame being drawn — and
+/// when the tour began, for the veil coming up.
+#[derive(Debug, Default)]
+pub(crate) struct Glide {
+    from: Option<iced::Rectangle>,
+    to: Option<iced::Rectangle>,
+    since: Option<std::time::Instant>,
+    now: Option<std::time::Instant>,
+    began: Option<std::time::Instant>,
+}
+
+impl Glide {
+    /// How far along the glide is at `now` (eased), 1 once it is there.
+    fn progress(&self, now: std::time::Instant) -> f32 {
+        match self.since {
+            Some(since) => eased(now.duration_since(since).as_secs_f32() / GLIDE.as_secs_f32()),
+            None => 1.0,
+        }
+    }
+
+    /// A frame at `now`, the hole to show being `hole`: a new hole sets
+    /// out from where the last was drawn. Whether another frame is wanted.
+    pub(crate) fn frame(&mut self, hole: Option<iced::Rectangle>, now: std::time::Instant) -> bool {
+        self.began.get_or_insert(now);
+        if self.to != hole {
+            let here = self.now.map_or(self.to, |then| {
+                between(self.from, self.to, self.progress(then))
+            });
+            self.from = here;
+            self.to = hole;
+            self.since = Some(now);
+        }
+        self.now = Some(now);
+        let settled = self.progress(now) >= 1.0;
+        let up = self
+            .began
+            .is_some_and(|began| now.duration_since(began) >= GLIDE);
+        !(settled && up)
+    }
+
+    /// The hole to draw, and how far up the veil is (0 to 1): `hole` as
+    /// asked, until a frame has seen it.
+    pub(crate) fn shown(&self, hole: Option<iced::Rectangle>) -> (Option<iced::Rectangle>, f32) {
+        let Some(now) = self.now.filter(|_| self.to == hole) else {
+            return (hole, 1.0);
+        };
+        let shade = self.began.map_or(1.0, |began| {
+            eased(now.duration_since(began).as_secs_f32() / GLIDE.as_secs_f32())
+        });
+        (between(self.from, self.to, self.progress(now)), shade)
+    }
+}
+
 /// Canvas that dims the window except `hole` (if any) and outlines it — the
 /// spotlight. Drawn as four dim rectangles around the hole so the highlighted
 /// region shows through at full brightness.
@@ -125,11 +208,28 @@ struct Spotlight {
 }
 
 impl iced::widget::canvas::Program<Message> for Spotlight {
-    type State = ();
+    type State = Glide;
+
+    /// Each frame: the hole moved, it glides there from where it is drawn
+    /// now; and a frame asked for while it is on its way.
+    fn update(
+        &self,
+        glide: &mut Glide,
+        event: &iced::widget::canvas::Event,
+        _bounds: iced::Rectangle,
+        _cursor: iced::advanced::mouse::Cursor,
+    ) -> Option<iced::widget::canvas::Action<Message>> {
+        let iced::Event::Window(iced::window::Event::RedrawRequested(now)) = event else {
+            return None;
+        };
+        glide
+            .frame(self.hole, *now)
+            .then(iced::widget::canvas::Action::request_redraw)
+    }
 
     fn draw(
         &self,
-        _state: &(),
+        glide: &Glide,
         renderer: &iced::Renderer,
         _theme: &iced::Theme,
         bounds: iced::Rectangle,
@@ -137,7 +237,8 @@ impl iced::widget::canvas::Program<Message> for Spotlight {
     ) -> Vec<iced::widget::canvas::Geometry> {
         use iced::widget::canvas::{Frame, Path, Stroke};
         let mut frame = Frame::new(renderer, bounds.size());
-        let dim = theme::scrim(0.6);
+        let (hole, shade) = glide.shown(self.hole);
+        let dim = theme::scrim(0.6 * shade);
         let pt = iced::Point::new;
         let sz = iced::Size::new;
         let w = bounds.width;
@@ -147,7 +248,7 @@ impl iced::widget::canvas::Program<Message> for Spotlight {
         // they stay clear), all but the hole.
         let veil = Path::new(|p| {
             p.rounded_rectangle(pt(0.0, 0.0), sz(w, h), theme::window_corners().into());
-            if let Some(r) = self.hole {
+            if let Some(r) = hole {
                 p.rectangle(pt(r.x, r.y), sz(r.width, r.height));
             }
         });
@@ -158,7 +259,7 @@ impl iced::widget::canvas::Program<Message> for Spotlight {
                 rule: iced::widget::canvas::fill::Rule::EvenOdd,
             },
         );
-        if let Some(r) = self.hole {
+        if let Some(r) = hole {
             // Accent outline offset from the region by `outline_pad`:
             // positive frames just outside (so it never covers the region's
             // own content, e.g. the breadcrumb or first code line); negative
@@ -191,14 +292,23 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
         return slot();
     };
 
-    // The callout card: progress · title · body · controls.
-    let progress = text(tr!(
-        "Step {step} of {total}",
-        step = step_i + 1,
-        total = total
-    ))
-    .size(ts::SMALL)
-    .color(theme::accent());
+    // The callout card: its chapter and how far along · title · body ·
+    // controls.
+    let chapter: Element<'_, Message> = match step.chapter.title() {
+        Some(title) => text(crate::i18n::lookup(title).to_string())
+            .size(ts::SMALL)
+            .color(theme::accent())
+            .into(),
+        None => slot(),
+    };
+    let count = text(tr!("{step} of {total}", step = step_i + 1, total = total))
+        .size(ts::SMALL)
+        .color(theme::dim());
+    let progress = column![
+        row![chapter, space().width(Fill), count].align_y(iced::Center),
+        progress_bar((step_i + 1) as f32 / total as f32),
+    ]
+    .spacing(6);
     let title = text(step.title.clone()).size(ts::TITLE).color(theme::fg());
     let body = text(step.body.clone())
         .size(ts::BASE)
@@ -384,7 +494,8 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill);
 
-    let card_layer = container(opaque(card))
+    // The card slides to each step's place, as the spotlight glides there.
+    let card_layer = container(slide(opaque(card)))
         .width(Fill)
         .height(Fill)
         .align_x(ax)
@@ -394,4 +505,323 @@ pub(crate) fn tutorial_overlay(app: &App) -> Element<'_, Message> {
     // Block clicks to the app while the tour runs; clicking the dimmed backdrop
     // does nothing (leaving is via Skip / Done), so a stray click can't drop it.
     opaque(mouse_area(stack![spotlight, card_layer]).on_press(Message::Noop))
+}
+
+/// How far along the tour is, as a thin bar across the card: `done` of 1.
+fn progress_bar<'a>(done: f32) -> Element<'a, Message> {
+    let track = |_: &iced::Theme| container::Style {
+        background: Some(theme::hairline().into()),
+        border: iced::border::rounded(1.5),
+        ..container::Style::default()
+    };
+    let fill = |_: &iced::Theme| container::Style {
+        background: Some(theme::accent().into()),
+        border: iced::border::rounded(1.5),
+        ..container::Style::default()
+    };
+    let done = done.clamp(0.0, 1.0);
+    // Portions of a row: what is done, and what is not.
+    let parts = |share: f32| ((share * 1000.0).round() as u16).max(1);
+    container(row![
+        container(space())
+            .width(Length::FillPortion(parts(done)))
+            .height(3)
+            .style(fill),
+        space().width(Length::FillPortion(parts(1.0 - done))),
+    ])
+    .width(Fill)
+    .height(3)
+    .style(track)
+    .into()
+}
+
+/// The sheet before the tour (see `crate::app::tutorial::TourPrep`): what
+/// the tour needs, one step at a time — the step it is on lit and its
+/// button the one to press, a step done ticked — and Start the Tour once
+/// what it cannot do without is there.
+pub(crate) fn tour_prep_sheet<'a>(
+    app: &'a App,
+    prep: &'a crate::app::tutorial::TourPrep,
+) -> Element<'a, Message> {
+    use super::chrome::{Backdrop, CONFIRM_PAD, DIALOG_W, Placement, modal};
+    use crate::app::tutorial::Need;
+    let current = prep.current(app);
+    let sample = prep.sample.as_ref();
+
+    let header = row![
+        text(tr!("Before the tour"))
+            .size(ts::TITLE)
+            .color(theme::fg()),
+        space().width(Fill),
+        super::chrome::close_button_saying(
+            super::heard::said(tr!("Not now"), Message::Tutorial(TutorialMsg::PrepClose)),
+            tr!("Not now"),
+        ),
+    ]
+    .align_y(iced::Center);
+    let intro = text(tr!(
+        "The tour shows Clew on Tea Shop, a small project it comes with, in a window of its own. It needs a few things first."
+    ))
+    .size(ts::BASE)
+    .color(theme::fg_muted())
+    .wrapping(Wrapping::Word);
+
+    // One step: its marker (a tick when done, its number lit when it is
+    // the one to do, else dim), its name, what it is for, and its buttons.
+    let step = |number: usize,
+                need: Need,
+                name: &'a str,
+                optional: bool,
+                about: String,
+                actions: Vec<Element<'a, Message>>|
+     -> Element<'a, Message> {
+        let done = prep.met(app, need);
+        let on = current == Some(need);
+        let marker: Element<'a, Message> = if done {
+            container(glyph::icon(Glyph::Check, theme::bg(), 12.0))
+                .center(22)
+                .style(|_: &iced::Theme| container::Style {
+                    background: Some(theme::success().into()),
+                    border: iced::border::rounded(11),
+                    ..container::Style::default()
+                })
+                .into()
+        } else {
+            container(text(number.to_string()).size(ts::SMALL).color(if on {
+                theme::bg()
+            } else {
+                theme::dim()
+            }))
+            .center(22)
+            .style(move |_: &iced::Theme| container::Style {
+                background: on.then(|| theme::accent().into()),
+                border: iced::border::rounded(11)
+                    .width(if on { 0.0 } else { 1.0 })
+                    .color(theme::hairline()),
+                ..container::Style::default()
+            })
+            .into()
+        };
+        let mut title = row![text(name).size(ts::EMPHASIS).color(if done || on {
+            theme::fg()
+        } else {
+            theme::fg_muted()
+        })]
+        .spacing(8)
+        .align_y(iced::Center);
+        if optional {
+            title = title.push(text(tr!("Optional")).size(ts::SMALL).color(theme::dim()));
+        }
+        let mut lines = column![
+            title,
+            text(about)
+                .size(ts::BODY)
+                .color(theme::fg_muted())
+                .wrapping(Wrapping::Word),
+        ]
+        .spacing(4);
+        if !done && !actions.is_empty() {
+            lines = lines.push(row(actions).spacing(8).padding(Padding {
+                top: 4.0,
+                ..Padding::ZERO
+            }));
+        }
+        row![marker, lines.width(Fill)].spacing(14).into()
+    };
+    // A step's button: the lit step's the primary one, every other quiet.
+    let action = |need: Need, label: &'a str, msg: Message| -> Element<'a, Message> {
+        let style = if current == Some(need) {
+            theme::primary_button
+        } else {
+            theme::secondary_button
+        };
+        button(text(label).size(ts::BODY))
+            .style(style)
+            .padding([4, 12])
+            .on_press(super::heard::said(label, msg))
+            .into()
+    };
+
+    let model = if app.llm_available {
+        tr!("All set.").to_string()
+    } else {
+        tr!("Clew explains code and answers questions with a language model you choose. Add its API key.")
+            .to_string()
+    };
+    let embeddings = if app.embed_available {
+        tr!("All set.").to_string()
+    } else if prep.skip_embeddings {
+        tr!("Skipped: the tour shows where it is, without results.").to_string()
+    } else {
+        tr!("Search code by what it does. With a model on this computer, or a service.").to_string()
+    };
+    let shop = match sample {
+        None => tr!("Getting Tea Shop ready…").to_string(),
+        Some(Err(e)) => e.clone(),
+        Some(Ok((_, census))) => {
+            let servers = if census.servers.is_empty() {
+                tr!("Its language server is ready.").to_string()
+            } else {
+                tr!(
+                    "Set up as the tour starts: {servers}.",
+                    servers = crate::app::setup::servers_line(&census.servers)
+                )
+            };
+            let calls = crate::app::setup::explain_line(
+                app.llm_available,
+                Some(census.calls),
+                app.embed_available,
+            );
+            format!("{servers} {calls}")
+        }
+    };
+
+    let steps = column![
+        step(
+            1,
+            Need::Model,
+            tr!("A language model"),
+            false,
+            model,
+            vec![action(
+                Need::Model,
+                tr!("Add an API Key…"),
+                Message::Tutorial(TutorialMsg::SetUp(crate::SettingsPage::LanguageModel)),
+            )],
+        ),
+        step(
+            2,
+            Need::Embeddings,
+            tr!("Find by meaning"),
+            true,
+            embeddings,
+            vec![
+                action(
+                    Need::Embeddings,
+                    tr!("Set Up…"),
+                    Message::Tutorial(TutorialMsg::SetUp(crate::SettingsPage::Embeddings)),
+                ),
+                button(text(tr!("Skip")).size(ts::BODY))
+                    .style(theme::toolbar_button)
+                    .padding([4, 12])
+                    .on_press(super::heard::said(
+                        tr!("Skip"),
+                        Message::Tutorial(TutorialMsg::SkipEmbeddings),
+                    ))
+                    .into(),
+            ],
+        ),
+        step(3, Need::Server, tr!("Tea Shop"), false, shop, Vec::new()),
+    ]
+    .spacing(18);
+
+    let ready = prep.ready(app);
+    let start = button(text(tr!("Start the Tour")).size(ts::BASE))
+        .style(theme::primary_button)
+        .padding([6, 16])
+        .on_press_maybe(ready.then(|| {
+            super::heard::said(tr!("Start the Tour"), Message::Tutorial(TutorialMsg::Go))
+        }));
+    let start = if ready {
+        start.into()
+    } else {
+        super::toolbar::tip_at(
+            start,
+            if app.llm_available {
+                tr!("Ready once Tea Shop is")
+            } else {
+                tr!("Needs a language model first")
+            },
+            None,
+            iced::widget::tooltip::Position::Top,
+        )
+    };
+    let not_now = button(text(tr!("Not now")).size(ts::BASE))
+        .style(theme::toolbar_button)
+        .padding([6, 16])
+        .on_press(super::heard::said(
+            tr!("Not now"),
+            Message::Tutorial(TutorialMsg::PrepClose),
+        ));
+
+    let panel = container(
+        column![
+            header,
+            intro,
+            steps,
+            row![space().width(Fill), not_now, start]
+                .spacing(10)
+                .align_y(iced::Center),
+        ]
+        .spacing(18),
+    )
+    .width(DIALOG_W)
+    .padding(CONFIRM_PAD)
+    .style(theme::modal_panel);
+    modal(panel, Placement::Center, Backdrop::Dim(None))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> iced::Rectangle {
+        iced::Rectangle {
+            x,
+            y,
+            width: w,
+            height: h,
+        }
+    }
+
+    /// The spotlight's veil comes up as the tour begins; a hole opens out
+    /// of its own middle, glides from one step's region to the next and
+    /// closes into its middle again — frames asked for while it moves,
+    /// none once it is there.
+    #[test]
+    fn the_spotlight_glides_from_step_to_step_and_settles() {
+        let t0 = Instant::now();
+        let ms = |n: u64| t0 + Duration::from_millis(n);
+        let mut glide = Glide::default();
+
+        // The welcome: no hole, the veil coming up.
+        assert!(glide.frame(None, ms(0)));
+        let (hole, shade) = glide.shown(None);
+        assert_eq!((hole, shade), (None, 0.0));
+        assert!(!glide.frame(None, ms(400)), "up, and still: no frames");
+        assert_eq!(glide.shown(None), (None, 1.0));
+
+        // A hole opens out of its middle.
+        let a = rect(100.0, 100.0, 200.0, 100.0);
+        assert!(glide.frame(Some(a), ms(500)));
+        let opening = glide.shown(Some(a)).0.unwrap();
+        assert_eq!((opening.center_x(), opening.width), (200.0, 0.0));
+        assert!(glide.frame(Some(a), ms(600)));
+        let opened = glide.shown(Some(a)).0.unwrap();
+        assert!(opened.width > 100.0 && opened.width < 200.0, "{opened:?}");
+        assert!(!glide.frame(Some(a), ms(900)));
+        assert_eq!(glide.shown(Some(a)).0, Some(a));
+
+        // On to the next region: from this one, not from nowhere.
+        let b = rect(500.0, 300.0, 40.0, 40.0);
+        assert!(glide.frame(Some(b), ms(1000)));
+        assert_eq!(glide.shown(Some(b)).0, Some(a));
+        assert!(glide.frame(Some(b), ms(1100)));
+        let on_the_way = glide.shown(Some(b)).0.unwrap();
+        assert!(on_the_way.x > a.x && on_the_way.x < b.x, "{on_the_way:?}");
+        assert!(!glide.frame(Some(b), ms(1400)));
+        assert_eq!(glide.shown(Some(b)).0, Some(b));
+
+        // A hole not yet seen by a frame is drawn where it is asked.
+        assert_eq!(glide.shown(Some(a)), (Some(a), 1.0));
+
+        // Back to no hole: it closes into its middle, then is gone.
+        assert!(glide.frame(None, ms(2000)));
+        assert!(glide.frame(None, ms(2100)));
+        let closing = glide.shown(None).0.unwrap();
+        assert!(closing.width < b.width && closing.center_x() == b.center_x());
+        assert!(!glide.frame(None, ms(2400)));
+        assert_eq!(glide.shown(None).0, None);
+    }
 }
