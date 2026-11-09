@@ -15,6 +15,7 @@ pub(crate) fn graph_modal_frame<'a>(
     graph_spin: bool,
     graph_heat: bool,
     extra: Option<Element<'a, Message>>,
+    search: Option<Element<'a, Message>>,
     picked: Option<Element<'a, Message>>,
     window: iced::Size,
     body: Element<'a, Message>,
@@ -38,6 +39,9 @@ pub(crate) fn graph_modal_frame<'a>(
     .align_y(iced::Center);
     if let Some(extra) = extra {
         header = header.push(extra);
+    }
+    if let Some(search) = search {
+        header = header.push(search);
     }
     // Map mode: a spin start/stop (3D only), then a 2D/3D projection toggle. Each
     // icon shows the action / the mode it switches to.
@@ -239,6 +243,7 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
             .into()
         },
     );
+    let search = app.graph_mode.then(|| graph_search_field(app));
     graph_modal_frame(
         title,
         app.graph_mode,
@@ -246,10 +251,165 @@ pub(crate) fn project_graph_modal(app: &App, overlay: crate::Overlay) -> Element
         app.graph_spin,
         app.graph_heat,
         extra,
+        search,
         picked,
         iced::Size::new(app.window_width, app.window_height),
         body,
     )
+}
+
+/// Node `i` of the map `kind` laid out as `layout`, picked: what it is,
+/// and how to open it — none for a node that opens nothing.
+pub(crate) fn node_pick(
+    layout: &crate::graphlayout::Layout,
+    kind: crate::Overlay,
+    i: usize,
+) -> Option<crate::app::model::GraphPick> {
+    let node = layout.nodes.get(i)?;
+    let open = node_open_message(layout, kind, i)?;
+    Some(crate::app::model::GraphPick {
+        label: node.label.clone(),
+        file: node.file.clone(),
+        open: Box::new(open),
+    })
+}
+
+/// The message that opens node `i` of the map `kind`, if it is part of
+/// `layout`.
+pub(crate) fn node_open_message(
+    layout: &crate::graphlayout::Layout,
+    kind: crate::Overlay,
+    i: usize,
+) -> Option<Message> {
+    let node = layout.nodes.get(i)?;
+    let file = node.file.clone();
+    Some(match kind {
+        crate::Overlay::ProjectImports => Message::Graph(GraphMsg::OverlayOpenImports(file)),
+        crate::Overlay::ProjectCalls => {
+            Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
+        }
+        crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: file,
+            line: node.line,
+        }),
+        // A node defined nowhere (a route's path) opens nothing.
+        crate::Overlay::ProjectMaps if file.as_os_str().is_empty() => return None,
+        crate::Overlay::ProjectMaps => Message::Graph(GraphMsg::OverlayOpenAt {
+            abs: file,
+            line: node.line,
+        }),
+    })
+}
+
+/// The nodes of `layout` the map's search `query` finds, best first: a
+/// name that is the query, then one that starts with it (or a part of its
+/// path does), then one that holds it — case aside — and among each, the
+/// weightier first. None for an empty query.
+pub(crate) fn graph_matches(layout: &crate::graphlayout::Layout, query: &str) -> Vec<usize> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let mut found: Vec<(u8, usize)> = layout
+        .nodes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, node)| {
+            let label = node.label.to_lowercase();
+            let parts = || label.split(['/', '\\', ':', '.']);
+            let rank = if label == query || parts().any(|p| p == query) {
+                0
+            } else if label.starts_with(&query) || parts().any(|p| p.starts_with(&query)) {
+                1
+            } else if label.contains(&query) {
+                2
+            } else {
+                return None;
+            };
+            Some((rank, i))
+        })
+        .collect();
+    found.sort_by(|(ra, a), (rb, b)| {
+        ra.cmp(rb)
+            .then(layout.nodes[*b].weight.total_cmp(&layout.nodes[*a].weight))
+            .then(layout.nodes[*a].label.cmp(&layout.nodes[*b].label))
+    });
+    found.into_iter().map(|(_, i)| i).collect()
+}
+
+/// The map's search as the canvas draws it: which nodes it found, the one
+/// the camera is on and its neighbours — lit, the rest dimmed.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Lit {
+    pub(crate) found: Vec<bool>,
+    pub(crate) near: Vec<bool>,
+    pub(crate) focus: Option<usize>,
+    /// What it is, for the scene cache: the query and the node in focus.
+    pub(crate) key: u64,
+}
+
+impl Lit {
+    /// Whether node `i` is drawn lit.
+    pub(crate) fn lit(&self, i: usize) -> bool {
+        self.focus == Some(i)
+            || self.found.get(i).copied().unwrap_or(false)
+            || self.near.get(i).copied().unwrap_or(false)
+    }
+}
+
+/// The map's search, in its header: the field, how many it found and which
+/// the camera is on, and the way to the one before and after.
+pub(crate) fn graph_search_field(app: &App) -> Element<'_, Message> {
+    let found = app.graph_matches().len();
+    let searching = !app.graph_search.trim().is_empty();
+    // As wide as it reads at its widest, so the field never shifts.
+    let count: Element<'_, Message> = if !searching {
+        slot()
+    } else if found == 0 {
+        text(tr!("No matches"))
+            .size(ts::SMALL)
+            .color(theme::dim())
+            .into()
+    } else {
+        text(tr!(
+            "{step} of {total}",
+            step = app.graph_found % found + 1,
+            total = found
+        ))
+        .size(ts::SMALL)
+        .color(theme::fg_muted())
+        .into()
+    };
+    let step = |g: Glyph, tip: &'static str, forward: bool| -> Element<'_, Message> {
+        chrome_tip(
+            button(glyph::icon(g, theme::fg_muted(), 14.0))
+                .style(theme::toolbar_button)
+                .padding([4, 6])
+                .on_press_maybe((found > 1).then(|| {
+                    super::heard::said(tip, Message::Graph(GraphMsg::SearchStep(forward)))
+                })),
+            tip,
+            None,
+        )
+    };
+    row![
+        text_input(tr!("Find in the map"), &app.graph_search)
+            .id(super::graph_search_id())
+            .on_input(|q| Message::Graph(GraphMsg::Search(q)))
+            .on_submit(Message::Graph(GraphMsg::SearchStep(true)))
+            .style(theme::input)
+            .size(ts::SMALL)
+            .padding([4, 8])
+            .width(190),
+        container(count)
+            .width(72)
+            .align_x(iced::alignment::Horizontal::Center),
+        step(Glyph::ChevronLeft, tr!("Previous match"), false),
+        step(Glyph::ChevronRight, tr!("Next match"), true),
+    ]
+    .spacing(2)
+    .align_y(iced::Center)
+    .into()
 }
 
 /// The node-link map: a force-directed canvas plus a legend.
@@ -302,7 +462,8 @@ pub(crate) fn graph_map_view(app: &App) -> Element<'_, Message> {
             app.proj.churn_rev,
         )
         .with_visited(Some(trace_files(app)), app.debug.trace_rev)
-        .with_fit(app.graph_fit_rev),
+        .with_fit(app.graph_fit_rev)
+        .with_search(&app.graph_search, app.graph_found, app.graph_focus_rev),
     )
     .width(Fill)
     .height(Fill);
@@ -391,6 +552,11 @@ pub(crate) struct GraphCanvas<'a> {
     pub(crate) visited_rev: u64,
     /// Bumped to put the camera back where it starts (`GraphMsg::FitView`).
     pub(crate) fit_rev: u64,
+    /// The map's search, while one is typed: what it lit.
+    pub(crate) lit: Option<Lit>,
+    /// Bumped to send the camera to the search's node in focus, or back
+    /// over the whole map once the search is cleared.
+    pub(crate) focus_rev: u64,
 }
 
 impl<'a> GraphCanvas<'a> {
@@ -414,7 +580,46 @@ impl<'a> GraphCanvas<'a> {
             visited: None,
             visited_rev: 0,
             fit_rev: 0,
+            lit: None,
+            focus_rev: 0,
         }
+    }
+
+    /// Light what the search `query` finds, `found` being which of its
+    /// matches (counted from 0, round) the camera goes to each time
+    /// `focus_rev` moves on.
+    pub(crate) fn with_search(mut self, query: &str, found: usize, focus_rev: u64) -> Self {
+        self.focus_rev = focus_rev;
+        let matches = graph_matches(self.layout, query);
+        if query.trim().is_empty() {
+            return self;
+        }
+        let n = self.layout.nodes.len();
+        let focus = (!matches.is_empty()).then(|| matches[found % matches.len()]);
+        let mut lit = Lit {
+            found: vec![false; n],
+            near: vec![false; n],
+            focus,
+            key: 0,
+        };
+        for &i in &matches {
+            lit.found[i] = true;
+        }
+        if let Some(f) = focus {
+            for &(a, b) in &self.layout.edges {
+                if a == f && b < n {
+                    lit.near[b] = true;
+                } else if b == f && a < n {
+                    lit.near[a] = true;
+                }
+            }
+        }
+        use std::hash::{Hash, Hasher};
+        let mut h = std::hash::DefaultHasher::new();
+        (query.trim().to_lowercase(), focus).hash(&mut h);
+        lit.key = h.finish() | 1;
+        self.lit = Some(lit);
+        self
     }
 
     /// Put the camera back where it starts each time `rev` moves on.
@@ -485,6 +690,10 @@ const HOLD_SLACK: f32 = 28.0;
 const MAX_TURN_DT: f32 = 0.25;
 /// Idle spin speed (radians per second, 3D only).
 const SPIN_RATE: f32 = 0.10;
+/// How much of itself what a search did not light keeps.
+const DIMMED: f32 = 0.22;
+/// How far the camera zooms in, at least, on the node a search found.
+const FOCUS_ZOOM: f32 = 2.4;
 
 /// Which kind of drag is in progress on the map.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -509,7 +718,7 @@ const FOCAL: f32 = 2400.0;
 /// What the cached scene was drawn for: the hovered node, the theme's
 /// revision, the layout's revision, the paint's (heat) revision and the
 /// visited set's (trace) revision.
-type SceneKey = (Option<usize>, u64, u64, u64, u64);
+type SceneKey = (Option<usize>, u64, u64, u64, u64, u64);
 
 /// Live 3D-simulation + orbit camera + interaction state, persisted by the
 /// canvas widget across frames. The force sim and the camera both run here
@@ -611,6 +820,13 @@ pub(crate) struct GraphState {
     /// leaves it. Kept while the pointer stays near it — it drifts on a
     /// little as the turn slows.
     hold: Option<usize>,
+    /// The node the search sent the camera to: it is centred and zoomed
+    /// on, and holds the spin, until the search moves on or is cleared.
+    focus: Option<usize>,
+    /// The `GraphCanvas::focus_rev` the camera last went by.
+    focus_rev: u64,
+    /// The search the cached scene and labels were laid out for.
+    lit_key: u64,
     /// The node clicked once (its index, under the layout signature it was
     /// clicked in): a click on it again opens it.
     picked: Option<(usize, u64)>,
@@ -670,6 +886,9 @@ impl Default for GraphState {
             last_bounds: iced::Size::ZERO,
             last_hover: None,
             hold: None,
+            focus: None,
+            focus_rev: 0,
+            lit_key: 0,
             picked: None,
             fit_rev: 0,
             scene: iced::widget::canvas::Cache::new(),
@@ -977,46 +1196,19 @@ impl GraphCanvas<'_> {
     /// The message that picks node `i` (see `GraphPick`), if it opens to
     /// anything.
     pub(crate) fn pick_message(&self, i: usize) -> Option<Message> {
-        let node = self.layout.nodes.get(i)?;
-        let open = self.open_message(i)?;
-        Some(Message::Graph(GraphMsg::Picked(Some(
-            crate::app::model::GraphPick {
-                label: node.label.clone(),
-                file: node.file.clone(),
-                open: Box::new(open),
-            },
-        ))))
+        node_pick(self.layout, self.kind, i)
+            .map(|pick| Message::Graph(GraphMsg::Picked(Some(pick))))
     }
 
     /// The message that opens node `i`, if it is still part of this layout.
     pub(crate) fn open_message(&self, i: usize) -> Option<Message> {
-        let node = self.layout.nodes.get(i)?;
-        let file = node.file.clone();
-        Some(match self.kind {
-            crate::Overlay::ProjectImports => Message::Graph(GraphMsg::OverlayOpenImports(file)),
-            crate::Overlay::ProjectCalls => {
-                Message::Graph(GraphMsg::OverlayOpenAt { abs: file, line: 1 })
-            }
-            crate::Overlay::ProjectTypes => Message::Graph(GraphMsg::OverlayOpenAt {
-                abs: file,
-                line: node.line,
-            }),
-            // A node defined nowhere (a route's path) opens nothing.
-            crate::Overlay::ProjectMaps if file.as_os_str().is_empty() => return None,
-            crate::Overlay::ProjectMaps => Message::Graph(GraphMsg::OverlayOpenAt {
-                abs: file,
-                line: node.line,
-            }),
-        })
+        node_open_message(self.layout, self.kind, i)
     }
 
-    /// Seed the simulation for the current node set, lifted into 3D with a
-    /// deterministic z spread so the graph opens as a volume rather than a
-    /// flat sheet. Any drag in progress belonged to the old node set and ends.
     /// Whether the idle spin turns the camera now: in 3D with the spin on,
     /// nothing grabbed, and no node holding it.
     fn spins(&self, st: &GraphState) -> bool {
-        self.is_3d && self.spin && st.drag == Drag::None && st.hold.is_none()
+        self.is_3d && self.spin && st.drag == Drag::None && st.hold.is_none() && st.focus.is_none()
     }
 
     /// The node holding the spin, the pointer being where `cursor` says and
@@ -1045,6 +1237,9 @@ impl GraphCanvas<'_> {
         near.then_some(held)
     }
 
+    /// Seed the simulation for the current node set, lifted into 3D with a
+    /// deterministic z spread so the graph opens as a volume rather than a
+    /// flat sheet. Any drag in progress belonged to the old node set and ends.
     fn reseed(&self, st: &mut GraphState) {
         use crate::graphlayout::WORLD;
         let n = self.layout.nodes.len();
@@ -1393,6 +1588,15 @@ impl GraphCanvas<'_> {
         } else {
             (fit_2d + (fit_3d - fit_2d) * e, box_center)
         };
+        // The node a search found: the camera centres it — eased there as
+        // any re-centring is.
+        let focused = st.focus.filter(|&f| f < n && !held);
+        let center_to = focused.map_or(center_to, |f| st.pos[f]);
+        let shift_to = if focused.is_some() {
+            (0.0, 0.0)
+        } else {
+            shift_to
+        };
         // While the mode switches, the blend of the two framings moves as
         // smoothly as the switch does: followed, not eased after.
         if reframe {
@@ -1457,12 +1661,19 @@ impl GraphCanvas<'_> {
         // farthest label away whatever the map, and a map of three files
         // named one of them. Full from a few dozen nodes up.
         let depth_fade = e * ((n as f32 - FADE_FREE_NODES) / FADE_FULL_NODES).clamp(0.0, 1.0);
-        // Priority: hovered first, then nearest the camera.
+        // Priority: hovered first, then what a search found (the node in
+        // focus before the rest), then nearest the camera.
+        let lit = self.lit.as_ref();
+        let first = |i: usize| -> u8 {
+            u8::from(hovered == Some(i)) * 4
+                + u8::from(lit.is_some_and(|l| l.focus == Some(i))) * 2
+                + u8::from(lit.is_some_and(|l| l.found.get(i) == Some(&true)))
+        };
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by(|&a, &b| {
-            let ha = (hovered == Some(a)) as u8;
-            let hb = (hovered == Some(b)) as u8;
-            hb.cmp(&ha).then(lproj[b].2.total_cmp(&lproj[a].2))
+            first(b)
+                .cmp(&first(a))
+                .then(lproj[b].2.total_cmp(&lproj[a].2))
         });
         let mut placed: Vec<iced::Rectangle> = Vec::new();
         let mut target = vec![0.0f32; n];
@@ -1470,7 +1681,9 @@ impl GraphCanvas<'_> {
         side.resize(n, 0.0);
         for &i in &order {
             let (x, y, z, persp) = lproj[i];
-            let is_hover = hovered == Some(i);
+            // The node in focus is named as the hovered one is: whatever
+            // its depth, over whatever its label would cover.
+            let is_hover = hovered == Some(i) || lit.is_some_and(|l| l.focus == Some(i));
             let fade = if is_hover {
                 1.0
             } else {
@@ -1558,6 +1771,14 @@ impl GraphCanvas<'_> {
                 continue;
             };
             let d = 1.0 - st.dim + st.dim * (near(az) + near(bz)) * 0.5;
+            // A search on: the links of the node in focus lit, links between
+            // what it lit as they are, the rest stepped back.
+            let (d, toward) = match &self.lit {
+                Some(lit) if lit.focus == Some(a) || lit.focus == Some(b) => (1.0, true),
+                Some(lit) if lit.lit(a) && lit.lit(b) => (d, false),
+                Some(_) => (d * DIMMED, false),
+                None => (d, false),
+            };
             let (dx, dy) = (bx - ax, by - ay);
             let len = (dx * dx + dy * dy).sqrt();
             if len < 2.0 {
@@ -1568,11 +1789,17 @@ impl GraphCanvas<'_> {
             // From just off the importer to the imported node's near edge.
             let (sx, sy) = (ax + ux * (radius(a) + 1.0), ay + uy * (radius(a) + 1.0));
             let (tx, ty) = (bx - ux * (radius(b) + 1.0), by - uy * (radius(b) + 1.0));
+            let (edge, width) = if toward {
+                (theme::with_alpha(theme::accent(), 0.75), 1.4)
+            } else {
+                (
+                    theme::with_alpha(theme::graph_edge(), 0.16 + 0.34 * d),
+                    0.6 + d * 0.4,
+                )
+            };
             frame.stroke(
                 &Path::line(iced::Point::new(sx, sy), iced::Point::new(tx, ty)),
-                Stroke::default()
-                    .with_width(0.6 + d * 0.4)
-                    .with_color(theme::with_alpha(theme::graph_edge(), 0.16 + 0.34 * d)),
+                Stroke::default().with_width(width).with_color(edge),
             );
             // Small arrowhead at the imported end.
             let ah = 3.8; // length
@@ -1607,6 +1834,10 @@ impl GraphCanvas<'_> {
                 continue;
             }
             let la = st.label_alpha.get(i).copied().unwrap_or(0.0);
+            let la = match &self.lit {
+                Some(lit) if !lit.lit(i) => la * DIMMED,
+                _ => la,
+            };
             if la >= 0.01 {
                 let side = st.label_side.get(i).copied().unwrap_or(0.0);
                 self.draw_label(frame, i, p, radius(i), la, side, false);
@@ -1635,7 +1866,32 @@ impl GraphCanvas<'_> {
         } else {
             hier_shade(lang_dot_color(crate::highlight::detect(&nd.file)), nd.depth)
         };
+        // A search on: what it did not find steps back.
+        let lit = self.lit.as_ref();
+        let color = match lit {
+            Some(lit) if !hover && !lit.lit(i) => theme::with_alpha(color, DIMMED),
+            _ => color,
+        };
         frame.fill(&Path::circle(iced::Point::new(x, y), r), color);
+        // What it found is ringed in the accent; the one the camera is on,
+        // more strongly.
+        if let Some(lit) = lit {
+            let (pad, width) = if lit.focus == Some(i) {
+                (3.5, 2.4)
+            } else if lit.found.get(i) == Some(&true) {
+                (2.5, 1.4)
+            } else {
+                (0.0, 0.0)
+            };
+            if width > 0.0 {
+                frame.stroke(
+                    &Path::circle(iced::Point::new(x, y), r + pad),
+                    Stroke::default()
+                        .with_width(width)
+                        .with_color(theme::accent()),
+                );
+            }
+        }
         if self.visited.as_ref().is_some_and(|v| v.contains(&nd.file)) {
             // The last run stopped here: a ring in the live colour.
             frame.stroke(
@@ -1788,6 +2044,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             self.rev,
             self.paint_rev,
             self.visited_rev,
+            self.lit.as_ref().map_or(0, |lit| lit.key),
         );
         if state.scene_key.get() != Some(key) {
             state.scene.clear();
@@ -1820,6 +2077,7 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         // The camera put back where it starts, asked from the header.
         if state.fit_rev != self.fit_rev {
             state.fit_rev = self.fit_rev;
+            state.focus = None;
             state.zoom_target = 1.0;
             state.zoom_at = None;
             state.zoom_vel = 0.0;
@@ -1828,6 +2086,35 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
             state.pitch = 0.35;
             state.yaw_vel = 0.0;
             state.pitch_vel = 0.0;
+            state.touch();
+            if !matches!(
+                event,
+                iced::Event::Window(iced::window::Event::RedrawRequested(_))
+            ) {
+                return Some(Action::request_redraw());
+            }
+        }
+        // The search sent the camera to a node — zoomed in on it, centred
+        // (`tick`), the spin held — or, cleared, back over the whole map.
+        let lit_key = self.lit.as_ref().map_or(0, |lit| lit.key);
+        if state.focus_rev != self.focus_rev || state.lit_key != lit_key {
+            if state.focus_rev != self.focus_rev {
+                state.focus_rev = self.focus_rev;
+                let focus = self
+                    .lit
+                    .as_ref()
+                    .and_then(|lit| lit.focus)
+                    .filter(|&f| f < self.layout.nodes.len());
+                state.focus = focus;
+                state.zoom_target = if focus.is_some() {
+                    state.zoom_target.max(FOCUS_ZOOM)
+                } else {
+                    1.0
+                };
+                state.zoom_at = None;
+                state.pan = iced::Vector::new(0.0, 0.0);
+            }
+            state.lit_key = lit_key;
             state.touch();
             if !matches!(
                 event,
@@ -3365,6 +3652,90 @@ mod tests {
             (late - smooth).abs() < smooth * 0.05,
             "at 5 fps it turned {late}, at 60 fps {smooth}"
         );
+    }
+
+    /// A frame at `at` ms past `t0` as the canvas gets it: an update for the
+    /// redraw, which also takes what the view changed (a search's focus).
+    fn redraw_at(c: &GraphCanvas<'_>, st: &mut GraphState, t0: std::time::Instant, at: f64) {
+        let now = t0 + std::time::Duration::from_secs_f64(at / 1000.0);
+        let _ = <GraphCanvas<'_> as iced::widget::canvas::Program<Message>>::update(
+            c,
+            st,
+            &iced::Event::Window(iced::window::Event::RedrawRequested(now)),
+            BOUNDS,
+            iced::advanced::mouse::Cursor::Unavailable,
+        );
+    }
+
+    /// The search finds a name that is the query first, then one that
+    /// starts with it — a part of its path counts — then one that holds it;
+    /// the weightier first among each; case aside; nothing for nothing.
+    #[test]
+    fn the_search_finds_the_best_matches_first() {
+        let mut l = layout(8);
+        l.nodes[2].label = "src/pricing.py".into();
+        l.nodes[3].label = "src/pricing_rules.py".into();
+        l.nodes[4].label = "tests/test_pricing.py".into();
+        l.nodes[5].label = "Pricing".into();
+        assert_eq!(graph_matches(&l, "pricing"), [5, 2, 3, 4]);
+        assert_eq!(graph_matches(&l, "PRICING_R"), [3]);
+        assert_eq!(graph_matches(&l, "  "), Vec::<usize>::new());
+        assert_eq!(graph_matches(&l, "nothing"), Vec::<usize>::new());
+        // Among the same rank, the weightier first.
+        assert_eq!(graph_matches(&l, "file"), [7, 6, 1, 0]);
+    }
+
+    /// What a search lights: what it found, and the node in focus with its
+    /// neighbours — the rest is dimmed; nothing typed, nothing lit.
+    #[test]
+    fn the_search_lights_its_finds_and_the_focus_neighbours() {
+        let l = layout(8);
+        let c = canvas(&l, true, false).with_search("file_4", 0, 1);
+        let lit = c.lit.as_ref().expect("a search");
+        assert_eq!(lit.focus, Some(4));
+        let on: Vec<usize> = (0..8).filter(|&i| lit.lit(i)).collect();
+        assert_eq!(on, [3, 4, 5], "the found node and its neighbours");
+        assert!(canvas(&l, true, false).with_search(" ", 0, 1).lit.is_none());
+        // Round: the third of one match is that match.
+        let c = canvas(&l, true, false).with_search("file_4", 2, 1);
+        assert_eq!(c.lit.as_ref().unwrap().focus, Some(4));
+    }
+
+    /// The camera goes to what the search found: centred, zoomed in, the
+    /// spin held; the search cleared, back over the whole map, spinning.
+    #[test]
+    fn the_camera_flies_to_what_the_search_found() {
+        let l = layout(8);
+        let t0 = std::time::Instant::now();
+        let mut st = GraphState::default();
+        let mut t = 0.0;
+        let plain = canvas(&l, true, true);
+        while t < 12_000.0 {
+            redraw_at(&plain, &mut st, t0, t);
+            t += 16.667;
+        }
+        let found = canvas(&l, true, true).with_search("file_6", 0, 1);
+        while t < 15_000.0 {
+            redraw_at(&found, &mut st, t0, t);
+            t += 16.667;
+        }
+        let (x, y, _, _) = found.node_screen(6, BOUNDS, &st);
+        let mid = (BOUNDS.width / 2.0, BOUNDS.height / 2.0);
+        assert!(
+            (x - mid.0).abs() < 1.0 && (y - mid.1).abs() < 1.0,
+            "not centred: {x},{y}"
+        );
+        assert!(st.zoom >= FOCUS_ZOOM - 1e-3, "not zoomed in: {}", st.zoom);
+        assert!(st.yaw_vel.abs() < 1e-3, "still spinning");
+
+        let cleared = canvas(&l, true, true).with_search("", 0, 2);
+        while t < 20_000.0 {
+            redraw_at(&cleared, &mut st, t0, t);
+            t += 16.667;
+        }
+        assert!((st.zoom - 1.0).abs() < 1e-3, "{}", st.zoom);
+        assert!((st.yaw_vel - SPIN_RATE).abs() < 2e-3, "{}", st.yaw_vel);
+        assert_eq!(st.focus, None);
     }
 
     /// Fit puts the camera back where it starts: zoom, pan and turn.

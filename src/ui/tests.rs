@@ -6397,6 +6397,7 @@ fn the_maps_header_says_its_views_in_words() {
             false,
             None,
             None,
+            None,
             WINDOW,
             iced::widget::space().into(),
         )
@@ -10584,6 +10585,7 @@ fn the_heat_toggle_keeps_its_width() {
             false,
             false,
             on,
+            None,
             None,
             None,
             WINDOW,

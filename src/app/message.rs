@@ -845,6 +845,12 @@ pub enum GraphMsg {
     Picked(Option<crate::app::model::GraphPick>),
     /// Put the map's camera back where it starts: zoom, pan and turn.
     FitView,
+    /// What the map's search field says now: the camera goes to the best
+    /// match, lit, the rest stepped back; empty, back over the whole map.
+    Search(String),
+    /// On to the next match (or, with Shift held or `false`, the one
+    /// before).
+    SearchStep(bool),
     /// A remote project's tsconfig/jsconfig path mappings were fetched from
     /// the host (see `App::fetch_remote_ts_configs`); applied only to the
     /// project instance they were fetched for, and only while no later fetch
@@ -2488,6 +2494,8 @@ impl GraphMsg {
             | GraphMsg::ToggleHeat
             | GraphMsg::Picked(..)
             | GraphMsg::FitView
+            | GraphMsg::Search(_)
+            | GraphMsg::SearchStep(_)
             | GraphMsg::SelectMap(..)
             | GraphMsg::RefineProjectCalls => None,
         }

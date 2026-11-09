@@ -527,7 +527,38 @@ impl App {
         self.proj.type_graph_key = Some(key);
     }
 
+    /// The nodes of the map on screen its search finds, best first (see
+    /// `ui::graph_matches`).
+    pub(crate) fn graph_matches(&self) -> Vec<usize> {
+        match (&self.proj.graph_layout, self.proj.overlay) {
+            (Some(layout), Some(_)) if self.proj.graph_layout_for == self.proj.overlay => {
+                ui::graph_matches(layout, &self.graph_search)
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// The search moved to another match, or was cleared: the camera goes
+    /// to it (or back over the whole map), and it is picked — what it is,
+    /// and Open, under the header.
+    fn on_graph_found(&mut self) -> Task<Message> {
+        self.graph_focus_rev += 1;
+        let matches = self.graph_matches();
+        self.proj.graph_pick = match (&self.proj.graph_layout, self.proj.overlay) {
+            (Some(layout), Some(kind)) if !matches.is_empty() => {
+                ui::node_pick(layout, kind, matches[self.graph_found % matches.len()])
+            }
+            _ => None,
+        };
+        Task::none()
+    }
+
     pub(crate) fn on_open_overlay(&mut self, which: Overlay) -> Task<Message> {
+        // A search typed over another map is not this one's.
+        if self.proj.overlay != Some(which) {
+            self.graph_search.clear();
+            self.graph_found = 0;
+        }
         self.proj.overlay = Some(which);
         self.proj.graph_pick = None;
         // A map laid out for another overlay is not shown under this one:
@@ -2636,6 +2667,7 @@ impl App {
             GraphMsg::CloseOverlay => {
                 self.proj.overlay = None;
                 self.proj.graph_pick = None;
+                self.graph_search.clear();
                 Task::none()
             }
             GraphMsg::Picked(pick) => {
@@ -2645,6 +2677,25 @@ impl App {
             GraphMsg::FitView => {
                 self.graph_fit_rev += 1;
                 Task::none()
+            }
+            GraphMsg::Search(query) => {
+                self.graph_search = query;
+                self.graph_found = 0;
+                self.on_graph_found()
+            }
+            GraphMsg::SearchStep(forward) => {
+                let found = self.graph_matches().len();
+                if found == 0 {
+                    return Task::none();
+                }
+                // Shift with Enter goes back, as in every find.
+                let back = !forward || self.modifiers.shift();
+                self.graph_found = if back {
+                    (self.graph_found + found - 1) % found
+                } else {
+                    (self.graph_found + 1) % found
+                };
+                self.on_graph_found()
             }
             GraphMsg::OverlayOpenImports(path) => {
                 self.proj.overlay = None;

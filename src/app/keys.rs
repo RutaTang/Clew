@@ -300,6 +300,13 @@ impl App {
             ProjectSearch => self.update(Message::Window(WindowMsg::SidebarTabPicked(
                 SidebarTab::Search,
             ))),
+            // Over a map, Find finds in the map.
+            FindInFile
+                if self.graph_mode
+                    && matches!(ui::active_overlay(self), Some(ui::ActiveOverlay::Graph(_))) =>
+            {
+                operation::focus(ui::graph_search_id())
+            }
             FindInFile => self.update(Message::Editor(EditorMsg::FindOpened)),
             CopySelection => {
                 if self.proj.finder.open {

@@ -10,6 +10,7 @@ mod askfloat;
 #[cfg(unix)]
 mod build_app;
 mod embedding;
+mod graph_search;
 mod insight;
 mod integrations;
 mod navigation_debug;

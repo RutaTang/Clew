@@ -264,6 +264,11 @@ pub fn finder_list_id() -> iced::widget::Id {
     iced::widget::Id::new("finder-list")
 }
 
+/// The map's search field (see `graph::graph_search_field`).
+pub fn graph_search_id() -> iced::widget::Id {
+    iced::widget::Id::new("graph-search")
+}
+
 pub fn search_input_id() -> iced::widget::Id {
     iced::widget::Id::new("search-input")
 }
@@ -531,7 +536,13 @@ impl<'a> ActiveOverlay<'a> {
 /// when nothing is layered over the app (Escape then falls through to the
 /// find bar / selection handling).
 pub(crate) fn escape_message(app: &App) -> Option<Message> {
-    active_overlay(app).map(|o| o.dismiss_message())
+    match active_overlay(app) {
+        // A map's search is cleared before the map is closed.
+        Some(ActiveOverlay::Graph(_)) if !app.graph_search.is_empty() => {
+            Some(Message::Graph(GraphMsg::Search(String::new())))
+        }
+        overlay => overlay.map(|o| o.dismiss_message()),
+    }
 }
 
 /// The window's view.

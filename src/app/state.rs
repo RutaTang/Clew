@@ -1326,6 +1326,13 @@ pub struct App {
     pub graph_heat: bool,
     /// Bumped to put the map's camera back where it starts (`GraphMsg::FitView`).
     pub graph_fit_rev: u64,
+    /// What the map's search field holds (`GraphMsg::Search`).
+    pub graph_search: String,
+    /// Which of the search's matches the camera is on, counted from 0.
+    pub graph_found: usize,
+    /// Bumped to send the map's camera to the match it is on, or back over
+    /// the whole map once the search is cleared.
+    pub graph_focus_rev: u64,
     /// Whether the left sidebar (files / search / marks / calls / imports) is shown.
     pub show_left_sidebar: bool,
     /// Whether the right sidebar (Outline / Explain tabs) is shown.
