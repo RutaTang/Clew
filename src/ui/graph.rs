@@ -476,6 +476,13 @@ const LABEL_SIDE_SLACK: f32 = 24.0;
 /// How far (px) outside every disc a click may land and still pick the
 /// nearest node, so tiny discs stay easy to hit.
 const HIT_SLOP: f32 = 16.0;
+/// How far past its disc the pointer may stray from the node holding the
+/// spin before letting it go.
+const HOLD_SLACK: f32 = 28.0;
+/// The longest a frame may turn the camera by: a late frame turns it as far
+/// as the time that passed, so the spin keeps its pace through it — but a
+/// map drawn again after a pause does not leap.
+const MAX_TURN_DT: f32 = 0.25;
 /// Idle spin speed (radians per second, 3D only).
 const SPIN_RATE: f32 = 0.10;
 
@@ -599,6 +606,11 @@ pub(crate) struct GraphState {
     /// The bounds and hovered node the last tick computed for.
     last_bounds: iced::Size,
     last_hover: Option<usize>,
+    /// The node the pointer rests on, which holds the spin: the camera
+    /// eases to a stop so it can be read, and turns again once the pointer
+    /// leaves it. Kept while the pointer stays near it — it drifts on a
+    /// little as the turn slows.
+    hold: Option<usize>,
     /// The node clicked once (its index, under the layout signature it was
     /// clicked in): a click on it again opens it.
     picked: Option<(usize, u64)>,
@@ -657,6 +669,7 @@ impl Default for GraphState {
             dirty: true,
             last_bounds: iced::Size::ZERO,
             last_hover: None,
+            hold: None,
             picked: None,
             fit_rev: 0,
             scene: iced::widget::canvas::Cache::new(),
@@ -1000,6 +1013,38 @@ impl GraphCanvas<'_> {
     /// Seed the simulation for the current node set, lifted into 3D with a
     /// deterministic z spread so the graph opens as a volume rather than a
     /// flat sheet. Any drag in progress belonged to the old node set and ends.
+    /// Whether the idle spin turns the camera now: in 3D with the spin on,
+    /// nothing grabbed, and no node holding it.
+    fn spins(&self, st: &GraphState) -> bool {
+        self.is_3d && self.spin && st.drag == Drag::None && st.hold.is_none()
+    }
+
+    /// The node holding the spin, the pointer being where `cursor` says and
+    /// over `hovered`: the hovered node, or the one held still while the
+    /// pointer stays within [`HOLD_SLACK`] of its disc — it drifts on as
+    /// the turn slows, and letting go there turned the camera again,
+    /// under the pointer, in a loop.
+    fn hold_for(
+        &self,
+        st: &GraphState,
+        hovered: Option<usize>,
+        cursor: iced::advanced::mouse::Cursor,
+        bounds: iced::Rectangle,
+    ) -> Option<usize> {
+        if st.drag != Drag::None {
+            return None;
+        }
+        let at = cursor.position_in(bounds)?;
+        if hovered.is_some() {
+            return hovered;
+        }
+        let held = st.hold.filter(|&i| i < self.layout.nodes.len())?;
+        let (x, y, _, persp) = self.project_all(bounds, st).get(held).copied()?;
+        let r = node_radius(self.layout.nodes[held].weight, persp);
+        let near = ((x - at.x).powi(2) + (y - at.y).powi(2)).sqrt() <= r + HOLD_SLACK;
+        near.then_some(held)
+    }
+
     fn reseed(&self, st: &mut GraphState) {
         use crate::graphlayout::WORLD;
         let n = self.layout.nodes.len();
@@ -1065,12 +1110,15 @@ impl GraphCanvas<'_> {
         st.rev = self.rev;
         // Frame time, as it passed: a map waking from rest, or drawn again
         // after it was out of sight, steps one frame, not the whole pause.
-        let dt = st
-            .last_frame
-            .map(|t| now.duration_since(t).as_secs_f32())
+        let gap = st.last_frame.map(|t| now.duration_since(t).as_secs_f32());
+        let dt = gap
             .filter(|&gap| gap <= 0.1)
             .unwrap_or(1.0 / 60.0)
             .clamp(0.004, 0.05);
+        // The camera turns by the time that passed, a late frame's whole
+        // gap: clamped as the physics step is, a slow frame slowed the spin
+        // and the next caught up — a stutter, then a spin.
+        let turn_dt = gap.unwrap_or(1.0 / 60.0).clamp(0.004, MAX_TURN_DT);
         st.last_frame = Some(now);
 
         // A switch between 3D and 2D: a camera move over `DIM_SECS`, from
@@ -1114,6 +1162,14 @@ impl GraphCanvas<'_> {
             st.alpha = st.alpha.max(0.3);
         }
 
+        // The node under the pointer holds the spin (see `GraphState::hold`).
+        let hovered = cursor
+            .position_in(bounds)
+            .and_then(|c| self.hit(c, bounds, st));
+        st.hold = self.hold_for(st, hovered, cursor, bounds);
+        // The node held is the one shown as hovered — its label kept, drawn
+        // on top — while the pointer strays near it.
+        let hovered = hovered.or(st.hold);
         // The camera's turn: followed from the pointer while orbiting (its
         // rate measured, to fling with on release), else coasting toward the
         // idle spin — or to rest — so a spin starts, stops and hands over
@@ -1125,25 +1181,21 @@ impl GraphCanvas<'_> {
             st.yaw_vel += (yaw_rate.clamp(-MAX_TURN, MAX_TURN) - st.yaw_vel) * follow;
             st.pitch_vel += (pitch_rate.clamp(-MAX_TURN, MAX_TURN) - st.pitch_vel) * follow;
         } else {
-            let spin = if self.is_3d && self.spin && st.drag == Drag::None {
-                SPIN_RATE
-            } else {
-                0.0
-            };
-            st.spin_goal += (spin - st.spin_goal) * ease_step(dt, LEAD_TAU);
+            let spin = if self.spins(st) { SPIN_RATE } else { 0.0 };
+            st.spin_goal += (spin - st.spin_goal) * ease_step(turn_dt, LEAD_TAU);
             if (st.spin_goal - spin).abs() < 1e-4 {
                 st.spin_goal = spin;
             }
-            st.yaw_vel += (st.spin_goal - st.yaw_vel) * ease_step(dt, TURN_TAU);
-            st.pitch_vel *= 1.0 - ease_step(dt, PITCH_TAU);
+            st.yaw_vel += (st.spin_goal - st.yaw_vel) * ease_step(turn_dt, TURN_TAU);
+            st.pitch_vel *= 1.0 - ease_step(turn_dt, PITCH_TAU);
             if st.yaw_vel.abs() < 1e-3 && st.spin_goal == 0.0 {
                 st.yaw_vel = 0.0;
             }
             if st.pitch_vel.abs() < 1e-3 {
                 st.pitch_vel = 0.0;
             }
-            st.yaw += st.yaw_vel * dt;
-            let pitch = st.pitch + st.pitch_vel * dt;
+            st.yaw += st.yaw_vel * turn_dt;
+            let pitch = st.pitch + st.pitch_vel * turn_dt;
             st.pitch = pitch.clamp(-PITCH_LIMIT, PITCH_LIMIT);
             if st.pitch != pitch {
                 st.pitch_vel = 0.0;
@@ -1152,7 +1204,7 @@ impl GraphCanvas<'_> {
         st.last_yaw = st.yaw;
         st.last_pitch = st.pitch;
         let turning = st.yaw_vel != 0.0 || st.pitch_vel != 0.0;
-        st.spinning = turning || (self.is_3d && self.spin && st.drag == Drag::None);
+        st.spinning = turning || self.spins(st);
 
         // The zoom eases to where the wheel asked for; flat, about the
         // point under the pointer.
@@ -1183,9 +1235,6 @@ impl GraphCanvas<'_> {
 
         st.flattening = !self.is_3d && st.pos.iter().any(|p| p[2].abs() > 0.5);
         let switching = switching || st.dim_t < 1.0;
-        let hovered = cursor
-            .position_in(bounds)
-            .and_then(|c| self.hit(c, bounds, st));
         let physics = pinned.is_some() || st.alpha > ALPHA_REST;
         let resized = bounds.size() != st.last_bounds;
         let changed = st.dirty
@@ -1561,6 +1610,8 @@ impl GraphCanvas<'_> {
             if la >= 0.01 {
                 let side = st.label_side.get(i).copied().unwrap_or(0.0);
                 self.draw_label(frame, i, p, radius(i), la, side, false);
+            } else {
+                self.keep_label(frame, i, p);
             }
         }
     }
@@ -1600,6 +1651,26 @@ impl GraphCanvas<'_> {
                 Stroke::default()
                     .with_width(1.3)
                     .with_color(theme::with_alpha(theme::warning(), 0.75)),
+            );
+        }
+    }
+
+    /// Keep a faded-out label's texture on the GPU: drawn invisibly, at a
+    /// point, so it stays in the renderer's image atlas. One a frame does
+    /// not draw is dropped from it as soon as any other image is added,
+    /// and every label fading back in as the map turned was uploaded
+    /// again, evicting others — work on every frame of a spin.
+    fn keep_label(
+        &self,
+        frame: &mut iced::widget::canvas::Frame,
+        i: usize,
+        (x, y, _, _): (f32, f32, f32, f32),
+    ) {
+        let nd = &self.layout.nodes[i];
+        if let Some(tex) = super::graph_labels::label_texture(&nd.label, theme::fg_muted()) {
+            frame.draw_image(
+                iced::Rectangle::new(iced::Point::new(x, y), iced::Size::new(1.0, 1.0)),
+                iced::advanced::image::Image::new(tex.handle).opacity(0.0),
             );
         }
     }
@@ -1705,7 +1776,8 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
         let proj = self.project_all(bounds, state);
         let hovered = cursor
             .position_in(bounds)
-            .and_then(|c| self.hit(c, bounds, state));
+            .and_then(|c| self.hit(c, bounds, state))
+            .or(state.hold);
         // The scene is cached: a settled map redraws (another widget animating,
         // the cursor moving elsewhere) without re-tessellating a single edge.
         // `tick` and every interaction clear it; so does a change of the hovered
@@ -1773,11 +1845,16 @@ impl iced::widget::canvas::Program<Message> for GraphCanvas<'_> {
                 .then(Action::request_redraw),
             // A hover change re-ranks the labels (the hovered one always
             // shows), so let the next frame recompute.
+            // A node holding the spin is let go once the pointer leaves it:
+            // the next frame decides.
             iced::Event::Mouse(mouse::Event::CursorMoved { .. }) if state.drag == Drag::None => {
                 let hovered = cursor
                     .position_in(bounds)
                     .and_then(|c| self.hit(c, bounds, state));
-                (hovered != state.last_hover).then(Action::request_redraw)
+                (hovered != state.last_hover || state.hold.is_some()).then(Action::request_redraw)
+            }
+            iced::Event::Mouse(mouse::Event::CursorLeft) if state.hold.is_some() => {
+                Some(Action::request_redraw())
             }
             // Zoom (dolly) — only where enabled; the embedded Overview map lets
             // the wheel fall through to the page.
@@ -3175,6 +3252,119 @@ mod tests {
             click(&mut st, at),
             Some(Message::Graph(GraphMsg::Picked(Some(_))))
         ));
+    }
+
+    /// A frame at `at` ms past `t0`, the pointer where `cursor` says.
+    fn frame_at(
+        c: &GraphCanvas<'_>,
+        st: &mut GraphState,
+        t0: std::time::Instant,
+        at: f64,
+        cursor: iced::advanced::mouse::Cursor,
+    ) {
+        let now = t0 + std::time::Duration::from_secs_f64(at / 1000.0);
+        let _ = c.tick(st, BOUNDS, now, cursor);
+    }
+
+    /// A node the pointer rests on eases the spin to a stop — no frame
+    /// turning the camera much less than the one before — and holds it
+    /// while the pointer stays by the node, which drifts on as the turn
+    /// slows; the pointer gone, the spin picks up again as gently.
+    #[test]
+    fn a_hovered_node_eases_the_spin_to_a_stop_and_lets_it_go() {
+        use iced::advanced::mouse::Cursor;
+        let l = layout(8);
+        let c = canvas(&l, true, true);
+        let mut st = GraphState::default();
+        let t0 = std::time::Instant::now();
+        let mut t = 0.0;
+        // The physics settled, the spin at its rate.
+        while t < 12_000.0 {
+            frame_at(&c, &mut st, t0, t, Cursor::Unavailable);
+            t += 16.667;
+        }
+        assert!((st.yaw_vel - SPIN_RATE).abs() < 1e-3, "{}", st.yaw_vel);
+
+        // Onto node 3.
+        let (x, y, _, _) = c.node_screen(3, BOUNDS, &st);
+        let on = Cursor::Available(iced::Point::new(x, y));
+        let mut rates = vec![st.yaw_vel];
+        for _ in 0..240 {
+            frame_at(&c, &mut st, t0, t, on);
+            t += 16.667;
+            assert_eq!(st.hold, Some(3), "let go while the pointer stayed");
+            rates.push(st.yaw_vel);
+        }
+        assert!(st.yaw_vel.abs() < 1e-3, "still turning: {}", st.yaw_vel);
+        let steps: Vec<f32> = rates.windows(2).map(|w| w[0] - w[1]).collect();
+        assert!(steps.iter().all(|d| *d >= -1e-6), "sped up on the way down");
+        let jolt = steps.iter().cloned().fold(0.0f32, f32::max);
+        assert!(jolt < SPIN_RATE * 0.1, "stopped with a jolt: {jolt}");
+
+        // Off the node, past where it counts as hovered but still by it:
+        // held. Farther: let go.
+        let (x, y, _, persp) = c.node_screen(3, BOUNDS, &st);
+        let r = node_radius(l.nodes[3].weight, persp);
+        let by = iced::Point::new(x + r + HIT_SLOP + 6.0, y);
+        assert_eq!(c.hit(by, BOUNDS, &st), None, "no node is hovered there");
+        frame_at(&c, &mut st, t0, t, Cursor::Available(by));
+        t += 16.667;
+        assert_eq!(st.hold, Some(3), "let go by the node");
+        let past = iced::Point::new(x + r + HOLD_SLACK + 6.0, y);
+        if c.hit(past, BOUNDS, &st).is_none() {
+            frame_at(&c, &mut st, t0, t, Cursor::Available(past));
+            t += 16.667;
+            assert_eq!(st.hold, None, "held from afar");
+        }
+
+        // Away: the spin comes back, as gently.
+        let away = Cursor::Available(iced::Point::new(2.0, 2.0));
+        let mut rates = vec![st.yaw_vel];
+        for _ in 0..240 {
+            frame_at(&c, &mut st, t0, t, away);
+            t += 16.667;
+            rates.push(st.yaw_vel);
+        }
+        assert_eq!(st.hold, None);
+        assert!((st.yaw_vel - SPIN_RATE).abs() < 2e-3, "{}", st.yaw_vel);
+        let steps: Vec<f32> = rates.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(steps.iter().all(|d| *d >= -1e-6));
+        assert!(steps.iter().cloned().fold(0.0f32, f32::max) < SPIN_RATE * 0.1);
+    }
+
+    /// The spin keeps its pace through late frames: a second of it turns
+    /// the camera as far at five frames a second as at sixty. Clamped as the
+    /// physics step is, a late frame turned it less, and the next frames
+    /// caught up — a stutter, then a spin.
+    #[test]
+    fn the_spin_keeps_its_pace_through_late_frames() {
+        use iced::advanced::mouse::Cursor;
+        let l = layout(8);
+        let c = canvas(&l, true, true);
+        let t0 = std::time::Instant::now();
+        // A second of the spin, after the same warm-up, with a frame every
+        // `gap` ms.
+        let turned = |gap: f64| {
+            let mut st = GraphState::default();
+            let mut t = 0.0;
+            while t < 12_000.0 {
+                frame_at(&c, &mut st, t0, t, Cursor::Unavailable);
+                t += 16.667;
+            }
+            let from = st.yaw;
+            let end = t + 1000.0;
+            while t < end {
+                t += gap;
+                frame_at(&c, &mut st, t0, t, Cursor::Unavailable);
+            }
+            st.yaw - from
+        };
+        let smooth = turned(16.667);
+        let late = turned(200.0);
+        assert!(
+            (late - smooth).abs() < smooth * 0.05,
+            "at 5 fps it turned {late}, at 60 fps {smooth}"
+        );
     }
 
     /// Fit puts the camera back where it starts: zoom, pan and turn.
