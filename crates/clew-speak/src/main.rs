@@ -223,22 +223,36 @@ fn load(family: Family, dir: &Path) -> Result<sherpa_onnx::OfflineTts, String> {
     }
 }
 
-/// `say`'s text as samples, at the model's rate.
-fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec<f32>, String> {
+/// How many steps Supertonic refines each sentence's sound in. Its own
+/// default, 5, keeps a grain in the voice that 8 smooths out; each step
+/// costs about a fortieth of the sentence's length on two cores of a slow
+/// laptop CPU, so 8 still makes speech some four times faster than it is
+/// said, well ahead of the reader.
+const SUPERTONIC_STEPS: i32 = 8;
+
+/// How `say` is made with `family`'s model, of `speakers` voices.
+fn generation(family: Family, say: &Say, speakers: i32) -> sherpa_onnx::GenerationConfig {
     let mut config = sherpa_onnx::GenerationConfig {
-        sid: say.voice.clamp(0, (tts.num_speakers() - 1).max(0)),
+        sid: say.voice.clamp(0, (speakers - 1).max(0)),
         speed: say.speed.clamp(0.5, 2.0),
         ..Default::default()
     };
-    if family == Family::Supertonic
-        && let Some(lang) = &say.lang
-    {
-        config.extra = Some(
-            [("lang".to_string(), serde_json::Value::from(lang.as_str()))]
-                .into_iter()
-                .collect(),
-        );
+    if family == Family::Supertonic {
+        config.num_steps = SUPERTONIC_STEPS;
+        if let Some(lang) = &say.lang {
+            config.extra = Some(
+                [("lang".to_string(), serde_json::Value::from(lang.as_str()))]
+                    .into_iter()
+                    .collect(),
+            );
+        }
     }
+    config
+}
+
+/// `say`'s text as samples, at the model's rate.
+fn speak(tts: &sherpa_onnx::OfflineTts, family: Family, say: &Say) -> Result<Vec<f32>, String> {
+    let config = generation(family, say, tts.num_speakers());
     let Some(audio) = tts.generate_with_config(&say.text, &config, None::<fn(&[f32], f32) -> bool>)
     else {
         return Err("nothing could be made of it".into());
@@ -311,6 +325,35 @@ fn pcm16(samples: &[f32]) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Supertonic refines each sentence in more steps than its default —
+    /// a smoother voice — in the language it is told; Kokoro reads its
+    /// language from its lexicons and has no steps to set.
+    #[test]
+    fn supertonic_speaks_in_more_steps_than_its_default() {
+        let say = |lang: Option<&str>| super::Say {
+            id: 1,
+            text: "Hello.".into(),
+            lang: lang.map(String::from),
+            voice: 9,
+            speed: 1.0,
+        };
+        let config = super::generation(super::Family::Supertonic, &say(Some("fr")), 10);
+        assert_eq!(config.num_steps, super::SUPERTONIC_STEPS);
+        assert!(super::SUPERTONIC_STEPS > sherpa_onnx::GenerationConfig::default().num_steps);
+        assert_eq!(config.sid, 9);
+        assert_eq!(
+            config.extra.as_ref().and_then(|e| e.get("lang")),
+            Some(&serde_json::Value::from("fr"))
+        );
+        let config = super::generation(super::Family::Kokoro, &say(Some("zh")), 4);
+        assert_eq!(
+            config.num_steps,
+            sherpa_onnx::GenerationConfig::default().num_steps
+        );
+        assert_eq!(config.sid, 3, "a voice it has");
+        assert!(config.extra.is_none());
+    }
+
     use super::*;
 
     /// How strong `hz` is in `samples` at `rate`, in dB, over their middle
