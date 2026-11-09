@@ -1832,9 +1832,9 @@ fn the_chrome_geometry_matches_what_is_drawn() {
                 super::ToolsRow::Shortcuts => {
                     matches!(sent.as_slice(), [Message::Window(WindowMsg::OpenShortcuts)])
                 }
-                super::ToolsRow::OpenFolder => matches!(
+                super::ToolsRow::Glossary => matches!(
                     sent.as_slice(),
-                    [Message::Project(crate::ProjectMsg::OpenFolderPressed)]
+                    [Message::Glossary(crate::GlossaryMsg::Open)]
                 ),
                 // The rest: something, and only one thing, is pressed.
                 _ => sent.len() <= 1,
@@ -1856,7 +1856,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     assert!(super::tools_on_strip(&app));
     app.show_tools_menu = true;
     assert!(
-        !shows(&mut sim_of(&app), "Open Remote…"),
+        !shows(&mut sim_of(&app), "Keyboard Shortcuts"),
         "a menu of what the strip shows"
     );
     // The ⋯ menu's rows, in a window too short for them on the strip: each
@@ -1865,7 +1865,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
     assert!(!super::tools_on_strip(&app));
     for (row, label) in [
         (super::ToolsRow::ExplainAll, "Explain All"),
-        (super::ToolsRow::OpenRemote, "Open Remote…"),
+        (super::ToolsRow::SetUp, "Set Up Project…"),
         (super::ToolsRow::Tutorial, "Tutorial"),
     ] {
         let rect = super::tools_menu_rows_rect(&app, row.index(), 1);
@@ -2252,7 +2252,7 @@ type Sim<'a> = iced_test::Simulator<'a, Message, iced::Theme, iced::Renderer>;
 /// The whole window, at the app's test size.
 /// A window short enough that the ⋯ menu's tools are in its menu, not laid
 /// on the strip ([`super::tools_on_strip`]): there is a ⋯ to open it from.
-const TOOLS_IN_MENU_H: f32 = 600.0;
+const TOOLS_IN_MENU_H: f32 = 520.0;
 
 /// `app`'s ⋯ menu open — in a window short enough to have one.
 fn open_tools_menu(app: &mut App) {
@@ -6255,7 +6255,6 @@ fn an_unchecked_summary_is_marked_in_the_outline_and_the_call_flow() {
 /// call hierarchy are not called what the margin's tabs are.
 #[test]
 fn a_feature_is_called_the_same_wherever_it_is_named() {
-    use super::toolbar::{ToolsRow, tools_row_label};
     use crate::SidebarTab as T;
     use crate::keymap::Action;
     let same = |a: &str, b: &str| {
@@ -6300,11 +6299,6 @@ fn a_feature_is_called_the_same_wherever_it_is_named() {
     let tab = super::sidebar::tab_name;
     assert!(same(Action::ProjectSearch.label(), tab(T::Search)));
     assert!(same(Action::Walkthrough.label(), tab(T::Walk)));
-    assert!(same(tools_row_label(ToolsRow::Walkthrough), tab(T::Walk)));
-    assert!(same(
-        tools_row_label(ToolsRow::LspServers),
-        crate::SettingsPage::Languages.title()
-    ));
     for margin in ["Notes", "Calls"] {
         for t in [T::Notes, T::Calls] {
             assert!(
@@ -9595,8 +9589,8 @@ fn the_window_resizes_from_its_edges_and_corners() {
 }
 
 /// The sidebar's strip holds its six everyday views and nothing else; a
-/// view opened by what shows it (a value traced, the import graph, a
-/// walkthrough, a symbol's docs) is named over it, with the way back to
+/// view opened by what shows it (a function's calls, a value traced, the
+/// import graph, a symbol's docs) is named over it, with the way back to
 /// the files.
 #[test]
 fn a_view_off_the_strip_is_named_over_it() {
@@ -9607,7 +9601,7 @@ fn a_view_off_the_strip_is_named_over_it() {
     for (tab, name) in [
         (crate::SidebarTab::Flow, "Value flow"),
         (crate::SidebarTab::Imports, "Imports"),
-        (crate::SidebarTab::Walk, "Walkthroughs"),
+        (crate::SidebarTab::Calls, "Call hierarchy"),
         (crate::SidebarTab::Docs, "API docs"),
         (crate::SidebarTab::Notes, "Your notes"),
     ] {
@@ -10284,7 +10278,7 @@ fn the_status_bars_chips_are_pressed_by_voice() {
 /// Hung from its button, its last rows ran past the foot, out of reach.
 #[test]
 fn the_tools_menu_fits_a_short_window() {
-    for height in [520.0, 600.0] {
+    for height in [460.0, 520.0] {
         let size = Size::new(1280.0, height);
         let mut app = reader_app();
         app.window_width = size.width;
@@ -10315,7 +10309,7 @@ fn the_tools_menu_fits_a_short_window() {
     }
     // Shorter than the menu: its rows scroll in what there is.
     let mut app = reader_app();
-    app.window_height = 360.0;
+    app.window_height = 240.0;
     assert!(super::tools_menu_h() > super::tools_menu_room(&app));
 }
 
@@ -10669,6 +10663,65 @@ fn every_page_over_the_code_has_its_close() {
     assert!(app.proj.docs.page.is_none());
 }
 
+/// Each tool is where what it opens is: nothing on the strip down the
+/// right edge opens one of the left sidebar's views — walkthroughs are one
+/// of its everyday views — opening another project is the app menu's, the
+/// language servers are the status bar's and Settings', and the reader's
+/// notes are exported from where they are listed.
+#[test]
+fn each_tool_is_on_the_side_it_opens() {
+    use super::toolbar::{
+        STRIP_TOP, StripTool, TOOLS_MENU_ROWS, app_menu_head, strip_tool, tools_row,
+    };
+    let app = reader_app();
+    let elsewhere = |m: &Message| {
+        matches!(
+            m,
+            Message::Window(WindowMsg::SidebarTabPicked(_))
+                | Message::Lsp(_)
+                | Message::Project(crate::ProjectMsg::OpenFolderPressed)
+                | Message::Connect(_)
+                | Message::Export(_)
+        )
+    };
+    for tool in STRIP_TOP.into_iter().chain([StripTool::Settings]) {
+        let (.., message) = strip_tool(&app, tool);
+        assert!(!elsewhere(&message), "{tool:?}");
+    }
+    for row in TOOLS_MENU_ROWS {
+        let (_, label, message) = tools_row(&app, row);
+        assert!(!message.as_ref().is_some_and(elsewhere), "{label}");
+    }
+    assert!(
+        super::SIDEBAR_TABS[..super::sidebar::STRIP_VIEWS]
+            .iter()
+            .any(|(_, tab)| *tab == crate::SidebarTab::Walk),
+        "walkthroughs hidden in the sidebar's overflow"
+    );
+    assert!(
+        app_menu_head(&app)
+            .iter()
+            .any(|(.., m)| matches!(m, Message::Project(crate::ProjectMsg::OpenFolderPressed)))
+    );
+    // Exported from the list of them, once there are any.
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Notes;
+    assert!(!shows(
+        &mut sim_elem(super::sidebar::notes_tab(&app)),
+        "Export…"
+    ));
+    app.proj.notes.push(crate::notes::Note {
+        rel: "src/lib.rs".into(),
+        symbol: "origin".into(),
+        understood: true,
+        text: "Where it all starts.".into(),
+    });
+    assert!(matches!(
+        click(sim_elem(super::sidebar::notes_tab(&app)), "Export…").as_slice(),
+        [Message::Export(crate::ExportMsg::Start)]
+    ));
+}
+
 /// The ⋯ menu's rows name the keys that do what they do, on the row and,
 /// where the rows are laid on the strip, in their tips — as every other tool
 /// does: they named none, as though they had none.
@@ -10677,8 +10730,6 @@ fn the_tools_menu_rows_name_their_keys() {
     use super::ToolsRow;
     let keyed = [
         (ToolsRow::ExplainAll, crate::keymap::Action::ExplainAll),
-        (ToolsRow::Walkthrough, crate::keymap::Action::Walkthrough),
-        (ToolsRow::LspServers, crate::keymap::Action::LspServers),
         (ToolsRow::Shortcuts, crate::keymap::Action::Shortcuts),
     ];
     let mut app = reader_app();

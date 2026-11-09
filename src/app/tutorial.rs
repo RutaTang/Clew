@@ -17,17 +17,12 @@ pub(crate) fn closes_tools_menu(message: &Message) -> bool {
     matches!(
         message,
         Message::Tutorial(TutorialMsg::Start)
-            | Message::Project(ProjectMsg::OpenFolderPressed)
-            | Message::Connect(ConnectMsg::Open)
             | Message::Explain(ExplainMsg::Cancel)
             | Message::Settings(SettingsMsg::Open | SettingsMsg::OpenAt(_))
             | Message::Explain(ExplainMsg::Project)
             | Message::Project(ProjectMsg::SetupShow(_))
-            | Message::Window(WindowMsg::SidebarTabPicked(_))
-            | Message::Lsp(LspMsg::TogglePanel)
             | Message::Window(WindowMsg::OpenShortcuts)
             | Message::Glossary(GlossaryMsg::Open)
-            | Message::Export(ExportMsg::Start)
     )
 }
 
@@ -348,18 +343,13 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // step a row made the tour forty-one steps long.
         TutStep::new(
             tr!("Understand the project"),
-            tr!("Explain All writes a note for every function, file and folder (it needs an API key); walkthroughs guide you through the code; the glossary defines the project's own terms."),
-            menu_rows(ToolsRow::ExplainAll, ToolsRow::Glossary),
+            tr!("Explain All writes a note for every function, file and folder (it needs an API key); the glossary defines the project's own terms; Set Up Project chooses its language servers again."),
+            menu_rows(ToolsRow::ExplainAll, ToolsRow::SetUp),
         ),
         TutStep::new(
-            tr!("Open another project"),
-            tr!("A folder on this machine, or code on another over SSH."),
-            menu_rows(ToolsRow::OpenFolder, ToolsRow::OpenRemote),
-        ),
-        TutStep::new(
-            tr!("And the rest"),
-            tr!("Export your notes as one Markdown file, set the project up again, restart a language server, look up a shortcut, or take this tour again."),
-            menu_rows(ToolsRow::ExportNotes, ToolsRow::Tutorial),
+            tr!("Help"),
+            tr!("Take this tour again, or look up a shortcut."),
+            menu_rows(ToolsRow::Tutorial, ToolsRow::Shortcuts),
         ),
         TutStep::new(
             tr!("That's Clew"),

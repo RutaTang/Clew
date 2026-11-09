@@ -21031,8 +21031,6 @@ fn every_tools_menu_row_dismisses_the_menu() {
     let emits = |row: ToolsRow| -> Vec<Message> {
         match row {
             ToolsRow::Tutorial => vec![Message::Tutorial(TutorialMsg::Start)],
-            ToolsRow::OpenFolder => vec![Message::Project(ProjectMsg::OpenFolderPressed)],
-            ToolsRow::OpenRemote => vec![Message::Connect(ConnectMsg::Open)],
             ToolsRow::ExplainAll => vec![
                 Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Explain)),
                 Message::Settings(SettingsMsg::OpenAt(crate::SettingsPage::LanguageModel)),
@@ -21041,12 +21039,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
             ToolsRow::SetUp => vec![Message::Project(ProjectMsg::SetupShow(
                 crate::app::setup::SetupMode::Manage,
             ))],
-            ToolsRow::Walkthrough => vec![Message::Window(WindowMsg::SidebarTabPicked(
-                SidebarTab::Walk,
-            ))],
             ToolsRow::Glossary => vec![Message::Glossary(GlossaryMsg::Open)],
-            ToolsRow::ExportNotes => vec![Message::Export(ExportMsg::Start)],
-            ToolsRow::LspServers => vec![Message::Lsp(LspMsg::TogglePanel)],
             ToolsRow::Shortcuts => vec![Message::Window(WindowMsg::OpenShortcuts)],
         }
     };
@@ -21060,7 +21053,7 @@ fn every_tools_menu_row_dismisses_the_menu() {
     }
     let mut app = blank_app();
     // Short enough for the ⋯ menu's tools to be in it, not on the strip.
-    app.window_height = 600.0;
+    app.window_height = 520.0;
     app.show_tools_menu = true;
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
     assert!(!app.show_tools_menu, "picking a row left the menu open");
@@ -29142,7 +29135,7 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
     // Short enough for the ⋯ menu's tools to be in it, not on the strip.
-    app.window_height = 600.0;
+    app.window_height = 520.0;
     let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     let _first_scrub = app.update(lib_history(&app, app.proj.time_gen));
     assert!(crate::ui::time_travel_on_screen(&app).is_some());
@@ -29268,7 +29261,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     open_synchronously(&mut app, "src/lib.rs", None);
     dismiss_overlays(&mut app);
     // Short enough for the ⋯ menu's tools to be in it, not on the strip.
-    app.window_height = 600.0;
+    app.window_height = 520.0;
     let _git = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     let _first_scrub = app.update(lib_history(&app, app.proj.time_gen));
     assert!(crate::ui::time_travel_on_screen(&app).is_some());
@@ -34449,7 +34442,7 @@ fn the_tour_takes_the_menus_rows_a_group_at_a_time() {
             _ => None,
         })
         .collect();
-    assert_eq!(menu.len(), 3, "{menu:?}");
+    assert_eq!(menu.len(), 2, "{menu:?}");
     let covered: usize = menu.iter().map(|(_, n)| n).sum();
     assert_eq!(covered, crate::ui::TOOLS_MENU_ROWS.len());
     assert!(all.len() <= 34, "{} steps", all.len());

@@ -11,20 +11,21 @@ pub(crate) const SIDEBAR_TABS: [(&str, SidebarTab); 11] = [
     ("FILES", SidebarTab::Files),
     ("SEARCH", SidebarTab::Search),
     ("FIND", SidebarTab::Semantic),
+    ("WALK", SidebarTab::Walk),
     ("MARKS", SidebarTab::Marks),
     ("TRAIL", SidebarTab::Trail),
     ("CALLS", SidebarTab::Calls),
     ("FLOW", SidebarTab::Flow),
     ("IMPORTS", SidebarTab::Imports),
-    ("WALK", SidebarTab::Walk),
     ("NOTES", SidebarTab::Notes),
     ("DOCS", SidebarTab::Docs),
 ];
 
 /// How many of [`SIDEBAR_TABS`] stand on the strip itself: the reader's
-/// everyday views. The rest open from what shows them — tracing a value,
-/// the import graph, a walkthrough, a symbol's docs — and from the command
-/// palette, each under a title of its own.
+/// everyday views, walkthroughs among them. The rest open from what shows
+/// them — a function's calls, tracing a value, the import graph, a symbol's
+/// docs — from the overflow, and from the command palette, each under a
+/// title of its own.
 pub(crate) const STRIP_VIEWS: usize = 6;
 
 /// A view's icon on its tab.
@@ -1668,7 +1669,11 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
 /// is marked understood or given a note — over every note in the project.
 pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
     if app.active_viewer().is_none() {
-        return notes_list(app);
+        return column![
+            row![space().width(Fill), notes_export(app)],
+            notes_list(app)
+        ]
+        .into();
     }
     let label = |s: &'static str| {
         container(
@@ -1688,9 +1693,40 @@ pub(crate) fn notes_tab(app: &App) -> Element<'_, Message> {
         label(tr!("In this file")),
         container(outline_content(app)).height(Length::FillPortion(1)),
         hairline(),
-        label(tr!("All notes")),
+        row![
+            label(tr!("All notes")),
+            space().width(Fill),
+            notes_export(app)
+        ]
+        .align_y(iced::Bottom),
         container(notes_list(app)).height(Length::FillPortion(1)),
     ]
+    .into()
+}
+
+/// The notes exported, as one Markdown file — here, where they are: none
+/// yet, nothing to export.
+fn notes_export(app: &App) -> Element<'_, Message> {
+    if app.proj.notes.is_empty() {
+        return space().into();
+    }
+    container(
+        button(
+            text(tr!("Export…"))
+                .size(ts::SMALL)
+                .color(theme::fg_muted()),
+        )
+        .style(theme::toolbar_button)
+        .padding([2, 8])
+        .on_press(super::heard::said(
+            tr!("Export notes"),
+            Message::Export(ExportMsg::Start),
+        )),
+    )
+    .padding(Padding {
+        right: 8.0,
+        ..Padding::ZERO
+    })
     .into()
 }
 

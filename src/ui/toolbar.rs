@@ -679,22 +679,25 @@ pub(crate) enum StripTool {
     Settings,
 }
 
-/// The strip's tools from the top, in their groups: seeing the whole project
-/// (Overview, Stats), running it (Debug), its graphs and maps, and More. A
-/// rule stands before each group but the first ([`STRIP_RULE_BEFORE`]).
-/// Settings stands apart, at the strip's foot.
+/// The strip's tools from the top, in their groups, in the order a project
+/// is come to know: the whole of it (Overview, Stats), how its parts
+/// connect (its graphs and maps), running it (Debug) — and More. A rule
+/// stands before each group but the first ([`STRIP_RULE_BEFORE`]). The
+/// strip holds what opens over the code or below it; what opens in the
+/// sidebar is the sidebar's to show ([`super::SIDEBAR_TABS`]). Settings
+/// stands apart, at the strip's foot.
 pub(crate) const STRIP_TOP: [StripTool; 8] = [
     StripTool::Overview,
     StripTool::Stats,
-    StripTool::Debug,
     StripTool::CallGraph,
     StripTool::ImportGraph,
     StripTool::TypeMap,
     StripTool::ProjectMaps,
+    StripTool::Debug,
     StripTool::More,
 ];
 /// The [`STRIP_TOP`] positions a group rule stands before.
-const STRIP_RULE_BEFORE: [usize; 3] = [2, 3, 7];
+const STRIP_RULE_BEFORE: [usize; 3] = [2, 6, 7];
 
 /// Where the strip's body starts: under the top bar and the update banner.
 pub(crate) fn body_top(app: &App) -> f32 {
@@ -942,41 +945,34 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ToolsRow {
     ExplainAll,
-    Walkthrough,
     Glossary,
-    OpenFolder,
-    OpenRemote,
-    ExportNotes,
     SetUp,
-    LspServers,
-    Shortcuts,
     Tutorial,
+    Shortcuts,
 }
 
-/// The ⋯ menu's rows, top to bottom, in three groups: understanding the
-/// project, opening another, and the rest. The menu is built from this list,
-/// and the tutorial points at rows by their position in it — so the two
-/// cannot drift.
-pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 10] = [
+/// The ⋯ menu's rows, top to bottom, in two groups: understanding the
+/// project, and help. Each tool is where what it opens is: walkthroughs and
+/// the reader's notes (and their export) in the sidebar, opening another
+/// project in the app menu, the language servers on the status bar and in
+/// Settings — none of them here. The menu is built from this list, and the
+/// tutorial points at rows by their position in it — so the two cannot
+/// drift.
+pub(crate) const TOOLS_MENU_ROWS: [ToolsRow; 5] = [
     ToolsRow::ExplainAll,
-    ToolsRow::Walkthrough,
     ToolsRow::Glossary,
-    ToolsRow::OpenFolder,
-    ToolsRow::OpenRemote,
-    ToolsRow::ExportNotes,
     ToolsRow::SetUp,
-    ToolsRow::LspServers,
-    ToolsRow::Shortcuts,
     ToolsRow::Tutorial,
+    ToolsRow::Shortcuts,
 ];
 
 /// The [`TOOLS_MENU_ROWS`] positions a separator stands before.
-pub(crate) const TOOLS_MENU_SEPARATORS: [usize; 2] = [3, 5];
+pub(crate) const TOOLS_MENU_SEPARATORS: [usize; 1] = [3];
 /// The [`TOOLS_MENU_ROWS`] positions a heading stands over, and what it
 /// says: the group of rows it names.
 pub(crate) const TOOLS_MENU_HEADINGS: [(usize, &str); 2] = [
     (0, tr_noop!("Understand the project")),
-    (3, tr_noop!("Open")),
+    (3, tr_noop!("Help")),
 ];
 
 impl ToolsRow {
@@ -1024,15 +1020,8 @@ fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
 pub(crate) fn tools_row_action(row: ToolsRow) -> Option<Action> {
     match row {
         ToolsRow::ExplainAll => Some(Action::ExplainAll),
-        ToolsRow::Walkthrough => Some(Action::Walkthrough),
-        ToolsRow::LspServers => Some(Action::LspServers),
         ToolsRow::Shortcuts => Some(Action::Shortcuts),
-        ToolsRow::Glossary
-        | ToolsRow::OpenFolder
-        | ToolsRow::OpenRemote
-        | ToolsRow::ExportNotes
-        | ToolsRow::SetUp
-        | ToolsRow::Tutorial => None,
+        ToolsRow::Glossary | ToolsRow::SetUp | ToolsRow::Tutorial => None,
     }
 }
 
@@ -1040,13 +1029,8 @@ pub(crate) fn tools_row_action(row: ToolsRow) -> Option<Action> {
 pub(crate) fn tools_row_label(row: ToolsRow) -> &'static str {
     match row {
         ToolsRow::ExplainAll => tr!("Explain All"),
-        ToolsRow::Walkthrough => tr!("Walkthroughs"),
         ToolsRow::Glossary => tr!("Glossary"),
-        ToolsRow::OpenFolder => tr!("Open Folder…"),
-        ToolsRow::OpenRemote => tr!("Open Remote…"),
-        ToolsRow::ExportNotes => tr!("Export Notes…"),
         ToolsRow::SetUp => tr!("Set Up Project…"),
-        ToolsRow::LspServers => tr!("Language Servers"),
         ToolsRow::Shortcuts => tr!("Keyboard Shortcuts"),
         ToolsRow::Tutorial => tr!("Tutorial"),
     }
@@ -1322,32 +1306,10 @@ pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Mess
             tr!("Explain All").into(),
             Some(explain_all_message(app)),
         ),
-        ToolsRow::Walkthrough => (
-            Glyph::Compass,
-            tr!("Walkthroughs").into(),
-            Some(Message::Window(WindowMsg::SidebarTabPicked(
-                SidebarTab::Walk,
-            ))),
-        ),
         ToolsRow::Glossary => (
             Glyph::Dictionary,
             tr!("Glossary").into(),
             has_project.then_some(Message::Glossary(GlossaryMsg::Open)),
-        ),
-        ToolsRow::OpenFolder => (
-            Glyph::FolderOpen,
-            tr!("Open Folder…").into(),
-            Some(Message::Project(ProjectMsg::OpenFolderPressed)),
-        ),
-        ToolsRow::OpenRemote => (
-            Glyph::Remote,
-            tr!("Open Remote…").into(),
-            Some(Message::Connect(ConnectMsg::Open)),
-        ),
-        ToolsRow::ExportNotes => (
-            Glyph::Export,
-            tr!("Export Notes…").into(),
-            has_project.then_some(Message::Export(ExportMsg::Start)),
         ),
         // Not Settings' gear: on the strip it stood over Settings itself.
         ToolsRow::SetUp => (
@@ -1356,11 +1318,6 @@ pub(crate) fn tools_row(app: &App, row: ToolsRow) -> (Glyph, String, Option<Mess
             has_project.then_some(Message::Project(ProjectMsg::SetupShow(
                 crate::app::setup::SetupMode::Manage,
             ))),
-        ),
-        ToolsRow::LspServers => (
-            Glyph::Plug,
-            tr!("Language Servers").into(),
-            Some(Message::Lsp(LspMsg::TogglePanel)),
         ),
         ToolsRow::Shortcuts => (
             Glyph::Shortcuts,
@@ -1754,17 +1711,17 @@ mod tests {
             assert!(slots.contains(&StripSlot::Row(row)), "{row:?}");
         }
         let center = |slot| strip_slot_center(&app, slot).unwrap().y;
-        let maps = center(StripSlot::Tool(StripTool::ProjectMaps));
+        let debug = center(StripSlot::Tool(StripTool::Debug));
         let first = center(StripSlot::Row(ToolsRow::ExplainAll));
-        let last = center(StripSlot::Row(ToolsRow::Tutorial));
-        assert!(first > maps);
+        let last = center(StripSlot::Row(ToolsRow::Shortcuts));
+        assert!(first > debug);
         let settings = center(StripSlot::Tool(StripTool::Settings));
         assert!(last + ICON_BTN / 2.0 + STRIP_FOOT_GAP <= settings - ICON_BTN / 2.0);
         let hole = tools_menu_rows_rect(&app, ToolsRow::Glossary.index(), 1);
         let glossary = strip_slot_center(&app, StripSlot::Row(ToolsRow::Glossary)).unwrap();
         assert!(hole.contains(glossary), "{hole:?} {glossary:?}");
 
-        app.window_height = 600.0;
+        app.window_height = 520.0;
         assert!(!tools_on_strip(&app));
         assert!(strip_slots(&app).contains(&StripSlot::Tool(StripTool::More)));
         assert!(strip_slot_center(&app, StripSlot::Row(ToolsRow::Glossary)).is_none());
@@ -1777,7 +1734,7 @@ mod tests {
         let mut app = crate::app::tests::blank_app();
         app.window_width = 1280.0;
         // Short enough for the ⋯ to be on the strip.
-        app.window_height = 600.0;
+        app.window_height = 520.0;
         let y = |app: &App, t| strip_tool_center(app, t).y;
         let pitch = ICON_BTN + STRIP_SPACING;
         let rule = STRIP_RULE_H + STRIP_SPACING;
@@ -1786,11 +1743,7 @@ mod tests {
             pitch
         );
         assert_eq!(
-            y(&app, StripTool::Debug) - y(&app, StripTool::Stats),
-            pitch + rule
-        );
-        assert_eq!(
-            y(&app, StripTool::CallGraph) - y(&app, StripTool::Debug),
+            y(&app, StripTool::CallGraph) - y(&app, StripTool::Stats),
             pitch + rule
         );
         assert_eq!(
@@ -1798,7 +1751,11 @@ mod tests {
             pitch
         );
         assert_eq!(
-            y(&app, StripTool::More) - y(&app, StripTool::ProjectMaps),
+            y(&app, StripTool::Debug) - y(&app, StripTool::ProjectMaps),
+            pitch + rule
+        );
+        assert_eq!(
+            y(&app, StripTool::More) - y(&app, StripTool::Debug),
             pitch + rule
         );
         let x = strip_tool_center(&app, StripTool::Overview).x;
