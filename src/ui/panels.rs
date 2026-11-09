@@ -908,6 +908,11 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         ),
         // Once there is a conversation, what is typed is a reply. (How to
         // talk instead is the microphone's own tooltip's to say.)
+        // Clew reading aloud, or the microphone open: what it says, and
+        // what is said, go where this would be typed — and it can still be
+        // typed.
+        None if app.voice.speech.is_speaking() => tr!("Speaking…").to_string(),
+        None if app.voice.is_listening() => tr!("Listening…").to_string(),
         None if !app.proj.ask_turns.is_empty() => tr!("Reply…").to_string(),
         None => tr!("Ask about this codebase…").to_string(),
     };
@@ -986,24 +991,13 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
             send_msg,
         ));
     let ask_btn = super::toolbar::tip_at(ask_btn, send_tip, None, tooltip::Position::Top);
-    // Or say it: the microphone, in the composer beside what is typed.
-    let listening = app.voice.is_listening();
+    // Or say it: the microphone, in the composer beside what is typed —
+    // lit while it is on ([`super::askfloat::voice_lit`]).
     let talk = super::toolbar::tip_at(
-        round(
-            Glyph::Mic,
-            if listening {
-                theme::danger()
-            } else {
-                theme::fg()
-            },
-        )
-        .style(theme::round_button(false))
-        .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
-        if listening {
-            tr!("Stop listening")
-        } else {
-            tr!("Talk")
-        },
+        round(Glyph::Mic, theme::fg())
+            .style(theme::round_button(false))
+            .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
+        tr!("Talk"),
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,
     );
@@ -1088,41 +1082,18 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .padding(iced::Padding::default().right(6))
         .into();
     }
-    // A conversation by voice: once Clew has answered, listen again. The
-    // design's switch — a track, its knob in from the end it is at — and
-    // beside it what it does, which turns it as well.
-    let on = app.voice.keep_listening;
-    let turn = Message::Voice(crate::VoiceMsg::SetKeepListening(!on));
-    let track = super::form::switch(on, turn.clone());
-    let keep_listening = row![
-        track,
-        iced::widget::mouse_area(ts::set_in(
-            text(tr!("Keep listening")).color(theme::fg_muted()),
-            super::form::SWITCH_H,
-            ts::INTER,
-            KEEP_LISTENING_SIZE,
-        ))
-        .on_press(turn)
-        .interaction(iced::mouse::Interaction::Pointer),
-    ]
-    .spacing(KEEP_LISTENING_GAP)
-    .align_y(iced::Center);
-    // While voice listens, works out the words, waits for a yes or Clew
-    // speaks, what it is doing is where the question is typed.
-    // As the pill says it, and the button lit as on the pill.
-    let input: Element<'_, Message> = match super::askfloat::voice_bar(app) {
-        Some(bar) => container(bar)
-            .width(Fill)
+    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
+    // How loud what the microphone hears is, or what Clew says, beside the
+    // button that stops it: the field stays to type in.
+    let meter: Element<'_, Message> = match super::askfloat::voice_meter(app) {
+        Some(meter) => container(meter)
             .height(Length::Fixed(ROUND_BUTTON))
-            .padding(Padding {
-                left: 4.0,
-                ..Padding::ZERO
-            })
             .align_y(iced::Center)
             .into(),
-        None => input,
+        None => space().into(),
     };
-    let talk = super::askfloat::voice_lit(app, ROUND_BUTTON, 15.0).unwrap_or(talk);
+    // A command heard that waits for a yes, over the field.
+    compose.push(compose_slot(super::askfloat::voice_confirm(app)));
     // What is queued, over the field, in a place of its own (`compose_slot`):
     // each question to be asked once the answer coming in is done, with a
     // way to ask it now — the answer stopped for it — and to take it back.
@@ -1179,9 +1150,9 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
         .into()
     })));
     // The composer, under a rule across the card: the question as it is
-    // typed, Keep listening, the microphone and send — or stop.
+    // typed, the microphone and send — or stop.
     // The buttons at the foot of a question of several lines, by its last.
-    let compose_row = row![input, keep_listening, talk, ask_btn]
+    let compose_row = row![input, meter, talk, ask_btn]
         .spacing(8)
         .align_y(iced::Bottom);
     compose.push(row![agent, compose_row].align_y(iced::Bottom).into());
@@ -1207,10 +1178,6 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
 pub(crate) const ROUND_BUTTON: f32 = 30.0;
 /// The most lines the question's field grows to before it scrolls.
 const COMPOSER_LINES: f32 = 6.0;
-/// Size of the composer's "Keep listening", as the design sets it.
-const KEEP_LISTENING_SIZE: f32 = 12.0;
-/// The design's gap between the switch and what it says.
-const KEEP_LISTENING_GAP: f32 = 7.0;
 /// Padding around the composer's row: a little more room at its start,
 /// where the question begins.
 pub(crate) const COMPOSER_PAD: Padding = Padding {

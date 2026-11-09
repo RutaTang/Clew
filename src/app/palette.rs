@@ -86,11 +86,11 @@ impl PaletteCommand {
         matches!(
             message,
             Message::Voice(
-                VoiceMsg::SetKeepListening(_)
-                    | VoiceMsg::SetSendQuestions(_)
+                VoiceMsg::SetSendQuestions(_)
                     | VoiceMsg::SetRunCommands(_)
                     | VoiceMsg::PickModel(_)
-            ) | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+            ) | Message::Editor(EditorMsg::RunAction(crate::keymap::Action::Voice))
+                | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
                 | Message::Updater(UpdaterMsg::SetAuto(_))
         )
     }
@@ -913,7 +913,7 @@ impl App {
         );
 
         // Every setting's every choice: the language, the theme, how voice
-        // listens and speaks ("Language: French", "Read answers aloud: Off").
+        // listens and speaks ("Language: French", "Read answers aloud: Never").
         for setting in self.settings_choices() {
             for choice in setting.choices {
                 out.push(PaletteCommand {

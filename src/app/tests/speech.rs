@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::app::speech::{Playing, Synthesizer};
-use crate::app::voice::{Claim, ClaimedFor, VoicePhase, VoicePrefs};
+use crate::app::voice::{Claim, ClaimedFor, ReadAloud, VoicePhase, VoicePrefs};
 use clew_protocol::StreamOutcome;
 use clew_voice::speaker::SayError;
 use clew_voice::speech::{self, VoiceModel};
@@ -234,7 +234,7 @@ fn a_spoken_answer_is_read_aloud_as_it_comes() {
     assert_eq!(voice.texts(), ["total adds every price."]);
     assert_eq!(output.lock().unwrap().played, [400]);
     assert!(app.voice.speech.is_speaking());
-    assert!(app.voice.is_busy(), "Esc has it to stop");
+    assert!(app.voice.takes_esc(), "Esc has it to stop");
     delta(&mut app, 1, " rounds.\n```python\nprint('not said')\n```\n");
     assert_eq!(voice.texts().len(), 1);
     ended(&mut app, 1, StreamOutcome::Done);
@@ -258,18 +258,33 @@ fn a_spoken_answer_is_read_aloud_as_it_comes() {
     // Played, it closes.
     all_played(&mut app, &output);
     assert!(!app.voice.speech.is_speaking());
-    assert!(!app.voice.is_busy());
+    assert!(!app.voice.takes_esc());
     // Typed: not said.
     asked(&mut app, 2, false);
     delta(&mut app, 2, "The total adds them. Then");
     ended(&mut app, 2, StreamOutcome::Done);
     assert_eq!(voice.texts().len(), 2);
     // Turned off: not said.
-    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(false)));
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
     asked(&mut app, 3, true);
     delta(&mut app, 3, "The total adds them. Then");
     ended(&mut app, 3, StreamOutcome::Done);
     assert_eq!(voice.texts().len(), 2);
+    // Every answer: a typed question's too.
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Always)));
+    asked(&mut app, 4, false);
+    delta(&mut app, 4, "The total adds them. Then");
+    assert_eq!(
+        voice.texts().get(2).map(String::as_str),
+        Some("The total adds them.")
+    );
+    // Turned back to spoken questions only, what was being read of a typed
+    // one stops.
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Spoken)));
+    assert!(!app.voice.speech.is_speaking());
+    let said = voice.texts().len();
+    ended(&mut app, 4, StreamOutcome::Done);
+    assert_eq!(voice.texts().len(), said);
 }
 
 /// Each sentence is said in its own language: French as French, Korean by
@@ -377,21 +392,23 @@ fn speech_stops_when_the_reader_asks() {
     assert!(!app.voice.speech.is_speaking(), "but not played");
 }
 
-/// Keep listening: the microphone opens once Clew has said all of the
-/// answer — not while it speaks, which it would hear.
+/// The microphone, on, opens once Clew has said all of the answer — not
+/// while it speaks, which it would hear; the reader stopping Clew opens it
+/// at once, as does an answer with nothing to say.
 #[test]
-fn keep_listening_waits_for_clew_to_finish() {
-    let (mut app, _voice, output) = speech_app("speech-keep-listening");
+fn the_microphone_waits_for_clew_to_finish() {
+    let (mut app, _voice, output) = speech_app("speech-mic-waits");
     let model = app.voice.prefs.model();
     let store = app.voice.store.clone().unwrap();
     std::fs::create_dir_all(store.dir()).unwrap();
     std::fs::write(store.path(model), b"a model").unwrap();
     app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
     app.ask_view = AskView::Compact;
-    // On already, as when the question was said (switching it on listens).
-    app.voice.keep_listening = true;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "{}", app.status);
     asked(&mut app, 1, true);
     delta(&mut app, 1, "The total adds every price.");
+    assert_eq!(app.voice.phase, VoicePhase::Idle, "not while Clew speaks");
     ended(&mut app, 1, StreamOutcome::Done);
     assert!(app.voice.speech.is_speaking());
     assert_eq!(app.voice.phase, VoicePhase::Idle, "not while Clew speaks");
@@ -402,19 +419,27 @@ fn keep_listening_waits_for_clew_to_finish() {
         "{:?}",
         app.voice.phase
     );
-    // Stopped by the reader: it does not listen on its own.
-    let _ = app.update(Message::Voice(VoiceMsg::Cancel));
+    // Stopped by the reader: it listens at once.
     asked(&mut app, 2, true);
-    delta(&mut app, 2, "The total adds every price.");
-    ended(&mut app, 2, StreamOutcome::Done);
-    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
-    all_played(&mut app, &output);
+    delta(&mut app, 2, "The total adds every price. Then");
     assert_eq!(app.voice.phase, VoicePhase::Idle);
+    let _ = app.update(Message::Voice(VoiceMsg::StopSpeaking));
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+    ended(&mut app, 2, StreamOutcome::Done);
+    assert!(app.voice.is_listening());
     // Nothing to say (all code): it listens at once.
     asked(&mut app, 3, true);
     delta(&mut app, 3, "```\nx = 1\n```");
     ended(&mut app, 3, StreamOutcome::Done);
     assert!(matches!(app.voice.phase, VoicePhase::Listening { .. }));
+    // Off, it stays off.
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    asked(&mut app, 4, true);
+    delta(&mut app, 4, "The total adds every price.");
+    ended(&mut app, 4, StreamOutcome::Done);
+    all_played(&mut app, &output);
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
 }
 
 /// A microphone that hears nothing.
@@ -593,7 +618,7 @@ fn speech_settings_are_kept() {
     std::fs::create_dir_all(&data).unwrap();
     let _env = data_dir_override(&data);
     let (mut app, _, _) = speech_app("speech-prefs");
-    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(false)));
+    let _ = app.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Never)));
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeed(1.25)));
     let task = app.update(Message::Voice(VoiceMsg::PickSpeechVoice {
         model: "supertonic-3",
@@ -602,12 +627,28 @@ fn speech_settings_are_kept() {
     settle(&mut app, task);
     let read = VoicePrefs::load();
     assert_eq!(read, app.voice.prefs);
-    assert!(!read.speak);
+    assert_eq!(read.read_aloud, ReadAloud::Never);
     assert_eq!(read.speed, 1.25);
     assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 8);
     assert_eq!(read.voice_for(speech::find("kokoro-zh").unwrap()), 47);
     let _ = app.update(Message::Voice(VoiceMsg::SetSpeed(9.0)));
     assert_eq!(app.voice.prefs.speed, 1.25);
+    // Kept as a switch by an earlier Clew: on read the answers to spoken
+    // questions, off none; what is none of these is not taken.
+    for (kept, read_aloud) in [
+        (toml::Value::Boolean(true), ReadAloud::Spoken),
+        (toml::Value::Boolean(false), ReadAloud::Never),
+        (toml::Value::String("always".into()), ReadAloud::Always),
+        (toml::Value::String("loudly".into()), ReadAloud::Spoken),
+    ] {
+        clew_core::globalconfig::edit(|root| {
+            if let Some(voice) = root.get_mut("voice").and_then(|v| v.as_table_mut()) {
+                voice.insert("speak".into(), kept.clone());
+            }
+        })
+        .unwrap();
+        assert_eq!(VoicePrefs::load().read_aloud, read_aloud, "{kept}");
+    }
 }
 
 /// Every file a fetch was asked for, and the most it might be.
@@ -713,10 +754,10 @@ fn a_late_close_of_an_earlier_answer_leaves_the_new_one_be() {
     assert_eq!(voice.texts().len(), said, "{:?}", voice.texts());
 }
 
-/// With Keep listening on, a voice that fails as the answer ends still
-/// leaves the microphone to open: the reader did not stop it.
+/// With the microphone on, a voice that fails as the answer ends still
+/// leaves the microphone to open: the reader did not turn it off.
 #[test]
-fn keep_listening_survives_a_voice_that_fails() {
+fn the_microphone_survives_a_voice_that_fails() {
     let (mut app, voice, _) = speech_app("speech-keep-listening-fails");
     let model = app.voice.prefs.model();
     let store = app.voice.store.clone().unwrap();
@@ -724,8 +765,8 @@ fn keep_listening_survives_a_voice_that_fails() {
     std::fs::write(store.path(model), b"a model").unwrap();
     app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
     app.ask_view = AskView::Compact;
-    // On already, as when the question was said (switching it on listens).
-    app.voice.keep_listening = true;
+    // On already, as when the question was said.
+    app.voice.mic_on = true;
     asked(&mut app, 1, true);
     // The answer ends while its sentence is still being made, and that
     // sentence fails: clew-speak is gone.
@@ -1110,11 +1151,11 @@ fn windows_keep_each_others_voice_settings() {
     }));
     settle(&mut first, task);
     // The second window still reads 1× and the default voice.
-    let _ = second.update(Message::Voice(VoiceMsg::SetSpeak(false)));
+    let _ = second.update(Message::Voice(VoiceMsg::SetSpeak(ReadAloud::Always)));
     let _ = second.update(Message::Voice(VoiceMsg::SetRunCommands(false)));
     let read = VoicePrefs::load();
     assert_eq!(read.speed, 1.25);
     assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 6);
-    assert!(!read.speak);
+    assert_eq!(read.read_aloud, ReadAloud::Always);
     assert!(!read.run_commands);
 }

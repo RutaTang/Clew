@@ -3551,10 +3551,10 @@ fn the_composers_one_button_stops_queues_or_asks() {
             size,
             super::panels::ask_panel(app, size.height),
         );
-        let row = text_at(&mut sim, |t| t == "Keep listening", 0).expect("the composer");
+        // The composer's last button, at its foot.
         sim.point_at(Point::new(
             size.width - super::COMPOSER_PAD.right - super::ROUND_BUTTON / 2.0,
-            row.center_y(),
+            size.height - super::COMPOSER_PAD.bottom - super::ROUND_BUTTON / 2.0,
         ));
         let _ = sim.simulate(iced_test::simulator::click());
         sent_by(sim)
@@ -9362,20 +9362,21 @@ fn speaking_shows_with_a_stop() {
             .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
         "{sent:?}"
     );
-    // On the card, in the composer: the same, Esc left to the pill.
+    // On the card, in the composer: the button lit to stop it, the field
+    // left to type in, Esc left to the pill.
     app.ask_view = crate::AskView::Compact;
-    let mut sim = sim_of(&app);
-    assert!(shows(&mut sim, "Speaking"), "on the card too");
-    assert!(!shows(&mut sim, "Esc"));
-    let sent = click_right_of(
-        || sim_of(&app),
-        "Speaking",
-        |m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)),
-    );
+    assert!(!shows(&mut sim_of(&app), "Esc"));
+    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit");
+    let mut sim = sim_elem(lit);
+    sim.point_at(Point::new(
+        super::ROUND_BUTTON / 2.0,
+        super::ROUND_BUTTON / 2.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
     assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking))),
-        "{sent:?}"
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::StopSpeaking)))
     );
 }
 
@@ -9420,37 +9421,38 @@ fn voice_shows_what_it_is_doing() {
         voice.as_slice(),
         [Message::Voice(crate::VoiceMsg::Toggle)]
     ));
+    // On the card, the field says it listens — and can still be typed in;
+    // the microphone, lit, turns it off. What is said is worked out out of
+    // sight: nothing says so, and there is no switch to keep it listening.
+    app.voice.mic_on = true;
     app.ask_view = crate::AskView::Compact;
-    assert!(shows(&mut sim_of(&app), "Listening"), "on the card too");
-    app.voice.phase = VoicePhase::Transcribing { token: 1 };
-    assert!(shows(&mut sim_of(&app), "Transcribing"));
-    // On the card, the microphone's place holds the way to cancel; on the
-    // pill, as while listening, Esc.
-    let sent = click_right_of(
-        || sim_of(&app),
-        "Transcribing",
-        |m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel)),
-    );
-    assert!(
-        sent.iter()
-            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::Cancel))),
-        "{sent:?}"
-    );
-    app.ask_view = crate::AskView::Hidden;
     {
         let mut sim = sim_of(&app);
-        assert!(shows(&mut sim, "Transcribing"));
-        assert!(!shows(&mut sim, "Esc"));
+        assert!(!shows(&mut sim, "Keep listening"));
+        assert!(!shows(&mut sim, "Transcribing"));
     }
-    app.ask_view = crate::AskView::Compact;
-    app.voice.phase = VoicePhase::Idle;
+    let lit = super::askfloat::voice_lit(&app, super::ROUND_BUTTON, 15.0).expect("lit while on");
+    let mut sim = sim_elem(lit);
+    sim.point_at(Point::new(
+        super::ROUND_BUTTON / 2.0,
+        super::ROUND_BUTTON / 2.0,
+    ));
+    let _ = sim.simulate(iced_test::simulator::click());
+    assert!(
+        sent_by(sim)
+            .iter()
+            .any(|m| matches!(m, Message::Voice(crate::VoiceMsg::Toggle))),
+        "it turns the microphone off"
+    );
+    // A command that asks first, while it listens on for the yes.
     app.voice.confirm = Some(crate::app::voice::Waiting::Command("Explain All".into()));
     assert!(shows(&mut sim_of(&app), "Run “Explain All”?"));
     assert!(matches!(
         click(sim_of(&app), "Run").as_slice(),
         [Message::Voice(crate::VoiceMsg::Confirm)]
     ));
-    // On the card: what was last heard, and what came of it.
+    // On the card: what was last heard, and what came of it — as it
+    // listens on.
     app.voice.confirm = None;
     app.voice.hear(Heard {
         text: "open the call graph".into(),
@@ -9469,9 +9471,14 @@ fn voice_shows_what_it_is_doing() {
         assert!(shows(&mut sim, "Call Graph"));
     }
     app.voice.heard_at = Some(std::time::Instant::now() - crate::app::voice::HEARD_SHOWN);
-    let mut sim = sim_of(&app);
-    assert!(!shows(&mut sim, "“open the call graph”"));
-    assert!(shows(&mut sim, "Ask"));
+    {
+        let mut sim = sim_of(&app);
+        assert!(!shows(&mut sim, "“open the call graph”"));
+        assert!(shows(&mut sim, "Listening"), "listening, as before");
+    }
+    app.voice.mic_on = false;
+    app.voice.phase = VoicePhase::Idle;
+    assert!(shows(&mut sim_of(&app), "Ask"));
 }
 
 /// The settings' Voice section: every model with its size, downloaded

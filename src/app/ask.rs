@@ -477,7 +477,7 @@ impl App {
             self.proj.ask_spoken = false;
         }
         // Said aloud, it is answered without the card opening over the code
-        // (see `on_transcribed`).
+        // (see `on_words`).
         if !spoken {
             self.reveal_ask();
         }
@@ -1032,7 +1032,7 @@ impl App {
         });
         self.proj.asking = false;
         // Said aloud, it is answered without the card opening over the code
-        // (see `on_transcribed`).
+        // (see `on_words`).
         if !spoken {
             self.reveal_ask();
         }
@@ -1275,15 +1275,10 @@ impl App {
         } else {
             self.read_answer(stream, true)
         };
-        // Answered, with Keep listening on: listen for what comes next —
-        // once all of it is said. A Stop or a failure leaves the microphone
-        // to the reader.
-        let listen = if matches!(outcome, StreamOutcome::Done) {
-            self.resume_listening()
-        } else {
-            Task::none()
-        };
-        Task::batch([task, to_bottom, said, listen])
+        // With the microphone on, it waited for the answer: it listens for
+        // what comes next — once all of it is said.
+        self.resume_listening();
+        Task::batch([task, to_bottom, said])
     }
 
     /// The agent made a tool call: append its chip to the open turn and keep

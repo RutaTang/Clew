@@ -175,7 +175,7 @@ impl App {
             Key::Named(Named::Escape) => {
                 self.pending_g = false;
                 self.pending_z = false;
-                if self.voice.is_busy() {
+                if self.voice.takes_esc() {
                     return self.update(Message::Voice(VoiceMsg::Cancel));
                 }
                 if self.proj.find.open {

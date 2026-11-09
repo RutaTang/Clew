@@ -1,11 +1,13 @@
 //! Voice: talking to the window instead of typing to it.
 //!
-//! The voice key (⇧⌘S, rebindable) or the microphone button starts
-//! listening; pressing either again stops — as does a pause once something
-//! has been said, so a spoken command needs no second key — and Esc
-//! cancels. What was heard is transcribed on this machine, by whisper.cpp on
-//! a model the user downloaded once ([`clew_voice::models`]): nothing that
-//! is said leaves the computer.
+//! The voice key (⇧⌘S, rebindable) or the microphone button turns the
+//! microphone on, and it listens until either is pressed again: a pause once
+//! something has been said ends that utterance, which is worked out out of
+//! sight while the microphone listens on for the next. It waits only while
+//! Clew reads an answer aloud — it would hear Clew. What was heard is
+//! transcribed on this machine, by whisper.cpp on a model the user
+//! downloaded once ([`clew_voice::models`]): nothing that is said leaves the
+//! computer.
 //!
 //! The words are then read as one of the window's commands when they
 //! plainly name one ("open the call graph", "hide the minimap" —
@@ -15,6 +17,7 @@
 //!
 //! Its messages, [`VoiceMsg`], arrive through `App::update_voice`.
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -31,7 +34,8 @@ use crate::*;
 pub(crate) const MAX_SECONDS: u32 = 60;
 /// The pause after speech that ends listening on its own.
 pub(crate) const END_SILENCE: f32 = 1.2;
-/// How long listening waits for anything to be said before giving up.
+/// How long the microphone keeps the quiet before it lets it go and
+/// listens afresh: what it keeps is for what is said.
 pub(crate) const NO_SPEECH_TIMEOUT: f32 = 8.0;
 /// A second press of the voice key sooner than this after the last one is
 /// the key repeating while held — or bouncing — not a press: ignored.
@@ -182,7 +186,7 @@ impl std::io::Write for WriteRef<'_> {
     }
 }
 
-/// What voice is doing.
+/// Whether the microphone is open.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum VoicePhase {
     Idle,
@@ -191,10 +195,6 @@ pub(crate) enum VoicePhase {
         since: Instant,
         /// The meter's latest reading, 0 to 1.
         level: f32,
-    },
-    /// What was heard is being turned into words; `token` names the run.
-    Transcribing {
-        token: u64,
     },
 }
 
@@ -214,8 +214,6 @@ pub(crate) enum HeardOutcome {
     Confirm(String),
     /// The words went to Ask.
     Asked,
-    /// Nothing was heard that could be read.
-    Nothing,
     /// It failed, saying why.
     Failed(String),
 }
@@ -303,9 +301,8 @@ pub(crate) struct VoicePrefs {
     pub run_commands: bool,
     /// Ask what is not one at once, rather than leave it in the input.
     pub send_questions: bool,
-    /// Read the answers to questions that were said aloud
-    /// ([`crate::app::speech`]).
-    pub speak: bool,
+    /// Which answers are read aloud ([`crate::app::speech`]).
+    pub read_aloud: ReadAloud,
     /// How fast Clew speaks: 1 is the voice's own pace.
     pub speed: f32,
     /// The voice picked for each speech model, by the model's id.
@@ -319,10 +316,69 @@ impl Default for VoicePrefs {
             language: None,
             run_commands: true,
             send_questions: true,
-            speak: true,
+            read_aloud: ReadAloud::Spoken,
             speed: 1.0,
             voices: std::collections::BTreeMap::new(),
         }
+    }
+}
+
+/// Which of Clew's answers it reads aloud.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadAloud {
+    Never,
+    /// The answers to questions said aloud.
+    Spoken,
+    /// Every answer, to questions typed too.
+    Always,
+}
+
+impl ReadAloud {
+    pub(crate) const ALL: [ReadAloud; 3] = [ReadAloud::Never, ReadAloud::Spoken, ReadAloud::Always];
+
+    /// Whether the answer to a question said aloud (`spoken`), or typed,
+    /// is read aloud.
+    pub(crate) fn reads(self, spoken: bool) -> bool {
+        match self {
+            ReadAloud::Never => false,
+            ReadAloud::Spoken => spoken,
+            ReadAloud::Always => true,
+        }
+    }
+
+    /// Its name, in English — translated where it is shown.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            ReadAloud::Never => tr_noop!("Never"),
+            ReadAloud::Spoken => tr_noop!("For spoken questions"),
+            ReadAloud::Always => tr_noop!("Always"),
+        }
+    }
+
+    /// As config.toml keeps it.
+    fn key(self) -> &'static str {
+        match self {
+            ReadAloud::Never => "never",
+            ReadAloud::Spoken => "spoken",
+            ReadAloud::Always => "always",
+        }
+    }
+
+    /// As config.toml keeps it — or as it kept it, a switch: on read the
+    /// answers to questions said aloud.
+    fn from_value(value: &toml::Value) -> Option<Self> {
+        match value {
+            toml::Value::Boolean(true) => Some(ReadAloud::Spoken),
+            toml::Value::Boolean(false) => Some(ReadAloud::Never),
+            toml::Value::String(key) => Self::ALL.into_iter().find(|r| r.key() == key),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReadAloud {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(crate::i18n::lookup(self.name()))
     }
 }
 
@@ -368,8 +424,8 @@ impl VoicePrefs {
         if let Some(on) = section.get("send").and_then(|v| v.as_bool()) {
             prefs.send_questions = on;
         }
-        if let Some(on) = section.get("speak").and_then(|v| v.as_bool()) {
-            prefs.speak = on;
+        if let Some(read_aloud) = section.get("speak").and_then(ReadAloud::from_value) {
+            prefs.read_aloud = read_aloud;
         }
         if let Some(speed) = section
             .get("speed")
@@ -426,7 +482,7 @@ impl VoicePrefs {
                     section.insert("send".into(), self.send_questions.into());
                 }
                 Pref::Speak => {
-                    section.insert("speak".into(), self.speak.into());
+                    section.insert("speak".into(), self.read_aloud.key().into());
                 }
                 Pref::Speed => {
                     section.insert("speed".into(), f64::from(self.speed).into());
@@ -470,9 +526,17 @@ pub(crate) struct VoiceState {
     /// for: the one found on this computer when listening began, whatever
     /// another window picks meanwhile.
     listening: Option<(Box<dyn Listening>, &'static Model)>,
-    /// Stops the transcription in progress.
-    cancel: Arc<AtomicBool>,
-    /// The last run started, so a late result of an earlier one is dropped.
+    /// The microphone is on: it listens, one utterance after another, until
+    /// its button or the voice key is pressed again. Closed meanwhile only
+    /// while Clew reads an answer aloud ([`App::resume_listening`]).
+    pub mic_on: bool,
+    /// What was said, waiting to be worked out after what was said before
+    /// it — one at a time, in the order it was said — with the model it is
+    /// worked out with.
+    unheard: VecDeque<(Recording, &'static Model)>,
+    /// The run working out what was said, by its token.
+    transcribing: Option<u64>,
+    /// The last run started.
     token: u64,
     /// When the voice key last started or stopped listening.
     last_toggle: Option<Instant>,
@@ -488,9 +552,6 @@ pub(crate) struct VoiceState {
     /// The last download's failure, by model id.
     pub download_errors: HashMap<&'static str, String>,
     pub prefs: VoicePrefs,
-    /// Keep listening: once Clew has answered, the microphone opens again
-    /// for what is said next — a conversation by voice, the card open.
-    pub keep_listening: bool,
     /// Where models are kept: under the data directory.
     pub store: Option<Store>,
     pub(crate) open_mic: OpenMic,
@@ -521,7 +582,9 @@ impl VoiceState {
         Self {
             phase: VoicePhase::Idle,
             listening: None,
-            cancel: Arc::new(AtomicBool::new(false)),
+            mic_on: false,
+            unheard: VecDeque::new(),
+            transcribing: None,
             token: 0,
             last_toggle: None,
             heard: None,
@@ -530,7 +593,6 @@ impl VoiceState {
             downloads: HashMap::new(),
             download_errors: HashMap::new(),
             prefs: VoicePrefs::load(),
-            keep_listening: false,
             store: clew_core::lsp::store::data_root().map(|d| Store::new(d.join("voice"))),
             open_mic: open_system_mic,
             transcriber: ENGINE.clone(),
@@ -542,8 +604,10 @@ impl VoiceState {
 
     /// Whether Esc has something of voice's to put away: listening, a
     /// transcription, a command waiting for a yes, Clew speaking.
-    pub(crate) fn is_busy(&self) -> bool {
-        self.phase != VoicePhase::Idle || self.confirm.is_some() || self.speech.is_speaking()
+    /// Whether Esc is voice's: a command waits for a yes, or Clew speaks.
+    /// Not the microphone: on, it stays on until its button turns it off.
+    pub(crate) fn takes_esc(&self) -> bool {
+        self.confirm.is_some() || self.speech.is_speaking()
     }
 
     pub(crate) fn is_listening(&self) -> bool {
@@ -562,8 +626,22 @@ impl VoiceState {
     pub(crate) fn reset_for_test(&mut self) {
         self.phase = VoicePhase::Idle;
         self.listening = None;
+        self.mic_on = false;
         self.heard = None;
         self.last_toggle = None;
+    }
+
+    /// The voice key's last press forgotten, so a test's next press is not
+    /// taken for a repeat.
+    #[cfg(test)]
+    pub(crate) fn forget_last_press(&mut self) {
+        self.last_toggle = None;
+    }
+
+    /// Whether what was said is still being worked out, or waits to be.
+    #[cfg(test)]
+    pub(crate) fn transcribing(&self) -> bool {
+        self.transcribing.is_some() || !self.unheard.is_empty()
     }
 
     /// Whether `model` is downloaded.
@@ -575,13 +653,13 @@ impl VoiceState {
 /// Voice's messages.
 #[derive(Debug, Clone)]
 pub enum VoiceMsg {
-    /// The voice key or the microphone button: start listening, or stop and
-    /// transcribe.
+    /// The voice key or the microphone button: turn the microphone on, or
+    /// off — or, while Clew speaks, talk over it.
     Toggle,
-    /// Stop listening and transcribe what was heard.
+    /// What is being said has ended: work it out, and listen on.
     Stop,
-    /// Esc: stop listening, or stop transcribing, keeping nothing; or say no
-    /// to the command waiting for a yes.
+    /// Esc, or the Cancel of a command waiting for a yes: say no to it — or
+    /// stop Clew speaking.
     Cancel,
     /// While listening: read the level and look for the pause that ends it.
     Tick,
@@ -632,8 +710,6 @@ pub enum VoiceMsg {
     SetLanguage(Option<&'static str>),
     SetRunCommands(bool),
     SetSendQuestions(bool),
-    /// Listen again after each answer, or not.
-    SetKeepListening(bool),
     /// A sentence made into speech, for the stop round it was made in — or
     /// why it could not be.
     Spoken {
@@ -646,8 +722,8 @@ pub enum VoiceMsg {
     SpeakTick,
     /// Stop speaking.
     StopSpeaking,
-    /// Read answers to spoken questions aloud, or not.
-    SetSpeak(bool),
+    /// Which answers are read aloud.
+    SetSpeak(ReadAloud),
     /// How fast Clew speaks.
     SetSpeed(f32),
     /// Speak with this voice of this speech model.
@@ -877,10 +953,9 @@ impl App {
             | VoiceMsg::RemoveSpeech(_)
             | VoiceMsg::SpeechRemoved { .. }) => self.update_speech(message),
             VoiceMsg::Toggle => self.on_voice_toggle(),
-            VoiceMsg::SetKeepListening(on) => self.set_keep_listening(on),
-            VoiceMsg::Stop => self.stop_listening(),
+            VoiceMsg::Stop => self.end_utterance(),
             VoiceMsg::Cancel => {
-                self.cancel_voice();
+                self.on_voice_escape();
                 Task::none()
             }
             VoiceMsg::Tick => self.on_voice_tick(),
@@ -895,21 +970,7 @@ impl App {
             | VoiceMsg::TurnDownloaded(_)
             | VoiceMsg::RemoveTurn
             | VoiceMsg::TurnRemoved(_)) => self.on_turn_settings(message),
-            VoiceMsg::Transcribed { token, result } => {
-                let ours = self.voice.phase == (VoicePhase::Transcribing { token });
-                let cancelled = result.as_ref().is_err_and(|e| e == "cancelled");
-                let task = self.on_transcribed(token, result);
-                // Keep listening: what was said is done with — a command
-                // run, a place gone to, a yes waited for, nothing caught —
-                // and the microphone opens for what comes next. Not after a
-                // question sent: its answer is waited for
-                // (`on_ask_stream_ended`), or Clew would hear itself say it.
-                if ours && !cancelled && !self.ask_stream_active() {
-                    Task::batch([task, self.resume_listening()])
-                } else {
-                    task
-                }
-            }
+            VoiceMsg::Transcribed { token, result } => self.on_transcribed(token, result),
             VoiceMsg::Confirm => match self.voice.confirm.take() {
                 Some(waiting) => {
                     self.voice.heard = self.voice.heard.take().map(|h| Heard {
@@ -1036,7 +1097,9 @@ impl App {
         }
     }
 
-    /// The voice key or the microphone button.
+    /// The voice key or the microphone button: the microphone on, or off.
+    /// Pressed while Clew speaks, it is said over Clew, as over a person:
+    /// Clew stops, and listens.
     fn on_voice_toggle(&mut self) -> Task<Message> {
         let now = Instant::now();
         // A held key repeats (as the menu's key equivalent, too): every
@@ -1050,87 +1113,90 @@ impl App {
             return Task::none();
         }
         self.voice.last_toggle = Some(now);
-        match self.voice.phase {
-            VoicePhase::Listening { .. } => self.stop_listening(),
-            VoicePhase::Transcribing { .. } => {
-                self.status = tr!("Still working out what was said…").into();
-                Task::none()
-            }
-            VoicePhase::Idle => {
-                // Said over Clew, as over a person: it stops, and listens.
-                self.stop_speaking();
-                self.start_listening()
-            }
-        }
-    }
-
-    /// Keep listening on: switched on, the microphone opens at once —
-    /// there is nothing else to press — and after it is heard each time,
-    /// again ([`App::resume_listening`]). Switched off, a listen that has
-    /// heard nothing yet is put away; one that is hearing someone ends as
-    /// it would have.
-    fn set_keep_listening(&mut self, on: bool) -> Task<Message> {
-        self.voice.keep_listening = on;
-        if !on {
-            self.voice.speech.listen_after = false;
-            let unheard = self
-                .voice
-                .listening_now()
-                .is_some_and(|l| l.silence_after_speech().is_none());
-            if unheard {
-                if let Some((listening, _)) = self.voice.listening.take() {
-                    drop(listening.stop());
-                }
-                self.voice.phase = VoicePhase::Idle;
-                self.status = tr!("Stopped listening").into();
-            }
-            return Task::none();
-        }
-        // While a question is answered, its end opens the microphone.
-        if self.ask_stream_active() {
-            return Task::none();
-        }
         if self.voice.speech.is_speaking() {
-            self.voice.speech.listen_after = true;
-            return Task::none();
-        }
-        if self.voice.phase == VoicePhase::Idle {
-            // No model yet: start_listening says so, and opens Settings on
-            // the download.
+            // With the microphone on, it opens as Clew stops.
+            self.stop_speaking();
+            if self.voice.mic_on {
+                return Task::none();
+            }
             return self.start_listening();
         }
+        if self.voice.mic_on {
+            return self.mic_off();
+        }
+        // An answer still coming that would be read aloud is talked over:
+        // it is not read, and the microphone does not wait for it.
+        if self.answer_read_aloud_coming() {
+            self.stop_speaking();
+        }
+        self.start_listening()
+    }
+
+    /// The microphone turned off. What it is hearing someone say is kept —
+    /// the press ends it, as a pause would — and what was said before is
+    /// still worked out and acted on; a listen that has heard nothing yet
+    /// is put away.
+    fn mic_off(&mut self) -> Task<Message> {
+        self.voice.mic_on = false;
+        self.status = tr!("Stopped listening").into();
+        let hearing = self
+            .voice
+            .listening_now()
+            .is_some_and(|l| l.silence_after_speech().is_some());
+        if hearing {
+            return self.end_utterance_now();
+        }
+        self.close_mic();
         Task::none()
     }
 
-    /// With Keep listening on, once what was said is done with — a
-    /// command run, an answer given and said: the microphone opens again
-    /// for what is said next, while nothing is being heard and there is a
-    /// model to hear it with (this never sends the reader to Settings for
-    /// one). The conversation need not be open: the pill says Clew is
-    /// listening. A command waiting for a yes is listened for too.
-    pub(crate) fn resume_listening(&mut self) -> Task<Message> {
-        // Not while Clew speaks: the microphone would hear it. Once all is
-        // said, this is asked again.
-        if self.voice.keep_listening && self.voice.speech.is_speaking() {
-            self.voice.speech.listen_after = true;
-            return Task::none();
-        }
-        // A question queued is asked next, and its answer waited for.
-        let ready = self.voice.keep_listening
-            && self.voice.phase == VoicePhase::Idle
-            && self.proj.ask_queue.is_empty()
-            && self.voice.installed(self.voice.prefs.model());
-        if ready {
-            self.start_listening()
-        } else {
-            Task::none()
+    /// Clew is about to speak — an answer it reads aloud is coming, Settings'
+    /// Try: the microphone, on, waits until all is said
+    /// ([`App::resume_listening`]), or it would hear Clew. Someone being
+    /// heard is heard out first.
+    pub(crate) fn hold_mic_for_clew(&mut self) {
+        let hearing = self
+            .voice
+            .listening_now()
+            .is_some_and(|l| l.silence_after_speech().is_some());
+        if !hearing {
+            self.close_mic();
         }
     }
 
-    /// Open the microphone — once there is a model to hear it with.
+    /// Close the microphone, keeping nothing of what it heard.
+    fn close_mic(&mut self) {
+        if let Some((listening, _)) = self.voice.listening.take() {
+            drop(listening.stop());
+        }
+        self.voice.phase = VoicePhase::Idle;
+    }
+
+    /// With the microphone on, once nothing keeps it closed, it opens for
+    /// what is said next — at once after what was said last, which is
+    /// worked out meanwhile. Not while Clew speaks, nor while an answer it
+    /// will read aloud is still coming: it would hear Clew. Once all is
+    /// said, or the answer is over (`on_ask_stream_ended`), this is asked
+    /// again. And only with a model to hear with: this never sends the
+    /// reader to Settings for one.
+    pub(crate) fn resume_listening(&mut self) {
+        if !self.voice.mic_on || self.voice.phase != VoicePhase::Idle {
+            return;
+        }
+        if self.voice.speech.is_speaking() || self.answer_read_aloud_coming() {
+            return;
+        }
+        if !self.voice.installed(self.voice.prefs.model()) {
+            // Removed meanwhile: the microphone is off, as it is.
+            self.voice.mic_on = false;
+            return;
+        }
+        self.open_mic();
+    }
+
+    /// Turn the microphone on — once there is a model to hear it with. It
+    /// listens until it is turned off.
     fn start_listening(&mut self) -> Task<Message> {
-        // A command waiting for a yes keeps waiting: what is said next can
-        // be the yes (or the no).
         let model = self.voice.prefs.model();
         if !self.voice.installed(model) {
             // Another one here: it is not that there is none.
@@ -1152,6 +1218,27 @@ impl App {
             };
             return self.update(Message::Settings(SettingsMsg::OpenAt(SettingsPage::Voice)));
         }
+        self.voice.mic_on = true;
+        self.voice.heard = None;
+        self.open_mic();
+        if self.voice.mic_on {
+            // A command waiting for a yes keeps waiting: what is said next
+            // can be the yes (or the no).
+            self.status = match &self.voice.confirm {
+                Some(waiting) => tr!(
+                    "Listening… say yes to run {command}, or no",
+                    command = waiting.said()
+                ),
+                None => tr!("Listening… say a command or a question").into(),
+            };
+        }
+        Task::none()
+    }
+
+    /// Open the microphone for what is said next. One that cannot be
+    /// opened turns it off, saying why.
+    fn open_mic(&mut self) {
+        let model = self.voice.prefs.model();
         match (self.voice.open_mic)(MAX_SECONDS) {
             Ok(listening) => {
                 self.voice.listening = Some((listening, model));
@@ -1160,16 +1247,9 @@ impl App {
                     level: 0.0,
                 };
                 self.turn_listening_began();
-                self.voice.heard = None;
-                self.status = match &self.voice.confirm {
-                    Some(waiting) => tr!(
-                        "Listening… say yes to run {command}, or no",
-                        command = waiting.said()
-                    ),
-                    None => tr!("Listening… say a command or a question").into(),
-                };
             }
             Err(e) => {
+                self.voice.mic_on = false;
                 self.status = tr!("Can't listen: {error}", error = e);
                 self.voice.hear(Heard {
                     text: String::new(),
@@ -1177,10 +1257,10 @@ impl App {
                 });
             }
         }
-        Task::none()
     }
 
-    /// While listening: the meter, and whether it is time to stop.
+    /// While listening: the meter, and whether what is being said has
+    /// ended.
     fn on_voice_tick(&mut self) -> Task<Message> {
         let VoicePhase::Listening { since, .. } = self.voice.phase else {
             return Task::none();
@@ -1189,7 +1269,8 @@ impl App {
             return Task::none();
         };
         if let Some(e) = listening.error() {
-            self.cancel_voice();
+            self.voice.mic_on = false;
+            self.close_mic();
             self.status = tr!("Stopped listening: {error}", error = e);
             return Task::none();
         }
@@ -1197,53 +1278,64 @@ impl App {
         self.voice.phase = VoicePhase::Listening { since, level };
         let full = listening.full();
         let quiet = listening.silence_after_speech();
-        // The pause ends listening — at once when Smart Turn hears a turn
-        // finished, later when it hears one that is not, after
+        // Clew speaks, or an answer it reads aloud is on its way — the
+        // question was just sent: the microphone waits until all is said.
+        if quiet.is_none() && (self.voice.speech.is_speaking() || self.answer_read_aloud_coming()) {
+            self.hold_mic_for_clew();
+            return Task::none();
+        }
+        // The pause ends what is being said — at once when Smart Turn hears
+        // a turn finished, later when it hears one that is not, after
         // [`END_SILENCE`] without it.
         let (paused, judge) = self.pause_ends(quiet);
         if full || paused {
-            return self.stop_listening();
+            return self.end_utterance();
         }
         if quiet.is_some() {
             return judge;
         }
-        let Some((listening, _)) = self.voice.listening.as_ref() else {
-            return Task::none();
-        };
-        if listening.silence_after_speech().is_none()
-            && since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT
-        {
-            if self.voice.keep_listening {
-                // Listening on, as asked: the quiet is let go, and the
-                // microphone listens afresh for what is said next.
-                if let Some((listening, _)) = self.voice.listening.take() {
-                    drop(listening.stop());
-                }
-                self.voice.phase = VoicePhase::Idle;
-                return self.start_listening();
-            }
-            self.cancel_voice();
-            self.voice.hear(Heard {
-                text: String::new(),
-                outcome: HeardOutcome::Nothing,
-            });
-            self.status = tr!("Nothing was heard — check the microphone and try again").into();
+        if since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT {
+            // Nothing said for a while: the quiet is let go, and the
+            // microphone listens afresh for what is said next.
+            self.close_mic();
+            self.open_mic();
         }
         Task::none()
     }
 
-    /// Stop listening and turn what was heard into words, off the UI
-    /// thread.
-    fn stop_listening(&mut self) -> Task<Message> {
+    /// What is being said has ended — a pause, Smart Turn, the most that
+    /// is kept: it is worked out out of sight, after what was said before
+    /// it, while the microphone listens on for what is said next.
+    fn end_utterance(&mut self) -> Task<Message> {
+        let task = self.end_utterance_now();
+        self.resume_listening();
+        task
+    }
+
+    /// What the microphone heard, taken to be worked out; the microphone
+    /// closed.
+    fn end_utterance_now(&mut self) -> Task<Message> {
         let Some((listening, model)) = self.voice.listening.take() else {
             return Task::none();
         };
-        let recording = listening.stop();
+        self.voice.phase = VoicePhase::Idle;
+        self.voice.unheard.push_back((listening.stop(), model));
+        self.transcribe_next()
+    }
+
+    /// Work out the next of what was said, off the UI thread — once what
+    /// was said before it is: one at a time, in the order said, each read
+    /// with the window as the one before left it.
+    fn transcribe_next(&mut self) -> Task<Message> {
+        if self.voice.transcribing.is_some() {
+            return Task::none();
+        }
+        let Some((recording, model)) = self.voice.unheard.pop_front() else {
+            return Task::none();
+        };
         self.voice.token += 1;
         let token = self.voice.token;
-        self.voice.phase = VoicePhase::Transcribing { token };
-        self.voice.cancel = Arc::new(AtomicBool::new(false));
-        self.status = tr!("Transcribing…").into();
+        self.voice.transcribing = Some(token);
         let Some(path) = self.voice.store.as_ref().map(|s| s.path(model)) else {
             return self.on_transcribed(token, Err(tr!("no data directory for the model").into()));
         };
@@ -1272,7 +1364,6 @@ impl App {
             hint,
             threads: 0,
         };
-        let cancel = self.voice.cancel.clone();
         let transcriber = self.voice.transcriber.clone();
         Task::perform(
             async move {
@@ -1281,9 +1372,12 @@ impl App {
                         // Nothing that sounded like speech: whisper is not
                         // asked to make words of the room.
                         None => Ok(String::new()),
-                        Some(audio) => {
-                            transcriber.transcribe(&path, audio.as_slice(), &options, &cancel)
-                        }
+                        Some(audio) => transcriber.transcribe(
+                            &path,
+                            audio.as_slice(),
+                            &options,
+                            &AtomicBool::new(false),
+                        ),
                     }
                 })
                 .await
@@ -1293,37 +1387,35 @@ impl App {
         )
     }
 
-    /// Esc: stop listening or transcribing and keep nothing; or say no to
-    /// the command that waits for a yes; and stop speaking.
-    pub(crate) fn cancel_voice(&mut self) {
+    /// Esc, or the Cancel of a command waiting for a yes: no to that
+    /// command — else Clew stops speaking. The microphone is left as it is.
+    fn on_voice_escape(&mut self) {
+        if let Some(waiting) = self.voice.confirm.take() {
+            self.status = tr!("Didn't run {command}", command = waiting.said());
+            self.voice.heard = None;
+            return;
+        }
         if self.stop_speaking() {
             self.status = tr!("Stopped speaking").into();
         }
-        if let Some((listening, _)) = self.voice.listening.take() {
-            drop(listening.stop());
+    }
+
+    /// What a run heard, then the next of what was said.
+    fn on_transcribed(&mut self, token: u64, result: Result<String, String>) -> Task<Message> {
+        if self.voice.transcribing != Some(token) {
+            return Task::none();
         }
-        if matches!(self.voice.phase, VoicePhase::Transcribing { .. }) {
-            self.voice.cancel.store(true, Ordering::Relaxed);
-        }
-        if self.voice.phase != VoicePhase::Idle {
-            self.status = tr!("Stopped listening").into();
-        }
-        self.voice.phase = VoicePhase::Idle;
-        if self.voice.confirm.take().is_some() {
-            self.voice.heard = None;
-        }
+        self.voice.transcribing = None;
+        let task = self.on_words(result);
+        Task::batch([task, self.transcribe_next()])
     }
 
     /// The words heard: a command, run (or asked about); else a question
-    /// for Ask.
-    fn on_transcribed(&mut self, token: u64, result: Result<String, String>) -> Task<Message> {
-        if token != self.voice.token || self.voice.phase != (VoicePhase::Transcribing { token }) {
-            return Task::none();
-        }
-        self.voice.phase = VoicePhase::Idle;
+    /// for Ask. Nothing that could be read is let go without a word: the
+    /// microphone listens on.
+    fn on_words(&mut self, result: Result<String, String>) -> Task<Message> {
         let text = match result {
             Ok(text) => text.trim().to_string(),
-            Err(e) if e == "cancelled" => return Task::none(),
             Err(e) => {
                 self.status = tr!("Could not transcribe: {error}", error = e);
                 self.voice.hear(Heard {
@@ -1334,11 +1426,6 @@ impl App {
             }
         };
         if text.is_empty() {
-            self.status = tr!("Didn't catch that — try again").into();
-            self.voice.hear(Heard {
-                text,
-                outcome: HeardOutcome::Nothing,
-            });
             return Task::none();
         }
         // The answer to a command waiting for a yes; anything else said

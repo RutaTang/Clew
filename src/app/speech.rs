@@ -8,10 +8,15 @@
 //! output ([`clew_voice::playback`]). Nothing said or heard leaves the
 //! computer.
 //!
+//! Which answers are read is the reader's to say
+//! ([`ReadAloud`](crate::app::voice::ReadAloud)): those to questions said
+//! aloud, every one, or none.
+//!
 //! It stops at Esc, at the voice key — which then listens, so the reader
 //! can speak over Clew as over a person — at a new question, and at Stop,
-//! Clear or closing Ask. With Keep listening on, the microphone opens again
-//! only once Clew has finished speaking: it would hear Clew otherwise.
+//! Clear or closing Ask. With the microphone on, it waits while Clew reads
+//! an answer aloud, and opens again once all is said: it would hear Clew
+//! otherwise.
 //!
 //! Its messages are [`VoiceMsg`]'s, handled here through
 //! [`App::update_speech`].
@@ -267,8 +272,6 @@ pub(crate) struct Speech {
     output: Option<Box<dyn Playing>>,
     /// Since when nothing has been left to play, nor to make.
     quiet_since: Option<Instant>,
-    /// Keep listening: listen once Clew has finished speaking.
-    pub listen_after: bool,
     /// How loud what is said is, 0 to 1, for the meter.
     pub level: f32,
     /// The output's last count of samples played, and when it last moved.
@@ -300,7 +303,6 @@ impl Speech {
             round: 0,
             output: None,
             quiet_since: None,
-            listen_after: false,
             level: 0.0,
             progress: None,
             reopened: false,
@@ -346,7 +348,6 @@ impl Speech {
             close_later(output);
         }
         self.quiet_since = None;
-        self.listen_after = false;
         self.level = 0.0;
         self.progress = None;
         self.reopened = false;
@@ -398,9 +399,16 @@ impl App {
                 }
                 Task::none()
             }
-            VoiceMsg::SetSpeak(on) => {
-                self.voice.prefs.speak = on;
-                if !on {
+            VoiceMsg::SetSpeak(read_aloud) => {
+                self.voice.prefs.read_aloud = read_aloud;
+                // What is being read stops when such answers are read no
+                // more; with Always, what was not read is not begun midway.
+                let reads = self
+                    .proj
+                    .ask_turns
+                    .last()
+                    .is_some_and(|t| read_aloud.reads(t.spoken));
+                if !reads {
                     self.stop_speaking();
                 }
                 self.save_voice_pref(crate::app::voice::Pref::Speak);
@@ -533,19 +541,20 @@ impl App {
     }
 
     /// The answer on stream `stream` grew — or, `done`, is over: what of it
-    /// is ready to be said is said, when it answers a question that was
-    /// said and answers are read aloud.
+    /// is ready to be said is said, when such answers are read aloud
+    /// ([`ReadAloud`](crate::app::voice::ReadAloud)).
     pub(crate) fn read_answer(&mut self, stream: u64, done: bool) -> Task<Message> {
-        if !self.voice.prefs.speak || self.voice.speech.hushed.contains(&stream) {
+        if self.voice.speech.hushed.contains(&stream) {
             return Task::none();
         }
+        let read_aloud = self.voice.prefs.read_aloud;
         // The newest answer only: one an earlier question gets late — its
         // close arriving after the next was asked — is not said over it.
         let Some(turn) = self
             .proj
             .ask_turns
             .last()
-            .filter(|t| t.stream == stream && t.spoken)
+            .filter(|t| t.stream == stream && read_aloud.reads(t.spoken))
         else {
             return Task::none();
         };
@@ -571,18 +580,21 @@ impl App {
         if done {
             speech.reading = None;
         }
+        // Read aloud: the microphone, on, waits for it.
+        self.hold_mic_for_clew();
         self.speak_next()
     }
 
     /// Stop speaking — what is said, made, or waits to be — and stop reading
-    /// the answer being read, or about to be: the one still coming. Whether
-    /// anything was being said.
+    /// the answer being read, or about to be: the one still coming. With
+    /// the microphone on, it opens. Whether anything was being said.
     pub(crate) fn stop_speaking(&mut self) -> bool {
+        let read_aloud = self.voice.prefs.read_aloud;
         let coming = self
             .proj
             .ask_turns
             .last()
-            .filter(|t| t.streaming && t.spoken)
+            .filter(|t| t.streaming && read_aloud.reads(t.spoken))
             .map(|t| t.stream);
         let speech = &mut self.voice.speech;
         let was = speech.is_speaking();
@@ -590,7 +602,19 @@ impl App {
         if let Some(stream) = coming {
             speech.hushed.insert(stream);
         }
+        self.resume_listening();
         was
+    }
+
+    /// Whether an answer Clew will read aloud is still coming in: the
+    /// microphone waits for it, as it does while Clew speaks.
+    pub(crate) fn answer_read_aloud_coming(&self) -> bool {
+        let read_aloud = self.voice.prefs.read_aloud;
+        self.proj.ask_turns.last().is_some_and(|t| {
+            t.streaming
+                && read_aloud.reads(t.spoken)
+                && !self.voice.speech.hushed.contains(&t.stream)
+        })
     }
 
     /// The answer on `stream` was stopped: what is said of it — and only of
@@ -604,18 +628,13 @@ impl App {
         speech.hushed.insert(stream);
     }
 
-    /// Clew could not go on speaking, saying `why` on the status line.
-    /// Unlike the reader's stop, this keeps what they asked for: with Keep
-    /// listening on, the microphone opens as it would have once all was said.
+    /// Clew could not go on speaking, saying `why` on the status line: with
+    /// the microphone on, it opens as it would have once all was said.
     fn give_up_speaking(&mut self, why: String) -> Task<Message> {
-        let listen = self.voice.speech.listen_after;
         self.voice.speech.hush();
         self.status = why;
-        if listen {
-            self.resume_listening()
-        } else {
-            Task::none()
-        }
+        self.resume_listening();
+        Task::none()
     }
 
     /// Say `model`'s sample, as Settings' Try does: whatever was being said
@@ -625,6 +644,7 @@ impl App {
         if !self.speech_installed(model) {
             return Task::none();
         }
+        self.hold_mic_for_clew();
         let sentence = sample(model);
         let speech = &mut self.voice.speech;
         speech.queue.push_back(sentence);
@@ -816,7 +836,7 @@ impl App {
     }
 
     /// While Clew speaks: the meter; the output closed once all is said;
-    /// then, with Keep listening on, the microphone opened.
+    /// then, with the microphone on, it opens.
     fn on_speak_tick(&mut self) -> Task<Message> {
         let speech = &mut self.voice.speech;
         let Some(output) = speech.output.as_ref() else {
@@ -868,10 +888,7 @@ impl App {
         speech.made_with.clear();
         speech.quiet_since = None;
         speech.level = 0.0;
-        if speech.listen_after && speech.reading.is_none() {
-            speech.listen_after = false;
-            return self.resume_listening();
-        }
+        self.resume_listening();
         Task::none()
     }
 

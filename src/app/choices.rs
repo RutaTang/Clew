@@ -276,18 +276,36 @@ impl App {
             tr_noop!("send questions right away, send spoken questions"),
             |on| Message::Voice(VoiceMsg::SetSendQuestions(on)),
         ));
-        out.push(switch(
-            tr_noop!("Keep listening"),
-            tr_noop!("listen continuously, always listen"),
-            |on| Message::Voice(VoiceMsg::SetKeepListening(on)),
-        ));
 
         // How Clew speaks.
-        out.push(switch(
-            tr_noop!("Read answers aloud"),
-            tr_noop!("speak answers, read aloud, text to speech"),
-            |on| Message::Voice(VoiceMsg::SetSpeak(on)),
-        ));
+        out.push(Setting {
+            name: tr_noop!("Read answers aloud"),
+            aliases: tr_noop!("speak answers, read aloud, text to speech"),
+            unnamed: false,
+            choices: crate::app::voice::ReadAloud::ALL
+                .into_iter()
+                .map(|read_aloud| {
+                    use crate::app::voice::ReadAloud;
+                    let name = read_aloud.name();
+                    // Turned on, every answer is read; off, none.
+                    let words = match read_aloud {
+                        ReadAloud::Never => OFF,
+                        ReadAloud::Spoken => tr_noop!("spoken questions, voice questions"),
+                        ReadAloud::Always => ON,
+                    };
+                    Choice {
+                        title: format!("Read answers aloud: {name}"),
+                        shown: format!(
+                            "{}: {}",
+                            tr!("Read answers aloud"),
+                            crate::i18n::lookup(name)
+                        ),
+                        names: vec![name.to_string(), words.to_string()],
+                        message: Message::Voice(VoiceMsg::SetSpeak(read_aloud)),
+                    }
+                })
+                .collect(),
+        });
         out.push(Setting {
             name: tr_noop!("Speed"),
             aliases: tr_noop!("speaking speed, reading speed, speech speed"),
@@ -941,11 +959,11 @@ mod tests {
         );
         assert_eq!(
             heard(&s, "turn off read answers aloud").as_deref(),
-            Some("Read answers aloud: Off")
+            Some("Read answers aloud: Never")
         );
         assert_eq!(
             heard(&s, "turn read answers aloud on").as_deref(),
-            Some("Read answers aloud: On")
+            Some("Read answers aloud: Always")
         );
         assert_eq!(heard(&s, "use OpenAI").as_deref(), Some("Provider: OpenAI"));
         assert_eq!(

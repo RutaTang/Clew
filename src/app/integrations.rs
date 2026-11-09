@@ -1001,7 +1001,7 @@ impl App {
             ..AskTurn::default()
         });
         // Said aloud, it is answered without the card opening over the code
-        // (see `on_transcribed`).
+        // (see `on_words`).
         if !spoken {
             self.reveal_ask();
         }

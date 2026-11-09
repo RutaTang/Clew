@@ -278,7 +278,7 @@ impl App {
             );
         }
         // While Clew speaks: the meter, and the moment all is said — when
-        // Keep listening opens the microphone.
+        // the microphone, on, opens again.
         if self.voice.speech.is_speaking() {
             subs.push(
                 iced::time::every(crate::app::speech::SPEAK_TICK)

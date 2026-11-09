@@ -185,14 +185,9 @@ fn speech_row_of<'a>(app: &'a App, model: &'static VoiceModel) -> Vec<Element<'a
             form::action(&label, msg).into()
         }
     };
-    let about = tr!(
-        "{about} {license} license.",
-        about = crate::i18n::lookup(model.about),
-        license = model.license
-    );
     let mut rows = vec![form::item(
         crate::i18n::lookup(model.name),
-        Some(about),
+        Some(crate::i18n::lookup(model.about).to_string()),
         state,
     )];
     if let Some(e) = app.voice.speech.download_errors.get(model.id) {
@@ -282,10 +277,9 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
         .into()
     };
     let about = tr!(
-        "Hears when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through. {license} license.",
-        license = MODEL.license
+        "Hears when you have finished speaking: a finished sentence is acted on at once, and a pause to think is waited through."
     );
-    let mut rows = vec![form::item(MODEL.name, Some(about), state)];
+    let mut rows = vec![form::item(MODEL.name, Some(about.to_string()), state)];
     let warning = |said: String| {
         form::plain(
             text(said)
@@ -308,11 +302,19 @@ fn turn_rows_of(app: &App) -> Vec<Element<'_, Message>> {
 /// How Clew answers aloud: whether it does, how fast, and the models it
 /// speaks with.
 fn speaking_rows(app: &App) -> Vec<Element<'_, Message>> {
-    let mut rows = vec![form::toggle(
+    let mut rows = vec![form::item(
         tr!("Read answers aloud"),
-        Some(tr!("Answers to spoken questions are read aloud on this computer.").into()),
-        app.voice.prefs.speak,
-        |v| Message::Voice(VoiceMsg::SetSpeak(v)),
+        Some(
+            tr!(
+                "Read on this computer: the answers to spoken questions only, or to every question."
+            )
+            .into(),
+        ),
+        form::pick(
+            &crate::app::voice::ReadAloud::ALL[..],
+            Some(app.voice.prefs.read_aloud),
+            |read_aloud| Message::Voice(VoiceMsg::SetSpeak(read_aloud)),
+        ),
     )];
     let speeds: Vec<SpeedChoice> = SPEEDS.iter().map(|s| SpeedChoice(*s)).collect();
     let selected = speeds

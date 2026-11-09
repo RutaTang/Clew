@@ -102,6 +102,21 @@ impl Transcriber for Hears {
     }
 }
 
+/// A recognizer that hears each of its words in turn.
+struct InTurn(Mutex<std::collections::VecDeque<String>>);
+
+impl Transcriber for InTurn {
+    fn transcribe(
+        &self,
+        _model: &Path,
+        _audio: &[f32],
+        _options: &Options,
+        _cancel: &AtomicBool,
+    ) -> Result<String, String> {
+        Ok(self.0.lock().unwrap().pop_front().unwrap_or_default())
+    }
+}
+
 /// An app with a project open, a model "downloaded", the test's microphone,
 /// and a recognizer that hears `words`.
 fn voice_app(tag: &str, words: &str) -> (App, Arc<Mutex<MicScript>>, Arc<Hears>) {
@@ -134,7 +149,8 @@ fn own_store(app: &mut App, tag: &str) -> clew_voice::models::Store {
     store
 }
 
-/// Listen, hear a pause after speech, and feed back what was heard.
+/// Turn the microphone on, hear a pause after speech, and feed back what
+/// was heard — worked out out of sight, the microphone listening on.
 fn say(app: &mut App, script: &Arc<Mutex<MicScript>>) {
     app.voice.reset_for_test();
     script.lock().unwrap().silence = None;
@@ -142,18 +158,22 @@ fn say(app: &mut App, script: &Arc<Mutex<MicScript>>) {
     assert!(app.voice.is_listening(), "{}", app.status);
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
-    assert!(matches!(app.voice.phase, VoicePhase::Transcribing { .. }));
-    assert!(script.lock().unwrap().stopped, "the microphone is closed");
+    assert!(app.voice.transcribing(), "what was said is worked out");
+    assert!(script.lock().unwrap().stopped, "what was heard was taken");
+    assert!(app.voice.is_listening(), "and the microphone listens on");
+    // The microphone open afresh has heard nothing yet.
+    script.lock().unwrap().silence = None;
     for message in run_task(task) {
         let _ = app.update(message);
     }
+    assert!(!app.voice.transcribing());
 }
 
 #[test]
 fn a_command_heard_runs_as_the_palette_runs_it() {
     let (mut app, script, hears) = voice_app("voice-command", "Open the call graph.");
     say(&mut app, &script);
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(app.voice.is_listening(), "it listens on for the next");
     assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
     assert_eq!(
         app.voice.heard.as_ref().map(|h| &h.outcome),
@@ -174,7 +194,8 @@ fn a_command_heard_runs_as_the_palette_runs_it() {
     );
 }
 
-/// A command that costs something waits for a yes; Esc is a no.
+/// A command that costs something waits for a yes — listened for, the
+/// microphone on; Esc is a no, and the microphone listens on.
 #[test]
 fn a_costly_command_asks_first() {
     let (mut app, script, _) = voice_app("voice-costly", "explain all");
@@ -184,7 +205,9 @@ fn a_costly_command_asks_first() {
         Some("Explain All")
     );
     assert!(!app.settings.open, "nothing ran yet");
-    assert!(app.voice.is_busy());
+    assert!(app.voice.is_listening(), "for the yes");
+    assert!(app.status.contains("Explain All?"), "{}", app.status);
+    assert!(app.voice.takes_esc());
     // Esc: no.
     let _ = app.update(key_press(
         keyboard::Key::Named(keyboard::key::Named::Escape),
@@ -192,6 +215,12 @@ fn a_costly_command_asks_first() {
     ));
     assert!(app.voice.confirm.is_none());
     assert!(!app.settings.open);
+    assert_eq!(app.status, "Didn't run Explain All");
+    assert!(
+        app.voice.is_listening(),
+        "Esc is no to it, not to listening"
+    );
+    assert!(!app.voice.takes_esc(), "Esc is the window's again");
     // Again, and yes: it runs (with no key to pay for it, Settings asks
     // for one).
     say(&mut app, &script);
@@ -292,160 +321,186 @@ fn a_question_said_is_answered_without_opening_the_card() {
     assert!(!app.proj.ask_unread);
 }
 
-/// Keep listening, switched on, listens at once — there is nothing else to
-/// press — and switched off before anything is said, stops.
+/// The microphone, turned on, listens until it is turned off: a quiet that
+/// goes on is let go and listened past, not reported as a microphone that
+/// hears nothing. Turned off before anything is said, nothing comes of it;
+/// turned off while someone is heard, what they said is still acted on.
 #[test]
-fn keep_listening_listens_as_it_is_switched_on() {
-    let (mut app, _script, _) = voice_app("voice-keep-on", "");
-    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
+fn the_microphone_listens_until_it_is_turned_off() {
+    let (mut app, script, _) = voice_app("voice-mic-on", "open the call graph");
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.mic_on);
     assert!(app.voice.is_listening(), "{}", app.status);
-    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(false)));
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
-    // Someone speaking as it is switched off is heard to the end.
-    let (mut app, script, _) = voice_app("voice-keep-off-speaking", "");
-    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
-    script.lock().unwrap().silence = Some(0.2);
-    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(false)));
-    assert!(app.voice.is_listening());
-}
-
-/// Keep listening: once what was said is done with — a command run, a
-/// place gone to, a yes waited for — the microphone opens again, card open
-/// or not; a quiet that goes on is let go and listened past, not reported
-/// as a microphone that hears nothing.
-#[test]
-fn keep_listening_listens_again_after_a_command() {
-    let (mut app, script, _) = voice_app("voice-keep-command", "open the call graph");
-    app.voice.keep_listening = true;
-    assert!(!app.ask_view.is_open());
-    say(&mut app, &script);
-    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
-    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
-    // A command that waits for a yes is listened for.
-    let (mut app, script, _) = voice_app("voice-keep-confirm", "explain all");
-    app.voice.keep_listening = true;
-    say(&mut app, &script);
-    assert_eq!(
-        app.voice.confirm.as_ref().map(|w| w.said()),
-        Some("Explain All")
-    );
-    assert!(app.voice.is_listening());
-    assert!(app.status.contains("say yes"), "{}", app.status);
-    // Nothing said for long: listened past, quietly.
-    script.lock().unwrap().silence = None;
+    assert_eq!(app.status, "Listening… say a command or a question");
+    // Nothing said for long: listened past, quietly, afresh.
     if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
         *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
     }
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
-    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
-    assert!(!app.status.contains("Nothing was heard"), "{}", app.status);
-    // Esc puts it away, and it stays away until asked for again.
-    let _ = app.update(Message::Voice(VoiceMsg::Cancel));
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { since, .. }
+            if since.elapsed().as_secs_f32() < NO_SPEECH_TIMEOUT),
+        "{:?}",
+        app.voice.phase
+    );
+    assert_eq!(app.status, "Listening… say a command or a question");
+    assert!(app.voice.heard.is_none(), "nothing said, nothing shown");
+    // Esc, with no question waiting and Clew quiet, is not the
+    // microphone's: it listens on.
+    let _ = app.update(key_press(
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::empty(),
+    ));
+    assert!(app.voice.is_listening());
+    // Turned off before anything is said: nothing comes of it.
+    app.voice.forget_last_press();
+    script.lock().unwrap().stopped = false;
+    let task = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.mic_on);
     assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(script.lock().unwrap().stopped, "the microphone is closed");
+    assert!(!app.voice.transcribing());
+    assert_eq!(task.units(), 0);
+    assert_eq!(app.status, "Stopped listening");
+    // Turned off as someone is heard: the press ends what they say, as a
+    // pause would, and it is acted on — the microphone stays off.
+    app.voice.forget_last_press();
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    script.lock().unwrap().silence = Some(0.2);
+    app.voice.forget_last_press();
+    let task = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!app.voice.mic_on);
+    assert!(app.voice.transcribing());
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls));
+    assert_eq!(app.voice.phase, VoicePhase::Idle, "it stays off");
 }
 
-/// Keep listening: once Clew has answered, the microphone opens again for
-/// what is said next — not after a Stop, not with the switch off — with the
-/// conversation open or put away to its pill, which says it listens.
+/// What is said while what was said before is still being worked out
+/// waits its turn: each is worked out, and acted on, in the order said —
+/// none dropped for the next.
 #[test]
-fn keep_listening_opens_the_microphone_after_an_answer() {
+fn what_is_said_is_worked_out_in_order() {
+    let (mut app, script, _) = voice_app("voice-in-order", "");
+    let heard = Arc::new(InTurn(Mutex::new(
+        ["open the call graph", "where is the origin defined"]
+            .map(String::from)
+            .into(),
+    )));
+    app.voice.transcriber = heard.clone();
+    app.voice.prefs.send_questions = false;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+    let first = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening(), "listening on at once");
+    // Said again before the first is worked out.
+    let second = app.update(Message::Voice(VoiceMsg::Tick));
+    assert_eq!(second.units(), 0, "it waits for the first");
+    assert!(app.voice.is_listening());
+    script.lock().unwrap().silence = None;
+    for message in run_task(first) {
+        for message in run_task(app.update(message)) {
+            let _ = app.update(message);
+        }
+    }
+    assert_eq!(app.proj.overlay, Some(Overlay::ProjectCalls), "the first");
+    assert_eq!(
+        app.proj.ask_input, "where is the origin defined",
+        "then the next"
+    );
+    assert!(heard.0.lock().unwrap().is_empty());
+    assert!(!app.voice.transcribing());
+    assert!(app.voice.is_listening());
+}
+
+/// The microphone, on, waits while Clew reads an answer aloud — it would
+/// hear Clew — and listens again once it is over, whatever ended it; an
+/// answer that is not read aloud is no reason to wait. Put away to its
+/// pill, the conversation is listened for all the same.
+#[test]
+fn the_microphone_waits_while_an_answer_is_read_aloud() {
+    use crate::app::voice::ReadAloud;
     use clew_protocol::StreamOutcome;
-    let (mut app, _script, _) = voice_app("voice-keep-listening", "");
+    let (mut app, _script, _) = voice_app("voice-waits-for-answer", "");
     app.ask_view = AskView::Compact;
-    let turn = |app: &mut App, stream: u64| {
+    let turn = |app: &mut App, stream: u64, spoken: bool| {
         app.proj.ask_turns.push(crate::app::model::AskTurn {
             stream,
             question: "where is it?".into(),
+            spoken,
             streaming: true,
             ..Default::default()
         });
     };
     // Off: the answer ends, the microphone stays shut.
-    turn(&mut app, 1);
+    turn(&mut app, 1, true);
     let _ = app.on_ask_stream_ended(1, StreamOutcome::Done);
     assert_eq!(app.voice.phase, VoicePhase::Idle);
-    // On: it opens.
-    let _ = app.update(Message::Voice(crate::VoiceMsg::SetKeepListening(true)));
-    turn(&mut app, 2);
+    // On: a spoken question's answer, read aloud, is waited for.
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening());
+    turn(&mut app, 2, true);
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert_eq!(app.voice.phase, VoicePhase::Idle, "it waits for the answer");
+    assert!(app.voice.mic_on, "still on");
     let _ = app.on_ask_stream_ended(2, StreamOutcome::Done);
-    assert!(
-        matches!(app.voice.phase, VoicePhase::Listening { .. }),
-        "{:?}",
-        app.voice.phase
-    );
-    let _ = app.update(Message::Voice(crate::VoiceMsg::Cancel));
-    // A Stop is the reader's: the microphone stays shut.
-    turn(&mut app, 3);
-    let _ = app.on_ask_stream_ended(3, StreamOutcome::Stopped);
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
-    // Put away to its pill, it listens all the same.
-    app.ask_view = AskView::Hidden;
-    turn(&mut app, 4);
-    let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
-    assert!(
-        matches!(app.voice.phase, VoicePhase::Listening { .. }),
-        "{:?}",
-        app.voice.phase
-    );
-}
-
-/// Nothing heard, nothing done; a recognizer that fails says why.
-#[test]
-fn silence_and_failures_do_nothing_but_say_so() {
-    let (mut app, script, _) = voice_app("voice-empty", "");
-    say(&mut app, &script);
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
-    assert_eq!(
-        app.voice.heard.as_ref().map(|h| &h.outcome),
-        Some(&HeardOutcome::Nothing)
-    );
-    assert!(app.proj.ask_input.is_empty());
-    assert!(!app.ask_view.is_open(), "nothing heard opens no card");
-    // Nothing said for long enough: it stops listening on its own.
-    app.voice.reset_for_test();
-    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
-    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
-    assert!(app.voice.is_listening(), "a repeat of the key, ignored");
-    script.lock().unwrap().silence = None;
-    if let VoicePhase::Listening { since, .. } = &mut app.voice.phase {
-        *since -= std::time::Duration::from_secs_f32(NO_SPEECH_TIMEOUT + 1.0);
-    }
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+    // A Stop, too: the microphone is on.
+    turn(&mut app, 3, true);
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
     assert_eq!(app.voice.phase, VoicePhase::Idle);
-    assert!(app.status.contains("Nothing was heard"), "{}", app.status);
-    // The microphone going away mid-way.
-    app.voice.reset_for_test();
+    let _ = app.on_ask_stream_ended(3, StreamOutcome::Stopped);
+    assert!(app.voice.is_listening());
+    // A typed question's answer is not read aloud: nothing to wait for —
+    // unless every answer is.
+    turn(&mut app, 4, false);
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening());
+    let _ = app.on_ask_stream_ended(4, StreamOutcome::Done);
+    app.voice.prefs.read_aloud = ReadAloud::Always;
+    turn(&mut app, 5, false);
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert_eq!(app.voice.phase, VoicePhase::Idle);
+    let _ = app.on_ask_stream_ended(5, StreamOutcome::Done);
+    assert!(app.voice.is_listening());
+    // None read aloud: none waited for.
+    app.voice.prefs.read_aloud = ReadAloud::Never;
+    turn(&mut app, 6, true);
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    assert!(app.voice.is_listening());
+    let _ = app.on_ask_stream_ended(6, StreamOutcome::Done);
+    // Put away to its pill, it listens all the same.
+    app.voice.prefs.read_aloud = ReadAloud::Spoken;
+    app.ask_view = AskView::Hidden;
+    turn(&mut app, 7, true);
+    let _ = app.update(Message::Voice(VoiceMsg::Tick));
+    let _ = app.on_ask_stream_ended(7, StreamOutcome::Done);
+    assert!(app.voice.is_listening(), "{:?}", app.voice.phase);
+}
+
+/// Nothing that could be read is let go without a word — no "didn't catch
+/// that": the microphone listens on. A microphone that goes away turns it
+/// off, saying why.
+#[test]
+fn silence_is_let_go_and_a_lost_microphone_says_so() {
+    let (mut app, script, _) = voice_app("voice-empty", "");
+    say(&mut app, &script);
+    assert!(app.voice.is_listening());
+    assert_eq!(app.voice.heard, None);
+    assert_eq!(app.status, "Listening… say a command or a question");
+    assert!(app.proj.ask_input.is_empty());
+    assert!(!app.ask_view.is_open(), "nothing heard opens no card");
+    // A repeat of the key, ignored.
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(app.voice.is_listening(), "a repeat of the key, ignored");
+    // The microphone going away mid-way.
     script.lock().unwrap().error = Some("the microphone is not available".into());
     let _ = app.update(Message::Voice(VoiceMsg::Tick));
     assert_eq!(app.voice.phase, VoicePhase::Idle);
+    assert!(!app.voice.mic_on);
     assert!(app.status.contains("not available"), "{}", app.status);
-}
-
-/// Esc stops listening and keeps nothing; a transcription stopped so
-/// comes to nothing when it lands.
-#[test]
-fn esc_cancels_listening_and_transcribing() {
-    let (mut app, script, _) = voice_app("voice-esc", "open the call graph");
-    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
-    assert!(app.voice.is_listening());
-    let _ = app.update(key_press(
-        keyboard::Key::Named(keyboard::key::Named::Escape),
-        keyboard::Modifiers::empty(),
-    ));
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
-    assert!(script.lock().unwrap().stopped);
-    // Stopped by hand, then cancelled while transcribing.
-    app.voice.reset_for_test();
-    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
-    let task = app.update(Message::Voice(VoiceMsg::Stop));
-    assert!(matches!(app.voice.phase, VoicePhase::Transcribing { .. }));
-    let _ = app.update(Message::Voice(VoiceMsg::Cancel));
-    for message in run_task(task) {
-        let _ = app.update(message);
-    }
-    assert_eq!(app.proj.overlay, None, "the words came too late");
-    assert_eq!(app.voice.phase, VoicePhase::Idle);
 }
 
 /// The voice key: ⇧⌘S, rebindable — and a menu item, "Talk".
@@ -1487,8 +1542,9 @@ fn quiet_for(app: &mut App, script: &Arc<Mutex<MicScript>>, quiet: f32) -> Task<
     app.update(Message::Voice(VoiceMsg::Tick))
 }
 
+/// Whether the turn was ended: what was said is being worked out.
 fn transcribing(app: &App) -> bool {
-    matches!(app.voice.phase, VoicePhase::Transcribing { .. })
+    app.voice.transcribing()
 }
 
 /// A turn that sounds finished ends listening at its first short pause,
@@ -1828,13 +1884,31 @@ fn the_apps_language_is_changed_as_it_is_said() {
 /// is every window's — and a switch is turned off and on by its name.
 #[test]
 fn a_setting_said_is_changed() {
+    use crate::app::voice::ReadAloud;
     let (mut app, script, _) = voice_app("voice-setting", "");
-    assert!(app.voice.prefs.speak);
+    assert_eq!(app.voice.prefs.read_aloud, ReadAloud::Spoken);
     say_words(&mut app, &script, "Turn off read answers aloud.");
-    assert!(!app.voice.prefs.speak, "{}", app.status);
-    assert_eq!(ran(&app), Some("Read answers aloud: Off"));
+    assert_eq!(
+        app.voice.prefs.read_aloud,
+        ReadAloud::Never,
+        "{}",
+        app.status
+    );
+    assert_eq!(ran(&app), Some("Read answers aloud: Never"));
     say_words(&mut app, &script, "turn read answers aloud back on");
-    assert!(app.voice.prefs.speak, "{}", app.status);
+    assert_eq!(
+        app.voice.prefs.read_aloud,
+        ReadAloud::Always,
+        "{}",
+        app.status
+    );
+    say_words(&mut app, &script, "read answers aloud for spoken questions");
+    assert_eq!(
+        app.voice.prefs.read_aloud,
+        ReadAloud::Spoken,
+        "{}",
+        app.status
+    );
     say_words(&mut app, &script, "set the voice language to French");
     assert_eq!(
         app.voice.prefs.language.as_deref(),
