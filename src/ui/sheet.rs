@@ -375,7 +375,7 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
         .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
     };
     row![
-        tab(tr!("Notes"), crate::MarginTab::Notes),
+        tab(tr!("Explanations"), crate::MarginTab::Notes),
         tab(tr!("Calls"), crate::MarginTab::Calls),
         tab(tr!("History"), crate::MarginTab::History),
     ]

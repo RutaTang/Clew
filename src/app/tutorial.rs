@@ -184,8 +184,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         ),
         // -- The margin beside the code, then the outline --------------------
         TutStep::new(
-            tr!("Notes beside the code"),
-            tr!("Clew's note on each function sits beside it. Explain All fills them in."),
+            tr!("Explanations beside the code"),
+            tr!("Clew's explanation of each function sits beside it. Explain All writes them."),
             Anchor::RightTop,
         ),
         TutStep::new(
@@ -343,7 +343,7 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // step a row made the tour forty-one steps long.
         TutStep::new(
             tr!("Understand the project"),
-            tr!("Explain All writes a note for every function, file and folder (it needs an API key); the glossary defines the project's own terms; Set Up Project chooses its language servers again."),
+            tr!("Explain All explains every function, file and folder (it needs an API key); the glossary defines the project's own terms; Set Up Project chooses its language servers again."),
             menu_rows(ToolsRow::ExplainAll, ToolsRow::SetUp),
         ),
         TutStep::new(

@@ -643,7 +643,9 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         )
     } else if app.proj.explain.cache.is_empty() {
         (
-            tr!("The overview is written from the project's notes, which Explain All writes."),
+            tr!(
+                "The overview is written from the project's explanations, which Explain All writes."
+            ),
             step(
                 tr!("Explain All…"),
                 super::toolbar::explain_all_message(app),
@@ -651,7 +653,7 @@ pub(crate) fn overview_home(app: &App) -> Element<'_, Message> {
         )
     } else {
         (
-            tr!("A map of the project's parts, written from its notes."),
+            tr!("A map of the project's parts, written from its explanations."),
             step(
                 tr!("Generate overview"),
                 Message::Overview(OverviewMsg::Generate),

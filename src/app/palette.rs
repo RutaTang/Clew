@@ -691,7 +691,7 @@ impl App {
                 );
             }
             for (title, tab) in [
-                (tr_noop!("Margin Notes"), MarginTab::Notes),
+                (tr_noop!("Margin Explanations"), MarginTab::Notes),
                 (tr_noop!("Margin Calls"), MarginTab::Calls),
                 (tr_noop!("Margin History"), MarginTab::History),
             ] {

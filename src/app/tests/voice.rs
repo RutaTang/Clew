@@ -1393,7 +1393,7 @@ fn every_command_runs_when_its_name_is_said() {
         // said.
         ("call hierarchy", "Call Hierarchy"),
         ("sidebar call hierarchy", "Sidebar: Call Hierarchy"),
-        ("margin notes", "Margin Notes"),
+        ("margin explanations", "Margin Explanations"),
         ("margin calls", "Margin Calls"),
         ("margin history", "Margin History"),
     ] {

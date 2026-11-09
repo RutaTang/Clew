@@ -1388,11 +1388,11 @@ fn indexing_and_explain_progress_say_what_is_happening_once() {
         },
     );
     {
-        // Idle, it says what is current: the notes — not "Up to date" a
+        // Idle, it says what is current: the explanations — not "Up to date" a
         // second time beside the scan's own.
         let mut sim = sim_of(&app);
         assert!(
-            shows(&mut sim, "Notes up to date"),
+            shows(&mut sim, "Explanations up to date"),
             "the refresh chip, idle"
         );
         assert!(
@@ -6138,7 +6138,7 @@ fn an_unchecked_summary_is_marked_where_it_is_shown() {
     assert!(shows(&mut sim, &marked), "the search results");
 }
 
-/// A click on the file banner shows the file's note in the margin, from
+/// A click on the file banner shows the file's explanation in the margin, from
 /// whichever of its pages the margin was on. Open on Calls (or History),
 /// the margin stayed there: the note was chosen to be shown on Notes, the
 /// banner stayed above the code, and the click seemed to do nothing.
@@ -6299,7 +6299,7 @@ fn a_feature_is_called_the_same_wherever_it_is_named() {
     let tab = super::sidebar::tab_name;
     assert!(same(Action::ProjectSearch.label(), tab(T::Search)));
     assert!(same(Action::Walkthrough.label(), tab(T::Walk)));
-    for margin in ["Notes", "Calls"] {
+    for margin in ["Explanations", "Calls"] {
         for t in [T::Notes, T::Calls] {
             assert!(
                 !same(tab(t), margin),

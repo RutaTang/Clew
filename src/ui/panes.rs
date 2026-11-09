@@ -1210,10 +1210,10 @@ pub(crate) fn file_banner<'a>(summary: String, file: crate::explain::Node) -> El
                 .padding([2, 6])
                 .width(Fill)
                 .on_press(super::heard::said(
-                    tr!("Show the file's note"),
+                    tr!("Show the file's explanation"),
                     Message::Explain(ExplainMsg::Show(file))
                 )),
-                tr!("Show the file's note"),
+                tr!("Show the file's explanation"),
                 None,
                 tooltip::Position::Bottom,
             ),
