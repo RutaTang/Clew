@@ -824,11 +824,13 @@ pub(crate) fn strip_tool(
             caps(Action::Stats),
             Message::Overview(OverviewMsg::ShowStats),
         ),
+        // Running it, four ways: for real or worked out by the model, run
+        // to its end or stepped through — one button, its menu the four.
         StripTool::Debug => (
             Glyph::Debug,
-            tr!("Debug"),
-            caps(Action::StartDebug),
-            Message::Debug(DebugMsg::Start),
+            tr!("Run and Debug"),
+            None,
+            Message::Window(WindowMsg::ToggleRunMenu),
         ),
         StripTool::CallGraph => (
             Glyph::Network,
@@ -875,8 +877,10 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
     let caps = |action: Action| Some(app.keymap.chord(action).caps());
     let tool = |tool: StripTool| -> Element<'_, Message> {
         let (glyph, label, shortcut, msg) = strip_tool(app, tool);
-        // Its menu open, the ⋯ is lit: drawn in the text's colour.
-        let on = tool == StripTool::More && app.show_tools_menu;
+        // Its menu open, the ⋯ is lit: drawn in the text's colour. So is
+        // the bug, its Run menu open.
+        let on = (tool == StripTool::More && app.show_tools_menu)
+            || (tool == StripTool::Debug && app.show_run_menu);
         let tint = if on { theme::fg() } else { theme::fg_muted() };
         // What reads a project does nothing with none open: drawn so, and
         // pressed, nothing — they looked as ready as the rest.
@@ -1275,6 +1279,144 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             right: TOOLS_MENU_RIGHT,
         },
         Backdrop::Clear(Message::Window(WindowMsg::ToggleToolsMenu)),
+    )
+}
+
+/// A row of the strip's Run menu: the program run for real, or worked out
+/// by the model ("fake"), to its end or stepped through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RunRow {
+    Run,
+    Debug,
+    FakeRun,
+    FakeDebug,
+}
+
+/// The Run menu's rows, top down: the real ones, then the model's.
+pub(crate) const RUN_MENU_ROWS: [RunRow; 4] = [
+    RunRow::Run,
+    RunRow::Debug,
+    RunRow::FakeRun,
+    RunRow::FakeDebug,
+];
+
+/// The [`RUN_MENU_ROWS`] positions a heading stands over, and what it says.
+const RUN_MENU_HEADINGS: [(usize, &str); 2] = [
+    (0, tr_noop!("Run the program")),
+    (2, tr_noop!("Work it out with AI")),
+];
+
+/// Width of the Run menu's panel as designed.
+const RUN_MENU_DESIGN_W: f32 = 232.0;
+
+/// The action a Run menu row runs, whose shortcut the row shows.
+pub(crate) fn run_row_action(row: RunRow) -> Action {
+    match row {
+        RunRow::Run => Action::Run,
+        RunRow::Debug => Action::StartDebug,
+        RunRow::FakeRun => Action::FakeRun,
+        RunRow::FakeDebug => Action::FakeDebug,
+    }
+}
+
+/// What a Run menu row shows and does: its icon, its name, and its message
+/// (`None` while it can do nothing: no project to run, no code open to
+/// work out).
+pub(crate) fn run_row(app: &App, row: RunRow) -> (Glyph, &'static str, Option<Message>) {
+    let project = app.proj.project.is_some();
+    let code = app.active_viewer().is_some();
+    match row {
+        RunRow::Run => (
+            Glyph::Play,
+            tr!("Run"),
+            project.then_some(Message::Debug(DebugMsg::Run)),
+        ),
+        RunRow::Debug => (
+            Glyph::Debug,
+            tr!("Debug"),
+            project.then_some(Message::Debug(DebugMsg::Start)),
+        ),
+        RunRow::FakeRun => (
+            Glyph::FakeRun,
+            tr!("Fake Run…"),
+            code.then_some(Message::Fake(crate::FakeMsg::AtCaret { debug: false })),
+        ),
+        RunRow::FakeDebug => (
+            Glyph::FakeDebug,
+            tr!("Fake Debug…"),
+            code.then_some(Message::Fake(crate::FakeMsg::AtCaret { debug: true })),
+        ),
+    }
+}
+
+/// Whether `message` is one a Run menu row sends: picking it puts the menu
+/// away.
+pub(crate) fn closes_run_menu(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::Debug(DebugMsg::Run | DebugMsg::Start)
+            | Message::Fake(crate::FakeMsg::AtCaret { .. })
+    )
+}
+
+/// Width of the Run menu's panel, in the reader's language.
+pub(crate) fn run_menu_w(app: &App) -> f32 {
+    let chord = |r: RunRow| {
+        super::sheet::text_width(
+            &app.keymap.chord(run_row_action(r)).caps(),
+            ts::SMALL,
+            crate::fonts::UI,
+        )
+    };
+    let rows: Vec<(&str, f32)> = RUN_MENU_ROWS
+        .iter()
+        .map(|&r| (run_row(app, r).1, chord(r)))
+        .collect();
+    let headings: Vec<&str> = RUN_MENU_HEADINGS
+        .iter()
+        .map(|&(_, h)| crate::i18n::lookup(h))
+        .collect();
+    menu_w(RUN_MENU_DESIGN_W, &rows, &headings)
+}
+
+/// The Run menu panel's height.
+fn run_menu_h() -> f32 {
+    2.0 * MENU_PAD
+        + RUN_MENU_ROWS.len() as f32 * (MENU_ROW_H + MENU_ROW_SPACING)
+        + RUN_MENU_HEADINGS.len() as f32 * (MENU_HEADING_H + MENU_ROW_SPACING)
+}
+
+/// Distance of the Run menu panel from the window's top edge: level with
+/// the bug it opens from, or raised to end above the window's foot.
+pub(crate) fn run_menu_top(app: &App) -> f32 {
+    let at_button = strip_tool_center(app, StripTool::Debug).y - ICON_BTN / 2.0;
+    let ends_at_foot = app.window_height - MENU_EDGE - run_menu_h();
+    at_button.min(ends_at_foot).max(TOOLBAR_H + MENU_EDGE)
+}
+
+/// The strip's Run menu: Run and Debug, then Fake Run and Fake Debug, each
+/// with its keys, opening to the left of the bug.
+pub(crate) fn run_menu(app: &App) -> Element<'_, Message> {
+    let mut items: Vec<Element<'_, Message>> = Vec::new();
+    for (i, &r) in RUN_MENU_ROWS.iter().enumerate() {
+        if let Some(&(_, heading)) = RUN_MENU_HEADINGS.iter().find(|&&(h, _)| h == i) {
+            items.push(menu_heading(crate::i18n::lookup(heading)));
+        }
+        let (glyph, label, msg) = run_row(app, r);
+        let keys = menu_chord(app, run_row_action(r));
+        items.push(menu_item(Some(glyph), label.to_string(), keys, msg));
+    }
+    let panel = container(Column::with_children(items).spacing(MENU_ROW_SPACING))
+        .width(run_menu_w(app))
+        .padding(MENU_PAD)
+        .style(theme::modal_panel_rounded(11.0));
+    modal(
+        panel,
+        Placement::TopRight {
+            top: run_menu_top(app),
+            right: TOOLS_MENU_RIGHT,
+        },
+        Backdrop::Clear(Message::Window(WindowMsg::ToggleRunMenu)),
     )
 }
 

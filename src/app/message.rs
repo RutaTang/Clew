@@ -1669,6 +1669,9 @@ pub enum TimeTravelMsg {
 pub enum DebugMsg {
     /// Start (or restart) a debug session from the project's launch config.
     Start,
+    /// Run the program the same way, without the debugger: the adapter is
+    /// told `noDebug`, and no breakpoint is set in it.
+    Run,
     /// The adapter is ready; carry its handle + the TCP address it announced
     /// (for child sessions).
     /// Every DAP-side message names the `run` it belongs to (`App::debug_run`):
@@ -2121,6 +2124,9 @@ pub enum WindowMsg {
     CollapseBottom,
     /// Show / hide the toolbar's "More" overflow menu.
     ToggleToolsMenu,
+    /// Open or close the strip's Run menu (Run, Debug, Fake Run, Fake
+    /// Debug).
+    ToggleRunMenu,
     ToggleTargetMenu,
     /// Show the keyboard shortcuts: Settings, on its Keyboard shortcuts
     /// page.
@@ -2775,6 +2781,7 @@ impl DebugMsg {
             | DebugMsg::ChildFailed { stamp, .. }
             | DebugMsg::NeedsInstall { stamp, .. } => Some(Origin::Stamped(stamp)),
             DebugMsg::Start
+            | DebugMsg::Run
             | DebugMsg::Control(..)
             | DebugMsg::Stop
             | DebugMsg::BreakpointToggle { .. }
@@ -2975,6 +2982,7 @@ impl WindowMsg {
             | WindowMsg::ShowDebugPanel
             | WindowMsg::CollapseBottom
             | WindowMsg::ToggleToolsMenu
+            | WindowMsg::ToggleRunMenu
             | WindowMsg::ToggleTargetMenu
             | WindowMsg::OpenShortcuts
             | WindowMsg::RebindStart(..)
@@ -3096,11 +3104,11 @@ impl<T> std::fmt::Debug for Handoff<T> {
 /// Fake run and fake debug (`app::fakerun`).
 #[derive(Debug, Clone)]
 pub enum FakeMsg {
-    /// Fake Run… from the code's context menu.
-    FromMenu,
-    /// Fake Run on the definition the caret is in (the shortcut, the
-    /// palette).
-    AtCaret,
+    /// Fake Run… (or, `debug`, Fake Debug…) from the code's context menu.
+    FromMenu { debug: bool },
+    /// Fake Run (or, `debug`, Fake Debug) on the definition the caret is in
+    /// (the shortcut, the palette, the strip's Run menu).
+    AtCaret { debug: bool },
     /// The sheet's `0`th field now holds `1`.
     Field(usize, String),
     /// Ask the model for inputs to fill the empty fields with.
@@ -3202,8 +3210,8 @@ impl FakeMsg {
             | FakeMsg::ToolCalled { stamp, .. }
             | FakeMsg::TurnEnded { stamp, .. }
             | FakeMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
-            FakeMsg::FromMenu
-            | FakeMsg::AtCaret
+            FakeMsg::FromMenu { .. }
+            | FakeMsg::AtCaret { .. }
             | FakeMsg::Field(..)
             | FakeMsg::Suggest
             | FakeMsg::Run

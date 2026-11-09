@@ -37,6 +37,11 @@ pub enum Glyph {
     Lightbulb,
     Minimap,
     Sparkle,
+    /// Play, and a spark: a run the AI works out (Fake Run).
+    FakeRun,
+    /// A step over, and a spark: a run the AI works out, stepped through
+    /// (Fake Debug).
+    FakeDebug,
     Compass,
     Skim,
     Folder,
@@ -221,6 +226,17 @@ fn body(g: Glyph) -> &'static str {
         }
         Sparkle => {
             "<path d='M12 4 C12.6 10 14 11.4 20 12 C14 12.6 12.6 14 12 20 C11.4 14 10 12.6 4 12 C10 11.4 11.4 10 12 4 Z'/>"
+        }
+        // Play, and the spark of what the AI writes (as on TextLines).
+        FakeRun => {
+            "<path d='M5 7 L14 13 L5 19 Z'/>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
+        }
+        // A step over a line, and the spark.
+        FakeDebug => {
+            "<path d='M3.5 15.5 C4.5 9.5 13.5 9.5 14.5 15.5'/><path d='M11.6 14.6 L14.5 15.5 L15.5 12.6'/>\
+             <circle cx='9' cy='19.5' r='1.4' fill='STROKE' stroke='none'/>\
+             <path d='M18 2.5C18.4 5 19 5.6 21.5 6C19 6.4 18.4 7 18 9.5C17.6 7 17 6.4 14.5 6C17 5.6 17.6 5 18 2.5Z'/>"
         }
         Compass => "<circle cx='12' cy='12' r='8'/><path d='M12 6 L14.2 12 L12 18 L9.8 12 Z'/>",
         // Folded together: the bodies skimmed over.

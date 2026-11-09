@@ -188,6 +188,10 @@ pub struct PendingAsk {
 pub struct DebugState {
     /// The active debug session (DAP), if any.
     pub session: Option<DebugSession>,
+    /// The session was started by Run, not Debug: the program runs
+    /// without the debugger — the adapter is told `noDebug`, and no
+    /// breakpoint is set in it, there at the start or added later.
+    pub no_debug: bool,
     /// The last run's stops, in order (see [`TraceStop`]): what the program
     /// actually did, kept after the session ends so a walkthrough can be
     /// made of it; cleared when the next run starts.
@@ -1249,6 +1253,9 @@ pub struct App {
     pub llm_config_cache: Option<Option<llm::Config>>,
     /// Whether the toolbar's "More" overflow menu is open.
     pub show_tools_menu: bool,
+    /// Whether the strip's Run menu is open: Run, Debug, Fake Run and Fake
+    /// Debug, under the bug.
+    pub show_run_menu: bool,
     /// The interactive tutorial: the current step index while a tour is running,
     /// `None` when idle (see `crate::app::tutorial`).
     pub tutorial: Option<usize>,

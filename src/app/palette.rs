@@ -66,7 +66,7 @@ impl PaletteCommand {
                 _ => matches!(
                     message,
                     Message::Editor(EditorMsg::RunAction(
-                        Action::ExplainAll | Action::StartDebug
+                        Action::ExplainAll | Action::StartDebug | Action::Run
                     )) | Message::Debug(_)
                         | Message::Explain(_)
                         | Message::Project(ProjectMsg::OpenFolderPressed)
@@ -186,6 +186,10 @@ impl PaletteCommand {
             | Message::Debug(DebugMsg::Start) => {
                 (Glyph::Debug, tr!("This builds the program and runs it."))
             }
+            Message::Editor(EditorMsg::RunAction(Action::Run)) | Message::Debug(DebugMsg::Run) => (
+                Glyph::Play,
+                tr!("This builds the program and runs it, without the debugger."),
+            ),
             Message::Debug(DebugMsg::Control(_)) => (
                 Glyph::Debug,
                 tr!("This resumes the program from where it stopped."),

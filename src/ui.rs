@@ -343,6 +343,8 @@ pub(crate) enum ActiveOverlay<'a> {
     Why(&'a crate::BlameWhy),
     Insight(&'a crate::Insight),
     ToolsMenu,
+    /// The strip's Run menu (Run, Debug, Fake Run, Fake Debug).
+    RunMenu,
     TargetMenu,
     AppMenu,
     ViewMenu,
@@ -393,6 +395,8 @@ pub(crate) fn active_overlay(app: &App) -> Option<ActiveOverlay<'_>> {
         O::Insight(insight)
     } else if app.show_tools_menu && !tools_on_strip(app) {
         O::ToolsMenu
+    } else if app.show_run_menu {
+        O::RunMenu
     } else if app.show_target_menu {
         O::TargetMenu
     } else if app.show_app_menu {
@@ -438,6 +442,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Why(_) => "why",
             Self::Insight(_) => "insight",
             Self::ToolsMenu => "tools-menu",
+            Self::RunMenu => "run-menu",
             Self::TargetMenu => "target-menu",
             Self::AppMenu => "app-menu",
             Self::ViewMenu => "view-menu",
@@ -496,6 +501,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Why(bw) => why_modal(app, bw),
             Self::Insight(insight) => insight_modal(app, insight),
             Self::ToolsMenu => tools_menu(app),
+            Self::RunMenu => toolbar::run_menu(app),
             Self::TargetMenu => target_menu(app),
             Self::AppMenu => app_menu(app),
             Self::ViewMenu => view_menu(app),
@@ -528,6 +534,7 @@ impl<'a> ActiveOverlay<'a> {
             Self::Why(_) => Message::TimeTravel(TimeTravelMsg::BlameWhyClose),
             Self::Insight(_) => Message::Hover(HoverMsg::InsightClose),
             Self::ToolsMenu => Message::Window(WindowMsg::ToggleToolsMenu),
+            Self::RunMenu => Message::Window(WindowMsg::ToggleRunMenu),
             Self::TargetMenu => Message::Window(WindowMsg::ToggleTargetMenu),
             Self::AppMenu => Message::Window(WindowMsg::ToggleAppMenu),
             Self::ViewMenu => Message::Window(WindowMsg::ToggleViewMenu),

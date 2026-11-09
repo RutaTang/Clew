@@ -1772,7 +1772,7 @@ fn the_chrome_geometry_matches_what_is_drawn() {
             matches!(m, Message::Overview(crate::OverviewMsg::ShowStats))
         }),
         (StripTool::Debug, |m| {
-            matches!(m, Message::Debug(DebugMsg::Start))
+            matches!(m, Message::Window(WindowMsg::ToggleRunMenu))
         }),
         (StripTool::CallGraph, |m| {
             matches!(
@@ -2424,11 +2424,68 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
+/// The bug opens the Run menu beside the strip, level with it: Run and
+/// Debug, then Fake Run and Fake Debug, each with its keys. A row sends
+/// its run, and picked, the menu goes; the bug is lit while it is open.
+#[test]
+fn the_bug_opens_a_menu_of_the_four_runs() {
+    use crate::keymap::Action;
+    use crate::ui::StripTool;
+    let mut app = reader_app();
+    let (.., open) = super::strip_tool(&app, StripTool::Debug);
+    assert!(matches!(open, Message::Window(WindowMsg::ToggleRunMenu)));
+    let _ = app.update(open);
+    assert!(app.show_run_menu);
+    let bug = super::strip_tool_center(&app, StripTool::Debug);
+    assert_eq!(
+        super::toolbar::run_menu_top(&app),
+        bug.y - super::ICON_BTN / 2.0,
+        "level with the bug"
+    );
+    let mut sim = sim_of(&app);
+    for (label, action) in [
+        ("Run", Action::Run),
+        ("Debug", Action::StartDebug),
+        ("Fake Run…", Action::FakeRun),
+        ("Fake Debug…", Action::FakeDebug),
+    ] {
+        let wanted = label.to_string();
+        let row = text_at(&mut sim, move |t| t == wanted, 0)
+            .unwrap_or_else(|| panic!("{label} is not in the menu"));
+        assert!(row.x < bug.x, "{label} is beside the strip, left of it");
+        let keys = app.keymap.chord(action).caps();
+        let chord = text_at(&mut sim, move |t| t == keys, 0)
+            .unwrap_or_else(|| panic!("{label}'s keys are not shown"));
+        assert!(
+            (chord.center().y - row.center().y).abs() < 2.0,
+            "{label}'s keys are on its row"
+        );
+    }
+    drop(sim);
+    let sent = click(sim_of(&app), "Run");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Debug(DebugMsg::Run))),
+        "{sent:?}"
+    );
+    for m in sent {
+        let _ = app.update(m);
+    }
+    assert!(!app.show_run_menu, "picked, it goes");
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    let sent = click(sim_of(&app), "Fake Debug…");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Fake(crate::FakeMsg::AtCaret { debug: true }))),
+        "{sent:?}"
+    );
+}
+
 /// Every tool on the strip — and every row of the ⋯ menu, laid on the strip
-/// where there is room — has a shortcut, and its tip says it: Overview,
-/// Stats and the menu's Glossary, Set Up Project… and Tutorial had none.
-/// The ⋯ itself, a menu, is the one without. No two share a chord, and
-/// none is one the menu bar keeps.
+/// where there is room, and of the Run menu — has a shortcut, and its tip
+/// says it: Overview, Stats and the menu's Glossary, Set Up Project… and
+/// Tutorial had none. The ⋯ and the bug, menus, are the ones without. No
+/// two share a chord, and none is one the menu bar keeps.
 #[test]
 fn every_tool_on_the_strip_has_a_shortcut() {
     use crate::ui::StripTool;
@@ -2436,10 +2493,17 @@ fn every_tool_on_the_strip_has_a_shortcut() {
     for tool in super::STRIP_TOP
         .into_iter()
         .chain([StripTool::Settings])
-        .filter(|t| *t != StripTool::More)
+        .filter(|t| !matches!(t, StripTool::More | StripTool::Debug))
     {
         let (_, label, keys, _) = super::strip_tool(&app, tool);
         assert!(keys.is_some(), "{label} has no shortcut");
+    }
+    for row in super::toolbar::RUN_MENU_ROWS {
+        let action = super::toolbar::run_row_action(row);
+        assert!(
+            !app.keymap.chord(action).caps().is_empty(),
+            "{row:?} has no chord"
+        );
     }
     for row in super::TOOLS_MENU_ROWS {
         let action = super::tools_row_action(row);
@@ -6385,6 +6449,10 @@ fn an_icon_stands_for_one_thing() {
         let (glyph, name, _) = tools_row(&app, row);
         named.push((name, glyph));
     }
+    for row in super::toolbar::RUN_MENU_ROWS {
+        let (glyph, name, _) = super::toolbar::run_row(&app, row);
+        named.push((name.to_string(), glyph));
+    }
     for (glyph, name, ..) in app_menu_head(&app) {
         named.push((name.to_string(), glyph));
     }
@@ -6410,6 +6478,8 @@ fn an_icon_stands_for_one_thing() {
     let one_thing = [
         ("imports", "import graph"),
         ("call hierarchy", "call graph"),
+        // The bug opens the Run menu, whose Debug is the bug's own.
+        ("run and debug", "debug"),
     ];
     for (i, (a, glyph_a)) in named.iter().enumerate() {
         for (b, glyph_b) in &named[i + 1..] {
@@ -11712,6 +11782,7 @@ fn the_fake_debug_panel_shows_the_trace_and_steps_it() {
         },
         at: 1,
         ended: false,
+        debug: true,
     });
     app.show_bottom = true;
     let mut sim = sim_of(&app);
@@ -11760,6 +11831,7 @@ fn the_fake_run_sheet_asks_for_each_parameter() {
         fields,
         target,
         suggesting: None,
+        debug: false,
     });
     let mut sim = sim_of(&app);
     assert!(shows(&mut sim, "Fake run"));

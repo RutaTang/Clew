@@ -63,6 +63,18 @@ fn take_notice(mut launch: serde_json::Value) -> (serde_json::Value, Option<Stri
     (launch, notice)
 }
 
+/// A `launch` body for a run without the debugger: DAP's `noDebug`, which
+/// every adapter that knows it takes as "run it, stop at nothing" — and no
+/// stop at the entry either, for one that does not. The breakpoints are
+/// kept from it by never being sent
+/// ([`crate::app::state::DebugState::no_debug`]).
+fn without_debugger(launch: &mut serde_json::Value) {
+    if let Some(body) = launch.as_object_mut() {
+        body.insert("noDebug".into(), serde_json::Value::Bool(true));
+        body.insert("stopOnEntry".into(), serde_json::Value::Bool(false));
+    }
+}
+
 /// The most children one variable shows: a list of a million is read a
 /// screenful at a time by no one.
 pub(crate) const MAX_VAR_CHILDREN: usize = 300;
@@ -82,6 +94,29 @@ impl App {
     /// Begin a debug session from the project's `.clew/launch.json`. Spawns the
     /// adapter off-thread and streams its events back as `DapEvent` messages.
     pub(crate) fn start_debug(&mut self) -> Task<Message> {
+        self.start_session(false)
+    }
+
+    /// Run the program as Debug would, without the debugger: the same
+    /// launch, the adapter told `noDebug`, no breakpoint set in it. Its
+    /// output and its end show in the bottom panel as a debug run's do.
+    pub(crate) fn start_run(&mut self) -> Task<Message> {
+        self.start_session(true)
+    }
+
+    /// What the status line says while the session runs: a run is no
+    /// debugger's.
+    fn running_said(&self) -> String {
+        if self.debug.no_debug {
+            tr!("Running…").into()
+        } else {
+            tr!("Debugger running…").into()
+        }
+    }
+
+    /// Begin a session from the launch config: a debug one, or with
+    /// `no_debug` a plain run ([`Self::start_run`]).
+    fn start_session(&mut self, no_debug: bool) -> Task<Message> {
         // A program that has ended leaves its session on screen — its output,
         // its last frames — but nothing runs in it: starting again ends it
         // (and lets its adapter go) rather than calling it "already running"
@@ -93,7 +128,7 @@ impl App {
             .is_some_and(|s| s.status == DebugStatus::Terminated)
         {
             let ended = self.stop_debug_session();
-            return Task::batch([ended, self.start_debug()]);
+            return Task::batch([ended, self.start_session(no_debug)]);
         }
         if self.debug.session.is_some() {
             self.status = tr!("A debug session is already running").into();
@@ -174,6 +209,7 @@ impl App {
             addr: None,
         });
         self.show_bottom = true;
+        self.debug.no_debug = no_debug;
         self.debug.last_fn = None;
         // A new run: its trace starts empty.
         self.debug.trace.clear();
@@ -184,10 +220,15 @@ impl App {
             .map(|n| n.to_string_lossy().into_owned());
         self.debug.pending_reason.clear();
         self.status = match lang {
+            Some(lang) if no_debug => tr!(
+                "Starting the program — {adapter}…",
+                adapter = crate::i18n::lookup(lang.label())
+            ),
             Some(lang) => tr!(
                 "Starting debugger — {adapter}…",
                 adapter = crate::i18n::lookup(lang.label())
             ),
+            None if no_debug => tr!("Starting the program on the remote host…").into(),
             None => tr!("Starting debugger on the remote host…").into(),
         };
         // This run's identity: every message the adapter stream produces carries
@@ -603,7 +644,10 @@ impl App {
                 // What the adapter's resolution has to say (a Zig binary
                 // whose variables lldb cannot read): to the debug console,
                 // and out of the body the adapter gets.
-                let (launch, notice) = take_notice(launch);
+                let (mut launch, notice) = take_notice(launch);
+                if no_debug {
+                    without_debugger(&mut launch);
+                }
                 if let Some(text) = notice {
                     let _ = output
                         .send(Message::Debug(DebugMsg::DapEvent {
@@ -777,7 +821,7 @@ impl App {
             }
             // The install is global and reported whatever the project; only
             // starting the session belongs to the project it was asked in.
-            Ok(()) if self.owns(&stamp) => self.start_debug(),
+            Ok(()) if self.owns(&stamp) => self.start_session(self.debug.no_debug),
             Ok(()) => {
                 self.status = tr!("Debug adapter installed").into();
                 Task::none()
@@ -1410,10 +1454,12 @@ impl App {
                 let Some(client) = configure else {
                     return Task::none();
                 };
+                // A run sets none: it stops at nothing.
                 let bps: Vec<(PathBuf, BpList)> = self
                     .debug
                     .breakpoints
                     .iter()
+                    .filter(|_| !self.debug.no_debug)
                     .map(|(p, m)| {
                         (
                             p.clone(),
@@ -1458,7 +1504,7 @@ impl App {
                 self.bump_debug_stop();
                 // Running again: "Stopped: breakpoint" is no longer so.
                 if self.debug.said.as_deref().is_some_and(|s| s == self.status) {
-                    self.say_debug_state(tr!("Debugger running…").into());
+                    self.say_debug_state(self.running_said());
                 }
                 self.show_paused_debug_session()
             }
@@ -1498,6 +1544,11 @@ impl App {
                 let Some(addr) = session.addr else {
                     return Task::none();
                 };
+                // A run's children run without the debugger too.
+                let mut config = config;
+                if self.debug.no_debug {
+                    without_debugger(&mut config);
+                }
                 let run = self.debug_run;
                 // The run's stop, which the child heeds as the run's own
                 // stream does: it went on forwarding a stopped run's events
@@ -1915,6 +1966,11 @@ impl App {
     /// Push one file's breakpoints (line + condition) to a live adapter. No-op
     /// when no session is running.
     pub(crate) fn push_breakpoints(&mut self, path: &Path) -> Task<Message> {
+        // A run without the debugger stops at nothing: the breakpoint is
+        // kept for the next debug run, and not sent to this one.
+        if self.debug.no_debug && self.debug.session.is_some() {
+            return Task::none();
+        }
         // A configuration being sent now is a snapshot of before this change
         // (see `DebugState::bp_rev`).
         self.debug.bp_rev += 1;
@@ -2325,6 +2381,7 @@ impl App {
     pub(crate) fn update_debug(&mut self, message: DebugMsg) -> Task<Message> {
         match message {
             DebugMsg::Start => self.start_debug(),
+            DebugMsg::Run => self.start_run(),
             DebugMsg::DapStarted {
                 run,
                 client,
@@ -2344,7 +2401,7 @@ impl App {
                     let children = self.debug_children();
                     children.own = Some((client, hover_safe));
                     children.active = crate::app::state::OWN_SESSION;
-                    self.say_debug_state(tr!("Debugger running…").into());
+                    self.say_debug_state(self.running_said());
                     self.bump_debug_stop();
                 }
                 Task::none()
@@ -2386,7 +2443,7 @@ impl App {
                         // "terminated", the next Start tore it down.
                         if status == Some(DebugStatus::Terminated) {
                             self.show_debug_running();
-                            self.say_debug_state(tr!("Debugger running…").into());
+                            self.say_debug_state(self.running_said());
                         }
                     }
                 }
@@ -2579,6 +2636,18 @@ mod tests {
         assert_eq!(launch, serde_json::json!({ "program": "/p/app" }));
         let plain = serde_json::json!({ "program": "/p/app" });
         assert_eq!(take_notice(plain.clone()), (plain, None));
+    }
+
+    /// A run's launch body tells the adapter `noDebug`, and not to stop at
+    /// the entry: a config's own `stopOnEntry` is a debugging choice.
+    #[test]
+    fn a_run_launches_without_the_debugger() {
+        let mut launch = serde_json::json!({ "program": "/p/app", "stopOnEntry": true });
+        without_debugger(&mut launch);
+        assert_eq!(
+            launch,
+            serde_json::json!({ "program": "/p/app", "noDebug": true, "stopOnEntry": false })
+        );
     }
 
     fn blank_session() -> DebugSession {

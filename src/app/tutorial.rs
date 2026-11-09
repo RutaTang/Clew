@@ -353,8 +353,8 @@ pub(crate) fn steps(app: &App) -> Vec<TutStep> {
         // -- Run it ---------------------------------------------------------
         TutStep::new(
             C::Run,
-            tr!("Debug"),
-            tr!("Set a breakpoint in checkout(), then run main.py: step through it and see its variables and its stack."),
+            tr!("Run and debug"),
+            tr!("The bug runs main.py: Run to its end, or Debug to stop at a breakpoint in checkout() and see its variables and its stack. Fake Run and Fake Debug have the AI work a function out on inputs you give, without running anything."),
             Anchor::Strip(StripTool::Debug),
         )
         .demo(Message::Window(WindowMsg::ShowDebugPanel)),

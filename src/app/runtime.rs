@@ -113,6 +113,7 @@ impl App {
             llm_available: llm::Config::available(),
             llm_config_cache: None,
             show_tools_menu: false,
+            show_run_menu: false,
             show_target_menu: false,
             show_app_menu: false,
             margin_tab: MarginTab::default(),
@@ -388,6 +389,7 @@ impl App {
     /// Close every menu of the chrome: they open one at a time.
     pub(crate) fn close_menus(&mut self) {
         self.show_tools_menu = false;
+        self.show_run_menu = false;
         self.show_target_menu = false;
         self.show_app_menu = false;
         self.show_view_menu = false;
@@ -704,6 +706,12 @@ impl App {
                 let open = !self.show_tools_menu && !crate::ui::tools_on_strip(self);
                 self.close_menus();
                 self.show_tools_menu = open;
+                Task::none()
+            }
+            WindowMsg::ToggleRunMenu => {
+                let open = !self.show_run_menu;
+                self.close_menus();
+                self.show_run_menu = open;
                 Task::none()
             }
             WindowMsg::ToggleTargetMenu => {

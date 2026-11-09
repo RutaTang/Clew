@@ -54,6 +54,9 @@ pub struct Sheet {
     pub(crate) values: Vec<String>,
     /// A suggestion of inputs is being asked for: its number.
     pub(crate) suggesting: Option<u64>,
+    /// Fake Debug: the trace is stepped through from its first line. Fake
+    /// Run lands on its end, on what it returns.
+    pub(crate) debug: bool,
 }
 
 /// A run the model is working out.
@@ -68,6 +71,8 @@ pub struct Working {
     /// What the agent has done so far, as its steps say it ("Read
     /// pricing.py"), newest last.
     pub(crate) reading: Vec<String>,
+    /// Fake Debug, not Fake Run (see [`Sheet::debug`]).
+    pub(crate) debug: bool,
 }
 
 /// A trace being stepped through.
@@ -81,6 +86,8 @@ pub struct Sim {
     /// Stepped past the last line: the run is over, and what it returns
     /// is what is shown.
     pub(crate) ended: bool,
+    /// Fake Debug, not Fake Run (see [`Sheet::debug`]).
+    pub(crate) debug: bool,
 }
 
 /// The widget id of the sheet's `i`th field.
@@ -121,9 +128,23 @@ impl App {
         Some(target)
     }
 
-    /// Open the inputs sheet on `target`: with the inputs last run on it,
-    /// when it is the same definition.
-    fn open_fake_sheet(&mut self, target: Target) -> Task<Message> {
+    /// The first definition a fake run could run that starts at or below
+    /// line `line1` of pane `pane`'s file.
+    fn fake_target_below(&self, pane: usize, line1: usize) -> Option<Target> {
+        let v = self.proj.panes.get(pane)?.as_ref()?;
+        let first = v
+            .symbols
+            .iter()
+            .filter(|s| fr::runnable(&s.kind) && s.line >= line1)
+            .map(|s| s.line)
+            .min()?;
+        self.fake_target_at(pane, first)
+    }
+
+    /// Open the inputs sheet on `target`, to fake-run it or (`debug`) to
+    /// fake-debug it: with the inputs last run on it, when it is the same
+    /// definition.
+    fn open_fake_sheet(&mut self, target: Target, debug: bool) -> Task<Message> {
         let same = |s: &&Sheet| {
             s.target.rel == target.rel
                 && s.target.name == target.name
@@ -139,17 +160,19 @@ impl App {
             fields,
             values,
             suggesting: None,
+            debug,
         });
         operation::focus(field_id(0))
     }
 
-    /// Fake Run… from the context menu: the definition it was opened on.
-    fn on_fake_from_menu(&mut self) -> Task<Message> {
+    /// Fake Run… or Fake Debug… from the context menu: the definition it
+    /// was opened on.
+    fn on_fake_from_menu(&mut self, debug: bool) -> Task<Message> {
         let Some(menu) = self.proj.context_menu.take() else {
             return Task::none();
         };
         match self.fake_target_at(menu.pane, menu.line + 1) {
-            Some(target) => self.open_fake_sheet(target),
+            Some(target) => self.open_fake_sheet(target, debug),
             None => {
                 self.status = tr!("No function, class or struct here to fake-run").into();
                 Task::none()
@@ -157,16 +180,27 @@ impl App {
         }
     }
 
-    /// Fake Run from the keyboard or the palette: the definition the caret
-    /// is in.
-    fn on_fake_at_caret(&mut self) -> Task<Message> {
+    /// Fake Run or Fake Debug from the keyboard, the palette or the
+    /// strip's Run menu: the definition the caret is in. With no caret
+    /// placed, where the reader is — the definition at the top of the code
+    /// in view, or the first one under it: from the strip, nothing had
+    /// placed one, and the run was refused for a caret no one had asked
+    /// for.
+    fn on_fake_at_caret(&mut self, debug: bool) -> Task<Message> {
         let pane = self.proj.active;
-        let line = self
+        let line_height = self.line_height();
+        let at = self
             .active_viewer()
-            .and_then(|v| v.caret)
-            .map(|(l, _)| l + 1);
-        match line.and_then(|l| self.fake_target_at(pane, l)) {
-            Some(target) => self.open_fake_sheet(target),
+            .map(|v| (v.current_line(line_height), v.caret.is_some()));
+        let target = at.and_then(|(line, caret)| {
+            self.fake_target_at(pane, line).or_else(|| {
+                (!caret)
+                    .then(|| self.fake_target_below(pane, line))
+                    .flatten()
+            })
+        });
+        match target {
+            Some(target) => self.open_fake_sheet(target, debug),
             None => {
                 self.status =
                     tr!("Put the caret in a function, class or struct to fake-run it").into();
@@ -189,6 +223,7 @@ impl App {
             return Task::none();
         };
         sheet.suggesting = None;
+        let debug = sheet.debug;
         let stopped = self.stop_fake_work();
         let given = fr::given(&sheet.fields, &sheet.values);
         let target = sheet.target.clone();
@@ -207,6 +242,7 @@ impl App {
             given: given.clone(),
             answer: fr::Answer::default(),
             reading: Vec::new(),
+            debug,
         };
         if self.server.is_up() && self.ai_on_server() {
             let question = fr::question(&target, &given, true, reply.as_deref());
@@ -353,15 +389,39 @@ impl App {
         };
         let parsed = answer.and_then(|text| fr::parse(&text, |file| self.fake_resolve(file)));
         match parsed {
-            Ok(trace) => {
+            Ok(trace) if !working.debug => {
+                // A fake run lands on its end: what it returns, what it
+                // printed, the steps there to go back through.
                 self.status = if trace.dropped > 0 {
                     trn!(
-                        "Fake run ready — 1 step named no line of this project and was left out",
-                        "Fake run ready — {n} steps named no line of this project and were left out",
+                        "Fake run done — 1 step named no line of this project and was left out",
+                        "Fake run done — {n} steps named no line of this project and were left out",
                         trace.dropped
                     )
                 } else {
-                    tr!("Fake run ready — step through it below").into()
+                    tr!("Fake run done — what it returns is below").into()
+                };
+                let at = trace.steps.len().saturating_sub(1);
+                self.proj.fake.sim = Some(Sim {
+                    target: working.target,
+                    given: working.given,
+                    trace,
+                    at,
+                    ended: true,
+                    debug: false,
+                });
+                self.show_bottom = true;
+                Task::none()
+            }
+            Ok(trace) => {
+                self.status = if trace.dropped > 0 {
+                    trn!(
+                        "Fake debug ready — 1 step named no line of this project and was left out",
+                        "Fake debug ready — {n} steps named no line of this project and were left out",
+                        trace.dropped
+                    )
+                } else {
+                    tr!("Fake debug ready — step through it below").into()
                 };
                 self.proj.fake.sim = Some(Sim {
                     target: working.target,
@@ -369,6 +429,7 @@ impl App {
                     trace,
                     at: 0,
                     ended: false,
+                    debug: true,
                 });
                 self.show_bottom = true;
                 self.fake_show_step()
@@ -563,8 +624,8 @@ impl App {
 
     pub(crate) fn update_fake(&mut self, message: FakeMsg) -> Task<Message> {
         match message {
-            FakeMsg::FromMenu => self.on_fake_from_menu(),
-            FakeMsg::AtCaret => self.on_fake_at_caret(),
+            FakeMsg::FromMenu { debug } => self.on_fake_from_menu(debug),
+            FakeMsg::AtCaret { debug } => self.on_fake_at_caret(debug),
             FakeMsg::Field(i, value) => {
                 if let Some(slot) = self
                     .proj

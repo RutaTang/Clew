@@ -26771,6 +26771,76 @@ fn breakpoints_changed_during_configuration_are_sent_again() {
     assert_eq!(lines, Some(serde_json::json!(4)));
 }
 
+/// A run without the debugger stops at nothing: no breakpoint goes to its
+/// adapter — not those set before, when it asks to be configured, nor one
+/// toggled while it runs — and it is still started (`configurationDone`).
+/// The breakpoint toggled is kept for the next debug run.
+#[test]
+fn a_run_sets_no_breakpoint() {
+    let mut app = scanned_app("debug-run-no-breakpoints");
+    let (_rt, _events, seen) = paused_session_with_fake_adapter(&mut app);
+    app.debug.no_debug = true;
+    let file = PathBuf::from("/p/prog.rs");
+    app.debug
+        .breakpoints
+        .entry(file.clone())
+        .or_default()
+        .insert(2, Default::default());
+    let count = |seen: &DapSeen, command: &str| {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(c, _)| c == command)
+            .count()
+    };
+    let _ = run_task(app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.debug_stamp(),
+        run: app.debug_run,
+        event: crate::dap::DapEvent::Initialized,
+    })));
+    assert_eq!(count(&seen, "configurationDone"), 1, "it is started");
+    assert_eq!(count(&seen, "setBreakpoints"), 0, "with none set");
+    let _ = run_task(app.on_breakpoint_toggle(file.clone(), 4));
+    assert_eq!(count(&seen, "setBreakpoints"), 0, "nor one added");
+    assert!(
+        app.debug.breakpoints[&file].contains_key(&4),
+        "kept for the next debug run"
+    );
+
+    // Debugging, the same configuration sends them.
+    app.debug.no_debug = false;
+    let _ = run_task(app.update(Message::Debug(DebugMsg::DapEvent {
+        stamp: app.debug_stamp(),
+        run: app.debug_run,
+        event: crate::dap::DapEvent::Initialized,
+    })));
+    assert_eq!(count(&seen, "setBreakpoints"), 1);
+}
+
+/// Run starts the program as Debug does, marked as a run — the status line
+/// says it starts the program, not a debugger — and Debug after it is a
+/// debug run again.
+#[test]
+fn run_starts_the_program_without_the_debugger() {
+    let mut app = scanned_app("debug-run-start");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    std::fs::write(root.join("main.py"), "print('hi')\n").unwrap();
+    open_synchronously(&mut app, "main.py", None);
+    let _ = app.update(Message::Debug(DebugMsg::Run));
+    assert!(app.debug.session.is_some(), "{}", app.status);
+    assert!(app.debug.no_debug);
+    assert!(
+        app.status.contains("Starting the program"),
+        "{}",
+        app.status
+    );
+    let _ = app.update(Message::Debug(DebugMsg::Stop));
+    let _ = app.update(Message::Debug(DebugMsg::Start));
+    assert!(app.debug.session.is_some(), "{}", app.status);
+    assert!(!app.debug.no_debug, "Debug debugs");
+    assert!(app.status.contains("Starting debugger"), "{}", app.status);
+}
+
 /// D1-10: hovering a word while the debuggee is paused evaluates it in the top
 /// frame as a `"hover"` evaluation — the only context an adapter's
 /// side-effect-free promise covers — and only when the adapter made that
@@ -29235,6 +29305,11 @@ fn an_overlay_over_a_time_travel_session_takes_its_keys_first() {
     let _ = app.update(esc_press());
     assert!(!app.show_tools_menu);
     assert_eq!(revision(&app), Some(0));
+    let _ = app.update(Message::Window(WindowMsg::ToggleRunMenu));
+    assert!(app.show_run_menu);
+    let _ = app.update(esc_press());
+    assert!(!app.show_run_menu, "the Run menu takes Esc");
+    assert_eq!(revision(&app), Some(0));
 
     // The shortcuts panel takes every key, the session's chords included.
     let _ = app.update(Message::Window(WindowMsg::OpenShortcuts));
@@ -29295,6 +29370,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             O::Why(_) => "why",
             O::Insight(_) => "insight",
             O::ToolsMenu => "tools menu",
+            O::RunMenu => "run menu",
             O::TargetMenu => "target menu",
             O::AppMenu => "app menu",
             O::ViewMenu => "view menu",
@@ -29319,6 +29395,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
         app.proj.blame_why = None;
         app.proj.insight = None;
         app.show_tools_menu = false;
+        app.show_run_menu = false;
         app.show_target_menu = false;
         app.show_app_menu = false;
         app.show_view_menu = false;
@@ -29381,6 +29458,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
                 values: vec![String::new()],
                 target,
                 suggesting: None,
+                debug: false,
             })
         }),
         Box::new(|a| a.proj.note_edit = Some(("src/lib.rs".into(), 1, String::new()))),
@@ -29409,6 +29487,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
             })
         }),
         Box::new(|a| a.show_tools_menu = true),
+        Box::new(|a| a.show_run_menu = true),
         Box::new(|a| a.show_target_menu = true),
         Box::new(|a| a.show_app_menu = true),
         Box::new(|a| a.show_view_menu = true),
@@ -29447,7 +29526,7 @@ fn every_overlay_over_a_time_travel_session_holds_its_chords() {
     distinct.dedup();
     assert_eq!(
         (raised.len(), distinct.len()),
-        (20, 20),
+        (21, 21),
         "every overlay but the hover peek is raised, once: {raised:?}"
     );
 

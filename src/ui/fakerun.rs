@@ -106,16 +106,23 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
             super::heard::Answer::No,
             cancel.clone(),
         ));
-    let run_b = button(text(tr!("Run")).size(ts::BODY))
+    // Fake Debug steps through what Fake Run lands at the end of: the
+    // sheet says which it is, and its button does that.
+    let (heading, go) = if sheet.debug {
+        (tr!("Fake debug"), tr!("Debug"))
+    } else {
+        (tr!("Fake run"), tr!("Run"))
+    };
+    let run_b = button(text(go).size(ts::BODY))
         .style(theme::primary_button)
         .padding([4, 12])
         .on_press(super::heard::answer(
-            tr!("Run"),
+            go,
             super::heard::Answer::Yes,
             run.clone(),
         ));
     let title = row![
-        text(tr!("Fake run")).size(ts::EMPHASIS).color(theme::fg()),
+        text(heading).size(ts::EMPHASIS).color(theme::fg()),
         text(sheet.target.name.clone())
             .size(ts::EMPHASIS)
             .font(crate::fonts::CODE)
@@ -174,12 +181,25 @@ pub(crate) fn fake_panel(app: &App) -> Element<'_, Message> {
             .color(theme::accent())
             .wrapping(Wrapping::None)
     };
+    // Which it was asked as: the run being worked out's, else the trace's,
+    // else the last sheet's.
+    let debug = fake
+        .working
+        .as_ref()
+        .map(|w| w.debug)
+        .or(fake.sim.as_ref().map(|s| s.debug))
+        .or(fake.last.as_ref().map(|s| s.debug))
+        .unwrap_or(true);
     let lead = |name: &str, status: String| {
         row![
-            text(tr!("Fake debug"))
-                .size(ts::BASE)
-                .color(theme::fg())
-                .wrapping(Wrapping::None),
+            text(if debug {
+                tr!("Fake debug")
+            } else {
+                tr!("Fake run")
+            })
+            .size(ts::BASE)
+            .color(theme::fg())
+            .wrapping(Wrapping::None),
             chip(),
             text(name.to_string())
                 .size(ts::SMALL)

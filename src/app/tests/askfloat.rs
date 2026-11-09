@@ -223,8 +223,8 @@ fn the_tour_shows_the_ask_card() {
     assert_eq!(app.ask_view, AskView::Hidden);
     let debug_step = crate::app::tutorial::steps(&app)
         .iter()
-        .position(|s| s.title == "Debug")
-        .expect("a Debug step");
+        .position(|s| s.title == "Run and debug")
+        .expect("a Run and debug step");
     while app.tutorial.is_some_and(|s| s < debug_step) {
         let _ = app.update(Message::Tutorial(TutorialMsg::Step(1)));
     }
