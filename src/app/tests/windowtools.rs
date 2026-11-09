@@ -168,7 +168,12 @@ fn the_agent_lists_and_runs_the_windows_commands() {
         "- Explain All ({}) — asks the user first",
         keys("⇧⌘E")
     )));
-    assert!(listed.contains("- Overview\n"), "{listed}");
+    assert!(
+        listed.contains(&format!("- Overview ({})\n", keys("⇧⌘O"))),
+        "{listed}"
+    );
+    // One with no key: its title alone.
+    assert!(listed.contains("- Window: Minimize\n"), "{listed}");
     // Something that only shows: run at once.
     let _ = call(
         &mut app,
