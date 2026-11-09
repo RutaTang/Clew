@@ -438,6 +438,17 @@ impl App {
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_settings(&mut self, message: SettingsMsg) -> Task<Message> {
         match message {
+            // Picked with Settings shut — said, or run from the command bar:
+            // picked as its page would pick it, and kept as closing it
+            // keeps it. Only its draft changed, which nothing then saved.
+            msg @ (SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+                if !self.settings.open =>
+            {
+                let opened = self.on_open_settings();
+                let picked = self.update_settings(msg);
+                let closed = self.close_settings();
+                Task::batch([opened, picked, closed])
+            }
             SettingsMsg::SetThemePref(pref) => {
                 self.set_theme(pref);
                 Task::none()

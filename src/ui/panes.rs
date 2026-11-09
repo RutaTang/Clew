@@ -1352,7 +1352,7 @@ fn notes_beside_code<'a>(
     ordinals: Vec<u32>,
 ) -> Element<'a, Message> {
     use crate::explain::Node;
-    iced::widget::responsive(move |size| {
+    let build = move |size: iced::Size| {
         let lh = app.line_height();
         // The code runs down to the margin's foot; what is above it in the
         // pane (a banner, the find bar) is the difference in height.
@@ -1462,9 +1462,21 @@ fn notes_beside_code<'a>(
                 left: 4.0 - NOTE_EDGE,
             })
             .into()
-    })
-    .into()
+    };
+    // Built only when laid out, which a gathering of what voice can press
+    // never does: built once more for it, here, so a note's buttons are
+    // said as clicked.
+    if super::heard::gathering() {
+        drop(build(iced::Size::new(
+            MARGIN_GATHER_W,
+            v.viewport_h.max(1.0),
+        )));
+    }
+    iced::widget::responsive(build).into()
 }
+
+/// The width the margin's notes are built at when only gathered.
+const MARGIN_GATHER_W: f32 = 320.0;
 
 /// A note's head: the name it is about (as code, for a function) and what
 /// kind of thing that is, where.
@@ -1870,6 +1882,8 @@ fn margin_calls(app: &App) -> Element<'_, Message> {
 /// into how the function and the line came to be. It was four links, two
 /// of them the header's own Diff and Time Travel again.
 fn margin_history(app: &App) -> Element<'_, Message> {
+    // Its rows counted from 1, as voice picks them ("open the second").
+    super::heard::list();
     let in_function = matches!(
         app.proj.explain.view,
         Some(crate::explain::Node::Function { .. })

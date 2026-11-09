@@ -658,6 +658,7 @@ fn every_permission_request_can_be_declined() {
         id: id.into(),
         label: id.into(),
         allows,
+        always: false,
     };
     let ids = |(options, added): (Vec<ApprovalOption>, Option<String>)| {
         (options.into_iter().map(|o| o.id).collect::<Vec<_>>(), added)
@@ -1451,11 +1452,13 @@ fn an_approval_card_is_allowed_only_once_it_can_have_been_read() {
                 id: "ok".into(),
                 label: "Allow".into(),
                 allows: true,
+                always: false,
             },
             ApprovalOption {
                 id: "no".into(),
                 label: "Reject".into(),
                 allows: false,
+                always: false,
             },
         ],
     };
@@ -1547,6 +1550,7 @@ fn an_ended_turn_leaves_no_card_to_answer() {
                     id: "once".into(),
                     label: "Allow once".into(),
                     allows: true,
+                    always: false,
                 }],
             }],
             ..TurnExtras::default()

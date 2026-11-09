@@ -236,7 +236,8 @@ fn number_said(units: &[String]) -> Option<usize> {
     crate::app::spoken::number(&units.join(" "))
 }
 
-/// `said` without what is said around a name to press it ([`PRESS`]).
+/// `said` without what is said around a name to press it ([`PRESS`]) —
+/// and a name, so: "Select All" is "all" said bare, as "select all" is.
 fn bare(said: &str) -> Vec<String> {
     use crate::app::choices::units;
     let mut words = units(said);
@@ -291,12 +292,15 @@ pub(crate) fn named(said: &str, targets: &[Target]) -> Option<Target> {
     }
     let squeeze = |w: &[String]| w.concat();
     let said_squeezed = squeeze(&words);
+    // A name as it is, or bare of what is said around one, as what was
+    // said is: "select all" names "Select All" both ways.
     let exact: Vec<&Target> = targets
         .iter()
         .filter(|t| {
             [&t.title, &t.shown].iter().any(|name| {
                 let u = crate::app::choices::units(name);
-                !u.is_empty() && squeeze(&u) == said_squeezed
+                !u.is_empty()
+                    && (squeeze(&u) == said_squeezed || squeeze(&bare(name)) == said_squeezed)
             })
         })
         .collect();
@@ -344,7 +348,26 @@ pub(crate) fn row(said: &str, targets: &[Target]) -> Option<Target> {
 }
 
 /// Whether pressing a target by a word, which may have been misheard,
-/// should wait for a yes: what removes, forgets or resets something.
+/// should wait for a yes: what removes, forgets or resets something, and
+/// what costs something as a command said does (a paid pass, the program
+/// started) — never the answer to a question, which was asked already.
+fn asks_first(target: &Target) -> bool {
+    target.answer.is_none() && (undoes(target) || costs(&target.message))
+}
+
+/// Whether `message`, said as a command, would wait for a yes
+/// ([`crate::app::palette::PaletteCommand::asks_when_said`]).
+fn costs(message: &Message) -> bool {
+    crate::app::palette::PaletteCommand {
+        title: String::new(),
+        keys: None,
+        action: crate::app::palette::PaletteAction::Send(message.clone()),
+        shown_as: None,
+    }
+    .asks_when_said()
+}
+
+/// Whether pressing `target` removes, forgets or resets something.
 fn undoes(target: &Target) -> bool {
     const WORDS: [&str; 9] = [
         "Remove",
@@ -357,7 +380,7 @@ fn undoes(target: &Target) -> bool {
         "Discard",
         "Uninstall",
     ];
-    target.answer.is_none() && WORDS.iter().any(|w| target.title.starts_with(w))
+    WORDS.iter().any(|w| target.title.starts_with(w))
 }
 
 impl App {
@@ -373,15 +396,24 @@ impl App {
         first: bool,
     ) -> Option<Task<Message>> {
         if first {
-            // A question on screen answered.
+            // A question on screen answered. A word that also puts away
+            // what is on top ("cancel", "never mind") answers only a
+            // question that is on top: said with a card in Ask, it closes
+            // what it closes, and declines nothing it was not looking at.
             if let Some(yes) = crate::app::spoken::only_yes_or_no(said) {
                 let answer = if yes { Answer::Yes } else { Answer::No };
-                if let Some(t) = targets.iter().find(|t| t.answer == Some(answer)) {
+                let dismissing = !yes && dismisses(said);
+                if let Some(t) = targets.iter().find(|t| {
+                    t.answer == Some(answer) && (!dismissing || t.layer >= Layer::Overlay)
+                }) {
                     return Some(self.press_heard(said, t.clone()));
                 }
             }
+            // A dialog's button, or its list's row by its place — before
+            // what is said is typed into its field: "the third one", said
+            // to the command bar, opens its third result.
             if targets.iter().any(|t| t.layer >= Layer::Overlay)
-                && let Some(t) = named(said, targets)
+                && let Some(t) = named(said, targets).or_else(|| row(said, targets))
             {
                 return Some(self.press_heard(said, t));
             }
@@ -425,11 +457,11 @@ impl App {
         self.update(on_input(typed))
     }
 
-    /// Press `target`, as `said` asked — or, when it undoes something,
-    /// ask first.
+    /// Press `target`, as `said` asked — or, when it undoes or costs
+    /// something, ask first ([`asks_first`]).
     fn press_heard(&mut self, said: &str, target: Target) -> Task<Message> {
         let text = said.to_string();
-        if undoes(&target) {
+        if asks_first(&target) {
             self.status = tr!("“{text}” → {command}?", text = text, command = target.shown);
             self.voice.hear(Heard {
                 text,
@@ -563,6 +595,19 @@ mod tests {
             named("settings", &same).map(|t| t.title).as_deref(),
             Some("Settings")
         );
+    }
+
+    /// What is said around a name to press it is said around one that
+    /// holds those words itself: "select all" names "Select All".
+    #[test]
+    fn a_name_with_a_press_word_in_it_is_pressed_by_it() {
+        let targets = [
+            target("Select All", Message::Noop),
+            target("Open Folder…", Message::Tick),
+        ];
+        let pressed = |said: &str| named(said, &targets).map(|t| t.title);
+        assert_eq!(pressed("select all").as_deref(), Some("Select All"));
+        assert_eq!(pressed("click select all").as_deref(), Some("Select All"));
     }
 
     /// What puts away what is on top is said alone: "close the minimap"

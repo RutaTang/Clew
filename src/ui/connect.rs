@@ -1681,17 +1681,23 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
             .text_size(ts::BODY)
             .size(15)
             .spacing(6);
-        super::heard::about(&crate::app::integrations::acp_label(agent), || {
-            super::heard::switch(tr!("Share my MCP servers"), agent.share_mcp, |on| {
-                Message::Integrations(M::AcpShareMcp(agent.name.clone(), on))
-            })
-        });
-        let remove = super::heard::about(&crate::app::integrations::acp_label(agent), || {
-            small(
-                tr!("Remove"),
-                Message::Integrations(M::AcpRemove(agent.name.clone())),
-            )
-        });
+        super::heard::about_with(
+            || crate::app::integrations::acp_label(agent),
+            || {
+                super::heard::switch(tr!("Share my MCP servers"), agent.share_mcp, |on| {
+                    Message::Integrations(M::AcpShareMcp(agent.name.clone(), on))
+                })
+            },
+        );
+        let remove = super::heard::about_with(
+            || crate::app::integrations::acp_label(agent),
+            || {
+                small(
+                    tr!("Remove"),
+                    Message::Integrations(M::AcpRemove(agent.name.clone())),
+                )
+            },
+        );
         agents.push(form::plain(
             row![
                 column![

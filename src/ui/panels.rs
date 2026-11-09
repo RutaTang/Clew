@@ -559,8 +559,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                     )
                     .style(theme::list_row(false))
                     .padding([3, 8])
-                    .on_press(super::heard::said(
-                        &strip_backticks(&q),
+                    .on_press(super::heard::said_with(
+                        || strip_backticks(&q),
                         Message::Ask(AskMsg::Suggested(q.clone())),
                     ))
                     .into()
@@ -870,8 +870,8 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
                         )
                         .style(theme::toolbar_button)
                         .padding([0, 4])
-                        .on_press(super::heard::said(
-                            &format!("{} {}", pin.rel, pin.line),
+                        .on_press(super::heard::said_with(
+                            || format!("{} {}", pin.rel, pin.line),
                             Message::Ask(AskMsg::PinGoto(key)),
                         )),
                         button(glyph::icon(Glyph::Close, theme::dim(), 10.0))
@@ -1361,17 +1361,22 @@ pub(crate) fn approval_card<'a>(
             .height(Length::Fixed(APPROVE_BUTTON_H))
             .padding([0.0, if option.allows { 12.0 } else { 10.0 }])
             .on_press_maybe((ready || !option.allows).then(|| {
-                // "Yes" allows as the first that allows does, "no" declines;
-                // each also by its words ("Allow always").
-                super::heard::answer(
-                    &option.label,
-                    if option.allows {
-                        super::heard::Answer::Yes
-                    } else {
-                        super::heard::Answer::No
-                    },
-                    answer,
-                )
+                // "Yes" allows this call, "no" declines it — never one
+                // that answers every such call from now on, which is
+                // pressed by its own words ("Always allow…") alone.
+                if option.always {
+                    super::heard::said(&option.label, answer)
+                } else {
+                    super::heard::answer(
+                        &option.label,
+                        if option.allows {
+                            super::heard::Answer::Yes
+                        } else {
+                            super::heard::Answer::No
+                        },
+                        answer,
+                    )
+                }
             }));
             if option.allows {
                 crate::ui::fresh::allow(ready, shown)

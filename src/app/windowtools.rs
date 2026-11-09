@@ -8,11 +8,12 @@
 //! They run here, in the client, as the MCP tools do (`AgentToolCall` in,
 //! `AgentToolResult` out). Opening and showing need no say-so: they only
 //! change what is on screen. A command that costs something — a paid pass,
-//! starting or stepping the program, another folder opened
-//! ([`PaletteCommand::costly`]) — waits for the user's approval on a card,
-//! as an MCP call does.
+//! starting or stepping the program, another folder opened — or changes
+//! what the microphone takes in or where code is sent
+//! ([`PaletteCommand::asks_the_agent`]) waits for the user's approval on a
+//! card, as an MCP call does.
 //!
-//! [`PaletteCommand::costly`]: crate::app::palette::PaletteCommand::costly
+//! [`PaletteCommand::asks_the_agent`]: crate::app::palette::PaletteCommand::asks_the_agent
 
 use clew_protocol::ExternalTool;
 use serde_json::{Value, json};
@@ -167,7 +168,7 @@ impl App {
                         if let Some(keys) = &c.keys {
                             line.push_str(&format!(" ({keys})"));
                         }
-                        if c.costly() {
+                        if c.asks_the_agent() {
                             line.push_str(" — asks the user first");
                         }
                         line
@@ -354,7 +355,7 @@ impl App {
         // What the user reads: the title as the palette shows it.
         let shown = command.shown().to_string();
         let (mark, does) = command.cost();
-        if !command.costly() {
+        if !command.asks_the_agent() {
             self.push_window_step(stream, &tr!("Ran {command}", command = shown), None);
             self.window_tool_result(stream, call, format!("Ran “{title}”."), false);
             return self.run_palette(&title);
@@ -390,11 +391,13 @@ impl App {
                     id: "once".into(),
                     label: tr!("Run it").into(),
                     allows: true,
+                    always: false,
                 },
                 ApprovalOption {
                     id: "deny".into(),
                     label: tr!("Don't run").into(),
                     allows: false,
+                    always: false,
                 },
             ],
         });

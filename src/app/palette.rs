@@ -66,6 +66,35 @@ impl PaletteCommand {
         }
     }
 
+    /// Whether the agent, running it, asks the user first: what costs
+    /// something ([`Self::costly`]), and a setting that changes what the
+    /// microphone takes in and what is done with it, where the project's
+    /// code is sent, or what is downloaded — the reader's to decide, never
+    /// a model's, which could otherwise turn on a microphone that listens
+    /// on and sends what it hears. The reader saying such a setting
+    /// changes it, as clicking it does.
+    pub(crate) fn asks_the_agent(&self) -> bool {
+        self.costly() || self.private()
+    }
+
+    /// Whether it is one of the settings [`Self::asks_the_agent`] keeps to
+    /// the reader.
+    fn private(&self) -> bool {
+        let (PaletteAction::Send(message) | PaletteAction::AtCaret(message)) = &self.action else {
+            return false;
+        };
+        matches!(
+            message,
+            Message::Voice(
+                VoiceMsg::SetKeepListening(_)
+                    | VoiceMsg::SetSendQuestions(_)
+                    | VoiceMsg::SetRunCommands(_)
+                    | VoiceMsg::PickModel(_)
+            ) | Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
+                | Message::Updater(UpdaterMsg::SetAuto(_))
+        )
+    }
+
     /// Whether the reader, saying it, is asked first: what [`Self::costly`]
     /// says, but for stepping the program they are debugging and marking
     /// where it stops — what they are doing, said, as a click does it, with
@@ -169,6 +198,20 @@ impl PaletteCommand {
                 (Glyph::Remote, tr!("This connects to another computer."))
             }
             Message::Export(_) => (Glyph::Export, tr!("This writes a file.")),
+            Message::Voice(VoiceMsg::PickModel(_)) => {
+                (Glyph::Mic, tr!("This can download a voice model."))
+            }
+            Message::Voice(_) => (
+                Glyph::Mic,
+                tr!("This changes what the microphone hears, and what is done with it."),
+            ),
+            Message::Settings(SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_)) => {
+                (Glyph::Network, tr!("This changes where your code is sent."))
+            }
+            Message::Updater(UpdaterMsg::SetAuto(_)) => (
+                Glyph::Network,
+                tr!("This changes whether Clew checks online for updates."),
+            ),
             _ => (Glyph::Play, tr!("This runs one of the window's commands.")),
         }
     }

@@ -1687,8 +1687,8 @@ pub(crate) fn target_menu(app: &App) -> Element<'_, Message> {
             .style(theme::menu_row)
             .width(Fill)
             .padding([5, 8])
-            .on_press(super::heard::said(
-                &super::statusbar::target_label(&t),
+            .on_press(super::heard::said_with(
+                || super::statusbar::target_label(&t),
                 Message::Reading(ReadingMsg::TargetSelected(t.clone())),
             ))
             .into()

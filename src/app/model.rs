@@ -498,6 +498,9 @@ pub struct ApprovalOption {
     pub label: String,
     /// Whether it lets the call run (the primary styling).
     pub allows: bool,
+    /// Whether it answers every such call from now on ("Always allow…"),
+    /// not this one: never what a bare "yes" or "no" said answers.
+    pub always: bool,
 }
 
 /// How a step chip's tool call stands.

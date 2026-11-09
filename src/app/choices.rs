@@ -744,6 +744,29 @@ fn only_around(units: &[String]) -> bool {
     made[units.len()]
 }
 
+/// Whether `said` (its [`units`]) opens as a question does — "is it in
+/// French", "what is the theme" — which asks what a setting is, not for
+/// it to change: some of a question's words are what a request is said
+/// around ("is", "it", "in": [`AROUND`]). "Can you switch to French",
+/// asked as a question is, is a request. (Another language's question
+/// has words of its own no request is said with — 吗, か, est-ce — and is
+/// no choice already.)
+fn asks_a_question(said: &[String]) -> bool {
+    const OPENS: [&str; 18] = [
+        "is", "are", "was", "were", "am", "does", "do", "did", "what", "whats", "which", "why",
+        "how", "where", "when", "who", "should", "shall",
+    ];
+    const ASKING: [&str; 4] = ["can", "could", "would", "will"];
+    const OF_THE_READER: [&str; 4] = ["you", "we", "i", "u"];
+    match said {
+        [first, ..] if OPENS.contains(&first.as_str()) => true,
+        [first, second, ..] if ASKING.contains(&first.as_str()) => {
+            !OF_THE_READER.contains(&second.as_str())
+        }
+        _ => false,
+    }
+}
+
 /// Which of `settings`' choices `said` asks for, as (setting, choice): its
 /// choice named, and its setting named or — where it may be ([`Setting::
 /// unnamed`]) — not, with nothing else said but what is said around a
@@ -754,7 +777,7 @@ fn only_around(units: &[String]) -> bool {
 /// the interface's language, not the voice's).
 pub(crate) fn chosen(said: &str, settings: &[Setting]) -> Option<(usize, usize)> {
     let said = units(said);
-    if said.is_empty() {
+    if said.is_empty() || asks_a_question(&said) {
         return None;
     }
     // (named, units named), and where.
@@ -834,6 +857,33 @@ mod tests {
 
     /// The words of what is said, and of what is written without spaces
     /// each character.
+    /// A question about a setting asks what it is: "is it in French?"
+    /// changes nothing, where "set it in French" — and "can you switch to
+    /// French?", asked as a question is — does.
+    #[test]
+    fn a_question_about_a_setting_changes_nothing() {
+        let app = crate::app::tests::blank_app();
+        let settings = app.settings_choices();
+        let picks = |said: &str| chosen(said, &settings).is_some();
+        for said in [
+            "Is it in French?",
+            "what is the language",
+            "is the theme dark",
+            "does it use French",
+            "will it be dark",
+        ] {
+            assert!(!picks(said), "{said:?}");
+        }
+        for said in [
+            "set it in French",
+            "Can you switch to French?",
+            "could you make it dark",
+            "change the app's language to French",
+        ] {
+            assert!(picks(said), "{said:?}");
+        }
+    }
+
     #[test]
     fn what_is_said_is_read_as_its_units() {
         assert_eq!(

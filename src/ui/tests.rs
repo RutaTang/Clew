@@ -3496,11 +3496,13 @@ fn an_unread_questions_allow_sends_nothing() {
                 id: "once".into(),
                 label: "Allow once".into(),
                 allows: true,
+                always: false,
             },
             crate::app::model::ApprovalOption {
                 id: "deny".into(),
                 label: "Deny".into(),
                 allows: false,
+                always: false,
             },
         ],
     };
@@ -3750,6 +3752,7 @@ fn an_approval_card_stays_put_while_its_turn_grows() {
             id: "once".into(),
             label: "Allow once".into(),
             allows: true,
+            always: false,
         }],
     };
     app.proj.ask_turns.push(AskTurn {
@@ -3888,6 +3891,7 @@ fn a_fitted_cards_approval_stays_put_while_its_turn_grows() {
             id: "once".into(),
             label: "Allow once".into(),
             allows: true,
+            always: false,
         }],
     };
     app.proj.ask_turns.push(AskTurn {
@@ -3965,6 +3969,7 @@ fn a_question_moved_or_out_of_view_waits_again() {
                     id: "once".into(),
                     label: "Allow once".into(),
                     allows: true,
+                    always: false,
                 }],
             }],
             ..TurnExtras::default()
@@ -4224,6 +4229,55 @@ fn a_question_moved_or_out_of_view_waits_again() {
     );
 }
 
+/// "Yes" said to an approval card allows this call, and "no" declines it:
+/// never the answer that allows — or declines — every such call from now
+/// on, however the agent orders its options; that one is pressed by its
+/// own words alone.
+#[test]
+fn yes_said_to_an_approval_never_allows_always() {
+    use crate::app::model::{Approval, ApprovalKey, ApprovalOption};
+    use crate::ui::heard::Answer;
+    let option = |id: &str, label: &str, allows: bool, always: bool| ApprovalOption {
+        id: id.into(),
+        label: label.into(),
+        allows,
+        always,
+    };
+    let approval = Approval {
+        key: ApprovalKey::Acp { id: 4 },
+        mark: None,
+        title: "edit main.rs".into(),
+        detail: String::new(),
+        // An agent that puts the lasting answers first.
+        options: vec![
+            option("allow_always", "Always allow", true, true),
+            option("allow_once", "Allow", true, false),
+            option("reject_always", "Always reject", false, true),
+            option("reject_once", "Reject", false, false),
+        ],
+    };
+    let targets =
+        crate::ui::heard::gather_of(|| super::panels::approval_card(9, &approval, true, 400.0, 0));
+    let answered = |answer: Answer| -> Vec<String> {
+        targets
+            .iter()
+            .filter(|t| t.answer == Some(answer))
+            .map(|t| match &t.message {
+                Message::Ask(AskMsg::Approve { option, .. }) => option.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(answered(Answer::Yes), ["allow_once"]);
+    assert_eq!(answered(Answer::No), ["reject_once"]);
+    assert!(
+        targets
+            .iter()
+            .any(|t| t.title == "Always allow" && t.answer.is_none()),
+        "the lasting answer is pressed by its words"
+    );
+}
+
 /// An agent's answers, however many, stay within the card's reach: a few
 /// of each kind at a time — a way to decline always among them — the rest
 /// a page on, where the card is read anew. And a card coming up in a
@@ -4235,6 +4289,7 @@ fn many_answers_or_a_low_panel_leave_the_card_answerable() {
         id: format!("{}{i}", if allows { "yes" } else { "no" }),
         label: format!("{} {i}", if allows { "Allow" } else { "Deny" }),
         allows,
+        always: false,
     };
     let page = |options: &[ApprovalOption], page| -> (Vec<String>, usize) {
         let (shown, pages) = super::panels::shown_answers(options, page);
@@ -4431,7 +4486,12 @@ const SQUEEZING: f32 = 660.0;
 #[test]
 fn a_page_of_answers_too_tall_for_the_panel_opens_it() {
     use crate::app::model::{Approval, ApprovalKey, ApprovalOption, AskTurn, TurnExtras};
-    let option = |id: String, label: String, allows: bool| ApprovalOption { id, label, allows };
+    let option = |id: String, label: String, allows: bool| ApprovalOption {
+        id,
+        label,
+        allows,
+        always: false,
+    };
     let mut options: Vec<ApprovalOption> = (0..3)
         .map(|i| option(format!("yes{i}"), format!("Allow {i}"), true))
         .collect();
@@ -4588,6 +4648,7 @@ fn where_moves_go_untold_the_pointer_moving_over_it_counts_anew() {
                     id: "once".into(),
                     label: "Allow once".into(),
                     allows: true,
+                    always: false,
                 }],
             }],
             ..TurnExtras::default()
@@ -4892,6 +4953,7 @@ fn a_card_come_up_under_a_resting_pointer_answers_its_first_click() {
             id: "once".into(),
             label: "Allow once".into(),
             allows: true,
+            always: false,
         }],
     };
     app.proj.ask_turns.push(AskTurn {
@@ -5101,11 +5163,13 @@ fn a_press_held_while_its_allow_stops_counting_answers_nothing() {
                 id: "once".into(),
                 label: "Allow once".into(),
                 allows: true,
+                always: false,
             },
             ApprovalOption {
                 id: "no".into(),
                 label: "Deny".into(),
                 allows: false,
+                always: false,
             },
         ],
     };
@@ -5272,11 +5336,13 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
                 id: "ok".into(),
                 label: "Allow".into(),
                 allows: true,
+                always: false,
             },
             crate::app::model::ApprovalOption {
                 id: "no".into(),
                 label: "Deny".into(),
                 allows: false,
+                always: false,
             },
         ],
     };
@@ -5297,6 +5363,7 @@ fn every_question_is_drawn_fresh_for_what_it_asks() {
             id: format!("ok{i}"),
             label: format!("Allow {i}"),
             allows: true,
+            always: false,
         }));
     assert_eq!(
         keys_in(&super::panels::approval_card(9, &paged, true, 200.0, 1)),
@@ -6400,6 +6467,27 @@ fn the_margin_history_lists_the_files_commits() {
             Message::TimeTravel(crate::TimeTravelMsg::StartAt { sha }) if sha == "aaaaaaa1111"
         )),
         "{sent:?}"
+    );
+    // Its commits are a list of their own, as voice counts them: "the
+    // second one" is the second commit, whatever list was drawn before.
+    let targets = crate::ui::heard::gather(&app);
+    let place = |subject: &str| {
+        targets
+            .iter()
+            .find(|t| t.title.contains(subject) && t.row.is_some())
+            .and_then(|t| t.row)
+            .unwrap_or_else(|| panic!("{subject} is no row"))
+    };
+    let (newest, oldest) = (place("Read lines lazily"), place("First reader"));
+    assert_eq!((newest.1, oldest.1), (1, 2));
+    assert_eq!(newest.0, oldest.0, "one list");
+    assert!(
+        targets
+            .iter()
+            .filter(|t| t.row.is_some_and(|(list, _)| list == newest.0))
+            .count()
+            == 2,
+        "the list holds only the commits"
     );
 
     // Another file's commits are not this one's.
@@ -10158,6 +10246,29 @@ fn the_status_bar_is_one_line_at_any_width() {
             .expect("the chip is shown");
         one_line(chip);
     });
+}
+
+/// What the status bar lays out for its room — the chip that sets up
+/// missing language servers — is built only when laid out, and is pressed
+/// by voice all the same: gathered as it is drawn.
+#[test]
+fn the_status_bars_chips_are_pressed_by_voice() {
+    let mut app = reader_app();
+    app.proj.setup_missing = vec![crate::app::setup::SetupServer {
+        language: "rust".into(),
+        name: "rust-analyzer".into(),
+        fetch: crate::app::setup::Fetch::Download,
+        builds: false,
+    }];
+    let targets = crate::ui::heard::gather(&app);
+    let chip = targets
+        .iter()
+        .find(|t| t.title == "Set up missing language servers")
+        .expect("the chip is gathered");
+    assert!(matches!(
+        chip.message,
+        Message::Project(ProjectMsg::SetUpMissing)
+    ));
 }
 
 /// The ⋯ menu fits the window: in one short enough for the strip to fall

@@ -187,7 +187,12 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
     .gap(5.0);
 
     // What stays while it lasts — setting up, a pass's progress — and what
-    // Clew says, laid out for the room there is (`status_left`).
+    // Clew says, laid out for the room there is (`status_left`). Built only
+    // when laid out, which a gathering of what voice can press never does:
+    // built once more for it, here, so its chips are said as clicked.
+    if super::heard::gathering() {
+        drop(status_left(app, f32::INFINITY));
+    }
     let said_row = container(iced::widget::responsive(move |room| {
         status_left(app, room.width)
     }))

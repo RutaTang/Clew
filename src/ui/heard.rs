@@ -136,6 +136,28 @@ pub(crate) fn said(shown: &str, message: Message) -> Message {
     message
 }
 
+/// [`said`], for a label made to be said (`shown`, a path and a line, a
+/// question without its marks): made only while gathering, never for a
+/// frame that is only drawn.
+pub(crate) fn said_with(shown: impl FnOnce() -> String, message: Message) -> Message {
+    if gathering() {
+        offer(&shown(), &message);
+    }
+    message
+}
+
+/// [`said_to`], the item's name made only while gathering ([`said_with`]).
+pub(crate) fn said_to_with(
+    action: &str,
+    item: impl FnOnce() -> String,
+    message: Message,
+) -> Message {
+    if gathering() {
+        return said_to(action, &item(), message);
+    }
+    message
+}
+
 /// `message`, offered as `action` done to `item` ("Remove: Whisper Small"):
 /// a button one of several rows has, each named by what it is done to.
 pub(crate) fn said_to(action: &str, item: &str, message: Message) -> Message {
@@ -217,6 +239,15 @@ pub(crate) fn about<T>(item: &str, build: impl FnOnce() -> T) -> T {
     built
 }
 
+/// [`about`], the item's name made only while gathering ([`said_with`]).
+pub(crate) fn about_with<T>(item: impl FnOnce() -> String, build: impl FnOnce() -> T) -> T {
+    if gathering() {
+        about(&item(), build)
+    } else {
+        build()
+    }
+}
+
 /// A list begins: the rows offered after it are numbered from 1, as the
 /// reader counts them down the list.
 pub(crate) fn list() {
@@ -273,18 +304,39 @@ pub(crate) fn gather(app: &App) -> Vec<Target> {
         .map(|g| g.targets)
         .unwrap_or_default();
     drop(stop);
-    on_top(targets)
+    on_top(targets, app.ask_view == crate::AskView::Expanded)
+}
+
+/// What building `build` offers, all of it — one part of the view,
+/// gathered as [`gather`] gathers the whole.
+#[cfg(test)]
+pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
+    GATHERING.with(|g| {
+        *g.borrow_mut() = Some(Gathering {
+            targets: Vec::new(),
+            layer: Layer::Window,
+            list: 0,
+            rows: 0,
+            about: Vec::new(),
+        })
+    });
+    drop(build());
+    GATHERING
+        .with(|g| g.borrow_mut().take())
+        .map(|g| g.targets)
+        .unwrap_or_default()
 }
 
 /// Of `targets`, those a press can reach: the tutorial's while it runs, a
-/// dialog's while one is up, else the window's and Ask's.
-fn on_top(targets: Vec<Target>) -> Vec<Target> {
+/// dialog's while one is up, Ask's while it is large over the window
+/// (`ask_large`), else the window's and Ask's.
+fn on_top(targets: Vec<Target>, ask_large: bool) -> Vec<Target> {
     let top = targets
         .iter()
         .map(|t| t.layer)
         .max()
         .unwrap_or(Layer::Window);
-    if top >= Layer::Overlay {
+    if top >= Layer::Overlay || (ask_large && top == Layer::Ask) {
         targets.into_iter().filter(|t| t.layer == top).collect()
     } else {
         targets
@@ -312,7 +364,10 @@ mod tests {
     #[test]
     fn only_what_is_on_top_can_be_pressed() {
         let titles = |targets: Vec<Target>| -> Vec<String> {
-            on_top(targets).into_iter().map(|t| t.title).collect()
+            on_top(targets, false)
+                .into_iter()
+                .map(|t| t.title)
+                .collect()
         };
         assert_eq!(
             titles(vec![
@@ -336,6 +391,37 @@ mod tests {
             ]),
             ["Next"]
         );
+        // Ask, large over the window, leaves nothing under it to press.
+        let large: Vec<String> = on_top(
+            vec![target("Diff", Layer::Window), target("Stop", Layer::Ask)],
+            true,
+        )
+        .into_iter()
+        .map(|t| t.title)
+        .collect();
+        assert_eq!(large, ["Stop"]);
+    }
+
+    /// A label made to be said is made only while gathering: a frame that
+    /// is only drawn spends nothing on it.
+    #[test]
+    fn a_label_is_made_only_while_gathering() {
+        let made = std::cell::Cell::new(0);
+        let label = || {
+            made.set(made.get() + 1);
+            "src/lib.rs 3".to_string()
+        };
+        let _ = said_with(label, Message::Noop);
+        let _ = said_to_with("Remove", label, Message::Noop);
+        about_with(label, || ());
+        assert_eq!(made.get(), 0, "made for a drawn frame");
+        let gathered = gather_of(|| {
+            let _ = said_with(label, Message::Noop);
+            let _ = said_to_with("Remove", label, Message::Noop);
+        });
+        assert_eq!(made.get(), 2);
+        let titles: Vec<&str> = gathered.iter().map(|t| t.title.as_str()).collect();
+        assert_eq!(titles, ["src/lib.rs 3", "Remove: src/lib.rs 3"]);
     }
 
     /// Nothing is kept while the window is only drawn: an offer outside a

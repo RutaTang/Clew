@@ -601,16 +601,19 @@ impl App {
                         id: "once".into(),
                         label: tr!("Allow").into(),
                         allows: true,
+                        always: false,
                     },
                     ApprovalOption {
                         id: "always".into(),
                         label: tr!("Always allow {tool}", tool = target.tool.name),
                         allows: true,
+                        always: true,
                     },
                     ApprovalOption {
                         id: "deny".into(),
                         label: tr!("Deny").into(),
                         allows: false,
+                        always: false,
                     },
                 ],
             });
@@ -1581,6 +1584,7 @@ impl App {
                             id: o.id.clone(),
                             label: o.name.clone(),
                             allows: o.kind.starts_with("allow"),
+                            always: o.kind.ends_with("always"),
                         })
                         .collect(),
                 );
@@ -2149,6 +2153,7 @@ pub(crate) fn with_a_decline(
         id: id.clone(),
         label: tr!("Decline").into(),
         allows: false,
+        always: false,
     });
     (options, Some(id))
 }

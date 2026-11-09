@@ -1970,6 +1970,147 @@ fn what_undoes_waits_for_a_yes() {
     assert!(app.proj.bookmarks.is_empty(), "{}", app.status);
 }
 
+/// A target of the window, as `ui::heard` offers one.
+fn on_screen(
+    title: &str,
+    message: Message,
+    layer: crate::ui::heard::Layer,
+    answer: Option<crate::ui::heard::Answer>,
+) -> crate::ui::heard::Target {
+    crate::ui::heard::Target {
+        title: title.into(),
+        shown: title.into(),
+        message,
+        layer,
+        row: None,
+        answer,
+        typing: None,
+    }
+}
+
+/// "Never mind" and "cancel" put away what is on top: they answer a
+/// question only when it is the one on top — a dialog — never a card in
+/// Ask the reader was not looking at, which "no" still answers.
+#[test]
+fn a_word_that_closes_answers_only_the_question_on_top() {
+    use crate::ui::heard::{Answer, Layer};
+    let mut app = blank_app();
+    let deny = |layer| {
+        on_screen(
+            "Deny",
+            Message::Window(WindowMsg::OpenShortcuts),
+            layer,
+            Some(Answer::No),
+        )
+    };
+    let card = [deny(Layer::Ask)];
+    assert!(app.heard_on_screen("never mind", &card, true).is_none());
+    assert!(!app.status.contains("Deny"), "{}", app.status);
+    assert!(app.heard_on_screen("no", &card, true).is_some());
+    assert!(app.status.contains("Deny"), "{}", app.status);
+    app.status.clear();
+    let dialog = [deny(Layer::Overlay)];
+    assert!(app.heard_on_screen("never mind", &dialog, true).is_some());
+    assert!(app.status.contains("Deny"), "{}", app.status);
+}
+
+/// Said to a dialog with a field and a list — the command bar — a row's
+/// place opens that row; it is not typed into the field.
+#[test]
+fn a_rows_place_said_to_the_command_bar_opens_it() {
+    use crate::ui::heard::Layer;
+    let mut app = blank_app();
+    let mut targets = vec![crate::ui::heard::Target {
+        typing: Some((String::new(), |q| {
+            Message::Nav(NavMsg::FinderQueryChanged(q))
+        })),
+        ..on_screen("", Message::Noop, Layer::Overlay, None)
+    }];
+    for i in 1..=3 {
+        targets.push(crate::ui::heard::Target {
+            row: Some((1, i)),
+            ..on_screen(
+                &format!("file{i}.rs"),
+                Message::Window(WindowMsg::OpenShortcuts),
+                Layer::Overlay,
+                None,
+            )
+        });
+    }
+    assert!(
+        app.heard_on_screen("the second one", &targets, true)
+            .is_some()
+    );
+    assert!(app.status.contains("file2.rs"), "{}", app.status);
+    assert!(!app.status.contains("Typed"), "{}", app.status);
+}
+
+/// A button that costs something, pressed by a word that may have been
+/// misheard, waits for a yes as the command said does — Explain, here —
+/// but the answer to a question asked is pressed: it was asked already.
+#[test]
+fn a_costly_button_said_waits_for_a_yes() {
+    use crate::ui::heard::{Answer, Layer};
+    let mut app = blank_app();
+    let explain = Message::Editor(EditorMsg::RunAction(crate::keymap::Action::ExplainAll));
+    let targets = [on_screen(
+        "Explain All",
+        explain.clone(),
+        Layer::Window,
+        None,
+    )];
+    assert!(
+        app.heard_on_screen("explain all", &targets, false)
+            .is_some()
+    );
+    assert!(
+        matches!(
+            &app.voice.confirm,
+            Some(crate::app::voice::Waiting::Press { .. })
+        ),
+        "{}",
+        app.status
+    );
+    app.voice.confirm = None;
+    let asked = [on_screen(
+        "Explain All",
+        explain,
+        Layer::Overlay,
+        Some(Answer::Yes),
+    )];
+    assert!(app.heard_on_screen("explain all", &asked, true).is_some());
+    assert!(app.voice.confirm.is_none(), "an answer is asked again");
+}
+
+/// The model's provider, picked with Settings shut — said, or run from
+/// the command bar — is kept, as picked on its page and closed: only the
+/// page's draft changed, which nothing then saved.
+#[test]
+fn a_provider_picked_with_settings_shut_is_kept() {
+    let data = test_dir("voice-provider-shut");
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let _keys = EnvVars::new()
+        .remove("ANTHROPIC_API_KEY")
+        .remove("OPENAI_API_KEY")
+        .remove("DEEPSEEK_API_KEY");
+    let mut app = blank_app();
+    assert!(!app.settings.open);
+    let before = app.settings.provider;
+    let other = crate::llm::Provider::ALL
+        .into_iter()
+        .find(|p| *p != before)
+        .expect("another provider");
+    let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(other)));
+    assert!(!app.settings.open, "Settings stays shut");
+    assert_eq!(
+        crate::llm::Config::current_or_default().provider,
+        other,
+        "{}",
+        app.status
+    );
+}
+
 /// What is on screen is the reader's to press by voice, never the agent's:
 /// a question's answers are no palette command.
 #[test]

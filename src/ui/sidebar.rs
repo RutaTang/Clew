@@ -1609,17 +1609,17 @@ pub(crate) fn marks_tab(app: &App) -> Element<'_, Message> {
         let pencil = button(glyph::icon(Glyph::Edit, note_color, 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(super::heard::said_to(
+            .on_press(super::heard::said_to_with(
                 tr!("Edit note"),
-                &format!("{} {}", bm.rel, bm.line),
+                || format!("{} {}", bm.rel, bm.line),
                 Message::Reading(ReadingMsg::BookmarkNoteEdit(bm.rel.clone(), bm.line)),
             ));
         let close = button(glyph::icon(Glyph::Close, theme::dim(), 13.0))
             .style(theme::list_row(false))
             .padding([2, 6])
-            .on_press(super::heard::said_to(
+            .on_press(super::heard::said_to_with(
                 tr!("Remove"),
-                &format!("{} {}", bm.rel, bm.line),
+                || format!("{} {}", bm.rel, bm.line),
                 Message::Reading(ReadingMsg::BookmarkRemoved {
                     rel: bm.rel.clone(),
                     line: bm.line,
