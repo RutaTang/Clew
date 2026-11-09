@@ -697,6 +697,13 @@ pub enum NavMsg {
         caller_line: usize,
         callee: String,
     },
+    /// The line of the call [`NavMsg::JumpToCall`] asked for, found off the
+    /// update loop — or the caller's own, not found.
+    CallSiteFound {
+        stamp: Stamp,
+        caller_file: PathBuf,
+        line: usize,
+    },
 }
 
 /// The reading session: bookmarks, notes, the trail, the reading target.
@@ -796,6 +803,9 @@ pub enum CallsMsg {
         direction: callgraph::Direction,
         lang: &'static str,
         items: Vec<lsp::client::CallItem>,
+        /// A tree traced again ([`CallsMsg::Refresh`]): whether the one it
+        /// replaces was expanded in full. `None` for a new one.
+        again: Option<bool>,
     },
     /// Expand (fetch children of, or toggle) node `id` of the call tree
     /// identified by `token` — ignored when the tree was replaced since the
@@ -2349,7 +2359,8 @@ impl NavMsg {
             | NavMsg::DefinitionResult { stamp, .. }
             | NavMsg::ReferencesResult { stamp, .. }
             | NavMsg::LocationPreviews { stamp, .. }
-            | NavMsg::PreviewsStyled { stamp, .. } => Some(Origin::Stamped(stamp)),
+            | NavMsg::PreviewsStyled { stamp, .. }
+            | NavMsg::CallSiteFound { stamp, .. } => Some(Origin::Stamped(stamp)),
             NavMsg::SearchQueryChanged(..)
             | NavMsg::ListingClosed
             | NavMsg::SearchSubmitted

@@ -430,8 +430,14 @@ impl App {
                     files
                         .into_iter()
                         .map(|(path, rel, content, lang, hash)| {
-                            // One parse per file for its symbols AND imports.
-                            let facts = index::analyze_file(&path, &rel, &content, lang);
+                            // One parse per file for its symbols AND imports
+                            // — none for a minifier's output, as the full
+                            // build has none (`index::build_indexed`).
+                            let facts = if clew_core::fs_scan::is_minified_source(&content) {
+                                index::FileFacts::default()
+                            } else {
+                                index::analyze_file(&path, &rel, &content, lang)
+                            };
                             IndexedFile {
                                 symbols: facts.symbols,
                                 imports: facts.imports,

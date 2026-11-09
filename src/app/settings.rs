@@ -434,6 +434,44 @@ fn saved_field_name(key: &str) -> &str {
 }
 
 impl App {
+    /// What the provider — or, `embeddings`, the embeddings source — just
+    /// picked still needs before it works: the page that asks for it, and
+    /// what to say; `None` when it is ready to be kept.
+    fn picked_needs(&self, embeddings: bool) -> Option<(SettingsPage, String)> {
+        let s = &self.settings;
+        if embeddings {
+            if s.embed_here && !clew_core::embed::local::installed() {
+                return Some((
+                    SettingsPage::Embeddings,
+                    tr!("Download the embedding model to make embeddings on this computer").into(),
+                ));
+            }
+            if !s.embed_here && s.embed_key.is_empty() && !s.embed_key_from_env {
+                return Some((
+                    SettingsPage::Embeddings,
+                    tr!("Add the embedding service's API key to use it").into(),
+                ));
+            }
+            return None;
+        }
+        let chat = llm::Config::from_form(
+            s.provider,
+            s.key.clone(),
+            s.model.clone(),
+            s.base_url.clone(),
+        );
+        if chat.api_key.is_empty() {
+            return Some((
+                SettingsPage::LanguageModel,
+                tr!(
+                    "Add your {provider} API key to use it",
+                    provider = s.provider.label()
+                ),
+            ));
+        }
+        None
+    }
+
     /// Handle a [`SettingsMsg`]: this feature's share of what `dispatch` routes
     /// (after its one ownership check and the menu bookkeeping).
     pub(crate) fn update_settings(&mut self, message: SettingsMsg) -> Task<Message> {
@@ -441,12 +479,25 @@ impl App {
             // Picked with Settings shut — said, or run from the command bar:
             // picked as its page would pick it, and kept as closing it
             // keeps it. Only its draft changed, which nothing then saved.
+            // What the pick still needs — a key for that provider, the model
+            // to make embeddings here — is asked for on its page, left open;
+            // nothing is saved meanwhile. Kept, the keyboard is where it was.
             msg @ (SettingsMsg::ProviderPicked(_) | SettingsMsg::EmbedHere(_))
                 if !self.settings.open =>
             {
+                let focused = self.code_focused;
                 let opened = self.on_open_settings();
+                let embeddings = matches!(msg, SettingsMsg::EmbedHere(_));
                 let picked = self.update_settings(msg);
+                if let Some((page, wanted)) = self.picked_needs(embeddings) {
+                    self.settings.page = page;
+                    self.status = wanted;
+                    return Task::batch([opened, picked]);
+                }
                 let closed = self.close_settings();
+                if !self.settings.open {
+                    self.code_focused = focused;
+                }
                 Task::batch([opened, picked, closed])
             }
             SettingsMsg::SetThemePref(pref) => {
@@ -543,17 +594,28 @@ impl App {
                 // URL as they were then, so a wrong pick undone costs nothing.
                 // Another provider: its defaults (the user can still edit
                 // them).
-                let (model, base_url) = match &self.settings.ai_snapshot.0 {
-                    opened if opened.provider == p => {
-                        (opened.model.clone(), opened.base_url.clone())
-                    }
+                // The key, too: one kept for another provider is that
+                // provider's secret, never sent to this one — its own
+                // variable, if it has one set, stands in.
+                let (model, base_url, key) = match &self.settings.ai_snapshot.0 {
+                    opened if opened.provider == p => (
+                        opened.model.clone(),
+                        opened.base_url.clone(),
+                        opened.api_key.clone(),
+                    ),
                     _ => (
                         p.default_model().to_string(),
                         p.default_base_url().to_string(),
+                        String::new(),
                     ),
                 };
+                self.settings.key_from_env = key.is_empty()
+                    && !llm::Config::from_form(p, String::new(), model.clone(), base_url.clone())
+                        .api_key
+                        .is_empty();
                 self.settings.model = model;
                 self.settings.base_url = base_url;
+                self.settings.key = key;
                 Task::none()
             }
             SettingsMsg::KeyChanged(s) => {

@@ -1039,8 +1039,35 @@ impl App {
             .any(|syms| syms.iter().any(|s| s.entry.is_some() || s.is_test))
     }
 
-    /// The first 1-based line where `caller` (in `caller_file`) calls `callee`,
-    /// found by re-parsing the caller's live source (the open pane, else disk).
+    /// Where the text of `caller_file` is read from to find a call in it:
+    /// an open pane's text, which is the file wherever it lives; else, for
+    /// a LOCAL project only, its file on this machine's disk — for a remote
+    /// one the path names another host, and a same-pathed local file would
+    /// silently place the call in the wrong code.
+    fn call_source(&self, caller_file: &Path) -> Option<CallSource> {
+        if let Some(v) = self
+            .proj
+            .panes
+            .iter()
+            .flatten()
+            .find(|v| v.abs == caller_file)
+        {
+            return Some(CallSource::Text(v.source.clone()));
+        }
+        self.proj
+            .project
+            .as_ref()
+            .filter(|_| self.local_project_state())
+            .map(|p| CallSource::Disk {
+                root: p.root.clone(),
+                path: caller_file.to_path_buf(),
+            })
+    }
+
+    /// The first 1-based line where `caller` (in `caller_file`) calls
+    /// `callee`, found by re-parsing the caller's live source — here, on
+    /// the update loop; a jump finds it off it ([`App::jump_to_call`]).
+    #[cfg(test)]
     pub(crate) fn call_site_line(
         &self,
         caller_file: &Path,
@@ -1048,53 +1075,89 @@ impl App {
         caller_line: usize,
         callee: &str,
     ) -> Option<usize> {
-        let lang = crate::highlight::detect(caller_file)?;
-        // An open pane's text is the file wherever it lives. Falling back to
-        // this machine's disk is only meaningful for a LOCAL project: for a
-        // remote one the path names another host, and a same-pathed local
-        // file would silently place the call in the wrong code.
-        let source = self
-            .proj
-            .panes
-            .iter()
-            .flatten()
-            .find(|v| v.abs == caller_file)
-            .map(|v| v.source.as_ref().clone())
-            .or_else(|| {
-                // Same guard as every other client-side project-source read
-                // (the symbol index, `tasks::gather_*`): the
-                // call-graph node holding this path came from a scan that can
-                // be minutes old, so the leaf may since have become a symlink
-                // pointing outside the project — whose text would be parsed as
-                // this project's code — or a FIFO. This runs on the iced update
-                // loop (`NavMsg::JumpToCall`), which serves EVERY window, so a
-                // blocking `open(2)` here freezes the whole interface rather
-                // than one background task. Containment costs nothing: call
-                // graph nodes are in-root by construction.
-                self.proj
-                    .project
-                    .as_ref()
-                    .filter(|_| self.local_project_state())
-                    .and_then(|p| {
-                        clew_core::fs_scan::read_confined_capped(
-                            &p.root,
-                            caller_file,
-                            index::MAX_INDEX_FILE_BYTES,
-                        )
-                    })
-            })?;
-        projectcalls::calls_of(&source, lang)
-            .into_iter()
-            // The first call after the caller's definition: a same-name
-            // function earlier in the file holds calls of its own.
-            .filter(|cs| {
-                cs.callee == callee
-                    && cs.caller.as_deref() == Some(caller)
-                    && cs.line >= caller_line
-            })
-            .map(|cs| cs.line)
-            .min()
+        let source = self.call_source(caller_file)?;
+        call_site(caller_file, &source.read()?, caller, caller_line, callee)
     }
+
+    /// Open the caller at its call of `callee`: the line found by parsing
+    /// the caller's text off the update loop — a file of megabytes parses
+    /// for a while, and this loop serves every window — or, not found, the
+    /// caller's own line.
+    fn jump_to_call(
+        &mut self,
+        caller_file: PathBuf,
+        caller: String,
+        caller_line: usize,
+        callee: String,
+    ) -> Task<Message> {
+        let source = self.call_source(&caller_file);
+        let stamp = self.stamp();
+        Task::perform(
+            async move {
+                let file = caller_file.clone();
+                let line = tokio::task::spawn_blocking(move || {
+                    call_site(&file, &source?.read()?, &caller, caller_line, &callee)
+                })
+                .await
+                .ok()
+                .flatten();
+                (caller_file, line.unwrap_or(caller_line))
+            },
+            move |(caller_file, line)| {
+                Message::Nav(NavMsg::CallSiteFound {
+                    stamp: stamp.clone(),
+                    caller_file,
+                    line,
+                })
+            },
+        )
+    }
+}
+
+/// The text a call is looked for in (see `App::call_source`).
+enum CallSource {
+    Text(Arc<String>),
+    Disk { root: PathBuf, path: PathBuf },
+}
+
+impl CallSource {
+    /// Its text. From disk, under the same guard as every other client-side
+    /// project-source read (the symbol index, `tasks::gather_*`): the
+    /// call-graph node holding the path came from a scan that can be
+    /// minutes old, so the leaf may since have become a symlink pointing
+    /// outside the project — whose text would be parsed as this project's
+    /// code — or a FIFO. Call graph nodes are in-root by construction, so
+    /// containment costs nothing.
+    fn read(self) -> Option<Arc<String>> {
+        match self {
+            CallSource::Text(text) => Some(text),
+            CallSource::Disk { root, path } => {
+                clew_core::fs_scan::read_confined_capped(&root, &path, index::MAX_INDEX_FILE_BYTES)
+                    .map(Arc::new)
+            }
+        }
+    }
+}
+
+/// The first 1-based line in `source` (the text of `file`) where `caller`,
+/// defined at `caller_line`, calls `callee`.
+fn call_site(
+    file: &Path,
+    source: &str,
+    caller: &str,
+    caller_line: usize,
+    callee: &str,
+) -> Option<usize> {
+    let lang = crate::highlight::detect(file)?;
+    projectcalls::calls_of(source, lang)
+        .into_iter()
+        // The first call after the caller's definition: a same-name
+        // function earlier in the file holds calls of its own.
+        .filter(|cs| {
+            cs.callee == callee && cs.caller.as_deref() == Some(caller) && cs.line >= caller_line
+        })
+        .map(|cs| cs.line)
+        .min()
 }
 
 impl App {
@@ -1302,12 +1365,10 @@ impl App {
                 caller,
                 caller_line,
                 callee,
-            } => {
-                let line = self
-                    .call_site_line(&caller_file, &caller, caller_line, &callee)
-                    .unwrap_or(caller_line);
-                self.open_file(caller_file, Some(line), true)
-            }
+            } => self.jump_to_call(caller_file, caller, caller_line, callee),
+            NavMsg::CallSiteFound {
+                caller_file, line, ..
+            } => self.open_file(caller_file, Some(line), true),
         }
     }
 }
@@ -1391,6 +1452,26 @@ mod tests {
         .unwrap();
         assert_eq!(app.call_site_line(&twins, "total", 2, "helper"), Some(3));
         assert_eq!(app.call_site_line(&twins, "total", 6, "helper"), Some(7));
+
+        // A jump along the call edge finds the line off the update loop: the
+        // jump itself parses nothing, and what comes back names the line —
+        // the caller's own when the call is not found.
+        for (caller_line, found) in [(6, 7), (1, 1)] {
+            let jump = app.update(Message::Nav(NavMsg::JumpToCall {
+                caller_file: twins.clone(),
+                caller: "total".into(),
+                caller_line,
+                callee: if caller_line == 6 { "helper" } else { "absent" }.into(),
+            }));
+            let landed: Vec<usize> = crate::app::tests::run_task(jump)
+                .into_iter()
+                .filter_map(|m| match m {
+                    Message::Nav(NavMsg::CallSiteFound { line, .. }) => Some(line),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(landed, [found]);
+        }
 
         for d in [&dir, &outside_dir] {
             let _ = std::fs::remove_dir_all(d);

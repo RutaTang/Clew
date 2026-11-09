@@ -52,16 +52,28 @@ impl PaletteCommand {
     pub(crate) fn costly(&self) -> bool {
         use keymap::Action;
         match &self.action {
-            PaletteAction::Send(message) | PaletteAction::AtCaret(message) => matches!(
-                message,
-                Message::Editor(EditorMsg::RunAction(
-                    Action::ExplainAll | Action::StartDebug
-                )) | Message::Debug(_)
-                    | Message::Explain(_)
-                    | Message::Project(ProjectMsg::OpenFolderPressed)
-                    | Message::Connect(ConnectMsg::Open)
-                    | Message::Export(_)
-            ),
+            PaletteAction::Send(message) | PaletteAction::AtCaret(message) => match message {
+                // What only shows, or stops spending, costs nothing: a
+                // variable opened, a condition or watch being typed, an
+                // explanation shown, an explain pass stopped.
+                Message::Debug(
+                    DebugMsg::ToggleVar(_)
+                    | DebugMsg::WatchInput(_)
+                    | DebugMsg::BpConditionInput(_)
+                    | DebugMsg::BpConditionCancel,
+                )
+                | Message::Explain(ExplainMsg::Cancel | ExplainMsg::Show(_)) => false,
+                _ => matches!(
+                    message,
+                    Message::Editor(EditorMsg::RunAction(
+                        Action::ExplainAll | Action::StartDebug
+                    )) | Message::Debug(_)
+                        | Message::Explain(_)
+                        | Message::Project(ProjectMsg::OpenFolderPressed)
+                        | Message::Connect(ConnectMsg::Open)
+                        | Message::Export(_)
+                ),
+            },
             PaletteAction::Goto(_) | PaletteAction::Insight => false,
         }
     }

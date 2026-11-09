@@ -2154,34 +2154,109 @@ fn a_costly_button_said_waits_for_a_yes() {
     )];
     assert!(app.heard_on_screen("explain all", &asked, true).is_some());
     assert!(app.voice.confirm.is_none(), "an answer is asked again");
+    // What only shows, or stops spending, is pressed at once: a variable
+    // opened, an explain pass stopped. Stopping the program asks, as
+    // starting it does — a misheard word would end the session.
+    for (title, message, asks) in [
+        ("total", Message::Debug(DebugMsg::ToggleVar(7)), false),
+        (
+            "Stop explaining",
+            Message::Explain(ExplainMsg::Cancel),
+            false,
+        ),
+        ("Stop", Message::Debug(DebugMsg::Stop), true),
+    ] {
+        let mut app = blank_app();
+        let targets = [on_screen(title, message, Layer::Window, None)];
+        assert!(
+            app.heard_on_screen(&title.to_lowercase(), &targets, false)
+                .is_some()
+        );
+        assert_eq!(app.voice.confirm.is_some(), asks, "{title}");
+    }
 }
 
 /// The model's provider, picked with Settings shut — said, or run from
-/// the command bar — is kept, as picked on its page and closed: only the
-/// page's draft changed, which nothing then saved.
+/// the command bar — is kept, as picked on its page and closed, when it
+/// has a key of its own: here, its variable's. Without one, its page opens
+/// to ask for it and nothing is saved meanwhile. A key kept for another
+/// provider is never carried to it — it would be sent there.
 #[test]
-fn a_provider_picked_with_settings_shut_is_kept() {
+fn a_provider_picked_with_settings_shut_is_kept_with_its_own_key() {
+    use crate::llm::{Config, Provider};
     let data = test_dir("voice-provider-shut");
+    let _ = std::fs::remove_dir_all(&data);
     std::fs::create_dir_all(&data).unwrap();
     let _env = data_dir_override(&data);
     let _keys = EnvVars::new()
         .remove("ANTHROPIC_API_KEY")
         .remove("OPENAI_API_KEY")
         .remove("DEEPSEEK_API_KEY");
+    Config::from_parts(
+        Provider::Anthropic,
+        "sk-ant-SECRET".into(),
+        String::new(),
+        String::new(),
+    )
+    .save()
+    .unwrap();
     let mut app = blank_app();
+    // Typing in Ask, say, as it was said.
+    app.code_focused = false;
     assert!(!app.settings.open);
-    let before = app.settings.provider;
-    let other = crate::llm::Provider::ALL
-        .into_iter()
-        .find(|p| *p != before)
-        .expect("another provider");
-    let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(other)));
-    assert!(!app.settings.open, "Settings stays shut");
+    // OpenAI, with no key of its own: its page asks for one.
+    let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(
+        Provider::OpenAI,
+    )));
+    assert!(app.settings.open, "{}", app.status);
+    assert_eq!(app.settings.page, SettingsPage::LanguageModel);
+    assert_eq!(app.settings.key, "", "Anthropic's key, offered to OpenAI");
+    assert!(app.status.contains("OpenAI"), "{}", app.status);
+    assert_eq!(Config::current_or_default().provider, Provider::Anthropic);
+    // Back to the provider it opened on: its own key again.
+    let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(
+        Provider::Anthropic,
+    )));
+    assert_eq!(app.settings.key, "sk-ant-SECRET");
+    let _ = app.update(Message::Settings(SettingsMsg::Close));
+    assert_eq!(Config::stored_key(), "sk-ant-SECRET");
+    // OpenAI's own key in its variable: kept at once, Settings shut, the
+    // keyboard where it was — and Anthropic's key not written for it.
+    app.code_focused = false;
+    let _openai = EnvVars::new().set("OPENAI_API_KEY", "sk-openai-ENV");
+    let _ = app.update(Message::Settings(SettingsMsg::ProviderPicked(
+        Provider::OpenAI,
+    )));
+    assert!(!app.settings.open, "{}", app.status);
+    let kept = Config::current_or_default();
+    assert_eq!(kept.provider, Provider::OpenAI);
+    assert_eq!(kept.api_key, "sk-openai-ENV");
+    assert_eq!(Config::stored_key(), "");
+    assert!(!app.code_focused, "the keyboard went to the code");
+}
+
+/// Picked with Settings shut, a page's own pick with nothing to keep
+/// asked of it — embeddings made here, their model not downloaded —
+/// opens the page on what it needs.
+#[test]
+fn embeddings_picked_with_settings_shut_ask_for_what_they_need() {
+    let data = test_dir("voice-embed-shut");
+    let _ = std::fs::remove_dir_all(&data);
+    std::fs::create_dir_all(&data).unwrap();
+    let _env = data_dir_override(&data);
+    let _keys = EnvVars::new().remove("OPENAI_API_KEY");
+    let mut app = blank_app();
+    let here = !clew_core::embed::Config::stored_here();
+    let _ = app.update(Message::Settings(SettingsMsg::EmbedHere(here)));
+    if here && clew_core::embed::local::installed() {
+        return;
+    }
+    assert!(app.settings.open, "{}", app.status);
+    assert_eq!(app.settings.page, SettingsPage::Embeddings);
     assert_eq!(
-        crate::llm::Config::current_or_default().provider,
-        other,
-        "{}",
-        app.status
+        clew_core::embed::Config::stored_here(),
+        !here,
+        "nothing saved"
     );
 }
 

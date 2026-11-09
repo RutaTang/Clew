@@ -5323,13 +5323,22 @@ async fn a_stale_call_tree_is_traced_again_from_its_own_function() {
         direction: callgraph::Direction::Outgoing,
         lang: "rust",
         items: vec![origin],
+        again: None,
     }));
     app.proj.call_graph.as_mut().unwrap().stale = true;
+    app.proj.call_graph.as_mut().unwrap().full = true;
+    // Two lines written above it since: it is asked about where it is now.
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "pub fn a() {}\n\n\n\n\n\n\n// moved\n// down\npub fn origin() {}\n",
+    )
+    .unwrap();
 
     let refresh = app.update(Message::Calls(CallsMsg::Refresh));
     let landed = run_task_async(refresh).await;
+    assert_eq!(server.prepared(7), 0, "asked where it was");
     assert_eq!(
-        server.prepared(7),
+        server.prepared(9),
         1,
         "the tree's own function was not asked"
     );
@@ -5339,11 +5348,48 @@ async fn a_stale_call_tree_is_traced_again_from_its_own_function() {
             [Message::Calls(CallsMsg::Prepared {
                 direction: callgraph::Direction::Outgoing,
                 lang: "rust",
+                again: Some(true),
                 ..
             })]
         ),
         "{landed:?}"
     );
+    // Landed, the tree that replaces it is expanded in full as it was; a
+    // trace that finds nothing leaves it, said so.
+    let token = app.proj.call_pending.expect("a trace awaited");
+    let _ = app.update(Message::Calls(CallsMsg::Prepared {
+        stamp: app.stamp(),
+        token,
+        direction: callgraph::Direction::Outgoing,
+        lang: "rust",
+        items: Vec::new(),
+        again: Some(true),
+    }));
+    assert_eq!(app.status, "Could not trace origin again");
+    assert!(app.proj.call_graph.is_some());
+    app.proj.call_pending = Some(token);
+    let _ = app.update(Message::Calls(CallsMsg::Prepared {
+        stamp: app.stamp(),
+        token,
+        direction: callgraph::Direction::Outgoing,
+        lang: "rust",
+        items: vec![lsp::client::CallItem {
+            name: "origin".into(),
+            detail: String::new(),
+            kind: 12,
+            path: root.join("src/lib.rs"),
+            line: 9,
+            character: 7,
+            raw: serde_json::json!({}),
+        }],
+        again: Some(true),
+    }));
+    assert!(app.proj.call_graph.as_ref().unwrap().full);
+    // Gone from the file: said so, and not asked about.
+    std::fs::write(root.join("src/lib.rs"), "pub fn a() {}\n").unwrap();
+    let refresh = app.update(Message::Calls(CallsMsg::Refresh));
+    assert!(run_task_async(refresh).await.is_empty());
+    assert_eq!(app.status, "origin is no longer in lib.rs");
     // With no tree, there is nothing to trace again.
     app.proj.call_graph = None;
     let refresh = app.update(Message::Calls(CallsMsg::Refresh));
@@ -5376,6 +5422,7 @@ fn stale_call_children_do_not_graft_onto_new_tree() {
         direction: callgraph::Direction::Incoming,
         lang: "rust",
         items: vec![item("root")],
+        again: None,
     }));
     assert_eq!(app.proj.call_graph.as_ref().unwrap().token, old_token);
 
@@ -14756,6 +14803,18 @@ fn a_watcher_batch_is_parsed_off_the_update_loop_and_applied_only_to_its_own_byt
         has(&mut app, "newest") && !has(&mut app, "parsed_later"),
         "a late parse of older bytes rolled the index back"
     );
+    // Rewritten as a minifier writes — one line of many thousand names —
+    // it is indexed empty, as the full build indexes it: none of its names
+    // in the finder or the call graph.
+    let minified = "pub fn packed_name() {} ".repeat(2_000);
+    assert!(clew_core::fs_scan::is_minified_source(&minified));
+    let packed = rehashed(&app, vec![modified(&abs, 7373, &minified)]);
+    apply_rehash(&mut app, packed);
+    assert!(
+        !has(&mut app, "packed_name"),
+        "a minified file indexed in full"
+    );
+    assert!(!has(&mut app, "newest"), "its old names kept");
 }
 
 /// A1 / D1-4 at scale: indexing a large project installs every file's
@@ -22117,12 +22176,18 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             styled: Vec::new(),
             marks: Vec::new(),
         }),
+        Message::Nav(NavMsg::CallSiteFound {
+            stamp: s(),
+            caller_file: abs.clone(),
+            line: 3,
+        }),
         Message::Calls(CallsMsg::Prepared {
             stamp: s(),
             token: app.call_token,
             direction: callgraph::Direction::Incoming,
             lang: "rust",
             items: Vec::new(),
+            again: None,
         }),
         Message::Calls(CallsMsg::Children {
             stamp: s(),
