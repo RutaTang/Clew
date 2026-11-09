@@ -77,7 +77,7 @@ pub(crate) use graph::project_map_layout;
 mod hover;
 pub(crate) mod insight;
 pub(crate) mod integrations;
-mod keys;
+pub(crate) mod keys;
 pub(crate) mod languages;
 mod lsp;
 pub(crate) mod navigation;

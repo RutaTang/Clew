@@ -49,7 +49,10 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
     let collapse = button(glyph::icon(Glyph::ChevronDown, theme::fg_muted(), 12.0))
         .style(theme::list_row(false))
         .padding([3, 10])
-        .on_press(Message::Window(WindowMsg::CollapseBottom));
+        .on_press(super::heard::said(
+            tr!("Hide panel"),
+            Message::Window(WindowMsg::CollapseBottom),
+        ));
     let tabs = row![title, space().width(Fill), collapse,]
         .spacing(2)
         .align_y(iced::Center)
@@ -1012,7 +1015,10 @@ fn ask_panel_in(app: &App, height: f32, fit: bool) -> Element<'_, Message> {
     let talk = super::toolbar::tip_at(
         round(Glyph::Mic, theme::fg())
             .style(theme::round_button(false))
-            .on_press(Message::Voice(crate::VoiceMsg::Toggle)),
+            .on_press(super::heard::said(
+                tr!("Talk"),
+                Message::Voice(crate::VoiceMsg::Toggle),
+            )),
         tr!("Talk"),
         Some(app.keymap.chord(crate::keymap::Action::Voice).caps()),
         tooltip::Position::Top,

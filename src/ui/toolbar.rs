@@ -330,18 +330,13 @@ pub(crate) fn split_caps(caps: &str) -> Vec<String> {
 /// How strongly a strip control that can do nothing now is drawn.
 pub(crate) const DISABLED_OPACITY: f32 = 0.35;
 
-fn icon_button<'a>(glyph: Glyph, color: iced::Color, on: bool) -> button::Button<'a, Message> {
+fn icon_button<'a>(glyph: Glyph, color: iced::Color, on: bool) -> Press<'a> {
     strip_button(glyph, color, on, true)
 }
 
 /// A strip control: `glyph` in `color`, lit when `on`, faded when it can
 /// do nothing (`able` false).
-fn strip_button<'a>(
-    glyph: Glyph,
-    color: iced::Color,
-    on: bool,
-    able: bool,
-) -> button::Button<'a, Message> {
+fn strip_button<'a>(glyph: Glyph, color: iced::Color, on: bool, able: bool) -> Press<'a> {
     let mark = if able {
         glyph::icon(glyph, color, ICON)
     } else {
@@ -369,8 +364,9 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
         traffic_lights(app)
     } else {
         chrome_tip(
-            icon_button(Glyph::Menu, theme::fg_muted(), app.show_app_menu)
-                .on_press(Message::Window(WindowMsg::ToggleAppMenu)),
+            icon_button(Glyph::Menu, theme::fg_muted(), app.show_app_menu).on_press(
+                super::heard::said(tr!("Menu"), Message::Window(WindowMsg::ToggleAppMenu)),
+            ),
             tr!("Menu"),
             None,
         )
@@ -385,7 +381,10 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
             },
             false,
         )
-        .on_press(Message::Window(WindowMsg::ToggleLeftSidebar)),
+        .on_press(super::heard::said(
+            tr!("Toggle sidebar"),
+            Message::Window(WindowMsg::ToggleLeftSidebar),
+        )),
         tr!("Toggle sidebar"),
         None,
     );
@@ -647,7 +646,10 @@ fn search_field(app: &App) -> Element<'_, Message> {
     })
     .width(Length::Fixed(rect.width))
     .height(Length::Fixed(FIELD_H))
-    .on_press(Message::Nav(NavMsg::FinderOpened(FinderMode::Files)));
+    .on_press(super::heard::said(
+        tr!("Search files, symbols and commands"),
+        Message::Nav(NavMsg::FinderOpened(FinderMode::Files)),
+    ));
     face.into()
 }
 

@@ -74,6 +74,8 @@ pub enum Action {
     LspServers,
     Shortcuts,
     CommandPalette,
+    /// A code on every control on screen, to press it by (`ui::jump`).
+    Jump,
     Voice,
     Overview,
     Stats,
@@ -85,7 +87,7 @@ pub enum Action {
 }
 
 impl Action {
-    pub const ALL: [Action; 37] = [
+    pub const ALL: [Action; 38] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -116,6 +118,7 @@ impl Action {
         Action::LspServers,
         Action::Shortcuts,
         Action::CommandPalette,
+        Action::Jump,
         Action::Voice,
         Action::Overview,
         Action::Stats,
@@ -158,6 +161,7 @@ impl Action {
             Action::FakeDebug => "fake_debug",
             Action::Shortcuts => "shortcuts",
             Action::CommandPalette => "command_palette",
+            Action::Jump => "jump",
             Action::Voice => "voice",
             Action::Overview => "overview",
             Action::Stats => "stats",
@@ -206,6 +210,7 @@ impl Action {
             Action::LspServers => tr!("Language servers"),
             Action::Shortcuts => tr!("Keyboard shortcuts"),
             Action::CommandPalette => tr!("Command palette"),
+            Action::Jump => tr!("Jump to a control"),
             Action::Voice => tr!("Talk (voice)"),
             Action::Overview => tr!("Project overview"),
             Action::Stats => tr!("Project stats"),
@@ -254,6 +259,7 @@ impl Action {
             Action::LspServers => at(MenuSection::View, tr_noop!("Language Servers…")),
             Action::Shortcuts => at(MenuSection::View, tr_noop!("Keyboard Shortcuts…")),
             Action::CommandPalette => at(MenuSection::View, tr_noop!("Command Palette…")),
+            Action::Jump => at(MenuSection::Go, tr_noop!("Jump to a Control")),
             Action::Voice => at(MenuSection::Tools, tr_noop!("Talk")),
             Action::Overview => at(MenuSection::Tools, tr_noop!("Overview")),
             Action::Stats => at(MenuSection::Tools, tr_noop!("Stats")),
@@ -302,6 +308,7 @@ impl Action {
             Action::Run => Chord::cmd('r'),
             Action::Shortcuts => Chord::cmd('/'),
             Action::CommandPalette => Chord::cmd_shift('p'),
+            Action::Jump => Chord::cmd('j'),
             // "Speak". Pressed again — or a pause once something was said —
             // it stops listening.
             Action::Voice => Chord::cmd_shift('s'),

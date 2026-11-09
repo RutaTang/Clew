@@ -1360,6 +1360,10 @@ pub struct App {
     /// The command bar's suggestions, as last built: what it offers with
     /// nothing typed (see `app::palette`).
     pub(crate) palette_home: Vec<crate::app::palette::Suggestion>,
+    /// What the window offered a click when the command bar opened
+    /// (`ui::heard::gather`): each control the bar lists by its name, for
+    /// the reader to run (`App::run_from_bar`) — never the agent.
+    pub(crate) palette_screen: Vec<crate::ui::heard::Target>,
     /// Bumped whenever inlay hints are turned off, invalidating every request
     /// still in flight (see [`crate::app::message::LspMsg::InlayHintsLoaded`]).
     pub inlay_gen: u64,
@@ -1379,6 +1383,11 @@ pub struct App {
     /// True when the code view (not a text input/finder) has keyboard focus,
     /// so Vim-style motion keys move the cursor instead of typing.
     pub code_focused: bool,
+    /// Jump mode (⌘J): what has been typed of a control's code while the
+    /// codes are up (`ui::jump`); `None` while they are not.
+    pub jump: Option<String>,
+    /// The region F6 last put the keys in (`App::cycle_region`).
+    pub(crate) region: crate::app::keys::Region,
     /// Pending `g` prefix for two-key motions (gg / gd / gr / gi / gy).
     pub pending_g: bool,
     /// Pending `z` prefix for fold commands (za / zR / zM).

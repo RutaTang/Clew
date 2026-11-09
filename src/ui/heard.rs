@@ -71,6 +71,23 @@ struct Gathering {
     rows: usize,
     /// What the controls built now belong to ([`about`]), innermost last.
     about: Vec<String>,
+    /// Every press marked for jump mode ([`marked`]), in its `Debug`
+    /// form, with its layer: what a pointer can press, to be checked
+    /// against what is offered here.
+    marks: Vec<(String, Layer)>,
+}
+
+impl Default for Gathering {
+    fn default() -> Self {
+        Gathering {
+            targets: Vec::new(),
+            layer: Layer::Window,
+            list: 0,
+            rows: 0,
+            about: Vec::new(),
+            marks: Vec::new(),
+        }
+    }
 }
 
 thread_local! {
@@ -269,8 +286,21 @@ pub(crate) fn row(shown: impl FnOnce() -> String, message: Message) -> Message {
     message
 }
 
+/// A press marked for jump mode (`super::jump::mark`): kept while
+/// gathering, so the tests can find a control a pointer presses that
+/// offers itself to no word.
+pub(crate) fn marked(message: &Message) {
+    GATHERING.with(|g| {
+        if let Some(g) = g.borrow_mut().as_mut() {
+            let layer = g.layer;
+            g.marks.push((format!("{message:?}"), layer));
+        }
+    });
+}
+
 /// What is built from here on is in `layer`.
 pub(crate) fn layer(layer: Layer) {
+    super::jump::layer(layer);
     GATHERING.with(|g| {
         if let Some(g) = g.borrow_mut().as_mut() {
             g.layer = layer;
@@ -282,44 +312,34 @@ pub(crate) fn layer(layer: Layer) {
 /// (top to bottom, as a list reads) — of the layer on top only, as a
 /// dialog over the window leaves nothing under it to press.
 pub(crate) fn gather(app: &App) -> Vec<Target> {
+    let (targets, _) = gather_all(app);
+    on_top(targets, app.ask_view == crate::AskView::Expanded)
+}
+
+/// Every target the view offers, of every layer, and every press it marks
+/// for jump mode ([`marked`]).
+pub(crate) fn gather_all(app: &App) -> (Vec<Target>, Vec<(String, Layer)>) {
     struct Stop;
     impl Drop for Stop {
         fn drop(&mut self) {
             GATHERING.with(|g| *g.borrow_mut() = None);
         }
     }
-    GATHERING.with(|g| {
-        *g.borrow_mut() = Some(Gathering {
-            targets: Vec::new(),
-            layer: Layer::Window,
-            list: 0,
-            rows: 0,
-            about: Vec::new(),
-        })
-    });
+    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
     let stop = Stop;
     drop(crate::ui::view(app));
-    let targets = GATHERING
+    let gathered = GATHERING
         .with(|g| g.borrow_mut().take())
-        .map(|g| g.targets)
         .unwrap_or_default();
     drop(stop);
-    on_top(targets, app.ask_view == crate::AskView::Expanded)
+    (gathered.targets, gathered.marks)
 }
 
 /// What building `build` offers, all of it — one part of the view,
 /// gathered as [`gather`] gathers the whole.
 #[cfg(test)]
 pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
-    GATHERING.with(|g| {
-        *g.borrow_mut() = Some(Gathering {
-            targets: Vec::new(),
-            layer: Layer::Window,
-            list: 0,
-            rows: 0,
-            about: Vec::new(),
-        })
-    });
+    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
     drop(build());
     GATHERING
         .with(|g| g.borrow_mut().take())

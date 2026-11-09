@@ -807,9 +807,21 @@ pub(crate) fn find_bar(app: &App) -> Element<'_, Message> {
                 crate::SearchOpt::Regex
             ),
             text(count).size(ts::SMALL).color(theme::dim()).width(46),
-            btn(Glyph::ChevronLeft, Message::Editor(EditorMsg::FindStep(-1))),
-            btn(Glyph::ChevronRight, Message::Editor(EditorMsg::FindStep(1))),
-            btn(Glyph::Close, Message::Editor(EditorMsg::FindClosed)),
+            btn(
+                Glyph::ChevronLeft,
+                super::heard::said(
+                    tr!("Previous match"),
+                    Message::Editor(EditorMsg::FindStep(-1))
+                )
+            ),
+            btn(
+                Glyph::ChevronRight,
+                super::heard::said(tr!("Next match"), Message::Editor(EditorMsg::FindStep(1)))
+            ),
+            btn(
+                Glyph::Close,
+                super::heard::said(tr!("Close"), Message::Editor(EditorMsg::FindClosed))
+            ),
         ]
         .spacing(6)
         .align_y(iced::Center),

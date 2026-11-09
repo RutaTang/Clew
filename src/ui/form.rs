@@ -241,7 +241,7 @@ pub(crate) fn radio<'a>(on: bool) -> Element<'a, Message> {
 
 /// A switch: its track, the knob in from the end it is at; pressing it
 /// sends `msg`.
-pub(crate) fn switch<'a>(on: bool, msg: Message) -> iced::widget::Button<'a, Message> {
+pub(crate) fn switch<'a>(on: bool, msg: Message) -> Press<'a> {
     let knob = container(space().width(SWITCH_KNOB).height(SWITCH_KNOB)).style(theme::switch_knob);
     button(
         container(knob)
@@ -274,7 +274,7 @@ pub(crate) fn toggle<'a>(
 }
 
 /// A button of a row: the fields' rounded well, a shade deeper.
-pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
     let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
         .style(theme::secondary_button)
@@ -283,7 +283,7 @@ pub(crate) fn action<'a>(label: &str, msg: Option<Message>) -> iced::widget::But
 }
 
 /// A row's main button (Add, Download): filled with the accent.
-pub(crate) fn primary<'a>(label: &str, msg: Option<Message>) -> iced::widget::Button<'a, Message> {
+pub(crate) fn primary<'a>(label: &str, msg: Option<Message>) -> Press<'a> {
     let msg = msg.map(|m| super::heard::said(label, m));
     button(text(label.to_string()).size(ts::BODY))
         .style(theme::primary_button)

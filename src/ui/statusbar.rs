@@ -178,7 +178,10 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::icon_button(false))
         .padding([2, 8])
-        .on_press(Message::Connect(ConnectMsg::Open)),
+        .on_press(super::heard::said(
+            tr!("Connect to a remote host"),
+            Message::Connect(ConnectMsg::Open),
+        )),
         // The design's tooltip bubble.
         container(
             text(tr!("Connect to a remote host"))
@@ -423,7 +426,15 @@ pub(crate) fn statusbar(app: &App) -> Element<'_, Message> {
         )
         .style(theme::icon_button(app.show_target_menu))
         .padding([0, 6])
-        .on_press(Message::Window(WindowMsg::ToggleTargetMenu));
+        .on_press(super::heard::said_with(
+            || {
+                tr!(
+                    "Reading for {target}",
+                    target = target_name(&app.proj.reading_target)
+                )
+            },
+            Message::Window(WindowMsg::ToggleTargetMenu),
+        ));
         bar = bar.push(picker);
     }
 

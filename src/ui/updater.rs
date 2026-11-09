@@ -1,7 +1,9 @@
 //! Auto-update UI: the inline "update available" banner (with download
 //! progress, and Cancel) and the release-notes modal.
 
-use iced::widget::{Row, button, column, container, row, scrollable, space, text};
+use iced::widget::{Row, column, container, row, scrollable, space, text};
+
+use super::button;
 use iced::{Element, Fill, Length};
 
 use super::{Backdrop, CONFIRM_PAD, DIALOG_W, NOTES_MAX_W, Placement, human_size, modal, slot, ts};

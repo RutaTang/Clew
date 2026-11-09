@@ -2552,13 +2552,21 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
             )
             .style(theme::secondary_button)
             .padding([3, 10])
-            .on_press(Message::Window(WindowMsg::RebindStart(action)));
+            .on_press(super::heard::said_to_with(
+                tr!("Change shortcut"),
+                || action.label().to_string(),
+                Message::Window(WindowMsg::RebindStart(action)),
+            ));
             if app.keymap.is_overridden(action) {
                 row![
                     button(text("↺").size(ts::BASE).color(theme::dim()))
                         .style(theme::toolbar_button)
                         .padding([2, 7])
-                        .on_press(Message::Window(WindowMsg::RebindReset(action))),
+                        .on_press(super::heard::said_to_with(
+                            tr!("Reset"),
+                            || action.label().to_string(),
+                            Message::Window(WindowMsg::RebindReset(action)),
+                        )),
                     pill,
                 ]
                 .spacing(4)
@@ -2572,7 +2580,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
     }
 
     // Read-only reading motions (not part of the customizable keymap).
-    let motions: [(&str, &str); 16] = [
+    let motions: [(&str, &str); 17] = [
         (tr!("Move left / down / up / right"), "h j k l   ← ↓ ↑ →"),
         (tr!("Word forward / back"), "w   b"),
         (tr!("Line start / end"), "0   $"),
@@ -2588,6 +2596,7 @@ pub(crate) fn shortcuts_body(app: &App) -> Element<'_, Message> {
         (tr!("Close all folds"), "zM"),
         (tr!("Time Travel: older / newer commit"), "⌘←   ⌘→"),
         (tr!("Next / previous field"), "tab   ⇧tab"),
+        (tr!("Code / sidebar / Ask"), "F6   ⇧F6"),
         (tr!("Close the top panel / clear selection"), "esc"),
     ];
     let vim = motions

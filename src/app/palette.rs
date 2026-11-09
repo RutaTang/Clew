@@ -251,6 +251,8 @@ impl App {
     /// Open the command bar: the finder, nothing typed, its suggestions
     /// showing.
     pub(crate) fn on_palette_opened(&mut self) -> Task<Message> {
+        // What is on screen under it, for the bar to list by name.
+        self.palette_screen = crate::ui::heard::gather(self);
         self.proj.finder.open = true;
         self.proj.finder.bar = true;
         self.proj.finder.mode = FinderMode::Files;
@@ -273,6 +275,8 @@ impl App {
     /// more that their English titles match.
     pub(crate) fn refresh_bar(&mut self) {
         self.palette = self.palette_commands();
+        let on_screen = self.screen_commands(&self.palette);
+        self.palette.extend(on_screen);
         let files = self
             .proj
             .project
@@ -431,6 +435,8 @@ impl App {
     /// match.
     pub(crate) fn refresh_palette(&mut self) {
         self.palette = self.palette_commands();
+        let on_screen = self.screen_commands(&self.palette);
+        self.palette.extend(on_screen);
         let recent = self.palette_recent.clone();
         let english =
             self.ranked_in_english(|finder, titles| finder.refresh_commands(titles, &recent));
@@ -448,6 +454,50 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The controls on screen when the command bar opened that no command
+    /// in `commands` already names, each a command of its own: what it
+    /// says, and the press its click sends. Only the bar lists them, and
+    /// only the reader runs them ([`App::run_from_bar`]).
+    fn screen_commands(&self, commands: &[PaletteCommand]) -> Vec<PaletteCommand> {
+        if !self.proj.finder.bar {
+            return Vec::new();
+        }
+        let mut seen: std::collections::HashSet<&str> =
+            commands.iter().map(|c| c.title.as_str()).collect();
+        self.palette_screen
+            .iter()
+            .filter(|t| t.typing.is_none() && !t.title.trim().is_empty())
+            .filter(|t| seen.insert(t.title.as_str()))
+            .map(|t| PaletteCommand {
+                title: t.title.clone(),
+                keys: None,
+                action: PaletteAction::Send(t.message.clone()),
+                shown_as: (t.shown != crate::i18n::lookup(&t.title)).then(|| t.shown.clone()),
+            })
+            .collect()
+    }
+
+    /// Run what the reader picked in the command bar: the command titled
+    /// `title`, or else the control on screen it names ([`Self::screen_commands`]),
+    /// pressed as a click presses it. The agent runs commands by
+    /// [`Self::run_palette`], which never reaches what is on screen.
+    pub(crate) fn run_from_bar(&mut self, title: &str) -> Task<Message> {
+        if self.palette_commands().iter().any(|c| c.title == title) {
+            return self.run_palette(title);
+        }
+        let Some(message) = self
+            .palette_screen
+            .iter()
+            .find(|t| t.typing.is_none() && t.title == title)
+            .map(|t| t.message.clone())
+        else {
+            return Task::none();
+        };
+        self.proj.finder.open = false;
+        self.code_focused = true;
+        self.update(message)
     }
 
     /// Run the command titled `title` — looked up afresh, so a click on a

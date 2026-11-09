@@ -45,6 +45,16 @@ pub(crate) fn tab_glyph(tab: SidebarTab) -> Glyph {
     }
 }
 
+/// The command that opens a view, when one does: its shortcut is said in
+/// the view's tooltip.
+pub(crate) fn tab_action(tab: SidebarTab) -> Option<crate::keymap::Action> {
+    match tab {
+        SidebarTab::Search => Some(crate::keymap::Action::ProjectSearch),
+        SidebarTab::Walk => Some(crate::keymap::Action::Walkthrough),
+        _ => None,
+    }
+}
+
 /// A view's name, as its tab's tooltip says it.
 pub(crate) fn tab_name(tab: SidebarTab) -> &'static str {
     match tab {
@@ -67,39 +77,41 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
     super::heard::list();
     // The views as a segmented row of icons, each naming itself on hover;
     // the chosen one raised as a chip.
-    let segment = |glyph: Glyph, chosen: bool, name: &'static str, msg: Message| {
-        tip_at(
-            button(
-                container(glyph::icon(
-                    glyph,
-                    if chosen {
-                        theme::fg_bright()
-                    } else {
-                        theme::fg_muted()
-                    },
-                    15.0,
-                ))
+    let segment =
+        |glyph: Glyph, chosen: bool, name: &'static str, keys: Option<String>, msg: Message| {
+            tip_at(
+                button(
+                    container(glyph::icon(
+                        glyph,
+                        if chosen {
+                            theme::fg_bright()
+                        } else {
+                            theme::fg_muted()
+                        },
+                        15.0,
+                    ))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(iced::Center)
+                    .align_y(iced::Center),
+                )
+                .style(theme::segment(chosen))
+                .padding(0)
                 .width(Fill)
-                .height(Fill)
-                .align_x(iced::Center)
-                .align_y(iced::Center),
+                .height(Length::Fixed(28.0))
+                .on_press(super::heard::said(name, msg)),
+                name,
+                keys,
+                tooltip::Position::Bottom,
             )
-            .style(theme::segment(chosen))
-            .padding(0)
-            .width(Fill)
-            .height(Length::Fixed(28.0))
-            .on_press(super::heard::said(name, msg)),
-            name,
-            None,
-            tooltip::Position::Bottom,
-        )
-    };
+        };
     let mut tabs_row = Row::new().spacing(2);
     for (_, this) in SIDEBAR_TABS.iter().take(STRIP_VIEWS) {
         tabs_row = tabs_row.push(segment(
             tab_glyph(*this),
             app.sidebar == *this,
             tab_name(*this),
+            tab_action(*this).map(|action| app.keymap.chord(action).caps()),
             Message::Window(WindowMsg::SidebarTabPicked(*this)),
         ));
     }

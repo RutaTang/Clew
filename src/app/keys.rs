@@ -4,7 +4,148 @@
 use crate::app::prelude::*;
 use crate::*;
 
+/// The parts of the window F6 moves the keys between, in the order it
+/// moves through them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Region {
+    /// The code: its motions and keys.
+    Code,
+    /// The sidebar's field: the file filter, or the text search.
+    Sidebar,
+    /// The chat with Clew.
+    Chat,
+}
+
+/// An id no field has: focusing it takes the keys from every field.
+fn nowhere() -> iced::widget::Id {
+    iced::widget::Id::new("clew-keys-nowhere")
+}
+
 impl App {
+    /// ⌘J: put a code on every control on screen (`ui::jump`), the keys
+    /// taken from the fields to type one by — or put the codes away, if
+    /// they are up.
+    fn start_jump(&mut self) -> Task<Message> {
+        if self.jump.take().is_some() {
+            self.status.clear();
+            return Task::none();
+        }
+        self.jump = Some(String::new());
+        self.pending_g = false;
+        self.pending_z = false;
+        self.status = tr!("Type the code on a control to press it — Esc to stop").into();
+        operation::focus(nowhere())
+    }
+
+    /// A key while jump mode's codes are up: a letter goes on with a code,
+    /// and a whole code presses its control, as a click does; Backspace
+    /// takes a letter back. Any other key — Esc, ⌘J — puts the codes away.
+    fn jump_key(&mut self, key: &keyboard::Key, modifiers: keyboard::Modifiers) -> Task<Message> {
+        use keyboard::Key;
+        use keyboard::key::Named;
+        let mut typed = self.jump.take().unwrap_or_default();
+        let plain = !(modifiers.command() || modifiers.control() || modifiers.alt());
+        match key.as_ref() {
+            Key::Named(Named::Backspace) if plain && !typed.is_empty() => {
+                typed.pop();
+                self.jump = Some(typed);
+                Task::none()
+            }
+            Key::Character(c) if plain => {
+                let Some(letter) = c.chars().next().filter(char::is_ascii_alphabetic) else {
+                    self.status.clear();
+                    return Task::none();
+                };
+                typed.push(letter.to_ascii_lowercase());
+                match ui::jump::pressed(&typed) {
+                    ui::jump::Typed::Press(message) => {
+                        self.status.clear();
+                        self.update(*message)
+                    }
+                    ui::jump::Typed::More => {
+                        self.jump = Some(typed);
+                        Task::none()
+                    }
+                    ui::jump::Typed::Nothing => {
+                        self.status = tr!(
+                            "No control has the code {code}",
+                            code = typed.to_uppercase()
+                        );
+                        Task::none()
+                    }
+                }
+            }
+            _ => {
+                self.status.clear();
+                Task::none()
+            }
+        }
+    }
+
+    /// The regions F6 moves through now: the code while a file is open,
+    /// the sidebar while it shows a field, and the chat.
+    fn regions(&self) -> Vec<Region> {
+        let mut regions = Vec::new();
+        if self.active_viewer().is_some() {
+            regions.push(Region::Code);
+        }
+        if self.sidebar_field().is_some() {
+            regions.push(Region::Sidebar);
+        }
+        regions.push(Region::Chat);
+        regions
+    }
+
+    /// The sidebar's field, while it is on screen.
+    fn sidebar_field(&self) -> Option<iced::widget::Id> {
+        if !self.show_left_sidebar || self.proj.project.is_none() {
+            return None;
+        }
+        match self.sidebar {
+            SidebarTab::Files => Some(ui::file_filter_id()),
+            SidebarTab::Search => Some(ui::search_input_id()),
+            _ => None,
+        }
+    }
+
+    /// F6 (`forward`) or Shift-F6: the keys to the next region of the
+    /// window, or the one before — from the code, wherever they are.
+    pub(crate) fn cycle_region(&mut self, forward: bool) -> Task<Message> {
+        let regions = self.regions();
+        let now = if self.code_focused {
+            Region::Code
+        } else {
+            self.region
+        };
+        let n = regions.len();
+        let next = match regions.iter().position(|&r| r == now) {
+            Some(i) if forward => (i + 1) % n,
+            Some(i) => (i + n - 1) % n,
+            None => 0,
+        };
+        let region = regions[next];
+        self.region = region;
+        match region {
+            Region::Code => {
+                self.code_focused = true;
+                operation::focus(nowhere())
+            }
+            Region::Sidebar => {
+                self.code_focused = false;
+                self.sidebar_field()
+                    .map_or_else(Task::none, operation::focus)
+            }
+            Region::Chat => {
+                self.reveal_ask();
+                self.code_focused = false;
+                Task::batch([
+                    operation::focus(ui::ask_input_id()),
+                    operation::move_cursor_to_end(ui::ask_input_id()),
+                ])
+            }
+        }
+    }
+
     pub(crate) fn handle_key(
         &mut self,
         key: keyboard::Key,
@@ -50,6 +191,10 @@ impl App {
         ) {
             return Task::none();
         }
+        // Jump mode's codes are up: every key is theirs (`jump_key`).
+        if self.jump.is_some() {
+            return self.jump_key(&key, modifiers);
+        }
         // The tutorial is modal: → / Enter advance, ← goes back, Esc leaves, and
         // every other key is swallowed so nothing acts behind the overlay.
         if self.tutorial.is_some() {
@@ -81,6 +226,12 @@ impl App {
         // every key so nothing acts behind it. (Esc never gets here: Settings
         // is an overlay, so `escape_message` above closed it.)
         if self.shortcuts_shown() {
+            // But ⌘J: its codes go on the page's own controls only.
+            if keymap::Chord::from_event(&key, modifiers)
+                .is_some_and(|chord| chord == self.keymap.chord(keymap::Action::Jump))
+            {
+                return self.start_jump();
+            }
             return Task::none();
         }
         // Tab / Shift-Tab move keyboard focus between fields (inside the open
@@ -90,6 +241,14 @@ impl App {
         {
             self.code_focused = false;
             return ui::cycle_focus(!modifiers.shift());
+        }
+        // F6 / Shift-F6 move the keys between the window's regions — the
+        // code, the sidebar's field, the chat — but not out of a dialog
+        // holding them.
+        if matches!(key.as_ref(), Key::Named(Named::F6))
+            && !ui::active_overlay(self).is_some_and(|o| o.holds_keys())
+        {
+            return self.cycle_region(!modifiers.shift());
         }
         // Keys go to whatever is on top first: the overlay drawn over the app
         // takes its own before anything under it — a time-travel session
@@ -329,6 +488,7 @@ impl App {
             Run => self.update(Message::Debug(DebugMsg::Run)),
             StartDebug => self.update(Message::Debug(DebugMsg::Start)),
             WeakSpots => self.update(Message::Weak(WeakMsg::Show)),
+            Jump => self.start_jump(),
             CallGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectCalls))),
             TypeGraph => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectTypes))),
             ProjectMaps => self.update(Message::Graph(GraphMsg::OpenOverlay(Overlay::ProjectMaps))),
@@ -378,7 +538,8 @@ impl App {
             let chord = self.keymap.chord(action);
             return self.capture_chord(target, chord);
         }
-        if self.tutorial.is_some() || self.shortcuts_shown() {
+        let jump_on_shortcuts = self.shortcuts_shown() && action == keymap::Action::Jump;
+        if self.tutorial.is_some() || (self.shortcuts_shown() && !jump_on_shortcuts) {
             return Task::none();
         }
         self.run_command_action(action).unwrap_or_else(Task::none)

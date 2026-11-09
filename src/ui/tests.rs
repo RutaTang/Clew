@@ -12188,3 +12188,392 @@ fn only_the_newest_registry_search_is_taken() {
         Some(Ok(ref v)) if v.is_empty()
     ));
 }
+
+/// Every state of the window the audit below reads: the code with each of
+/// the sidebar's views, the margin's tabs and the bottom panel, Ask open
+/// and large, the menus, each page of Settings, and the pages over the
+/// code.
+fn audited_states() -> Vec<(String, App)> {
+    let mut states = Vec::new();
+    let base = reader_app();
+    states.push(("the code".to_string(), base_clone(&base)));
+    for (_, tab) in crate::ui::SIDEBAR_TABS {
+        let mut app = base_clone(&base);
+        app.show_left_sidebar = true;
+        app.sidebar = tab;
+        states.push((format!("the sidebar's {tab:?}"), app));
+    }
+    for tab in [
+        crate::MarginTab::Notes,
+        crate::MarginTab::Calls,
+        crate::MarginTab::History,
+    ] {
+        let mut app = base_clone(&base);
+        app.show_right_panel = true;
+        app.margin_tab = tab;
+        states.push((format!("the margin's {tab:?}"), app));
+    }
+    let mut app = base_clone(&base);
+    app.show_bottom = true;
+    states.push(("the bottom panel".into(), app));
+    for (name, message) in [
+        ("Ask", Message::Ask(AskMsg::Toggle)),
+        (
+            "the tools menu",
+            Message::Window(WindowMsg::ToggleToolsMenu),
+        ),
+        ("the run menu", Message::Window(WindowMsg::ToggleRunMenu)),
+        ("the overview", Message::Overview(crate::OverviewMsg::Show)),
+        (
+            "the stats",
+            Message::Overview(crate::OverviewMsg::ShowStats),
+        ),
+        ("the weak spots", Message::Weak(crate::WeakMsg::Show)),
+        ("the command bar", Message::Nav(NavMsg::PaletteOpened)),
+    ] {
+        let mut app = base_clone(&base);
+        let _ = app.update(message);
+        states.push((name.to_string(), app));
+    }
+    let mut app = base_clone(&base);
+    let _ = app.update(Message::Ask(AskMsg::Toggle));
+    app.ask_view = crate::AskView::Expanded;
+    states.push(("Ask, large".into(), app));
+    for page in crate::SettingsPage::ALL {
+        let mut app = base_clone(&base);
+        let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(page)));
+        states.push((format!("Settings, {page:?}"), app));
+    }
+    // What each command opens — but those that start a program, the
+    // microphone or a paid pass, or put codes on the window.
+    use crate::keymap::Action;
+    for action in Action::ALL {
+        if matches!(
+            action,
+            Action::Run
+                | Action::StartDebug
+                | Action::ExplainAll
+                | Action::Voice
+                | Action::FakeRun
+                | Action::FakeDebug
+                | Action::Jump
+        ) {
+            continue;
+        }
+        let mut app = base_clone(&base);
+        let _ = app.update(Message::Editor(EditorMsg::RunAction(action)));
+        states.push((format!("{action:?}"), app));
+    }
+    // The context menu over the code, and a tree with rows.
+    let mut app = base_clone(&base);
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 1,
+        col: 1,
+        x: 20.0,
+        y: 20.0,
+        insight: None,
+        served: true,
+        by_pointer: true,
+    });
+    states.push(("the context menu".into(), app));
+    let mut app = base_clone(&base);
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec!["README.md".into()],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: vec!["lib.rs".into(), "main.rs".into()],
+            },
+        )],
+    };
+    app.proj.expanded.insert("src".into());
+    states.push(("a tree".into(), app));
+    states
+}
+
+/// [`reader_app`] again: an `App` is not `Clone`.
+fn base_clone(_base: &App) -> App {
+    reader_app()
+}
+
+/// Every button a click presses offers itself to voice and to the
+/// command bar too (`heard`): in every state audited, each press a button
+/// marks for jump mode is one voice can make by a word. A button built
+/// without a word for it fails here.
+#[test]
+fn every_button_a_click_presses_a_word_presses_too() {
+    let mut unsaid = Vec::new();
+    for (name, app) in audited_states() {
+        let (targets, marks) = crate::ui::heard::gather_all(&app);
+        assert!(!marks.is_empty(), "{name}: nothing marked");
+        let offered: std::collections::HashSet<String> =
+            targets.iter().map(|t| format!("{:?}", t.message)).collect();
+        for (mark, _) in marks {
+            if !offered.contains(&mark) {
+                unsaid.push(format!("{name}: {mark}"));
+            }
+        }
+    }
+    unsaid.dedup();
+    assert!(
+        unsaid.is_empty(),
+        "pressed by a click, by no word:\n{}",
+        unsaid.join("\n")
+    );
+}
+
+/// The window drawn once, as the runtime draws it: the codes jump mode
+/// deals go out as it is.
+fn draw_window(app: &App) {
+    let mut renderer = renderer();
+    let mut ui = UserInterface::build(super::view(app), WINDOW, Cache::default(), &mut renderer);
+    let _ = ui.update(
+        &redraw(),
+        mouse::Cursor::Unavailable,
+        &mut renderer,
+        &mut clipboard::Null,
+        &mut Vec::new(),
+    );
+    ui.draw(
+        &mut renderer,
+        &crate::theme::app_theme(),
+        &iced::advanced::renderer::Style {
+            text_color: iced::Color::BLACK,
+        },
+        mouse::Cursor::Unavailable,
+    );
+}
+
+/// A key typed as the window gets it.
+fn type_key(app: &mut App, key: keyboard::Key, modifiers: keyboard::Modifiers) {
+    let _ = app.handle_key(key, modifiers);
+}
+
+fn type_letters(app: &mut App, letters: &str) {
+    for c in letters.chars() {
+        type_key(
+            app,
+            keyboard::Key::Character(c.to_string().into()),
+            keyboard::Modifiers::empty(),
+        );
+    }
+}
+
+/// ⌘J puts a code on every control on screen — the sidebar's rows, the
+/// strip's tools, the bar's buttons — one each, all as long; typing a
+/// tool's code presses it as a click does, and the codes go.
+#[test]
+fn jump_codes_go_on_every_control_and_a_code_presses_it() {
+    let (_, mut app) = audited_states()
+        .into_iter()
+        .find(|(name, _)| name == "a tree")
+        .expect("the tree state");
+    let cmd_j = keyboard::Modifiers::COMMAND;
+    type_key(&mut app, keyboard::Key::Character("j".into()), cmd_j);
+    assert_eq!(app.jump.as_deref(), Some(""), "{}", app.status);
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt();
+    assert!(dealt.len() > 26, "{} codes", dealt.len());
+    let codes: std::collections::HashSet<&str> = dealt.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes.len(), dealt.len(), "each code is another");
+    assert!(dealt.iter().all(|(c, _)| c.len() == 2), "all two letters");
+    // A file's row in the tree has one.
+    assert!(
+        dealt
+            .iter()
+            .any(|(_, m)| format!("{m:?}").contains("main.rs")),
+        "the tree's rows"
+    );
+    let (code, _) = dealt
+        .iter()
+        .find(|(_, m)| matches!(m, Message::Weak(crate::WeakMsg::Show)))
+        .expect("the strip's Weak Spots");
+    let code = code.clone();
+    type_letters(&mut app, &code[..1]);
+    assert_eq!(app.jump.as_deref(), Some(&code[..1]), "waits for the rest");
+    type_letters(&mut app, &code[1..]);
+    assert!(app.proj.weak.showing, "pressed");
+    assert!(app.jump.is_none(), "the codes go");
+    // Drawn without them, none is dealt.
+    draw_window(&app);
+    assert!(crate::ui::jump::dealt().is_empty());
+}
+
+/// Backspace takes a letter back; a letter no code goes on with, or Esc,
+/// puts the codes away and presses nothing.
+#[test]
+fn jump_mode_takes_letters_back_and_ends_on_a_wrong_one() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt();
+    let first = dealt[0].0.clone();
+    type_letters(&mut app, &first[..1]);
+    type_key(
+        &mut app,
+        keyboard::Key::Named(keyboard::key::Named::Backspace),
+        keyboard::Modifiers::empty(),
+    );
+    assert_eq!(app.jump.as_deref(), Some(""));
+    // A letter no code begins with.
+    let unused = ('a'..='z')
+        .find(|c| !dealt.iter().any(|(code, _)| code.starts_with(*c)))
+        .expect("a letter no code begins with");
+    type_letters(&mut app, &unused.to_string());
+    assert!(app.jump.is_none());
+    assert!(
+        app.status
+            .contains(&unused.to_ascii_uppercase().to_string()),
+        "{}",
+        app.status
+    );
+    // Esc puts them away too; ⌘J again as well.
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    type_key(
+        &mut app,
+        keyboard::Key::Named(keyboard::key::Named::Escape),
+        keyboard::Modifiers::empty(),
+    );
+    assert!(app.jump.is_none());
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    assert!(app.jump.is_none());
+}
+
+/// A dialog over the window takes the codes as it takes the pointer:
+/// only its own controls have one.
+#[test]
+fn a_dialog_takes_the_codes_from_what_is_under_it() {
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Shortcuts,
+    )));
+    let _ = app.update(Message::Editor(EditorMsg::RunAction(
+        crate::keymap::Action::Jump,
+    )));
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt();
+    assert!(
+        dealt
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Window(WindowMsg::RebindStart(_)))),
+        "the dialog's own"
+    );
+    assert!(
+        !dealt
+            .iter()
+            .any(|(_, m)| matches!(m, Message::Weak(crate::WeakMsg::Show))),
+        "nothing under it"
+    );
+    // ⌘J typed on that page, which keeps every other key from what is
+    // under it, puts the codes up as well.
+    let mut app = reader_app();
+    let _ = app.update(Message::Settings(crate::SettingsMsg::OpenAt(
+        crate::SettingsPage::Shortcuts,
+    )));
+    type_key(
+        &mut app,
+        keyboard::Key::Character("j".into()),
+        keyboard::Modifiers::COMMAND,
+    );
+    assert!(app.jump.is_some());
+}
+
+/// F6 moves the keys from the code to the sidebar's field, to the chat
+/// and back to the code; Shift-F6 the other way.
+#[test]
+fn f6_moves_the_keys_between_the_regions() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.code_focused = true;
+    let f6 = || keyboard::Key::Named(keyboard::key::Named::F6);
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Sidebar);
+    assert!(!app.code_focused);
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+    assert!(app.ask_view.is_open(), "the chat shown to type in");
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Code);
+    assert!(app.code_focused);
+    type_key(&mut app, f6(), keyboard::Modifiers::SHIFT);
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+    // A sidebar view with no field is passed over.
+    app.sidebar = crate::SidebarTab::Marks;
+    app.code_focused = true;
+    type_key(&mut app, f6(), keyboard::Modifiers::empty());
+    assert_eq!(app.region, crate::app::keys::Region::Chat);
+}
+
+/// The command bar lists what is on screen under it by name — a control
+/// no command names — and runs it for the reader; the agent, running
+/// commands by title, never reaches it.
+#[test]
+fn the_command_bar_lists_what_is_on_screen_for_the_reader_only() {
+    let mut app = reader_app();
+    app.show_bottom = true;
+    let _ = app.update(Message::Nav(NavMsg::PaletteOpened));
+    app.refresh_bar();
+    let hide = app
+        .palette
+        .iter()
+        .find(|c| c.title == "Hide panel")
+        .expect("the panel's Hide is listed")
+        .title
+        .clone();
+    assert!(
+        !app.palette_commands().iter().any(|c| c.title == hide),
+        "no command of the agent's"
+    );
+    let _ = app.run_palette(&hide);
+    assert!(app.show_bottom, "the agent's way runs nothing");
+    let _ = app.update(Message::Nav(NavMsg::PaletteOpened));
+    let _ = app.update(Message::Nav(NavMsg::PaletteRun(hide)));
+    assert!(!app.show_bottom, "the reader's does");
+    assert!(!app.proj.finder.open);
+}
+
+/// Only what is on screen has a code: a long tree's rows scrolled away
+/// below the window have none, and the codes stay two letters long.
+#[test]
+fn rows_scrolled_away_have_no_code() {
+    let mut app = reader_app();
+    app.show_left_sidebar = true;
+    app.sidebar = crate::SidebarTab::Files;
+    app.proj.project.as_mut().unwrap().tree = crate::fs_scan::DirNode {
+        files: vec![],
+        dirs: vec![(
+            "src".into(),
+            crate::fs_scan::DirNode {
+                dirs: vec![],
+                files: (0..800).map(|i| format!("f{i}.rs")).collect(),
+            },
+        )],
+    };
+    app.proj.expanded.insert("src".into());
+    app.jump = Some(String::new());
+    draw_window(&app);
+    let dealt = crate::ui::jump::dealt();
+    let rows = |name: &str| {
+        dealt
+            .iter()
+            .any(|(_, m)| format!("{m:?}").contains(&format!("src/{name}\"")))
+    };
+    assert!(rows("f0.rs"), "the first row, on screen");
+    assert!(!rows("f799.rs"), "the last, far below, has none");
+    assert!(dealt.len() < 200, "{} codes", dealt.len());
+    assert!(dealt.iter().all(|(c, _)| c.len() == 2));
+}

@@ -2,7 +2,9 @@
 //! where clew keeps its data, its language servers, explaining it — and
 //! "Set up project…" and Explain All asking again.
 
-use iced::widget::{button, checkbox, column, container, row, space, text};
+use iced::widget::{checkbox, column, container, row, space, text};
+
+use super::button;
 use iced::{Element, Fill, Padding};
 
 use super::chrome::{Backdrop, CONFIRM_PAD, DIALOG_W, Placement, modal};

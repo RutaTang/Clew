@@ -888,7 +888,7 @@ impl App {
                 .and_then(|i| self.palette.get(*i))
                 .map(|c| c.title.clone());
             return match title {
-                Some(title) => self.run_palette(&title),
+                Some(title) => self.run_from_bar(&title),
                 None => Task::none(),
             };
         }
@@ -903,7 +903,7 @@ impl App {
                 return Task::none();
             };
             return match self.palette.get(idx).map(|c| c.title.clone()) {
-                Some(title) => self.run_palette(&title),
+                Some(title) => self.run_from_bar(&title),
                 None => self.finder_open_index(idx - self.palette.len()),
             };
         }
@@ -1313,7 +1313,7 @@ impl App {
             }
             NavMsg::FinderConfirm => self.on_finder_confirm(),
             NavMsg::PaletteOpened => self.on_palette_opened(),
-            NavMsg::PaletteRun(title) => self.run_palette(&title),
+            NavMsg::PaletteRun(title) => self.run_from_bar(&title),
             NavMsg::PaletteSuggestion(suggestion) => self.run_suggestion(suggestion),
             NavMsg::GotoLineRequested => self.on_goto_line_requested(),
             NavMsg::DefinitionResult { seq, result, .. } => {

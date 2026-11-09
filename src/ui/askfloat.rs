@@ -221,7 +221,14 @@ fn ask_pill(app: &App) -> Option<Element<'_, Message>> {
         .padding(0)
         .width(Length::Fixed(26.0))
         .height(Length::Fixed(26.0))
-        .on_press(Message::Voice(VoiceMsg::Toggle)),
+        .on_press(super::heard::said(
+            if listening {
+                tr!("Stop listening")
+            } else {
+                tr!("Talk")
+            },
+            Message::Voice(VoiceMsg::Toggle),
+        )),
         if listening {
             tr!("Stop listening")
         } else {

@@ -372,7 +372,10 @@ fn margin_tabs(app: &App) -> Element<'_, Message> {
         ))
         .style(theme::segment(chosen))
         .padding([0, 10])
-        .on_press(Message::Window(WindowMsg::MarginTabPicked(this)))
+        .on_press(super::heard::said(
+            label,
+            Message::Window(WindowMsg::MarginTabPicked(this)),
+        ))
     };
     row![
         tab(tr!("Explanations"), crate::MarginTab::Notes),
@@ -468,7 +471,10 @@ fn sheet_header(app: &App) -> Element<'_, Message> {
     )
     .style(theme::icon_button(app.show_view_menu))
     .padding(VIEW_PAD)
-    .on_press(Message::Window(WindowMsg::ToggleViewMenu));
+    .on_press(super::heard::said(
+        tr!("View"),
+        Message::Window(WindowMsg::ToggleViewMenu),
+    ));
     let view_menu: Element<'_, Message> = if short {
         tip_at(view_menu, tr!("View"), None, tooltip::Position::Bottom)
     } else {

@@ -4,8 +4,8 @@
 use iced::widget::scrollable::{Direction, Scrollbar};
 use iced::widget::text::Wrapping;
 use iced::widget::{
-    Column, Row, button, center, column, container, mouse_area, opaque, pick_list, row, scrollable,
-    slider, space, stack, text, text_input, tooltip,
+    Column, Row, center, column, container, mouse_area, opaque, pick_list, row, scrollable, slider,
+    space, stack, text, text_input, tooltip,
 };
 use iced::{Element, Fill, Length, Padding, Task};
 
@@ -35,6 +35,9 @@ pub(crate) use ops::*;
 mod dialogs;
 pub(crate) use dialogs::*;
 mod fakerun;
+pub(crate) mod jump;
+mod press;
+pub(crate) use press::{Press, button};
 mod proof;
 mod weakspots;
 pub(crate) use fakerun::*;
@@ -574,6 +577,8 @@ pub(crate) fn escape_message(app: &App) -> Option<Message> {
 /// deeper), its scrollable was rebuilt at offset 0 and reported that offset,
 /// throwing the reader back to the top of the file.
 pub fn view(app: &App) -> Element<'_, Message> {
+    // Jump mode's codes, when they are up, go on what is built now.
+    jump::begin(app.jump.is_some());
     heard::layer(heard::Layer::Window);
     // The divider says where the pointer is in the window; the sidebar is
     // inside its frame.
@@ -642,13 +647,18 @@ pub fn view(app: &App) -> Element<'_, Message> {
     // renderer draws the window (`watch_overlays`); inside the frame, every
     // layer reaching the window's corners rounds its own as they are.
     let inner = (app.window_radius - app.window_frame).max(0.0);
-    placed::watch_overlays(
+    let window = placed::watch_overlays(
         placed::Known {
             overlay_open: app.overlay_open,
             software_renderer: app.software_renderer,
             corners: inner,
         },
         stack![framed, resize_grips()],
+    );
+    jump::root(
+        window,
+        app.jump.as_deref(),
+        app.ask_view == crate::AskView::Expanded,
     )
 }
 
