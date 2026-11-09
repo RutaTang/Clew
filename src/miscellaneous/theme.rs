@@ -2471,7 +2471,8 @@ pub fn floating_card(_theme: &Theme) -> container::Style {
 }
 
 /// The pill Ask hides to, in the window's corner: the floating card's
-/// surface, as round as it is tall.
+/// surface, as round as it is tall, lifted by a shadow of its own size —
+/// the card's, made for a panel, spread a grey haze round a small control.
 pub fn floating_pill(theme: &Theme) -> container::Style {
     let card = floating_card(theme);
     container::Style {
@@ -2479,9 +2480,23 @@ pub fn floating_pill(theme: &Theme) -> container::Style {
             radius: 20.0.into(),
             ..card.border
         },
+        shadow: pill_shadow(),
         ..card
     }
 }
+
+/// The shadow of a small floating control: close and soft.
+pub fn pill_shadow() -> iced::Shadow {
+    iced::Shadow {
+        color: scrim(if is_light() { 0.10 } else { 0.35 }),
+        offset: iced::Vector::new(0.0, PILL_SHADOW_OFFSET),
+        blur_radius: PILL_SHADOW_BLUR,
+    }
+}
+
+/// How far [`pill_shadow`] falls below its control, and how far it blurs.
+pub const PILL_SHADOW_OFFSET: f32 = 3.0;
+pub const PILL_SHADOW_BLUR: f32 = 12.0;
 
 /// Dimmed backdrop behind the modal: over the whole window, its corners
 /// as the window's, so they stay clear.
@@ -2820,6 +2835,17 @@ mod tests {
         assert_eq!(ids.len(), THEMES.len());
         assert!(THEMES.iter().filter(|t| t.is_light).count() >= 7);
         assert!(THEMES.iter().filter(|t| !t.is_light).count() >= 10);
+    }
+
+    /// A small floating control casts a small shadow: Ask's pill, under
+    /// the panel's, spread a haze several times its own height.
+    #[test]
+    fn the_pill_casts_a_shadow_of_its_size() {
+        let pill = floating_pill(&Theme::Dark).shadow;
+        let panel = panel_shadow();
+        assert!(pill.offset.y + pill.blur_radius <= 16.0, "{pill:?}");
+        assert!(pill.color.a < panel.color.a);
+        assert!(pill.blur_radius < panel.blur_radius / 4.0);
     }
 
     /// What Clew writes — explanations, answers, notes — is set in the
