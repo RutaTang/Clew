@@ -2421,6 +2421,48 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
+/// Every tool on the strip — and every row of the ⋯ menu, laid on the strip
+/// where there is room — has a shortcut, and its tip says it: Overview,
+/// Stats and the menu's Glossary, Set Up Project… and Tutorial had none.
+/// The ⋯ itself, a menu, is the one without. No two share a chord, and
+/// none is one the menu bar keeps.
+#[test]
+fn every_tool_on_the_strip_has_a_shortcut() {
+    use crate::ui::StripTool;
+    let app = reader_app();
+    for tool in super::STRIP_TOP
+        .into_iter()
+        .chain([StripTool::Settings])
+        .filter(|t| *t != StripTool::More)
+    {
+        let (_, label, keys, _) = super::strip_tool(&app, tool);
+        assert!(keys.is_some(), "{label} has no shortcut");
+    }
+    for row in super::TOOLS_MENU_ROWS {
+        let action = super::tools_row_action(row);
+        assert!(
+            !app.keymap.chord(action).caps().is_empty(),
+            "{row:?} has no chord"
+        );
+    }
+    let all = crate::keymap::Action::ALL;
+    for (i, a) in all.iter().enumerate() {
+        let chord = app.keymap.chord(*a);
+        for b in &all[i + 1..] {
+            assert!(
+                app.keymap.chord(*b) != chord,
+                "{a:?} and {b:?} share a chord"
+            );
+        }
+        assert!(
+            !crate::keymap::MENU_RESERVED
+                .iter()
+                .any(|(c, _)| *c == chord),
+            "{a:?} takes a chord the menu bar keeps"
+        );
+    }
+}
+
 /// Every tool on the strip for reading a project has its one tutorial
 /// step, and none has two; and no text field holds the keyboard while the
 /// tour shows its tab — the SEARCH box did, and took the → and Enter that

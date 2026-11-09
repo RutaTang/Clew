@@ -522,6 +522,7 @@ impl App {
                     | keymap::Action::ZoomOut
                     | keymap::Action::ZoomReset
                     | keymap::Action::Shortcuts
+                    | keymap::Action::Tutorial
             );
             if !(project || global) {
                 continue;
@@ -748,19 +749,8 @@ impl App {
             send(Message::Window(WindowMsg::ToggleFullscreen)),
         );
 
-        // The toolbar's own tools.
-        if project {
-            add(
-                tr_noop!("Overview").into(),
-                None,
-                send(Message::Overview(OverviewMsg::Show)),
-            );
-            add(
-                tr_noop!("Stats").into(),
-                None,
-                send(Message::Overview(OverviewMsg::ShowStats)),
-            );
-        }
+        // The toolbar's own tools (Overview and Stats are keymap actions,
+        // listed with the rest above).
         add(
             tr_noop!("Settings").into(),
             Some(crate::keymap::local_keys("⌘,")),
@@ -852,19 +842,13 @@ impl App {
             ] {
                 add(toggle(shown, hide, show), None, send(message));
             }
-            // The ⋯ menu's tools that have no chord of their own.
+            // The tools that have no chord of their own.
             for (title, message) in [
-                (tr_noop!("Glossary"), Message::Glossary(GlossaryMsg::Open)),
                 (
                     tr_noop!("Skim (Fold Bodies)"),
                     Message::Editor(EditorMsg::SkimFile),
                 ),
                 (tr_noop!("Export Notes…"), Message::Export(ExportMsg::Start)),
-                (
-                    tr_noop!("Set Up Project…"),
-                    Message::Project(ProjectMsg::SetupShow(crate::app::setup::SetupMode::Manage)),
-                ),
-                (tr_noop!("Tutorial"), Message::Tutorial(TutorialMsg::Start)),
             ] {
                 add(title.into(), None, send(message));
             }

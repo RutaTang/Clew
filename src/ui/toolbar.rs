@@ -815,13 +815,13 @@ pub(crate) fn strip_tool(
         StripTool::Overview => (
             Glyph::Layout,
             tr!("Overview"),
-            None,
+            caps(Action::Overview),
             Message::Overview(OverviewMsg::Show),
         ),
         StripTool::Stats => (
             Glyph::Stats,
             tr!("Stats"),
-            None,
+            caps(Action::Stats),
             Message::Overview(OverviewMsg::ShowStats),
         ),
         StripTool::Debug => (
@@ -919,7 +919,7 @@ pub(crate) fn tool_strip(app: &App) -> Element<'_, Message> {
                     strip_button(glyph, theme::fg_muted(), false, msg.is_some())
                         .on_press_maybe(msg.map(|m| super::heard::said(&label, m))),
                     label,
-                    tools_row_action(row).and_then(caps),
+                    caps(tools_row_action(row)),
                     tooltip::Position::Left,
                 )
             }
@@ -1015,13 +1015,15 @@ fn menu_w(design: f32, rows: &[(&str, f32)], headings: &[&str]) -> f32 {
     design.max(widest_row).max(widest_heading).ceil()
 }
 
-/// The shortcut that does what a ⋯ menu row does, where there is one:
-/// shown on the row, and in its tip on the strip.
-pub(crate) fn tools_row_action(row: ToolsRow) -> Option<Action> {
+/// The action a ⋯ menu row runs, whose shortcut is shown on the row and in
+/// its tip on the strip: every row has one.
+pub(crate) fn tools_row_action(row: ToolsRow) -> Action {
     match row {
-        ToolsRow::ExplainAll => Some(Action::ExplainAll),
-        ToolsRow::Shortcuts => Some(Action::Shortcuts),
-        ToolsRow::Glossary | ToolsRow::SetUp | ToolsRow::Tutorial => None,
+        ToolsRow::ExplainAll => Action::ExplainAll,
+        ToolsRow::Shortcuts => Action::Shortcuts,
+        ToolsRow::Glossary => Action::Glossary,
+        ToolsRow::SetUp => Action::SetUpProject,
+        ToolsRow::Tutorial => Action::Tutorial,
     }
 }
 
@@ -1062,9 +1064,11 @@ pub(crate) fn tools_menu_w(app: &App) -> f32 {
             .map(|(_, total)| (total, total)),
     );
     let chord = |r: ToolsRow| {
-        tools_row_action(r).map_or(0.0, |a| {
-            super::sheet::text_width(&app.keymap.chord(a).caps(), ts::SMALL, crate::fonts::UI)
-        })
+        super::sheet::text_width(
+            &app.keymap.chord(tools_row_action(r)).caps(),
+            ts::SMALL,
+            crate::fonts::UI,
+        )
     };
     let rows: Vec<(&str, f32)> = TOOLS_MENU_ROWS
         .iter()
@@ -1248,7 +1252,7 @@ pub(crate) fn tools_menu(app: &App) -> Element<'_, Message> {
             items.push(menu_heading(crate::i18n::lookup(heading)));
         }
         let (glyph, label, msg) = tools_row(app, r);
-        let keys = tools_row_action(r).map_or_else(slot, |a| menu_chord(app, a));
+        let keys = menu_chord(app, tools_row_action(r));
         let item = menu_item(Some(glyph), label, keys, msg);
         items.push(item);
     }

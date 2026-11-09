@@ -68,10 +68,15 @@ pub enum Action {
     Shortcuts,
     CommandPalette,
     Voice,
+    Overview,
+    Stats,
+    Glossary,
+    SetUpProject,
+    Tutorial,
 }
 
 impl Action {
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 33] = [
         Action::OpenFile,
         Action::OpenSymbol,
         Action::ProjectSearch,
@@ -100,6 +105,11 @@ impl Action {
         Action::Shortcuts,
         Action::CommandPalette,
         Action::Voice,
+        Action::Overview,
+        Action::Stats,
+        Action::Glossary,
+        Action::SetUpProject,
+        Action::Tutorial,
     ];
 
     /// Stable identifier used as the TOML key. Never change these.
@@ -133,6 +143,11 @@ impl Action {
             Action::Shortcuts => "shortcuts",
             Action::CommandPalette => "command_palette",
             Action::Voice => "voice",
+            Action::Overview => "overview",
+            Action::Stats => "stats",
+            Action::Glossary => "glossary",
+            Action::SetUpProject => "set_up_project",
+            Action::Tutorial => "tutorial",
         }
     }
 
@@ -172,6 +187,11 @@ impl Action {
             Action::Shortcuts => tr!("Keyboard shortcuts"),
             Action::CommandPalette => tr!("Command palette"),
             Action::Voice => tr!("Talk (voice)"),
+            Action::Overview => tr!("Project overview"),
+            Action::Stats => tr!("Project stats"),
+            Action::Glossary => tr!("Glossary"),
+            Action::SetUpProject => tr!("Set up project"),
+            Action::Tutorial => tr!("Tutorial"),
         }
     }
 
@@ -211,6 +231,11 @@ impl Action {
             Action::Shortcuts => at(MenuSection::View, tr_noop!("Keyboard Shortcuts…")),
             Action::CommandPalette => at(MenuSection::View, tr_noop!("Command Palette…")),
             Action::Voice => at(MenuSection::Tools, tr_noop!("Talk")),
+            Action::Overview => at(MenuSection::Tools, tr_noop!("Overview")),
+            Action::Stats => at(MenuSection::Tools, tr_noop!("Stats")),
+            Action::Glossary => at(MenuSection::Tools, tr_noop!("Glossary")),
+            Action::SetUpProject => at(MenuSection::Tools, tr_noop!("Set Up Project…")),
+            Action::Tutorial => at(MenuSection::View, tr_noop!("Tutorial")),
         }
     }
 
@@ -249,6 +274,14 @@ impl Action {
             // "Speak". Pressed again — or a pause once something was said —
             // it stops listening.
             Action::Voice => Chord::cmd_shift('s'),
+            // The rest of the strip's tools, so every one has a chord:
+            // Overview, the Numbers, glossarY, setting up to Read it,
+            // tUtorial.
+            Action::Overview => Chord::cmd_shift('o'),
+            Action::Stats => Chord::cmd_shift('n'),
+            Action::Glossary => Chord::cmd_shift('y'),
+            Action::SetUpProject => Chord::cmd_shift('r'),
+            Action::Tutorial => Chord::cmd_shift('u'),
         }
     }
 }

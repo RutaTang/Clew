@@ -348,6 +348,13 @@ impl App {
             ))),
             LspServers => self.update(Message::Lsp(LspMsg::TogglePanel)),
             Shortcuts => self.update(Message::Window(WindowMsg::OpenShortcuts)),
+            Overview => self.update(Message::Overview(OverviewMsg::Show)),
+            Stats => self.update(Message::Overview(OverviewMsg::ShowStats)),
+            Glossary => self.update(Message::Glossary(GlossaryMsg::Open)),
+            SetUpProject => self.update(Message::Project(ProjectMsg::SetupShow(
+                crate::app::setup::SetupMode::Manage,
+            ))),
+            Tutorial => self.update(Message::Tutorial(TutorialMsg::Start)),
             CommandPalette => self.update(Message::Nav(NavMsg::PaletteOpened)),
             Voice => self.update(Message::Voice(VoiceMsg::Toggle)),
         })
