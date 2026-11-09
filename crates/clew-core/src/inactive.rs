@@ -83,6 +83,13 @@ impl Target {
             Target::new("Linux (arm64)", "linux", "aarch64", "unix"),
             Target::new("Windows (x86_64)", "windows", "x86_64", "windows"),
             Target::new("Windows (arm64)", "windows", "aarch64", "windows"),
+            // The phones and the browser: what `cfg(target_os = "ios")`,
+            // `__ANDROID__` or a `_js.go` file is written for.
+            Target::new("iOS (arm64)", "ios", "aarch64", "unix"),
+            Target::new("Android (arm64)", "android", "aarch64", "unix"),
+            // `wasm32-unknown-unknown`: Rust's `target_os` is "unknown"
+            // there, and its family "wasm".
+            Target::new("Web (wasm32)", "unknown", "wasm32", "wasm"),
         ]
     }
 
@@ -145,10 +152,11 @@ impl Target {
         }
     }
 
-    /// This target's `GOOS`.
+    /// This target's `GOOS`: the browser's is `js`.
     fn goos(&self) -> &str {
         match self.os.as_str() {
             "macos" => "darwin",
+            "unknown" if self.family == "wasm" => "js",
             os => os,
         }
     }
@@ -1175,6 +1183,8 @@ const ARCH_MACROS: &[(&str, &[&str])] = &[
     ("__aarch64__", &["aarch64"]),
     ("__i386__", &["x86"]),
     ("__arm__", &["arm"]),
+    ("__wasm__", &["wasm32", "wasm64"]),
+    ("__wasm32__", &["wasm32"]),
 ];
 
 /// The lines of the C or C++ file `source` (named `rel`) its preprocessor
@@ -2208,6 +2218,50 @@ mod tests {
             arch: "aarch64".into(),
             family: "unix".into(),
         }
+    }
+
+    /// The phones and the browser are targets too: Rust's cfgs, C's
+    /// platform macros and Go's `GOOS`/`GOARCH` read each one as it is.
+    #[test]
+    fn the_phones_and_the_browser_are_targets_too() {
+        let ios = Target::from_label("iOS (arm64)");
+        let android = Target::from_label("Android (arm64)");
+        let web = Target::from_label("Web (wasm32)");
+        assert_eq!(eval_cfg("target_os = \"ios\"", &ios), Some(true));
+        assert_eq!(eval_cfg("target_os = \"macos\"", &ios), Some(false));
+        assert_eq!(eval_cfg("unix", &ios), Some(true));
+        assert_eq!(eval_cfg("target_os = \"android\"", &android), Some(true));
+        assert_eq!(eval_cfg("unix", &android), Some(true));
+        assert_eq!(eval_cfg("target_arch = \"wasm32\"", &web), Some(true));
+        assert_eq!(eval_cfg("target_family = \"wasm\"", &web), Some(true));
+        assert_eq!(eval_cfg("unix", &web), Some(false));
+        assert_eq!(eval_cfg("windows", &web), Some(false));
+
+        let c = "#ifdef __ANDROID__\nint a;\n#endif\n#ifdef __APPLE__\nint i;\n#endif\n#ifdef __wasm__\nint w;\n#endif\n";
+        let off = |t: &Target| {
+            let mut v: Vec<usize> = inactive_lines(c, "c", t).into_iter().collect();
+            v.sort_unstable();
+            v
+        };
+        let android_off = off(&android);
+        let ios_off = off(&ios);
+        let web_off = off(&web);
+        // Each target keeps its own group and drops the other two.
+        assert_eq!(android_off.len(), 2, "{android_off:?}");
+        assert_eq!(ios_off.len(), 2, "{ios_off:?}");
+        assert_eq!(web_off.len(), 2, "{web_off:?}");
+        assert!(
+            !android_off
+                .iter()
+                .any(|l| ios_off.contains(l) && web_off.contains(l))
+        );
+        let kept = |o: &[usize]| (0..9).filter(|l| !o.contains(l)).collect::<Vec<_>>();
+        assert_ne!(kept(&android_off), kept(&ios_off));
+        assert_ne!(kept(&ios_off), kept(&web_off));
+
+        assert_eq!((ios.goos(), ios.goarch()), ("ios", "arm64"));
+        assert_eq!((android.goos(), android.goarch()), ("android", "arm64"));
+        assert_eq!((web.goos(), web.goarch()), ("js", "wasm"));
     }
 
     #[test]

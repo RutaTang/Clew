@@ -80,12 +80,17 @@ pub(crate) fn target_name(target: &crate::inactive::Target) -> String {
         "macos" => "macOS",
         "windows" => "Windows",
         "freebsd" => "FreeBSD",
+        "ios" => "iOS",
+        "android" => "Android",
+        _ if target.family == "wasm" => "Web",
         _ => return target.label.clone(),
     };
-    let usual = if target.os == "macos" {
-        "aarch64"
-    } else {
-        "x86_64"
+    // The architecture each is usually read for: said only when it is
+    // another.
+    let usual = match target.os.as_str() {
+        "macos" | "ios" | "android" => "aarch64",
+        _ if target.family == "wasm" => "wasm32",
+        _ => "x86_64",
     };
     if target.label.starts_with("Host") || target.arch == usual || target.arch.is_empty() {
         return system.to_string();
@@ -795,6 +800,9 @@ mod target_name_tests {
         assert_eq!(named("Linux (x86_64)"), "Linux");
         assert_eq!(named("macOS (arm64)"), "macOS");
         assert_eq!(named("macOS (x86_64)"), "macOS (x86_64)");
+        assert_eq!(named("iOS (arm64)"), "iOS");
+        assert_eq!(named("Android (arm64)"), "Android");
+        assert_eq!(named("Web (wasm32)"), "Web");
         let host = Target::host();
         assert!(!target_name(&host).contains('('), "{}", target_name(&host));
     }
