@@ -368,6 +368,12 @@ pub(crate) fn voice_section(app: &App) -> Element<'_, Message> {
         app.voice.prefs.send_questions,
         |v| Message::Voice(VoiceMsg::SetSendQuestions(v)),
     ));
+    listening.push(form::toggle(
+        tr!("Talk over Clew while it speaks"),
+        None,
+        app.voice.prefs.talk_over,
+        |v| Message::Voice(VoiceMsg::SetTalkOver(v)),
+    ));
     listening.extend(turn_rows(app));
     // Groups, and no captions around them: the voice key is on the button
     // it starts, and where models are kept is no setting.

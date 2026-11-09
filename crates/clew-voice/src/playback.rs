@@ -4,10 +4,14 @@
 //! A [`Player`] owns a thread that owns the output stream — a stream is not
 //! `Send` on every platform — and plays what it is given, one sentence after
 //! another, resampled to the device's own rate ([`crate::audio::resample`]),
-//! until it is cleared or dropped.
+//! until it is cleared or dropped. It can be paused — while the reader
+//! talks over Clew — and resumed where it was, fading out and back in.
+//!
+//! What it plays, silence too, goes to the [`echo`](crate::echo) bus, so
+//! that the microphone's echo of it can be taken out of what it hears.
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -28,7 +32,12 @@ struct Shared {
     level: AtomicU32,
     /// A failure the stream reported after it started.
     failed: Mutex<Option<String>>,
+    /// Held: nothing more is played until it is resumed.
+    paused: AtomicBool,
 }
+
+/// How long a pause fades out over, and a resume back in.
+const FADE_SECONDS: f32 = 0.01;
 
 /// The default output, playing.
 pub struct Player {
@@ -93,6 +102,22 @@ impl Player {
         if let Ok(mut queue) = self.shared.queue.lock() {
             queue.extend(samples);
         }
+    }
+
+    /// Hold what is playing, fading it out: what is queued waits, to be
+    /// played from where it was held ([`Player::resume`]).
+    pub fn pause(&self) {
+        self.shared.paused.store(true, Ordering::Relaxed);
+    }
+
+    /// Go on playing what was held, fading back in.
+    pub fn resume(&self) {
+        self.shared.paused.store(false, Ordering::Relaxed);
+    }
+
+    /// Whether it is held.
+    pub fn paused(&self) -> bool {
+        self.shared.paused.load(Ordering::Relaxed)
     }
 
     /// Stop: what is queued is not played.
@@ -170,6 +195,7 @@ fn open() -> Result<(cpal::Stream, u32, Arc<Shared>), String> {
         played: AtomicU64::new(0),
         level: AtomicU32::new(0),
         failed: Mutex::new(None),
+        paused: AtomicBool::new(false),
     });
     let config = supported.config();
     let stream = match supported.sample_format() {
@@ -192,6 +218,41 @@ fn open() -> Result<(cpal::Stream, u32, Arc<Shared>), String> {
     Ok((stream, rate, shared))
 }
 
+/// The next `frames` samples to play, taken from `queue`: let through at
+/// `gain`, moved toward `target` by `step` a sample — faded out to a pause
+/// (0), back in from one (1). Paused, what is queued waits. Also how many
+/// were taken.
+fn fill(
+    queue: &mut VecDeque<f32>,
+    frames: usize,
+    target: f32,
+    gain: &mut f32,
+    step: f32,
+) -> (Vec<f32>, u64) {
+    let mut out = Vec::with_capacity(frames);
+    let mut taken = 0u64;
+    for _ in 0..frames {
+        if target == 0.0 && *gain <= 0.0 {
+            // Held: what is queued waits.
+            out.push(0.0);
+            continue;
+        }
+        *gain = if target > *gain {
+            (*gain + step).min(target)
+        } else {
+            (*gain - step).max(target)
+        };
+        match queue.pop_front() {
+            Some(sample) => {
+                taken += 1;
+                out.push(sample * *gain);
+            }
+            None => out.push(0.0),
+        }
+    }
+    (out, taken)
+}
+
 fn build<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
@@ -203,19 +264,35 @@ where
 {
     let data = shared.clone();
     let errors = shared.clone();
+    let rate = config.sample_rate;
+    let echo = crate::echo::bus();
+    // How loud what is played is let through: falling to nothing as it is
+    // paused, rising back as it resumes.
+    let step = 1.0 / (rate as f32 * FADE_SECONDS).max(1.0);
+    let mut gain = 1.0f32;
     device.build_output_stream::<T, _, _>(
         config,
-        move |output: &mut [T], _| {
+        move |output: &mut [T], info: &cpal::OutputCallbackInfo| {
             let frames = output.len() / channels;
-            let mut mono = Vec::with_capacity(frames);
-            if let Ok(mut queue) = data.queue.lock() {
-                let n = frames.min(queue.len());
-                mono.extend(queue.drain(..n));
-            }
-            data.played.fetch_add(mono.len() as u64, Ordering::Relaxed);
+            let target = if data.paused.load(Ordering::Relaxed) {
+                0.0
+            } else {
+                1.0
+            };
+            let (mut mono, drained) = match data.queue.lock() {
+                Ok(mut queue) => fill(&mut queue, frames, target, &mut gain, step),
+                Err(_) => (vec![0.0; frames], 0),
+            };
+            data.played.fetch_add(drained, Ordering::Relaxed);
             data.level
                 .store(audio::meter(audio::rms(&mono)).to_bits(), Ordering::Relaxed);
             mono.resize(frames, 0.0);
+            let timestamp = info.timestamp();
+            echo.played(
+                &mono,
+                rate,
+                Some(timestamp.playback.duration_since(timestamp.callback)),
+            );
             for (frame, sample) in output.chunks_mut(channels).zip(&mono) {
                 for out in frame {
                     *out = T::from_sample(*sample);
@@ -234,6 +311,33 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Paused, what is playing fades out and then waits; resumed, it fades
+    /// back in and goes on from where it waited — nothing skipped but the
+    /// fade.
+    #[test]
+    fn a_pause_fades_out_holds_and_goes_on() {
+        let mut queue: VecDeque<f32> = (0..1000).map(|i| 1.0 + i as f32).collect();
+        let step = 0.25;
+        let mut gain = 1.0;
+        let (out, taken) = fill(&mut queue, 4, 1.0, &mut gain, step);
+        assert_eq!(out, [1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(taken, 4);
+        // Paused: four samples fading out, then silence, the queue held.
+        let (out, taken) = fill(&mut queue, 10, 0.0, &mut gain, step);
+        assert_eq!(&out[..4], &[5.0 * 0.75, 6.0 * 0.5, 7.0 * 0.25, 0.0]);
+        assert!(out[4..].iter().all(|s| *s == 0.0));
+        assert_eq!(taken, 4);
+        let (out, taken) = fill(&mut queue, 10, 0.0, &mut gain, step);
+        assert!(out.iter().all(|s| *s == 0.0) && taken == 0, "held");
+        // Resumed: from where it was held, fading back in.
+        let (out, _) = fill(&mut queue, 6, 1.0, &mut gain, step);
+        assert_eq!(out, [9.0 * 0.25, 10.0 * 0.5, 11.0 * 0.75, 12.0, 13.0, 14.0]);
+        // Nothing left: silence, nothing taken.
+        let mut empty = VecDeque::new();
+        let (out, taken) = fill(&mut empty, 3, 1.0, &mut gain, step);
+        assert_eq!((out, taken), (vec![0.0; 3], 0));
+    }
 
     /// The default output plays what it is given and says when all of it
     /// has been played — when the test is pointed at one.

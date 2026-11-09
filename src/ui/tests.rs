@@ -9621,6 +9621,8 @@ fn speaking_shows_with_a_stop() {
         fn error(&self) -> Option<String> {
             None
         }
+        fn pause(&self) {}
+        fn resume(&self) {}
     }
     let mut app = reader_app();
     app.ask_view = crate::AskView::Hidden;

@@ -5,7 +5,8 @@
 //! A [`Recorder`] owns a thread that owns the input stream — a stream is
 //! not `Send` on every platform — and gathers what it hears, one channel at
 //! the device's own rate, until it is stopped or has heard as much as it
-//! may keep.
+//! may keep — with what the speaker plays taken out of it when asked
+//! ([`crate::echo`]): Clew's own voice is then not heard as the reader's.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc;
@@ -64,14 +65,16 @@ pub struct Recorder {
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
 impl Recorder {
-    /// Start listening on the default input, keeping at most `max_seconds`.
-    pub fn start(max_seconds: u32) -> Result<Recorder, String> {
+    /// Start listening on the default input, keeping at most `max_seconds`
+    /// — with the echo of what the speaker plays taken out of what is
+    /// heard, when `cancel_echo`.
+    pub fn start(max_seconds: u32, cancel_echo: bool) -> Result<Recorder, String> {
         let (ready_tx, ready_rx) = mpsc::channel::<Result<(u32, String, Arc<Shared>), String>>();
         let (stop_tx, stop_rx) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
             .name("clew-microphone".into())
             .spawn(move || {
-                let stream = match open(max_seconds) {
+                let stream = match open(max_seconds, cancel_echo) {
                     Ok((stream, rate, device, shared)) => {
                         let _ = ready_tx.send(Ok((rate, device, shared)));
                         stream
@@ -186,7 +189,10 @@ impl Drop for Recorder {
 }
 
 /// Open the default input and start it, gathering into a fresh [`Shared`].
-fn open(max_seconds: u32) -> Result<(cpal::Stream, u32, String, Arc<Shared>), String> {
+fn open(
+    max_seconds: u32,
+    cancel_echo: bool,
+) -> Result<(cpal::Stream, u32, String, Arc<Shared>), String> {
     let host = cpal::default_host();
     let device = host.default_input_device().ok_or(NO_MICROPHONE)?;
     let name = device
@@ -206,14 +212,14 @@ fn open(max_seconds: u32) -> Result<(cpal::Stream, u32, String, Arc<Shared>), St
     });
     let config = supported.config();
     let stream = match supported.sample_format() {
-        SampleFormat::F32 => build::<f32>(&device, config, channels, &shared),
-        SampleFormat::F64 => build::<f64>(&device, config, channels, &shared),
-        SampleFormat::I8 => build::<i8>(&device, config, channels, &shared),
-        SampleFormat::I16 => build::<i16>(&device, config, channels, &shared),
-        SampleFormat::I32 => build::<i32>(&device, config, channels, &shared),
-        SampleFormat::U8 => build::<u8>(&device, config, channels, &shared),
-        SampleFormat::U16 => build::<u16>(&device, config, channels, &shared),
-        SampleFormat::U32 => build::<u32>(&device, config, channels, &shared),
+        SampleFormat::F32 => build::<f32>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::F64 => build::<f64>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::I8 => build::<i8>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::I16 => build::<i16>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::I32 => build::<i32>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::U8 => build::<u8>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::U16 => build::<u16>(&device, config, channels, &shared, cancel_echo),
+        SampleFormat::U32 => build::<u32>(&device, config, channels, &shared, cancel_echo),
         other => {
             return Err(format!(
                 "the microphone's sample format ({other}) is not supported"
@@ -230,6 +236,7 @@ fn build<T>(
     config: cpal::StreamConfig,
     channels: usize,
     shared: &Arc<Shared>,
+    cancel_echo: bool,
 ) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
@@ -237,15 +244,29 @@ where
 {
     let data = shared.clone();
     let errors = shared.clone();
+    let mut canceller =
+        cancel_echo.then(|| crate::echo::Canceller::new(config.sample_rate, crate::echo::bus()));
     // One level frame's worth of samples at the device's rate, and the
     // frame being summed.
     let frame = ((config.sample_rate as f32 * audio::FRAME_SECONDS) as usize).max(1);
     let (mut sum, mut count) = (0.0f64, 0usize);
     device.build_input_stream::<T, _, _>(
         config,
-        move |input: &[T], _| {
+        move |input: &[T], info: &cpal::InputCallbackInfo| {
             let floats: Vec<f32> = input.iter().map(|s| s.to_sample::<f32>()).collect();
             let mono = audio::mono(&floats, channels);
+            // What the speaker played, taken out: from here on, what is
+            // measured and kept is what was said.
+            let mono = match canceller.as_mut() {
+                Some(canceller) => {
+                    let timestamp = info.timestamp();
+                    canceller.clean(
+                        &mono,
+                        Some(timestamp.callback.duration_since(timestamp.capture)),
+                    )
+                }
+                None => mono,
+            };
             data.level
                 .store(audio::meter(audio::rms(&mono)).to_bits(), Ordering::Relaxed);
             let mut done = Vec::new();
@@ -367,7 +388,7 @@ mod tests {
             eprintln!("skipped: set CLEW_TEST_MICROPHONE=1 to open the microphone");
             return;
         }
-        match Recorder::start(1) {
+        match Recorder::start(1, false) {
             Ok(recorder) => {
                 assert!(!recorder.device().is_empty());
                 std::thread::sleep(Duration::from_millis(200));

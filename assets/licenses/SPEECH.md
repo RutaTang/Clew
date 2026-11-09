@@ -21,6 +21,17 @@ these libraries, each unmodified:
 The Apache License 2.0 is in [`Apache-2.0.txt`](Apache-2.0.txt), beside
 this file; the MIT and BSD-3-Clause licenses follow.
 
+## Echo cancellation
+
+So that the reader can talk over Clew while it speaks, Clew takes its own
+voice back out of what the microphone hears with **sonora**
+(<https://github.com/dignifiedquire/sonora>), a Rust port of the WebRTC audio
+processing module's echo canceller (AEC3), built into Clew itself:
+
+| Library | License | Copyright |
+| --- | --- | --- |
+| sonora (<https://github.com/dignifiedquire/sonora>), from WebRTC (<https://webrtc.org>) | BSD-3-Clause | Copyright (c) 2011, The WebRTC Project Authors; Copyright (c) 2016, Arun Raghavan and contributors; Copyright (c) 2026, dignifiedquire. All rights reserved. |
+
 ## The voices
 
 No voice ships with Clew. Each is downloaded only when the user asks for it,
@@ -58,7 +69,7 @@ above.
 
 ## BSD 3-Clause License
 
-Applies to KISS FFT, with its copyright above.
+Applies to KISS FFT and to sonora, each with its copyright above.
 
 > Redistribution and use in source and binary forms, with or without
 > modification, are permitted provided that the following conditions are met:

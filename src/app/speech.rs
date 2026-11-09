@@ -14,9 +14,16 @@
 //!
 //! It stops at Esc, at the voice key — which then listens, so the reader
 //! can speak over Clew as over a person — at a new question, and at Stop,
-//! Clear or closing Ask. With the microphone on, it waits while Clew reads
-//! an answer aloud, and opens again once all is said: it would hear Clew
-//! otherwise.
+//! Clear or closing Ask. With the microphone on, the reader can also just
+//! talk over Clew ([`VoicePrefs::talk_over`]): the microphone stays open
+//! while Clew speaks, Clew's own voice taken out of what it hears
+//! ([`clew_voice::echo`]); Clew pauses at the first words said over it, and
+//! stops once they are heard to be words — not its own, heard back — or
+//! goes on where it paused when they were not. With that off, the
+//! microphone waits while Clew reads an answer aloud, and opens again once
+//! all is said.
+//!
+//! [`VoicePrefs::talk_over`]: crate::app::voice::VoicePrefs::talk_over
 //!
 //! Its messages are [`VoiceMsg`]'s, handled here through
 //! [`App::update_speech`].
@@ -81,6 +88,10 @@ pub(crate) trait Playing: Send {
     fn level(&self) -> f32;
     /// A failure since it opened (the device went away).
     fn error(&self) -> Option<String>;
+    /// Hold what is playing, to go on from there ([`Playing::resume`]).
+    fn pause(&self);
+    /// Go on playing what was held.
+    fn resume(&self);
 }
 
 impl Playing for Player {
@@ -107,6 +118,12 @@ impl Playing for Player {
     }
     fn error(&self) -> Option<String> {
         Player::error(self)
+    }
+    fn pause(&self) {
+        Player::pause(self);
+    }
+    fn resume(&self) {
+        Player::resume(self);
     }
 }
 
@@ -291,7 +308,21 @@ pub(crate) struct Speech {
     pub download_errors: HashMap<&'static str, String>,
     pub(crate) open_output: OpenOutput,
     pub(crate) synthesizer: Arc<dyn Synthesizer>,
+    /// Since when Clew is held while the reader talks over it — until what
+    /// they said is heard, and told from Clew's own voice
+    /// ([`said_over`](crate::app::voice::said_over)).
+    barged: Option<Instant>,
+    /// The last sentences made to be said: what the microphone may still
+    /// hear of Clew's own voice, its echo not all taken out.
+    said_lately: VecDeque<String>,
 }
+
+/// How many of the sentences last made [`Speech::said_lately`] keeps.
+const SAID_LATELY: usize = 6;
+
+/// How long Clew is held for words said over it at most, before it goes
+/// on: what was said is heard by then.
+const HELD_AT_MOST: Duration = Duration::from_secs(12);
 
 impl Speech {
     pub(crate) fn new() -> Self {
@@ -313,7 +344,57 @@ impl Speech {
             download_errors: HashMap::new(),
             open_output: Arc::new(open_system_output),
             synthesizer: SYSTEM.clone(),
+            barged: None,
+            said_lately: VecDeque::new(),
         }
+    }
+
+    /// Whether Clew is held while the reader talks over it.
+    pub(crate) fn held(&self) -> bool {
+        self.barged.is_some()
+    }
+
+    /// The reader talks over Clew: what is being said is held — faded out,
+    /// kept to go on from — while what they say is heard. Nothing playing,
+    /// nothing is held.
+    pub(crate) fn hold(&mut self) {
+        if self.barged.is_none()
+            && let Some(output) = &self.output
+        {
+            output.pause();
+            self.barged = Some(Instant::now());
+        }
+    }
+
+    /// Go on with what was held, where it was.
+    pub(crate) fn go_on(&mut self) {
+        if self.barged.take().is_some()
+            && let Some(output) = &self.output
+        {
+            output.resume();
+            // The pause was the reader's, not the output's: a stall is
+            // counted from now.
+            self.progress = None;
+        }
+    }
+
+    /// Held longer than words said over it take to be heard.
+    pub(crate) fn held_too_long(&self) -> bool {
+        self.barged
+            .is_some_and(|since| since.elapsed() >= HELD_AT_MOST)
+    }
+
+    /// Held as if since `ago`.
+    #[cfg(test)]
+    pub(crate) fn hold_since_for_test(&mut self, ago: Duration) {
+        if self.barged.is_some() {
+            self.barged = Instant::now().checked_sub(ago);
+        }
+    }
+
+    /// The sentences last made to be said.
+    pub(crate) fn said_lately(&self) -> Vec<String> {
+        self.said_lately.iter().cloned().collect()
     }
 
     /// Whether Clew is speaking: something is being said, made, or waits to
@@ -352,6 +433,7 @@ impl Speech {
         self.progress = None;
         self.reopened = false;
         self.made_with.clear();
+        self.barged = None;
     }
 }
 
@@ -718,6 +800,11 @@ impl App {
                 continue;
             }
             let dir = speech::dir(&store, model);
+            let lately = &mut self.voice.speech.said_lately;
+            lately.push_back(sentence.text.clone());
+            while lately.len() > SAID_LATELY {
+                lately.pop_front();
+            }
             let voice = self.voice.prefs.voice_for(model);
             let speed = self.voice.prefs.speed;
             let synthesizer = self.voice.speech.synthesizer.clone();
@@ -866,6 +953,15 @@ impl App {
         // stop only once it plays nothing more — a device's hiccup is played
         // through.
         let played = output.played();
+        // Held while the reader talks over Clew: it plays nothing on
+        // purpose. Held too long — what was said was not heard — it goes on.
+        if speech.barged.is_some() {
+            if speech.held_too_long() {
+                speech.go_on();
+            }
+            speech.level = 0.0;
+            return Task::none();
+        }
         match speech.progress {
             // Nothing played since, though there was something to play.
             Some((before, _)) if before == played && !output.idle() => {}

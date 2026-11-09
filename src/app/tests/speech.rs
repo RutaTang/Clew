@@ -97,6 +97,8 @@ struct OutputScript {
     opened: usize,
     /// There is no speaker to open.
     absent: bool,
+    /// Held: the reader talks over Clew.
+    paused: bool,
 }
 
 struct Output(Arc<Mutex<OutputScript>>);
@@ -129,6 +131,12 @@ impl Playing for Output {
     }
     fn error(&self) -> Option<String> {
         self.0.lock().unwrap().error.clone()
+    }
+    fn pause(&self) {
+        self.0.lock().unwrap().paused = true;
+    }
+    fn resume(&self) {
+        self.0.lock().unwrap().paused = false;
     }
 }
 
@@ -406,7 +414,7 @@ fn speech_stops_when_the_reader_asks() {
     ended(&mut app, 3, StreamOutcome::Stopped);
     assert!(!app.voice.speech.is_speaking());
     // The voice key: said over Clew, it stops and listens.
-    app.voice.open_mic = |_| Err("no microphone is available".into());
+    app.voice.open_mic = |_, _| Err("no microphone is available".into());
     let model = app.voice.prefs.model();
     let store = app.voice.store.clone().unwrap();
     std::fs::create_dir_all(store.dir()).unwrap();
@@ -441,17 +449,20 @@ fn speech_stops_when_the_reader_asks() {
     assert!(!app.voice.speech.is_speaking(), "but not played");
 }
 
-/// The microphone, on, opens once Clew has said all of the answer — not
-/// while it speaks, which it would hear; the reader stopping Clew opens it
-/// at once, as does an answer with nothing to say.
+/// Not to be talked over, the microphone, on, opens once Clew has said
+/// all of the answer — not while it speaks, which it would hear; the
+/// reader stopping Clew opens it at once, as does an answer with nothing to
+/// say.
 #[test]
 fn the_microphone_waits_for_clew_to_finish() {
     let (mut app, _voice, output) = speech_app("speech-mic-waits");
+    // Not talked over: talked over, it listens through (below).
+    app.voice.prefs.talk_over = false;
     let model = app.voice.prefs.model();
     let store = app.voice.store.clone().unwrap();
     std::fs::create_dir_all(store.dir()).unwrap();
     std::fs::write(store.path(model), b"a model").unwrap();
-    app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
+    app.voice.open_mic = |_, _| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
     app.ask_view = AskView::Compact;
     let _ = app.update(Message::Voice(VoiceMsg::Toggle));
     assert!(app.voice.is_listening(), "{}", app.status);
@@ -812,7 +823,7 @@ fn the_microphone_survives_a_voice_that_fails() {
     let store = app.voice.store.clone().unwrap();
     std::fs::create_dir_all(store.dir()).unwrap();
     std::fs::write(store.path(model), b"a model").unwrap();
-    app.voice.open_mic = |_| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
+    app.voice.open_mic = |_, _| Ok(Box::new(Quiet) as Box<dyn crate::app::voice::Listening>);
     app.ask_view = AskView::Compact;
     // On already, as when the question was said.
     app.voice.mic_on = true;
@@ -1207,4 +1218,224 @@ fn windows_keep_each_others_voice_settings() {
     assert_eq!(read.voice_for(speech::find("supertonic-3").unwrap()), 6);
     assert_eq!(read.read_aloud, ReadAloud::Always);
     assert!(!read.run_commands);
+}
+
+thread_local! {
+    /// How long the talking microphone has been quiet since words were
+    /// said over Clew; `None` while none were.
+    static TALK: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+    /// Whether the microphone was opened to take Clew's own voice out.
+    static CANCELLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// A microphone the test talks into ([`TALK`]).
+struct Talker;
+
+impl crate::app::voice::Listening for Talker {
+    fn level(&self) -> f32 {
+        0.2
+    }
+    fn silence_after_speech(&self) -> Option<f32> {
+        TALK.with(|t| t.get())
+    }
+    fn recent(&self, _seconds: f32) -> (Vec<f32>, u32) {
+        (Vec::new(), 16_000)
+    }
+    fn full(&self) -> bool {
+        false
+    }
+    fn error(&self) -> Option<String> {
+        None
+    }
+    fn stop(self: Box<Self>) -> clew_voice::capture::Recording {
+        // Half a second of quiet, a second said, half a second of quiet.
+        let said: Vec<f32> = (0..32_000)
+            .map(|i| {
+                if (8_000..24_000).contains(&i) {
+                    0.3 * (i as f32 * 0.07).sin()
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        clew_voice::capture::Recording {
+            samples: said,
+            rate: 16_000,
+        }
+    }
+}
+
+fn talking_mic(
+    _max_seconds: u32,
+    cancel_echo: bool,
+) -> Result<Box<dyn crate::app::voice::Listening>, String> {
+    CANCELLED.with(|c| c.set(cancel_echo));
+    Ok(Box::new(Talker))
+}
+
+/// A recognizer that hears `0`.
+struct Hears(String);
+
+impl crate::app::voice::Transcriber for Hears {
+    fn transcribe(
+        &self,
+        _model: &Path,
+        _audio: &[f32],
+        _options: &clew_voice::whisper::Options,
+        _cancel: &AtomicBool,
+    ) -> Result<String, String> {
+        Ok(self.0.clone())
+    }
+}
+
+/// Clew reading an answer aloud with the microphone on, to be talked over;
+/// what the reader is heard to say is `heard`.
+fn talked_over(tag: &str, heard: &str) -> (App, Arc<Mutex<OutputScript>>) {
+    let (mut app, _voice, output) = speech_app(tag);
+    let model = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(model), b"a model").unwrap();
+    app.voice.open_mic = talking_mic;
+    app.voice.transcriber = Arc::new(Hears(heard.into()));
+    app.ask_view = AskView::Compact;
+    TALK.with(|t| t.set(None));
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(
+        CANCELLED.with(|c| c.get()),
+        "opened to take Clew's voice out"
+    );
+    asked(&mut app, 1, true);
+    delta(
+        &mut app,
+        1,
+        "The total adds every price. Then the discount is taken off.",
+    );
+    // Clew speaks, and the microphone listens through it.
+    assert!(app.voice.speech.is_speaking());
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { .. }),
+        "listening while Clew speaks: {:?}",
+        app.voice.phase
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert!(app.voice.speech.is_speaking());
+    (app, output)
+}
+
+fn voice_tick(app: &mut App) {
+    let task = app.update(Message::Voice(VoiceMsg::Tick));
+    settle(app, task);
+}
+
+/// Talked over, Clew is held at the first words said over it — the
+/// microphone listening all along — and stops once they are heard to be
+/// the reader's.
+#[test]
+fn talking_over_clew_holds_it_then_stops_it() {
+    let (mut app, output) = talked_over("speech-talk-over", "wait");
+    assert!(
+        matches!(app.voice.phase, VoicePhase::Listening { .. }),
+        "listening while Clew speaks: {:?}",
+        app.voice.phase
+    );
+    // Words said over Clew: it is held.
+    TALK.with(|t| t.set(Some(0.1)));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    assert!(output.lock().unwrap().paused, "faded out");
+    assert!(app.voice.speech.is_speaking(), "held, not stopped");
+    // Held, the output plays nothing: no stall — it is not opened again.
+    let opened = output.lock().unwrap().opened;
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+        settle(&mut app, task);
+    }
+    assert!(
+        app.voice.speech.is_speaking(),
+        "not taken for a stalled speaker"
+    );
+    assert_eq!(output.lock().unwrap().opened, opened, "not opened again");
+    assert!(output.lock().unwrap().paused);
+    // What was said ends, and is heard: Clew stops.
+    TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+    voice_tick(&mut app);
+    assert!(!app.voice.speech.is_speaking(), "{}", app.status);
+    assert!(!app.voice.speech.held());
+}
+
+/// What is heard over Clew that is only Clew's own words, heard back —
+/// echo the canceller left — lets it go on where it was held.
+#[test]
+fn clews_own_words_heard_back_let_it_go_on() {
+    let (mut app, output) = talked_over("speech-talk-echo", "the total adds every price");
+    TALK.with(|t| t.set(Some(0.1)));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    TALK.with(|t| t.set(Some(crate::app::voice::END_SILENCE + 0.1)));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.is_speaking(), "it goes on");
+    assert!(!app.voice.speech.held());
+    assert!(!output.lock().unwrap().paused, "faded back in");
+    assert!(app.proj.ask_turns.len() == 1, "nothing asked");
+}
+
+/// Held, and what was said never heard — the microphone gone quiet — Clew
+/// goes on by itself.
+#[test]
+fn a_hold_never_answered_lets_clew_go_on() {
+    let (mut app, output) = talked_over("speech-talk-timeout", "wait");
+    TALK.with(|t| t.set(Some(0.1)));
+    voice_tick(&mut app);
+    assert!(app.voice.speech.held());
+    app.voice
+        .speech
+        .hold_since_for_test(std::time::Duration::from_secs(60));
+    let task = app.update(Message::Voice(VoiceMsg::SpeakTick));
+    settle(&mut app, task);
+    assert!(!app.voice.speech.held());
+    assert!(!output.lock().unwrap().paused);
+}
+
+/// Talking over Clew turned off: the microphone is opened as it was, with
+/// nothing taken out, and waits while Clew speaks.
+#[test]
+fn not_to_be_talked_over_the_microphone_waits() {
+    let (mut app, _voice, _output) = speech_app("speech-talk-off");
+    let model = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    std::fs::create_dir_all(store.dir()).unwrap();
+    std::fs::write(store.path(model), b"a model").unwrap();
+    app.voice.open_mic = talking_mic;
+    app.ask_view = AskView::Compact;
+    let _ = app.update(Message::Voice(VoiceMsg::SetTalkOver(false)));
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    assert!(!CANCELLED.with(|c| c.get()));
+    asked(&mut app, 1, true);
+    delta(&mut app, 1, "The total adds every price.");
+    assert_eq!(app.voice.phase, VoicePhase::Idle, "waits for Clew");
+}
+
+/// Words said over Clew are the reader's but for a few nearly all Clew's
+/// own; anything short is the reader's, whatever Clew said.
+#[test]
+fn what_is_said_over_clew_is_told_from_its_echo() {
+    use crate::app::voice::said_over;
+    let said = vec!["The total adds every price.".to_string()];
+    assert!(said_over("stop", &said), "short: the reader's");
+    // Short, though Clew said it too: still the reader's.
+    let stop = vec!["You can stop the server first.".to_string()];
+    assert!(said_over("stop", &stop));
+    assert!(said_over("stop the", &stop));
+    assert!(!said_over("you can stop the server", &stop));
+    assert!(said_over("wait wait", &said));
+    assert!(!said_over("The total adds every", &said), "Clew's own");
+    assert!(said_over("open the cart file please", &said));
+    assert!(!said_over("", &said), "nothing said");
+    assert!(!said_over("…", &said), "no words");
+    // Without spaces: each character a word.
+    let chinese = vec!["总价把每个价格加起来。".to_string()];
+    assert!(!said_over("每个价格加起来", &chinese));
+    assert!(said_over("打开购物车文件", &chinese));
 }

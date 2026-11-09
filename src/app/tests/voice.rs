@@ -54,7 +54,7 @@ thread_local! {
     static MIC: RefCell<Option<Arc<Mutex<MicScript>>>> = const { RefCell::new(None) };
 }
 
-fn fake_mic(_max_seconds: u32) -> Result<Box<dyn Listening>, String> {
+fn fake_mic(_max_seconds: u32, _cancel_echo: bool) -> Result<Box<dyn Listening>, String> {
     MIC.with(|m| m.borrow().clone())
         .map(|script| Box::new(FakeMic(script)) as Box<dyn Listening>)
         .ok_or_else(|| "no microphone is available".to_string())
@@ -415,15 +415,17 @@ fn what_is_said_is_worked_out_in_order() {
     assert!(app.voice.is_listening());
 }
 
-/// The microphone, on, waits while Clew reads an answer aloud — it would
-/// hear Clew — and listens again once it is over, whatever ended it; an
-/// answer that is not read aloud is no reason to wait. Put away to its
-/// pill, the conversation is listened for all the same.
+/// Not to be talked over, the microphone, on, waits while Clew reads an
+/// answer aloud — it would hear Clew — and listens again once it is over,
+/// whatever ended it; an answer that is not read aloud is no reason to
+/// wait. Put away to its pill, the conversation is listened for all the
+/// same.
 #[test]
 fn the_microphone_waits_while_an_answer_is_read_aloud() {
     use crate::app::voice::ReadAloud;
     use clew_protocol::StreamOutcome;
     let (mut app, _script, _) = voice_app("voice-waits-for-answer", "");
+    app.voice.prefs.talk_over = false;
     app.ask_view = AskView::Compact;
     let turn = |app: &mut App, stream: u64, spoken: bool| {
         app.proj.ask_turns.push(crate::app::model::AskTurn {

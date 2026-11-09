@@ -276,6 +276,11 @@ impl App {
             tr_noop!("send questions right away, send spoken questions"),
             |on| Message::Voice(VoiceMsg::SetSendQuestions(on)),
         ));
+        out.push(switch(
+            tr_noop!("Talk over Clew while it speaks"),
+            tr_noop!("talk over Clew, interrupt Clew, barge in"),
+            |on| Message::Voice(VoiceMsg::SetTalkOver(on)),
+        ));
 
         // How Clew speaks.
         out.push(Setting {
