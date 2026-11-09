@@ -32,21 +32,43 @@ impl App {
         let context = self.gather_walkthrough_context();
         let overview = self.proj.overview.markdown.clone();
         let scope = scope.trim().to_string();
-        let scope_opt = (!scope.is_empty()).then(|| scope.clone());
-        let prompt = walkthrough::prompt(
-            &project_name,
-            overview.as_deref(),
-            &context,
-            scope_opt.as_deref(),
-        );
+        // The reading guide: a tree of where to start, what to read next and
+        // where reading ends, asked for as its own kind of answer.
+        let guide = scope == walkthrough::GUIDE_SCOPE;
+        let (system, prompt) = if guide {
+            (
+                walkthrough::GUIDE_SYSTEM,
+                walkthrough::guide_prompt(&project_name, overview.as_deref(), &context),
+            )
+        } else {
+            let scope_opt = (!scope.is_empty()).then(|| scope.clone());
+            (
+                walkthrough::SYSTEM,
+                walkthrough::prompt(
+                    &project_name,
+                    overview.as_deref(),
+                    &context,
+                    scope_opt.as_deref(),
+                ),
+            )
+        };
         let seq = self.begin_walkthrough_generation(scope.clone());
-        self.status = tr!("Generating walkthrough…").into();
+        self.status = if guide {
+            tr!("Writing the reading guide…")
+        } else {
+            tr!("Generating walkthrough…")
+        }
+        .into();
         let ai = self.ai_client();
         let stamp = self.stamp();
         Task::perform(
             async move {
-                let resp = ai.complete(cfg, walkthrough::SYSTEM, prompt, 4096).await?;
-                walkthrough::parse(&resp)
+                let resp = ai.complete(cfg, system, prompt, 4096).await?;
+                let mut wt = walkthrough::parse(&resp)?;
+                if guide {
+                    walkthrough::shape_guide(&mut wt);
+                }
+                Ok(wt)
             },
             move |result| {
                 Message::Walk(WalkMsg::Done {

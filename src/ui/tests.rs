@@ -2590,6 +2590,7 @@ fn reading_panels_are_drawn_fresh_for_what_they_show() {
         symbol: None,
         line: Some(n),
         narration: format!("narration {n}"),
+        depth: 0,
     };
     let tour = crate::walkthrough::Walkthrough {
         title: "tour".into(),
@@ -7402,6 +7403,7 @@ fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
                 symbol: None,
                 line: Some(1),
                 narration: "n".into(),
+                depth: 0,
             },
             crate::walkthrough::Step {
                 title: format!("{scope} two"),
@@ -7409,6 +7411,7 @@ fn tour(scope: &str) -> crate::walkthrough::Walkthrough {
                 symbol: None,
                 line: Some(2),
                 narration: "n".into(),
+                depth: 0,
             },
         ],
     }
@@ -11794,4 +11797,64 @@ fn the_shortcuts_are_in_the_app_menu_not_on_the_strip() {
         )),
         "{picked:?}"
     );
+}
+
+/// The reading guide is offered first in the Walkthroughs view — written
+/// when there is none, opened when there is — and, open, its steps are a
+/// tree: each under the one it is read from.
+#[test]
+fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
+    use crate::walkthrough::{GUIDE_SCOPE, Step, Walkthrough};
+    let mut app = reader_app();
+    app.sidebar = crate::SidebarTab::Walk;
+    app.show_left_sidebar = true;
+    let label = "\u{2691} Where to start reading";
+    let write = click(sim_elem(super::walk_tab(&app)), label);
+    assert!(
+        write
+            .iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::Generate(s)) if s == GUIDE_SCOPE)),
+        "{write:?}"
+    );
+    let step = |title: &str, depth: usize| Step {
+        title: title.into(),
+        file: "src/lib.rs".into(),
+        symbol: None,
+        line: Some(1),
+        narration: "n".into(),
+        depth,
+    };
+    app.proj.walk.library = vec![Walkthrough {
+        title: "Where to start".into(),
+        scope: GUIDE_SCOPE.into(),
+        steps: vec![
+            step("The entry point", 0),
+            step("The router", 1),
+            step("One handler", 2),
+            step("The store", 1),
+        ],
+    }];
+    let open = click(sim_elem(super::walk_tab(&app)), label);
+    assert!(
+        open.iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::Open(s)) if s == GUIDE_SCOPE)),
+        "{open:?}"
+    );
+    app.proj.walk.open = Some(GUIDE_SCOPE.into());
+    let mut sim = sim_elem(super::walk_tab(&app));
+    assert!(shows(&mut sim, "Reading guide"));
+    let x = |sim: &mut Sim<'_>, title: &str| {
+        text_at(sim, |t| t == title, 0)
+            .unwrap_or_else(|| panic!("{title} is drawn"))
+            .x
+    };
+    let root = x(&mut sim, "The entry point");
+    let child = x(&mut sim, "The router");
+    let grandchild = x(&mut sim, "One handler");
+    let sibling = x(&mut sim, "The store");
+    assert!(
+        root < child && child < grandchild,
+        "{root} {child} {grandchild}"
+    );
+    assert_eq!(child, sibling, "siblings line up");
 }

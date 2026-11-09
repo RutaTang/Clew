@@ -241,7 +241,24 @@ pub(crate) fn sidebar(app: &App) -> Element<'_, Message> {
 pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
     let header = walk_header(app);
     // A quick action to review the current branch/PR changes as a narrated tour.
+    // Where to start reading: the guide, opened when there is one, else
+    // written.
+    let guide = crate::walkthrough::GUIDE_SCOPE;
+    let has_guide = app.proj.walk.library.iter().any(|w| w.scope == guide);
+    let guide_msg = if has_guide {
+        Message::Walk(WalkMsg::Open(guide.to_string()))
+    } else {
+        Message::Walk(WalkMsg::Generate(guide.to_string()))
+    };
     let mut actions = column![
+        button(text(format!("\u{2691} {}", tr!("Where to start reading"))).size(ts::SMALL))
+            .style(theme::toolbar_button)
+            .padding([4, 10])
+            .width(Fill)
+            .on_press_maybe(
+                (app.proj.walk.generating.as_deref() != Some(guide))
+                    .then(|| super::heard::said(tr!("Where to start reading"), guide_msg))
+            ),
         button(text(format!("\u{2387} {}", tr!("Review branch changes"))).size(ts::SMALL))
             .style(theme::toolbar_button)
             .padding([4, 10])
@@ -317,6 +334,8 @@ pub(crate) fn walk_tab(app: &App) -> Element<'_, Message> {
 pub(crate) fn scope_label(scope: &str) -> String {
     if scope.is_empty() {
         tr!("Whole codebase").to_string()
+    } else if scope == crate::walkthrough::GUIDE_SCOPE {
+        tr!("Reading guide").to_string()
     } else if let Some(rest) = scope.strip_prefix("@trace") {
         match rest.trim() {
             "" => tr!("Debug run").to_string(),
@@ -533,15 +552,25 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
 
         // Expanded: the tour's steps, indented, current one highlighted.
         if is_open {
+            // A reading guide is a tree: each step under the one it is read
+            // from, by its depth, with a branch mark where a tour numbers it.
+            let tree = crate::walkthrough::is_guide(wt);
             for (si, step) in wt.steps.iter().enumerate() {
                 let is_cur = cur == Some(si);
+                let (mark, indent) = if tree {
+                    let mark = if step.depth == 0 {
+                        "\u{25C9}"
+                    } else {
+                        "\u{2514}"
+                    };
+                    (mark.to_string(), 14.0 * step.depth as f32)
+                } else {
+                    (format!("{}", si + 1), 0.0)
+                };
                 list = list.push(
                     button(
                         row![
-                            text(format!("{}", si + 1))
-                                .size(ts::CAPTION)
-                                .color(theme::dim())
-                                .width(18),
+                            text(mark).size(ts::CAPTION).color(theme::dim()).width(18),
                             text(step.title.clone()).size(ts::BODY).color(if is_cur {
                                 theme::fg()
                             } else {
@@ -557,7 +586,7 @@ pub(crate) fn walk_library(app: &App) -> Element<'_, Message> {
                         top: 4.0,
                         right: 8.0,
                         bottom: 4.0,
-                        left: 22.0,
+                        left: 22.0 + indent,
                     })
                     .on_press(super::heard::row(
                         || step.title.clone(),

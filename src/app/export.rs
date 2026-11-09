@@ -416,6 +416,7 @@ mod export_tests {
                 symbol: Some("main".into()),
                 line: Some(1),
                 narration: "Where it starts.\nTwo lines.".into(),
+                depth: 0,
             }],
         }];
         let mut glossary_files = vec![clew_protocol::DocFile {
@@ -537,6 +538,7 @@ _Scope: boot_
                 symbol: Some("__init__".into()),
                 line: Some(1),
                 narration: String::new(),
+                depth: 0,
             }],
         }];
         let glossary = Glossary::default();

@@ -8534,6 +8534,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
         }],
     };
     walkthrough::save_library(&root, &[theirs]).unwrap();
@@ -8548,6 +8549,7 @@ fn a_generated_walkthrough_keeps_the_other_windows_tour() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
         }],
     };
     // (The generation this window is waiting for.)
@@ -8632,6 +8634,7 @@ fn an_answer_shown_clears_the_line_that_said_it_was_coming() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
         }],
     };
     let s = stamp();
@@ -9452,6 +9455,7 @@ fn an_adopted_remote_walkthrough_library_keeps_the_open_tour_by_scope() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
         }],
     };
     assert!(app.save_walkthrough_scope("mine", Some(&mine)));
@@ -20258,6 +20262,7 @@ fn a_superseded_walkthrough_is_kept_but_not_opened_and_leaves_the_busy_row() {
             symbol: None,
             line: Some(1),
             narration: "n".into(),
+            depth: 0,
         }],
     };
     app.proj.walk.seq += 1;
@@ -27772,6 +27777,7 @@ fn a_walkthrough_step_the_reader_left_never_moves_the_cursor_later() {
             symbol: Some("origin".into()),
             line: None,
             narration: "n".into(),
+            depth: 0,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -27805,6 +27811,7 @@ fn a_jump_within_the_steps_file_supersedes_the_step() {
             symbol: Some("origin".into()),
             line: None,
             narration: "n".into(),
+            depth: 0,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -27849,6 +27856,7 @@ fn walk_tour(symbol: &str, line: Option<usize>) -> Vec<walkthrough::Walkthrough>
             symbol: Some(symbol.into()),
             line,
             narration: "n".into(),
+            depth: 0,
         }],
     }]
 }
@@ -28205,6 +28213,7 @@ fn markdown_step_landed(tag: &str) -> (App, Task<Message>) {
             symbol: Some("usage".into()),
             line: None,
             narration: "n".into(),
+            depth: 0,
         }],
     }];
     let _ = app.update(Message::Walk(WalkMsg::Open("tour".into())));
@@ -30720,6 +30729,7 @@ fn a_walkthrough_step_whose_symbol_is_missing_says_so_once_its_file_lands() {
         symbol: Some(symbol.into()),
         line,
         narration: "n".into(),
+        depth: 0,
     };
     app.proj.walk.library = vec![walkthrough::Walkthrough {
         title: "Tour".into(),
@@ -34844,4 +34854,55 @@ fn the_files_views_take_turns() {
     // Then Time Travel: the skim gives way.
     let _ = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
     assert!(!skimmed(&app), "skimmed under Time Travel");
+}
+
+/// The reading guide is generated as one — said so on the status line —
+/// kept in the library under its own scope with its tree's depths, opened,
+/// and written again as a guide when regenerated.
+#[test]
+fn the_reading_guide_is_written_kept_and_regenerated_as_a_guide() {
+    use walkthrough::GUIDE_SCOPE;
+    let mut app = scanned_app("walk-guide");
+    let root = app.proj.project.as_ref().unwrap().root.clone();
+    app.llm_config_cache = Some(Some(unreachable_llm()));
+    let _ = app.update(Message::Walk(WalkMsg::Generate(GUIDE_SCOPE.into())));
+    assert_eq!(app.proj.walk.generating.as_deref(), Some(GUIDE_SCOPE));
+    assert!(app.status.contains("reading guide"), "{}", app.status);
+    let step = |title: &str, depth: usize| walkthrough::Step {
+        title: title.into(),
+        file: "src/lib.rs".into(),
+        symbol: Some("origin".into()),
+        line: None,
+        narration: "n".into(),
+        depth,
+    };
+    let guide = walkthrough::Walkthrough {
+        title: "Where to start".into(),
+        scope: String::new(),
+        steps: vec![step("Start", 0), step("Then", 1)],
+    };
+    let _ = app.update(Message::Walk(WalkMsg::Done {
+        stamp: app.stamp(),
+        seq: app.proj.walk.pending.expect("awaited"),
+        scope: GUIDE_SCOPE.into(),
+        result: Ok(guide),
+    }));
+    assert_eq!(
+        app.proj.walk.open_tour().map(|w| w.scope.as_str()),
+        Some(GUIDE_SCOPE),
+        "the guide is opened"
+    );
+    let kept = walkthrough::load_library(&root);
+    let saved = kept.iter().find(|w| w.scope == GUIDE_SCOPE).expect("kept");
+    assert_eq!(
+        saved.steps.iter().map(|s| s.depth).collect::<Vec<_>>(),
+        [0, 1]
+    );
+    let again = run_task(app.update(Message::Walk(WalkMsg::Regenerate(GUIDE_SCOPE.into()))));
+    assert!(
+        again
+            .iter()
+            .any(|m| matches!(m, Message::Walk(WalkMsg::Generate(s)) if s == GUIDE_SCOPE)),
+        "{again:?}"
+    );
 }
