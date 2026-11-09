@@ -20,6 +20,8 @@ struct MicScript {
     full: bool,
     error: Option<String>,
     stopped: bool,
+    /// How often what was heard was handed over, the microphone kept open.
+    taken: usize,
 }
 
 struct FakeMic(Arc<Mutex<MicScript>>);
@@ -31,6 +33,9 @@ impl Listening for FakeMic {
     fn silence_after_speech(&self) -> Option<f32> {
         self.0.lock().unwrap().silence
     }
+    fn speech_over(&self) -> Option<f32> {
+        self.0.lock().unwrap().silence.map(|_| 0.0)
+    }
     fn recent(&self, _seconds: f32) -> (Vec<f32>, u32) {
         (spoken(), 16_000)
     }
@@ -39,6 +44,13 @@ impl Listening for FakeMic {
     }
     fn error(&self) -> Option<String> {
         self.0.lock().unwrap().error.clone()
+    }
+    fn take(&mut self) -> Recording {
+        self.0.lock().unwrap().taken += 1;
+        Recording {
+            samples: spoken(),
+            rate: 16_000,
+        }
     }
     fn stop(self: Box<Self>) -> Recording {
         self.0.lock().unwrap().stopped = true;
@@ -159,8 +171,9 @@ fn say(app: &mut App, script: &Arc<Mutex<MicScript>>) {
     script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
     let task = app.update(Message::Voice(VoiceMsg::Tick));
     assert!(app.voice.transcribing(), "what was said is worked out");
-    assert!(script.lock().unwrap().stopped, "what was heard was taken");
+    assert!(script.lock().unwrap().taken > 0, "what was heard was taken");
     assert!(app.voice.is_listening(), "and the microphone listens on");
+    assert!(!script.lock().unwrap().stopped, "the same one, kept open");
     // The microphone open afresh has heard nothing yet.
     script.lock().unwrap().silence = None;
     for message in run_task(task) {
@@ -1431,6 +1444,33 @@ fn listening_keeps_the_model_it_began_with() {
     );
 }
 
+/// A model picked while listening, and there to hear with, is the next
+/// listen's: the microphone is opened again for it.
+#[test]
+fn a_model_picked_while_listening_is_the_next_listens() {
+    let (mut app, script, hears) = voice_app("voice-model-next", "hello");
+    let began = app.voice.prefs.model();
+    let store = app.voice.store.clone().unwrap();
+    let tiny = clew_voice::models::find("tiny.en").unwrap();
+    std::fs::write(store.path(tiny), b"a model").unwrap();
+    app.voice.reset_for_test();
+    script.lock().unwrap().silence = None;
+    let _ = app.update(Message::Voice(VoiceMsg::Toggle));
+    let _ = app.update(Message::Voice(VoiceMsg::PickModel("tiny.en")));
+    let mut say = || {
+        script.lock().unwrap().silence = Some(END_SILENCE + 0.1);
+        let task = app.update(Message::Voice(VoiceMsg::Tick));
+        for message in run_task(task) {
+            let _ = app.update(message);
+        }
+        assert!(app.voice.is_listening());
+        hears.model.lock().unwrap().clone()
+    };
+    assert_eq!(say(), Some(store.path(began)), "as listening began");
+    assert_eq!(say(), Some(store.path(tiny)));
+    assert!(script.lock().unwrap().stopped, "opened again for it");
+}
+
 /// A model downloading is not downloaded again in another window — both
 /// wrote one partial file, and the first to finish moved the other's
 /// half-written bytes into place — and, chosen, it stays chosen when
@@ -1568,8 +1608,34 @@ fn a_finished_turn_ends_listening_at_its_first_pause() {
     }
     assert_eq!(*judge.asked.lock().unwrap(), [spoken().len()]);
     assert!(transcribing(&app), "a finished turn ends listening");
-    assert!(script.lock().unwrap().stopped);
+    assert_eq!(script.lock().unwrap().taken, 1);
     const { assert!(JUDGE_AFTER < END_SILENCE) };
+}
+
+/// What was judged of a turn that has ended is not the next one's: the
+/// microphone listening on, the next pause is judged for itself.
+#[test]
+fn the_next_turn_is_judged_for_itself() {
+    use crate::app::turn::JUDGE_AFTER;
+    let (mut app, script, judge) = turn_app("turn-next", vec![Ok(0.9), Ok(0.1)], true);
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.05);
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(script.lock().unwrap().taken, 1, "the first turn ended");
+    assert!(app.voice.is_listening());
+    // The next one's first pause, no shorter than the last: asked about.
+    let task = quiet_for(&mut app, &script, JUDGE_AFTER + 0.1);
+    assert_eq!(
+        script.lock().unwrap().taken,
+        1,
+        "not ended by the last turn's verdict"
+    );
+    for message in run_task(task) {
+        let _ = app.update(message);
+    }
+    assert_eq!(judge.asked.lock().unwrap().len(), 2);
+    assert_eq!(script.lock().unwrap().taken, 1, "unfinished: waited for");
 }
 
 /// A turn that sounds unfinished — a pause to think — is waited through,

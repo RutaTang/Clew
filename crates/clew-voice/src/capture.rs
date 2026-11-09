@@ -47,9 +47,32 @@ struct Shared {
     level: AtomicU32,
     /// The level ([`audio::rms`]) of every [`audio::FRAME_SECONDS`] heard.
     levels: Mutex<Vec<f32>>,
+    /// The frames heard while the echo canceller was learning the room:
+    /// from the first of Clew it heard to the first once it had learned it,
+    /// in [`Shared::levels`]; open-ended while it learns, empty without one.
+    learning: Mutex<Learning>,
     /// A failure the stream reported after it started (the device was
     /// unplugged).
     failed: Mutex<Option<String>>,
+}
+
+/// Where, in what was heard, the echo canceller began to hear Clew, and
+/// where it had learned the room: frames, as [`Shared::levels`] counts them.
+#[derive(Default)]
+struct Learning {
+    from: Option<usize>,
+    learned: Option<usize>,
+}
+
+impl Learning {
+    /// The frames heard while it learned.
+    fn frames(&self) -> std::ops::Range<usize> {
+        match (self.from, self.learned) {
+            (None, _) => 0..0,
+            (Some(from), None) => from..usize::MAX,
+            (Some(from), Some(learned)) => from..learned,
+        }
+    }
 }
 
 /// The microphone, listening.
@@ -135,6 +158,15 @@ impl Recorder {
         audio::trailing_silence(&levels)
     }
 
+    /// Where speech said over Clew began, in seconds from the start: a
+    /// stricter test than [`Recorder::silence_after_speech`]'s
+    /// ([`audio::speech_over`]).
+    pub fn speech_over(&self) -> Option<f32> {
+        let levels = self.shared.levels.lock().ok()?;
+        let learning = self.shared.learning.lock().ok()?.frames();
+        audio::speech_over(&levels, learning)
+    }
+
     /// The last `seconds` of what it has heard, and the rate they are at:
     /// what a model that hears the end of an utterance is given, while
     /// listening goes on. Copied as they are — the input's lock is held no
@@ -155,6 +187,31 @@ impl Recorder {
     /// A failure since it started, such as the device going away.
     pub fn error(&self) -> Option<String> {
         self.shared.failed.lock().ok().and_then(|f| f.clone())
+    }
+
+    /// Hand over what was heard so far, and listen on afresh — the same
+    /// stream, the same echo canceller, with what it has learned of the
+    /// room: one opened anew would let Clew's voice through while it learns.
+    pub fn take(&self) -> Recording {
+        let samples = self
+            .shared
+            .samples
+            .lock()
+            .map(|mut s| std::mem::take(&mut *s))
+            .unwrap_or_default();
+        if let Ok(mut levels) = self.shared.levels.lock() {
+            levels.clear();
+            // What is heard from now on is after what was.
+            if let Ok(mut learning) = self.shared.learning.lock() {
+                learning.from = learning.from.map(|_| 0);
+                learning.learned = learning.learned.map(|_| 0);
+            }
+        }
+        self.shared.full.store(false, Ordering::Relaxed);
+        Recording {
+            samples,
+            rate: self.rate,
+        }
     }
 
     /// Stop listening and hand over what was heard.
@@ -208,6 +265,7 @@ fn open(
         full: AtomicBool::new(false),
         level: AtomicU32::new(0),
         levels: Mutex::new(Vec::new()),
+        learning: Mutex::new(Learning::default()),
         failed: Mutex::new(None),
     });
     let config = supported.config();
@@ -278,10 +336,18 @@ where
                     (sum, count) = (0.0, 0);
                 }
             }
-            if !done.is_empty()
-                && let Ok(mut levels) = data.levels.lock()
-            {
+            if let Ok(mut levels) = data.levels.lock() {
                 levels.extend(done);
+                if let Some(canceller) = canceller.as_ref()
+                    && let Ok(mut learning) = data.learning.lock()
+                {
+                    if canceller.heard_clew() && learning.from.is_none() {
+                        learning.from = Some(levels.len());
+                    }
+                    if canceller.learned() && learning.learned.is_none() {
+                        learning.learned = Some(levels.len());
+                    }
+                }
             }
             if let Ok(mut samples) = data.samples.lock() {
                 let room = data.max.saturating_sub(samples.len());
@@ -347,6 +413,95 @@ mod tests {
         };
         assert_eq!(r.seconds(), 0.5);
         assert_eq!(Recording::default().seconds(), 0.0);
+    }
+
+    /// What was heard, handed over: the microphone listens on afresh —
+    /// nothing heard yet, nothing taken for speech, room to keep more.
+    #[test]
+    fn what_is_taken_leaves_the_microphone_listening_afresh() {
+        let shared = Arc::new(Shared {
+            samples: Mutex::new(vec![0.25; 4_800]),
+            max: 4_800,
+            full: AtomicBool::new(true),
+            level: AtomicU32::new(0),
+            levels: Mutex::new(vec![0.0, 0.05, 0.05, 0.05, 0.05, 0.0]),
+            learning: Mutex::new(Learning::default()),
+            failed: Mutex::new(None),
+        });
+        let recorder = Recorder {
+            shared,
+            rate: 48_000,
+            device: "test".into(),
+            stop: None,
+            thread: None,
+        };
+        assert!(recorder.speech_over().is_some());
+        assert!(recorder.silence_after_speech().is_some());
+        let taken = recorder.take();
+        assert_eq!(taken.samples, vec![0.25; 4_800]);
+        assert_eq!(taken.rate, 48_000);
+        assert_eq!(recorder.seconds(), 0.0);
+        assert!(!recorder.full(), "room to keep more");
+        assert_eq!(recorder.speech_over(), None, "nothing heard yet");
+        assert_eq!(recorder.silence_after_speech(), None);
+        assert_eq!(recorder.stop().samples, Vec::<f32>::new());
+    }
+
+    /// What is heard while the echo canceller learns the room — from the
+    /// first of Clew it heard — is not taken for speech said over Clew;
+    /// what was heard before it, or once it has learned, is. Handed over,
+    /// what is heard next is after it.
+    #[test]
+    fn what_is_heard_while_the_canceller_learns_is_not_taken_for_speech() {
+        let (quiet, loud) = (0.0005, 0.05);
+        let shared = Arc::new(Shared {
+            samples: Mutex::new(Vec::new()),
+            max: 48_000,
+            full: AtomicBool::new(false),
+            level: AtomicU32::new(0),
+            levels: Mutex::new(vec![
+                quiet, quiet, quiet, loud, loud, loud, loud, loud, quiet,
+            ]),
+            learning: Mutex::new(Learning {
+                from: Some(2),
+                learned: None,
+            }),
+            failed: Mutex::new(None),
+        });
+        let recorder = Recorder {
+            shared: shared.clone(),
+            rate: 48_000,
+            device: "test".into(),
+            stop: None,
+            thread: None,
+        };
+        assert_eq!(recorder.speech_over(), None, "learning");
+        shared.learning.lock().unwrap().learned = Some(4);
+        assert_eq!(recorder.speech_over(), Some(4.0 * audio::FRAME_SECONDS));
+        // Before Clew was heard: the reader's.
+        *shared.learning.lock().unwrap() = Learning {
+            from: Some(7),
+            learned: None,
+        };
+        assert_eq!(recorder.speech_over(), Some(3.0 * audio::FRAME_SECONDS));
+        // Handed over while it learns: it is still learning.
+        shared.learning.lock().unwrap().from = Some(2);
+        let _ = recorder.take();
+        shared
+            .levels
+            .lock()
+            .unwrap()
+            .extend([quiet, loud, loud, loud, loud, loud]);
+        assert_eq!(recorder.speech_over(), None);
+        // Handed over once it has learned: all is heard after.
+        shared.learning.lock().unwrap().learned = Some(6);
+        let _ = recorder.take();
+        shared
+            .levels
+            .lock()
+            .unwrap()
+            .extend([quiet, loud, loud, loud, loud]);
+        assert_eq!(recorder.speech_over(), Some(audio::FRAME_SECONDS));
     }
 
     /// The failures the user may meet are said in words, with where to

@@ -224,6 +224,37 @@ pub fn trailing_silence(levels: &[f32]) -> Option<f32> {
     Some((levels.len() - 1 - last) as f32 * FRAME_SECONDS)
 }
 
+/// Fewest frames in a row above the threshold that make speech said over
+/// Clew: 120 ms unbroken. What is left of Clew's own voice once its echo
+/// is taken out comes in shorter bursts — three frames at most, measured
+/// through a speaker the microphone hears — and a word, even a short one
+/// said softly, is longer.
+const OVER_RUN: usize = 4;
+
+/// While Clew speaks: where, in seconds from the start of `levels` (the
+/// [`rms`] of each [`FRAME_SECONDS`] heard), speech said over it began —
+/// four frames in a row above the threshold, 120 ms — or `None` while
+/// nothing has: what holds Clew for the reader. Stricter than
+/// [`trailing_silence`], which a few frames anywhere satisfy. Frames heard
+/// while the echo canceller was still learning the room — `learning` — do
+/// not count: what it lets through of Clew's voice then comes in bursts as
+/// long and loud as a word.
+pub fn speech_over(levels: &[f32], learning: Range<usize>) -> Option<f32> {
+    if levels.is_empty() {
+        return None;
+    }
+    let threshold = threshold(levels);
+    let mut run = 0;
+    for (i, level) in levels.iter().enumerate() {
+        let speech = *level >= threshold && !learning.contains(&i);
+        run = if speech { run + 1 } else { 0 };
+        if run == OVER_RUN {
+            return Some((i + 1 - OVER_RUN) as f32 * FRAME_SECONDS);
+        }
+    }
+    None
+}
+
 /// Shortest clip handed to whisper: it refuses less than a second, and
 /// ends a phrase more surely with silence after it.
 const MIN_CLIP: usize = 16_000 * 5 / 4;
@@ -422,6 +453,38 @@ mod tests {
         // Still speaking at the end: none.
         let x = room_then_voice(0.5, 2.5, 2.5);
         assert_eq!(trailing_silence(&levels(&x)), Some(0.0));
+    }
+
+    /// Said over Clew: speech is a run of frames above the threshold, and
+    /// where the run began is where it was said. Bursts shorter than the
+    /// run — what is left of Clew's echo — are not, however many.
+    #[test]
+    fn speech_over_clew_is_an_unbroken_run() {
+        let quiet = 0.0005;
+        let loud = 0.05;
+        assert_eq!(speech_over(&[], 0..0), None);
+        // Bursts of three frames, again and again: not speech.
+        let bursts: Vec<f32> = (0..60)
+            .map(|i| if i % 8 < 3 { loud } else { quiet })
+            .collect();
+        assert_eq!(speech_over(&bursts, 0..0), None);
+        assert!(
+            trailing_silence(&bursts).is_some(),
+            "the looser test takes them"
+        );
+        // Four frames in a row from the 40th: speech, from there.
+        let mut said = bursts.clone();
+        said[40..44].iter_mut().for_each(|l| *l = loud);
+        assert_eq!(speech_over(&said, 0..0), Some(40.0 * FRAME_SECONDS));
+        // The first run found is where it began.
+        said[20..30].iter_mut().for_each(|l| *l = loud);
+        assert_eq!(speech_over(&said, 0..0), Some(20.0 * FRAME_SECONDS));
+        // What was heard while the canceller learned the room does not
+        // count; four frames in a row before it, or after, do.
+        assert_eq!(speech_over(&said, 15..41), None);
+        assert_eq!(speech_over(&said, 15..40), Some(40.0 * FRAME_SECONDS));
+        assert_eq!(speech_over(&said, 24..60), Some(20.0 * FRAME_SECONDS));
+        assert_eq!(speech_over(&said, 23..60), None);
     }
 
     #[test]

@@ -42,6 +42,9 @@ pub(crate) const NO_SPEECH_TIMEOUT: f32 = 8.0;
 pub(crate) const TOGGLE_DEBOUNCE: Duration = Duration::from_millis(400);
 /// How often the level meter and the pause are read while listening.
 pub(crate) const LISTEN_TICK: Duration = Duration::from_millis(60);
+/// Kept of what was heard before speech said over Clew began, in seconds:
+/// a soft first sound, before the run that was taken for speech.
+const OVER_LEAD: f32 = 0.5;
 
 /// The microphone while it listens: the system's ([`Recorder`]), or a
 /// test's.
@@ -51,6 +54,10 @@ pub(crate) trait Listening: Send {
     /// Seconds of quiet since the speaker last spoke; `None` before any
     /// speech.
     fn silence_after_speech(&self) -> Option<f32>;
+    /// Where speech said over Clew began, in seconds from the start: a
+    /// stricter test than [`Listening::silence_after_speech`]'s, which what
+    /// is left of Clew's own voice may pass ([`Recorder::speech_over`]).
+    fn speech_over(&self) -> Option<f32>;
     /// The last `seconds` heard, and the rate they are at: what Smart Turn
     /// judges a pause by ([`crate::app::turn`]).
     fn recent(&self, seconds: f32) -> (Vec<f32>, u32);
@@ -58,6 +65,8 @@ pub(crate) trait Listening: Send {
     fn full(&self) -> bool;
     /// A failure since it started (the device went away).
     fn error(&self) -> Option<String>;
+    /// Hand over what was heard so far, and listen on afresh, as opened.
+    fn take(&mut self) -> Recording;
     /// Stop, handing over what was heard.
     fn stop(self: Box<Self>) -> Recording;
 }
@@ -69,6 +78,9 @@ impl Listening for Recorder {
     fn silence_after_speech(&self) -> Option<f32> {
         Recorder::silence_after_speech(self)
     }
+    fn speech_over(&self) -> Option<f32> {
+        Recorder::speech_over(self)
+    }
     fn recent(&self, seconds: f32) -> (Vec<f32>, u32) {
         Recorder::recent(self, seconds)
     }
@@ -77,6 +89,9 @@ impl Listening for Recorder {
     }
     fn error(&self) -> Option<String> {
         Recorder::error(self)
+    }
+    fn take(&mut self) -> Recording {
+        Recorder::take(self)
     }
     fn stop(self: Box<Self>) -> Recording {
         Recorder::stop(*self)
@@ -547,6 +562,10 @@ pub(crate) struct VoiceState {
     /// it — one at a time, in the order it was said — with the model it is
     /// worked out with.
     unheard: VecDeque<(Recording, &'static Model)>,
+    /// Where, in what the microphone is hearing, speech said over Clew
+    /// began, in seconds: what is heard before it — what was left of Clew's
+    /// voice — is not worked out with it.
+    over_from: Option<f32>,
     /// The run working out what was said, by its token.
     transcribing: Option<u64>,
     /// The last run started.
@@ -597,6 +616,7 @@ impl VoiceState {
             listening: None,
             mic_on: false,
             unheard: VecDeque::new(),
+            over_from: None,
             transcribing: None,
             token: 0,
             last_toggle: None,
@@ -1331,6 +1351,7 @@ impl App {
         match (self.voice.open_mic)(MAX_SECONDS, self.voice.prefs.talk_over) {
             Ok(listening) => {
                 self.voice.listening = Some((listening, model));
+                self.voice.over_from = None;
                 self.voice.phase = VoicePhase::Listening {
                     since: Instant::now(),
                     level: 0.0,
@@ -1366,7 +1387,8 @@ impl App {
         let level = listening.level();
         self.voice.phase = VoicePhase::Listening { since, level };
         let full = listening.full();
-        let quiet = listening.silence_after_speech();
+        let mut quiet = listening.silence_after_speech();
+        let over = listening.speech_over();
         // Clew speaks, or an answer it reads aloud is on its way — the
         // question was just sent: the microphone waits until all is said —
         // unless the reader may talk over Clew, who is then held at the
@@ -1376,9 +1398,18 @@ impl App {
             self.hold_mic_for_clew();
             return Task::none();
         }
-        if quiet.is_some() && self.voice.speech.is_speaking() && !self.voice.speech.held() {
-            self.voice.speech.hold();
-            self.status = tr!("Listening… say a command or a question").into();
+        // Said over Clew: only an unbroken run of speech holds it. Short of
+        // one, what is heard is what is left of Clew's own voice, and ends
+        // nothing.
+        if self.voice.speech.is_speaking() && !self.voice.speech.held() {
+            match over {
+                Some(from) => {
+                    self.voice.speech.hold();
+                    self.voice.over_from = Some(from);
+                    self.status = tr!("Listening… say a command or a question").into();
+                }
+                None => quiet = None,
+            }
         }
         // The pause ends what is being said — at once when Smart Turn hears
         // a turn finished, later when it hears one that is not, after
@@ -1393,16 +1424,58 @@ impl App {
         if since.elapsed().as_secs_f32() >= NO_SPEECH_TIMEOUT {
             // Nothing said for a while: the quiet is let go, and the
             // microphone listens afresh for what is said next.
-            self.close_mic();
-            self.open_mic();
+            if self.listen_on_afresh().is_none() {
+                self.close_mic();
+                self.open_mic();
+            }
         }
         Task::none()
+    }
+
+    /// Of what was heard, what was said over Clew: from where it began, a
+    /// little before — not what was heard of Clew's own voice before it.
+    fn said_from(&mut self, recording: &mut Recording) {
+        if let Some(from) = self.voice.over_from.take() {
+            let cut = ((from - OVER_LEAD).max(0.0) * recording.rate as f32) as usize;
+            recording.samples.drain(..cut.min(recording.samples.len()));
+        }
+    }
+
+    /// What the microphone heard so far, handed over, and it listening on
+    /// afresh — the same one, kept open: opened anew, its echo canceller
+    /// would learn the room again, and let Clew's voice through meanwhile.
+    /// `None`, nothing taken, when it may not listen on as it is: turned
+    /// off, to wait while Clew speaks, or opened for another model.
+    fn listen_on_afresh(&mut self) -> Option<Recording> {
+        let model = self.voice.prefs.model();
+        let waits = !self.voice.prefs.talk_over
+            && (self.voice.speech.is_speaking() || self.answer_read_aloud_coming());
+        if !self.voice.mic_on || waits || !self.voice.installed(model) {
+            return None;
+        }
+        let (listening, opened_for) = self.voice.listening.as_mut()?;
+        if !std::ptr::eq(*opened_for, model) {
+            return None;
+        }
+        let mut recording = listening.take();
+        self.said_from(&mut recording);
+        self.voice.phase = VoicePhase::Listening {
+            since: Instant::now(),
+            level: 0.0,
+        };
+        self.turn_listening_began();
+        Some(recording)
     }
 
     /// What is being said has ended — a pause, Smart Turn, the most that
     /// is kept: it is worked out out of sight, after what was said before
     /// it, while the microphone listens on for what is said next.
     fn end_utterance(&mut self) -> Task<Message> {
+        let model = self.voice.listening.as_ref().map(|(_, model)| *model);
+        if let (Some(recording), Some(model)) = (self.listen_on_afresh(), model) {
+            self.voice.unheard.push_back((recording, model));
+            return self.transcribe_next();
+        }
         let task = self.end_utterance_now();
         self.resume_listening();
         task
@@ -1415,7 +1488,9 @@ impl App {
             return Task::none();
         };
         self.voice.phase = VoicePhase::Idle;
-        self.voice.unheard.push_back((listening.stop(), model));
+        let mut recording = listening.stop();
+        self.said_from(&mut recording);
+        self.voice.unheard.push_back((recording, model));
         self.transcribe_next()
     }
 
