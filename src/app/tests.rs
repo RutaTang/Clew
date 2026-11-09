@@ -34735,3 +34735,62 @@ async fn the_window_polls_until_a_sent_documents_diagnostics_come() {
         _ => panic!("no snapshot"),
     }
 }
+
+/// The file's views take turns: Diff, Time Travel and Skim each show the
+/// file another way, and turning one on turns the others off — a diff
+/// asked for under Time Travel never showed, its button lit all the same.
+#[test]
+fn the_files_views_take_turns() {
+    let mut app = scanned_app("file-views-take-turns");
+    open_synchronously(&mut app, "src/lib.rs", None);
+    dismiss_overlays(&mut app);
+    // Its one function, as the symbol index has it (as the Skim button's
+    // own test sets it up).
+    let abs = app.active_viewer().unwrap().abs.clone();
+    app.proj.symbol_index_by_file.insert(
+        abs.clone(),
+        Arc::new(vec![SymbolEntry {
+            name: "origin".into(),
+            kind: "function".into(),
+            rel: "src/lib.rs".into(),
+            abs,
+            line: 3,
+            is_test: false,
+            entry: None,
+        }]),
+    );
+    let skimmed = |app: &App| {
+        app.active_viewer()
+            .is_some_and(|v| v.skimmed(&app.skim_lines(&v.abs)))
+    };
+
+    // Skim, then Diff: the diff is asked for, the skim undone.
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(skimmed(&app), "the fixture has bodies to fold");
+    let _ = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    assert!(app.proj.diff_pending.is_some());
+    assert!(!skimmed(&app), "skimmed under the diff");
+
+    // Then Time Travel: the diff gives way.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    let _ = app.update(lib_history(&app, app.proj.time_gen));
+    assert!(crate::ui::time_travel_on_screen(&app).is_some());
+    assert!(app.proj.diff_pending.is_none() && app.proj.diff.is_none());
+
+    // Then Diff again: Time Travel ends, the diff is asked for.
+    let _ = app.update(Message::Editor(EditorMsg::ToggleDiff));
+    assert!(
+        app.proj.time_travel.is_none(),
+        "Time Travel stayed over the diff"
+    );
+    assert!(app.proj.diff_pending.is_some());
+
+    // Then Skim: the diff gives way.
+    let _ = app.update(Message::Editor(EditorMsg::SkimFile));
+    assert!(skimmed(&app));
+    assert!(app.proj.diff_pending.is_none() && app.proj.diff.is_none());
+
+    // Then Time Travel: the skim gives way.
+    let _ = app.update(Message::TimeTravel(TimeTravelMsg::Start { symbol: false }));
+    assert!(!skimmed(&app), "skimmed under Time Travel");
+}

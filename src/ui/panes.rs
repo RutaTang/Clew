@@ -159,26 +159,12 @@ pub(crate) fn time_travel_banner<'a>(
     tt: &'a TimeTravel,
     commit: Option<&'a crate::git::HistCommit>,
 ) -> Element<'a, Message> {
-    // Its key on hover, as every control of the chrome says its own.
-    let exit = super::toolbar::tip_at(
-        button(text(tr!("Exit")).size(ts::SMALL).color(theme::fg_muted()))
-            .style(theme::toolbar_button)
-            .padding([2, 8])
-            .on_press(super::heard::said(
-                tr!("Exit Time Travel"),
-                Message::TimeTravel(TimeTravelMsg::Exit),
-            )),
-        tr!("Exit Time Travel"),
-        Some("Esc".to_string()),
-        iced::widget::tooltip::Position::Bottom,
-    );
-
+    // No Exit of its own: the Time Travel button over the file, lit while
+    // this shows, turns it off, as Esc does.
     let Some(c) = commit else {
         let head = row![
             glyph::icon(Glyph::TimeTravel, theme::accent(), 15.0),
             text(tr!("Time Travel")).size(ts::BODY).color(theme::fg()),
-            space().width(Fill),
-            exit,
         ]
         .spacing(8)
         .align_y(iced::Center);
@@ -207,8 +193,6 @@ pub(crate) fn time_travel_banner<'a>(
         ))
         .size(ts::SMALL)
         .color(theme::dim()),
-        space().width(Fill),
-        exit,
     ]
     .spacing(10)
     .align_y(iced::Center);

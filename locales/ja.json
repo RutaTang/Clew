@@ -550,8 +550,6 @@
  "Every function and class in the file. Mark the ones you've understood, or write a note on one.": "ファイル内のすべての関数とクラスです。理解したものに印を付けたり、メモを書いたりできます。",
  "Every function's calls across the project, as one map you can move around.": "プロジェクト全体の関数の呼び出しを、自由に動かせる一枚のマップで表示します。",
  "Every jump you made, as a tree, so you can always find your way back.": "移動のすべてをツリーで残すので、いつでも元の場所に戻れます。",
- "Exit": "終了",
- "Exit Time Travel": "タイムトラベルを終了",
  "Exit Time Travel to add a bookmark": "ブックマークするにはタイムトラベルを終了してください",
  "Exit Time Travel to trace values": "値を追跡するにはタイムトラベルを終了してください",
  "Expand": "大きく表示",

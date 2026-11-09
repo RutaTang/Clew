@@ -550,8 +550,6 @@
  "Every function and class in the file. Mark the ones you've understood, or write a note on one.": "파일의 모든 함수와 클래스입니다. 이해한 것에 표시하거나 메모를 남기세요.",
  "Every function's calls across the project, as one map you can move around.": "프로젝트 전체의 함수 호출을 자유롭게 둘러볼 수 있는 하나의 지도로 보여 줍니다.",
  "Every jump you made, as a tree, so you can always find your way back.": "이동한 모든 곳을 트리로 남겨, 언제든 돌아갈 길을 찾을 수 있습니다.",
- "Exit": "나가기",
- "Exit Time Travel": "타임 트래블 종료",
  "Exit Time Travel to add a bookmark": "북마크를 추가하려면 타임 트래블을 끝내세요",
  "Exit Time Travel to trace values": "값을 추적하려면 타임 트래블을 끝내세요",
  "Expand": "크게 보기",

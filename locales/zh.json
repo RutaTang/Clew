@@ -550,8 +550,6 @@
  "Every function and class in the file. Mark the ones you've understood, or write a note on one.": "文件中的每个函数和类。把读懂的标记出来，或给其中一个写笔记。",
  "Every function's calls across the project, as one map you can move around.": "整个项目中所有函数的调用关系，汇成一张可以自由拖动查看的地图。",
  "Every jump you made, as a tree, so you can always find your way back.": "你的每一次跳转都以树状记录下来，随时都能找到回去的路。",
- "Exit": "退出",
- "Exit Time Travel": "退出时间旅行",
  "Exit Time Travel to add a bookmark": "退出时间旅行后才能添加书签",
  "Exit Time Travel to trace values": "退出时间旅行后才能追踪值",
  "Expand": "展开",

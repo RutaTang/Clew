@@ -224,8 +224,10 @@ impl App {
             self.status = tr!("Time Travel needs a git repository").into();
             return Task::none();
         };
+        // The file's other views give way (see `App::one_file_view`).
+        let others = self.one_file_view(crate::app::editor::FileView::TimeTravel);
         let Some(v) = self.active_viewer() else {
-            return Task::none();
+            return others;
         };
         let (abs, rel, lang) = (v.abs.clone(), v.rel.clone(), v.lang_key);
         // A start re-scopes the session on screen (its bar's toggle), which
@@ -337,7 +339,7 @@ impl App {
                 })
             },
         );
-        Task::batch([carried, history])
+        Task::batch([others, carried, history])
     }
 
     /// Await the history of `abs`, asked for in `pane`, as the one

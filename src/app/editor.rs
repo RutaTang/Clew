@@ -1150,10 +1150,38 @@ impl App {
         let Some(git) = self.git_source() else {
             return Task::none();
         };
+        let others = self.one_file_view(FileView::Diff);
         let req = self.mint_request_id();
         self.proj.diff_pending = Some((req, abs.clone()));
         self.status = tr!("Computing the diff of {file}…", file = self.rel_of(&abs));
-        self.load_diff(git, req, abs)
+        Task::batch([others, self.load_diff(git, req, abs)])
+    }
+
+    /// The file's other views put away for `keep`. Skim, Diff and Time
+    /// Travel each show the file another way, and only one shows at a time:
+    /// a diff asked for while Time Travel was on never showed, its button
+    /// lit all the same, and Skim folded a view no one could see.
+    pub(crate) fn one_file_view(&mut self, keep: FileView) -> Task<Message> {
+        let mut tasks = Vec::new();
+        if keep != FileView::TimeTravel && ui::time_travel_pane(self) == Some(self.proj.active) {
+            tasks.push(self.update(Message::TimeTravel(TimeTravelMsg::Exit)));
+        }
+        if keep != FileView::Diff {
+            self.proj.diff_pending = None;
+            if self.proj.diff.take().is_some() {
+                self.proj.diff_refresh = None;
+                tasks.push(self.restore_code_scroll(self.proj.active));
+            }
+        }
+        if keep != FileView::Skim
+            && let Some(abs) = self.active_viewer().map(|v| v.abs.clone())
+        {
+            let sig_lines = self.skim_lines(&abs);
+            if self.active_viewer().is_some_and(|v| v.skimmed(&sig_lines)) {
+                self.fold_in(self.proj.active, |v| v.skim_bodies(&sig_lines));
+            }
+        }
+        Task::batch(tasks)
     }
 
     /// The diff on screen again, when `path` — just changed or deleted on
@@ -1897,8 +1925,18 @@ impl App {
                 Task::none()
             }
             EditorMsg::SkimFile => {
+                // Skimming puts the file's other views away; unskimming
+                // leaves them be.
+                let skimmed = self
+                    .active_viewer()
+                    .is_some_and(|v| v.skimmed(&self.skim_lines(&v.abs)));
+                let others = if skimmed {
+                    Task::none()
+                } else {
+                    self.one_file_view(FileView::Skim)
+                };
                 self.skim_active_file();
-                Task::none()
+                others
             }
             EditorMsg::ScrollPages(pages) => self.scroll_pages(pages),
             EditorMsg::ScrollLines(lines) => self.scroll_rows(i64::from(lines)),
@@ -1994,4 +2032,13 @@ fn word_at(raw: &str, name: &str) -> Option<usize> {
     raw.match_indices(name).map(|(at, _)| at).find(|&at| {
         !word(raw[..at].chars().next_back()) && !word(raw[at + name.len()..].chars().next())
     })
+}
+
+/// One way of showing the file on the sheet, of the ones that exclude each
+/// other (see [`App::one_file_view`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FileView {
+    Skim,
+    Diff,
+    TimeTravel,
 }
