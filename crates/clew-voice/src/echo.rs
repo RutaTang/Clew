@@ -356,6 +356,67 @@ mod tests {
         );
     }
 
+    /// Through real devices — the system's speaker, and a microphone that
+    /// hears it, as a laptop's does (a loopback between them, such as
+    /// PulseAudio's null sinks: the speaker `spk`, the reader `user`, both
+    /// looped into the room the default microphone hears): Clew speaks for
+    /// eight seconds and the reader talks over it from the fifth to the
+    /// sixth and a half. Heard with the canceller, Clew's echo is all but
+    /// gone and the reader's voice is not.
+    #[test]
+    #[ignore = "needs a loopback from the speaker to the microphone: CLEW_TEST_LOOPBACK=1"]
+    fn the_echo_is_taken_out_through_real_devices() {
+        use std::io::Write;
+        if std::env::var_os("CLEW_TEST_LOOPBACK").is_none() {
+            return;
+        }
+        let run = |cancel: bool| -> (f32, f32) {
+            let recorder = crate::capture::Recorder::start(30, cancel).expect("a microphone");
+            let player = crate::playback::Player::start().expect("a speaker");
+            let rate = player.rate();
+            player.play(&speech_like(1, 8.0, rate), rate);
+            std::thread::sleep(Duration::from_millis(5000));
+            // The reader, from another source in the room.
+            let voice = speech_like(9, 1.5, 48_000);
+            let bytes: Vec<u8> = voice.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let mut reader = std::process::Command::new("pacat")
+                .args([
+                    "--playback",
+                    "--device=user",
+                    "--format=float32le",
+                    "--rate=48000",
+                    "--channels=1",
+                ])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .expect("pacat");
+            reader.stdin.take().unwrap().write_all(&bytes).unwrap();
+            let _ = reader.wait();
+            std::thread::sleep(Duration::from_millis(2500));
+            let heard = recorder.stop();
+            drop(player);
+            let at = |seconds: f32| (seconds * heard.rate as f32) as usize;
+            let window =
+                |from: f32, to: f32| rms(&heard.samples[at(from)..at(to).min(heard.samples.len())]);
+            // Clew alone; then Clew and the reader.
+            (window(2.5, 4.5), window(5.4, 6.3))
+        };
+        let (raw_echo, raw_both) = run(false);
+        let (echo, both) = run(true);
+        eprintln!(
+            "without: echo {raw_echo:.4}, with the reader {raw_both:.4}; with: echo {echo:.4}, with the reader {both:.4}"
+        );
+        assert!(raw_echo > 0.01, "the microphone heard Clew: {raw_echo}");
+        assert!(
+            echo < raw_echo / 4.0,
+            "the echo is 12 dB down: {raw_echo} → {echo}"
+        );
+        assert!(
+            both > echo * 3.0,
+            "the reader is heard over what is left: {echo} → {both}"
+        );
+    }
+
     /// What is played is kept only while a canceller listens, and not
     /// more than a couple of seconds of it.
     #[test]
