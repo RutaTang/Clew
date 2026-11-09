@@ -347,6 +347,18 @@ pub(crate) fn gather_of<T>(build: impl FnOnce() -> T) -> Vec<Target> {
         .unwrap_or_default()
 }
 
+/// [`gather_of`], with every press it marks for jump mode too: what
+/// [`gather_all`] gives for the whole view.
+#[cfg(test)]
+pub(crate) fn gather_all_of<T>(build: impl FnOnce() -> T) -> (Vec<Target>, Vec<(String, Layer)>) {
+    GATHERING.with(|g| *g.borrow_mut() = Some(Gathering::default()));
+    drop(build());
+    GATHERING
+        .with(|g| g.borrow_mut().take())
+        .map(|g| (g.targets, g.marks))
+        .unwrap_or_default()
+}
+
 /// Of `targets`, those a press can reach: the tutorial's while it runs, a
 /// dialog's while one is up, Ask's while it is large over the window
 /// (`ask_large`), else the window's and Ask's.

@@ -478,10 +478,10 @@ pub(crate) fn toolbar(app: &App) -> Element<'_, Message> {
 /// amber and green, showing their glyphs while the pointer is over the
 /// cluster, grey while the window has no focus. Being real buttons, they
 /// take their own clicks, so a drag from them never moves the window.
-fn traffic_lights(app: &App) -> Element<'_, Message> {
+pub(crate) fn traffic_lights(app: &App) -> Element<'_, Message> {
     let show_icon = app.controls_hovered;
     let colored = app.window_focused || app.controls_hovered;
-    let light = move |color: iced::Color, icon: TrafficIcon, msg: Message| {
+    let light = move |color: iced::Color, icon: TrafficIcon, label: &str, msg: Message| {
         let content: Element<'_, Message> = if show_icon {
             iced::widget::canvas::Canvas::new(TrafficGlyph {
                 icon,
@@ -515,7 +515,12 @@ fn traffic_lights(app: &App) -> Element<'_, Message> {
                 }
             })
             .padding(0)
-            .on_press(msg)
+            .on_press(super::heard::said(label, msg))
+    };
+    let fullscreen = if app.fullscreen {
+        tr!("Exit Full Screen")
+    } else {
+        tr!("Full Screen")
     };
     // No tooltips: native traffic lights show only their glyph on hover.
     mouse_area(
@@ -523,16 +528,19 @@ fn traffic_lights(app: &App) -> Element<'_, Message> {
             light(
                 theme::TRAFFIC_CLOSE,
                 TrafficIcon::Close,
+                tr!("Close"),
                 Message::Window(WindowMsg::Close)
             ),
             light(
                 theme::TRAFFIC_MINIMIZE,
                 TrafficIcon::Minimize,
+                tr!("Minimize"),
                 Message::Window(WindowMsg::Minimize)
             ),
             light(
                 theme::TRAFFIC_ZOOM,
                 TrafficIcon::Fullscreen(app.fullscreen),
+                fullscreen,
                 Message::Window(WindowMsg::ToggleFullscreen)
             ),
         ]

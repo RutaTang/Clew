@@ -12333,6 +12333,33 @@ fn every_button_a_click_presses_a_word_presses_too() {
     );
 }
 
+/// macOS's window buttons — drawn only there, so the states above, built on
+/// any system, show them only on a Mac — are pressed by a word too: "close",
+/// "minimize", "full screen", or "exit full screen" once it is.
+#[test]
+fn the_window_buttons_of_macos_are_pressed_by_a_word_too() {
+    let mut app = reader_app();
+    for fullscreen in [false, true] {
+        app.fullscreen = fullscreen;
+        let (targets, marks) =
+            crate::ui::heard::gather_all_of(|| crate::ui::toolbar::traffic_lights(&app));
+        assert_eq!(marks.len(), 3, "{marks:?}");
+        for (mark, _) in &marks {
+            assert!(
+                targets.iter().any(|t| &format!("{:?}", t.message) == mark),
+                "{mark}: pressed by a click, by no word"
+            );
+        }
+        let shown: Vec<&str> = targets.iter().map(|t| t.shown.as_str()).collect();
+        let full = if fullscreen {
+            "Exit Full Screen"
+        } else {
+            "Full Screen"
+        };
+        assert_eq!(shown, ["Close", "Minimize", full]);
+    }
+}
+
 /// The window drawn once, as the runtime draws it: the codes jump mode
 /// deals go out as it is.
 fn draw_window(app: &App) {

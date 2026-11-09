@@ -2416,14 +2416,23 @@ fn a_written_history_is_the_one_asked_for() {
         ],
     )
     .unwrap();
-    let log = sh_git_out(&root, &["log", "--format=%an <%ae> %aI %cI %s"]);
+    // The dates as seconds, and their zone apart: git 2.56 spells UTC in
+    // `%aI` as `Z`, older ones as `+00:00`.
+    let log = sh_git_out(
+        &root,
+        &[
+            "log",
+            "--format=%an <%ae> %at %ct %ad %s",
+            "--date=format:%z",
+        ],
+    );
     assert_eq!(
         log.lines().collect::<Vec<_>>(),
         [
-            "Mira Chen <mira@teashop.example> 2025-03-06T09:00:00Z 2025-03-06T09:00:00Z Change a"
-                .replace('Z', "+00:00"),
-            "Mira Chen <mira@teashop.example> 2025-03-04T10:12:00Z 2025-03-04T10:12:00Z Start"
-                .replace('Z', "+00:00"),
+            // 2025-03-06T09:00:00+00:00
+            "Mira Chen <mira@teashop.example> 1741251600 1741251600 +0000 Change a",
+            // 2025-03-04T10:12:00+00:00
+            "Mira Chen <mira@teashop.example> 1741083120 1741083120 +0000 Start",
         ]
     );
     let head = sh_git_out(&root, &["rev-parse", "HEAD~1"]);
