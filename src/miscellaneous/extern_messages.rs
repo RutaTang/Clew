@@ -548,6 +548,7 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("the xz decoder failed unexpectedly"),
     tr_noop!("the {arg1} highlight query does not compile"),
     tr_noop!("the {arg1} server program you chose cannot be run: {why}"),
+    tr_noop!("the {arg1} tool failed unexpectedly"),
     tr_noop!(
         "the {language} language server is not installed — the user can open a {language} file in Clew to install it; use `search` for now"
     ),
@@ -604,6 +605,9 @@ pub(crate) const MESSAGES: &[&str] = &[
     tr_noop!("x-mcp-header on `{arg1}`, which is not a string, integer or boolean"),
     tr_noop!("xz decode failed: {e}"),
     tr_noop!("zig could not build {arg1}:\n{arg2}"),
+    tr_noop!(
+        "{STEPS_LEFT_WARNING} exploration steps remain. Gather only what is still missing, then call `answer`."
+    ),
     tr_noop!("{arg1} (requires {arg2} on PATH)"),
     tr_noop!("{arg1} answered before it was ready"),
     tr_noop!("{arg1} answered {p}, not a probability"),
