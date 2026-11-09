@@ -424,6 +424,7 @@ impl App {
             Message::Tutorial(message) => self.update_tutorial(message),
             Message::Voice(message) => self.update_voice(message),
             Message::Fake(message) => self.update_fake(message),
+            Message::Proof(message) => self.update_proof(message),
             Message::Tick => self.on_tick(),
             Message::Noop => Task::none(),
             Message::Placed { question, place } => self.on_placed(question, place),

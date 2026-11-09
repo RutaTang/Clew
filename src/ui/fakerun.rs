@@ -155,7 +155,11 @@ pub(crate) fn fake_sheet<'a>(sheet: &'a Sheet) -> Element<'a, Message> {
 }
 
 /// A step control: its words, what it does, and whether it can now.
-fn control<'a>(label: &'static str, msg: Message, enabled: bool) -> Element<'a, Message> {
+pub(crate) fn control<'a>(
+    label: &'static str,
+    msg: Message,
+    enabled: bool,
+) -> Element<'a, Message> {
     let mut b = button(text(label).size(ts::BODY).wrapping(Wrapping::None))
         .style(theme::toolbar_button)
         .padding([2, 8]);
@@ -166,7 +170,7 @@ fn control<'a>(label: &'static str, msg: Message, enabled: bool) -> Element<'a, 
 }
 
 /// A column's heading.
-fn heading<'a>(words: &'a str) -> Element<'a, Message> {
+pub(crate) fn heading<'a>(words: &'a str) -> Element<'a, Message> {
     text(words).size(ts::CAPTION).color(theme::dim()).into()
 }
 

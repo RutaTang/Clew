@@ -23,12 +23,16 @@ pub(crate) fn debug_col(rows: Vec<Element<'_, Message>>) -> Element<'_, Message>
 /// The collapsible bottom panel: the debugger's, under a title strip with a
 /// collapse control. (Ask floats over the code instead: `ui::askfloat`.)
 pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
-    // A fake run's session shows while no real one runs.
-    let fake = app.debug.session.is_none() && app.proj.fake.shown();
+    // A proof being stepped through, else a fake run's session, shows
+    // while no real one runs.
+    let proof = app.debug.session.is_none() && app.proj.proof.is_some();
+    let fake = app.debug.session.is_none() && !proof && app.proj.fake.shown();
     let title = container(
         row![
             glyph::icon(Glyph::Debug, theme::fg_bright(), 16.0),
-            text(if fake {
+            text(if proof {
+                tr!("Proof")
+            } else if fake {
                 tr!("Fake debug")
             } else {
                 tr!("Debug")
@@ -58,6 +62,8 @@ pub(crate) fn bottom_panel(app: &App) -> Element<'_, Message> {
 
     let content: Element<'_, Message> = if app.debug.session.is_some() {
         debug_panel(app)
+    } else if proof {
+        super::proof::proof_panel(app)
     } else if fake {
         fake_panel(app)
     } else {

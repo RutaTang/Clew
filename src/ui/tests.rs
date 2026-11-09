@@ -2424,6 +2424,106 @@ fn the_tutorial_walks_every_step_end_to_end() {
     assert_eq!(app.tutorial, None, "Done ends the tour");
 }
 
+/// A Rust file's context menu has its memory layout and its tests; a Lean
+/// file's, Step Through Proof. Each sends its own message.
+#[test]
+fn the_context_menu_has_each_languages_own_rows() {
+    let mut app = reader_app();
+    app.proj.context_menu = Some(crate::ContextMenu {
+        pane: 0,
+        line: 3,
+        col: 4,
+        x: 200.0,
+        y: 120.0,
+        insight: crate::InsightKind::for_lang("rust"),
+        served: true,
+        by_pointer: true,
+    });
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Memory Layout"));
+    assert!(shows(&mut sim, "Related Tests"));
+    assert!(!shows(&mut sim, "Step Through Proof"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Related Tests");
+    assert!(
+        sent.iter().any(|m| matches!(
+            m,
+            Message::Hover(HoverMsg::InsightOf(crate::InsightKind::RelatedTests))
+        )),
+        "{sent:?}"
+    );
+    // The same file as Lean.
+    let v = app.proj.panes[0].as_mut().unwrap();
+    v.lang_key = Some("lean");
+    app.proj.context_menu.as_mut().unwrap().insight = crate::InsightKind::for_lang("lean");
+    let mut sim = sim_of(&app);
+    assert!(shows(&mut sim, "Step Through Proof"));
+    assert!(!shows(&mut sim, "Memory Layout"));
+    drop(sim);
+    let sent = click(sim_of(&app), "Step Through Proof");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::FromMenu))),
+        "{sent:?}"
+    );
+}
+
+/// The proof panel shows the step's tactic among the steps, the goals
+/// before and after it, what the tactic brought marked `+`, changed `~`,
+/// and the goals it closed; at the end, that it is proved.
+#[test]
+fn the_proof_panel_marks_what_each_tactic_did() {
+    use clew_core::leanproof::ProofStep;
+    let mut app = reader_app();
+    let step = |first: usize, text: &str| ProofStep {
+        first,
+        last: first,
+        end: 0,
+        text: text.into(),
+    };
+    app.proj.proof = Some(crate::app::proof::ProofWalk {
+        abs: PathBuf::from("/nonexistent/clew-ui-test/Swap.lean"),
+        name: "and_swap".into(),
+        steps: vec![step(0, "by"), step(1, "intro h"), step(2, "exact h.symm")],
+        goals: Some(vec![
+            Some(vec![
+                "n : Nat\nk : Nat\n⊢ n = 1 → 1 = n".into(),
+                "⊢ True".into(),
+            ]),
+            Some(vec!["n : Nat\nk : Int\nh : n = 1\n⊢ 1 = n".into()]),
+            Some(Vec::new()),
+        ]),
+        failed: None,
+        at: 1,
+        token: 1,
+    });
+    app.show_bottom = true;
+    let mut sim = sim_of(&app);
+    for words in [
+        "Proof",
+        "and_swap",
+        "step 2 of 3",
+        "intro h",
+        "GOALS BEFORE",
+        "GOALS AFTER",
+        "+ h : n = 1",
+        "~ k : Int",
+        "  n : Nat",
+        "1 goal closed",
+    ] {
+        assert!(shows(&mut sim, words), "{words} is not shown");
+    }
+    drop(sim);
+    let sent = click(sim_of(&app), "exact h.symm");
+    assert!(
+        sent.iter()
+            .any(|m| matches!(m, Message::Proof(crate::ProofMsg::Goto(2)))),
+        "{sent:?}"
+    );
+    app.proj.proof.as_mut().unwrap().at = 2;
+    assert!(shows(&mut sim_of(&app), "No goals left: proved."));
+}
+
 /// The bug opens the Run menu beside the strip, level with it: Run and
 /// Debug, then Fake Run and Fake Debug, each with its keys. A row sends
 /// its run, and picked, the menu goes; the bug is lit while it is open.

@@ -451,7 +451,8 @@ impl App {
                 };
                 self.goto_request(menu.pane, menu.line, menu.col, kind)
             }
-            HoverMsg::Insight => self.on_insight_from_menu(),
+            HoverMsg::Insight => self.on_insight_from_menu(None),
+            HoverMsg::InsightOf(kind) => self.on_insight_from_menu(Some(kind)),
             HoverMsg::InsightAtCursor => self.insight_at_cursor(),
             HoverMsg::InsightAnswered { token, result, .. } => {
                 self.on_insight_answered(token, result)

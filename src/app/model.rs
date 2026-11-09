@@ -955,6 +955,11 @@ pub enum InsightKind {
     GoalState,
     /// The type of a Haskell name, from haskell-language-server.
     TypeAtPoint,
+    /// How a Rust type is laid out in memory — its size, alignment, each
+    /// field's offset and the padding between — from rust-analyzer.
+    MemoryLayout,
+    /// The tests that exercise a Rust item, from rust-analyzer.
+    RelatedTests,
 }
 
 impl InsightKind {
@@ -968,6 +973,15 @@ impl InsightKind {
         })
     }
 
+    /// The language's other actions, past [`InsightKind::for_lang`]'s: in
+    /// the context menu and the palette, with no key of their own.
+    pub fn more_for_lang(lang_key: &str) -> &'static [InsightKind] {
+        match lang_key {
+            "rust" => &[InsightKind::MemoryLayout, InsightKind::RelatedTests],
+            _ => &[],
+        }
+    }
+
     /// Its name, in English whatever the interface speaks: the command
     /// palette runs it by this title.
     pub fn name(self) -> &'static str {
@@ -975,6 +989,8 @@ impl InsightKind {
             InsightKind::ExpandMacro => tr_noop!("Expand Macro"),
             InsightKind::GoalState => tr_noop!("Show Goal"),
             InsightKind::TypeAtPoint => tr_noop!("Show Type"),
+            InsightKind::MemoryLayout => tr_noop!("Memory Layout"),
+            InsightKind::RelatedTests => tr_noop!("Related Tests"),
         }
     }
 
@@ -991,6 +1007,14 @@ impl InsightKind {
                 "No goal here: the Lean server has no proof state or expected type at this point."
             ),
             InsightKind::TypeAtPoint => tr!("The language server has no type for this name."),
+            InsightKind::MemoryLayout => {
+                tr!(
+                    "No type here whose layout rust-analyzer knows: put the cursor on a type's name."
+                )
+            }
+            InsightKind::RelatedTests => {
+                tr!("No test exercises this, as far as rust-analyzer can tell.")
+            }
         }
     }
 }

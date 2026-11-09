@@ -563,6 +563,21 @@ impl App {
                     PaletteAction::Insight,
                 );
             }
+            let lang = self.active_viewer().and_then(|v| v.lang_key);
+            for &kind in lang.map_or(&[][..], InsightKind::more_for_lang) {
+                add(
+                    kind.name().to_string(),
+                    None,
+                    PaletteAction::AtCaret(Message::Hover(HoverMsg::InsightOf(kind))),
+                );
+            }
+            if lang == Some("lean") {
+                add(
+                    tr_noop!("Step Through Proof").to_string(),
+                    None,
+                    PaletteAction::AtCaret(Message::Proof(crate::ProofMsg::FromMenu)),
+                );
+            }
             let at_caret = |m| PaletteAction::AtCaret(m);
             for (title, keys, message) in [
                 (

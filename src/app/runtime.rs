@@ -158,6 +158,7 @@ impl App {
             lsp_doc_rev: 1,
             blame_why_seq: 0,
             insight_seq: 0,
+            proof_seq: 0,
             palette: Vec::new(),
             palette_recent: Vec::new(),
             palette_home: Vec::new(),

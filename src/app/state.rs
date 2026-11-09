@@ -1351,6 +1351,8 @@ pub struct App {
     pub blame_why_seq: u64,
     /// Mints [`crate::app::model::Insight::token`], like `blame_why_seq`.
     pub insight_seq: u64,
+    /// Mints [`crate::app::proof::ProofWalk::token`], likewise.
+    pub proof_seq: u64,
     /// The command palette's list, as last built (see `app::palette`).
     pub(crate) palette: Vec<crate::app::palette::PaletteCommand>,
     /// The titles of the palette commands run last, most recent first.
@@ -2076,6 +2078,8 @@ pub struct ProjectSession {
     pub walk: WalkState,
     /// Fake run and fake debug (`app::fakerun`).
     pub fake: crate::app::fakerun::FakeRun,
+    /// A Lean proof being stepped through (`app::proof`).
+    pub proof: Option<crate::app::proof::ProofWalk>,
     /// The API documentation view's state (see [`DocsState`]).
     pub docs: DocsState,
     /// The Glossary page (`app::glossary`).
@@ -2396,6 +2400,7 @@ impl Default for ProjectSession {
             stats: Default::default(),
             walk: Default::default(),
             fake: Default::default(),
+            proof: None,
             docs: Default::default(),
             glossary: Default::default(),
             last_auto_refresh: Default::default(),

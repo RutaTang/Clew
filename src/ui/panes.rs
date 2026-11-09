@@ -1033,7 +1033,7 @@ pub(crate) fn code_pane<'a>(app: &'a App, pane: usize, v: &'a Viewer) -> Element
         .map(|(_, line)| *line);
     // A fake debug session's line, in the accent: what was reasoned, not
     // where a program stopped.
-    let fake_current = app.fake_line(&v.abs);
+    let fake_current = app.fake_line(&v.abs).or_else(|| app.proof_line(&v.abs));
 
     let frame = app.window_frame;
     // The block cursor shows only on the active pane while the code view has

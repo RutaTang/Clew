@@ -16,6 +16,7 @@ mod insight;
 mod integrations;
 mod navigation_debug;
 mod palette;
+mod proof;
 mod remote_state_refresh;
 mod semantic_space;
 mod setup;
@@ -22585,6 +22586,11 @@ fn stamped_samples(app: &App, stamp: &Stamp) -> Vec<Message> {
             stamp: s(),
             seq: 1,
             result: Ok(String::new()),
+        }),
+        Message::Proof(crate::ProofMsg::Answered {
+            stamp: s(),
+            token: 1,
+            result: Ok(Vec::new()),
         }),
     ]
 }

@@ -96,6 +96,7 @@ pub mod imports;
 pub mod inactive;
 pub mod incremental;
 pub(crate) mod lean;
+pub mod leanproof;
 pub mod linerpc;
 pub mod llm;
 pub mod lsp;

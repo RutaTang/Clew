@@ -120,6 +120,31 @@ pub(crate) fn context_menu<'a>(app: &App, menu: &'a crate::ContextMenu) -> Eleme
             able: true,
         });
     }
+    // And its others (Rust: a type's memory layout, an item's tests),
+    // which only its language server can answer.
+    let lang = app
+        .proj
+        .panes
+        .get(menu.pane)
+        .and_then(Option::as_ref)
+        .and_then(|v| v.lang_key);
+    for &kind in lang.map_or(&[][..], crate::InsightKind::more_for_lang) {
+        navigate.push(Row {
+            label: kind.label(),
+            msg: Message::Hover(HoverMsg::InsightOf(kind)),
+            keys: None,
+            able: menu.served,
+        });
+    }
+    // A Lean proof, walked one tactic at a time.
+    if lang == Some("lean") {
+        navigate.push(Row {
+            label: tr!("Step Through Proof"),
+            msg: Message::Proof(crate::ProofMsg::FromMenu),
+            keys: None,
+            able: menu.served,
+        });
+    }
     let plain = |label: &'static str, msg: Message| Row {
         label,
         msg,

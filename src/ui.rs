@@ -35,6 +35,7 @@ pub(crate) use ops::*;
 mod dialogs;
 pub(crate) use dialogs::*;
 mod fakerun;
+mod proof;
 pub(crate) use fakerun::*;
 mod slide;
 mod tutorial;

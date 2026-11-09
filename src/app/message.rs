@@ -98,6 +98,9 @@ pub enum Message {
     /// out, the trace stepped through. Handled in `app::fakerun`
     /// (`App::update_fake`).
     Fake(FakeMsg),
+    /// Step Through Proof (Lean): a tactic proof walked one tactic at a
+    /// time. Handled in `app::proof` (`App::update_proof`).
+    Proof(ProofMsg),
     /// The refresh tick, while something is changing (see
     /// `App::window_subscription`): language servers starting or indexing,
     /// the server panel, an auto-refresh waiting out its cooldown.
@@ -588,6 +591,9 @@ pub enum HoverMsg {
     Insight,
     /// The same at the caret (`ge`).
     InsightAtCursor,
+    /// One of the language's other actions ([`crate::InsightKind::more_for_lang`])
+    /// at the context menu's position.
+    InsightOf(crate::app::model::InsightKind),
     /// The language's answer: `None` when it had nothing to say there.
     InsightAnswered {
         stamp: Stamp,
@@ -2249,6 +2255,7 @@ impl Message {
             Message::Tutorial(m) => m.origin(),
             Message::Voice(m) => m.origin(),
             Message::Fake(m) => m.origin(),
+            Message::Proof(m) => m.origin(),
             Message::Tick
             | Message::Noop
             | Message::Placed { .. }
@@ -2406,6 +2413,7 @@ impl HoverMsg {
             | HoverMsg::Pin(..)
             | HoverMsg::Insight
             | HoverMsg::InsightAtCursor
+            | HoverMsg::InsightOf(_)
             | HoverMsg::InsightClose
             | HoverMsg::InsightOpenDefinition => None,
         }
@@ -3102,6 +3110,35 @@ impl<T> std::fmt::Debug for Handoff<T> {
 }
 
 /// Fake run and fake debug (`app::fakerun`).
+#[derive(Debug, Clone)]
+pub enum ProofMsg {
+    /// Step Through Proof from the code's context menu.
+    FromMenu,
+    /// The Lean server's goals after each step of the proof asked.
+    Answered {
+        stamp: Stamp,
+        /// Which asking it answers ([`crate::app::proof::ProofWalk::token`]).
+        token: u64,
+        result: Result<Vec<Option<Vec<String>>>, String>,
+    },
+    /// One step on (`true`) or back.
+    Step(bool),
+    /// Go to step `0`.
+    Goto(usize),
+    /// Put the proof away.
+    Close,
+}
+
+impl ProofMsg {
+    /// Where the message comes from, for `dispatch`'s ownership check.
+    pub fn origin(&self) -> Option<Origin<'_>> {
+        match self {
+            ProofMsg::Answered { stamp, .. } => Some(Origin::Stamped(stamp)),
+            ProofMsg::FromMenu | ProofMsg::Step(_) | ProofMsg::Goto(_) | ProofMsg::Close => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum FakeMsg {
     /// Fake Run… (or, `debug`, Fake Debug…) from the code's context menu.
