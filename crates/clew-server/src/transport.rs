@@ -131,7 +131,9 @@ pub(crate) fn bulk_weight(msg: &ServerMessage) -> usize {
         // Streamed model text: a stream to a client that stopped reading
         // parks its producer (the model call pushes back on its socket)
         // instead of growing the queue without bound.
-        Event::ChatDelta { text, .. } | Event::AgentDelta { text, .. } => text.len(),
+        Event::ChatDelta { text, .. }
+        | Event::AgentDelta { text, .. }
+        | Event::AgentDraft { text, .. } => text.len(),
         // The flat list and the nested tree carry the same names.
         Event::Tree {
             files,

@@ -585,6 +585,26 @@ impl App {
         self.speak_next()
     }
 
+    /// The answer on `stream`, being read, cut back to its first `from`
+    /// bytes — a step's remark before its tool calls taken back out
+    /// (`AskMsg::DraftEnd`): what was ready of the remark is said through,
+    /// as a person finishes what they were saying, and reading goes on from
+    /// where the answer now ends.
+    pub(crate) fn answer_cut_back(&mut self, stream: u64, from: usize) -> Task<Message> {
+        let Some(turn) = self.proj.ask_turns.iter().find(|t| t.stream == stream) else {
+            return Task::none();
+        };
+        let kept = turn.answer_md.get(..from).unwrap_or_default();
+        let speech = &mut self.voice.speech;
+        let Some((_, reader)) = speech.reading.as_mut().filter(|(s, _)| *s == stream) else {
+            return Task::none();
+        };
+        let rest = reader.next(&turn.answer_md, true);
+        reader.cut_back(kept);
+        speech.queue.extend(rest);
+        self.speak_next()
+    }
+
     /// Stop speaking — what is said, made, or waits to be — and stop reading
     /// the answer being read, or about to be: the one still coming. With
     /// the microphone on, it opens. Whether anything was being said.

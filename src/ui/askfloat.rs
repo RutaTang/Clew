@@ -322,8 +322,14 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
             })
             .into()
     };
-    if let Some(bar) = voice_confirm(app).or_else(|| speaking_line(app)) {
+    // A command waiting for a yes has buttons of its own; anything else the
+    // pill says opens the conversation, as its face does — Clew speaking an
+    // answer most of all, which is in it.
+    if let Some(bar) = voice_confirm(app) {
         return Some(inset(bar));
+    }
+    if let Some(line) = speaking_line(app) {
+        return Some(opens_ask(line));
     }
     // A question answered with the card put away (one said aloud is):
     // the pill says so, a click opening the card on it.
@@ -346,7 +352,26 @@ fn pill_voice(app: &App) -> Option<Element<'_, Message>> {
                 .into(),
         );
     }
-    pill_heard(app).or_else(|| listening_line(app).map(inset))
+    pill_heard(app)
+        .or_else(|| listening_line(app))
+        .map(opens_ask)
+}
+
+/// `face` on the pill, pressed to open the conversation.
+fn opens_ask(face: Element<'_, Message>) -> Element<'_, Message> {
+    button(face)
+        .style(theme::pill_face)
+        .padding(Padding {
+            top: 4.0,
+            right: 8.0,
+            bottom: 4.0,
+            left: 8.0,
+        })
+        .on_press(super::heard::said(
+            tr!("Open Ask"),
+            Message::Ask(AskMsg::Open),
+        ))
+        .into()
 }
 
 /// For a moment, what was just heard and what came of it.
@@ -380,10 +405,6 @@ fn pill_heard(app: &App) -> Option<Element<'_, Message>> {
     };
     let mut line = row![glyph::icon(mark, mark_color, 14.0)]
         .spacing(8)
-        .padding(Padding {
-            left: 8.0,
-            ..Padding::ZERO
-        })
         .align_y(iced::Center);
     if !heard.text.is_empty() {
         line = line.push(

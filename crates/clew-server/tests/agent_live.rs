@@ -68,6 +68,7 @@ async fn ask_agent_streams_a_grounded_answer() {
     let mut steps = 0;
     let mut done = None;
     let mut answer = String::new();
+    let mut draft = String::new();
     while let Ok(msg) = rx.try_recv() {
         if let ServerMessage::Notification { event, .. } = msg {
             match event {
@@ -78,6 +79,16 @@ async fn ask_agent_streams_a_grounded_answer() {
                 Event::AgentDelta { text, .. } => {
                     deltas += 1;
                     answer.push_str(&text);
+                }
+                Event::AgentDraft { text, .. } => {
+                    deltas += 1;
+                    draft.push_str(&text);
+                }
+                Event::AgentDraftEnd { kept, .. } => {
+                    if kept {
+                        answer.push_str(&draft);
+                    }
+                    draft.clear();
                 }
                 Event::AgentDone { outcome, .. } => done = Some(outcome),
                 _ => {}

@@ -9343,6 +9343,14 @@ fn speaking_shows_with_a_stop() {
             "in the corner: {speaking:?}"
         );
     }
+    // The pill opens the conversation, as it does at rest: the answer being
+    // read is in it.
+    assert!(
+        click(sim_of(&app), "Speaking")
+            .iter()
+            .any(|m| matches!(m, Message::Ask(AskMsg::Open))),
+        "the conversation is out of reach while Clew speaks"
+    );
     // Its button, lit, stops it — and no key is named beside it, which
     // said the same thing twice.
     assert!(!shows(&mut sim_of(&app), "Esc"));
@@ -9389,6 +9397,12 @@ fn voice_shows_what_it_is_doing() {
         level: 0.5,
     };
     {
+        assert!(
+            click(sim_of(&app), "Listening")
+                .iter()
+                .any(|m| matches!(m, Message::Ask(AskMsg::Open))),
+            "the pill opens the conversation while it listens"
+        );
         let mut sim = sim_of(&app);
         let listening = text_at(&mut sim, |t| t == "Listening", 0)
             .expect("the pill says it listens, even put away");

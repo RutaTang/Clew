@@ -450,6 +450,8 @@ pub(crate) fn event_name(event: &clew_protocol::Event) -> &'static str {
         Event::AgentStep { .. } => "AgentStep",
         Event::AgentToolCall { .. } => "AgentToolCall",
         Event::AgentDelta { .. } => "AgentDelta",
+        Event::AgentDraft { .. } => "AgentDraft",
+        Event::AgentDraftEnd { .. } => "AgentDraftEnd",
         Event::AgentDone { .. } => "AgentDone",
         Event::Status { .. } => "Status",
         Event::LspResolved { .. } => "LspResolved",

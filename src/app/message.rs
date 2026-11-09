@@ -1248,6 +1248,21 @@ pub enum AskMsg {
         stream: u64,
         text: String,
     },
+    /// Text an agent step on `stream` is writing, as it comes: shown, and
+    /// said, as the answer — until [`AskMsg::DraftEnd`] says whether it was
+    /// the answer or a remark before tool calls.
+    Draft {
+        stamp: Stamp,
+        stream: u64,
+        text: String,
+    },
+    /// The text since the last [`AskMsg::Draft`] began was the answer
+    /// (`kept`), or a remark before tool calls, taken back out of it.
+    DraftEnd {
+        stamp: Stamp,
+        stream: u64,
+        kept: bool,
+    },
     /// The streamed answer on `stream` ended — finished, stopped on request,
     /// or failed. Identified like [`AskMsg::Delta`].
     StreamEnded {
@@ -2619,6 +2634,8 @@ impl AskMsg {
             AskMsg::Retrieved { stamp, .. }
             | AskMsg::ContextReady { stamp, .. }
             | AskMsg::Delta { stamp, .. }
+            | AskMsg::Draft { stamp, .. }
+            | AskMsg::DraftEnd { stamp, .. }
             | AskMsg::StreamEnded { stamp, .. }
             | AskMsg::AgentStepped { stamp, .. }
             | AskMsg::AgentTurnEnded { stamp, .. }

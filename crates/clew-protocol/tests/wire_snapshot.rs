@@ -256,6 +256,8 @@ fn event_index(e: &Event) -> usize {
         Event::BuildFacts { .. } => 33,
         Event::ProjectMaps { .. } => 34,
         Event::MacroExpansion { .. } => 35,
+        Event::AgentDraft { .. } => 36,
+        Event::AgentDraftEnd { .. } => 37,
     }
 }
 
@@ -1446,6 +1448,14 @@ fn notification_samples() -> Vec<Event> {
         Event::AgentDelta {
             stream: 1,
             text: "t".into(),
+        },
+        Event::AgentDraft {
+            stream: 1,
+            text: "Let me read it.".into(),
+        },
+        Event::AgentDraftEnd {
+            stream: 1,
+            kept: false,
         },
         // ...and one on the agent's, which shares the type.
         Event::AgentDone {

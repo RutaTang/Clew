@@ -298,6 +298,7 @@ pub fn run(
         stream,
         notify: &notify,
         external,
+        drafted: std::cell::Cell::new(false),
     };
     let outcome = match turn.drive() {
         _ if stop.load(Ordering::Relaxed) => StreamOutcome::Stopped,
@@ -351,6 +352,9 @@ struct Turn<'a> {
     notify: &'a dyn Fn(Event),
     /// The client's tools this turn may call.
     external: External,
+    /// The step being asked has sent text ([`Event::AgentDraft`]) not yet
+    /// kept or dropped ([`Event::AgentDraftEnd`]).
+    drafted: std::cell::Cell<bool>,
 }
 
 impl Turn<'_> {
@@ -398,14 +402,18 @@ impl Turn<'_> {
                     let out = self.step()?;
                     steps += 1;
                     if out.calls.is_empty() {
-                        // Prose instead of `answer`: the text IS the answer.
+                        // Prose instead of `answer`: the text IS the answer —
+                        // shown, and said, as it was written.
                         if !out.text.is_empty() {
-                            self.deliver(&out.text);
+                            self.keep_draft(&out.text);
                             return self.finish_answer(out, STEP_TOKENS_CEIL, false);
                         }
+                        self.end_draft(false);
                         self.retry_empty(&mut empty_retried, &out)?;
                         continue;
                     }
+                    // A remark before its tool calls: not the answer.
+                    self.end_draft(false);
                     if out.truncated {
                         // Truncated even at the ceiling, with calls attached:
                         // their arguments may be half-written — never run them.
@@ -447,12 +455,13 @@ impl Turn<'_> {
                     };
                     if !out.text.is_empty() {
                         if unpinned {
-                            self.deliver(&out.text);
+                            self.keep_draft(&out.text);
                             return self.finish_answer(out, STEP_TOKENS_CEIL, false);
                         }
                         // The tokens already went out as they arrived.
                         return self.finish_answer(out, ANSWER_TOKENS, true);
                     }
+                    self.end_draft(false);
                     if out.calls.is_empty() {
                         self.retry_empty(&mut empty_retried, &out)?;
                         continue;
@@ -493,17 +502,26 @@ impl Turn<'_> {
         let mut tokens = STEP_TOKENS;
         loop {
             // Streamed (see `complete_tools_step`) so the stop flag reaches a
-            // step already on the wire.
-            let out = llm::complete_tools_step(
+            // step already on the wire — and its text goes out as it is
+            // written ([`Event::AgentDraft`]): an answer given in a step is
+            // shown, and said, as it comes, not once it is whole.
+            let out = llm::complete_tools_step_with(
                 self.chat,
                 &self.system,
                 &self.msgs,
                 &self.tools,
                 tokens,
+                &mut |text| {
+                    if !self.stopped() {
+                        self.draft(text);
+                    }
+                },
                 &|| self.stopped(),
             )?;
             if out.truncated && tokens < STEP_TOKENS_CEIL {
                 self.check_stop()?;
+                // Asked again: what it wrote is taken back.
+                self.end_draft(false);
                 tokens = tokens.saturating_mul(2).min(STEP_TOKENS_CEIL);
                 continue;
             }
@@ -535,6 +553,40 @@ impl Turn<'_> {
             stream: self.stream,
             text,
         });
+    }
+
+    /// Text the step is writing, as it comes ([`Event::AgentDraft`]).
+    fn draft(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.drafted.set(true);
+        (self.notify)(Event::AgentDraft {
+            stream: self.stream,
+            text: text.to_string(),
+        });
+    }
+
+    /// What the step wrote ([`Event::AgentDraft`]) was the answer (`kept`),
+    /// or a remark before its tool calls. Nothing is said of a step that
+    /// wrote nothing.
+    fn end_draft(&self, kept: bool) {
+        if self.drafted.replace(false) {
+            (self.notify)(Event::AgentDraftEnd {
+                stream: self.stream,
+                kept,
+            });
+        }
+    }
+
+    /// `text`, the step's whole text, is the answer: kept as it was sent,
+    /// or — an endpoint that sent none of it as it came — sent now.
+    fn keep_draft(&self, text: &str) {
+        if self.drafted.get() {
+            self.end_draft(true);
+        } else {
+            self.deliver(text);
+        }
     }
 
     /// An answer, `out`, that has been delivered: carried on where it
@@ -2288,7 +2340,9 @@ mod tests {
         let mut done = None;
         while let Ok(ServerMessage::Notification { event, .. }) = rx.try_recv() {
             match event {
-                Event::AgentDelta { .. } => panic!("a delta went out past a full queue"),
+                Event::AgentDelta { .. } | Event::AgentDraft { .. } => {
+                    panic!("a delta went out past a full queue")
+                }
                 Event::AgentDone { outcome, .. } => done = Some(outcome),
                 _ => {}
             }
@@ -2675,6 +2729,10 @@ mod tests {
     struct Outcome {
         steps: Vec<String>,
         answer: String,
+        /// What steps wrote before their tool calls: drafts not kept.
+        remarks: Vec<String>,
+        /// How many pieces of step text went out as they were written.
+        drafts: usize,
         /// How the one `AgentDone` said the turn ended.
         done: Option<StreamOutcome>,
     }
@@ -2728,10 +2786,23 @@ mod tests {
             &stop,
         );
         let mut outcome = Outcome::default();
+        let mut draft = String::new();
         while let Ok(ServerMessage::Notification { event, .. }) = rx.try_recv() {
             match event {
                 Event::AgentStep { title, .. } => outcome.steps.push(title),
                 Event::AgentDelta { text, .. } => outcome.answer.push_str(&text),
+                Event::AgentDraft { text, .. } => {
+                    outcome.drafts += 1;
+                    draft.push_str(&text);
+                }
+                Event::AgentDraftEnd { kept, .. } => {
+                    let draft = std::mem::take(&mut draft);
+                    if kept {
+                        outcome.answer.push_str(&draft);
+                    } else {
+                        outcome.remarks.push(draft);
+                    }
+                }
                 Event::AgentDone { outcome: done, .. } => {
                     assert!(outcome.done.is_none(), "exactly one AgentDone");
                     outcome.done = Some(done);
@@ -2822,6 +2893,7 @@ mod tests {
             );
         });
         let mut answer = String::new();
+        let mut draft = String::new();
         let mut done = None;
         while let Some(ServerMessage::Notification { event }) = rx.blocking_recv() {
             match event {
@@ -2841,6 +2913,13 @@ mod tests {
                     assert_ne!(tool, "mcp__gh__issues", "the client shows its own step");
                 }
                 Event::AgentDelta { text, .. } => answer.push_str(&text),
+                Event::AgentDraft { text, .. } => draft.push_str(&text),
+                Event::AgentDraftEnd { kept, .. } => {
+                    if kept {
+                        answer.push_str(&draft);
+                    }
+                    draft.clear();
+                }
                 Event::AgentDone { outcome, .. } => {
                     done = Some(outcome);
                     break;
@@ -2996,6 +3075,30 @@ mod tests {
         assert_eq!(provider.requests().len(), 2, "one retry, not a loop");
     }
 
+    /// What a step writes goes out as it is written: a step's prose answer
+    /// streams to the client — shown, and said, as it comes — and a remark
+    /// written before tool calls is told apart, not left in the answer.
+    #[test]
+    fn a_steps_text_streams_and_a_remark_is_told_apart() {
+        let dir = project("drafts");
+        let provider = Provider::new(vec![
+            sse(&[
+                text_event("Let me read it.", None),
+                call_event(0, "read", serde_json::json!({ "file": "a.rs" })),
+                serde_json::json!({ "choices": [{ "delta": {}, "finish_reason": "tool_calls" }] }),
+            ]),
+            sse(&[
+                text_event("It returns ", None),
+                text_event("42.", Some("stop")),
+            ]),
+        ]);
+        let outcome = turn(&dir, &provider, Vec::new());
+        assert_eq!(outcome.done, Some(StreamOutcome::Done), "{outcome:?}");
+        assert_eq!(outcome.remarks, ["Let me read it."]);
+        assert_eq!(outcome.answer, "It returns 42.");
+        assert_eq!(outcome.drafts, 3, "sent as it came, not whole at the end");
+    }
+
     /// A prose answer cut at the output budget is re-asked with a doubled
     /// budget up to the ceiling; cut even there, it is carried on where it
     /// stopped, and cut still after every carry-on, it is delivered — marked
@@ -3138,6 +3241,7 @@ mod tests {
                 pending: Default::default(),
                 next: std::cell::Cell::new(0),
             },
+            drafted: std::cell::Cell::new(false),
         }
     }
 

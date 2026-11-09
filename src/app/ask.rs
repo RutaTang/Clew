@@ -838,6 +838,7 @@ impl App {
             answer_md: String::new(),
             answer: Vec::new(),
             settled: 0,
+            draft_from: None,
             sources,
             steps: Vec::new(),
             streaming: true,
@@ -1025,6 +1026,7 @@ impl App {
             answer_md: String::new(),
             answer: Vec::new(),
             settled: 0,
+            draft_from: None,
             sources: Vec::new(),
             steps: Vec::new(),
             streaming: true,
@@ -1101,6 +1103,22 @@ impl App {
                             }),
                             false,
                         ),
+                        AgentPiece::Draft(t) => (
+                            Message::Ask(AskMsg::Draft {
+                                stamp: stamp.clone(),
+                                stream: stream_id,
+                                text: t,
+                            }),
+                            false,
+                        ),
+                        AgentPiece::DraftEnd(kept) => (
+                            Message::Ask(AskMsg::DraftEnd {
+                                stamp: stamp.clone(),
+                                stream: stream_id,
+                                kept,
+                            }),
+                            false,
+                        ),
                         AgentPiece::Done(outcome) => (
                             Message::Ask(AskMsg::AgentTurnEnded {
                                 stamp: stamp.clone(),
@@ -1157,6 +1175,55 @@ impl App {
     /// [`settle_point`] found, or its end): what came since it was last
     /// settled is prepared and added on. Its whole text is never prepared
     /// again, so nothing drawn moves.
+    /// Text an agent step on `stream` is writing: the answer as far as
+    /// anyone can tell — shown, and said, as it comes — with where it began
+    /// kept, in case it turns out a remark before tool calls.
+    pub(crate) fn on_ask_draft(&mut self, stream: u64, text: String) -> Task<Message> {
+        let Some(turn) = self
+            .proj
+            .ask_turns
+            .iter_mut()
+            .find(|t| t.stream == stream && t.streaming)
+        else {
+            return Task::none();
+        };
+        turn.draft_from.get_or_insert(turn.answer_md.len());
+        self.on_ask_delta(stream, text)
+    }
+
+    /// What the step on `stream` wrote was the answer (`kept`) — it stays —
+    /// or a remark before its tool calls: what was said of it is said
+    /// through, and it is taken back out of the answer, whose tool calls
+    /// show what it went on to do.
+    pub(crate) fn on_ask_draft_end(&mut self, stream: u64, kept: bool) -> Task<Message> {
+        let Some(idx) = self
+            .proj
+            .ask_turns
+            .iter()
+            .position(|t| t.stream == stream && t.streaming)
+        else {
+            return Task::none();
+        };
+        let Some(from) = self.proj.ask_turns[idx].draft_from.take() else {
+            return Task::none();
+        };
+        if kept {
+            return Task::none();
+        }
+        let said = self.answer_cut_back(stream, from);
+        let turn = &mut self.proj.ask_turns[idx];
+        if from <= turn.answer_md.len() && turn.answer_md.is_char_boundary(from) {
+            turn.answer_md.truncate(from);
+        }
+        // What was drawn of the remark goes with it.
+        if turn.settled > turn.answer_md.len() {
+            turn.answer.clear();
+            turn.settled = 0;
+        }
+        let settle = settle_point(&turn.answer_md, turn.settled);
+        Task::batch([said, self.settle_answer_to(idx, settle)])
+    }
+
     pub(crate) fn settle_answer_to(&mut self, idx: usize, to: usize) -> Task<Message> {
         let Some(turn) = self.proj.ask_turns.get_mut(idx) else {
             return Task::none();
@@ -1735,6 +1802,8 @@ impl App {
                 stream, messages, ..
             } => self.on_ask_context_ready(stream, messages),
             AskMsg::Delta { stream, text, .. } => self.on_ask_delta(stream, text),
+            AskMsg::Draft { stream, text, .. } => self.on_ask_draft(stream, text),
+            AskMsg::DraftEnd { stream, kept, .. } => self.on_ask_draft_end(stream, kept),
             AskMsg::AgentStepped { stream, step, .. } => self.on_agent_stepped(stream, step),
             AskMsg::AgentTurnEnded {
                 stream, outcome, ..

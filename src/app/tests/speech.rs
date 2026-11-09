@@ -287,6 +287,55 @@ fn a_spoken_answer_is_read_aloud_as_it_comes() {
     assert_eq!(voice.texts().len(), said);
 }
 
+/// An agent step's text is said as it is written, not once it is whole: a
+/// remark before tool calls is said through and taken out of the answer —
+/// the tool calls show what it went on to do — and the answer the next step
+/// writes is said from its first sentence, none of the remark again.
+#[test]
+fn a_steps_text_is_said_as_it_is_written() {
+    let (mut app, voice, _output) = speech_app("speech-drafts");
+    asked(&mut app, 1, true);
+    let draft = |app: &mut App, text: &str| {
+        let task = app.on_ask_draft(1, text.into());
+        settle(app, task);
+    };
+    let draft_end = |app: &mut App, kept: bool| {
+        let task = app.on_ask_draft_end(1, kept);
+        settle(app, task);
+    };
+    // A remark, then its tool calls.
+    draft(&mut app, "Let me look at the pricing code. Then");
+    assert_eq!(
+        voice.texts(),
+        ["Let me look at the pricing code."],
+        "said as it came"
+    );
+    assert_eq!(
+        app.proj.ask_turns[0].answer_md, "Let me look at the pricing code. Then",
+        "shown as it came"
+    );
+    draft_end(&mut app, false);
+    assert_eq!(
+        app.proj.ask_turns[0].answer_md, "",
+        "the remark is not the answer"
+    );
+    assert!(app.proj.ask_turns[0].answer.is_empty());
+    assert_eq!(voice.texts(), ["Let me look at the pricing code.", "Then"]);
+    // The answer, written in the next step: said from its first sentence.
+    draft(&mut app, "The total adds tax last. It rounds to cents. And");
+    assert_eq!(
+        voice.texts()[2..],
+        ["The total adds tax last.", "It rounds to cents."]
+    );
+    draft_end(&mut app, true);
+    assert_eq!(
+        app.proj.ask_turns[0].answer_md,
+        "The total adds tax last. It rounds to cents. And"
+    );
+    ended(&mut app, 1, StreamOutcome::Done);
+    assert_eq!(voice.texts().last().map(String::as_str), Some("And"));
+}
+
 /// Each sentence is said in its own language: French as French, Korean by
 /// its script; Chinese by Kokoro, once it is here — until then not said,
 /// and the reader told where to get it, once.

@@ -434,6 +434,10 @@ pub struct AskTurn {
     pub answer: Vec<PreparedSeg>,
     /// How much of `answer_md` is in `answer`, in bytes (see there).
     pub settled: usize,
+    /// Where the text an agent step is writing began in `answer_md`, while
+    /// it is not known yet whether it is the answer or a remark before tool
+    /// calls (`AskMsg::Draft`): a remark is taken back out from here.
+    pub draft_from: Option<usize>,
     /// The retrieved nodes (with similarity scores) that grounded this answer,
     /// shown beneath it as clickable source chips.
     pub sources: Vec<(explain::Node, f32)>,
@@ -611,6 +615,10 @@ pub enum AgentPiece {
         args: serde_json::Value,
     },
     Delta(String),
+    /// Text a step is writing, as it comes (`Event::AgentDraft`).
+    Draft(String),
+    /// That text was the answer (`true`), or a remark before tool calls.
+    DraftEnd(bool),
     /// The turn ended, and how (see [`ChatStreamPiece::Done`]).
     Done(clew_protocol::StreamOutcome),
 }

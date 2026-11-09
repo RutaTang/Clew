@@ -123,7 +123,12 @@ pub use payload::*;
 ///
 /// v21: [`GitOp::WorkingStatus`] reads the working tree's changes, for the
 /// Files view's marks.
-pub const PROTOCOL_VERSION: u32 = 21;
+///
+/// v22: an agent step's text streams as it is written ([`Event::AgentDraft`]),
+/// then is kept as the answer or dropped as a remark before tool calls
+/// ([`Event::AgentDraftEnd`]): an answer given in an ordinary step is shown,
+/// and said aloud, as it comes rather than once it is whole.
+pub const PROTOCOL_VERSION: u32 = 22;
 
 /// A hash of this crate's source as a token stream — comments and whitespace
 /// removed — computed at build time (see `build.rs`). Carried in `Hello` /
@@ -1334,6 +1339,16 @@ pub enum Event {
     },
     /// One token of an agent turn's final answer (a notification).
     AgentDelta { stream: u64, text: String },
+    /// One token of the text an agent step is writing (a notification):
+    /// the answer, if the step ends without tool calls, else a remark the
+    /// model makes before calling them. Shown, and said, as it comes;
+    /// [`Event::AgentDraftEnd`] says which it was.
+    AgentDraft { stream: u64, text: String },
+    /// The step's text so far ([`Event::AgentDraft`]) was the answer —
+    /// `kept`, and the answer goes on from it — or a remark before tool
+    /// calls, to be taken back out of the answer (a notification). Also
+    /// sent, not kept, before a step is asked again.
+    AgentDraftEnd { stream: u64, kept: bool },
     /// An agent turn ended (a notification), and how.
     AgentDone { stream: u64, outcome: StreamOutcome },
     /// A one-line notice for the status bar about the connection's background

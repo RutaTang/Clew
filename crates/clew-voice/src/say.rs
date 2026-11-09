@@ -1276,6 +1276,13 @@ impl Reader {
         }
     }
 
+    /// The answer cut back to `answer` — what came after it taken out, a
+    /// remark made before the answer was: its sentences, all of them handed
+    /// out already, are where reading goes on from.
+    pub fn cut_back(&mut self, answer: &str) {
+        self.given = sentences(&marked(answer)).len();
+    }
+
     /// The sentences of `answer` (its markdown so far) not handed out yet;
     /// `done`: no more is coming.
     pub fn next(&mut self, answer: &str, done: bool) -> Vec<Sentence> {
@@ -2089,6 +2096,32 @@ mod tests {
                     lang: "ko"
                 }
             ]
+        );
+    }
+
+    /// A remark made before the answer, said and then cut back out: reading
+    /// goes on with the answer that follows, none of it skipped, none of
+    /// the remark said again.
+    #[test]
+    fn a_reader_goes_on_after_a_remark_is_cut_back() {
+        let mut reader = Reader::new(Some("en"));
+        let remark = "Let me look at the pricing code. Then";
+        let said: Vec<String> = reader
+            .next(remark, true)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(said, ["Let me look at the pricing code.", "Then"]);
+        reader.cut_back("");
+        let answer = "The total is worked out in total(). It adds tax last. More";
+        let said: Vec<String> = reader
+            .next(answer, false)
+            .into_iter()
+            .map(|s| s.text)
+            .collect();
+        assert_eq!(
+            said,
+            ["The total is worked out in total().", "It adds tax last."]
         );
     }
 }

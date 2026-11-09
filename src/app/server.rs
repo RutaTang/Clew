@@ -904,6 +904,16 @@ impl App {
                     let _ = tx.send(AgentPiece::Delta(text));
                 }
             }
+            Event::AgentDraft { stream, text } => {
+                if let Some(tx) = self.proj.link.agent_streams.get(&stream) {
+                    let _ = tx.send(AgentPiece::Draft(text));
+                }
+            }
+            Event::AgentDraftEnd { stream, kept } => {
+                if let Some(tx) = self.proj.link.agent_streams.get(&stream) {
+                    let _ = tx.send(AgentPiece::DraftEnd(kept));
+                }
+            }
             Event::AgentDone { stream, outcome } => {
                 if let Some(tx) = self.proj.link.agent_streams.remove(&stream) {
                     let _ = tx.send(AgentPiece::Done(outcome));
