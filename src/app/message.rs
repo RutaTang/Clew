@@ -1408,6 +1408,17 @@ pub enum IntegrationsMsg {
     McpExtra(String),
     /// Add the server the form describes.
     McpAdd,
+    /// The MCP registry search's words.
+    RegistryQuery(String),
+    /// Search the MCP registry for them.
+    RegistrySearch,
+    /// What search `seq` found.
+    RegistryFound {
+        seq: u64,
+        result: Result<Vec<clew_core::mcp::registry::Entry>, String>,
+    },
+    /// Fill the add-a-server form from the found entry at this index.
+    RegistryUse(usize),
     McpRemove(String),
     McpEnable(String, bool),
     McpApprove(String, clew_core::mcp::Approve),
@@ -1447,6 +1458,10 @@ impl IntegrationsMsg {
             | IntegrationsMsg::McpTarget(..)
             | IntegrationsMsg::McpExtra(..)
             | IntegrationsMsg::McpAdd
+            | IntegrationsMsg::RegistryQuery(..)
+            | IntegrationsMsg::RegistrySearch
+            | IntegrationsMsg::RegistryFound { .. }
+            | IntegrationsMsg::RegistryUse(..)
             | IntegrationsMsg::McpRemove(..)
             | IntegrationsMsg::McpEnable(..)
             | IntegrationsMsg::McpApprove(..)

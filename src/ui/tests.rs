@@ -11858,3 +11858,96 @@ fn the_reading_guide_is_a_tree_in_the_walkthroughs_view() {
     );
     assert_eq!(child, sibling, "siblings line up");
 }
+
+/// The MCP registry in Settings: what the servers are for (Clew's own
+/// agent, not an ACP agent's), each found server with how it runs and Use,
+/// and — once used — what it reads that the form leaves to fill in.
+#[test]
+fn the_mcp_registry_is_searched_and_used_from_settings() {
+    use crate::IntegrationsMsg as M;
+    let mut app = reader_app();
+    app.settings.open = true;
+    app.settings.page = crate::SettingsPage::Integrations;
+    let entries = clew_core::mcp::registry::parse(
+        r#"{"servers": [
+          {"server": {"name": "io.github.acme/notes-mcp", "description": "Your notes.",
+            "version": "1.2.0", "packages": [{"registryType": "npm",
+              "identifier": "@acme/notes", "version": "1.2.0",
+              "environmentVariables": [{"name": "NOTES_TOKEN", "description": "An API token",
+                "isRequired": true, "isSecret": true}]}]}},
+          {"server": {"name": "com.example/bundle", "version": "1",
+            "packages": [{"registryType": "mcpb", "identifier": "x"}]}}]}"#,
+    )
+    .unwrap();
+    app.settings.integrations.registry.query = "notes".into();
+    app.settings.integrations.registry.found = Some(Ok(entries));
+    {
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "Find in the MCP registry"));
+        assert!(shows(&mut sim, "tools for Clew's own agent"));
+        assert!(shows(&mut sim, "io.github.acme/notes-mcp"));
+        assert!(shows(&mut sim, "npm · 1.2.0"));
+        assert!(shows(&mut sim, "Clew can't run it"));
+    }
+    let used = click(sim_of(&app), "Use");
+    assert!(
+        used.iter()
+            .any(|m| matches!(m, Message::Integrations(M::RegistryUse(0)))),
+        "{used:?}"
+    );
+    let _ = app.update(Message::Integrations(M::RegistryUse(0)));
+    let draft = &app.settings.integrations;
+    assert_eq!(draft.new_mcp_name, "notes");
+    assert_eq!(draft.new_mcp_target, "npx -y @acme/notes@1.2.0");
+    assert_eq!(draft.new_mcp_extra, "NOTES_TOKEN=");
+    {
+        // The results put away, the add form is in view.
+        let found = app.settings.integrations.registry.found.take();
+        let mut sim = sim_of(&app);
+        assert!(shows(&mut sim, "NOTES_TOKEN (required, secret)"));
+        assert!(shows(&mut sim, "An API token"));
+        drop(sim);
+        app.settings.integrations.registry.found = found;
+    }
+    // An entry Clew cannot run fills nothing.
+    let _ = app.update(Message::Integrations(M::RegistryUse(1)));
+    assert_eq!(app.settings.integrations.new_mcp_name, "notes");
+}
+
+/// A search runs off the window's thread and only the newest answer is
+/// taken; an empty query searches nothing.
+#[test]
+fn only_the_newest_registry_search_is_taken() {
+    use crate::IntegrationsMsg as M;
+    let mut app = reader_app();
+    let _ = app.update(Message::Integrations(M::RegistrySearch));
+    assert_eq!(app.settings.integrations.registry.searching, None);
+    let _ = app.update(Message::Integrations(M::RegistryQuery("git".into())));
+    let _ = app.update(Message::Integrations(M::RegistrySearch));
+    let first = app
+        .settings
+        .integrations
+        .registry
+        .searching
+        .expect("searching");
+    let _ = app.update(Message::Integrations(M::RegistrySearch));
+    let second = app.settings.integrations.registry.searching.unwrap();
+    assert_ne!(first, second);
+    let _ = app.update(Message::Integrations(M::RegistryFound {
+        seq: first,
+        result: Err("late".into()),
+    }));
+    assert!(
+        app.settings.integrations.registry.found.is_none(),
+        "the older one"
+    );
+    let _ = app.update(Message::Integrations(M::RegistryFound {
+        seq: second,
+        result: Ok(Vec::new()),
+    }));
+    assert_eq!(app.settings.integrations.registry.searching, None);
+    assert!(matches!(
+        app.settings.integrations.registry.found,
+        Some(Ok(ref v)) if v.is_empty()
+    ));
+}

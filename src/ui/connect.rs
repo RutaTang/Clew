@@ -1625,6 +1625,55 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         });
         servers.push(row);
     }
+    let registry = registry_group(draft);
+    // What the server last picked from the registry reads, which the form
+    // leaves to the user: each variable or header, what it is for, and
+    // whether it is needed and secret.
+    let mut needs: Vec<Element<'_, Message>> = Vec::new();
+    if let Some(used) = &draft.registry.used {
+        use clew_core::mcp::registry::Install;
+        let vars = match &used.install {
+            Install::Stdio { env, .. } => env.as_slice(),
+            Install::Remote { headers, .. } => headers.as_slice(),
+            Install::Unsupported(_) => &[],
+        };
+        for v in vars {
+            let mut tags = Vec::new();
+            if v.required {
+                tags.push(tr!("required"));
+            }
+            if v.secret {
+                tags.push(tr!("secret"));
+            }
+            let head = if tags.is_empty() {
+                v.name.clone()
+            } else {
+                format!("{} ({})", v.name, tags.join(", "))
+            };
+            needs.push(
+                column![
+                    text(head)
+                        .size(ts::SMALL)
+                        .font(crate::fonts::CODE)
+                        .color(theme::fg()),
+                    text(v.description.clone())
+                        .size(ts::SMALL)
+                        .color(theme::dim())
+                        .wrapping(Wrapping::WordOrGlyph),
+                ]
+                .spacing(1)
+                .into(),
+            );
+        }
+    }
+    let mut add_rows = Vec::new();
+    if !needs.is_empty() {
+        add_rows.push(form::field(
+            tr!("It reads"),
+            None,
+            Column::with_children(needs).spacing(6),
+        ));
+    }
     let add_mcp = form::group(
         tr!("Add an MCP server"),
         None,
@@ -1668,7 +1717,10 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
                 ]
                 .align_y(iced::Center),
             ),
-        ],
+        ]
+        .into_iter()
+        .chain(add_rows)
+        .collect(),
     );
 
     let mut agents = Vec::new();
@@ -1785,6 +1837,7 @@ fn integrations_section(app: &App) -> Element<'_, Message> {
         None,
         servers,
     ));
+    parts.push(registry);
     parts.push(add_mcp);
     parts.push(form::group(
         tr!("ACP agents"),
@@ -2652,4 +2705,107 @@ fn embed_model_rows(app: &App) -> Vec<Element<'_, Message>> {
         ),
     ));
     rows
+}
+
+/// The MCP registry search in Settings: what servers added here are for
+/// (Clew's own agent, not an ACP agent's), the search, and what it found —
+/// each with how it runs, and Use to fill the add form with it.
+fn registry_group(draft: &crate::app::integrations::IntegrationsDraft) -> Element<'_, Message> {
+    use crate::IntegrationsMsg as M;
+    use clew_core::mcp::registry::Install;
+    let reg = &draft.registry;
+    let searching = reg.searching.is_some();
+    let search = row![
+        form::input(tr!("Search, e.g. github, postgres, browser"), &reg.query)
+            .on_input(|v| Message::Integrations(M::RegistryQuery(v)))
+            .on_submit(Message::Integrations(M::RegistrySearch)),
+        form::action(
+            if searching {
+                tr!("Searching…")
+            } else {
+                tr!("Search")
+            },
+            (!searching && !reg.query.trim().is_empty())
+                .then_some(Message::Integrations(M::RegistrySearch)),
+        ),
+    ]
+    .spacing(8)
+    .align_y(iced::Center);
+    super::heard::field(&reg.query, |v| Message::Integrations(M::RegistryQuery(v)));
+    let mut rows: Vec<Element<'_, Message>> = vec![
+        form::plain(form::note(tr!(
+            "Servers you add here are tools for Clew's own agent in Ask. An ACP agent uses its own MCP servers, unless you turn on \"Share my MCP servers\" for it."
+        ))),
+        form::plain(search),
+    ];
+    match &reg.found {
+        None => {}
+        Some(Err(why)) => rows.push(form::plain(
+            text(tr!(
+                "The registry could not be searched: {why}",
+                why = why.clone()
+            ))
+            .size(ts::BODY)
+            .color(theme::danger()),
+        )),
+        Some(Ok(entries)) if entries.is_empty() => {
+            rows.push(form::plain(form::note(tr!("Nothing found"))))
+        }
+        Some(Ok(entries)) => {
+            for (i, entry) in entries.iter().enumerate() {
+                let how = match &entry.install {
+                    Install::Stdio { kind, .. } => {
+                        format!("{} · {}", registry_kind(kind), entry.version)
+                    }
+                    Install::Remote { .. } => format!("{} · {}", tr!("remote"), entry.version),
+                    Install::Unsupported(why) => tr!("Clew can't run it: {why}", why = why.clone()),
+                };
+                let usable = !matches!(entry.install, Install::Unsupported(_));
+                let use_button: Element<'_, Message> = if usable {
+                    super::heard::about(&entry.name, || {
+                        form::action(tr!("Use"), Some(Message::Integrations(M::RegistryUse(i))))
+                    })
+                    .into()
+                } else {
+                    space().into()
+                };
+                rows.push(form::plain(
+                    row![
+                        column![
+                            text(entry.name.clone())
+                                .size(ts::BASE)
+                                .font(crate::fonts::UI_MEDIUM)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::WordOrGlyph),
+                            text(entry.description.clone())
+                                .size(ts::SMALL)
+                                .color(theme::fg())
+                                .wrapping(Wrapping::WordOrGlyph),
+                            text(how).size(ts::SMALL).color(theme::dim()),
+                        ]
+                        .spacing(2)
+                        .width(Fill),
+                        use_button,
+                    ]
+                    .spacing(10)
+                    .align_y(iced::Center),
+                ));
+            }
+            rows.push(form::plain(form::note(tr!(
+                "The registry lists what publishers say about their servers; it does not check them. Read the command before you add one."
+            ))));
+        }
+    }
+    form::group(tr!("Find in the MCP registry"), None, None, rows)
+}
+
+/// How a registry package is said: its ecosystem's own name.
+fn registry_kind(kind: &str) -> String {
+    match kind {
+        "npm" => "npm".into(),
+        "pypi" => "PyPI".into(),
+        "oci" => "Docker".into(),
+        "nuget" => "NuGet".into(),
+        other => other.to_string(),
+    }
 }
